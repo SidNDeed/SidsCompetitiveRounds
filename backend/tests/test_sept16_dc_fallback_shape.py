@@ -185,8 +185,10 @@ def test_the_sweep_relocks_and_rechecks_inside_the_transaction():
 
 def test_the_sweep_measures_the_bound_on_the_same_clock_as_the_marker():
     joined = "\n".join(span("_team_dc_fallback_sweep_once"))
-    # Discovery and the locked re-read, both on clock_timestamp().
-    assert joined.count("clock_timestamp() - make_interval(secs => :bound)") == 2
+    # Discovery, the locked re-read and the settlement statement's own WHERE,
+    # all three on clock_timestamp(). The third is round 8's: the statement
+    # that writes re-states the bound rather than trusting the locked read.
+    assert joined.count("clock_timestamp() - make_interval(secs => :bound)") == 3
     assert "NOW()" not in joined
 
 
@@ -1350,8 +1352,10 @@ def test_the_sweep_does_not_consult_the_room_clock():
         "the sweep is reading the room clock again")
     assert "room_quiet" not in joined
     assert '"quiet"' not in joined
-    # One time term remains, and it is named in both statements: the bound.
-    assert joined.count("float(_DC_FALLBACK_DEFER_SECONDS)") == 2, joined
+    # One time term remains, and it is named in all three statements that
+    # measure it -- discovery, the locked re-read and, since round 8, the
+    # settlement's own WHERE: the bound.
+    assert joined.count("float(_DC_FALLBACK_DEFER_SECONDS)") == 3, joined
 
 
 def flat_code_of(node):
@@ -1604,66 +1608,343 @@ def test_the_liveness_veto_is_re_evaluated_after_the_lock_is_held():
     assert vetoes[0] < lock < vetoes[1] < settle, (vetoes, lock, settle)
 
 
-def test_nothing_awaits_between_the_post_lock_veto_and_the_settlement_write():
-    """The round-4 HIGH, as a property of the source.
+def _calls_named(node, name):
+    """Every call of the bare name `name` anywhere under `node`."""
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == name]
 
-    Liveness is in-process evidence, so it is only as current as the last
-    moment this coroutine held the event loop. Round 4 ran the awaited
-    service-subject lookup AFTER the post-lock veto; on a cold or hourly-
-    expired cache that lookup issues its own SELECT, and any await lets the
-    presence ping that publishes in-match evidence for this very series run to
-    completion. The veto's answer was then a reading of the past and the
-    settlement write acted on it as current.
 
-    So: the veto is the LAST thing read before the write, and between them
-    there is no await of any kind. Asserted over this function's own span
-    (#432) and on the AST rather than on a line count, so a helper call that
-    happens to be written across two lines cannot slip through.
+def _sql_of_execute(call):
+    """The whitespace-collapsed SQL of `<x>.execute(text("..."), ...)`, else None."""
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "execute" and call.args):
+        return None
+    first = call.args[0]
+    if (isinstance(first, ast.Call) and isinstance(first.func, ast.Name)
+            and first.func.id == "text" and first.args
+            and isinstance(first.args[0], ast.Constant)
+            and isinstance(first.args[0].value, str)):
+        return _WS.sub(" ", first.args[0].value).strip()
+    return None
+
+
+# What the settlement statement's WHERE must carry, each as it reads once the
+# statement's whitespace is collapsed. The first is the live-game veto; the
+# rest are the settle's column predicates, re-stated under the lock (#208).
+SETTLE_WHERE_PREDICATES = (
+    "AND NOT CAST(:live AS BOOLEAN)",
+    "AND dc_fallback_at < clock_timestamp() - make_interval(secs => :bound)",
+    "AND status IN ('active', 'dc_paused')",
+    "AND dc_fallback_at IS NOT NULL",
+)
+
+
+def settlement_veto_findings(tree, src, name="_team_dc_fallback_sweep_once"):
+    """Why the sweep's settlement does NOT carry its own live-game veto; [] if it does.
+
+    A function over a TREE, so the same check reads main.py and the decoys of
+    the superseded form below, and a check that cannot fail is shown failing.
     """
-    node = node_named("_team_dc_fallback_sweep_once")
-
-    def veto_calls(stmt):
-        return [n for n in ast.walk(stmt)
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                and n.func.id == "_group_game_in_progress"]
-
-    assert len(veto_calls(node)) == 2, "the sweep no longer has two vetoes"
+    node = next((n for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and n.name == name), None)
+    if node is None:
+        return ["%s is not a top-level def" % name]
     loops = [n for n in ast.walk(node) if isinstance(n, ast.For)]
-    assert len(loops) == 1, "the per-row loop is not where it was"
+    if len(loops) != 1:
+        return ["the per-row loop is not where it was (%d loops)" % len(loops)]
     body = loops[0].body
+    settles = [c for c in ast.walk(node)
+               if "SET status = 'dc_incomplete'" in (_sql_of_execute(c) or "")]
+    if len(settles) != 1:
+        return ["%d settlement statements, not one" % len(settles)]
+    call = settles[0]
+    sql = _sql_of_execute(call)
+    where = sql[sql.find(" WHERE "):] if " WHERE " in sql else ""
+    out = ["the settlement WHERE lacks %r" % p
+           for p in SETTLE_WHERE_PREDICATES if p not in where]
+    # The parameters: a NAME, bound to a dict literal by the statement
+    # immediately before the settlement, whose "live" entry IS the veto call.
+    # Immediately before, so nothing can sit between the veto read and the
+    # statement that carries it.
+    at = [i for i, st in enumerate(body) if any(n is call for n in ast.walk(st))]
+    if len(at) != 1:
+        return out + ["the settlement is not a statement of the per-row loop"]
+    at = at[0]
+    if len(call.args) < 2 or not isinstance(call.args[1], ast.Name):
+        return out + ["the settlement's parameters are not a named dict"]
+    pname = call.args[1].id
+    prev = body[at - 1] if at else None
+    if not (isinstance(prev, ast.Assign) and isinstance(prev.value, ast.Dict)
+            and [getattr(t, "id", None) for t in prev.targets] == [pname]):
+        return out + ["the statement before the settlement does not bind %s "
+                      "to a dict literal" % pname]
+    live = [v for k, v in zip(prev.value.keys, prev.value.values)
+            if isinstance(k, ast.Constant) and k.value == "live"]
+    if not (len(live) == 1 and isinstance(live[0], ast.Call)
+            and isinstance(live[0].func, ast.Name)
+            and live[0].func.id == "_group_game_in_progress"):
+        out.append("the settlement's \"live\" bind is not a call of "
+                   "_group_game_in_progress")
+    # And that bind is the ONLY post-lock veto: a separate veto read between
+    # the locked re-read and the settlement is the superseded pre-read form.
+    lock = [i for i, st in enumerate(body)
+            if "FOR NO KEY UPDATE SKIP LOCKED" in (ast.get_source_segment(src, st) or "")]
+    if len(lock) != 1:
+        return out + ["%d locked re-reads in the loop, not one" % len(lock)]
+    for st in body[lock[0] + 1:at - 1]:
+        if _calls_named(st, "_group_game_in_progress"):
+            out.append("a separate veto read at line %d stands between the lock "
+                       "and the settlement" % st.lineno)
+    vetoes = _calls_named(node, "_group_game_in_progress")
+    if len(vetoes) != 2:
+        out.append("%d veto calls in the sweep, not two" % len(vetoes))
+    # The vetoed outcome still says so: witness 6 reads this line.
+    logged = [st for st in body[at + 1:]
+              if isinstance(st, ast.If)
+              and pname in (ast.get_source_segment(src, st.test) or "")
+              and "VETOED after the lock" in (ast.get_source_segment(src, st) or "")]
+    if len(logged) != 1:
+        out.append("the vetoed outcome is not logged from the bind")
+    return out
 
-    # The post-lock veto is the LAST top-level `if` in the loop whose own test
-    # calls the veto. Its own branch is the vetoed path -- awaits in there
-    # happen instead of the write, not before it -- so the question is only
-    # about the SIBLINGS that follow it.
-    veto_idx = [i for i, st in enumerate(body)
-                if isinstance(st, ast.If) and veto_calls(st.test)]
-    assert veto_idx, "no `if` in the per-row loop tests the live-game veto"
-    after = body[veto_idx[-1] + 1:]
-    assert after, "nothing follows the post-lock veto"
 
-    first_await = None
-    for stmt in after:
-        awaits = sorted(n.lineno for n in ast.walk(stmt)
-                        if isinstance(n, ast.Await))
-        if awaits:
-            first_await = (stmt, awaits[0])
-            break
-    assert first_await is not None, "the settlement write disappeared"
-    stmt, lineno = first_await
-    text_of = "\n".join(LINES[stmt.lineno - 1:stmt.end_lineno])
-    assert "SET status = 'dc_incomplete'" in text_of, (
-        "the first thing awaited after the post-lock live-game veto is not "
-        f"the settlement write but line {lineno}: {LINES[lineno - 1].strip()!r}"
-        " -- the veto is stale by however long that await takes")
+def test_the_settlement_statement_itself_carries_the_live_game_veto():
+    """The round-7c HIGH, as a property of the source.
 
-    # And the service-subject lookup -- the await that used to be there -- now
-    # runs BEFORE the veto, where its cost is paid while nothing is decided.
-    service = [n.lineno for n in ast.walk(node)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-               and n.func.id == "_assert_no_service_subject"]
-    assert len(service) == 1, service
-    assert service[0] < body[veto_idx[-1]].lineno, (service, veto_idx)
+    What round 7 asserted here was that nothing was AWAITED between the
+    post-lock veto and the settlement write, and it had to allow the awaited
+    UPDATE itself as the first await -- which is the window: while that UPDATE
+    was in flight a presence ping could complete a plain membership read and
+    publish evidence the settlement then committed over. The absence of awaits
+    was never the property. The property is that the veto the settlement rests
+    on is part of the settlement statement, and that nothing can publish
+    evidence for the series between that read and the commit.
+
+    This is the first half: the settlement UPDATE's own WHERE refuses on the
+    veto -- read into a typed bind by the statement immediately before it -- and
+    re-states the settle's column predicates, and no separate veto read stands
+    between the lock and the write. The second half, the publisher's lock, is
+    the test after this one.
+    """
+    assert settlement_veto_findings(TREE, SRC) == []
+
+
+# The superseded form, as round 7 left it: a pre-read veto as its own `if`,
+# then an UPDATE whose WHERE carries no veto and no bound. A decoy, parsed and
+# fed to the same check, so the check is shown REJECTING the form it replaced.
+_PRE_READ_VETO_DECOY = """
+async def _team_dc_fallback_sweep_once(db) -> int:
+    settled = 0
+    due = []
+    for row in due:
+        sid = row["id"]
+        if _group_game_in_progress(str(sid)):
+            continue
+        locked = (await db.execute(text("SELECT status FROM team_series"
+                                         " WHERE id = :sid FOR NO KEY UPDATE SKIP LOCKED"),
+                                    {"sid": sid})).mappings().first()
+        if _group_game_in_progress(str(sid)):
+            print("[TEAM-DC-SWEEP] deferred settle VETOED after the lock")
+            await db.commit()
+            continue
+        done = (await db.execute(text(\"\"\"
+            UPDATE team_series SET status = 'dc_incomplete'
+             WHERE id = :sid AND status IN ('active', 'dc_paused')
+               AND dc_fallback_at IS NOT NULL
+             RETURNING id\"\"\"), {"sid": sid})).scalar()
+        await db.commit()
+    return settled
+"""
+
+
+def test_the_settlement_veto_check_rejects_the_pre_read_form():
+    findings = settlement_veto_findings(ast.parse(_PRE_READ_VETO_DECOY),
+                                        _PRE_READ_VETO_DECOY)
+    joined = " | ".join(findings)
+    assert "AND NOT CAST(:live AS BOOLEAN)" in joined, findings
+    assert "named dict" in joined, findings
+
+
+# Every row-lock mode that CONFLICTS with the sweep's FOR NO KEY UPDATE. FOR
+# KEY SHARE is deliberately absent: it does not conflict with it, so a
+# publisher taking it would still read the row mid-settlement (#202).
+PUBLISHER_LOCK_MODES = ("FOR SHARE", "FOR NO KEY UPDATE", "FOR UPDATE")
+MEMBERSHIP_READ = "p.id IN (ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id)"
+
+
+def publisher_lock_findings(tree, src):
+    """Why some publisher of in-match evidence does NOT lock first; [] if all do.
+
+    A DERIVED census: every def that calls _in_match_touch is a publisher and
+    each one is judged, so a second publisher cannot be added beside the first
+    without taking the same lock or reddening this. For each: exactly one read
+    of the named team_series row under a mode that conflicts with the sweep's
+    lock; the membership read after it; the publication after that; no commit
+    or rollback between the lock and the publication, so the evidence is
+    published while the lock is held; and the publication conditioned on the
+    status that locked read returned.
+    """
+    out = []
+    pubs = []
+    for fn in tree.body:
+        if (isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and fn.name != "_in_match_touch"):
+            t = _calls_named(fn, "_in_match_touch")
+            if t:
+                pubs.append((fn, t))
+    if not pubs:
+        return ["nothing publishes in-match evidence"]
+    # The census is complete only if _in_match_touch is the one door into the
+    # map: nothing else may store into _in_match_seen, and the helper may not
+    # be handed around as a value (a callback would publish from wherever it
+    # is called, outside every def this census judges).
+    for fn in ast.walk(tree):
+        if (not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                or fn.name == "_in_match_touch"):
+            continue
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
+                    and isinstance(n.value, ast.Name)
+                    and n.value.id == "_in_match_seen"):
+                out.append("%s: stores into _in_match_seen directly at line %d"
+                           % (fn.name, n.lineno))
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id == "_in_match_seen"
+                    and n.func.attr in ("update", "setdefault", "__setitem__")):
+                out.append("%s: adds to _in_match_seen via .%s at line %d"
+                           % (fn.name, n.func.attr, n.lineno))
+    called = {id(c.func) for c in _calls_named(tree, "_in_match_touch")}
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Name) and n.id == "_in_match_touch"
+                and id(n) not in called):
+            out.append("_in_match_touch is referenced as a value at line %d"
+                       % n.lineno)
+    total = len(_calls_named(tree, "_in_match_touch"))
+    if total != sum(len(t) for _, t in pubs):
+        out.append("%d publication(s) outside any top-level def"
+                   % (total - sum(len(t) for _, t in pubs)))
+    for fn, touches in pubs:
+        execs = [(c.lineno, _sql_of_execute(c)) for c in ast.walk(fn)
+                 if _sql_of_execute(c)]
+        locks = [ln for ln, sql in execs
+                 if re.search(r"\bFROM team_series\b", sql)
+                 and "WHERE id = :gid" in sql and "FOR KEY SHARE" not in sql
+                 and any(m in sql for m in PUBLISHER_LOCK_MODES)]
+        members = [ln for ln, sql in execs if MEMBERSHIP_READ in sql]
+        if len(locks) != 1:
+            out.append("%s: %d conflicting locked read(s) of the series row, "
+                       "not one" % (fn.name, len(locks)))
+            continue
+        if len(members) != 1:
+            out.append("%s: %d membership read(s), not one"
+                       % (fn.name, len(members)))
+            continue
+        ends = [c.lineno for c in ast.walk(fn)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                and c.func.attr in ("commit", "rollback")]
+        for t in touches:
+            if not locks[0] < members[0] < t.lineno:
+                out.append("%s: the lock (line %d), the membership read (line "
+                           "%d) and the publication (line %d) are out of order"
+                           % (fn.name, locks[0], members[0], t.lineno))
+            if any(locks[0] < ln < t.lineno for ln in ends):
+                out.append("%s: the lock is released before the publication at "
+                           "line %d" % (fn.name, t.lineno))
+        # The status the locked read returned must decide the publication.
+        lock_assign = [a for a in ast.walk(fn) if isinstance(a, ast.Assign)
+                       and any(getattr(n, "lineno", 0) == locks[0]
+                               for n in ast.walk(a.value))]
+        held = {getattr(tg, "id", None) for a in lock_assign for tg in a.targets}
+        held.discard(None)
+        guards = [n for n in ast.walk(fn) if isinstance(n, ast.If)
+                  and any(t in list(ast.walk(n)) for t in touches)
+                  and not any(t in list(ast.walk(n.test)) for t in touches)]
+        decided = False
+        for g in guards:
+            names = {n.id for n in ast.walk(g.test) if isinstance(n, ast.Name)}
+            for a in ast.walk(fn):
+                if (isinstance(a, ast.Assign)
+                        and {getattr(tg, "id", None) for tg in a.targets} & names):
+                    seg = ast.get_source_segment(src, a.value) or ""
+                    if (any(h in seg for h in held) and "active" in seg
+                            and "dc_paused" in seg):
+                        decided = True
+        if not held:
+            out.append("%s: the locked read's result is not kept" % fn.name)
+        elif not decided:
+            out.append("%s: the publication is not conditioned on the status "
+                       "read under the lock" % fn.name)
+    return out
+
+
+def test_every_in_match_publisher_locks_the_series_row_before_its_membership_read():
+    """The second half of the round-7c HIGH closure.
+
+    The settlement's veto is only as current as the evidence map it reads, and
+    the map is written by whoever calls _in_match_touch. Row locks do not
+    serialize a plain MVCC read: a publisher that read membership with an
+    ordinary SELECT while the sweep's UPDATE was in flight saw the row still
+    open and published. So every publisher takes a lock on the series row that
+    CONFLICTS with the sweep's FOR NO KEY UPDATE, before its membership read,
+    and publishes while holding it, only if the row it read is still open. A
+    publication then either precedes the sweep's lock -- and its veto reads it
+    -- or follows its commit and finds the settled row.
+    """
+    assert publisher_lock_findings(TREE, SRC) == []
+
+
+# The superseded publisher: a plain membership SELECT and an unconditional
+# publication. The same check must reject it.
+_PLAIN_READ_PUBLISHER_DECOY = """
+async def presence_ping(request, steam_id, in_match, db):
+    _gid = UUID(in_match)
+    _im_row = (await db.execute(text(\"\"\"
+        SELECT p.id AS pid FROM players p
+         WHERE EXISTS(SELECT 1 FROM team_series ts WHERE ts.id = :gid
+                        AND p.id IN (ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id))
+    \"\"\"), {"gid": _gid})).mappings().first()
+    if _im_row is not None:
+        _in_match_touch(in_match)
+"""
+
+# And the lock a publisher might reach for that does NOT conflict.
+_KEY_SHARE_PUBLISHER_DECOY = _PLAIN_READ_PUBLISHER_DECOY.replace(
+    "    _gid = UUID(in_match)\n",
+    "    _gid = UUID(in_match)\n"
+    "    _im_series = (await db.execute(text(\n"
+    "        \"SELECT status FROM team_series WHERE id = :gid FOR KEY SHARE\"\n"
+    "    ), {\"gid\": _gid})).first()\n")
+
+
+def test_the_publisher_lock_check_rejects_a_plain_read_and_a_non_conflicting_lock():
+    for decoy in (_PLAIN_READ_PUBLISHER_DECOY, _KEY_SHARE_PUBLISHER_DECOY):
+        findings = publisher_lock_findings(ast.parse(decoy), decoy)
+        assert any("conflicting locked read" in f for f in findings), findings
+    assert "FOR KEY SHARE" in _KEY_SHARE_PUBLISHER_DECOY
+
+
+# A second door into the map, beside a publisher the census would pass: a
+# direct store and the helper handed out as a callback. Both must be named.
+_SIDE_DOOR_DECOY = _PLAIN_READ_PUBLISHER_DECOY + """
+
+def _heartbeat(gid):
+    _in_match_seen[str(gid)] = 0.0
+
+
+def _register(hooks):
+    hooks.append(_in_match_touch)
+"""
+
+
+def test_the_publisher_census_rejects_a_second_door_into_the_map():
+    findings = publisher_lock_findings(ast.parse(_SIDE_DOOR_DECOY),
+                                       _SIDE_DOOR_DECOY)
+    joined = " | ".join(findings)
+    assert "_heartbeat: stores into _in_match_seen directly" in joined, findings
+    assert "_in_match_touch is referenced as a value" in joined, findings
 
 
 def test_every_value_the_settle_writes_is_read_from_the_locked_row():

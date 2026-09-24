@@ -2380,7 +2380,7 @@
           ],
           "main",
           "presence_ping",
-          "ab0a9b7c3c7456eb0d88ca29acea0ef81e2285f6"
+          "3b1936ad329991ce5abe068e8dfeb094cde46924"
         ],
         [
           "/api/v1/queue/count",
@@ -3326,7 +3326,7 @@
       [
         "main",
         "lifespan",
-        "1e71d0cda6c8d7a76b32639d13a31f2636accd60"
+        "eedb4b9ca8e43e02b29250de05df3ee4cb052368"
       ]
     ]
   },

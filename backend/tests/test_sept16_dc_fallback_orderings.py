@@ -42,6 +42,7 @@ import contextlib
 import os
 import pathlib
 import time
+import types
 import uuid
 
 import pytest
@@ -69,6 +70,8 @@ SID_T2B = "90000000000000024"
 PRE_326_SCHEMA = """
 DROP TABLE IF EXISTS team_matches;
 DROP TABLE IF EXISTS team_series;
+DROP TABLE IF EXISTS ovt_series;
+DROP TABLE IF EXISTS ffa_lobbies;
 DROP TABLE IF EXISTS players;
 
 CREATE TABLE players (
@@ -114,6 +117,20 @@ CREATE TABLE team_matches (
     photon_room_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- The two other group tables presence_ping's membership read names. It asks
+-- all three kinds in one statement, so a harness without them would fail that
+-- statement and test nothing about the team branch; the columns are exactly
+-- the ones the read touches.
+CREATE TABLE ovt_series (
+    id UUID PRIMARY KEY,
+    solo_id UUID, duo_a_id UUID, duo_b_id UUID
+);
+
+CREATE TABLE ffa_lobbies (
+    id UUID PRIMARY KEY,
+    member_ids UUID[]
+);
 """
 
 
@@ -127,6 +144,33 @@ async def _run_script(sql: str) -> None:
     conn = await asyncpg.connect(_raw_dsn())
     try:
         await conn.execute(sql)
+    finally:
+        await conn.close()
+
+
+async def _take_clean_slate() -> None:
+    """The per-case reset TAKES the clean slate rather than assuming it (#753).
+
+    A case that dies while one of its sessions holds a row lock -- a mutation
+    run that times out mid-interleave, say -- leaves that lock behind, and
+    PostgreSQL does not notice a vanished client until it next writes to its
+    socket, which can be minutes and outlives the process. Every later case
+    would then block on its own DROP TABLE. So every other backend on THIS
+    throwaway database is terminated first, and the schema is rebuilt under a
+    short lock_timeout, so a DROP that is still blocked fails loudly with a
+    lock error instead of hanging the run.
+
+    current_database() and never a name: the DSN is the throwaway cluster's,
+    and this statement cannot reach any other database on the server.
+    """
+    import asyncpg
+    conn = await asyncpg.connect(_raw_dsn())
+    try:
+        await conn.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+            " WHERE datname = current_database() AND pid <> pg_backend_pid()")
+        await conn.execute("SET lock_timeout = '5s'")
+        await conn.execute(PRE_326_SCHEMA)
     finally:
         await conn.close()
 
@@ -200,7 +244,7 @@ async def _fresh_series(t2_wins: int = 1):
     the series WITH ratings. That is the outcome a fallback must never be able
     to displace, so it is the outcome every ordering below asserts.
     """
-    await _run_script(PRE_326_SCHEMA)
+    await _take_clean_slate()
     await _run_script(MIGRATION.read_text(encoding="utf-8"))
     engine = create_async_engine(DSN, future=True)
     Session = async_sessionmaker(engine, expire_on_commit=False)
@@ -535,11 +579,19 @@ class _GateOnStatement:
     """A session wrapper that pauses the sweep at one chosen statement.
 
     The sweep's discovery SELECT and its locked re-read are two round trips
-    with nothing awaitable of OURS in between, and after the lock the liveness
-    re-check is a plain synchronous call. Landing a competing commit, or a
-    client ping, in one of those gaps is otherwise a race. This holds the sweep
-    at the door of (or just past) a named statement so the gap is a place the
-    test can stand.
+    with nothing awaitable of OURS in between, and the post-lock liveness veto
+    is read synchronously while the settlement statement's parameters are
+    built. Landing a competing commit, or a client ping, in one of those gaps
+    is otherwise a race. This holds the sweep at the door of (or just past) a
+    named statement so the gap is a place the test can stand.
+
+    Two kinds of ping stand in those gaps below, and they answer different
+    questions. `main._in_match_touch` called directly puts evidence into the
+    map at a chosen moment: it asks what the veto does with evidence that is
+    THERE. A ping through `main.presence_ping` is the real publisher, with its
+    own lock and its own membership read: it asks whether evidence can ARRIVE
+    at a moment the veto has already passed. The round-7c HIGH was a question
+    of the second kind that this file had only asked in the first form.
 
     It is the TEST's wrapper, around the session the test itself hands in:
     production code gets no seam it would have to carry, and the sweep runs
@@ -1188,6 +1240,165 @@ def test_a_fenced_report_answers_not_deferred_and_leaves_the_series_open():
                 assert row["dc_player_id"] is None, row
         finally:
             await engine2.dispose()
+    _drive(body)
+
+
+# ── The publisher cannot land between the veto and the write ────────────
+
+
+SETTLE_STATEMENT = "SET status = 'dc_incomplete'"
+
+
+class _PingRequest:
+    """The two attributes presence_ping reads off its request, and no more."""
+
+    def __init__(self):
+        self.state = types.SimpleNamespace()
+        self.headers = {}
+
+
+@contextlib.contextmanager
+def _presence_harness():
+    """Let the REAL presence_ping run against this file's schema.
+
+    * the Steam-session check is made to pass: authentication is not what
+      these scenarios measure, and the real check needs a sessions table;
+    * the lease renewal is RECORDED instead of executed: the harness has no
+      lease table, and the record is how a scenario proves the ping got as far
+      as a verified membership decision rather than failing early and
+      publishing nothing for an unrelated reason.
+
+    Everything the publication decision rests on -- the series lock, the
+    membership read and the status it reads -- is the real route against the
+    real database. The route's last_seen stamp fails against this schema and
+    the route's own guard swallows that, exactly as it does in production for
+    any stamp failure; nothing below depends on it.
+    """
+    renewals = []
+    old_check = main._check_steam_session
+    old_renew = main._lease_renew
+
+    async def _session_ok(request, steam_id, db):
+        return None
+
+    async def _renew(db, pid, mode, gid, ttl, **kwargs):
+        renewals.append((str(pid), mode, str(gid)))
+
+    main._check_steam_session = _session_ok
+    main._lease_renew = _renew
+    try:
+        yield renewals
+    finally:
+        main._check_steam_session = old_check
+        main._lease_renew = old_renew
+
+
+async def _ping(Session, steam_id, sid):
+    """One in-match presence ping through the real route."""
+    async with Session() as s:
+        return await main.presence_ping(
+            request=_PingRequest(), steam_id=steam_id, in_match=str(sid), db=s)
+
+
+def test_a_ping_queued_between_the_veto_and_the_write_publishes_nothing_the_settlement_missed():
+    """The round-7c HIGH, as a run and not as a shape.
+
+    The sweep read its post-lock veto -- no evidence -- and is held at the door
+    of its settlement UPDATE, still holding the series lock. A seat of this
+    series now pings, claiming to be in its game. Before the fix the ping's
+    membership read was a plain SELECT: it saw the row still open, published
+    evidence, and the sweep then committed a settlement that evidence never
+    reached -- the stale publication. With the fix the ping takes FOR SHARE on
+    the series row before that read, so it waits for the sweep's commit, finds
+    the row settled, and publishes nothing.
+
+    THE PROPERTY is that evidence for a series is never published in a window
+    the settlement's veto has already passed. It is asserted in three parts:
+    nothing was published while the write was held; the settlement happened
+    (so the first part is not a sweep that simply stopped); and the ping did
+    reach a verified membership decision -- its lease renewal is recorded -- so
+    "nothing published" is the route declining and not the route failing.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        key = str(sid)
+        try:
+            with _harness_globals(), _presence_harness() as renewals:
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+
+                gate = asyncio.Event()
+                sweep = asyncio.create_task(
+                    _gated_sweep(Session, gate, SETTLE_STATEMENT, "before"))
+                await asyncio.sleep(0.5)
+                assert not sweep.done(), (
+                    "the sweep never reached its settlement write")
+                assert key not in main._in_match_seen
+
+                ping = asyncio.create_task(_ping(Session, SID_T1B, sid))
+                await asyncio.sleep(1.0)
+                published_while_held = key in main._in_match_seen
+                ping_waited = not ping.done()
+
+                gate.set()
+                settled = await asyncio.wait_for(sweep, 15)
+                await asyncio.wait_for(ping, 15)
+                end = await _row(Session, sid)
+
+                assert not published_while_held, (
+                    "a presence ping published in-match evidence for this "
+                    "series between the sweep's veto read and its settlement "
+                    "write -- the stale publication")
+                assert settled == 1, settled
+                assert end["status"] == "dc_incomplete", dict(end)
+                assert key not in main._in_match_seen, (
+                    "evidence was published for a series already settled")
+                assert ping_waited, (
+                    "the ping finished while the sweep held the series lock")
+                assert renewals == [(str(ids["t1b"]), "team", key)], renewals
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+def test_a_ping_before_the_sweep_takes_its_lock_is_published_and_vetoes_it():
+    """The other direction, and the negative control of the test above (#391).
+
+    The same real ping, delivered while the sweep is held at the door of its
+    LOCKED re-read -- its pass-1 filter has already run and found nothing, and
+    it holds no lock yet. Nothing makes the ping wait, so it publishes, and the
+    settlement statement's veto reads that evidence and refuses in SQL. Without
+    this half, the test above would also pass on a route that never publishes
+    at all.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        key = str(sid)
+        try:
+            with _harness_globals(), _presence_harness() as renewals:
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+
+                gate = asyncio.Event()
+                sweep = asyncio.create_task(
+                    _gated_sweep(Session, gate, LOCK_STATEMENT, "before"))
+                await asyncio.sleep(0.5)
+                assert not sweep.done(), "the sweep never reached its locked read"
+
+                await asyncio.wait_for(_ping(Session, SID_T1B, sid), 15)
+                assert key in main._in_match_seen, (
+                    "an unobstructed ping from a member published nothing")
+                assert renewals == [(str(ids["t1b"]), "team", key)], renewals
+
+                gate.set()
+                assert await asyncio.wait_for(sweep, 15) == 0
+                end = await _row(Session, sid)
+                assert end["status"] == "active", dict(end)
+                assert end["invalidation_reason"] is None
+        finally:
+            await engine.dispose()
     _drive(body)
 
 

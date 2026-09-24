@@ -3845,16 +3845,13 @@ async def _team_dc_fallback_sweep_once(db) -> int:
         # LOCKED row's membership -- the same four ids the settle is about to
         # attribute to -- with the lock held.
         #
-        # IT RUNS BEFORE THE VETO, and that ordering is the point (round-4
-        # HIGH). This helper AWAITS: on a cold or hourly-expired cache
-        # _service_player_uuids issues its own SELECT, and any await hands the
-        # event loop to other requests -- including the presence ping that
-        # publishes in-match evidence for this very series. Run it after the
-        # veto and the veto is a reading of the past by however long that
-        # lookup took, while the settlement write below acts as though it were
-        # current. So every await this row needs happens HERE, and the veto
-        # below is the LAST thing read before the write with nothing awaited in
-        # between. Adding an await after the veto re-opens the same window.
+        # IT RUNS BEFORE THE VETO (round-4 HIGH). This helper AWAITS: on a cold
+        # or hourly-expired cache _service_player_uuids issues its own SELECT.
+        # Running it first means the only awaits after the veto read are the
+        # settlement statement and its commit, so the lookup's cost is paid
+        # while nothing is decided. What keeps the veto CURRENT through the
+        # write is not that ordering but the lock discipline described at the
+        # settlement statement.
         try:
             await _assert_no_service_subject(
                 db,
@@ -3863,29 +3860,6 @@ async def _team_dc_fallback_sweep_once(db) -> int:
             )
         except HTTPException:
             print(f"[TEAM-DC-SWEEP] deferred settle REFUSED, service subject: {sid}")
-            await db.commit()
-            continue
-        # Proof-of-life veto, PASS 2, and THIS is the one the settle rests on.
-        # Pass 1 ran before the lock. A row can become live between the two --
-        # the four press Start, a room is issued, the first in-match ping lands
-        # -- and the in-transaction re-check above cannot see it, because it
-        # re-checks COLUMNS while liveness is in-process evidence. Re-read here
-        # or the sweep acts on a liveness decision as stale as the wait was
-        # long. The lock is released by the commit before continuing.
-        #
-        # LAST READ BEFORE THE WRITE. Between this call and the UPDATE below
-        # there is no await, so no other task on this loop can run and no
-        # evidence can arrive unseen -- the only publisher of that evidence is
-        # presence_ping, an async handler on this same loop, not a threadpool
-        # caller. What is left between the two is a handful of lookups on the
-        # row already in hand and a membership test -- no I/O, and nothing
-        # that yields. test_sept16_dc_fallback_shape.py asserts that property
-        # over this function's own span, and the orderings file delivers a
-        # heartbeat during the service-subject lookup above and requires this
-        # veto to take it.
-        if _group_game_in_progress(str(sid)):
-            print("[TEAM-DC-SWEEP] deferred settle VETOED after the lock, "
-                  f"game in progress: {sid}")
             await db.commit()
             continue
         # The remaining team is derived from the membership on the LOCKED row's
@@ -3899,6 +3873,43 @@ async def _team_dc_fallback_sweep_once(db) -> int:
         _remaining = None
         if _dcp is not None:
             _remaining = 2 if _dcp in (locked["t1a_id"], locked["t1b_id"]) else 1
+        # Proof-of-life veto, PASS 2, and THIS is the one the settle rests on.
+        # Pass 1 ran before the lock. A row can become live between the two --
+        # the four press Start, a room is issued, the first in-match ping lands
+        # -- and the in-transaction re-check above cannot see it, because it
+        # re-checks COLUMNS while liveness is in-process evidence.
+        #
+        # THE SETTLEMENT STATEMENT CARRIES THE VETO (round-7c HIGH). The
+        # evidence is this process's memory, so no SQL predicate can read it;
+        # the veto is read while the statement's parameters are built and
+        # travels INTO the UPDATE as a typed bind, and the UPDATE refuses in
+        # SQL when it holds. There is no separate step between the last veto
+        # read and the write for anything to land in.
+        #
+        # WHY THAT READING IS STILL CURRENT WHEN THE COMMIT MAKES IT
+        # AUTHORITATIVE: the lock, and not an absence of awaits -- the UPDATE
+        # itself is awaited. This pass holds FOR NO KEY UPDATE on the row from
+        # its locked re-SELECT until the commit below. The one caller of
+        # _in_match_touch, presence_ping, takes FOR SHARE on the same series
+        # row BEFORE its membership read and publishes while it still holds
+        # that lock, and FOR SHARE conflicts with FOR NO KEY UPDATE. So a
+        # publication for this series lands in one of three places relative to
+        # this pass: it finished before this pass's lock was granted, and is
+        # in the map the bind reads, counting until IN_MATCH_TTL_SEC lapses;
+        # or its lock was held when this pass asked
+        # for one, and SKIP LOCKED passed the row over, so nothing was settled
+        # this tick; or it waits for the commit and reads the row as this pass
+        # left it -- publishing if the row is still open and nothing if it is
+        # settled. test_sept16_dc_fallback_shape.py asserts the bind, the
+        # predicate and the publisher's lock, and counts the publishers; the
+        # orderings file queues a real ping between this read and the write.
+        #
+        # The UPDATE also re-states every other condition the settle rests on
+        # -- status, a marker present, the marker past the bound on
+        # clock_timestamp() -- so what it writes is decided by what it finds.
+        _settle = {"sid": sid, "dpid": _dcp, "ot": _remaining,
+                   "bound": float(_DC_FALLBACK_DEFER_SECONDS),
+                   "live": _group_game_in_progress(str(sid))}
         done = (await db.execute(
             text("""
                 UPDATE team_series
@@ -3909,11 +3920,18 @@ async def _team_dc_fallback_sweep_once(db) -> int:
                  WHERE id = :sid
                    AND status IN ('active', 'dc_paused')
                    AND dc_fallback_at IS NOT NULL
+                   AND dc_fallback_at
+                       < clock_timestamp() - make_interval(secs => :bound)
+                   AND NOT CAST(:live AS BOOLEAN)
                  RETURNING id
             """),
-            {"sid": sid, "dpid": _dcp, "ot": _remaining},
+            _settle,
         )).scalar()
         await db.commit()
+        if _settle["live"]:
+            print("[TEAM-DC-SWEEP] deferred settle VETOED after the lock, "
+                  f"game in progress: {sid}")
+            continue
         if done:
             settled += 1
             print("[TEAM-DC-SWEEP] deferred fallback settled to dc_incomplete: "
@@ -15563,12 +15581,42 @@ async def presence_ping(request: Request,
         _im_ok = False
         _im_mode = None
         _im_pid = None
+        _im_publish = False
         try:
             # Python-side UUID validation first: a malformed id must not reach
             # a CAST and poison the transaction the last_seen stamp below
             # still needs (#235).
             _gid = UUID(in_match)
             await _check_steam_session(request, steam_id, db)
+            # THE SERIES LOCK COMES BEFORE THE MEMBERSHIP READ (round-7c
+            # HIGH). This is the only caller of _in_match_touch, and the 2v2
+            # deferred-fallback sweep settles a series on the strength of that
+            # evidence being ABSENT: it holds FOR NO KEY UPDATE on the series
+            # row from its locked re-read until its commit, and its settlement
+            # statement carries the veto it read under that lock. FOR SHARE
+            # conflicts with that lock, so while the sweep holds it this read
+            # waits; when the sweep commits, the read returns the row as the
+            # sweep left it. The publication below therefore lands in one of
+            # three places relative to one sweep pass over this series: before
+            # the sweep's lock is granted, where the veto its settlement
+            # carries reads it; while this lock is held, in which case the
+            # sweep's SKIP LOCKED passes the row over and settles nothing that
+            # tick; or after the sweep's commit, against the row as the sweep
+            # left it -- published to if it is still open, not if it was
+            # settled. A plain membership SELECT could run in the middle of
+            # that transaction, see the row still open and publish evidence the
+            # settlement never saw.
+            #
+            # FOR SHARE and not FOR NO KEY UPDATE: it is the weakest mode that
+            # conflicts with the sweep's (#202), so the four seats of one
+            # series do not queue behind each other's pings. A group id that
+            # is not a team series matches no row and takes no lock; the ovt
+            # and ffa branches below are unchanged. Taken AFTER the session
+            # check, so a caller whose session does not verify never locks a
+            # series row.
+            _im_series = (await db.execute(text(
+                "SELECT status FROM team_series WHERE id = :gid FOR SHARE"
+            ), {"gid": _gid})).first()
             # Returns WHICH kind of group as well as whether membership holds,
             # because this ping is also the queue lease's in-game renewal
             # carrier (migration 174) and a lease renewal must name its mode.
@@ -15598,6 +15646,25 @@ async def presence_ping(request: Request,
                 _im_ok = True
                 _im_mode = _im_row["mode"]
                 _im_pid = _im_row["pid"]
+                # A team series is published to only while it is still a
+                # series a closer can act on -- the two statuses the sweep
+                # settles from -- as read under the lock above. A row the
+                # sweep has already settled is not: evidence arriving after a
+                # settlement is not evidence the settlement could have seen.
+                _im_publish = (_im_mode != "team"
+                               or (_im_series is not None
+                                   and _im_series[0] in ("active",
+                                                         "dc_paused")))
+            if _im_publish:
+                _in_match_touch(in_match)
+            elif _im_ok:
+                print("[PRESENCE] in_match evidence not published, series "
+                      f"no longer open: {steam_id} -> {in_match}")
+            # Release the series lock before any other write: the lease
+            # renewal and the presence stamp below each take row locks of
+            # their own, and holding this one across them would put a ping
+            # into lock orders it has no business in.
+            await db.commit()
         except Exception:
             _im_ok = False
             try:
@@ -15605,7 +15672,6 @@ async def presence_ping(request: Request,
             except Exception:
                 pass
         if _im_ok:
-            _in_match_touch(in_match)
             # RENEW this caller's own lease only — never the group's. One
             # member must not be able to hold three other people's exclusion
             # open, so a client that lies about being in a battle can only
