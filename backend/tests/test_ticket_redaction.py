@@ -38,8 +38,13 @@ naming the variable (the harness shape of test_ffa_quarantine_triage.py):
     TICKET_REDACTION_TEST_PG_OPTOUT=1   says out loud that this run skips them
 Each case ends every other session on that database and drops and recreates
 its own tables there, so the harness REFUSES, before either, a database whose
-name lacks this lane's scratch marker or that holds anything but this
-harness's own synthetic fixtures (round 2, M3).
+name lacks this lane's scratch marker, that holds any relation or sequence --
+in any schema a client can create or an unbound session's search path names --
+other than this harness's own fixtures, or whose fixture tables hold anything
+but its synthetic rows (rounds 2 and 3, M3). Every table and sequence the
+harness touches is named with its schema, public, and every connection that
+sends a statement after those refusals is bound to that schema at connect
+(round 3).
 """
 
 import asyncio
@@ -444,22 +449,38 @@ def run(coro):
 # admin_users come from the ORM, because submit_bug_report selects every mapped
 # Player column. gen_random_uuid()
 # stands in for 083's uuid_generate_v4(), which needs an extension.
+#
+# ONE SCHEMA (round 3, R2 finding 1). Every table and sequence the harness
+# touches is named with its schema, BOUND_SCHEMA: in the statements below,
+# in the seed engine's (its schema_translate_map names it in what create_all
+# and the ORM render), and in the refusals' reads. Every connection that
+# sends a statement after the refusals is bound to it at connect
+# (search_path = BOUND_SCHEMA): _clean_slate's, the seed engine's, and
+# database.py's two engines through _redirect_for, because the routes' own
+# SQL names no schema. Each case checks from its own record that it named no
+# fixture table or sequence without the schema (_unbound_references). The
+# drops are RESTRICT, in dependency order: each removes its table and what
+# PostgreSQL made for it -- its indexes, a sequence one of its columns owns --
+# and an object elsewhere that depends on it makes the drop fail instead of
+# being dropped with it.
+
+BOUND_SCHEMA = "public"
 
 DROP = """
-DROP TABLE IF EXISTS bug_report_events CASCADE;
-DROP TABLE IF EXISTS bug_reports CASCADE;
-DROP SEQUENCE IF EXISTS bug_reports_number_seq;
-DROP TABLE IF EXISTS admin_users CASCADE;
-DROP TABLE IF EXISTS players CASCADE;
-DROP TABLE IF EXISTS shop_items CASCADE;
-DROP TABLE IF EXISTS steam_sessions CASCADE
+DROP TABLE IF EXISTS public.bug_report_events RESTRICT;
+DROP TABLE IF EXISTS public.bug_reports RESTRICT;
+DROP SEQUENCE IF EXISTS public.bug_reports_number_seq RESTRICT;
+DROP TABLE IF EXISTS public.admin_users RESTRICT;
+DROP TABLE IF EXISTS public.players RESTRICT;
+DROP TABLE IF EXISTS public.shop_items RESTRICT;
+DROP TABLE IF EXISTS public.steam_sessions RESTRICT
 """
 
 BUG_DDL = """
-CREATE SEQUENCE bug_reports_number_seq;
-CREATE TABLE bug_reports (
+CREATE SEQUENCE public.bug_reports_number_seq;
+CREATE TABLE public.bug_reports (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    player_id         UUID REFERENCES players(id) ON DELETE SET NULL,
+    player_id         UUID REFERENCES public.players(id) ON DELETE SET NULL,
     steam_id          VARCHAR(32),
     display_name      VARCHAR(64),
     mod_version       VARCHAR(32),
@@ -474,13 +495,13 @@ CREATE TABLE bug_reports (
     triage_notes      TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    bug_number        BIGINT NOT NULL DEFAULT nextval('bug_reports_number_seq') UNIQUE,
+    bug_number        BIGINT NOT NULL DEFAULT nextval('public.bug_reports_number_seq') UNIQUE,
     channel_posted_at TIMESTAMPTZ,
     kind              VARCHAR(16) NOT NULL DEFAULT 'report' CHECK (kind IN ('report', 'auto'))
 );
-CREATE TABLE bug_report_events (
+CREATE TABLE public.bug_report_events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    bug_report_id   UUID NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+    bug_report_id   UUID NOT NULL REFERENCES public.bug_reports(id) ON DELETE CASCADE,
     actor_steam_id  VARCHAR(32),
     actor_name      VARCHAR(96) NOT NULL,
     event_type      VARCHAR(24) NOT NULL,
@@ -520,22 +541,36 @@ ROUTES = (
 # What a case does to its database, in order: end every other session on it
 # (_clean_slate, #753), then DROP the tables below and recreate them. Pointed
 # at the wrong database, the first ends someone's sessions and the second
-# deletes their data. So two refusals run first, on their own connection:
+# deletes their data. So three refusals run first, on their own connection:
 #
-#   NAME  the database's name carries this lane's scratch marker -- the
-#         scr_bug391 lane-database gate, generalised from one literal to the
-#         lane's prefix, because this lane runs on more than one database
-#         (scr_ticket_redaction; the whole-suite run's own);
-#   ROWS  every table the DROP names holds only this harness's own synthetic
-#         fixtures (rows keyed on ADMIN or REPORTER, nothing in shop_items),
-#         and the database holds no table this harness does not create. A
-#         database a real player's row lives in is refused whatever its name.
+#   NAME    the database's name carries this lane's scratch marker -- the
+#           scr_bug391 lane-database gate, generalised from one literal to
+#           the lane's prefix, because this lane runs on more than one
+#           database (scr_ticket_redaction; the whole-suite run's own);
+#   CENSUS  every relation and sequence in every schema a client can create,
+#           and in any other schema an unbound session's search path names
+#           (pg_catalog and information_schema aside), is one of this
+#           harness's own fixtures, matched by name in BOUND_SCHEMA: a
+#           harness table or sequence by its own name, an index or a
+#           column-owned sequence by its table's (_foreign_objects), never
+#           by a count. A same-named table or sequence in a schema an
+#           unbound search path reaches before public -- the object an
+#           unqualified DROP would have removed (round 3, R2 finding 1) -- is
+#           refused, and so is a table the harness never creates;
+#   ROWS    every table the DROP names holds only this harness's own
+#           synthetic fixtures (rows keyed on ADMIN or REPORTER, nothing in
+#           shop_items). A database a real player's row lives in is refused
+#           whatever its name.
+#
+# The refusal connection alone is not bound to BOUND_SCHEMA, on purpose: it
+# reads the search path an unbound session of this database gets, and every
+# table it reads is named with its schema.
 #
 # A refusal is a RuntimeError naming the database and what it would have
 # lost, raised before the first terminate or DROP is SENT. Every statement a
 # case sends on the way in is written down (Env.sent), and every case checks
-# from its own record that both refusals ran before its first terminate or
-# DROP -- so the order is proved on every run, not only by the cases that
+# from its own record that all three refusals ran before its first terminate
+# or DROP -- so the order is proved on every run, not only by the cases that
 # point the harness at the wrong database.
 
 SCRATCH_MARKER = "scr_ticket_redaction"
@@ -543,6 +578,9 @@ SCRATCH_DB_RE = re.compile(re.escape(SCRATCH_MARKER) + r"(?:_[a-z0-9_]+)?")
 FIXTURE_IDS = (ADMIN, REPORTER)
 HARNESS_TABLES = ("bug_report_events", "bug_reports", "admin_users", "players", "shop_items",
                   "steam_sessions")
+# BUG_DDL's own sequence. shop_items' serial id makes a second one, which the
+# census admits as the sequence a harness table's column owns.
+FIXTURE_SEQUENCES = ("bug_reports_number_seq",)
 # (table, the column a row's identity is, whether NULL is a fixture's): a
 # fixture row is keyed on a FIXTURE_IDS value; shop_items gets no row at all.
 POPULATION = (
@@ -553,8 +591,82 @@ POPULATION = (
     ("steam_sessions", "steam_id", False),
     ("shop_items", None, False),
 )
-NAME_GATE_SQL = "SELECT current_database() /* ticket-redaction scratch-name gate */"
+NAME_GATE_SQL = "SELECT pg_catalog.current_database() /* ticket-redaction scratch-name gate */"
 ROWS_GATE_TAG = "/* ticket-redaction population gate */"
+CENSUS_TAG = "/* ticket-redaction census */"
+# One row per relation -- table, index, sequence, view, any pg_class kind --
+# in the schemas the census reads: every schema a client can create (a name
+# without the reserved pg_ prefix) and any other one an unbound session's
+# search path names, but pg_catalog and information_schema. `owner` is the
+# table an index belongs to, or the table whose column owns a sequence.
+CENSUS_SQL = (
+    "SELECT n.nspname::text AS schema, c.relname::text AS name, c.relkind::text AS kind,"
+    " n.nspname = ANY (pg_catalog.current_schemas(false)) AS on_path,"
+    " COALESCE(tn.nspname::text || '.' || t.relname::text,"
+    " sn.nspname::text || '.' || s.relname::text) AS owner"
+    " FROM pg_catalog.pg_class c"
+    " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " LEFT JOIN pg_catalog.pg_index x ON x.indexrelid = c.oid"
+    " LEFT JOIN pg_catalog.pg_class t ON t.oid = x.indrelid"
+    " LEFT JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace"
+    " LEFT JOIN pg_catalog.pg_depend d ON c.relkind = 'S' AND d.objid = c.oid AND d.deptype IN ('a', 'i')"
+    " AND d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass"
+    " AND d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass"
+    " LEFT JOIN pg_catalog.pg_class s ON s.oid = d.refobjid"
+    " LEFT JOIN pg_catalog.pg_namespace sn ON sn.oid = s.relnamespace"
+    " WHERE n.nspname::text <> ALL (ARRAY['pg_catalog', 'information_schema'])"
+    " AND (n.nspname::text !~ '^pg_' OR n.nspname = ANY (pg_catalog.current_schemas(false)))"
+    " ORDER BY 1, 2 " + CENSUS_TAG)
+CENSUS_PATH_SQL = "SELECT pg_catalog.current_schemas(false)::text[] " + CENSUS_TAG
+_KINDS = {"r": "table", "p": "partitioned table", "v": "view", "m": "materialized view",
+          "f": "foreign table", "S": "sequence", "i": "index", "I": "partitioned index",
+          "c": "composite type", "t": "TOAST table"}
+
+
+def _foreign_objects(census):
+    """The census rows that are NOT this harness's own: the name-set match,
+    never a count. Admitted, in BOUND_SCHEMA only: a table named in
+    HARNESS_TABLES and a sequence named in FIXTURE_SEQUENCES; and what
+    PostgreSQL makes for such a table and drops with it -- its indexes, and a
+    sequence one of its columns owns -- by the qualified name of the table
+    it belongs to. Anything else, in any schema the census reads, is someone
+    else's."""
+    tables = {f"{BOUND_SCHEMA}.{t}" for t in HARNESS_TABLES}
+    return [r for r in census
+            if not (r["schema"] == BOUND_SCHEMA
+                    and ((r["kind"] == "r" and r["name"] in HARNESS_TABLES)
+                         or (r["kind"] == "S" and r["name"] in FIXTURE_SEQUENCES)
+                         or (r["kind"] in ("i", "S") and r["owner"] in tables)))]
+
+
+# A harness table or sequence named after one of these words, or inside
+# nextval('...'), must carry BOUND_SCHEMA (_unbound_references).
+_OBJECT_REF_RE = re.compile(
+    r'\b(?:(?:TABLE|SEQUENCE)(?:\s+IF\s+(?:NOT\s+)?EXISTS)?|INTO|FROM|JOIN|UPDATE|TRUNCATE|REFERENCES|ON)'
+    r'\s+((?:"?\w+"?\.)?"?\w+"?)', re.IGNORECASE)
+_NEXTVAL_RE = re.compile(r"nextval\('([^']+)'", re.IGNORECASE)
+
+
+def _unbound_references(sent):
+    """(reference, statement) for every harness table or sequence that a
+    statement names without BOUND_SCHEMA: the proof, from a case's own
+    record, that the harness named each of its tables and sequences with the
+    schema."""
+    own = set(HARNESS_TABLES) | set(FIXTURE_SEQUENCES)
+    found = []
+    for s in sent:
+        refs = [m.group(1) for m in _OBJECT_REF_RE.finditer(s)]
+        refs += [m.group(1) for m in _NEXTVAL_RE.finditer(s)]
+        for ref in refs:
+            schema, _, obj = ref.replace('"', "").rpartition(".")
+            if obj in own and schema != BOUND_SCHEMA:
+                found.append((ref, " ".join(s.split())[:120]))
+    return found
+
+
+def _assert_bound(sent):
+    bad = _unbound_references(sent)
+    assert not bad, f"the harness named a fixture object without its schema {BOUND_SCHEMA!r}: {bad[:3]}"
 
 
 def _destructive(sql: str) -> bool:
@@ -593,51 +705,63 @@ async def _connect(url, sent, database=None, **settings):
     return _Recorded(conn, sent)
 
 
+async def _refuse_unless_only_fixtures(conn, name, lost):
+    """CENSUS (above): refuses unless every relation and sequence the census
+    reads is one of this harness's own fixtures, and names each one that is
+    not, with its schema, its kind and whether an unbound search path reaches
+    it."""
+    path = list(await conn.fetchval(CENSUS_PATH_SQL) or [])
+    foreign = _foreign_objects(await conn.fetch(CENSUS_SQL))
+    if foreign:
+        shown = "; ".join(
+            f"{r['schema']}.{r['name']} ({_KINDS.get(r['kind'], r['kind'])}"
+            f"{', on the search path' if r['on_path'] else ''})" for r in foreign[:10])
+        more = f"; and {len(foreign) - 10} more" if len(foreign) > 10 else ""
+        raise RuntimeError(
+            f"database {name!r} holds {len(foreign)} object(s) this harness never creates: "
+            f"{shown}{more}. An unbound session's search path here is "
+            f"{', '.join(path) or '(empty)'}. Refusing to end its sessions or drop {lost}.")
+
+
 async def _refuse_unless_scratch(url, sent):
-    """M3: the NAME and ROWS refusals (above), on their own connection, before
-    _clean_slate and the DROP block. A table another session holds locked
-    cannot stall them into skipping: a read that waits 5 s fails, and a read
-    that fails is a refusal."""
+    """M3: the NAME, CENSUS and ROWS refusals (above), in that order, on
+    their own connection, before _clean_slate and the DROP block. A table
+    another session holds locked cannot stall them into skipping: a read that
+    waits 5 s fails, and a read that fails is a refusal."""
     conn = await _connect(url, sent, lock_timeout="5s")
     try:
         name = await conn.fetchval(NAME_GATE_SQL)
-        lost = ", ".join(HARNESS_TABLES)
+        lost = ", ".join(f"{BOUND_SCHEMA}.{t}" for t in HARNESS_TABLES + FIXTURE_SEQUENCES)
         if not SCRATCH_DB_RE.fullmatch(name or ""):
             raise RuntimeError(
                 f"TICKET_REDACTION_TEST_PG_DSN points at database {name!r}. Each case ends every "
                 f"other session on its database and drops {lost}, so it runs only on a database "
                 f"whose name carries the scratch marker {SCRATCH_MARKER!r}.")
-        foreign = sorted(r["tablename"] for r in await conn.fetch(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-            " AND tablename <> ALL($1::text[]) " + ROWS_GATE_TAG, list(HARNESS_TABLES)))
-        if foreign:
-            raise RuntimeError(
-                f"database {name!r} holds tables this harness never creates ({', '.join(foreign)}), "
-                f"so it is not this harness's scratch database; refusing to end its sessions or "
-                f"drop {lost}.")
+        await _refuse_unless_only_fixtures(conn, name, lost)
         for table, column, null_ok in POPULATION:
-            if not await conn.fetchval("SELECT to_regclass($1) IS NOT NULL " + ROWS_GATE_TAG,
-                                       "public." + table):
+            qualified = f"{BOUND_SCHEMA}.{table}"
+            if not await conn.fetchval("SELECT pg_catalog.to_regclass($1) IS NOT NULL " + ROWS_GATE_TAG,
+                                       qualified):
                 continue
             if column is None:
-                sql, args = f"SELECT count(*) FROM {table} " + ROWS_GATE_TAG, ()
+                sql, args = f"SELECT count(*) FROM {qualified} " + ROWS_GATE_TAG, ()
             elif null_ok:
-                sql = (f"SELECT count(*) FROM {table} WHERE {column} IS NOT NULL"
+                sql = (f"SELECT count(*) FROM {qualified} WHERE {column} IS NOT NULL"
                        f" AND {column} <> ALL($1::text[]) " + ROWS_GATE_TAG)
                 args = (list(FIXTURE_IDS),)
             else:
-                sql = (f"SELECT count(*) FROM {table} WHERE {column} IS NULL"
+                sql = (f"SELECT count(*) FROM {qualified} WHERE {column} IS NULL"
                        f" OR {column} <> ALL($1::text[]) " + ROWS_GATE_TAG)
                 args = (list(FIXTURE_IDS),)
             try:
                 n = await conn.fetchval(sql, *args)
             except Exception as ex:
                 raise RuntimeError(
-                    f"database {name!r}: could not read {table} ({type(ex).__name__}), so this "
+                    f"database {name!r}: could not read {qualified} ({type(ex).__name__}), so this "
                     f"harness cannot show it holds only its own fixtures; refusing to drop it.") from ex
             if n:
                 raise RuntimeError(
-                    f"database {name!r} holds {n} row(s) in {table} that are not this harness's "
+                    f"database {name!r} holds {n} row(s) in {qualified} that are not this harness's "
                     f"synthetic fixtures; refusing to end its sessions or drop {lost}.")
     finally:
         await conn.close()
@@ -648,6 +772,7 @@ def _assert_the_refusals_came_first(sent):
     assert first is not None, "this case sent no terminate and no DROP, so its record proves no order"
     before = sent[:first]
     assert NAME_GATE_SQL in before, "the scratch-name refusal did not run before the first terminate or DROP"
+    assert any(CENSUS_TAG in s for s in before), "the census did not run before the first terminate or DROP"
     assert any(ROWS_GATE_TAG in s for s in before), \
         "the population refusal did not run before the first terminate or DROP"
 
@@ -658,12 +783,16 @@ def sig(action: str, target: str) -> str:
 
 
 def _redirect_for(url):
+    """database.py's engines, as the routes get them: pointed at the lane
+    database, and bound to BOUND_SCHEMA at connect, because the routes' own
+    SQL names no schema."""
     def redirect(dialect, conn_rec, cargs, cparams):
         cparams.update(host=url.host, port=url.port, user=url.username, database=url.database)
         if url.password:
             cparams["password"] = url.password
         else:
             cparams.pop("password", None)
+        cparams["server_settings"] = dict(cparams.get("server_settings") or {}, search_path=BOUND_SCHEMA)
     return redirect
 
 
@@ -672,10 +801,11 @@ async def _clean_slate(url, sent):
     lane database is ended first, so a lock a dead case left behind cannot
     hold this one's DDL. The lane database is this file's alone, which is what
     _refuse_unless_scratch establishes before this runs (Env.__aenter__)."""
-    conn = await _connect(url, sent)
+    conn = await _connect(url, sent, search_path=BOUND_SCHEMA)
     try:
-        await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-                           " WHERE datname = current_database() AND pid <> pg_backend_pid()")
+        await conn.execute("SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
+                           " WHERE datname = pg_catalog.current_database()"
+                           " AND pid <> pg_catalog.pg_backend_pid()")
     finally:
         await conn.close()
 
@@ -691,9 +821,16 @@ def _app():
     return app
 
 
+# The seed engine's binding: search_path at connect, and the schema named in
+# every statement create_all and the ORM render (text() names its own).
+_BOUND_CONNECT = {"server_settings": {"search_path": BOUND_SCHEMA}}
+_BOUND_EXECUTION = {"schema_translate_map": {None: BOUND_SCHEMA}}
+
+
 class Env:
-    """database.py's own engines redirected to the lane database, fresh
-    tables, the bundle directory in a pytest temporary directory."""
+    """database.py's own engines redirected to the lane database and bound to
+    BOUND_SCHEMA, fresh tables there, the bundle directory in a pytest
+    temporary directory."""
 
     def __init__(self, monkeypatch, log_dir):
         self.mp = monkeypatch
@@ -702,11 +839,14 @@ class Env:
     async def __aenter__(self):
         self.url = make_url(require_pg())
         self.sent = []     # every statement sent on the way in, in order (M3)
-        # M3, before anything destructive: the scratch-name and population
-        # refusals. Only then is the slate taken and are the tables dropped.
+        # M3, before anything destructive: the scratch-name, census and
+        # population refusals. Only then is the slate taken and are the
+        # tables dropped.
         await _refuse_unless_scratch(self.url, self.sent)
         await _clean_slate(self.url, self.sent)
-        self.seed = create_async_engine(require_pg(), pool_size=2, max_overflow=4)
+        self.seed = create_async_engine(require_pg(), pool_size=2, max_overflow=4,
+                                        connect_args=_BOUND_CONNECT,
+                                        execution_options=_BOUND_EXECUTION)
         event.listen(self.seed.sync_engine, "before_cursor_execute", self._record)
         try:
             async with self.seed.begin() as conn:
@@ -718,10 +858,12 @@ class Env:
                                             models.AdminUser.__table__])
                 for stmt in [s for s in BUG_DDL.split(";") if s.strip()]:
                     await conn.execute(text(stmt))
-                await conn.execute(text("INSERT INTO admin_users (steam_id, granted_at) VALUES (:s, now())"),
+                await conn.execute(text("INSERT INTO public.admin_users (steam_id, granted_at) VALUES (:s, now())"),
                                    {"s": ADMIN})
-            # This case's own proof that the refusals came first.
+            # This case's own proof that the refusals came first, and that it
+            # named every fixture object with the schema.
             _assert_the_refusals_came_first(self.sent)
+            _assert_bound(self.sent)
         except BaseException:
             await self.seed.dispose()
             raise
@@ -750,6 +892,8 @@ class Env:
             await eng.dispose()
             event.remove(eng.sync_engine, "do_connect", self._redirect)
         await self.seed.dispose()
+        if exc[0] is None:
+            _assert_bound(self.sent)     # the whole case's record, the seed engine's statements included
         return False
 
     def _record(self, conn, cursor, statement, parameters, context, executemany):
@@ -763,7 +907,7 @@ class Env:
         """Every non-NULL bug_report_events.comment of a report, oldest first."""
         async with self.seed.connect() as conn:
             return [r[0] for r in (await conn.execute(text(
-                "SELECT comment FROM bug_report_events WHERE bug_report_id = CAST(:i AS uuid)"
+                "SELECT comment FROM public.bug_report_events WHERE bug_report_id = CAST(:i AS uuid)"
                 " AND comment IS NOT NULL ORDER BY created_at, id"), {"i": str(rid)})).all()]
 
     async def legacy_event(self, rid, comment):
@@ -771,7 +915,7 @@ class Env:
         unnotified. Returns the event id."""
         eid = str(uuid.uuid4())
         await self.ex(
-            "INSERT INTO bug_report_events (id, bug_report_id, actor_steam_id, actor_name, event_type, comment)"
+            "INSERT INTO public.bug_report_events (id, bug_report_id, actor_steam_id, actor_name, event_type, comment)"
             " VALUES (CAST(:e AS uuid), CAST(:i AS uuid), :a, 'fixture admin', 'comment', :c)",
             {"e": eid, "i": str(rid), "a": ADMIN, "c": comment})
         return eid
@@ -779,7 +923,7 @@ class Env:
     async def bug_number(self, rid):
         async with self.seed.connect() as conn:
             return (await conn.execute(text(
-                "SELECT bug_number FROM bug_reports WHERE id = CAST(:i AS uuid)"), {"i": str(rid)})).scalar()
+                "SELECT bug_number FROM public.bug_reports WHERE id = CAST(:i AS uuid)"), {"i": str(rid)})).scalar()
 
     async def linked_reporter(self):
         """The reporter's player row with REPORTER_DISCORD linked: the reply
@@ -793,7 +937,7 @@ class Env:
     async def row(self, rid):
         async with self.seed.connect() as conn:
             return (await conn.execute(text(
-                "SELECT description, repro_steps, log_filename FROM bug_reports WHERE id = CAST(:i AS uuid)"),
+                "SELECT description, repro_steps, log_filename FROM public.bug_reports WHERE id = CAST(:i AS uuid)"),
                 {"i": str(rid)})).mappings().first()
 
     def stored_bundle(self, fname) -> str:
@@ -807,12 +951,12 @@ class Env:
         blob = gzip.compress(log_text.encode("utf-8"), compresslevel=1)
         (self.log_dir / fname).write_bytes(blob)
         await self.ex(
-            "INSERT INTO bug_reports (id, steam_id, display_name, severity, category, description,"
+            "INSERT INTO public.bug_reports (id, steam_id, display_name, severity, category, description,"
             " repro_steps, log_filename, log_bytes)"
             " VALUES (CAST(:i AS uuid), :s, 'fixture player', 'high', 'other', :d, :r, :f, :b)",
             {"i": str(rid), "s": REPORTER, "d": description, "r": repro_steps, "f": fname, "b": len(blob)})
         await self.ex(
-            "INSERT INTO bug_report_events (bug_report_id, actor_steam_id, actor_name, event_type, comment)"
+            "INSERT INTO public.bug_report_events (bug_report_id, actor_steam_id, actor_name, event_type, comment)"
             " VALUES (CAST(:i AS uuid), :a, 'fixture admin', 'comment', 'looking into it')",
             {"i": str(rid), "a": ADMIN})
         return str(rid), fname
@@ -1250,12 +1394,19 @@ def test_pg_legacy_bundle_over_the_read_ceiling_is_redacted_before_the_window(mo
 # ── M3: the harness refuses a wrong or populated database ─────────────────
 
 
-def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql):
+RESOLVE_SQL = ("SELECT n.nspname::text FROM pg_catalog.pg_class c"
+               " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+               " WHERE c.oid = pg_catalog.to_regclass($1)")
+
+
+def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql, resolve=None):
     """Point the harness at a sacrificial database `probe` holding what
     `setup_sql` puts there, with one canary session open on it, and enter it
     exactly as every case does. Returns what __aenter__ raised (None if it
     entered), every statement it sent, whether the canary session survived,
-    and what `count_sql` reads afterwards. The database is dropped after."""
+    what `count_sql` reads afterwards, and -- when `resolve` names an object
+    -- the schema a fresh, unbound session finds it in when it names it
+    without one. The database is dropped after."""
     async def body():
         lane = make_url(require_pg())
         admin = await _connect(lane, [])
@@ -1268,6 +1419,13 @@ def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql):
         try:
             canary = await _connect(lane, [], database=probe)
             await canary.execute(setup_sql)
+            resolved = None
+            if resolve:
+                fresh = await _connect(lane, [], database=probe)
+                try:
+                    resolved = await fresh.fetchval(RESOLVE_SQL, resolve)
+                finally:
+                    await fresh.close()
             monkeypatch.setattr(sys.modules[__name__], "DSN",
                                 lane.set(database=probe).render_as_string(hide_password=False))
             env = Env(monkeypatch, tmp_path)
@@ -1283,7 +1441,7 @@ def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql):
                 alive, rows = True, await canary.fetchval(count_sql)
             except Exception:
                 alive, rows = False, None
-            return raised, list(getattr(env, "sent", [])), alive, rows
+            return raised, list(getattr(env, "sent", [])), alive, rows, resolved
         finally:
             if canary is not None:
                 try:
@@ -1305,10 +1463,10 @@ def test_pg_the_harness_refuses_a_database_without_the_scratch_marker(monkeypatc
     sessions and tables and the terminate and DROP."""
     probe = f"ticket_redaction_gate_probe_{os.getpid()}"
     assert not SCRATCH_DB_RE.fullmatch(probe)
-    raised, sent, alive, rows = _drive_env_against(
+    raised, sent, alive, rows, _ = _drive_env_against(
         monkeypatch, tmp_path, probe,
-        f"CREATE TABLE players (steam_id varchar(32)); INSERT INTO players VALUES ('{REPORTER}')",
-        "SELECT count(*) FROM players")
+        f"CREATE TABLE public.players (steam_id varchar(32)); INSERT INTO public.players VALUES ('{REPORTER}')",
+        "SELECT count(*) FROM public.players")
     assert isinstance(raised, RuntimeError), f"the harness entered {probe!r}: {raised!r}"
     assert repr(probe) in str(raised) and SCRATCH_MARKER in str(raised), str(raised)
     assert NAME_GATE_SQL in sent, sent
@@ -1316,27 +1474,174 @@ def test_pg_the_harness_refuses_a_database_without_the_scratch_marker(monkeypatc
     assert alive and rows == 1, "the canary session or its table did not survive the refusal"
 
 
-@pytest.mark.parametrize("setup_sql,table", [
-    (f"CREATE TABLE players (steam_id varchar(32)); INSERT INTO players VALUES ('{OUTSIDER}')",
-     "players"),
-    ("CREATE TABLE bug_report_events (actor_steam_id varchar(32));"
-     f" INSERT INTO bug_report_events VALUES ('{OUTSIDER}')", "bug_report_events"),
-    ("CREATE TABLE shop_items (id int); INSERT INTO shop_items VALUES (1)", "shop_items"),
-    ("CREATE TABLE matches (id int); INSERT INTO matches VALUES (1)", "matches"),
+@pytest.mark.parametrize("setup_sql,table,gate", [
+    (f"CREATE TABLE public.players (steam_id varchar(32)); INSERT INTO public.players VALUES ('{OUTSIDER}')",
+     "players", ROWS_GATE_TAG),
+    ("CREATE TABLE public.bug_report_events (actor_steam_id varchar(32));"
+     f" INSERT INTO public.bug_report_events VALUES ('{OUTSIDER}')", "bug_report_events", ROWS_GATE_TAG),
+    ("CREATE TABLE public.shop_items (id int); INSERT INTO public.shop_items VALUES (1)", "shop_items",
+     ROWS_GATE_TAG),
+    ("CREATE TABLE public.matches (id int); INSERT INTO public.matches VALUES (1)", "matches", CENSUS_TAG),
 ], ids=["players", "events", "shop_items", "foreign_table"])
-def test_pg_the_harness_refuses_a_populated_scratch_database(monkeypatch, tmp_path, setup_sql, table):
+def test_pg_the_harness_refuses_a_populated_scratch_database(monkeypatch, tmp_path, setup_sql, table, gate):
     """The ROWS refusal: a database named with the marker, holding a row keyed
-    on someone other than this harness's fixtures, a shop item, or a table the
-    harness never creates."""
+    on someone other than this harness's fixtures, or a shop item; and the
+    CENSUS refusal of a table the harness never creates."""
     probe = f"{SCRATCH_MARKER}_gate_populated_{os.getpid()}"
     assert SCRATCH_DB_RE.fullmatch(probe)
-    raised, sent, alive, rows = _drive_env_against(
-        monkeypatch, tmp_path, probe, setup_sql, f"SELECT count(*) FROM {table}")
+    raised, sent, alive, rows, _ = _drive_env_against(
+        monkeypatch, tmp_path, probe, setup_sql, f"SELECT count(*) FROM public.{table}")
     assert isinstance(raised, RuntimeError), f"the harness entered a populated {probe!r}: {raised!r}"
     assert repr(probe) in str(raised) and table in str(raised), str(raised)
-    assert NAME_GATE_SQL in sent and any(ROWS_GATE_TAG in s for s in sent), sent
+    assert NAME_GATE_SQL in sent and any(gate in s for s in sent), sent
     assert [s for s in sent if _destructive(s)] == [], "a terminate or DROP was sent before the refusal"
     assert alive and rows == 1, "the canary session or its row did not survive the refusal"
+
+
+# ── round 3, R2 finding 1: the census and the one-schema binding ──────────
+
+SHADOW_SCHEMA = "ticket_redaction_shadow"
+
+
+def _lane_role():
+    """The role this file connects as. The default search path is
+    "$user", public: a schema named for this role comes first."""
+    async def body():
+        conn = await _connect(make_url(require_pg()), [])
+        try:
+            return await conn.fetchval("SELECT current_user")
+        finally:
+            await conn.close()
+    return run(body())
+
+
+def _shadow_case(variant, role, probe):
+    """(schema, object, setup SQL, the read that shows the object intact, what
+    that read returns while it is): ONE object, named like a harness fixture,
+    in a schema an unbound session's search path reaches before public. A
+    table's one row is keyed on OUTSIDER, someone else's; the sequence stands
+    at 4242; public holds nothing."""
+    user = f'"{role}"'
+    if variant == "user_schema_table":
+        return (role, "players",
+                f"CREATE SCHEMA {user} AUTHORIZATION {user};"
+                f" CREATE TABLE {user}.players (steam_id varchar(32));"
+                f" INSERT INTO {user}.players VALUES ('{OUTSIDER}')",
+                f"SELECT count(*) FROM {user}.players", 1)
+    if variant == "database_path_table":
+        return (SHADOW_SCHEMA, "admin_users",
+                f"CREATE SCHEMA {SHADOW_SCHEMA};"
+                f" CREATE TABLE {SHADOW_SCHEMA}.admin_users (steam_id varchar(20));"
+                f" INSERT INTO {SHADOW_SCHEMA}.admin_users VALUES ('{OUTSIDER}');"
+                f' ALTER DATABASE "{probe}" SET search_path = {SHADOW_SCHEMA}, public',
+                f"SELECT count(*) FROM {SHADOW_SCHEMA}.admin_users", 1)
+    assert variant == "user_schema_sequence", variant
+    return (role, "bug_reports_number_seq",
+            f"CREATE SCHEMA {user} AUTHORIZATION {user};"
+            f" CREATE SEQUENCE {user}.bug_reports_number_seq;"
+            f" SELECT pg_catalog.setval('{user}.bug_reports_number_seq', 4242)",
+            f"SELECT last_value FROM {user}.bug_reports_number_seq", 4242)
+
+
+@pytest.mark.parametrize("variant", ["user_schema_table", "database_path_table", "user_schema_sequence"])
+def test_pg_the_harness_refuses_a_same_named_object_ahead_of_public(monkeypatch, tmp_path, variant):
+    """The CENSUS refusal: a database named with the marker whose public
+    schema is EMPTY, so the NAME and ROWS refusals both pass it, but where an
+    unbound session's search path reaches a same-named table or sequence
+    first -- the object an unqualified DROP would have removed. That schema is
+    the connecting role's own ("$user", first on the default path), or one
+    the database's own search_path setting puts first. It is refused before
+    the first terminate or DROP; the object and the canary session survive."""
+    probe = f"{SCRATCH_MARKER}_gate_shadow_{os.getpid()}"
+    assert SCRATCH_DB_RE.fullmatch(probe)
+    schema, obj, setup_sql, read_sql, intact = _shadow_case(variant, _lane_role(), probe)
+    raised, sent, alive, rows, resolved = _drive_env_against(
+        monkeypatch, tmp_path, probe, setup_sql, read_sql, resolve=obj)
+    assert resolved == schema, f"setup: an unbound session finds {obj} in {resolved!r}, not {schema!r}"
+    destructive = [" ".join(s.split())[:70] for s in sent if _destructive(s)]
+    assert not destructive, (f"the harness accepted {probe!r}: it sent {len(destructive)} terminate or DROP "
+                             f"statement(s), the first {destructive[0]!r}, and raised {raised!r}")
+    assert isinstance(raised, RuntimeError), f"the harness stopped without a refusal: {raised!r}"
+    message = str(raised)
+    assert repr(probe) in message and f"{schema}.{obj}" in message, message
+    assert NAME_GATE_SQL in sent and any(CENSUS_TAG in s for s in sent), sent
+    assert alive and rows == intact, \
+        f"{schema}.{obj} or the canary session did not survive the refusal: alive={alive}, read {rows!r}"
+    print(f"REFUSED [{variant}]: {message}")
+    print(f"INTACT [{variant}]: {read_sql} -> {rows!r}, read through the canary session, still connected")
+
+
+def test_pg_every_harness_connection_is_bound_to_one_schema(monkeypatch, tmp_path):
+    """The BINDING: the seed engine, and both of database.py's engines as the
+    routes get them, run with search_path = BOUND_SCHEMA; the harness's own
+    DDL, create_all's included, names every table it creates with it; and
+    the case's record names no fixture object without it."""
+    async def body():
+        async with Env(monkeypatch, tmp_path) as env:
+            paths = {}
+            for label, eng in (("seed", env.seed), ("database.engine", database.engine),
+                               ("database.release_engine", database.release_engine)):
+                async with eng.connect() as conn:
+                    paths[label] = (await conn.execute(text("SHOW search_path"))).scalar()
+            return paths, list(env.sent)
+
+    paths, sent = run(body())
+    assert paths == dict.fromkeys(paths, BOUND_SCHEMA), f"a harness connection is not bound: {paths}"
+    created = {m.group(1) for s in sent for m in re.finditer(r"CREATE TABLE (\S+) \(", s)}
+    expected = {f"{BOUND_SCHEMA}.{t}" for t in HARNESS_TABLES if t != "steam_sessions"}
+    assert expected <= created, f"the harness's DDL did not name {sorted(expected - created)}: {sorted(created)}"
+    assert _unbound_references(sent) == [], _unbound_references(sent)
+    print(f"BOUND: {paths}; created {sorted(created)}")
+
+
+def _census_row(schema, name, kind, owner=None):
+    return {"schema": schema, "name": name, "kind": kind, "owner": owner, "on_path": True}
+
+
+def test_the_census_admits_the_harnesss_own_objects_by_name_and_nothing_else():
+    """_foreign_objects on rows shaped like CENSUS_SQL's. Every admitted row
+    names an object the lane database holds after a run."""
+    own = [_census_row("public", t, "r") for t in HARNESS_TABLES]
+    own += [_census_row("public", "bug_reports_number_seq", "S"),
+            _census_row("public", "shop_items_id_seq", "S", "public.shop_items"),
+            _census_row("public", "players_pkey", "i", "public.players"),
+            _census_row("public", "ix_players_steam_id", "i", "public.players"),
+            _census_row("public", "bug_reports_bug_number_key", "i", "public.bug_reports"),
+            _census_row("public", "shop_items_sku_key", "i", "public.shop_items")]
+    assert _foreign_objects(own) == []
+    for row in (_census_row("postgres", "players", "r"),               # same name, another schema
+                _census_row("shadow", "bug_reports_number_seq", "S"),  # same-named sequence, another schema
+                _census_row("public", "players", "v"),                 # the right name, another kind
+                _census_row("public", "players", "p"),
+                _census_row("public", "matches", "r"),                 # a table the harness never creates
+                _census_row("public", "matches_pkey", "i", "public.matches"),
+                _census_row("public", "orders_id_seq", "S", "public.orders"),
+                _census_row("public", "stray_seq", "S"),
+                _census_row("shadow", "players_pkey", "i", "shadow.players"),
+                _census_row("shadow", "shop_items_id_seq", "S", "public.shop_items")):
+        assert _foreign_objects(own + [row]) == [row], row
+
+
+def test_the_binding_check_finds_a_fixture_named_without_its_schema():
+    bound = ["DROP TABLE IF EXISTS public.players RESTRICT",
+             "DROP SEQUENCE IF EXISTS public.bug_reports_number_seq RESTRICT",
+             "CREATE TABLE public.bug_reports (id uuid, player_id uuid REFERENCES public.players(id),"
+             " bug_number bigint DEFAULT nextval('public.bug_reports_number_seq'))",
+             "INSERT INTO public.admin_users (steam_id) VALUES ($1)",
+             "SELECT count(*) FROM public.shop_items WHERE id IS NULL",
+             "CREATE INDEX ix_players_steam_id ON public.players (steam_id)",
+             CENSUS_SQL, NAME_GATE_SQL]
+    assert _unbound_references(bound) == []
+    for s in ("DROP TABLE IF EXISTS players RESTRICT",
+              "DROP SEQUENCE IF EXISTS bug_reports_number_seq",
+              "CREATE TABLE bug_reports (id uuid)",
+              "CREATE TABLE public.x (p uuid REFERENCES players(id))",
+              "CREATE TABLE public.y (n bigint DEFAULT nextval('bug_reports_number_seq'))",
+              "INSERT INTO admin_users (steam_id) VALUES ($1)",
+              "UPDATE bug_report_events SET comment = NULL",
+              'SELECT count(*) FROM "postgres".players',
+              "CREATE INDEX ix ON players (steam_id)"):
+        assert _unbound_references([s]), s
 
 
 # ── L6: the automatic post-match upload, as a CONTRACT ────────────────────
@@ -1418,8 +1723,8 @@ async def _arm_the_real_auto_route(env, monkeypatch, auto_logs):
     """What the real route reads before its body: a session row for the token,
     and the strict session check (satisfied for REPORTER only); then the
     module's own router, mounted on the test app."""
-    await env.ex("CREATE TABLE steam_sessions (token_hash text PRIMARY KEY, steam_id varchar(32) NOT NULL)")
-    await env.ex("INSERT INTO steam_sessions (token_hash, steam_id) VALUES (:h, :s)",
+    await env.ex("CREATE TABLE public.steam_sessions (token_hash text PRIMARY KEY, steam_id varchar(32) NOT NULL)")
+    await env.ex("INSERT INTO public.steam_sessions (token_hash, steam_id) VALUES (:h, :s)",
                  {"h": hashlib.sha256(AUTO_TOKEN.encode()).hexdigest(), "s": REPORTER})
 
     async def session_ok(request, steam_id, db):

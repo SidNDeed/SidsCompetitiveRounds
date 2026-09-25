@@ -5,8 +5,9 @@ Every receive path, every read-back door, the /health marker and three
 properties of the rule itself -- and, from round 2, every comment path and
 the comment store (M1), the rule-before-the-cut order at every cut and the
 over-ceiling read's hold-back (M2), the harness's two refusals (M3) and the
-automatic upload's contract through its stand-in (L6) -- are carried below
-as DATA: the file, the exact
+automatic upload's contract through its stand-in (L6); and, from round 3,
+the harness's census of every schema and its one-schema binding (R2
+finding 1) -- are carried below as DATA: the file, the exact
 text a plant replaces, the text it writes, and the test nodes it must turn RED
 (a mutant, which bypasses or weakens the function at that site) or leave
 GREEN (an inert twin at the same site, #391). Each plant is printed as a
@@ -96,12 +97,20 @@ NAME_REFUSAL = T + "test_pg_the_harness_refuses_a_database_without_the_scratch_m
 POPULATED = [T + "test_pg_the_harness_refuses_a_populated_scratch_database[%s]" % i
              for i in ("players", "events", "shop_items", "foreign_table")]
 STANDIN_CONTRACT = T + "test_pg_auto_log_contract_holds_on_the_stand_in"
+# round 3
+SHADOW = [T + "test_pg_the_harness_refuses_a_same_named_object_ahead_of_public[%s]" % i
+          for i in ("user_schema_table", "database_path_table", "user_schema_sequence")]
+BIND = T + "test_pg_every_harness_connection_is_bound_to_one_schema"
 # Every live case that enters the harness on this tree. The two L6 cases
 # against the real auto-upload route are not here: without the route they
 # skip before the harness is entered, on every tree this file can see.
 EVERY_PG_CASE = [R1, R1_NEG, DETAIL, DOWNLOAD, LIST, DISCORD, EVENTS, LEGACY_NEG, HEALTH,
                  ADMIN_COMMENT, STATUS_COMMENTS, INTERNAL_COMMENT, REPLY, FEED_COMMENT, DETAIL_COMMENT,
-                 CLAMPS, WINDOW, NAME_REFUSAL, *POPULATED, STANDIN_CONTRACT]
+                 CLAMPS, WINDOW, NAME_REFUSAL, *POPULATED, STANDIN_CONTRACT, *SHADOW, BIND]
+# Of those, the cases that get past the refusals on the lane database: each
+# asserts from its own record that every refusal ran before its first
+# terminate or DROP.
+ENTERING = [c for c in EVERY_PG_CASE if c != NAME_REFUSAL and c not in POPULATED and c not in SHADOW]
 
 Plant = namedtuple("Plant", "name control kind what edits checks")
 PLANTS = []
@@ -247,6 +256,34 @@ pair("M2-carry-bound", "the hold-back is unbounded",
 pair("M3-gate", "Env.__aenter__ no longer calls the scratch-name and population refusals",
      "        await _refuse_unless_scratch(self.url, self.sent)\n", "",
      "the refusals", EVERY_PG_CASE, TESTS)
+
+# ── round 3, R2 finding 1: the census and the one-schema binding ──────────
+# Without the census call: every case that enters the harness goes RED on its
+# own entry assertion (the census did not run first); the foreign-table case
+# is entered; and the three same-named objects ahead of public are ACCEPTED --
+# the harness sends its terminate and its drops.
+pair("M3-census", "_refuse_unless_scratch no longer calls the census",
+     "        await _refuse_unless_only_fixtures(conn, name, lost)\n", "",
+     "the census", ENTERING + [POPULATED[3]] + SHADOW, TESTS)
+# The census narrowed to the public schema, round 2's scope: it still runs
+# first and still refuses a foreign public table, so only the three
+# same-named objects in a schema ahead of public show the difference.
+pair("M3-census-scope", "the census reads the public schema only (round 2's scope)",
+     "    \" AND (n.nspname::text !~ '^pg_' OR n.nspname = ANY (pg_catalog.current_schemas(false)))\"\n",
+     "    \" AND n.nspname::text = 'public'\"\n",
+     "the census's scope", SHADOW, TESTS)
+pair("M3-bind-seed", "the seed engine is no longer bound to one schema at connect",
+     "                                        connect_args=_BOUND_CONNECT,\n", "",
+     "the seed engine's binding", [BIND], TESTS)
+pair("M3-bind-routes", "database.py's engines, as the routes get them, are no longer bound at connect",
+     '        cparams["server_settings"] = dict(cparams.get("server_settings") or {}, search_path=BOUND_SCHEMA)\n',
+     "", "the routes' binding", [BIND], TESTS)
+# A drop line is SQL, so its inert twin is a SQL comment inside the statement.
+M3_DROP_LINE = "DROP TABLE IF EXISTS public.players RESTRICT;\n"
+mutant("M3-qualify-mutant", "M3-qualify", "one drop names its table without the schema",
+       [(TESTS, M3_DROP_LINE, "DROP TABLE IF EXISTS players RESTRICT;\n")], [BIND])
+twin("M3-qualify-twin", "M3-qualify", "a SQL comment inside the same drop",
+     [(TESTS, M3_DROP_LINE, "DROP TABLE IF EXISTS public.players RESTRICT /* the twin */;\n")], [BIND])
 
 # ── round 2, L6: the automatic upload's contract, planted in the stand-in ──
 L6_SCRUB = "    scrubbed, counts, _ids = await asyncio.to_thread(_scrub_pass_one, log_blob)\n"
