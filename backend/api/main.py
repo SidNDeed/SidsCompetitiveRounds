@@ -36034,7 +36034,11 @@ async def recent_bug_report_events(
                 "event_type": r["event_type"],
                 "old_status": r["old_status"],
                 "new_status": r["new_status"],
-                "comment": r["comment"],
+                # Read-time rule (the T3 choice): a comment stored before the
+                # store-time rule still holds what it was sent. This is the
+                # bot's own feed; the reporter DM and the bug-thread mirror
+                # both republish this field as served.
+                "comment": _logred.redact_credentials(r["comment"]),
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
             for r in rows
@@ -36211,7 +36215,9 @@ async def get_bug_report(
             "event_type": e["event_type"],
             "old_status": e["old_status"],
             "new_status": e["new_status"],
-            "comment": e["comment"],
+            # Read-time rule, as on the event feed: rows stored before the
+            # store-time rule still hold what they were sent.
+            "comment": _logred.redact_credentials(e["comment"]),
             "created_at": e["created_at"].isoformat() if e["created_at"] else None,
         }
         for e in ev_rows
@@ -36249,6 +36255,14 @@ _BUG_REPORT_VALID_STATUSES = ("open", "triaged", "resolved", "wontfix", "dupe")
 
 async def _record_bug_event(db, report_id, actor_steam_id, actor_name, event_type,
                             old_status=None, new_status=None, comment=None):
+    # Every comment reaches bug_report_events.comment through here: the admin
+    # comment, a status change's optional comment, the internal comment and the
+    # reporter's own reply that the bot relays from a Discord DM (the one other
+    # writer, submit_bug_report's "created" event, stores none). A pasted log
+    # line lands in a comment as easily as in a description, so the credential
+    # rule is applied once, at the store, for all of them (None and "" come
+    # back unchanged). The reply path applies it before its own length cut too.
+    comment = _logred.redact_credentials(comment)
     db.add(BugReportEvent(
         bug_report_id=report_id,
         actor_steam_id=actor_steam_id,
@@ -36478,7 +36492,11 @@ async def user_comment_on_bug_report(
     # Key-gated, not source-IP-gated — same reasoning as
     # internal_comment_on_bug_report above. The bot already holds the key.
     _require_internal_key(x_internal_key)
-    comment = (req.comment or "").strip()
+    # The credential rule BEFORE the 2000-character cut, the order the event
+    # feed's description_snippet uses: a cut made first can leave the head of a
+    # ticket too short for the rule to recognise. _record_bug_event applies the
+    # rule again at the store, where it is then a no-op.
+    comment = _logred.redact_credentials((req.comment or "").strip())
     if not comment:
         raise HTTPException(400, "Comment cannot be empty")
     if len(comment) > 2000:
