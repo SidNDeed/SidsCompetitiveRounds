@@ -1275,9 +1275,19 @@ def test_the_via_check_refuses_anything_but_game_or_discord():
 
 
 @needs_pg
-def test_deleting_a_mail_takes_its_queued_dms_and_nothing_else():
+def test_deleting_a_mail_leaves_its_relay_dms_as_tombstones_and_nothing_else():
+    """330 section 3: `mail_id` is ON DELETE SET NULL, not CASCADE. The
+    retention sweep hard-deletes mail on a timer, and a relay row has to
+    outlive its mail so that the code printed in the DM can still be answered
+    truthfully. So deleting the mail ROW leaves no row pointing at it, keeps
+    every relay row it queued as a tombstone (mail_id NULL, relay_code kept),
+    and touches no generic queue row. `relay_code` is the discriminator, so a
+    generic row is `relay_code IS NULL`; `mail_id IS NULL` would count the
+    tombstones as generic."""
     import asyncio
     import asyncpg
+
+    want = sum(1 for *_rest, should_dm in CAST if should_dm)
 
     async def run():
         conn = await asyncpg.connect(DSN)
@@ -1285,22 +1295,32 @@ def test_deleting_a_mail_takes_its_queued_dms_and_nothing_else():
             await _seed(conn)
             await conn.execute(
                 "INSERT INTO pending_dms (steam_id, content) VALUES ('9', 'generic')")
-            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code())
+            code = _code()
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code)
+            queued = await conn.fetchval(
+                "SELECT COUNT(*) FROM pending_dms WHERE mail_id = $1", MAIL)
             await conn.execute("DELETE FROM mail_messages WHERE id = $1", MAIL)
             return (
+                queued,
                 await conn.fetchval(
                     "SELECT COUNT(*) FROM pending_dms WHERE mail_id IS NOT NULL"),
                 await conn.fetchval(
-                    "SELECT COUNT(*) FROM pending_dms WHERE mail_id IS NULL"))
+                    "SELECT COUNT(*) FROM pending_dms"
+                    " WHERE mail_id IS NULL AND relay_code = $1", code),
+                [tuple(r) for r in await conn.fetch(
+                    "SELECT steam_id, content FROM pending_dms WHERE relay_code IS NULL")])
         finally:
             await conn.close()
 
-    mail_rows, generic_rows = asyncio.get_event_loop_policy() \
+    queued, pointing, tombstones, generic = asyncio.get_event_loop_policy() \
         .new_event_loop().run_until_complete(run())
-    assert mail_rows == 0, "the cascade left %d orphaned relay rows" % mail_rows
-    assert generic_rows == 1, (
-        "the cascade removed %d generic queue rows; it must touch only rows "
-        "that belong to the deleted mail" % (1 - generic_rows))
+    assert queued == want >= 1, "the fanout queued %d relay rows, CAST wants %d" % (queued, want)
+    assert pointing == 0, "%d rows still point at the deleted mail" % pointing
+    assert tombstones == queued, (
+        "%d of %d relay rows survived the mail as tombstones; 330 requires every "
+        "one to" % (tombstones, queued))
+    assert generic == [("9", "generic")], (
+        "deleting the mail changed the generic queue: %r" % (generic,))
 
 
 @pytest.mark.parametrize("dsn", [
@@ -2564,8 +2584,8 @@ def test_deleting_a_mail_cancels_the_dm_that_has_not_gone_out_yet():
     player deletes the mail in game and the bot DMs them the full text
     afterwards, with a footer whose Reply then resolves to not_found.
 
-    NOT the FK cascade -- that fires when the mail ROW is removed, and
-    this route soft-deletes, so the cascade never runs on this path. Three
+    NOT the FK's ON DELETE SET NULL -- that fires when the mail ROW is
+    removed, and this route soft-deletes, so it never runs on this path. Three
     predicates and one row of each kind they exclude."""
     import asyncpg
 

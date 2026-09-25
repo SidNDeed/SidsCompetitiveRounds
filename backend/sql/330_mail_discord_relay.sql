@@ -272,7 +272,7 @@ END $$;
 
 -- 5. Six indexes the item-5 access patterns need and the table lacks.
 --
---    mail_id: read by the ON DELETE CASCADE above, and by the account
+--    mail_id: read by the ON DELETE SET NULL above, and by the account
 --    deletion sweep's "DMs of mail this player sent" subquery. Without it
 --    both seq-scan a queue that only ever grows.
 CREATE INDEX IF NOT EXISTS idx_pending_dms_mail
