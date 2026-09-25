@@ -647,10 +647,12 @@ def test_pg_legacy_row_event_feed_redacts_before_the_140_character_cut(monkeypat
     async def body():
         async with Env(monkeypatch, tmp_path) as env:
             values, sent = legacy_texts()
-            # A second row whose ticket starts at character 100, so a cut at 140
-            # made BEFORE the rule would leave 24 hex characters of it.
+            # A second row whose ticket starts at character 116, so a cut at 140
+            # made BEFORE the rule would leave 24 hex characters of it -- under
+            # the rule's 32 -- in the snippet, unredacted.
             hx_cut = synthetic_hex("legacy-cut", 96)
-            straddle = "x" * (100 - len(LABEL)) + LABEL + hx_cut + " end"
+            straddle = "x" * 100 + LABEL + hx_cut + " end"
+            assert straddle.index(hx_cut) == 116
             rid_a, _ = await env.legacy_report(sent[0], sent[1], sent[2])
             rid_b, _ = await env.legacy_report(sent[0], straddle, None)
             return values, sent, (hx_cut, straddle), await reader(env, rid_a), await reader(env, rid_b)
