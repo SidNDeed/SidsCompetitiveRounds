@@ -24620,15 +24620,20 @@ def _auto_owned(steam_id: str | None, sku: str | None) -> bool:
     two surfaces reading the same exemption and neither excluding the rungs
     (#279: a flag names a line, the defect is a class).
 
-    BOTH SURFACES CALL THIS FUNCTION: `_set_active_cosmetic` on equip, and the
-    achievement append in `list_shop_items` on the listing. That is asserted
-    rather than left to hold, by
+    ALL THREE SURFACES CALL THIS FUNCTION: `_set_active_cosmetic` on equip,
+    the achievement append in `list_shop_items` on the listing, and the
+    ladder read route (`title_ladders.get_title_ladders`) for each rung's
+    `owned` -- so an exempt account wearing an entry rung it never bought
+    reads it as owned there, exactly as the listing reports it. That is
+    asserted rather than left to hold: by
     `test_the_listing_decides_visibility_with_the_same_predicate_as_equip`,
-    which reads the listing's AST for the call. It is asserted because the
-    listing spent a round spelling the same rule a second time in SQL, under a
-    comment saying the two could not drift. Two predicates that agree are not
-    one predicate; they are one edit away from disagreeing, and no test of the
-    behaviour can see the difference until they do.
+    which reads the listing's AST for the call, and by
+    `test_the_route_decides_owned_with_the_shared_predicate`, which reads the
+    route's. It is asserted because the listing spent a round spelling the
+    same rule a second time in SQL, under a comment saying the two could not
+    drift. Two predicates that agree are not one predicate; they are one edit
+    away from disagreeing, and no test of the behaviour can see the
+    difference until they do.
     """
     if not _is_shop_owner(steam_id):
         return False

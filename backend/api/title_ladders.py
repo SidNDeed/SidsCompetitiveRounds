@@ -538,6 +538,21 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
     all-zeroes answer would render as "you have made no progress" for what is
     actually a wrong id.
     """
+    # One snapshot per request. The answer is built from up to five SELECTs,
+    # and under READ COMMITTED each takes its own snapshot, so a GET racing a
+    # ladder-credit commit could pair the old worn title and ownership with
+    # the new progress. REPEATABLE READ makes every read below see the
+    # snapshot taken at the first SELECT; READ ONLY makes any table write
+    # here an error. PostgreSQL refuses this statement once the transaction
+    # has run a query, so it must stay first; get_db's session has run none.
+    await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+    # Late, for the reason record_completed_games gives for its own late
+    # import: `main` imports this module at module level. `owned` asks the
+    # exemption the same function /shop/items and equip ask (#279), so an
+    # exempt account wearing an entry rung it never bought reads it as owned
+    # here too, and a granted-only rung never does.
+    from main import _auto_owned
+
     player = (await db.execute(
         select(Player).where(Player.steam_id == steam_id)
     )).scalar_one_or_none()
@@ -594,7 +609,7 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
                 "preview_color": r["preview_color"],
                 "threshold": r["threshold"],
                 "price": r["price"],
-                "owned": r["sku"] in owned_skus,
+                "owned": r["sku"] in owned_skus or _auto_owned(steam_id, r["sku"]),
                 "active": r["sku"] == active_sku,
             } for r in ld["rungs"]],
         })

@@ -1,7 +1,7 @@
 """The title-ladder route, SERVED by main.app against a real PostgreSQL.
 
 test_title_ladder_route_contract.py proves the route is in `app.routes` and
-pins the answer's keys against a fake session. Three things it cannot show,
+pins the answer's keys against a fake session. Five things it cannot show,
 and this file does:
 
   * that main.app ANSWERS the path over HTTP, through the middleware a
@@ -13,15 +13,31 @@ and this file does:
   * that what the route reads exists once migration 331 is RUN -- executed,
     not parsed -- on the PostgreSQL major the primary runs, and that the item
     ids the route reports are the rows 331 inserted.
-  * that the route is a READ. Every statement it sends is captured at the
-    cursor: each is a SELECT with no row-locking clause, and the row counts
-    of every table it could touch are unchanged by the request.
+  * that the route is a READ of one snapshot. Every statement it sends is
+    captured at the cursor: the first is exactly the SET TRANSACTION that
+    makes the request REPEATABLE READ and READ ONLY, each one after it is a
+    SELECT with no row-locking clause, and the row counts of every table it
+    could touch are unchanged by the request.
+  * that the snapshot is what makes an answer one committed state. A request
+    paused after each of its statements in turn, while a second connection
+    commits a real ladder credit, answers the whole state before that commit
+    or the whole state after it -- which one is fixed by where the pause
+    falls -- and never a mix. The same request with SELECT 1 sent in place
+    of the SET answers the mix: that is the negative control.
+  * that `owned` asks the shop-owner exemption the question /shop/items and
+    equip ask (main._auto_owned). The exempt account, wearing an entry rung
+    it never bought, reads that rung owned and active, every entry rung
+    owned and every granted-only rung unowned; an ordinary account with the
+    same rows reads nothing owned.
 
 The schema is the ladder suite's own live harness (LADDER_PREREQ, then the
 331 file), with one widening: the route's `select(Player)` names every column
 the Player model maps, and LADDER_PREREQ's `players` carries only the four the
 hook needs. The rest are added nullable and default-free from the model
 itself, so a column added to the model later cannot break this file silently.
+Each case builds it in a throwaway schema of its own through ladder_pg_harness:
+every connection bound to that schema, and a census before anything is
+created or dropped.
 
 Live PostgreSQL is REQUIRED, and a missing DSN FAILS, naming the variable --
 the same gate, the same variable and the same polarity as the live half of
@@ -37,15 +53,13 @@ import io
 import os
 import re
 import sys
-import uuid
 from collections import defaultdict, deque
 
 import httpx
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
@@ -57,6 +71,7 @@ from models import Player  # noqa: E402
 # Reused, not copied: the route is exercised on exactly the schema the hook's
 # live tests run migration 331 on.
 from test_title_ladders import LADDER_PREREQ, MIGRATION  # noqa: E402
+import ladder_pg_harness as harness  # noqa: E402
 
 try:
     import asyncpg as _asyncpg
@@ -74,6 +89,12 @@ SQL_LOG = os.environ.get("LADDER_ROUTE_SQL_LOG")
 KNOWN = "76561190000000201"
 BARE = "76561190000000202"
 UNKNOWN = "76561190000000203"
+# The race's player, and D7's ordinary account.
+RACER = "76561190000000204"
+PLAIN = "76561190000000205"
+
+# The statement that makes one request one snapshot (title_ladders.py, D9).
+SNAPSHOT_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 
 # Every table the route reads or could be mistaken for writing.
 WATCHED = ("players", "player_items", "shop_items", "title_ladders",
@@ -108,9 +129,11 @@ def _run(coro):
 
 # -- the schema: LADDER_PREREQ, players widened to the model, then 331 --------
 
-async def _build(conn, schema):
-    await conn.execute('CREATE SCHEMA "%s"' % schema)
-    await conn.execute('SET search_path TO "%s"' % schema)
+async def _build(case):
+    """Into case.schema, on case.conn (bound to it): LADDER_PREREQ, players
+    widened to the model, then the 331 file as written. Sealed, so the drop's
+    census knows what the case created."""
+    conn, schema = case.conn, case.schema
     await conn.execute(LADDER_PREREQ)
     have = {r["column_name"] for r in await conn.fetch(
         "SELECT column_name FROM information_schema.columns "
@@ -118,9 +141,11 @@ async def _build(conn, schema):
     dialect = postgresql.dialect()
     for col in Player.__table__.columns:
         if col.name not in have:
-            await conn.execute('ALTER TABLE players ADD COLUMN "%s" %s'
-                               % (col.name, col.type.compile(dialect=dialect)))
+            await conn.execute('ALTER TABLE %s.players ADD COLUMN "%s" %s'
+                               % (harness.quoted(schema), col.name,
+                                  col.type.compile(dialect=dialect)))
     await conn.execute(io.open(MIGRATION, encoding="utf-8").read())
+    await case.seal()
 
 
 async def _seed(conn):
@@ -159,18 +184,25 @@ def _log_sql(case, statements):
             fh.write("-- [%d]\n%s\n" % (i, s))
 
 
-async def _serve(schema, paths):
+def _log_line(line):
+    if not SQL_LOG:
+        return
+    with io.open(SQL_LOG, "a", encoding="utf-8") as fh:
+        fh.write("== %s\n" % line)
+
+
+async def _serve(schema, paths, wrap=None):
     """GET each path from main.app with the route's session bound to
     `schema`. Returns [(status, json, statements)] -- the statements are what
-    that one request sent through the cursor, nothing else."""
-    engine = create_async_engine(
-        DSN.replace("postgresql://", "postgresql+asyncpg://"),
-        connect_args={"server_settings": {"search_path": schema}},
-        poolclass=NullPool)
+    that one request sent through the cursor, nothing else. `wrap`, when
+    given, is handed each request's real session and returns what the route
+    receives in its place."""
+    engine = harness.bound_engine(DSN, schema)
     # The dialect's first-connect probes are not the route's SQL; take them
-    # before the recorder is attached.
+    # before the recorder is attached, and check the binding while at it.
     async with engine.connect() as c:
-        await c.exec_driver_sql("SELECT 1")
+        path = list((await c.exec_driver_sql(harness.PATH_SQL)).scalar_one())
+    assert path == ["pg_catalog", schema], path
     session = async_sessionmaker(engine, expire_on_commit=False)
     captured = []
 
@@ -179,7 +211,7 @@ async def _serve(schema, paths):
 
     async def _db():
         async with session() as db:
-            yield db
+            yield db if wrap is None else wrap(db)
 
     out = []
     event.listen(engine.sync_engine, "before_cursor_execute", _record)
@@ -204,23 +236,19 @@ async def _serve(schema, paths):
     return out
 
 
-async def _case(paths):
-    """A fresh schema, seeded; the requests; the counts either side; the
-    schema dropped whatever happens."""
-    schema = "ladder_route_%s" % uuid.uuid4().hex[:10]
-    conn = await _asyncpg.connect(DSN)
-    try:
-        await _build(conn, schema)
-        ids, owned = await _seed(conn)
-        before = await _counts(conn)
-        answers = await _serve(schema, paths)
-        after = await _counts(conn)
+async def _case(paths, seed_more=None):
+    """A fresh schema, built and seeded (`seed_more(conn, ids)` adds rows
+    after _seed's); the requests; the counts either side; the schema dropped
+    under the census whatever happens."""
+    async with harness.CaseSchema(DSN, "ladder_route") as case:
+        await _build(case)
+        ids, owned = await _seed(case.conn)
+        if seed_more is not None:
+            await seed_more(case.conn, ids)
+        before = await _counts(case.conn)
+        answers = await _serve(case.schema, paths)
+        after = await _counts(case.conn)
         return ids, owned, before, after, answers
-    finally:
-        try:
-            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
-        finally:
-            await conn.close()
 
 
 def _url(steam_id):
@@ -230,10 +258,13 @@ def _url(steam_id):
 
 
 def _assert_read_only(statements, tables):
-    """Each statement a SELECT with no row lock, reading exactly `tables`,
-    in the route's order."""
-    assert [_TABLES.findall(s) for s in statements] == tables, statements
-    for s in statements:
+    """Statement 1 exactly the SET that makes the request one REPEATABLE
+    READ, READ ONLY snapshot; every statement after it a SELECT with no row
+    lock, the SELECTs reading exactly `tables`, in the route's order."""
+    assert statements[:1] == [SNAPSHOT_SQL], statements[:1]
+    reads = statements[1:]
+    assert [_TABLES.findall(s) for s in reads] == tables, reads
+    for s in reads:
         assert s.lstrip().upper().startswith("SELECT"), s
         assert not _ROW_LOCK.search(s), s
 
@@ -257,28 +288,22 @@ def test_pg_migration_331_creates_what_the_route_reads():
     rows (players and player_items predate it). Asserted after a fresh run of
     the real file, before any request."""
     _require_live_pg()
-    schema = "ladder_route_%s" % uuid.uuid4().hex[:10]
 
     async def _go():
-        conn = await _asyncpg.connect(DSN)
-        try:
-            await _build(conn, schema)
+        async with harness.CaseSchema(DSN, "ladder_route") as case:
+            await _build(case)
+            conn = case.conn
             regs = {t: await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", t)
                     for t in ("title_ladders", "title_ladder_progress",
                               "title_ladder_credits")}
             cols = [r["column_name"] for r in await conn.fetch(
                 "SELECT column_name FROM information_schema.columns "
                 " WHERE table_schema = $1 AND table_name = 'title_ladder_progress' "
-                " ORDER BY ordinal_position", schema)]
+                " ORDER BY ordinal_position", case.schema)]
             skus = await conn.fetchval(
                 "SELECT count(*) FROM shop_items WHERE sku = ANY($1::varchar[])",
                 list(tl.ALL_SKUS))
             return regs, cols, skus
-        finally:
-            try:
-                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
-            finally:
-                await conn.close()
 
     regs, cols, skus = _run(_go())
     assert regs == {"title_ladders": True, "title_ladder_progress": True,
@@ -333,7 +358,7 @@ def test_pg_a_player_with_no_titles_gets_every_line_with_nothing_owned():
     for ln in body["ladders"]:
         assert (ln["games"], ln["tier"]) == (0, 1), ln["line"]
         assert not any(r["owned"] or r["active"] for r in ln["rungs"]), ln["line"]
-    # No worn title, so no fifth statement.
+    # No worn title, so no fifth SELECT: the SET, then four reads.
     _assert_read_only(sql, [["players"], ["shop_items", "player_items"],
                             ["shop_items"], ["title_ladder_progress"]])
     assert after == before, (before, after)
@@ -353,3 +378,246 @@ def test_pg_an_unknown_steam_id_is_the_routes_own_404():
     assert (r_status, r_body) == (404, {"detail": "Not Found"}), (r_status, r_body)
     assert r_sql == [], r_sql
     assert after == before, (before, after)
+
+
+# -- one snapshot: a request racing a ladder credit (D9) ------------------------
+
+OLD_RAT = (9, 1, ["title_ladder_rat_1"], ["title_ladder_rat_1"])
+NEW_RAT = (10, 2, ["title_ladder_rat_1", "title_ladder_rat_2"], ["title_ladder_rat_2"])
+# Games and tier after the credit, ownership and the worn title before it.
+MIXED_RAT = (10, 2, ["title_ladder_rat_1"], ["title_ladder_rat_1"])
+WORN_READS = [["players"], ["shop_items", "player_items"], ["shop_items"],
+              ["title_ladder_progress"], ["shop_items"]]
+
+
+async def _seed_racer(conn, ids):
+    """RACER owns and wears rat rung 1 at 9 games, so the tenth credited
+    series moves games, tier, ownership and the worn title in one commit."""
+    pid = await conn.fetchval(
+        "INSERT INTO players (steam_id) VALUES ($1) RETURNING id", RACER)
+    await conn.execute(
+        "INSERT INTO player_items (player_id, item_id, purchase_price) "
+        "VALUES ($1, $2, 0)", pid, ids["title_ladder_rat_1"])
+    await conn.execute(
+        "INSERT INTO title_ladder_progress (player_id, line, games, tier) "
+        "VALUES ($1, 'rat', 9, 1)", pid)
+    await conn.execute("UPDATE players SET active_title_id = $1 WHERE id = $2",
+                       ids["title_ladder_rat_1"], pid)
+    return pid
+
+
+class _Paused:
+    """A request's real session with one change: after its k-th execute
+    returns -- its rows already read, an AsyncSession result being buffered
+    -- it awaits `writer()` before handing the result back to the route.
+    With `control`, its first statement, which must be the SET, is sent as
+    SELECT 1 instead: the request then runs READ COMMITTED with every other
+    statement where it was."""
+
+    def __init__(self, db, k, writer, control=False):
+        self._db, self._k, self._writer, self._control = db, k, writer, control
+        self.sent = 0
+        self.paused_after = None
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    async def execute(self, statement, *args, **kwargs):
+        if self._control and self.sent == 0:
+            assert str(statement) == SNAPSHOT_SQL, str(statement)
+            statement = text("SELECT 1")
+        result = await self._db.execute(statement, *args, **kwargs)
+        self.sent += 1
+        if self.sent == self._k:
+            await self._writer()
+            self.paused_after = self.sent
+        return result
+
+
+async def _credit(schema, pid, reference_id):
+    """The real hook for one player, on an engine and a connection of its
+    own, committed. Returns its events."""
+    engine = harness.bound_engine(DSN, schema)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+            events = await tl.record_completed_games(
+                db, [pid], mode="1v1", reference_id=reference_id)
+            await db.commit()
+            return events
+    finally:
+        await engine.dispose()
+
+
+def _rat(body):
+    """What one rat credit moves in an answer: (rat games, rat tier, owned
+    rat skus, every worn sku)."""
+    rat = _line(body, "rat")
+    return (rat["games"], rat["tier"],
+            [r["sku"] for r in rat["rungs"] if r["owned"]],
+            [r["sku"] for ln in body["ladders"] for r in ln["rungs"] if r["active"]])
+
+
+async def _race(k, control=False):
+    """On one fresh schema: a request before the credit (OLD), a request
+    paused after its statement k while _credit commits, a request after
+    (NEW). Returns the three answers, the writer's events, the paused
+    sessions and RACER's credit rows."""
+    async with harness.CaseSchema(DSN, "ladder_route") as case:
+        await _build(case)
+        ids, _owned = await _seed(case.conn)
+        pid = await _seed_racer(case.conn, ids)
+        events, sessions = [], []
+
+        async def _writer():
+            events.append(await _credit(case.schema, pid, "race-k%d" % k))
+
+        def _wrap(db):
+            sessions.append(_Paused(db, k, _writer, control))
+            return sessions[-1]
+
+        (old,) = await _serve(case.schema, [_url(RACER)])
+        (paused,) = await _serve(case.schema, [_url(RACER)], wrap=_wrap)
+        (new,) = await _serve(case.schema, [_url(RACER)])
+        credits = await case.conn.fetchval(
+            "SELECT count(*) FROM title_ladder_credits WHERE player_id = $1", pid)
+        return old, paused, new, events, sessions, credits
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 4, 5])
+def test_pg_a_request_racing_a_credit_answers_one_committed_state(k):
+    """D9 (design V3 section 7a, test 1). RACER wears rat rung 1 at 9 games.
+    A request pauses after its statement k while a second connection runs
+    the real record_completed_games for RACER and commits: games 10, tier 2,
+    rung 2 granted and worn. The paused answer must equal the answer before
+    that commit (OLD) or the one after it (NEW), whole -- and which one is
+    fixed. k = 1 pauses after the SET, before any SELECT has taken the
+    snapshot, so it reads NEW; k = 2..5 pause after the snapshot was taken,
+    so they read OLD."""
+    _require_live_pg()
+    old, paused, new, events, sessions, credits = _run(_race(k))
+    (o_status, o_body, o_sql), (p_status, p_body, p_sql), (n_status, n_body, n_sql) = (
+        old, paused, new)
+    _log_sql("race, paused after statement %d" % k, p_sql)
+    assert (o_status, p_status, n_status) == (200, 200, 200), (o_status, p_status, n_status)
+    # The writer ran where it was put, once, and its commit landed.
+    assert [s.paused_after for s in sessions] == [k], [s.paused_after for s in sessions]
+    assert [[e["to_tier"] for e in ev] for ev in events] == [[2]], events
+    assert credits == 1, credits
+    # OLD and NEW are the two committed states, and one credit tells them apart.
+    assert _rat(o_body) == OLD_RAT, _rat(o_body)
+    assert _rat(n_body) == NEW_RAT, _rat(n_body)
+    assert o_body != n_body
+    want, name = (n_body, "NEW") if k == 1 else (o_body, "OLD")
+    assert p_body == want, (
+        "paused after statement %d the route answered %r; its snapshot makes "
+        "that %s %r, whole" % (k, _rat(p_body), name, _rat(want)))
+    for sql in (o_sql, p_sql, n_sql):
+        _assert_read_only(sql, WORN_READS)
+
+
+def test_pg_without_the_snapshot_the_same_race_reads_a_mixed_state():
+    """#391's negative control for the race above (design V3 section 7a,
+    test 2): the same race paused after statement 3, with SELECT 1 sent in
+    place of the SET, so the request runs READ COMMITTED with every other
+    statement where it was. It must read the state no commit had -- games 10
+    and tier 2 from after the credit, the ownership and the worn title from
+    before it -- which is neither OLD nor NEW. An OLD or NEW answer here
+    means the race is not interleaving at all, and this fails."""
+    _require_live_pg()
+    old, paused, new, events, sessions, credits = _run(_race(3, control=True))
+    (o_status, o_body), (n_status, n_body) = old[:2], new[:2]
+    p_status, p_body, p_sql = paused
+    _log_sql("race control: SELECT 1 in place of the SET, paused after statement 3", p_sql)
+    _log_line("race control answer (rat games, rat tier, owned rat rungs, worn): %r "
+              "-- OLD %r, NEW %r" % (_rat(p_body), _rat(o_body), _rat(n_body)))
+    assert (o_status, p_status, n_status) == (200, 200, 200), (o_status, p_status, n_status)
+    assert [s.paused_after for s in sessions] == [3], [s.paused_after for s in sessions]
+    assert p_sql[:1] == ["SELECT 1"], p_sql[:1]
+    assert credits == 1, credits
+    assert _rat(p_body) == MIXED_RAT, _rat(p_body)
+    assert p_body != o_body and p_body != n_body
+
+
+# -- owned asks the shared predicate (D7) ---------------------------------------
+
+ENTRY_SKUS = sorted(r["sku"] for ld in tl.LADDERS for r in ld["rungs"] if r["tier"] == 1)
+
+
+def _owner():
+    """The exemption's account, read from main: never spelled in a test."""
+    owners = sorted(main.SHOP_OWNER_STEAM_IDS)
+    assert owners, "main.SHOP_OWNER_STEAM_IDS is empty: no exempt account to read"
+    return owners[0]
+
+
+async def _seed_worn_entry(conn, ids):
+    """The exempt account and PLAIN each wear rat rung 1 with no
+    player_items row -- what an exempt equip writes, since equip skips the
+    ownership read for that account."""
+    for steam_id in (_owner(), PLAIN):
+        await conn.execute(
+            "INSERT INTO players (steam_id, active_title_id) VALUES ($1, $2)",
+            steam_id, ids["title_ladder_rat_1"])
+
+
+def _owned_skus(body):
+    return sorted(r["sku"] for ln in body["ladders"] for r in ln["rungs"] if r["owned"])
+
+
+def _active_skus(body):
+    return sorted(r["sku"] for ln in body["ladders"] for r in ln["rungs"] if r["active"])
+
+
+def _ownership(body):
+    """(owned skus, worn skus, active_line): an answer with its steam_id left
+    out. The D7 cases assert on this alone, so a failing assertion's output
+    -- which pytest expands into the values an expression was built from --
+    never carries the exempt account's id into a log."""
+    return _owned_skus(body), _active_skus(body), body["active_line"]
+
+
+def test_pg_the_exempt_account_reads_its_worn_entry_rung_as_owned():
+    """D7 (design V3 section 7). The exempt account wears rat rung 1 with no
+    player_items row. Its answer reads that rung owned AND active, as
+    /shop/items reports it; every entry rung owned; and all forty
+    granted-only rungs unowned, because the exemption stops at them. PLAIN,
+    with the same rows under an ordinary id, reads nothing owned: the
+    exemption, not a row, is what answers owned here."""
+    _require_live_pg()
+    ids, owned, before, after, answers = _run(_case(
+        [_url(_owner()), _url(PLAIN)], seed_more=_seed_worn_entry))
+    (x_status, x_body, x_sql), (p_status, p_body, _p) = answers
+    _log_sql("exempt account wearing an entry rung", x_sql)
+    assert (x_status, p_status) == (200, 200), (x_status, p_status)
+    exempt, ordinary = _ownership(x_body), _ownership(p_body)
+    del x_body, p_body
+    assert len(ENTRY_SKUS) == 8 and len(tl.GRANTED_ONLY_SKUS) == 40
+    assert sorted(ENTRY_SKUS + sorted(tl.GRANTED_ONLY_SKUS)) == sorted(tl.ALL_SKUS)
+    assert exempt == (ENTRY_SKUS, ["title_ladder_rat_1"], "rat"), exempt
+    assert ordinary == ([], ["title_ladder_rat_1"], "rat"), ordinary
+    _assert_read_only(x_sql, WORN_READS)
+    assert after == before, (before, after)
+
+
+def test_pg_the_exempt_reading_comes_from_the_shared_predicate(monkeypatch):
+    """Control for the case above: the same rows, with main._auto_owned made
+    to answer False, read nothing owned for the exempt account either. So
+    the owned rungs above came through the shared predicate, which the route
+    consulted for every rung neither account holds a row for: 48 each."""
+    _require_live_pg()
+    asked = []
+
+    def _never(steam_id, sku):
+        asked.append(sku)
+        return False
+
+    monkeypatch.setattr(main, "_auto_owned", _never)
+    ids, owned, before, after, answers = _run(_case(
+        [_url(_owner()), _url(PLAIN)], seed_more=_seed_worn_entry))
+    (x_status, x_body, _x), (p_status, p_body, _p) = answers
+    assert (x_status, p_status) == (200, 200), (x_status, p_status)
+    exempt, ordinary = _ownership(x_body), _ownership(p_body)
+    del x_body, p_body
+    assert exempt == ([], ["title_ladder_rat_1"], "rat"), exempt
+    assert ordinary == ([], ["title_ladder_rat_1"], "rat"), ordinary
+    assert sorted(asked) == sorted(list(tl.ALL_SKUS) * 2), len(asked)
