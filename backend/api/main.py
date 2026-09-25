@@ -38,6 +38,7 @@ from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_relea
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
+import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from schemas import (
     AchievementUnlockRequest,
@@ -35558,6 +35559,18 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 #   * Discord snowflakes -- an off-platform identity linking a game account to
 #     a person. Nothing in a gameplay log needs one.
 #
+# SCRUBBED -- credentials:
+#   * The Steam session ticket. ROUNDS' own Steam runtime logs the web-API
+#     ticket it receives as "Steam Login success. Session Ticket: <hex>", and
+#     that hex can be the credential POST /api/v1/auth/steam exchanges for a
+#     session. log_redaction.py holds the one rule: the value becomes
+#     "[redacted len=<n> sha256=<first 8 hex>]". It runs FIRST in pass one
+#     below, so every API door that serves a stored bundle applies it, and
+#     submit_bug_report applies the same rule before its first write, so no
+#     bundle stored by this build holds a ticket. Bundles stored before it
+#     still do on disk; this read-time pass is what keeps those out of the API.
+#     (The ops `bug-log:` verb reads the file itself and is outside this pass.)
+#
 # NOT SCRUBBED -- pseudonymous game identifiers with real diagnostic value:
 #   * SteamID64s and display names of LIVE accounts. They are public on every
 #     leaderboard, and they are how an admin answers "who did this player
@@ -35574,7 +35587,7 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 # header on the download endpoint, and as a `log_scrub_version` field on
 # GET /bug-reports/{id} -- so a borrower can always prove which ruleset
 # produced what they are holding. Bump it whenever the rules below change.
-_BUG_LOG_SCRUB_VERSION = "1"
+_BUG_LOG_SCRUB_VERSION = "2"             # 2 = the credential class above joined the ruleset
 _BUG_LOG_MAX_GZ = 8 * 1024 * 1024        # refuse a stored blob bigger than this
 _BUG_LOG_MAX_TEXT = 16 * 1024 * 1024     # gunzip ceiling
 _BUG_LOG_STEAMID_PROBE_MAX = 500         # distinct ids fed to the purge lookup
@@ -35635,8 +35648,8 @@ def _read_bug_log_sync(path_str: str) -> str:
 
 
 def _scrub_pass_one(body: str) -> tuple:
-    """Regex half, stage 1: path usernames + discord ids, and collect the
-    distinct SteamID64s the caller must ask the database about.
+    """Regex half, stage 1: credentials, path usernames + discord ids, and
+    collect the distinct SteamID64s the caller must ask the database about.
 
     SYNCHRONOUS AND THREAD-DESTINED. Review measured the split the first
     version got backwards: the gunzip that was moved off the loop costs ~0.035s
@@ -35645,9 +35658,13 @@ def _scrub_pass_one(body: str) -> tuple:
     cheap half and keeping the expensive half is not an optimisation. Touches
     no session and no async state, so it is safe in a worker thread.
     """
-    counts = {"os_user": 0, "discord_id": 0, "deleted_steam_id": 0}
+    counts = {"os_user": 0, "discord_id": 0, "deleted_steam_id": 0, "credential": 0}
     if not body:
         return body, counts, []
+
+    # Credentials first (the posture above): every Steam session ticket value
+    # is its marker before any other pass reads the text.
+    body, counts["credential"] = _logred.redact_credentials_counted(body)
 
     def _user(m):
         counts["os_user"] += 1
@@ -35804,7 +35821,15 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
 
     log_filename: str | None = None
     log_bytes_stored: int | None = None
-    log_blob = (req.log_text or "").strip()
+    # No credential reaches storage (the bug-log posture above): the Steam
+    # session ticket's value becomes its marker in the bundle AND in the two
+    # free-text fields, where a pasted log line lands, before the first write
+    # of either -- the flush below writes the row, the open() writes the file.
+    # The bundle's pass runs in a worker thread, as the read-time scrub's does
+    # (_scrub_bug_log says what that does and does not buy).
+    log_blob = await asyncio.to_thread(_logred.redact_credentials, (req.log_text or "").strip())
+    description = _logred.redact_credentials(req.description.strip())
+    repro_steps = _logred.redact_credentials((req.repro_steps or "").strip()) or None
 
     report = BugReport(
         player_id=player.id if player else None,
@@ -35814,8 +35839,8 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         game_version=req.game_version,
         severity=severity,
         category=category,
-        description=req.description.strip(),
-        repro_steps=(req.repro_steps or "").strip() or None,
+        description=description,
+        repro_steps=repro_steps,
     )
     db.add(report)
     await db.flush()  # need report.id for the filename
@@ -35908,7 +35933,9 @@ async def list_bug_reports(
                 severity=r["severity"],
                 category=r["category"],
                 status=r["status"],
-                description=r["description"],
+                # Read-time credential rule: rows stored before it reached
+                # ingest still hold the text they were sent.
+                description=_logred.redact_credentials(r["description"]),
                 has_log=r["log_filename"] is not None,
                 log_bytes=r["log_bytes"],
                 kind=r["kind"] or "report",
@@ -35957,7 +35984,7 @@ async def recent_bug_report_events(
         text(f"""SELECT bre.id              AS event_id,
                        bre.bug_report_id::text AS bug_report_id,
                        br.bug_number,
-                       LEFT(br.description, 140) AS description_snippet,
+                       br.description,
                        br.steam_id        AS reporter_steam_id,
                        reporter.discord_id AS reporter_discord_id,
                        reporter.display_name AS reporter_name,
@@ -35982,7 +36009,10 @@ async def recent_bug_report_events(
                 "event_id": str(r["event_id"]),
                 "bug_report_id": r["bug_report_id"],
                 "bug_number": r["bug_number"] or 0,
-                "description_snippet": r["description_snippet"] or "",
+                # The credential rule BEFORE the 140-character cut, which used
+                # to be LEFT() in the SQL: cutting first could leave the head of
+                # a ticket too short for the rule to recognise.
+                "description_snippet": (_logred.redact_credentials(r["description"]) or "")[:140],
                 "reporter_steam_id": r["reporter_steam_id"],
                 "reporter_discord_id": r["reporter_discord_id"],
                 "reporter_name": r["reporter_name"],
@@ -36092,7 +36122,8 @@ async def recent_bug_reports(
                 "severity": r["severity"],
                 "category": r["category"],
                 "status": r["status"],
-                "description": r["description"],
+                # Read-time credential rule: this text becomes a Discord post.
+                "description": _logred.redact_credentials(r["description"]),
             }
             for r in rows
         ],
@@ -36179,6 +36210,11 @@ async def get_bug_report(
         out["player_id"] = str(out["player_id"])
     out["created_at"] = out["created_at"].isoformat() if out["created_at"] else None
     out["updated_at"] = out["updated_at"].isoformat() if out["updated_at"] else None
+    # Read-time credential rule on the two free-text fields (the bundle got it
+    # inside _scrub_bug_log): rows stored before it reached ingest still hold
+    # the text they were sent.
+    out["description"] = _logred.redact_credentials(out["description"])
+    out["repro_steps"] = _logred.redact_credentials(out["repro_steps"])
     out["log_text"] = log_text
     # The scrub receipt, on THIS door too. The download endpoint returns it as
     # an X-Scrub-Version header, and the posture comment claimed the version
@@ -36294,7 +36330,7 @@ async def download_bug_report_log(
 
     body, counts = await _scrub_bug_log(db, raw)
     print(f"[BUG-LOG] #{row['bug_number']} downloaded by {admin_steam_id} "
-          f"({len(body)} chars; redacted os_user={counts['os_user']} "
+          f"({len(body)} chars; redacted credential={counts['credential']} os_user={counts['os_user']} "
           f"discord={counts['discord_id']} deleted_steam={counts['deleted_steam_id']})")
 
     return PlainTextResponse(
