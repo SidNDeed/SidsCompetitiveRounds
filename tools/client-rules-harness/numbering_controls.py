@@ -1,4 +1,5 @@
-"""RJ-DRIFT numbering controls (design V4 section 5, "Driver" and "Controls").
+"""RJ-DRIFT numbering controls (design V10 section 5, "Driver" and "Controls":
+V4's 23 rows, then the 14 of V5-V9).
 
 For each control row: copy the rule files, the harness project and Main.cs to
 a work directory (the tree itself is never edited, checked out or restored),
@@ -62,18 +63,20 @@ ALL_WALKS = (
     + walk("W6.4", None) + walk("W6.5") + walk("W6.6") + walk("W6.6s", None) + walk("W6.7")
     + walk("W6.7a", None) + walk("W6.8", None) + walk("W6.8d", None) + walk("W6.9")
     + walk("W6.9p", None)
-    + [w for n in range(1, 8) for w in walk("W7.%d" % n, None)]
+    + [w for n in range(10, 16) for w in walk("W6.%d" % n, None)]
+    + [w for n in range(1, 12) for w in walk("W7.%d" % n, None)]
 )
-assert len(ALL_WALKS) == 67, len(ALL_WALKS)
-assert len(set(ALL_WALKS)) == 67
+assert len(ALL_WALKS) == 77, len(ALL_WALKS)
+assert len(set(ALL_WALKS)) == 77
 
-# FfaReportRules.cs lines at the design's pin -> the check's name (names are
-# stable across the port; line numbers are not).
+# FfaReportRules.cs lines at the design's pin (V10: 901ed11; V4 cited 426,
+# 447, 460 and 472 at 46f54d4) -> the check's name (names are stable across
+# the port; line numbers are not).
 FFAREPORT = {
-    426: "a rollover after the freeze cannot change the key",
-    447: "a later freeze cannot move a key already taken",
-    460: "a seat that froze after the rollover files a different game",
-    472: "a cleared snapshot files nothing",
+    465: "a rollover after the freeze cannot change the key",
+    487: "a later freeze cannot move a key already taken",
+    502: "a seat that froze after the rollover files a different game",
+    515: "a cleared snapshot files nothing",
 }
 
 
@@ -86,26 +89,28 @@ def ffa(*lines):
 
 
 D3_WALKS = [w for w in ALL_WALKS if not any(w.endswith(" " + x) for x in (
-    "W5.1", "W6.2", "W6.3q", "W6.3n", "W6.4", "W7.1", "W7.2", "W7.3", "W7.4", "W7.6", "W7.7"))]
-assert len(D3_WALKS) == 56, len(D3_WALKS)
+    "W5.1", "W6.2", "W6.3q", "W6.3n", "W6.4", "W6.12", "W6.13", "W6.14", "W7.1", "W7.2", "W7.3",
+    "W7.4", "W7.6", "W7.7", "W7.9", "W7.10", "W7.11"))]
+assert len(D3_WALKS) == 60, len(D3_WALKS)
 
 C_LIVE_WALKS = (
     [x for w in ("W3.1", "W3.2", "W3.3", "W3.4", "W4.1", "W4.4", "W5.2", "W5.3", "W6.7")
      for x in walk(w, "i", "iii")]
     + walk("W3.2m", None) + walk("W5.2m", None)
     + [x for w in ("W4.2", "W5.4", "W6.1", "W6.5", "W6.9") for x in walk(w)]
-    + walk("W6.9p", None)
+    + walk("W6.9p", None) + walk("W6.11", None)
 )
-assert len(C_LIVE_WALKS) == 36, len(C_LIVE_WALKS)
+assert len(C_LIVE_WALKS) == 37, len(C_LIVE_WALKS)
 
 C_STALE_WALKS = (
     [x for w in ("W3.1", "W3.2", "W3.3", "W3.4", "W4.1", "W4.2", "W4.4", "W5.2", "W5.3", "W5.4",
                  "W6.1", "W6.5", "W6.7") for x in walk(w, "ii")]
-    + walk("W6.6") + walk("W6.6s", None) + walk("W6.7a", None)
+    + walk("W6.6") + walk("W6.6s", None) + walk("W6.7a", None) + walk("W6.15", None)
+    + walk("W6.10", None)
 )
-assert len(C_STALE_WALKS) == 18, len(C_STALE_WALKS)
+assert len(C_STALE_WALKS) == 20, len(C_STALE_WALKS)
 
-# ── the rows (V4:L1476-1499) ────────────────────────────────────────────
+# ── the rows (V10 section 5: V4's 23, then V5-V9's 14) ─────────────────
 # Each: id, file, function signature text, anchor, mutation, twin,
 # expected FAIL set, (case id or None, named failure substring).
 
@@ -125,7 +130,8 @@ ROWS = [
     ("C-D5", NR, "static bool SameIncarnation(", "a != null && ReferenceEquals(a, b)",
      "a != null", "a != null && ReferenceEquals(b, a)",
      units("INC-2", "ARM-2", "ROOM-2", "ROOM-3") + walk("W4.2") + walk("W5.2m", None) + walk("W5.3")
-     + walk("W5.4") + walk("W6.1") + walk("W6.5") + walk("W6.7") + walk("W6.7a", None),
+     + walk("W5.4") + walk("W6.1") + walk("W6.5") + walk("W6.7") + walk("W6.7a", None)
+     + walk("W7.8", None),
      ("walk-D5 W5.3(i)", "two numbers g4 RG{A4,B4,D4,X7}")),
     ("C-D6", NR, "static int Candidate(",
      "ticketValid && ticketGame >= 1 ? ticketGame : (readback >= 1 ? readback : NoGame)",
@@ -135,13 +141,15 @@ ROWS = [
      ("walk-D6 W6.6s", "two numbers g5 RG{A4,B2,C2,D2}")),
     ("C-SNAP", NR, "static bool SnapshotArmed(", "return SameIncarnation(armedIn, room);",
      "return armedIn != null;", "return SameIncarnation(room, armedIn);",
-     units("ARM-2") + walk("W4.2") + walk("W5.2m", None) + walk("W5.4") + walk("W6.1") + walk("W6.5"),
+     units("ARM-2") + walk("W4.2") + walk("W5.2m", None) + walk("W5.4") + walk("W6.1") + walk("W6.5")
+     + walk("W7.8", None),
      ("walk-D6 W6.5(i)", "two numbers g4 F{A4,B4,C3,D4}")),
     ("C-HELD", NR, "static bool HeldByRoom(", "return candidate >= 1 && (masterHolds || fighterHolds);",
      "return candidate >= 1;", "return candidate >= 1 && (fighterHolds || masterHolds);",
      units("HELD-3", "HELD-6") + walk("W6.3n", None) + walk("W6.4", None) + walk("W6.6")
      + walk("W6.6s", None) + walk("W6.7a", None) + walk("W6.8d", None) + walk("W6.9")
-     + walk("W6.9p", None) + walk("W7.2", None) + walk("W7.5", None),
+     + walk("W6.9p", None) + walk("W6.10", None) + walk("W6.11", None) + walk("W6.15", None)
+     + walk("W7.5", None),
      ("walk-D6 W6.6(i)", "provenance g4 F{A1,B1,C1,D1}")),
     ("C-ROOMHELD", NR, "static bool HeldByRoom(", "return candidate >= 1 && (masterHolds || fighterHolds);",
      "return candidate >= 1 && masterHolds;",
@@ -152,11 +160,12 @@ ROWS = [
      "if (!gate) return candidate >= 1;\n            return candidate >= 1 && (masterHolds || fighterHolds);",
      "if (!gate && candidate < 0) return candidate >= 1;\n"
      "            return candidate >= 1 && (masterHolds || fighterHolds);",
-     units("HELD-6") + walk("W6.3n", None) + walk("W6.4", None) + walk("W7.2", None) + walk("W7.5", None),
+     units("HELD-6") + walk("W6.3n", None) + walk("W6.4", None) + walk("W6.11", None) + walk("W6.15", None)
+     + walk("W7.5", None),
      ("walk-D12 W7.5", "EXPECTED g4 F{A1,B1,C1} expected none")),
     ("C-VOID", NR, "static int WitnessAtJoin(", "return NoGame;",
      "return held;", "return -1;",
-     units("WIT-3") + walk("W6.1"),
+     units("WIT-3") + walk("W6.1") + walk("W7.8", None),
      ("walk-D6 W6.1(i)", "g4 E{A,B,C,D} on A,B,D: C holds none")),
     ("C-LB", NR, "static int LeaverStampSource(", "return seq;",
      "return counter;", "return seq + 0;",
@@ -164,7 +173,7 @@ ROWS = [
      ("walk-D12 W7.4", "LEAVER g7 body lists P absent (left in g7)")),
     ("C-ARM", RR, "void Clear(object room)", "_armedIn = room;",
      "_armedIn = null;", "_armedIn = room ?? null;",
-     ffa(426, 447, 460) + ALL_WALKS,
+     ffa(465, 487, 502) + ALL_WALKS,
      (None, "LIVE-F g1 F none on A")),
     ("C-CAND", NR, "static int CarryAfterGameOver(", "return candidate + 1;",
      "return fieldAtCarry + 1;", "return 1 + candidate;",
@@ -172,7 +181,7 @@ ROWS = [
      ("walk-D6 W6.6s", "two numbers g5 RG{A4,B2,C2,D2}")),
     ("C-REENTRY", NR, "static bool RoomObjectChanged(", "return !SameIncarnation(lastRoom, room);",
      "return lastName != name;", "return !SameIncarnation(room, lastRoom);",
-     units("ROOM-2") + walk("W6.7") + walk("W6.7a", None),
+     units("ROOM-2") + walk("W4.2") + walk("W6.1") + walk("W6.5") + walk("W6.7") + walk("W6.7a", None),
      ("walk-D6 W6.7(i)", "RESET g4 C counter 4 sequence 4")),
     ("C-LIVE", NR, "static int PickIdentitySource(", "return liveGame >= 1 ? liveGame : NoGame;",
      "return counter;", "return liveGame >= 1 ? liveGame : -1;",
@@ -186,8 +195,9 @@ ROWS = [
      ("walk-D3 W3.1(ii)", "g4 CS{A4,B4,C3,D4}")),
     ("C-GATE", NR, "static bool DriftGate(", "if (localAdvert != want) return false;",
      "", "if (want != localAdvert) return false;",
-     units("GATE-2", "GATE-5") + walk("W5.2x", None) + walk("W5.2f", None) + walk("W7.6", None)
-     + walk("W7.7", None),
+     units("GATE-2", "GATE-5") + walk("W5.2x", None) + walk("W5.2f", None) + walk("W6.3n", None)
+     + walk("W6.3q", None) + walk("W6.4", None) + walk("W6.11", None) + walk("W6.12", None)
+     + walk("W6.13", None) + walk("W6.15", None) + walk("W7.6", None) + walk("W7.7", None),
      ("walk-D12 W7.6", "AGREE-G g1 G{A0,B1,C0,D0}")),
     ("C-KEY", NR, "static int StagedAdvertKey(", "return RoomKey(target);",
      "return RoomKey(current);", "return RoomKey((target));",
@@ -195,13 +205,14 @@ ROWS = [
      (None, "EXPECTED g1 advert{A,B,C,D} 1:136261 expected 1:987561")),
     ("C-LP", NR, "static int LivePointsGame(", "if (candidate >= 1) return candidate;",
      "return counter;", "if (candidate >= 1) return candidate + 0;",
-     units("LP-2", "LP-3", "LP-4", "LP-5") + walk("W6.9") + walk("W6.9p", None),
+     units("LP-2", "LP-3", "LP-4", "LP-5") + walk("W6.9") + walk("W6.9p", None) + walk("W6.11", None),
      ("walk-D6 W6.9(i)", "LIVE-POINTS g2 A sent 2, expected the candidate 1")),
     ("C-SETTLE", NR, "static int LivePointsGame(", "if (candidate >= 1) return candidate;",
      "if (candidate >= 1 && (held || !gate)) return candidate;",
      "if (candidate >= 1 && (held || true)) return candidate;",
      units("LP-4") + walk("W6.6") + walk("W6.6s", None) + walk("W6.7a", None) + walk("W6.8d", None)
-     + walk("W6.9") + walk("W6.9p", None),
+     + walk("W6.9") + walk("W6.9p", None) + walk("W6.10", None) + walk("W6.11", None)
+     + walk("W6.15", None),
      ("walk-D6 W6.8d", "SETTLE-LOCK g1 _r1 accepted, game 1 never locked")),
     ("C-FOLLOW", NR, "static bool FollowsHost(",
      "return !isMaster && masterPresent && masterWitness == NoGame && roomGame >= 1;",
@@ -213,7 +224,7 @@ ROWS = [
      "if (masterPresent && masterGame == NoGame && candidate >= 1)",
      "if (masterPresent && masterGame == NoGame && candidate >= 1 && !heldRGAtStart)",
      "if (masterPresent && masterGame == NoGame && candidate >= 1 && (heldRGAtStart || !heldRGAtStart))",
-     units("CARRY-4") + walk("W6.9"),
+     units("CARRY-4") + walk("W6.9") + walk("W6.11", None),
      ("walk-D6 W6.9(i)", "two numbers g3 RG{A2,B3,C2}")),
     ("C-CONT", NR, "static void StartNumbers(", "prevRGHere && prevRG >= 1 && !followedPrev",
      "prevRGHere && prevRG >= 1", "prevRGHere && prevRG >= 1 && !(followedPrev)",
@@ -224,10 +235,72 @@ ROWS = [
      "return null;",
      "return string.Equals(join, pending, StringComparison.Ordinal) ? join : null;",
      units("SPEC-1") + walk("W5.1", None) + walk("W5.2") + walk("W5.2m", None) + walk("W6.6")
-     + walk("W6.6s", None) + walk("W6.7a", None) + walk("W7.5", None),
+     + walk("W6.6s", None) + walk("W6.7a", None) + walk("W6.15", None) + walk("W7.5", None),
      ("walk-D5 W5.2(i)", "EXPECTED g4 G{A0,B0,C0,D0,S0} expected 1")),
+    # V5-V9's rows (V10 section 5). A deleted line is an empty replacement.
+    ("C-OPEN", NR, "static int MasterOpenerGame(",
+     "if (ownGame >= 1) { cycle = ownCycle + 1; return ownGame; }",
+     "", "if (1 <= ownGame) { cycle = ownCycle + 1; return ownGame; }",
+     units("OPEN-4") + walk("W6.6s", None),
+     ("walk-D6 W6.6s", "AGREE-P g4 P{A3:5,B1:2,C1:2,D1:2}")),
+    ("C-PROMOTE", NR, "static bool ReopensOnPromotion(", "return gate && isMaster && phaseGame < 1;",
+     "return false;", "return gate && isMaster && phaseGame < 1 && true;",
+     units("PROM-1") + walk("W6.10", None) + walk("W6.15", None),
+     ("walk-D6 W6.10", "CLOSE-SAFE g4 c1 B master without identity did not reopen")),
+    ("C-KEYED", NR, "static bool KeyedReadsAllowed(", "return !gate || game >= 1;",
+     "return game >= 1;", "return !gate || 1 <= game;",
+     units("KEYED-3") + walk("W7.8", None),
+     ("walk-D12 W7.8", "EXPECTED g4 CS{A4,B4,C-,D4} expected 4")),
+    ("C-RESETG", NR, "static int CounterAfterRoomChange(", "return (gate || lastName != name) ? 0 : counter;",
+     "return 0;", "return (gate || lastName != name) ? 0 : counter + 0;",
+     units("RESETG-2") + walk("W7.8", None),
+     ("walk-D12 W7.8", "EXPECTED g5 CS{A5,B5,C1,D5} expected 5")),
+    ("C-SAMEGAME", NR, "static bool EpochEvidence(",
+     "return sameEpoch && ahead && (!gate || (pickGame == phaseGame && pickCycle == phaseCycle));",
+     "return sameEpoch && ahead && (!gate || pickCycle == phaseCycle);",
+     "return ahead && sameEpoch && (!gate || (pickGame == phaseGame && pickCycle == phaseCycle));",
+     units("EVID-2") + walk("W6.11", None),
+     ("walk-D6 W6.11", "SAME-GAME g2 A adopted 2:1 over 1:1")),
+    ("C-EPOCH", NR, "static bool SameEpoch(", "return a != null && a == b;",
+     "return a != null && b != null;", "return a != null && b == a;",
+     units("EP-2", "ENV-2") + walk("W6.3q", None) + walk("W6.12", None),
+     ("walk-D6 W6.12", "REPLAY B adopted 4:3 at g4.4 from picks written at g4.3")),
+    ("C-OTHERS", NR, "static int EvidenceQuorum(", "int n = OthersOf(owners, local).Count;",
+     "int n = owners.Count - 1;", "int n = OthersOf(owners, local).Count + 0;",
+     units("QUORUM-5") + walk("W6.13", None),
+     ("walk-D6 W6.13", "EXPECTED g4 F none, expected 4")),
+    ("C-FINAL", NR, "static bool FinalizesAtTermination(", "return pe != null;",
+     "return pe != null && applied > 0;", "return pe != null && (applied > 0 || applied <= 0);",
+     units("FIN-2") + walk("W6.14", None),
+     ("walk-D6 W6.14", "EPOCH g4.3 C holds the epoch of its terminated g4.2")),
+    ("C-LIVEEP", NR, "static string LiveEpoch(", "if (finalized != null && finalized.Contains(e)) return null;",
+     "", "if (null != finalized && finalized.Contains(e)) return null;",
+     units("LEP-4") + walk("W6.14", None),
+     ("walk-D6 W6.14", "EPOCH g4.3 C holds the epoch of its terminated g4.2")),
+    ("C-LEGACY", NR, "static string LegacyPickValue(", "return \"\";",
+     "return nonce + \":\" + game + \":\" + cycle + \":\" + card;", "return \"\" + \"\";",
+     units("LEGACY-1", "LEGACY-2") + walk("W7.4", None) + walk("W7.9", None),
+     ("walk-D12 W7.9", "REPLAY Z applied 3:4 at g4.1, written at g3.4")),
+    ("C-HOLD", NR, "static string HeldEpoch(", "return live;",
+     "return live ?? pe;", "return pe == live ? pe : live;",
+     units("HE-2") + walk("W6.8d", None) + walk("W6.15", None) + walk("W7.10", None) + walk("W7.11", None),
+     ("walk-D12 W7.10", "EPOCH g4.1 P holds the epoch of departed A")),
+    ("C-ISSUER", NR, "static string LiveEpoch(", "if (!issuer.HasValue || issuer.Value != masterActor) return null;",
+     "", "if (!issuer.HasValue || masterActor != issuer.Value) return null;",
+     units("LEP-2", "LEP-6") + walk("W6.8d", None) + walk("W6.15", None) + walk("W7.11", None),
+     ("walk-D6 W6.15", "EPOCH g4.3 C holds the epoch of departed A")),
+    ("C-CYCLE", NR, "static bool EpochEvidence(",
+     "return sameEpoch && ahead && (!gate || (pickGame == phaseGame && pickCycle == phaseCycle));",
+     "return sameEpoch && ahead && (!gate || pickGame == phaseGame);",
+     "return sameEpoch && ahead && (!gate || (pickCycle == phaseCycle && pickGame == phaseGame));",
+     units("EVID-6") + walk("W6.15", None),
+     ("walk-D6 W6.15", "SAME-CYCLE g4 B adopted 1:3 over 1:2")),
+    ("C-USE", NR, "static string EpochAtUse(", "return issuer == masterActor ? pe : null;",
+     "return pe;", "return masterActor == issuer ? pe : null;",
+     units("USE-2", "USE-3") + walk("W7.11", None),
+     ("walk-D12 W7.11", "USE g4.1 P published under the epoch of departed A")),
 ]
-assert len(ROWS) == 23, len(ROWS)
+assert len(ROWS) == 37, len(ROWS)
 
 # ── mechanics ───────────────────────────────────────────────────────────
 
