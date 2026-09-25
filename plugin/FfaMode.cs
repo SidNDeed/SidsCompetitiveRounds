@@ -2614,9 +2614,11 @@ namespace CompetitiveRounds
                 (g, c) => g > game || (g == game && c > cycle);
             string rawCycleAtEntry = ReadRawRoomProp(PropCycle);
             // RJ-DRIFT N19(b)/(i): a non-master evaluates the room's epoch at
-            // its entry read. The watch step in both loops below starts from
-            // these values and re-evaluates on a master change, then (a
-            // non-master) on a change of cr_ffa_cyc or cr_ffa_ep.
+            // its entry read. Below, every iteration of the wait and the
+            // result loop first re-evaluates on a master change, before its
+            // read or publish; a non-master re-evaluates on a change of
+            // cr_ffa_cyc or cr_ffa_ep against these values in the wait and in
+            // the watch, which runs after the result read.
             string rawEpochSeen = ReadRawRoomProp(PropEpoch);
             string rawCycleSeen = rawCycleAtEntry;
             int lastMasterActor = MasterActorNow();
@@ -2691,8 +2693,11 @@ namespace CompetitiveRounds
             // Wait for the manifest (all clients, incl. master reading its own write).
             while (manifest == null && Time.realtimeSinceStartup - phaseStart < ManifestWaitSeconds)
             {
-                // RJ-DRIFT N19(i): before this iteration's read or publish.
-                EpochWatchStep(phaseNonce, ref lastMasterActor, ref rawCycleSeen, ref rawEpochSeen);
+                // RJ-DRIFT N19(i): a master change evaluates before this
+                // iteration's read or publish; then N19(b): a non-master
+                // evaluates on a change of cr_ffa_cyc or cr_ffa_ep.
+                EpochMasterCheck(phaseNonce, ref lastMasterActor);
+                if (!PhotonNetwork.IsMasterClient) EpochChangeCheck(phaseNonce, ref rawCycleSeen, ref rawEpochSeen);
                 if (FfaNumberingRules.KeyedReadsAllowed(gate, game))
                 {
                     manifest = ReadCycleManifest(game, cycle);
@@ -2966,8 +2971,12 @@ namespace CompetitiveRounds
             }
             while (true)
             {
-                // RJ-DRIFT N19(i): before this iteration's read or publish.
-                EpochWatchStep(phaseNonce, ref lastMasterActor, ref rawCycleSeen, ref rawEpochSeen);
+                // RJ-DRIFT N19(i): a master change evaluates before this
+                // iteration's read or publish. The change evaluation (N19(b))
+                // runs in the watch below, AFTER the read, so a seat whose
+                // result and the next phase's epoch arrive together applies
+                // its result first.
+                EpochMasterCheck(phaseNonce, ref lastMasterActor);
                 // N12(d): no keyed read without an identity (under G; change
                 // 25(a): under G false the pin's reads, a counter of 0 included).
                 if (FfaNumberingRules.KeyedReadsAllowed(gate, game))
@@ -3003,6 +3012,10 @@ namespace CompetitiveRounds
                         // publish observed DURING this loop is fresh by
                         // construction). Catches a lagged continuous client
                         // the master-only detector can't help.
+                        // RJ-DRIFT N19(b): the held epoch is re-evaluated on a
+                        // change of cr_ffa_cyc or cr_ffa_ep first, so an
+                        // adoption below re-stamps under the evaluated epoch.
+                        EpochChangeCheck(phaseNonce, ref rawCycleSeen, ref rawEpochSeen);
                         string rawNow = ReadRawRoomProp(PropCycle);
                         var np = rawNow != rawCycleAtResultEntry ? ParseCycleProp(rawNow) : null;
                         // RJ-DRIFT N15 re-evaluated on this change, then N12(c):
@@ -3551,23 +3564,29 @@ namespace CompetitiveRounds
             if (phaseEpoch != before) RepublishLocalPickFor(nonce, phaseGame, phaseCycle);
         }
 
-        /// <summary>N19(b)/(i): the per-iteration watch of the manifest wait
-        /// and the result loop. A master change evaluates first (every seat);
-        /// otherwise a non-master evaluates on a change of cr_ffa_cyc or
-        /// cr_ffa_ep. A sitting master never evaluates on its own writes.</summary>
-        private static void EpochWatchStep(string nonce, ref int lastMasterActor, ref string rawCycleSeen,
-                                           ref string rawEpochSeen)
+        /// <summary>N19(i): every iteration of the wait and the result loop
+        /// compares the present master's ActorNumber (-1 with none) with the
+        /// last one seen, recorded at the phase entry, and on a difference
+        /// evaluates (a seat that became master evaluates with live none).</summary>
+        private static void EpochMasterCheck(string nonce, ref int lastMasterActor)
         {
             int masterNow = MasterActorNow();
+            if (masterNow == lastMasterActor) return;
+            lastMasterActor = masterNow;
+            EvaluatePhaseEpoch(nonce);
+        }
+
+        /// <summary>N19(b): a non-master evaluates on a change of cr_ffa_cyc
+        /// or cr_ffa_ep since its last evaluation point (the entry, or this
+        /// check). A sitting master never evaluates on its own writes.</summary>
+        private static void EpochChangeCheck(string nonce, ref string rawCycleSeen, ref string rawEpochSeen)
+        {
             string cyc = ReadRawRoomProp(PropCycle);
             string ep = ReadRawRoomProp(PropEpoch);
-            bool masterChanged = masterNow != lastMasterActor;
-            bool propChanged = cyc != rawCycleSeen || ep != rawEpochSeen;
-            lastMasterActor = masterNow;
+            if (cyc == rawCycleSeen && ep == rawEpochSeen) return;
             rawCycleSeen = cyc;
             rawEpochSeen = ep;
-            if (masterChanged) EvaluatePhaseEpoch(nonce);
-            else if (propChanged && !PhotonNetwork.IsMasterClient) EvaluatePhaseEpoch(nonce);
+            EvaluatePhaseEpoch(nonce);
         }
 
         /// <summary>N19(i): a result for game:cycle exists under either key
