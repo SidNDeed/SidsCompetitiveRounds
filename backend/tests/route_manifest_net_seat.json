@@ -943,7 +943,7 @@
           ],
           "main",
           "delete_player_data",
-          "cf1a3a3e73855609a0f2925ba652a6bef4ddae14"
+          "d764029dc3ff772fa1118cbc57eac357dc5c7f28"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1231,7 +1231,7 @@
           ],
           "main",
           "update_team_live_points",
-          "8b647ac651a81fa6208f66204ff69ae7cb2064a7"
+          "d1f50955392e13bda1337d310d99f946847f1d1d"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "7948e12724e1d7cc35bc1f3610a9fe4a19ef5abc"
+          "8c42aa1025d289920825726a11fc352d9b825342"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -2074,7 +2074,7 @@
           ],
           "main",
           "internal_pending_dms",
-          "34d51ad1a1efc40be58a4d81bbe43b7e59d2b32b"
+          "1229be700b9c0887e899c434ea215aac30f84030"
         ],
         [
           "/api/v1/internal/pending-dms/ack",
@@ -2963,7 +2963,7 @@
           ],
           "main",
           "mail_send",
-          "31af1129efd38064162d456c7823ea26fad347c9"
+          "6536d62f6d67c88249d27f9009662d176f09a4f5"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3017,7 +3017,7 @@
           ],
           "main",
           "mail_settings_put",
-          "8cde761c3b3cab265b9ea05b129f38a883d6abed"
+          "c7c0691938536ec59c884c618c90f7d867725f33"
         ],
         [
           "/api/v1/mail/settings",
@@ -3071,7 +3071,7 @@
           ],
           "main",
           "mail_reply",
-          "8022411df1c89b6e78b0562b971eb858ceeb96c0"
+          "bf646496381b4bd5cc69dba4b57c1296ad0e12c6"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3326,7 +3326,7 @@
           ],
           "auto_logs",
           "run_auto_log_prune",
-          "6bf5dfdbddce9444776fdd824a4f4416377c6738"
+          "99a9b7ac122de4e390019abd55c093cfc355e217"
         ],
         [
           "/api/v1/internal/mail/relay-pref",
@@ -3335,7 +3335,7 @@
           ],
           "mail_discord",
           "mail_relay_pref",
-          "99de267163a6099a80d3a48c1ef85c98b3912ad4"
+          "47a842e533507876a61426f3d08b96d600a21d8b"
         ],
         [
           "/api/v1/internal/mail/relay-threads",
@@ -3362,7 +3362,7 @@
           ],
           "auto_logs",
           "upload_auto_log",
-          "1c30b24f39bca17508db017a010083b9592a5efc"
+          "5fdce19e45c6c6e64547d7b72747c67b7b9bf96a"
         ],
         [
           "/api/v1/players/{steam_id}/title-ladders",
@@ -3372,6 +3372,21 @@
           "title_ladders",
           "get_title_ladders",
           "048abf0b5609e7e94c44470ccba0b3c0eb785746"
+        ]
+      ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "Static source review (v1.41.0 beta round 2, finding 7: the pending-DM cancellation recheck the bot asks before each send): over the route's whole reached surface no W1 private Match column is named, no SQL reads the matches table and the Match model is not used; it answers {\"cancelled\": bool} from pending_dms.cancelled_at alone.",
+      "routes": [
+        [
+          "/api/v1/internal/pending-dms/{dm_id}/cancelled",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pending_dm_cancelled",
+          "d00b9ea939cf26d75a15ebdf22b3da86b896dce8"
         ]
       ]
     }
@@ -3410,7 +3425,7 @@
       [
         "main",
         "lifespan",
-        "13dcb9eda05e9726d782a1b69a90f6746500d583"
+        "cef91a4deb84edd9d67ee1863e2c997c177b9cf9"
       ]
     ]
   },
@@ -3633,6 +3648,7 @@
     "POST /api/v1/internal/tournament-notices/ack -> main.ack_tournament_notices",
     "GET /api/v1/internal/pending-dms -> main.internal_pending_dms",
     "POST /api/v1/internal/pending-dms/ack -> main.ack_pending_dms",
+    "GET /api/v1/internal/pending-dms/{dm_id}/cancelled -> main.internal_pending_dm_cancelled",
     "POST /api/v1/lfp-ping -> main.lfp_ping",
     "GET /api/v1/internal/lfp-pings -> main.internal_lfp_pings",
     "POST /api/v1/internal/lfp-pings/ack -> main.ack_lfp_pings",
