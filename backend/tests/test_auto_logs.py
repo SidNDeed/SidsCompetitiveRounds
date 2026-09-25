@@ -21,6 +21,7 @@ import gzip
 import inspect
 import json
 import os
+import pathlib
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -627,36 +628,234 @@ def test_an_unknown_player_still_uploads(logdir, verified):
 
 # ── retention ────────────────────────────────────────────────────────────────
 
+CANDIDATES_KEY = "SELECT id::text AS id FROM bug_reports"
+ROW_KEY = "DELETE FROM bug_reports WHERE id = CAST(:id AS uuid)"
+BULK_KEY = "DELETE FROM bug_reports WHERE kind = 'auto'"
+
+
+class _Savepoint:
+    def __init__(self, db):
+        self.db = db
+
+    async def __aenter__(self):
+        self.mark = len(self.db.pending)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            del self.db.pending[self.mark:]          # ROLLBACK TO SAVEPOINT
+        return False
+
+
+class PruneDb(Scripted):
+    """Scripted, plus a table: every row in it is past the cutoff. A DELETE
+    removes a row only while it is still there and answers its log_filename
+    (RETURNING); a savepoint that exits with an exception discards the DELETEs
+    made inside it; only commit() makes a DELETE durable, so anything pending
+    when the call returns was never committed.
+
+    It answers the per-row statement AND the old bulk statement, so the
+    mutation control that restores the bulk DELETE-then-unlink shape is
+    measured against the same table rather than against a fake that cannot
+    see it."""
+
+    def __init__(self, rows):
+        super().__init__({CANDIDATES_KEY: [[{"id": rid} for rid in rows]]})
+        self.table = dict(rows)
+        self.pending = []
+
+    def begin_nested(self):
+        return _Savepoint(self)
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        if ROW_KEY in sql:
+            self.log.append((sql, params))
+            rid = params["id"]
+            if rid not in self.table or rid in self.pending:
+                return _Res([])
+            self.pending.append(rid)
+            return _Res([{"log_filename": self.table[rid]}])
+        if BULK_KEY in sql:
+            self.log.append((sql, params))
+            gone = [rid for rid in self.table if rid not in self.pending]
+            self.pending.extend(gone)
+            return _Res([{"id": rid, "log_filename": self.table[rid]} for rid in gone])
+        return await super().execute(statement, params)
+
+    async def commit(self):
+        await super().commit()
+        for rid in self.pending:
+            self.table.pop(rid, None)
+        self.pending = []
+
+    async def rollback(self):
+        await super().rollback()
+        self.pending = []
+
+
 def test_the_prune_deletes_only_auto_rows_and_then_their_blobs(logdir):
     keep = logdir / "keep.log.gz"
     drop = logdir / "drop.log.gz"
     keep.write_bytes(b"x")
     drop.write_bytes(b"x")
-    db = Scripted({"DELETE FROM bug_reports": [[{"id": "r1", "log_filename": "drop.log.gz"}]]})
+    db = PruneDb({"r1": "drop.log.gz"})
 
     out = _run(auto_logs.prune_auto_logs(db))
 
-    sql = db.sql_for("DELETE FROM bug_reports")[0]
-    assert "kind = 'auto'" in sql, sql
-    # New interval arithmetic uses make_interval from a typed CAST: #448's
-    # ruling, over the parameter-typing trap #275 documents.
-    assert "make_interval(days => CAST(:days AS integer))" in sql, sql
-    assert db.params_for("DELETE FROM bug_reports")[0] == {"days": 14}
-    assert out == {"rows": 1, "blobs": 1}
-    assert keep.exists() and not drop.exists()
+    # Both statements carry the whole predicate: the listing, and the DELETE
+    # that claims each row (#208). New interval arithmetic uses make_interval
+    # from a typed CAST: #448's ruling, over the parameter-typing trap #275
+    # documents.
+    for sql in (db.sql_for(CANDIDATES_KEY)[0], db.sql_for(ROW_KEY)[0]):
+        assert "kind = 'auto'" in sql, sql
+        assert "make_interval(days => CAST(:days AS integer))" in sql, sql
+    assert db.params_for(CANDIDATES_KEY)[0] == {"days": 14}
+    assert db.params_for(ROW_KEY)[0] == {"id": "r1", "days": 14}
+    assert out == {"rows": 1, "blobs": 1, "kept": 0}
+    assert db.table == {} and keep.exists() and not drop.exists()
 
 
 def test_a_prune_over_nothing_writes_nothing(logdir):
-    db = Scripted({"DELETE FROM bug_reports": [[]]})
-    assert _run(auto_logs.prune_auto_logs(db)) == {"rows": 0, "blobs": 0}
+    db = PruneDb({})
+    assert _run(auto_logs.prune_auto_logs(db)) == {"rows": 0, "blobs": 0, "kept": 0}
+    assert db.sql_for(ROW_KEY) == []
 
 
 def test_a_missing_blob_does_not_abort_the_sweep(logdir):
-    db = Scripted({"DELETE FROM bug_reports": [[
-        {"id": "r1", "log_filename": "gone.log.gz"},
-        {"id": "r2", "log_filename": None},
-    ]]})
-    assert _run(auto_logs.prune_auto_logs(db)) == {"rows": 2, "blobs": 0}
+    """An absent blob is a previous sweep whose unlink landed and whose commit
+    did not: the row goes, and so does a row that never had a blob."""
+    db = PruneDb({"r1": "gone.log.gz", "r2": None})
+    assert _run(auto_logs.prune_auto_logs(db)) == {"rows": 2, "blobs": 0, "kept": 0}
+    assert db.table == {}
+
+
+def test_a_blob_that_will_not_unlink_keeps_its_row_for_the_next_sweep(logdir, monkeypatch, capsys):
+    """Round 2 finding 5: a failed unlink must stay discoverable and retryable.
+
+    The old sweep deleted every row first and then swallowed each unlink's
+    OSError, so a blob that would not go was named by no row, and no later
+    sweep (they select by row) could find it. Now the row's DELETE rolls back
+    with its savepoint, the row stays past the cutoff, one line names it, and
+    the next sweep collects it once the obstacle is gone.
+
+    Control: restore the bulk DELETE-then-unlink shape -> red (the row is
+    gone, the blob is orphaned, and no line names it)."""
+    stuck = logdir / "stuck.log.gz"
+    fine = logdir / "fine.log.gz"
+    stuck.write_bytes(b"x")
+    fine.write_bytes(b"x")
+    real_unlink = pathlib.Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self.name == "stuck.log.gz":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", unlink)
+    db = PruneDb({"r-stuck": "stuck.log.gz", "r-fine": "fine.log.gz"})
+    out = _run(auto_logs.prune_auto_logs(db))
+
+    assert db.table == {"r-stuck": "stuck.log.gz"}, (
+        "the row whose blob would not unlink did not survive the sweep: %r" % db.table)
+    assert stuck.exists() and not fine.exists()
+    assert out == {"rows": 1, "blobs": 1, "kept": 1}
+    said = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("[AUTO-LOG] prune: unlink failed for row r-stuck (")]
+    assert len(said) == 1, "the kept row was not named exactly once"
+    assert str(stuck) in said[0] and said[0].endswith("-- left in place for retry"), said[0]
+
+    # Still past the cutoff, so the next sweep lists it again, and with the
+    # obstacle gone it goes, blob and all.
+    monkeypatch.setattr(pathlib.Path, "unlink", real_unlink)
+    again = PruneDb(dict(db.table))
+    assert _run(auto_logs.prune_auto_logs(again)) == {"rows": 1, "blobs": 1, "kept": 0}
+    assert again.table == {} and not stuck.exists()
+
+
+def test_a_row_another_sweep_already_took_keeps_its_blob_out_of_this_one(logdir):
+    """Listed without a lock; the DELETE ... RETURNING is the claim. A row
+    that is gone by the time this sweep reaches it is another sweep's, and so
+    is its blob."""
+    blob = logdir / "taken.log.gz"
+    blob.write_bytes(b"x")
+    db = PruneDb({"r-taken": "taken.log.gz"})
+    db.table.pop("r-taken")          # listed, then taken before this sweep's DELETE
+    assert _run(auto_logs.prune_auto_logs(db)) == {"rows": 0, "blobs": 0, "kept": 0}
+    assert blob.exists(), "a sweep unlinked a blob whose row it did not delete"
+
+
+def test_the_sweep_needs_no_upload_to_run(logdir):
+    """Round 2 finding 5: retention may not wait for a future upload. The
+    autouse fixture has set the upload path's throttle to "just pruned", no
+    upload happens here, and a direct call (what the janitor arm makes)
+    still collects everything past the cutoff."""
+    old = logdir / "old.log.gz"
+    old.write_bytes(b"x")
+    db = PruneDb({"r-old": "old.log.gz", "r-older": None})
+    assert _run(auto_logs.prune_auto_logs(db)) == {"rows": 2, "blobs": 1, "kept": 0}
+    assert db.table == {} and not old.exists()
+    assert db.sql_for(INSERT_KEY) == [] and db.sql_for(COUNT_KEY) == []
+
+
+def _innermost_try(parents, node):
+    while node is not None and not isinstance(node, ast.Try):
+        node = parents.get(node)
+    return node
+
+
+def test_the_janitor_runs_the_retention_sweep_on_its_own_cadence():
+    """Round 2 finding 5: the sweep runs from the 60 s janitor loop, hourly,
+    whether or not anything is uploaded. Structural, because the arm sits in
+    an endless loop a test cannot enter: exactly one call to
+    auto_logs.prune_auto_logs in queue_cleanup_loop, inside its OWN try whose
+    handler names the sweep (one arm's failure never skips the next, #228),
+    gated on the module-level cadence state, and placed right after the Mail
+    retention arm."""
+    src = open(main.__file__, encoding="utf-8").read()
+    loop = _named_function(ast.parse(src), "queue_cleanup_loop")
+    assert loop is not None, "queue_cleanup_loop not found in main.py"
+    parents = {}
+    for p in ast.walk(loop):
+        for ch in ast.iter_child_nodes(p):
+            parents[ch] = p
+
+    def calls(dotted):
+        return [n for n in ast.walk(loop)
+                if isinstance(n, ast.Call) and ast.unparse(n.func) == dotted]
+
+    sites = calls("auto_logs.prune_auto_logs")
+    assert len(sites) == 1, "expected one janitor call to the sweep, found %d" % len(sites)
+    arm = _innermost_try(parents, sites[0])
+    assert arm is not None, "the sweep's janitor call is not inside its own try"
+    body = "\n".join(ast.unparse(s) for s in arm.body)
+    assert "_AUTO_LOG_PRUNE_STATE['next']" in body and "time.monotonic() + 3600" in body, body
+    assert arm.handlers and all("[AUTO-LOG] janitor sweep error" in ast.unparse(h)
+                                for h in arm.handlers), "the arm's handler does not name the sweep"
+
+    mail = _innermost_try(parents, calls("_mail_retention_sweep")[0])
+    holder = parents[arm]
+    assert parents[mail] is holder, "the two retention arms are not siblings in the loop"
+    assert holder.body.index(arm) == holder.body.index(mail) + 1, (
+        "the auto-log arm is not the one right after the Mail retention arm")
+    assert isinstance(main._AUTO_LOG_PRUNE_STATE, dict) and "next" in main._AUTO_LOG_PRUNE_STATE
+
+
+def test_the_janitor_self_test_sees_the_retention_sweep_sql():
+    """The boot-time EXPLAIN self-test walks the janitor's call graph from its
+    roots. The sweep's two statements must be in that inventory, reached from
+    queue_cleanup_loop, and nothing in it may be unresolvable -- a module the
+    inventory does not read is janitor SQL the self-test never plans."""
+    inv = main._janitor_sql_inventory()
+    assert inv["dynamic"] == [], inv["dynamic"]
+    mine = [s for s in inv["statements"]
+            if s["module"] == "auto_logs" and s["func"] == "prune_auto_logs"]
+    sqls = sorted(" ".join(s["sql"].split()) for s in mine)
+    assert len(sqls) == 2, sqls
+    assert sqls[0].startswith(ROW_KEY), sqls
+    assert sqls[1].startswith(CANDIDATES_KEY), sqls
+    for s in mine:
+        assert "queue_cleanup_loop" in s["roots"], s["roots"]
 
 
 def test_the_prune_endpoint_needs_the_internal_key(logdir, monkeypatch):
@@ -671,10 +870,10 @@ def test_the_prune_endpoint_needs_the_internal_key(logdir, monkeypatch):
 
 def test_the_prune_endpoint_runs_with_the_internal_key(logdir, monkeypatch):
     monkeypatch.setenv("API_SECRET_KEY", "shh")
-    db = Scripted({"DELETE FROM bug_reports": [[]]})
+    db = PruneDb({})
     assert _run(auto_logs.run_auto_log_prune(x_internal_key="shh", days=30, db=db)) == {
-        "rows": 0, "blobs": 0}
-    assert db.params_for("DELETE FROM bug_reports")[0] == {"days": 30}
+        "rows": 0, "blobs": 0, "kept": 0}
+    assert db.params_for(CANDIDATES_KEY)[0] == {"days": 30}
 
 
 def test_an_empty_secret_never_authorises_the_prune(logdir, monkeypatch):
@@ -687,7 +886,7 @@ def test_an_empty_secret_never_authorises_the_prune(logdir, monkeypatch):
 def test_the_opportunistic_prune_never_fails_an_upload(logdir, verified, monkeypatch, capsys):
     monkeypatch.setattr(auto_logs, "_LAST_PRUNE", [0.0])
     db = Scripted({COUNT_KEY: [[{"count": 0}]], PLAYER_KEY: [[{"id": PID}]],
-                   INSERT_KEY: [[{"bug_number": 11}]]}, fail_on="DELETE FROM bug_reports")
+                   INSERT_KEY: [[{"bug_number": 11}]]}, fail_on=CANDIDATES_KEY)
     out = _run(auto_logs.upload_auto_log(_request(), db))
     assert out["bug_number"] == 11
     assert db.rolled_back == 1
@@ -940,10 +1139,10 @@ def test_the_prune_route_is_callable_in_process_without_a_days_argument(monkeypa
     failed on its first run.
     """
     monkeypatch.setenv("API_SECRET_KEY", "shh")
-    db = Scripted({"DELETE FROM bug_reports": [[]]})
+    db = PruneDb({})
     out = _run(auto_logs.run_auto_log_prune(x_internal_key="shh", db=db))
-    assert out == {"rows": 0, "blobs": 0}
-    assert db.params_for("DELETE FROM bug_reports")[0] == {
+    assert out == {"rows": 0, "blobs": 0, "kept": 0}
+    assert db.params_for(CANDIDATES_KEY)[0] == {
         "days": auto_logs.AUTO_LOG_RETENTION_DAYS}, (
         "an omitted days must resolve to the retention default, not to a "
         "Query descriptor")

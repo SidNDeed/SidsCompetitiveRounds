@@ -68,33 +68,33 @@ told 503 in both cases and can try again after the next match.
   unconditionally. It was false of the write arm, which raised without
   unlinking, and it was not achievable across the commit at all.
 
-RETENTION REQUIRES A SWEEP TO RUN -- it does not expire on its own, and an
-earlier version of this paragraph claimed the opposite. Nothing deletes a
+RETENTION REQUIRES A SWEEP TO RUN, AND THE JANITOR RUNS IT. Nothing deletes a
 bug_reports row by age by itself: no reader filters on created_at for
-retention, and the only collector is ``prune_auto_logs``, reached either
-opportunistically after an ACCEPTED upload (at most hourly) or from the
-internal route. So the corpus is bounded only while uploads keep arriving,
-and if every client vanishes the last cohort of rows and blobs persists
-indefinitely -- the exact case the old wording called safe. The #276 citation
-was pointed backwards: #276 is about failure DIRECTION, where an expiring
-design lapses because nothing renews it and a blocking one needs a positive
-cleanup that always runs. A sweep that must be invoked is the second kind, so
-#276 is the reason to be uneasy about this design rather than the reason it is
-fine. Wiring the sweep into the janitor is the fix and is not done here (see
-below). ``prune_auto_logs`` deletes the ROW first and the file second. The reverse order would leave, for the width of the window, a row
-advertising a log that is already gone — and that exact state has needed a
-migration here before: backend/sql/087_clear_orphaned_bug_logs.sql exists
-because rows pointed at blobs the container had discarded and the admin
-viewer kept showing a [log] tag over empty content. An orphan FILE is the
-cheaper failure: nothing reads it and nothing claims it exists.
+retention, and the only collector is ``prune_auto_logs``. It used to be
+reached only opportunistically after an ACCEPTED upload (at most hourly) or
+from the internal route, so the corpus was bounded only while uploads kept
+arriving, and if every client vanished the last cohort of rows and blobs
+persisted indefinitely. #276 names that design: a sweep that must be invoked
+is a blocking design, and a blocking design needs a positive cleanup that
+always runs. main's queue_cleanup_loop now has an auto-log retention arm that
+runs the sweep hourly whether or not anything is uploaded (v1.41.0 beta round
+2, finding 5). The post-upload call stays as a fast path, and
+``POST /api/v1/internal/logs/auto/prune`` stays for an operator or the bot.
+The janitor loops do not run on the read replica, so neither does this arm;
+the primary owns the rows and the blobs.
 
-NOT WIRED INTO THE JANITOR. The plan asks for the retention sweep to run from
-main.py's janitor; that is a main.py body edit this batch's ownership table
-does not grant Item 3, so it is not done here. Instead the prune runs
-opportunistically after an accepted upload (at most hourly) and is exposed as
-``POST /api/v1/internal/logs/auto/prune`` for an operator or the bot. The gap
-this leaves is bounded and stated plainly: if uploads stop entirely, the last
-cohort of rows is never collected until something calls the internal route.
+A ROW GOES ONLY WITH ITS BLOB. ``prune_auto_logs`` takes one candidate at a
+time: its DELETE and the unlink share a savepoint, and the DELETE commits only
+once the blob is gone. A blob that will not unlink keeps its row, which stays
+past the cutoff and is retried by the next sweep. This reverses an earlier
+trade, deleting the row first and the file second, which the old wording
+defended because the reverse order leaves a row advertising a log that is
+already gone (the state backend/sql/087_clear_orphaned_bug_logs.sql once had
+to clean up). But row-first turned every failed unlink into a blob no row
+names, which no later sweep can find, because sweeps select by row: permanent
+and silent. The row-advertising-a-missing-blob state now lasts for one unlink
+per row, or, if the process dies inside that window, until the next sweep,
+which finds the file already gone and deletes the row.
 
 NOT A REPLICA-ROUTABLE PATH. The blob is written to the api container's own
 disk. If this path were ever added to the edge's read-routing list, uploads
@@ -152,6 +152,29 @@ AUTO_LOG_MAX_BODY_BYTES = 14 * 1024 * 1024
 # a wall-clock correction cannot stall or stampede it.
 _PRUNE_MIN_INTERVAL_S = 3600.0
 _LAST_PRUNE = [0.0]
+
+# The retention sweep's two statements. Module constants so the janitor's
+# boot-time EXPLAIN self-test resolves them: main's auto-log retention arm
+# calls prune_auto_logs, and main._janitor_sql_inventory reads this module.
+#
+# The candidates are listed WITHOUT a lock. Each row's own DELETE ... RETURNING
+# is its claim, and it re-checks the whole predicate (#208): a row another
+# sweep has already taken answers nothing, and its blob is that sweep's.
+_PRUNE_CANDIDATES_SQL = """
+    SELECT id::text AS id
+      FROM bug_reports
+     WHERE kind = 'auto'
+       AND created_at < NOW() - make_interval(days => CAST(:days AS integer))
+     ORDER BY created_at, id
+"""
+
+_PRUNE_ROW_SQL = """
+    DELETE FROM bug_reports
+     WHERE id = CAST(:id AS uuid)
+       AND kind = 'auto'
+       AND created_at < NOW() - make_interval(days => CAST(:days AS integer))
+ RETURNING log_filename
+"""
 
 
 # The widths are the DATABASE's, per column, not one number for all of them:
@@ -531,8 +554,14 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     }
 
 
+class _KeepRow(Exception):
+    """Raised inside one row's savepoint when its blob will not unlink. It
+    rolls back that row's DELETE and nothing else."""
+
+
 async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DAYS) -> dict:
-    """Delete kind='auto' rows older than `days`, then their blobs.
+    """Delete kind='auto' rows older than `days`, each only together with its
+    blob.
 
     ONLY kind='auto'. The predicate is the whole safety property here: bug
     reports have no retention and this function must never be the thing that
@@ -549,35 +578,74 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
     :mins to a string concatenation and to a numeric comparison in the same
     statement, and all new interval arithmetic uses the make_interval form
     regardless. This is new interval arithmetic, so it uses make_interval.
+
+    ONE ROW AT A TIME, AND THE ROW GOES ONLY WITH ITS BLOB (v1.41.0 beta round
+    2, finding 5). This used to be one bulk DELETE ... RETURNING, committed,
+    and then an unlink loop that swallowed every OSError. A blob whose unlink
+    failed for any reason other than being absent was then named by no row,
+    and every later sweep selects by row age, so nothing could find it again.
+    Now each candidate's DELETE ... RETURNING runs in its own savepoint, the
+    blob is unlinked inside it, and the DELETE commits only once the blob is
+    gone:
+      * FileNotFoundError counts as gone. It is a previous sweep whose unlink
+        landed and whose commit did not, and finishing it is the point.
+      * any other OSError rolls the savepoint back. The row stays, still past
+        the cutoff, as the durable pointer to its blob; one line says so, and
+        the next sweep tries again. Nothing else in the sweep is undone.
+      * a DELETE that returns nothing means another sweep claimed the row
+        first, and its blob is that sweep's to remove.
+    Each row commits on its own, so a failure later in the sweep cannot undo
+    a row whose blob is already gone. A database error still ends the sweep;
+    the rows it had not reached wait for the next one.
+
+    Returns rows deleted, blobs unlinked, and rows kept for a retry.
     """
     from main import BUG_REPORT_LOG_DIR
 
-    rows = (await db.execute(
-        text("""DELETE FROM bug_reports
-                 WHERE kind = 'auto'
-                   AND created_at < NOW() - make_interval(days => CAST(:days AS integer))
-             RETURNING id::text AS id, log_filename"""),
-        {"days": int(days)},
-    )).mappings().all()
-    await db.commit()
+    d = int(days)
+    candidates = (await db.execute(text(_PRUNE_CANDIDATES_SQL), {"days": d})).mappings().all()
 
-    unlinked = 0
+    removed = unlinked = kept = 0
     base = pathlib.Path(BUG_REPORT_LOG_DIR)
-    for r in rows:
-        name = r["log_filename"]
-        if not name:
-            continue
+    for c in candidates:
+        rid = c["id"]
+        path = None
+        blob_gone = False
+        claimed = False
         try:
-            (base / name).unlink()
+            async with db.begin_nested():
+                got = (await db.execute(text(_PRUNE_ROW_SQL),
+                                        {"id": rid, "days": d})).mappings().first()
+                if got is not None:
+                    claimed = True
+                    name = got["log_filename"]
+                    if name:
+                        path = base / name
+                        try:
+                            path.unlink()
+                            blob_gone = True
+                        except FileNotFoundError:
+                            pass
+                        except OSError as ex:
+                            raise _KeepRow(ex)
+        except _KeepRow as keep:
+            kept += 1
+            print(f"[AUTO-LOG] prune: unlink failed for row {rid} ({path}): "
+                  f"{keep.args[0]} -- left in place for retry")
+            continue
+        if not claimed:
+            continue
+        await db.commit()
+        removed += 1
+        if blob_gone:
             unlinked += 1
-        except OSError:
-            # An already-absent file is the expected outcome of a previous
-            # half-finished sweep, not an error worth failing the pass for.
-            pass
-    if rows:
-        print(f"[AUTO-LOG] prune removed {len(rows)} row(s) older than {days}d, "
-              f"{unlinked} blob(s) unlinked")
-    return {"rows": len(rows), "blobs": unlinked}
+    # Closes the transaction a kept or unclaimed row may have left open.
+    await db.commit()
+    if removed or kept:
+        print(f"[AUTO-LOG] prune removed {removed} row(s) older than {days}d, "
+              f"{unlinked} blob(s) unlinked"
+              + (f", {kept} left in place for retry" if kept else ""))
+    return {"rows": removed, "blobs": unlinked, "kept": kept}
 
 
 async def _maybe_prune(db: AsyncSession) -> None:

@@ -2960,11 +2960,16 @@ def _janitor_print(msg: str) -> None:
 
 
 def _janitor_sql_inventory() -> dict:
-    """Extract the janitor SQL inventory from the sources of this module and
-    tournaments (the only two modules the janitor call graph touches)."""
+    """Extract the janitor SQL inventory from the sources of this module,
+    tournaments and auto_logs: the three modules the janitor call graph
+    touches. auto_logs is the third since queue_cleanup_loop's auto-log
+    retention arm (v1.41.0 beta round 2, finding 5); a module left out here
+    is janitor SQL the self-test never sees."""
     import tournaments as _tournaments
+    import auto_logs as _auto_logs
     sources = {}
-    for name, path in (("main", __file__), ("tournaments", _tournaments.__file__)):
+    for name, path in (("main", __file__), ("tournaments", _tournaments.__file__),
+                       ("auto_logs", _auto_logs.__file__)):
         with open(path, "r", encoding="utf-8") as fh:
             sources[name] = fh.read()
     return _janitor_sql_from_sources(sources, _JANITOR_SELFTEST_ROOTS)
@@ -4545,6 +4550,24 @@ async def queue_cleanup_loop():
                               f"purged {_purged} message(s), pruned {_hits} censor-hit row(s)")
         except Exception as e:
             print(f"[MAIL-RETENTION] sweep error: {e}")
+        # ── Auto-log retention (v1.41.0 item 3) ──────────────────────────
+        # Own try/except and hourly cadence, the Mail arm's shape. The sweep
+        # used to run only after an ACCEPTED upload, so if uploads stopped,
+        # the automatic logs already stored were never collected (v1.41.0
+        # beta round 2, finding 5). The post-upload call stays as a fast
+        # path. The statements live in auto_logs.prune_auto_logs, and
+        # _janitor_sql_inventory reads that module too, so the boot-time
+        # EXPLAIN self-test reaches them through this call.
+        try:
+            if time.monotonic() >= _AUTO_LOG_PRUNE_STATE["next"]:
+                _AUTO_LOG_PRUNE_STATE["next"] = time.monotonic() + 3600
+                async with async_session() as db:
+                    _result = await auto_logs.prune_auto_logs(db)
+                    if _result.get("rows"):
+                        print(f"[AUTO-LOG] janitor pruned {_result['rows']} row(s), "
+                              f"{_result['blobs']} blob(s) unlinked")
+        except Exception as e:
+            print(f"[AUTO-LOG] janitor sweep error: {e}")
         # ── Stranded-bet reconciliation (bet-lifecycle backstop) ────────
         # Wagers can outlive their lobby/series: a closure path without bet
         # handling (the NotNic 500g class), a settle savepoint rollback on a
@@ -4737,6 +4760,11 @@ app.include_router(mail_discord.router)
 from auto_logs import router as auto_logs_router, internal_router as auto_logs_internal_router
 app.include_router(auto_logs_router)
 app.include_router(auto_logs_internal_router)
+# The janitor's auto-log retention arm (queue_cleanup_loop) calls
+# auto_logs.prune_auto_logs through this module name, which is also how the
+# janitor self-test's walker follows the call into auto_logs.py.
+import auto_logs  # noqa: E402
+_AUTO_LOG_PRUNE_STATE = {"next": 0.0}   # janitor cadence, monotonic seconds
 
 # Animal title ladders (v1.41.0 item 12): the READ route only,
 # GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
