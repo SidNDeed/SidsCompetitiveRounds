@@ -433,6 +433,14 @@ class Env:
         self.mp.setattr(main, "BUG_REPORT_LOG_DIR", str(self.log_dir))
         self._redirect = _redirect_for(self.url)
         for eng in (database.engine, database.release_engine):
+            # These engines are module globals shared by the whole suite. An
+            # earlier module can leave connections checked in that were made on
+            # its own event loop, now closed (and perhaps to another database);
+            # handed to a route here, such a connection fails and the route
+            # answers 500. Drop the old pool untouched (close=False: its
+            # connections belong to a loop that no longer runs), so every
+            # connection this check uses is new and made through the redirect.
+            await eng.dispose(close=False)
             event.listen(eng.sync_engine, "do_connect", self._redirect)
         self.seed = create_async_engine(require_pg(), pool_size=2, max_overflow=4)
         async with self.seed.begin() as conn:
