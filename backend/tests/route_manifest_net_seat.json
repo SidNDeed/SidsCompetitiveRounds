@@ -1231,7 +1231,7 @@
           ],
           "main",
           "update_team_live_points",
-          "9f364a6663f7a2a092a430a53d1bb39827156ba9"
+          "43f851f55e526445851bf5f8f6ee6e3ed0aa2936"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "ebc6c39ebb5354e0d21ae044ba0276cbdfd22c38"
+          "865b9f30b846d4866a29c3c65a33393b96215160"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "83908db89304be0b174a2d5f00e449c6e88e510e"
+          "50d45fbbec71f98581e22812e866f042c7867f70"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3365,7 +3365,7 @@
       [
         "main",
         "lifespan",
-        "892186f0b9ad9eeb4b28987233e250be086688e6"
+        "d78aa11b0386254adaaa8d0bdf088109e87bbeb3"
       ]
     ]
   },
