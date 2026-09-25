@@ -2473,3 +2473,44 @@ def test_c1_a_hold_still_taken_at_its_bound_is_released_by_its_timer(monkeypatch
     assert one == (False, 1)
     assert timed_out == (True, 0)
     assert again == (True, 0)
+
+
+# ── M1: the round-2 build marker on /health (round 2, LAND) ────────────────
+# Round 2 adds no route: the three triage routes answer on the build before
+# it. So the release train tells the two builds apart by the VALUE of a
+# /health key -- `rj_triage`, absent before round 2 and 2 on this build --
+# and the route carries it on both of its arms, the one whose database
+# answered and the one whose database did not. Read through the K-tests'
+# harness: the api's own health route and response model mounted on the test
+# app, database.py's own engine redirected to the lane database for the
+# connected arm, a session whose first statement fails for the other.
+
+RJ_TRIAGE_HEALTH = "/api/v1/health"
+
+
+class _RjTriageUnreachable:
+    """A session whose first statement fails, as an unreachable database's does."""
+
+    async def execute(self, *a, **k):
+        raise OSError("database unreachable")
+
+
+def test_pg_rj_triage_health_carries_the_round_2_marker_on_both_arms(monkeypatch):
+    async def body():
+        async with Env(monkeypatch) as env:
+            api = [r for r in main.app.routes if getattr(r, "path", None) == RJ_TRIAGE_HEALTH]
+            assert len(api) == 1 and api[0].endpoint is main.health_check, api
+            env.app.add_api_route(RJ_TRIAGE_HEALTH, api[0].endpoint, methods=["GET"],
+                                  response_model=api[0].response_model)
+            up = await env.client.get(RJ_TRIAGE_HEALTH)
+            env.app.dependency_overrides[main.get_db] = lambda: _RjTriageUnreachable()
+            down = await env.client.get(RJ_TRIAGE_HEALTH)
+            return up, down
+
+    up, down = run(body())
+    assert (up.status_code, down.status_code) == (200, 200), (up.text[:500], down.text[:500])
+    up, down = up.json(), down.json()
+    assert (up["status"], up["database"]) == ("ok", "connected"), up
+    assert (down["status"], down["database"]) == ("degraded", "disconnected"), down
+    assert up.get("rj_triage") == 2, up
+    assert down.get("rj_triage") == 2, down

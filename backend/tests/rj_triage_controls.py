@@ -5,7 +5,8 @@ Every control of RJ-TRIAGE-DESIGN-V5 section 6.2 (K1-K19), round 2's K20
 (PT3's lobby-wide label gate) and K21 (K2c's capture-completion bound, whose
 site is in the test file itself), and round 2's K22 (a gap the idle bound
 ends answers 503), K23 (every captured way a read ends early answers 503,
-one mutant per classifier branch) and C1 controls (the collection hold), is
+one mutant per classifier branch) and C1 controls (the collection hold), and
+the LAND sitting's M1 (the round-2 build marker on /health), is
 carried below as DATA: the file, the exact
 text a plant replaces, the text it writes, the test nodes it must turn RED (a
 mutant) or leave GREEN (an inert twin at the same site, #391). Each plant is printed as a unified diff beside the run it
@@ -1035,6 +1036,40 @@ twin("C1-twin-timer-through-a-lambda", "C1", "the timer calls release through a 
      [(MAIN, TIMER, "        self._timer = asyncio.get_running_loop().call_later(_TRIAGE_GC_HOLD_MAX_S,"
                     " lambda: self.release())\n")],
      [C1_TIMER])
+
+# ── round 2, LAND: M1, the build marker on /health ───────────────────────────
+# Appended after the 181 plants above, which keep their order and bytes. The
+# mutants remove the marker's key line from each arm of the health route (the
+# key then reads null) and change the marker's value to 1; each twin adds a
+# comment at the same site -- inside health_check for the two arms, on the
+# constant's own line for the value -- and changes nothing the route answers.
+
+M1_TEST = S + "test_pg_rj_triage_health_carries_the_round_2_marker_on_both_arms"
+M1_KEY = "                              rj_triage=_RJ_TRIAGE_MARKER,\n"
+M1_KEY_NOTE = "                              rj_triage=_RJ_TRIAGE_MARKER,  # the round-2 build marker\n"
+M1_CONNECTED = ("                              pc_steam_render=_pc_steam_render_word(),\n"
+                "                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),\n"
+                "                              ffa_hold_fences=_FFA_HOLD_FENCES,\n")
+M1_DEGRADED = ('        return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,\n'
+               "                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),\n"
+               "                              ffa_hold_fences=_FFA_HOLD_FENCES,\n")
+M1_VALUE = "_RJ_TRIAGE_MARKER = 2\n"
+mutant("M1-marker-line-removed-connected-arm", "M1",
+       "the connected arm of /health no longer carries rj_triage, which then reads null",
+       [(MAIN, M1_CONNECTED + M1_KEY, M1_CONNECTED)], [M1_TEST])
+twin("M1-twin-comment-on-the-connected-arm", "M1",
+     "a comment on the connected arm's marker line, inside health_check",
+     [(MAIN, M1_CONNECTED + M1_KEY, M1_CONNECTED + M1_KEY_NOTE)], [M1_TEST])
+mutant("M1-marker-line-removed-degraded-arm", "M1",
+       "the degraded arm of /health no longer carries rj_triage, which then reads null",
+       [(MAIN, M1_DEGRADED + M1_KEY, M1_DEGRADED)], [M1_TEST])
+twin("M1-twin-comment-on-the-degraded-arm", "M1",
+     "a comment on the degraded arm's marker line, inside health_check",
+     [(MAIN, M1_DEGRADED + M1_KEY, M1_DEGRADED + M1_KEY_NOTE)], [M1_TEST])
+mutant("M1-value-changed-to-1", "M1", "the marker's value changed from 2 to 1",
+       [(MAIN, M1_VALUE, "_RJ_TRIAGE_MARKER = 1\n")], [M1_TEST])
+twin("M1-twin-comment-on-the-value", "M1", "a comment on the marker's definition line",
+     [(MAIN, M1_VALUE, "_RJ_TRIAGE_MARKER = 2  # read by nothing; probed on /health\n")], [M1_TEST])
 
 # ── the runner ───────────────────────────────────────────────────────────────
 
