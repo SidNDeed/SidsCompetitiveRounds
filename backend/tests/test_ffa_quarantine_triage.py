@@ -25,6 +25,7 @@ case (ii) quotes the lines of the route's backend.
 
 import ast
 import asyncio
+import gc
 import hashlib
 import hmac
 import inspect
@@ -38,10 +39,13 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import asyncpg.exceptions as apg_exc
 import httpx
 import pytest
+import sqlalchemy.exc as sa_exc
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import event, text
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi as sa_asyncpg_dbapi
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -797,6 +801,29 @@ async def _hold_staggered(url, base_box, ready, n=10, step=0.9, wait_cap=20.0):
     return released
 
 
+async def _hold_capture_key(url, group, t0_box, ready, release_s, wait_cap=20.0):
+    """K21's holder, in case (iv)'s shape: its own connection takes the
+    capture's advisory key -- mrq:<group>, the key _quarantine_report takes
+    before its first read of the table -- and releases it release_s after t0,
+    so the capture commits at a known offset from t0. The routes take no
+    advisory key (K2d), so none of the route's reads waits on it."""
+    c = await _pg(url)
+    try:
+        await c.execute("BEGIN")
+        await c.execute("SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST($1 AS text)))", str(group))
+        ready.set()
+        start = time.monotonic()
+        while "t0" not in t0_box and time.monotonic() - start < wait_cap:
+            await asyncio.sleep(0.005)
+        delay = t0_box.get("t0", time.monotonic()) + release_s - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await c.execute("COMMIT")
+        return time.monotonic()
+    finally:
+        await c.close()
+
+
 async def _alter(url):
     c = await _pg(url)
     try:
@@ -890,7 +917,9 @@ def _k2c_verdict(case, route, box):
             why.append(f"route held {held_after[0]['route']} at {rel(held_after[0]['tick'])}")
         if cap[0] != "recorded" or cap[1] is None:
             why.append(f"capture outcome {cap[0]!r}")
-        elif cap[1] - t0 > K2C_BOUND_S + (alter_run or 0.0) + 0.5:
+        # K2c's bar: the capture commits within 5.5 s of t0 plus the ALTER's
+        # own run, with no slack past that (round 2, L2); K21 is its control.
+        elif cap[1] - t0 > K2C_BOUND_S + (alter_run or 0.0):
             why.append(f"capture committed at {rel(cap[1])}, past 5.5 s + the ALTER's run")
         want = ("0", "0", "0")
         if tuple(box.get("show_before") or ()) != want or tuple(box.get("show_after") or ()) != want:
@@ -970,7 +999,7 @@ def _server_log_lines(pid_):
     return ["server log: " + ln for ln in hits[-6:]] or [f"server log: no line for backend {pid_} in the last 300 s"]
 
 
-async def _k2c_case(case, route, monkeypatch, capsys):
+async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, out=None):
     dsn = require_pg()
     url = make_url(dsn)
     box = {"show_before": None, "show_after": None}
@@ -1004,6 +1033,12 @@ async def _k2c_case(case, route, monkeypatch, capsys):
                 threads["holder"] = _Thread("k2c-holder", lambda: _hold_staggered(url, base_box, ready))
                 threads["holder"].start()
                 assert ready.wait(15), "the staggered holder never took its ten locks"
+            if capture_key_until is not None:
+                key_ready = threading.Event()
+                threads["key"] = _Thread("k21-key", lambda: _hold_capture_key(
+                    url, fx["capture_kw"]["group_id"], t0_box, key_ready, capture_key_until))
+                threads["key"].start()
+                assert key_ready.wait(15), "the K21 holder never took the capture's advisory key"
             threads["alter"] = _Thread("k2c-alter", lambda: _alter(url))
             threads["capture"] = _Thread("k2c-capture", lambda: _capture_elsewhere(dsn, fx["capture_kw"]))
             orig_ended = main._triage_ended_early
@@ -1095,7 +1130,7 @@ async def _k2c_case(case, route, monkeypatch, capsys):
                 box["status"] = resp.status_code
                 detail.append(f"response {resp.status_code}: {resp.text[:160]}")
             box["route_end"] = time.monotonic()
-            for name in ("alter", "capture", "holder", "observer"):
+            for name in ("alter", "capture", "holder", "key", "observer"):
                 th = threads.get(name)
                 if th is not None and th.ident is not None:
                     th.join(45)
@@ -1112,6 +1147,10 @@ async def _k2c_case(case, route, monkeypatch, capsys):
                 box["capture"] = threads["capture"].result
                 if threads["capture"].error is not None:
                     detail.append(f"capture error: {threads['capture'].error!r}")
+            if "key" in threads:
+                box["key_released"] = threads["key"].result
+                if threads["key"].error is not None:
+                    detail.append(f"K21 holder error: {threads['key'].error!r}")
             box["show_after"] = await _k2c_show(maker)
         finally:
             await eng.dispose()
@@ -1137,6 +1176,13 @@ async def _k2c_case(case, route, monkeypatch, capsys):
         detail.append("the failed read, as the route saw it: " + " <- ".join(chain))
     if case == "ii":
         detail.extend(_server_log_lines(box.get("route_pid")))
+    if capture_key_until is not None:
+        kr = box.get("key_released")
+        kr_rel = None if kr is None or t0 is None else round(kr - t0, 3)
+        detail.append(f"K21: the capture's advisory key (mrq:<its group>) was held from before t0; released at "
+                      f"{kr_rel} s from t0, planned {capture_key_until:.3f} s")
+        if out is not None:
+            out["key_released"] = kr_rel
     verdict, line = _k2c_verdict(case, route, box)
     _k2c_record(line, detail, capsys)
     return verdict, line
@@ -1148,6 +1194,47 @@ def test_pg_k2c_relation_locks_released_within_5_5s_of_t0(case, route, monkeypat
     if verdict == "NO_VERDICT":
         pytest.fail("NO VERDICT (not a pass): " + line)
     assert verdict == "PASS", line
+
+
+# ── K21: a capture committing past K2c's bound is a FAIL (round 2, L2) ─────
+# K2c's verdict fails a capture that commits later than 5.5 s from t0 plus
+# the ALTER's own run, with no slack past that. Case (i) on each route, with
+# the capture's advisory key held by _hold_capture_key until K21_PAST_S past
+# 5.5 s: the capture commits just after the key's release, inside the 0.5 s
+# that 6702efd's verdict still passed. A case is evidence only when that
+# premise held; otherwise it is NO VERDICT, never a pass.
+
+K21_PAST_S = 0.2
+
+
+@pytest.mark.parametrize("route", ["V1", "V2", "D1"])
+def test_pg_k21_a_capture_committing_past_the_bound_is_a_fail(route, monkeypatch, capsys):
+    seen = {}
+    verdict, line = run(_k2c_case("i", route, monkeypatch, capsys,
+                                  capture_key_until=K2C_BOUND_S + K21_PAST_S, out=seen))
+    head, _, why = line.partition(" why=")
+    f = dict(re.findall(r"(\w+)=(\S*)", head))
+    num = (lambda v: None if v in (None, "None") else float(v))
+    done, alter_run, released = num(f.get("capture_done")), num(f.get("alter_run")) or 0.0, seen.get("key_released")
+    past = None if done is None else round(done - K2C_BOUND_S - alter_run, 3)
+    _k2c_record(f"K21-RECORD route={route} planned_release={K2C_BOUND_S + K21_PAST_S:.3f}"
+                f" key_released={released} capture_done={f.get('capture_done')} alter_run={f.get('alter_run')}"
+                f" past_bound={past} verdict={verdict}", [], capsys)
+    premise = []
+    if f.get("status") != "200":
+        premise.append(f"the route answered {f.get('status')}")
+    if f.get("held_after_bound") != "0":
+        premise.append("the route held a relation lock past the bound")
+    if f.get("capture") != "recorded" or done is None:
+        premise.append(f"capture outcome {f.get('capture')}")
+    elif released is None or done < released:
+        premise.append(f"the capture committed at {done}, not after the key's release at {released}")
+    elif not 0.0 < past < 0.5:
+        premise.append(f"the capture committed {past} s past the bound, outside (0, 0.5)")
+    if verdict == "NO_VERDICT" or premise:
+        pytest.fail("NO VERDICT (not a pass): " + "; ".join(premise or ["K2c gave no verdict"]) + ": " + line)
+    assert verdict == "FAIL", line
+    assert why == f"capture committed at {f['capture_done']}, past 5.5 s + the ALTER's run", line
 
 
 # ── K2d: one primitive per route (static, per function span, #432) ─────────
@@ -1437,6 +1524,87 @@ def test_pg_k6c_a_201_row_lobby_is_read_whole_or_labelled_partial(monkeypatch):
     assert c["pt3"]["label"] == (f"{page} of 201 rows read before the read budget ran out; "
                                  "no lobby-wide statement is made; reopen the view")
     assert c["pt5"]["c2"] == main._TRIAGE_INCOMPLETE and c["pt1"]["r"] == main._TRIAGE_INCOMPLETE
+
+
+# ── K20: PT3's lobby-wide label needs every comparison to have run ────────
+# A lobby-wide label (agrees / no settled account / differs) concludes over
+# every row's comparison. Each case reads every row of the lobby (the
+# accounts are complete) with one comparison input missing: the steam-id map,
+# because the read budget runs out at that statement (K6c's technique, aimed
+# at the steam-map read), or the capture's payload, which does not validate
+# as a report. Every row then reads "not compared", and the label must name
+# the cause and make no lobby-wide statement -- over one settled row, and
+# over none. The two budget cases first read the same lobby whole, where the
+# comparison runs and the label is lobby-wide.
+
+K20_CASES = ["steam-map-unread", "payload-invalid", "no-rows-payload-invalid", "no-rows-steam-map-unread"]
+
+
+def _k20_record(line, capsys):
+    with capsys.disabled():
+        print("\n" + line)
+    path = os.environ.get("RJ_TRIAGE_PG_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
+@pytest.mark.parametrize("case", K20_CASES)
+def test_pg_k20_pt3_makes_no_lobby_wide_statement_unless_every_comparison_ran(case, monkeypatch, capsys):
+    n = 0 if case.startswith("no-rows") else 1
+    unread = case.endswith("steam-map-unread")
+
+    async def body():
+        async with Env(monkeypatch) as env:
+            ids = await env.seats()
+            lid = await env.lobby(games_played=n)
+            if n:
+                await env.ffa_settle(lid, 1, "K20", ACC_A, 1, 1, 10)
+            if unread:
+                q = await env.ffa_capture(lid, room("K20q", 1), ACC_B, 2, 2, 20)
+            else:
+                pl = report(lid, room("K20q", 1), steam(2), steam(2), players_of(ACC_B))
+                del pl["winner_steam_id"]          # the stored payload no longer validates as a report
+                q = await env.capture(reason="ffa_game_contradiction", group=lid, room_id=room("K20q", 1),
+                                      reporter=pid(ids, 2), player_ids=list(ids.values()), payload=pl,
+                                      created=20)
+            whole = ok(await env.v2("ffa", lid))
+            if not unread:
+                return q, whole, whole
+            orig = main._TriageReadHandle.read
+
+            async def read(self, statement, params=None):
+                if statement == main._TRIAGE_SQL_V2_STEAM_MAP:
+                    self.t0 -= 100.0          # the read deadline is reached at the steam-map read
+                return await orig(self, statement, params)
+
+            monkeypatch.setattr(main._TriageReadHandle, "read", read)
+            return q, whole, ok(await env.v2("ffa", lid))
+    q, whole, view = run(body())
+    c = cap_of(view, q)["pt3"]
+    cause = ("not compared: the steam-id map was not read within the read budget" if unread
+             else "not compared: the payload does not validate")
+    line = (f"K20-RECORD case={case} rows={n} complete={view['accounts']['complete']}"
+            f" steam_map_read={view['reads']['steam_map_read']} budget_spent={view['reads']['budget_spent']}"
+            f" verdicts={[r['verdict'] for r in c['rows']]} label={c['label']!r}")
+    if unread:
+        line += f" whole_label={cap_of(whole, q)['pt3']['label']!r}"
+    _k20_record(line, capsys)
+    # every row was read, and exactly the one comparison input is missing
+    assert view["accounts"]["complete"] is True and c["read"] == f"{n} of {n} read"
+    assert view["reads"]["steam_map_read"] is (not unread)
+    assert view["reads"]["budget_spent"] is unread
+    assert len(c["rows"]) == n and all(r["verdict"] == cause for r in c["rows"])
+    # no lobby-wide label: the cause is named instead
+    for lobby_wide in ("agrees with the settled account", "no settled account of this lobby exists",
+                       "differs from every settled account"):
+        assert not c["label"].startswith(lobby_wide), c["label"]
+    assert c["label"] == f"{cause}, so no lobby-wide statement is made ({n} of {n} rows read)"
+    if unread:
+        w = cap_of(whole, q)["pt3"]
+        assert whole["reads"]["steam_map_read"] is True and whole["reads"]["budget_spent"] is False
+        assert w["label"].startswith("differs from every settled account of this lobby (1 of 1 read)" if n
+                                     else "no settled account of this lobby exists (0 of 0 read)"), w["label"]
 
 
 # ── K6d: the expected game in the migration gap (W24) ─────────────────────
@@ -1879,3 +2047,470 @@ def test_the_three_routes_are_registered_on_the_app():
     assert set(got) == set(want)
     for path, fn in want.items():
         assert got[path].endpoint is fn and got[path].methods == {"GET"}
+
+
+# ── K22: a gap the idle bound ends answers 503, never 500 (round 2) ─────────
+# A 1.5 s gap planted inside the handle -- after the read budget admitted a
+# statement, before the statement is sent -- outlasts the transaction's own
+# 1 s idle-in-transaction bound: the server ends the session and the
+# statement finds the connection gone. BLOCKING stalls the event loop
+# (time.sleep, as a collection pass does), so asyncpg notices the loss during
+# the statement; YIELDING lets the loop run on (asyncio.sleep, as when the
+# loop runs other tasks first), so asyncpg notices the loss before the
+# statement and refuses it on a closed connection. Either way the route
+# answers 503 and asks the operator to reopen the view. The same gap at the
+# start of build, after the COMMIT, changes nothing: 200 (the inert twin).
+
+K22_GAP_S = 1.5
+K22_AT = {"V1": 3, "V2": 2, "D1": 2}     # the handle read the gap precedes (never the first)
+K22_ROUTES = ("V1", "V2", "D1")
+K22_CASES = [(kind, route) for route in K22_ROUTES for kind in ("blocking", "yielding")]
+K22_DETAIL = r"the view's read transaction ended early \((08\w{3}|25P03)\); reopen the view"
+
+
+async def _k22_gap(kind):
+    if kind == "blocking":
+        time.sleep(K22_GAP_S)
+    else:
+        await asyncio.sleep(K22_GAP_S)
+
+
+async def _k22_call(env, route, w):
+    if route == "V1":
+        return await env.v1()
+    if route == "V2":
+        return await env.v2("ffa", w["lid"])
+    return await env.d1()
+
+
+def _k22_plant_in_transaction(monkeypatch, kind, at):
+    """The handle's read with the gap between its budget check and its
+    statement, at the at-th read of the request."""
+    orig = main._TriageReadHandle.read
+    ops = {"n": 0}
+
+    async def read(self, statement, params=None):
+        ops["n"] += 1
+        if ops["n"] != at:
+            return await orig(self, statement, params)
+        self._admit()
+        await _k22_gap(kind)
+        res = await self._db.execute(text(statement), params or {})
+        return [dict(r) for r in res.mappings().all()]
+
+    monkeypatch.setattr(main._TriageReadHandle, "read", read)
+    return ops
+
+
+def _k22_plant_after_commit(monkeypatch, kind):
+    """The same gap at the start of build, which the primitive calls after the
+    COMMIT returned."""
+    orig = main._triage_read_txn
+    ops = {"n": 0}
+
+    async def txn(db, read, build):
+        async def build_after_gap(rows):
+            ops["n"] += 1
+            await _k22_gap(kind)
+            return await build(rows)
+        return await orig(db, read, build_after_gap)
+
+    monkeypatch.setattr(main, "_triage_read_txn", txn)
+    return ops
+
+
+def _k22_run(monkeypatch, kind, route, where):
+    async def body():
+        async with Env(monkeypatch) as env:
+            w = await walk_w6(env)
+            whole = await _k22_call(env, route, w)
+            ops = (_k22_plant_in_transaction(monkeypatch, kind, K22_AT[route]) if where == "in"
+                   else _k22_plant_after_commit(monkeypatch, kind))
+            return whole, await _k22_call(env, route, w), ops["n"]
+    return run(body())
+
+
+@pytest.mark.parametrize("kind,route", K22_CASES)
+def test_pg_k22_a_gap_the_idle_bound_ends_answers_503_never_500(kind, route, monkeypatch):
+    whole, resp, n = _k22_run(monkeypatch, kind, route, "in")
+    assert whole.status_code == 200, whole.text[:500]
+    assert n >= K22_AT[route], f"the plant was not reached: {n} read(s)"
+    assert resp.status_code != 500, resp.text[:500]
+    assert resp.status_code == 503, (resp.status_code, resp.text[:500])
+    detail = resp.json()["detail"]
+    assert re.fullmatch(K22_DETAIL, detail), detail
+
+
+@pytest.mark.parametrize("kind,route", K22_CASES)
+def test_pg_k22_twin_the_same_gap_after_the_commit_answers_200(kind, route, monkeypatch):
+    whole, resp, n = _k22_run(monkeypatch, kind, route, "after")
+    assert whole.status_code == 200, whole.text[:500]
+    assert n == 1, f"the gap ran {n} time(s)"
+    assert resp.status_code == 200, (resp.status_code, resp.text[:500])
+
+
+# ── K23: every captured way a read ends early answers 503 (round 2) ─────────
+# The captured shapes are the exception chains a server-ended session and a
+# cancelled statement produced when a 1.5 s gap was planted at each statement
+# boundary of V1, V2 and D1, the COMMIT included, rebuilt from the same
+# classes with the same links (SQLAlchemy's wrapper, whose .orig and
+# __cause__ are its asyncpg adapter's error, whose __cause__ is asyncpg's)
+# and raised from one handle read:
+#   * a loss asyncpg noticed during a call: ConnectionDoesNotExistError 08003
+#     under a wrapper marked connection_invalidated;
+#   * a loss asyncpg noticed before a statement, or before the COMMIT: its
+#     InterfaceError for a closed connection, no SQLSTATE anywhere, under a
+#     wrapper marked connection_invalidated;
+#   * SQLAlchemy's PendingRollbackError 8s2b, raised when the view went on
+#     with a connection it had invalidated (the later-rated count's handler
+#     used to swallow the closed-connection error);
+#   * a statement cancelled at statement_timeout: 57014.
+# Each classifier branch then has a chain it alone recognises, so reverting
+# that branch turns the case 500 (the order between a lost connection and a
+# cancelled count is the one exception: reverting it lets the count's handler
+# go on, and the view answers 200). The inert twins: a ValueError raised
+# inside read and a unique violation the server raises (23505) leave the
+# route as before -- 500, with that same exception leaving the primitive.
+
+K23_WRAP = "SELECT 1"      # the statement text a wrapper names; none is sent
+
+
+def _k23_raised(make, cause=None):
+    """make() raised, from `cause` while `cause` is being handled when one is
+    given: the way SQLAlchemy and its asyncpg adapter chain what they
+    re-raise (__cause__ and a suppressed __context__, both `cause`)."""
+    try:
+        if cause is None:
+            raise make()
+        try:
+            raise cause
+        except BaseException as c:
+            raise make() from c
+    except BaseException as e:
+        return e
+
+
+def _k23_wrapped(root, adapted_cls, wrapper_cls, invalidated):
+    """What SQLAlchemy raises for a driver error `root`: its asyncpg adapter's
+    error (carrying root's SQLSTATE, raised from root), wrapped in
+    wrapper_cls (whose .orig is the adapter's error, raised from it)."""
+    def adapted():
+        a = adapted_cls(f"{type(root)}: {root}")
+        a.pgcode = a.sqlstate = getattr(root, "sqlstate", None)
+        return a
+    mid = _k23_raised(adapted, root)
+    return _k23_raised(lambda: wrapper_cls(K23_WRAP, {}, mid, connection_invalidated=invalidated), mid)
+
+
+def _k23_lost_during_a_call():
+    return _k23_raised(lambda: apg_exc.ConnectionDoesNotExistError("connection was closed in the middle of operation"),
+                       ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host"))
+
+
+def _k23_08003():
+    return apg_exc.ConnectionDoesNotExistError("connection was closed in the middle of operation")
+
+
+def _k23_pending_rollback():
+    return sa_exc.PendingRollbackError("Can't reconnect until invalid transaction is rolled back.  "
+                                       "Please rollback() fully before proceeding", code="8s2b")
+
+
+K23_SHAPES = {
+    "lost-during-a-call": (lambda: _k23_wrapped(_k23_lost_during_a_call(), sa_asyncpg_dbapi.Error,
+                                                sa_exc.DBAPIError, True), "08003"),
+    "closed-before-a-statement": (lambda: _k23_wrapped(apg_exc.InterfaceError("connection is closed"),
+                                                       sa_asyncpg_dbapi.InterfaceError, sa_exc.InterfaceError,
+                                                       True), "08003"),
+    "closed-before-the-commit": (lambda: _k23_wrapped(apg_exc.InterfaceError(
+        "cannot call Transaction.commit(): the underlying connection is closed"),
+        sa_asyncpg_dbapi.InterfaceError, sa_exc.InterfaceError, True), "08003"),
+    "pending-rollback": (_k23_pending_rollback, "08003"),
+    "statement-timeout": (lambda: _k23_wrapped(apg_exc.QueryCanceledError(
+        "canceling statement due to statement timeout"), sa_asyncpg_dbapi.Error, sa_exc.DBAPIError, False),
+        "57014"),
+}
+
+
+def _k23_orig_only():
+    return sa_exc.DBAPIError(K23_WRAP, {}, _k23_08003(), connection_invalidated=False)
+
+
+def _k23_cause_only():
+    e = RuntimeError("the read failed")
+    e.__cause__ = _k23_08003()
+    return e
+
+
+def _k23_context_only():
+    e = RuntimeError("the read failed")
+    e.__context__ = _k23_08003()
+    return e
+
+
+def _k23_behind_a_foreign_state():
+    """A unique violation raised while a lost connection was being handled:
+    the first SQLSTATE met (23505) is no bound's; the one behind it is."""
+    try:
+        raise _k23_08003()
+    except BaseException:
+        try:
+            raise apg_exc.UniqueViolationError("duplicate key value violates unique constraint")
+        except BaseException as e:
+            return e
+
+
+def _k23_orig_not_an_exception():
+    e = sa_exc.DBAPIError(K23_WRAP, {}, "not an exception", connection_invalidated=False)
+    e.__cause__ = _k23_08003()
+    return e
+
+
+K23_BRANCHES = {
+    "orig": (_k23_orig_only, "08003"),
+    "cause": (_k23_cause_only, "08003"),
+    "context": (_k23_context_only, "08003"),
+    "25P03": (lambda: _k23_wrapped(apg_exc.IdleInTransactionSessionTimeoutError(
+        "terminating connection due to idle-in-transaction timeout"), sa_asyncpg_dbapi.Error,
+        sa_exc.DBAPIError, False), "25P03"),
+    "class-08": (lambda: _k23_wrapped(_k23_lost_during_a_call(), sa_asyncpg_dbapi.Error, sa_exc.DBAPIError,
+                                      False), "08003"),
+    "57014": (lambda: _k23_wrapped(apg_exc.QueryCanceledError("canceling statement due to statement timeout"),
+                                   sa_asyncpg_dbapi.Error, sa_exc.DBAPIError, False), "57014"),
+    "55P03": (lambda: _k23_wrapped(apg_exc.LockNotAvailableError("canceling statement due to lock timeout"),
+                                   sa_asyncpg_dbapi.Error, sa_exc.DBAPIError, False), "55P03"),
+    "connection-invalidated": (lambda: _k23_wrapped(apg_exc.InterfaceError(
+        "cannot perform operation: another operation is in progress"), sa_asyncpg_dbapi.InterfaceError,
+        sa_exc.InterfaceError, True), "08003"),
+    "asyncpg-closed": (lambda: _k23_wrapped(apg_exc.InterfaceError("connection is closed"),
+                                            sa_asyncpg_dbapi.InterfaceError, sa_exc.InterfaceError, False),
+                       "08003"),
+    "8s2b": (_k23_pending_rollback, "08003"),
+    "any-link": (_k23_behind_a_foreign_state, "08003"),
+    "not-an-exception": (_k23_orig_not_an_exception, "08003"),
+}
+
+
+def _k23_plant_raise(monkeypatch, make, at):
+    """The at-th handle read raises make() in place of its statement."""
+    orig = main._TriageReadHandle.read
+    ops = {"n": 0, "raised": 0}
+
+    async def read(self, statement, params=None):
+        ops["n"] += 1
+        if ops["n"] == at:
+            ops["raised"] += 1
+            raise make()
+        return await orig(self, statement, params)
+
+    monkeypatch.setattr(main._TriageReadHandle, "read", read)
+    return ops
+
+
+def _k23_route(monkeypatch, route, make):
+    async def body():
+        async with Env(monkeypatch) as env:
+            w = await walk_w6(env)
+            ops = _k23_plant_raise(monkeypatch, make, K22_AT[route])
+            return await _k22_call(env, route, w), ops
+    return run(body())
+
+
+def _k23_503(resp, ops, state):
+    assert ops["raised"] == 1, ops
+    assert resp.status_code != 500, resp.text[:500]
+    assert resp.status_code == 503, (resp.status_code, resp.text[:500])
+    assert resp.json()["detail"] == f"the view's read transaction ended early ({state}); reopen the view"
+
+
+@pytest.mark.parametrize("shape,route", [(s, r) for s in K23_SHAPES for r in K22_ROUTES])
+def test_pg_k23_every_captured_shape_answers_503(shape, route, monkeypatch):
+    make, state = K23_SHAPES[shape]
+    resp, ops = _k23_route(monkeypatch, route, make)
+    _k23_503(resp, ops, state)
+
+
+@pytest.mark.parametrize("branch", list(K23_BRANCHES))
+def test_pg_k23_each_classifier_branch_alone_answers_503(branch, monkeypatch):
+    make, state = K23_BRANCHES[branch]
+    resp, ops = _k23_route(monkeypatch, "V1", make)
+    _k23_503(resp, ops, state)
+
+
+def test_pg_k23_a_lost_connection_outranks_a_cancelled_count(monkeypatch):
+    """V2's first later-rated count raises a statement cancellation raised
+    while a closed connection was being handled. The count's handler goes on
+    after 57014 alone; with the connection gone it must fail the view."""
+    def chain():
+        try:
+            raise apg_exc.InterfaceError("connection is closed")
+        except BaseException:
+            try:
+                raise apg_exc.QueryCanceledError("canceling statement due to statement timeout")
+            except BaseException as e:
+                return e
+
+    async def body():
+        async with Env(monkeypatch) as env:
+            w = await walk_w6(env)
+            orig = main._quarantine_later_rated_count
+            calls = {"n": 0}
+
+            async def count(db, *args):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise chain()
+                return await orig(db, *args)
+
+            monkeypatch.setattr(main, "_quarantine_later_rated_count", count)
+            return await env.v2("ffa", w["lid"]), calls
+    resp, calls = run(body())
+    assert calls["n"] >= 1, calls
+    assert resp.status_code == 503, (resp.status_code, resp.text[:500])
+    assert resp.json()["detail"] == "the view's read transaction ended early (08003); reopen the view"
+
+
+@pytest.mark.parametrize("error,route", [(e, r) for e in ("ValueError", "23505") for r in K22_ROUTES])
+def test_pg_k23_twin_an_unrelated_error_leaves_the_route_as_before(error, route, monkeypatch):
+    async def body():
+        async with Env(monkeypatch) as env:
+            w = await walk_w6(env)
+            orig_read, orig_txn = main._TriageReadHandle.read, main._triage_read_txn
+            ops, left = {"n": 0}, []
+
+            async def read(self, statement, params=None):
+                ops["n"] += 1
+                if ops["n"] == K22_AT[route]:
+                    if error == "ValueError":
+                        raise ValueError("raised inside read")
+                    statement, params = ("DO $$ BEGIN RAISE EXCEPTION 'raised inside read'"
+                                         " USING ERRCODE = 'unique_violation'; END $$"), {}
+                return await orig_read(self, statement, params)
+
+            async def txn(db, read_, build):
+                try:
+                    return await orig_txn(db, read_, build)
+                except BaseException as e:
+                    left.append(e)
+                    raise
+
+            monkeypatch.setattr(main._TriageReadHandle, "read", read)
+            monkeypatch.setattr(main, "_triage_read_txn", txn)
+            return await _k22_call(env, route, w), ops, left
+    resp, ops, left = run(body())
+    assert ops["n"] >= K22_AT[route], ops
+    assert resp.status_code == 500, (resp.status_code, resp.text[:500])
+    want = ValueError if error == "ValueError" else sa_exc.IntegrityError
+    assert [type(e) for e in left] == [want], [type(e) for e in left]
+
+
+# ── C1 controls: no collection pass inside the read transaction (round 2) ───
+# The primitive holds automatic collection off from before statement 1 until
+# the COMMIT returns, restoring the state it found; a hold still taken at its
+# bound is released by its own timer.
+
+@pytest.mark.parametrize("route", K22_ROUTES)
+def test_pg_c1_collection_is_off_from_statement_1_to_the_commit_and_restored_after(route, monkeypatch):
+    seen = {"reads": [], "build": []}
+
+    async def body():
+        async with Env(monkeypatch) as env:
+            w = await walk_w6(env)
+            orig_read, orig_txn = main._TriageReadHandle.read, main._triage_read_txn
+
+            async def read(self, statement, params=None):
+                seen["reads"].append(gc.isenabled())
+                return await orig_read(self, statement, params)
+
+            async def txn(db, read_, build):
+                async def build_(rows):
+                    seen["build"].append(gc.isenabled())
+                    return await build(rows)
+                return await orig_txn(db, read_, build_)
+
+            monkeypatch.setattr(main._TriageReadHandle, "read", read)
+            monkeypatch.setattr(main, "_triage_read_txn", txn)
+            first = await _k22_call(env, route, w)
+            after_first = gc.isenabled()
+            gc.disable()
+            try:
+                second = await _k22_call(env, route, w)
+                after_second = gc.isenabled()
+            finally:
+                gc.enable()
+            return first, after_first, second, after_second
+
+    assert gc.isenabled()
+    first, after_first, second, after_second = run(body())
+    assert first.status_code == 200 and second.status_code == 200, (first.text[:300], second.text[:300])
+    assert seen["reads"] and not any(seen["reads"]), seen
+    assert seen["build"] == [True, False], seen
+    assert (after_first, after_second) == (True, False)
+
+
+def test_c1_a_hold_still_taken_at_its_bound_is_released_by_its_timer(monkeypatch):
+    monkeypatch.setattr(main, "_TRIAGE_GC_HOLD_MAX_S", 0.05)
+    assert gc.isenabled() and main._triage_gc_state["depth"] == 0
+
+    async def body():
+        a, b = main._TriageGcHold(), main._TriageGcHold()
+        a.acquire()
+        b.acquire()
+        both = (gc.isenabled(), main._triage_gc_state["depth"])
+        b.release()
+        one = (gc.isenabled(), main._triage_gc_state["depth"])
+        await asyncio.sleep(0.3)          # a's timer fires
+        timed_out = (gc.isenabled(), main._triage_gc_state["depth"])
+        a.release()                        # released already: a no-op
+        return both, one, timed_out, (gc.isenabled(), main._triage_gc_state["depth"])
+
+    try:
+        both, one, timed_out, again = run(body())
+    finally:
+        main._triage_gc_state["depth"] = 0
+        gc.enable()
+    assert both == (False, 2)
+    assert one == (False, 1)
+    assert timed_out == (True, 0)
+    assert again == (True, 0)
+
+
+# ── M1: the round-2 build marker on /health (round 2, LAND) ────────────────
+# Round 2 adds no route: the three triage routes answer on the build before
+# it. So the release train tells the two builds apart by the VALUE of a
+# /health key -- `rj_triage`, absent before round 2 and 2 on this build --
+# and the route carries it on both of its arms, the one whose database
+# answered and the one whose database did not. Read through the K-tests'
+# harness: the api's own health route and response model mounted on the test
+# app, database.py's own engine redirected to the lane database for the
+# connected arm, a session whose first statement fails for the other.
+
+RJ_TRIAGE_HEALTH = "/api/v1/health"
+
+
+class _RjTriageUnreachable:
+    """A session whose first statement fails, as an unreachable database's does."""
+
+    async def execute(self, *a, **k):
+        raise OSError("database unreachable")
+
+
+def test_pg_rj_triage_health_carries_the_round_2_marker_on_both_arms(monkeypatch):
+    async def body():
+        async with Env(monkeypatch) as env:
+            api = [r for r in main.app.routes if getattr(r, "path", None) == RJ_TRIAGE_HEALTH]
+            assert len(api) == 1 and api[0].endpoint is main.health_check, api
+            env.app.add_api_route(RJ_TRIAGE_HEALTH, api[0].endpoint, methods=["GET"],
+                                  response_model=api[0].response_model)
+            up = await env.client.get(RJ_TRIAGE_HEALTH)
+            env.app.dependency_overrides[main.get_db] = lambda: _RjTriageUnreachable()
+            down = await env.client.get(RJ_TRIAGE_HEALTH)
+            return up, down
+
+    up, down = run(body())
+    assert (up.status_code, down.status_code) == (200, 200), (up.text[:500], down.text[:500])
+    up, down = up.json(), down.json()
+    assert (up["status"], up["database"]) == ("ok", "connected"), up
+    assert (down["status"], down["database"]) == ("degraded", "disconnected"), down
+    assert up.get("rj_triage") == 2, up
+    assert down.get("rj_triage") == 2, down
