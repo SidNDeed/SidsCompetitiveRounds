@@ -1228,7 +1228,7 @@ namespace CompetitiveRounds
         //
         // The thumbnail has to exclude three things: the camera's 1.08 wobble
         // pad, the letterbox the fixed RT aspect adds, and the vanilla name
-        // plate (a second copy of the card's name, unreadable at 101 px and
+        // plate (a second copy of the card's name, unreadable at ~91 px and
         // crowding the badge's top rail). On the prefab this was measured
         // against, ALL THREE go for ONE reason, and it is not this table.
         //
