@@ -31363,6 +31363,11 @@ async def update_team_live_points(
     Slot order is team_series' own (t1a/t1b vs t2a/t2b) — the reporter maps
     its in-game side to that order before signing, the same contract the
     match report already uses.
+
+    Clients post here in EVERY game of a series, not only game 1, and each
+    accepted post also raises the current game's row in team_series_games:
+    the per-game record the DC report's lead-forfeit rule reads. See
+    _record_team_game_points below.
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
@@ -31413,6 +31418,12 @@ async def update_team_live_points(
     # it). Attesting before it would record a seat for a series it may not be in.
     await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
                                    (t1_points or 0) + (t2_points or 0))
+    # The per-game record the DC report's lead-forfeit rule reads. Same
+    # transaction, after the UPDATE above has established membership and
+    # locked the series row, so the game this post is filed under is counted
+    # from the row state that lock pins. Savepointed inside: a failure to
+    # record costs this post nothing.
+    await _record_team_game_points(db, sid, t1_points, t2_points)
     await db.commit()
     return {
         "status": "ok",
@@ -31420,6 +31431,165 @@ async def update_team_live_points(
         "live_t2_points": pts[1],
         "bets_locked": (pts[0] + pts[1]) >= 2,
     }
+
+
+# ── The 2v2 per-game record: did THIS game see real play? ───────────────────
+#
+# team_series_report_dc settles a mid-series leave one of two ways: the whole
+# series completes to the team that stayed, with ratings and gold, or it goes
+# to dc_incomplete for an admin. It auto-completes only when the team that
+# stayed was already a game up AND the abandoned game saw real play, two
+# points between the teams. That second half used to be read from the DC
+# report's query string: one survivor's snapshot, outside the DC signature.
+# Two honest survivors can hold different snapshots of the same game, so the
+# settlement depended on which of their two reports took the series lock
+# first.
+#
+# It is now read from team_series_games (migration 348): one row per
+# (series_id, game_ordinal), written by the live-points POST above while the
+# game is being played, and only ever raised. The DC report reads that row
+# after it has locked the series, and the snapshot the report carries is not
+# read at all. Two survivors' reports of one leave are therefore decided by
+# the same fact whichever of them takes the lock first: the first to reach
+# the settlement settles the series from the row, and the other finds it
+# settled. Their order can no longer choose which snapshot decides, because
+# none does.
+#
+# WHICH GAME a post is filed under is the server's own count: games recorded
+# on the series (t1_series_wins + t2_series_wins) plus one, read in the same
+# transaction as the live-points UPDATE, after that UPDATE has locked the
+# series row. The match report takes the same row FOR UPDATE before it counts
+# a game, so the count a post reads is never one a report is halfway through
+# changing.
+#
+# What the count cannot place is a post that LEFT a client during game N and
+# is recorded AFTER game N's report: it is filed under game N+1 while carrying
+# game N's points. Two ordinary paths produce one: a post that waited on the
+# report's own row lock, and a post on the client's retry chain
+# (ApiClient.SendLivePoints: at most 4 attempts, a 20 s timeout each, with 2,
+# 4 and 6 s between them, so the last attempt of a chain that began before the
+# game ended starts no more than 72 s after it ended). Counted as it stands,
+# such a post would mark game N+1 as played from its first second. So a
+# crossing counts only when it was posted more than _TEAM_GAME_SETTLE_SECONDS
+# after the game OPENED, and the opening is the later of the series' last
+# recorded game and its last relock (a relock replays the same game number
+# over the dead sitting's row). crossed_at keeps the transaction start, NOW(),
+# of the LATEST post whose own pair summed to two or more, which is the
+# earliest time the server can put on a request. Each seat holding the series
+# id re-posts its non-zero pair every 20 s while it tracks a game
+# (GameStateWatcher.MaybeSendLivePoints), so a genuine crossing inside the
+# window is counted by the first re-post after the window closes. The window
+# costs only on the conservative side: a leave inside it, after real play,
+# goes to dc_incomplete for an admin instead of completing automatically.
+# The window is sized from that client bound, with 18 s to spare. A stale post
+# that the server itself holds for longer than that before its transaction
+# starts is still counted under the next game: a residual, not a guarantee.
+#
+# TWO POINTS means the game's cumulative points: the pair the client's
+# per-game counters post (GameStateWatcher's liveCum counters, capped at two
+# each, the same pair the bet cutoff reads). The old snapshot was the in-round
+# score, which starts again at 0-0 every round, so a leave at the start of a
+# later round used to read as a game with no play in it.
+#
+# What this does NOT change: a live-points post is signed with the shared mod
+# secret and names its seat in a query parameter, so a modified client can
+# still post points nobody played, exactly as it could write the old
+# query-string snapshot. This record removes the disagreement between honest
+# seats. It does not authenticate the points.
+_TEAM_GAME_SETTLE_SECONDS = 90
+
+_TEAM_GAME_POINTS_UPSERT_SQL = (
+    "INSERT INTO team_series_games"
+    "  (series_id, game_ordinal, max_points_sum, crossed_at)"
+    " SELECT ts.id,"
+    "        COALESCE(ts.t1_series_wins, 0) + COALESCE(ts.t2_series_wins, 0) + 1,"
+    "        CAST(:psum AS integer),"
+    "        CASE WHEN CAST(:psum AS integer) >= 2 THEN NOW() END"
+    "   FROM team_series ts"
+    "  WHERE ts.id = :sid"
+    " ON CONFLICT (series_id, game_ordinal) DO UPDATE"
+    "    SET max_points_sum = GREATEST(team_series_games.max_points_sum,"
+    "                                  EXCLUDED.max_points_sum),"
+    "        crossed_at = GREATEST(team_series_games.crossed_at,"
+    "                              EXCLUDED.crossed_at),"
+    "        last_posted_at = NOW()")
+
+# GREATEST ignores NULL, so a series with no recorded game and no relock has no
+# opening, and a crossing in it counts at once. That is game 1, where the
+# lead-forfeit rule cannot fire anyway: nobody is a game up yet.
+_TEAM_GAME_CROSSED_SQL = (
+    "SELECT g.crossed_at IS NOT NULL"
+    "       AND (b.opened IS NULL"
+    "            OR g.crossed_at > b.opened"
+    "               + make_interval(secs => CAST(:settle AS integer))) AS crossed"
+    "  FROM team_series_games g,"
+    "       (SELECT GREATEST("
+    "                 (SELECT MAX(tm.created_at) FROM team_matches tm"
+    "                   WHERE tm.series_id = :sid),"
+    "                 (SELECT ts.relocked_at FROM team_series ts"
+    "                   WHERE ts.id = :sid)) AS opened) b"
+    " WHERE g.series_id = :sid"
+    "   AND g.game_ordinal = CAST(:ord AS integer)")
+
+
+async def _record_team_game_points(db, series_id, t1_points, t2_points) -> bool:
+    """Raise the current game's row in team_series_games with one accepted
+    team live-points post. The caller has already run the live-points UPDATE,
+    so this transaction holds the series row lock and the game count read here
+    cannot change under it.
+
+    Only ever raises: max_points_sum by GREATEST, and crossed_at to the latest
+    transaction start of a post whose OWN pair summed to two or more. A post
+    below two never clears a crossing another post recorded.
+
+    Returns whether the row was written. Never raises. The isolation is a
+    SAVEPOINT, not a bare try/except, because under asyncpg a caught statement
+    error still aborts the whole transaction (#235) and would take the points
+    write with it. Before migration 348 is applied this records nothing, and
+    the DC report then treats every game as not played: the conservative
+    settlement."""
+    try:
+        async with db.begin_nested():
+            await db.execute(text(_TEAM_GAME_POINTS_UPSERT_SQL), {
+                "sid": series_id,
+                "psum": int(t1_points or 0) + int(t2_points or 0)})
+        return True
+    except Exception as ex:
+        print(f"[TEAM-GAME-POINTS] series={series_id} not recorded: {type(ex).__name__}")
+        return False
+
+
+async def _team_game_crossed_two(db, series_id, series_row, reported_points=None) -> bool:
+    """Whether the game in progress on this series saw real play, by the
+    server's own record: a live-points post carrying two or more points,
+    started after the game's settle window. The caller holds the series row
+    lock and passes the row it read under that lock, so the game number is
+    the one the lock pins.
+
+    `reported_points` is the DC report's own snapshot. It is LOGGED when it
+    disagrees with the record and never read by the answer: that disagreement
+    is exactly what this record takes out of the settlement.
+
+    False when there is no row, no counted crossing, or the record cannot be
+    read (before migration 348, or any statement error inside the savepoint).
+    Every one of those settles as dc_incomplete, the outcome an admin can still
+    change. Never raises."""
+    ordinal = (int(series_row["t1_series_wins"] or 0)
+               + int(series_row["t2_series_wins"] or 0) + 1)
+    try:
+        async with db.begin_nested():
+            crossed = bool((await db.execute(text(_TEAM_GAME_CROSSED_SQL), {
+                "sid": series_id, "ord": ordinal,
+                "settle": _TEAM_GAME_SETTLE_SECONDS})).scalar())
+    except Exception as ex:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: per-game record "
+              f"unreadable ({type(ex).__name__}); treated as not played")
+        return False
+    if reported_points is not None and (int(reported_points) >= 2) != crossed:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: server record says "
+              f"{'played' if crossed else 'not played'}; the report's snapshot "
+              f"said {int(reported_points)} point(s). The record decides.")
+    return crossed
 
 
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
@@ -40865,7 +41035,9 @@ async def team_series_report_dc(
     db: AsyncSession = Depends(get_db),
 ):
     """Mid-series disconnect report. Two outcomes: (1) lead-forfeit — if the
-    non-DC team was already up a game AND the abandoned game had >=2 total
+    non-DC team was already up a game AND the server's own per-game record
+    (team_series_games, raised by the live-points POST during play; never the
+    report's point snapshot) shows the abandoned game reached >=2 total
     points, the whole series completes to them with full ratings/economy;
     (2) otherwise the series flips to status='dc_incomplete'
     (invalidation_reason='dc_manual_pending') for manual admin resolution —
@@ -41001,7 +41173,8 @@ async def team_series_report_dc(
     # restart DC (little or no play) or an even series is NOT auto-decided — it drops
     # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
     # that breaks and needs a restart never auto-penalizes anyone.
-    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:
+    if ((other_team_existing_wins or 0) >= 1
+            and await _team_game_crossed_two(db, sid_uuid, s, total_points)):
         # Record a synthetic forfeit game for history parity.
         await db.execute(
             text("""INSERT INTO team_matches
