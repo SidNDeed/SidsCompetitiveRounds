@@ -12103,6 +12103,21 @@ async def _ack_pending_dms(dm_ids, undeliverable=False, claims=None,
         return False
 
 
+async def _dm_still_live(dm_id):
+    """The last question before a handed-out DM is sent: was it withdrawn
+    since the hand-out? (v1.41.0 beta round 2, finding 7.) A mail deleted,
+    or the relay turned off, while the row waited behind the batch's earlier
+    sends cancels it server-side, and only asking again can see that.
+
+    Three answers, kept apart (#430): True -- the server says it is still
+    live; False -- the server says it was cancelled, or that the row is
+    gone; None -- the server could not be asked, which is not a yes."""
+    data = await api_get(f"/internal/pending-dms/{dm_id}/cancelled")
+    if not isinstance(data, dict) or not isinstance(data.get("cancelled"), bool):
+        return None
+    return not data["cancelled"]
+
+
 @tasks.loop(seconds=60)
 async def poll_pending_dms():
     """Own fully-guarded loop (learning #129)."""
@@ -12166,6 +12181,26 @@ async def poll_pending_dms():
                 if user is None:
                     retry.append(did_key)
                     continue
+                # Asked for each row immediately before its send -- not at
+                # hand-out and not once per batch: a row can wait seconds
+                # behind the sends ahead of it, and a cancellation in that
+                # window is what this has to see (finding 7).
+                live = await _dm_still_live(did_key)
+                if live is False:
+                    # Not sent, and settled nowhere: its cancelled_at keeps
+                    # it out of every later claim, so it never resurfaces.
+                    print(f"[PDM] {did_key} cancelled before delivery -- skipped, not sent")
+                    continue
+                if live is None:
+                    # The api could not answer, and a DM is not sent on a
+                    # question nobody answered. This row and the rest of the
+                    # batch go back as unreached -- charge 0, released now --
+                    # and the next poll asks again. Stopping here also bounds
+                    # an api stall to one timeout per poll.
+                    reached.discard(str(did_key))
+                    print(f"[PDM] {did_key} cancellation recheck unavailable -- "
+                          f"not sent; it and the rest of this batch go back uncharged")
+                    break
                 try:
                     sent = await user.send(content[:2000])
                     print(f"[PDM] dm {did_key} → {user} ({d.get('display_name') or d.get('steam_id')})")

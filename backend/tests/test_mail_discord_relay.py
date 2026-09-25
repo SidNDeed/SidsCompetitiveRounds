@@ -103,7 +103,7 @@ needs_pg = pytest.mark.skipif(
 # Exactly this many tests in this module need the DSN. Pinned from OUT here
 # so that moving one behind the gate is a deliberate edit and not a silent
 # "1 skipped" that still reads as a clean run.
-LIVE_TESTS = 11
+LIVE_TESTS = 12
 
 
 def _read(path):
@@ -427,11 +427,19 @@ def _ack_fn(status=200, boom=False):
     return _lift_bot("_ack_pending_dms", ns), sess
 
 
-def _drain(rows, ack_ok=True, seen=None, unacked=None, boom_after=None):
+def _drain(rows, ack_ok=True, seen=None, unacked=None, boom_after=None,
+           recheck=None, events=None):
     """`poll_pending_dms` against fakes. Returns (fn, ns, sent, acks, out)
     -- the loop's whole observable behaviour, so the map it builds while
-    sending is tested where it is WRITTEN and not only where it is read."""
+    sending is tested where it is WRITTEN and not only where it is read.
+
+    The loop's cancellation recheck is the REAL `_dm_still_live`, asking the
+    fake api here: `recheck` maps a dm_id to what the api answers for it
+    (default: a live row; None: the api could not be asked). `events`, when
+    given, records every recheck request and every send, in order."""
     sent, acks, out = [], [], []
+    recheck = dict(recheck or {})
+    ev = events if events is not None else []
 
     class _User:
         def __init__(self, uid):
@@ -439,6 +447,7 @@ def _drain(rows, ack_ok=True, seen=None, unacked=None, boom_after=None):
 
         async def send(self, content):
             sent.append((self.id, content))
+            ev.append(("send", content))
             return types.SimpleNamespace(id=1000 + len(sent))
 
         def __str__(self):
@@ -459,7 +468,11 @@ def _drain(rows, ack_ok=True, seen=None, unacked=None, boom_after=None):
                      "unreached": list(not_attempted_ids or [])})
         return ack_ok
 
-    async def _get(_path):
+    async def _get(path):
+        m = _sql_re.fullmatch(r"/internal/pending-dms/([^/]+)/cancelled", path)
+        if m:
+            ev.append(("check", m.group(1)))
+            return recheck.get(m.group(1), {"cancelled": False})
         return {"dms": [dict(r) for r in rows]}
 
     sleeps = []
@@ -483,7 +496,9 @@ def _drain(rows, ack_ok=True, seen=None, unacked=None, boom_after=None):
           "_pdm_unacked": unacked if unacked is not None else set(),
           "_ack_pending_dms": _ack,
           "print": lambda *a, **k: out.append(" ".join(str(x) for x in a))}
-    return _lift_bot("poll_pending_dms", ns), ns, sent, acks, out
+    fn = _lift_bot("poll_pending_dms", ns)
+    _lift_bot("_dm_still_live", ns)
+    return fn, ns, sent, acks, out
 
 
 def _queue_row(dm_id, mail_id=None, did="4242", content="you have new mail",
@@ -2253,6 +2268,119 @@ def test_the_unacked_set_does_not_grow_once_a_row_is_retired():
         "a row the server has stopped mentioning is still held: %s" % unacked)
 
 
+# -- Round 2 finding 7: a DM cancelled after its hand-out is not sent ------
+
+
+def _still_live(answer):
+    asked = []
+
+    async def _get(path):
+        asked.append(path)
+        return answer
+
+    return _lift_bot("_dm_still_live", {"api_get": _get}), asked
+
+
+@pytest.mark.parametrize("answer,want", [
+    ({"cancelled": False}, True),
+    ({"cancelled": True}, False),
+    (None, None),                       # the api could not be asked
+    ({}, None),                         # it answered without saying
+    ({"cancelled": "false"}, None),     # ...or said something else
+])
+def test_the_recheck_helper_reports_what_the_server_said_and_nothing_more(
+        answer, want):
+    """Three answers kept apart (#430): live, cancelled, and could-not-ask.
+    The last is not a yes -- read as one, a DM the player withdrew goes out
+    whenever the api hiccups. The path asked is the route's own path, so
+    both halves of the contract carry the same literal (#329/#341)."""
+    fn, asked = _still_live(answer)
+    got = _run(fn(42))
+    assert got is want, (answer, got)
+    assert asked == ["/internal/pending-dms/42/cancelled"], asked
+    routes = {(r.path, m) for r in main.app.routes
+              for m in (getattr(r, "methods", None) or ())}
+    assert ("/api/v1/internal/pending-dms/{dm_id}/cancelled", "GET") in routes
+
+
+def test_every_send_is_immediately_preceded_by_its_own_recheck():
+    """The call-order contract. A recording spy on _dm_still_live and on
+    each send, in one timeline: every row of the batch is asked about, and
+    the question for a row -- the helper entered, then its request -- is the
+    last thing that happens before that row's send. A count alone would pass
+    a loop that asked once per batch, or asked after sending."""
+    rows = [_queue_row("r%d" % i, did=str(4240 + i), content="dm r%d" % i)
+            for i in range(1, 5)]
+    events = []
+    fn, ns, sent, _acks, _out = _drain(rows, events=events)
+    real = ns["_dm_still_live"]
+
+    async def spy(dm_id):
+        events.append(("asked", str(dm_id)))
+        return await real(dm_id)
+
+    ns["_dm_still_live"] = spy
+    _run(fn())
+    assert len(sent) == 4, sent
+    sends = [i for i, e in enumerate(events) if e[0] == "send"]
+    assert len(sends) == 4, events
+    for i in sends:
+        dm = events[i][1].split()[-1]
+        assert i >= 2 and events[i - 2] == ("asked", dm) \
+            and events[i - 1] == ("check", dm), (
+                "the send of %s was not immediately preceded by its own "
+                "recheck: %s" % (dm, events))
+    assert [e[1] for e in events if e[0] == "asked"] == [
+        "r1", "r2", "r3", "r4"], events
+
+
+def test_a_dm_cancelled_after_its_hand_out_is_not_sent_and_settles_nowhere():
+    """Four rows of one batch: still live; cancelled while it waited (a mail
+    deleted, or the relay turned off); one whose recheck the api could not
+    answer; and one behind it.
+
+    live        -> sent, acked delivered
+    cancelled   -> not sent, and in NO settlement: its cancelled_at already
+                   keeps it out of every later claim
+    unanswered  -> not sent; it and the rest of the batch go back as
+                   unreached, charge 0, so the next poll asks again"""
+    rows = [_queue_row("r1", content="dm r1"),
+            _queue_row("r2", did="4243", content="dm r2"),
+            _queue_row("r3", did="4244", content="dm r3"),
+            _queue_row("r4", did="4245", content="dm r4")]
+    fn, _ns, sent, acks, out = _drain(
+        rows, recheck={"r2": {"cancelled": True}, "r3": None})
+    _run(fn())
+    assert [c for _u, c in sent] == ["dm r1"], sent
+    assert "[PDM] r2 cancelled before delivery -- skipped, not sent" in out, out
+    assert [i for a in acks if not a["und"] for i in a["ids"]] == ["r1"], acks
+    for a in acks:
+        assert "r2" not in a["ids"] + a["retried"] + a["unreached"], (
+            "a cancelled row was settled: %s" % acks)
+    assert sorted(i for a in acks for i in a["unreached"]) == ["r3", "r4"], acks
+    assert not [i for a in acks for i in a["retried"]], (
+        "a row nobody sent was charged an attempt: %s" % acks)
+    assert [ln for ln in out if "r3 cancellation recheck unavailable" in ln], out
+
+
+def test_the_recheck_route_refuses_a_caller_without_the_key(monkeypatch):
+    """The key is re-checked in the handler, not left to the middleware, as
+    on every internal route. db=None: a handler that touched the database
+    before refusing would fail with something other than a 403."""
+    monkeypatch.setenv("API_SECRET_KEY", "the-key")
+    for key in (None, "", "wrong"):
+        with pytest.raises(HTTPException) as e:
+            _run(main.internal_pending_dm_cancelled(
+                dm_id=1, x_internal_key=key, db=None))
+        assert e.value.status_code == 403, (key, e.value.status_code)
+    # No key configured refuses everyone, including a caller sending none.
+    monkeypatch.setenv("API_SECRET_KEY", "")
+    with pytest.raises(HTTPException) as e:
+        _run(main.internal_pending_dm_cancelled(
+            dm_id=1, x_internal_key="", db=None))
+    assert e.value.status_code == 403
+
+
 # ── Live: the whole path, against the real migration ─────────────────────
 
 def _live(coro_factory):
@@ -2803,6 +2931,58 @@ def test_a_tombstone_is_a_relay_row_to_the_claim_and_to_relay_off():
     assert tag == "UPDATE 1" and cancelled, (
         "relay-off left the tombstone live (%s, cancelled=%r)" % (tag, cancelled))
     assert "the DM body" not in after, after
+
+
+@needs_pg
+def test_the_recheck_route_answers_from_the_row(monkeypatch):
+    """Round 2 finding 7, the route against the real table and a real
+    session, so the statement, its typed bind and the row-to-answer mapping
+    all execute. A queued row is live; a row the mail-delete path cancelled
+    is cancelled; a row that no longer exists answers cancelled too -- a DM
+    whose row is gone does not go out."""
+    import asyncpg
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    monkeypatch.setenv("API_SECRET_KEY", "the-key")
+    sa_dsn = "postgresql+asyncpg://" + DSN.split("://", 1)[1]
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        engine = create_async_engine(sa_dsn, poolclass=NullPool)
+        try:
+            await _seed(conn)
+            # player 2's copy stays live; player 1's is cancelled by the
+            # delete route's own statement
+            live_id = await conn.fetchval(
+                "INSERT INTO pending_dms (steam_id, content, mail_id,"
+                " relay_code) VALUES ('2', 'live relay', $1, $2)"
+                " RETURNING id", MAIL, _code())
+            cancelled_id = await conn.fetchval(
+                "INSERT INTO pending_dms (steam_id, content, mail_id,"
+                " relay_code) VALUES ('1', 'withdrawn relay', $1, $2)"
+                " RETURNING id", MAIL, _code())
+            await conn.execute(
+                _pg(main._MAIL_CANCEL_PENDING_DM_SQL, "mid", "sid"),
+                MAIL, "1")
+            gone_id = await conn.fetchval(
+                "SELECT COALESCE(MAX(id), 0) + 1000 FROM pending_dms")
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+            out = {}
+            for name, i in (("live", live_id), ("cancelled", cancelled_id),
+                            ("gone", gone_id)):
+                async with sm() as db:
+                    out[name] = await main.internal_pending_dm_cancelled(
+                        dm_id=int(i), x_internal_key="the-key", db=db)
+            return out
+        finally:
+            await engine.dispose()
+            await conn.close()
+
+    out = _live(run)
+    assert out == {"live": {"cancelled": False},
+                   "cancelled": {"cancelled": True},
+                   "gone": {"cancelled": True}}, out
 
 
 def test_the_delete_route_cancels_only_for_the_player_who_deleted():

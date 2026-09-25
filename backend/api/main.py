@@ -35732,7 +35732,12 @@ _PENDING_DM_SETTLE_SQL = (
 # nothing. Cancelling closes the endpoint's question with a guarantee rather
 # than a mechanism (#310): it never has to know whether the row is in flight.
 #   not yet handed out -> it is no longer claimable, so it is never sent
-#   in flight, unsent  -> same, and the bot's settlement matches zero rows
+#   in flight, unsent  -> the bot asks again immediately before each send
+#                         (internal_pending_dm_cancelled, v1.41.0 beta round
+#                         2 finding 7) and skips it; any settlement would
+#                         match zero rows. A cancellation that lands after
+#                         that question and before the send still goes out:
+#                         the window is one request wide, not closed
 #   already sent       -> the DM is out and no design can recall it; the row
 #                         survives, so the ACK still lands and the reply
 #                         still resolves
@@ -35832,6 +35837,42 @@ async def ack_pending_dms(
                            {"ids": ids, "und": bool(body.undeliverable)})
     await db.commit()
     return {"acked": res.rowcount or 0, "settled": settled}
+
+
+# The bot's last question before a handed-out DM goes out (v1.41.0 beta
+# round 2, finding 7). A batch is up to PENDING_DM_BATCH rows sent at 0.15 s
+# spacing, so a row can wait seconds behind the sends ahead of it. A mail
+# deleted, or the relay turned off, in that window cancels the row -- and the
+# bot, holding the payload since the hand-out, used to send it anyway, after
+# which the ungated ACK marked it delivered. The ACK stays ungated (delivery
+# is terminal truth, above); the question is asked on the send side, for each
+# row immediately before its send.
+#
+# A row that no longer exists answers cancelled as well: whatever removed it
+# (the account erasure does), a DM whose row is gone does not go out.
+_PENDING_DM_CANCELLED_SQL = (
+    "SELECT cancelled_at IS NOT NULL AS cancelled FROM pending_dms"
+    " WHERE id = CAST(:id AS BIGINT)")
+
+
+@app.get("/api/v1/internal/pending-dms/{dm_id}/cancelled", tags=["Internal"])
+async def internal_pending_dm_cancelled(
+    dm_id: int,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only: was this handed-out DM withdrawn since its hand-out?
+    {"cancelled": bool}. The key is re-checked here and not left to the
+    middleware alone, as on every internal route."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    if dm_id < 1 or dm_id > 9223372036854775807:
+        # Outside BIGSERIAL's range, so no row carries it: gone.
+        return {"cancelled": True}
+    row = (await db.execute(text(_PENDING_DM_CANCELLED_SQL),
+                            {"id": dm_id})).first()
+    return {"cancelled": True if row is None else bool(row[0])}
 
 
 # ── Routes: LFP Discord ping (July 21) ───────────────────────
