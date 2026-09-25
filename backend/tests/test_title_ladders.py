@@ -20,7 +20,11 @@ function" as a global rule, which is the check that passes while a whole mode
 goes unhooked — and each call passes the reference EXPECTED_REFERENCE names:
 the series id, or for FFA the lobby id, since one lobby is one sitting. 1v2
 is the fifth symbol and is asserted the other way round: it must exist and
-must NOT be hooked, because it reports unrated.
+must NOT be hooked, because it reports unrated. Beside it, two whole-file
+checks: main.py names the hook exactly four times, one awaited call in each
+of the four functions -- so no fifth call, ffa_queue_leave's close above all,
+can sit outside the spans the per-mode check reads -- and no module but
+title_ladders.py carries SQL that writes the two ladder tables.
 """
 
 import ast
@@ -607,6 +611,199 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
         f"rated-only contract in title_ladders' docstring. If 1v2 is now "
         f"meant to count, that is a design decision: move it into "
         f"COMPLETION_SITES and say so in the module docstring.")
+
+
+def _top_level_owner(top):
+    """The name a whole-file finding is reported under: the top-level
+    function it sits in (nested defs count toward it), else "<module>"."""
+    if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return top.name
+    return "<module>"
+
+
+def hook_references(source):
+    """Every place `source` names the hook, as (owner, line, kind).
+
+    kind is "awaited call" for an attribute `x.record_completed_games` that
+    is the callee of an awaited call, and otherwise says what the reference
+    is -- "attribute" (an unawaited call, or an alias `f = x.<hook>`),
+    "name", "import", or "string" (a constant equal to the name, as a
+    getattr would use). A comment cannot produce an entry: this walks the
+    parse tree. A name assembled at run time (`getattr(m, "record_" + s)`)
+    is beyond any static reading and is not claimed."""
+    tree = ast.parse(source)
+    refs = []
+    for top in tree.body:
+        owner = _top_level_owner(top)
+        awaited = {id(n.value.func) for n in ast.walk(top)
+                   if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)}
+        for n in ast.walk(top):
+            if isinstance(n, ast.Attribute) and n.attr == HOOK:
+                kind = "awaited call" if id(n) in awaited else "attribute"
+            elif isinstance(n, ast.Name) and n.id == HOOK:
+                kind = "name"
+            elif isinstance(n, ast.alias) and HOOK in (n.name.split(".")[-1], n.asname):
+                kind = "import"
+            elif isinstance(n, ast.Constant) and n.value == HOOK:
+                kind = "string"
+            else:
+                continue
+            refs.append((owner, getattr(n, "lineno", 0), kind))
+    return refs
+
+
+def test_main_py_holds_exactly_the_four_hook_calls():
+    """Whole file, not per span: main.py names the hook exactly four times,
+    each the awaited callee inside one of the four COMPLETION_SITES
+    functions, one per function -- no fifth call anywhere, and no alias,
+    import or getattr string that could make one.
+
+    The per-mode coverage test reads only the four spans and the excluded
+    one, so a call planted anywhere else passes it. ffa_queue_leave is the
+    case in point (design V3 section 12.4): when the departures reach all but
+    one member it writes the lobby 'completed', and it stays unhooked -- the
+    sitting's credit, if it earned one, was written by submit_ffa_match under
+    the lobby key, by the first accepted rated game that rated each player,
+    and deduped across the later ones. It is named here so that the claim
+    does not rest on COMPLETION_SITES staying as it is."""
+    source = _read(MAIN_PY)
+    refs = hook_references(source)
+    found = sorted((owner, kind) for owner, _line, kind in refs)
+    expected = sorted((fn, "awaited call") for fn in COMPLETION_SITES.values())
+    assert len(set(COMPLETION_SITES.values())) == 4, COMPLETION_SITES
+    assert found == expected, (
+        "main.py must name %s exactly four times, one awaited call in each of "
+        "%s; it names it at:\n  %s" % (
+            HOOK, sorted(COMPLETION_SITES.values()),
+            "\n  ".join("%s line %d: %s" % r for r in sorted(refs))))
+    tops = {_top_level_owner(n) for n in ast.parse(source).body}
+    assert "ffa_queue_leave" in tops, (
+        "ffa_queue_leave is not a top-level function of main.py any more: the "
+        "unhooked-close assertion below would be asserting nothing")
+    in_leave = [r for r in refs if r[0] == "ffa_queue_leave"]
+    assert not in_leave, (
+        "ffa_queue_leave credits the ladder at %r. Its close is not a "
+        "completion: the sitting was credited by the rated games that played "
+        "it, under the lobby key (design V3 section 12.4)." % in_leave)
+
+
+LADDER_TABLES = ("title_ladder_credits", "title_ladder_progress")
+_SQL_WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|TRUNCATE|MERGE|COPY|ALTER|DROP)\b",
+                        re.IGNORECASE)
+
+
+def ladder_table_writes(source):
+    """(owner, line) for every string constant in `source` that names one of
+    the two ladder tables beside an SQL write verb. Docstrings are skipped:
+    they describe the tables, they do not write them."""
+    tree = ast.parse(source)
+    docstrings = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if (n.body and isinstance(n.body[0], ast.Expr)
+                    and isinstance(n.body[0].value, ast.Constant)):
+                docstrings.add(id(n.body[0].value))
+    out = []
+    for top in tree.body:
+        for n in ast.walk(top):
+            if (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                    and id(n) not in docstrings
+                    and any(t in n.value for t in LADDER_TABLES)
+                    and _SQL_WRITE.search(n.value)):
+                out.append((_top_level_owner(top), n.lineno))
+    return out
+
+
+def test_the_ladder_tables_have_no_writer_but_the_hook():
+    """Design V3 section 12.4's closing claim, made checkable: a close (or
+    anything else) cannot reach ladder state around the hook, because
+    title_ladder_credits and title_ladder_progress are written only inside
+    title_ladders.record_completed_games. Every other backend/api module
+    carries no SQL that writes them, and inside title_ladders.py every such
+    statement is in that one function."""
+    elsewhere = []
+    for name in sorted(os.listdir(API_DIR)):
+        if name.endswith(".py") and name != os.path.basename(MODULE_PY):
+            elsewhere += ["%s:%s line %d" % ((name,) + w)
+                          for w in ladder_table_writes(_read(os.path.join(API_DIR, name)))]
+    assert not elsewhere, (
+        "SQL writing a ladder table outside title_ladders.py: %r" % elsewhere)
+    in_module = ladder_table_writes(_read(MODULE_PY))
+    owners = sorted({owner for owner, _line in in_module})
+    assert owners == [HOOK], (
+        "inside title_ladders.py the ladder tables must be written by %s "
+        "alone; SQL writing them sits in %r" % (HOOK, in_module))
+
+
+# A fake main.py shaped like the real one, for the whole-file checks' controls.
+FAKE_MAIN = """
+import title_ladders
+
+async def submit_match(db):
+    await title_ladders.record_completed_games(db, [1], mode="1v1", reference_id="a")
+
+async def submit_team_match(db):
+    await title_ladders.record_completed_games(db, [1], mode="2v2", reference_id="b")
+
+async def _complete_team_series_with_ratings(db):
+    await title_ladders.record_completed_games(db, [1], mode="2v2-settled", reference_id="b")
+
+async def submit_ffa_match(db):
+    await title_ladders.record_completed_games(db, [1], mode="ffa", reference_id="c")
+
+async def ffa_queue_leave(db):
+    await db.commit()
+"""
+
+
+def test_the_whole_file_scan_sees_the_four_and_each_kind_of_fifth():
+    """Control: the fake file reads as the four awaited calls; a fifth in
+    ffa_queue_leave, a module-level alias, an import and a getattr string
+    are each reported as what they are."""
+    four = sorted((o, k) for o, _l, k in hook_references(FAKE_MAIN))
+    assert four == sorted((fn, "awaited call") for fn in COMPLETION_SITES.values()), four
+    planted = {
+        "fifth call": ("    await db.commit()\n",
+                       "    await title_ladders.record_completed_games(db, [1], mode='ffa', reference_id='c')\n"
+                       "    await db.commit()\n",
+                       ("ffa_queue_leave", "awaited call")),
+        "alias": ("import title_ladders\n",
+                  "import title_ladders\n_credit = title_ladders.record_completed_games\n",
+                  ("<module>", "attribute")),
+        "import": ("import title_ladders\n",
+                   "import title_ladders\nfrom title_ladders import record_completed_games as rcg\n",
+                   ("<module>", "import")),
+        "getattr": ("    await db.commit()\n",
+                    "    getattr(title_ladders, 'record_completed_games')\n    await db.commit()\n",
+                    ("ffa_queue_leave", "string")),
+    }
+    for label, (old, new, extra) in planted.items():
+        src = FAKE_MAIN.replace(old, new, 1)
+        assert src != FAKE_MAIN, label
+        got = sorted((o, k) for o, _l, k in hook_references(src))
+        assert got == sorted(four + [extra]), (label, got)
+
+
+def test_the_table_writer_scan_sees_a_write_and_skips_prose():
+    """Control: an UPDATE of title_ladder_progress planted in a fake
+    ffa_queue_leave is reported under that function; the same words in a
+    docstring, or a plain SELECT, are not."""
+    write = FAKE_MAIN.replace(
+        "    await db.commit()\n",
+        "    await db.execute(text('UPDATE title_ladder_progress SET games = games + 1'))\n"
+        "    await db.commit()\n", 1)
+    prose = FAKE_MAIN.replace(
+        "async def ffa_queue_leave(db):\n",
+        "async def ffa_queue_leave(db):\n"
+        "    'Never UPDATE title_ladder_progress here.'\n", 1)
+    read = FAKE_MAIN.replace(
+        "    await db.commit()\n",
+        "    await db.execute(text('SELECT games FROM title_ladder_progress'))\n"
+        "    await db.commit()\n", 1)
+    assert write != FAKE_MAIN and prose != FAKE_MAIN and read != FAKE_MAIN
+    assert [o for o, _l in ladder_table_writes(write)] == ["ffa_queue_leave"]
+    assert ladder_table_writes(prose) == []
+    assert ladder_table_writes(read) == []
 
 
 # ── Line endings ───────────────────────────────────────────────────
