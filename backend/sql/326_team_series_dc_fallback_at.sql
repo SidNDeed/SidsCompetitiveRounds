@@ -68,10 +68,12 @@
 -- indefinitely by re-posting; the bound has to run from the first filing.
 --
 -- WHAT MAKES A MARKER INERT. Not a clear: the sweep's predicate requires
--- status IN ('active','dc_paused'), so the moment a real-totals report
--- completes or settles the series the marker can never be acted on again, and
--- it is left in place because "a fallback was filed for this series" is worth
--- having in the admin panel. It IS cleared by the funnels that REVIVE a series
+-- status IN ('active','dc_paused'), so the moment any writer moves the row out
+-- of those two statuses -- a real-totals report completing or settling it
+-- among them -- the marker cannot be acted on while the row stays out of them,
+-- and it is left in place because "a fallback was filed for this series" is
+-- worth having in the admin panel.
+-- It IS cleared by the funnels that REVIVE a series
 -- -- the ones that flip it back to 'active' and clear the other DC fields --
 -- because a marker surviving a revival comes due on the first tick after it
 -- passes the bound and settles the resumed series. The clear is
@@ -90,15 +92,24 @@
 -- operation across the whole of main.py rather than inside one function.
 --
 -- THE MARKER PERSISTS; THE DEFERRAL IS ENDED BY A WRITER, NEVER BY THE CLOCK.
--- Four writers end it: a real-totals report inside the bound, a revival funnel
--- clearing the marker, a sweep tick after the bound, and the room-issue write
--- in the queue poll, which calls the same clearing helper on the statement
--- that stamps room_issued_at. An earlier draft of this line enumerated three
--- and left the fourth out, so a marker that vanished with no tick, no report
--- and no funnel in the log had no place left to look; the room-issue clear is
--- expected to find nothing on today's flows and is not guaranteed to run its
--- UPDATE -- the helper swallows what the attempt raises -- but a writer that
--- sometimes ends a deferral is a writer that ends one. The clock alone ends
+-- A deferral ends in one of two ways, and neither is a count to type here.
+-- The row leaves ('active','dc_paused') with the marker still set: a sweep
+-- tick after the bound, a real-totals report inside the bound (at its
+-- lead-forfeit completion or its dc_incomplete exit), a completing game
+-- report, an admin void or completion, a queue-janitor or queue-leave cancel
+-- and the legacy dc_paused grace lapse among them. Or the marker itself is
+-- cleared, which only the clearing helper's callers do: a revival funnel
+-- clearing the marker, and the room-issue write in the queue poll, which
+-- calls the same helper on the statement that stamps room_issued_at. The
+-- structural suite derives both lists from main.py -- every def whose UPDATE
+-- moves a series out of the two open statuses, and every caller of the
+-- helper -- and holds them against a registry of its own, so a writer added
+-- later reddens a test instead of going missing from this paragraph. Two
+-- earlier drafts of this paragraph each typed a count, and each count was
+-- short. The room-issue clear is expected to find nothing on today's flows
+-- and is not guaranteed to run its UPDATE -- the helper swallows what the
+-- attempt raises -- but a writer that sometimes ends a deferral is a writer
+-- that ends one. The clock alone ends
 -- nothing -- with no sweep ticking, a marked row stays deferred for as long as
 -- the api is up. That is the direction the unhandled case fails in (#276, #430)
 -- and it is why the sweep is a janitor self-test root rather than a loop nobody

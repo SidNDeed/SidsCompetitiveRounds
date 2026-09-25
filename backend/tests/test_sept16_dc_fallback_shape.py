@@ -1340,12 +1340,16 @@ def test_the_bound_is_derived_from_the_assembly_ceiling_not_from_transport_alone
 def test_the_sweep_does_not_consult_the_room_clock():
     """The 214 s "second refusal" is gone, constant and all.
 
-    It could not refuse a row. An ordinary room is stamped when it is ISSUED,
-    before the sitting that produces the marker, so a marker past 420 s always
-    sat on a room past 214 s; and a continuation series carries a real room
-    with a NULL room_issued_at, which made the term true on arrival. A check
-    that cannot fail is worse than no check (#342, #431, #441), so it is
-    deleted rather than patched (#310, #389).
+    It could refuse no row a working flow produces. An ordinary room is
+    stamped when it is ISSUED, before the sitting that produces the marker, so
+    a marker past 420 s always sat on a room past 214 s; and a continuation
+    series carries a real room with a NULL room_issued_at, which made the term
+    true on arrival. The one row it could refuse -- a room re-issued over a
+    marker whose clear failed, for 214 s after the issue -- is the
+    swallowed-error residual the clear helper records, and the orderings
+    suite settles that row on the bound. A check that cannot fail on any shape
+    a working flow produces is worse than no check (#342, #431, #441), so it
+    is deleted rather than patched (#310, #389).
     """
     import main
     assert not hasattr(main, "_DC_FALLBACK_ROOM_QUIET_SECONDS")
@@ -1407,13 +1411,14 @@ def test_every_room_issue_clears_the_deferral_marker():
     the property the sweep leans on now that its room term is gone. The clear
     is attempted under a savepoint that swallows what it raises, so no such
     relation is available to lean on. Nor does the sweep's deleted room term
-    need a replacement: the 214 s term could not refuse a row, which
-    test_the_sweep_does_not_consult_the_room_clock sets out, so the deletion
-    took nothing away. What stands between a marker this clear did not reach
-    and a settled row is the sweep's live-game veto, a bound and not a
-    guarantee. This docstring said the veto CARRIED that deletion until the
-    account was read off the code (#405, #351). The requirement stands on its
-    own without any of it: a funnel that stamps the clock without even
+    need a replacement: the 214 s term could refuse no row a working flow
+    produces, which test_the_sweep_does_not_consult_the_room_clock sets out,
+    so the deletion took nothing from a working flow. What stands between a
+    marker this clear did not reach and a settled row is the sweep's
+    live-game veto, a bound and not a guarantee. This docstring said the veto
+    CARRIED that deletion until the account was read off the code (#405,
+    #351). The requirement stands on its own without any of it: a funnel
+    that stamps the clock without even
     attempting the clear is a funnel nothing would clear after. Counted
     file-wide, because the defect is a class and a span-local count could not
     see a third funnel (#432, #330, #351).
@@ -1485,7 +1490,8 @@ def test_the_room_issue_clear_is_introduced_as_an_attempt_not_an_invariant():
     # with a refusal and no replacement (#331). TWO sentences, because the
     # block has now carried two different WRONG attributions for that
     # deletion -- first this clear, then the live-game veto -- and the
-    # correct answer is neither: the term could not refuse a row.
+    # correct answer is neither: the term could refuse no row a working flow
+    # produces.
     assert ("WHAT MAKES THAT DELETION SAFE IS THE DELETED TERM'S OWN VACUITY"
             in block), block
     assert "LIVE-GAME VETO" in block, block
@@ -1495,60 +1501,119 @@ def test_the_room_issue_clear_is_introduced_as_an_attempt_not_an_invariant():
     assert "swallows every exception" in block, block
 
 
-# Which role in migration 326's writer enumeration each caller of the clearing
-# helper plays. The two revival funnels are ONE role in that list; the
-# room-issue write is its own. A caller that is not in this map is a role
-# nobody has written the sentence for, which is the state the check refuses.
-ROLE_OF_CLEARING_CALLER = {
-    "_team_relock_existing_series": "a revival funnel clearing the marker",
-    "team_lobby_start": "a revival funnel clearing the marker",
-    "team_queue_poll": "the room-issue write in the queue poll",
+# The writers that end a deferral, DERIVED rather than counted. A deferral
+# ends when the row leaves ('active','dc_paused') with the marker still set,
+# or when the marker itself is cleared, and both halves are read off main.py:
+# a def whose UPDATE team_series assigns a status other than the two open
+# ones, and a def that calls the clearing helper. This registry is the other
+# side of the comparison, so a writer added later is a def nobody has
+# classified and the census reddens on it. Migration 326's header typed a
+# count twice -- three, then four -- and the round-8 cold lens found the
+# second short as well (finding 6); a count typed beside a comment is the
+# defect, so none is typed now (#342, #432).
+OPEN_STATUSES = ("active", "dc_paused")
+CLEARS_THE_MARKER = "clears the marker"
+ENDS_A_DEFERRAL = {
+    "_team_dc_fallback_sweep_once": {"dc_incomplete"},
+    "team_series_report_dc": {"dc_incomplete"},
+    "_complete_team_series_with_ratings": {"completed"},
+    "submit_team_match": {"completed"},
+    "admin_resolve_team_series": {"cancelled"},
+    "admin_reverse_team_series": {"cancelled"},
+    "team_series_state": {"canceled", "dc_incomplete"},
+    "team_queue_cleanup_loop": {"cancelled"},
+    "team_queue_leave": {"cancelled"},
+    "team_queue_poll": {"cancelled", CLEARS_THE_MARKER},
+    "delete_player_data": {"cancelled"},
+    "_team_lock_family_pick": {"cancelled"},
+    "_team_relock_existing_series": {CLEARS_THE_MARKER},
+    "team_lobby_start": {CLEARS_THE_MARKER},
 }
-# The two writers that end a deferral WITHOUT going through the helper: the
-# in-bound real-totals report, which settles the series on the real
-# attribution, and the sweep tick, which settles the row. NAMED rather than
-# counted, and each is required below to be a def in main.py that is NOT one
-# of the helper's callers -- so the number this check adds is bound to two
-# functions in the tree instead of being typed beside a comment (#342).
-WRITERS_NOT_THROUGH_THE_HELPER = ("team_series_report_dc",
-                                  "_team_dc_fallback_sweep_once")
-_COUNT_WORD = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six"}
+_ASSIGNS_STATUS = re.compile(r"(?<![\w.])status\s*=\s*'?([:\w]+)", re.I)
 
 
-def test_the_migration_enumerates_every_writer_that_ends_a_deferral():
-    """326's writer list, counted from the tree instead of remembered.
+def deferral_writer_census(tree=None):
+    """{def name: kinds} for every def in `tree` that can end a deferral.
 
-    The header enumerated three -- report, revival funnel, sweep tick -- and
-    left out the room-issue write, which calls the same helper on the
-    statement that stamps room_issued_at. A guard, test or runbook step
-    derived from the short list would treat that path as one that cannot end
-    a deferral, and a marker it cleared would leave a reader with no fourth
-    candidate to look at.
-
-    The COUNT WORD is derived here rather than typed: the helper's callers are
-    read out of main.py, mapped to the roles the sentence names, and the total
-    is those roles plus the two NAMED writers that never touch the helper,
-    each of which has to be a def in the file and not a caller. A fifth caller
-    reddens this test instead of being quietly missing from the prose, and a
-    named writer that is renamed or removed reddens it too.
+    A kind is a status the def's UPDATE team_series assigns other than the two
+    open ones -- a bound parameter reads as ':name', so a status written from
+    a variable is surfaced rather than missed -- or CLEARS_THE_MARKER for a
+    CALL of the clearing helper. As generous at the margins as
+    functions_updating_team_series, for the same reason: over-reporting puts
+    a def in front of a reader, under-reporting is how the count went short.
     """
-    callers = [n for n in functions_performing("_team_clear_dc_fallback_marker(")
-               if n != "_team_clear_dc_fallback_marker"]
-    assert set(callers) == set(ROLE_OF_CLEARING_CALLER), (
-        callers, sorted(ROLE_OF_CLEARING_CALLER))
-    for name in WRITERS_NOT_THROUGH_THE_HELPER:
-        node_named(name)          # a def in main.py, or this raises by name
-        assert name not in callers, (name, callers)
+    out = {}
+    for n in (tree or TREE).body:
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        kinds = set()
+        for u in _UPDATE_TEAM_SERIES.finditer(sql_carried_by(n)):
+            for s in _SET_LIST.finditer(u.group(1)):
+                kinds |= {a.group(1) for a in _ASSIGNS_STATUS.finditer(s.group(1))
+                          if a.group(1) not in OPEN_STATUSES}
+        if (n.name != "_team_clear_dc_fallback_marker"
+                and _calls_named(n, "_team_clear_dc_fallback_marker")):
+            kinds.add(CLEARS_THE_MARKER)
+        if kinds:
+            out[n.name] = kinds
+    return out
+
+
+_NEW_WRITER_DECOY = '''
+async def _team_void_on_rehost(db, series_id):
+    """UPDATE team_series SET status='completed' -- prose, not a write."""
+    await db.execute(text(
+        "UPDATE team_series"
+        " SET status='cancelled',invalidation_reason='rehost'"
+        " WHERE id=:sid AND status IN ('active','dc_paused')"), {"sid": series_id})
+    await db.execute(text("UPDATE team_series SET status = 'active' "
+                          "WHERE id = :sid"), {"sid": series_id})
+    await _team_clear_dc_fallback_marker(db, series_id)
+'''
+
+
+def test_every_writer_that_ends_a_deferral_is_derived_and_none_is_counted():
+    """326's writer list, derived from the tree and never typed as a number.
+
+    The header enumerated three writers, then four; the round-8 cold lens
+    found the four short too -- admin void and completion, a completing game
+    report, report_dc's own dc_incomplete exit, the queue-janitor cancel and
+    the legacy grace lapse also move a marked row out of the open statuses,
+    which ends the deferral. So the census is the source of truth, the header
+    names ROLES without a count, and the room-issue comment points here.
+    """
+    census = deferral_writer_census()
+    assert census == ENDS_A_DEFERRAL, {
+        k: (sorted(census.get(k, ())), sorted(ENDS_A_DEFERRAL.get(k, ())))
+        for k in set(census) | set(ENDS_A_DEFERRAL)
+        if census.get(k) != ENDS_A_DEFERRAL.get(k)}
+    assert {k for k, v in census.items() if CLEARS_THE_MARKER in v} == {
+        "_team_relock_existing_series", "team_lobby_start", "team_queue_poll"}
+    # main.py is the one backend module that writes team_series, so a census
+    # of main.py is a census of the api.
+    backend = pathlib.Path(__file__).resolve().parents[1]
+    others = [p.name for p in sorted((backend / "api").glob("*.py"))
+              + sorted(backend.glob("*.py"))
+              if p.name != "main.py" and re.search(
+                  r"\bUPDATE\s+team_series\b", p.read_text(encoding="utf-8"),
+                  re.I)]
+    assert others == [], others
+    # The header names the roles and types no count.
     flat = _collapsed(_dc_claim_sources()["326_team_series_dc_fallback_at.sql"])
-    roles = sorted({ROLE_OF_CLEARING_CALLER[c] for c in callers})
-    want = _COUNT_WORD[len(roles) + len(WRITERS_NOT_THROUGH_THE_HELPER)]
-    assert ("%s writers end it" % want) in flat, (want, callers, roles)
-    for phrase in roles + ["a real-totals report inside the bound",
-                           "a sweep tick after the bound"]:
+    counted = re.findall(r"\b(\w+) writers end it\b", flat, re.I)
+    assert counted == [], counted
+    for phrase in ("A deferral ends in one of two ways, and neither is a count "
+                   "to type here.",
+                   "a real-totals report inside the bound",
+                   "a sweep tick after the bound",
+                   "a revival funnel clearing the marker",
+                   "the room-issue write in the queue poll",
+                   "is not guaranteed to run its UPDATE"):
         assert flat.count(phrase) >= 1, phrase
-    # And the header prices the fourth honestly: it is a writer that sometimes
-    # ends a deferral, not one guaranteed to run its UPDATE.
-    assert "is not guaranteed to run its UPDATE" in flat, flat[:600]
+    # Negative control (#391): a new writer is seen, with both kinds, and the
+    # docstring and the revival to 'active' are not.
+    assert deferral_writer_census(ast.parse(_NEW_WRITER_DECOY)) == {
+        "_team_void_on_rehost": {"cancelled", CLEARS_THE_MARKER}}
 
 
 def test_the_bound_sentence_is_one_sentence_in_every_copy():
@@ -2091,6 +2156,131 @@ def test_no_ordering_scenario_writes_evidence_inside_a_held_sweep():
     assert held_window_writes(_PRE_WINDOW_WRITE_TWIN) == []
 
 
+# ── Every reader of the live-game veto, classified ───────────────────────
+#
+# The round-7c HIGH was a veto read, then a write, with nothing ordering a
+# publication between them. The sweep is fixed: its settlement carries the
+# veto and the one publisher locks the series row first. The same SHAPE is
+# in other closers -- the cold lens's finding 4 names team_queue_cleanup's
+# stale-series and husk cancels -- and those are FILED (OI-8), not fixed in
+# this lane: the finding itself says so, they predate this branch, and the
+# ovt and ffa readers cannot be serialized against a publisher that locks no
+# ovt or ffa row. This census names every reader, so the filed set cannot
+# grow silently and no reader moves between classes without an edit here.
+#
+#   SERIALIZED -- holds a lock on the team_series row that FOR SHARE conflicts
+#                 with, from before its veto read until its write commits.
+#   OPEN       -- does not; a write that rests on its reading can commit over
+#                 evidence published after the read. Filed as OI-8.
+#   REPORTED   -- no server write rests on the reading; it goes to a client.
+#   HELPER     -- a wrapper around a veto helper; its callers are read in its
+#                 place and classified themselves.
+VETO_HELPERS = ("_group_game_in_progress", "_group_game_positively_live")
+LIVENESS_VETO_READERS = {
+    "_team_dc_fallback_sweep_once": "SERIALIZED",
+    "team_queue_leave": "SERIALIZED",
+    "team_queue_cleanup_loop": "OPEN",
+    "team_series_state": "OPEN",
+    "queue_cleanup_loop": "OPEN",
+    "ovt_queue_leave": "OPEN",
+    "ovt_queue_poll": "OPEN",
+    "ffa_queue_leave": "OPEN",
+    "ffa_queue_poll": "OPEN",
+    "_ffa_game_in_progress_tristate": "HELPER",
+    "_ffa_poll_locked_payload": "REPORTED",
+}
+
+
+def veto_readers(tree=None):
+    """Every top-level def that calls a veto helper, directly or through a
+    HELPER-classified wrapper -- by call, so prose naming a helper is not a
+    reader."""
+    wrappers = set(VETO_HELPERS) | {
+        n for n, k in LIVENESS_VETO_READERS.items() if k == "HELPER"}
+    out = set()
+    for n in (tree or TREE).body:
+        if (not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                or n.name in VETO_HELPERS):
+            continue
+        if any(_calls_named(n, w) for w in wrappers if w != n.name):
+            out.add(n.name)
+    return out
+
+
+_NEW_READER_DECOY = '''
+async def _team_idle_closer(db, sid):
+    """Mentions _group_game_positively_live( in prose only."""
+    if not _group_game_positively_live(str(sid)):
+        await db.execute(text("UPDATE team_series SET status='cancelled' "
+                              "WHERE id = :sid"), {"sid": sid})
+
+
+async def _team_idle_note(db, sid):
+    """Calls _group_game_in_progress( nowhere; this docstring names it."""
+    # _group_game_in_progress(str(sid)) would be the veto.
+    return None
+'''
+
+
+def test_every_reader_of_the_live_game_veto_is_classified():
+    """The cold lens's finding 4, filed with a census rather than in prose.
+
+    Only the two SERIALIZED readers are held by the source here; the OPEN
+    ones are the filed class, and what this test guarantees about them is
+    only that the list is complete and none of them is claimed to be closed.
+    """
+    import main
+    readers = veto_readers()
+    assert readers == set(LIVENESS_VETO_READERS), sorted(
+        readers ^ set(LIVENESS_VETO_READERS))
+    serialized = {n for n, k in LIVENESS_VETO_READERS.items()
+                  if k == "SERIALIZED"}
+    assert serialized == {"_team_dc_fallback_sweep_once", "team_queue_leave"}
+    # The sweep's claim is the settlement check's.
+    assert settlement_veto_findings(TREE, SRC) == []
+    # The leave's: the grouped-row lock -- FOR UPDATE on the parent team_series
+    # row for every grouped status its cancel path admits -- comes before the
+    # veto read; the veto read and the cancel sit inside the branch that admits
+    # only those statuses; and every commit between the lock and the cancel is
+    # on a branch that RETURNS, so none of them releases the lock on the path
+    # that reaches the cancel. Read by AST line, not by filtered text lines.
+    leave = node_named("team_queue_leave")
+
+    def _first(pred):
+        at = sorted(n.lineno for n in ast.walk(leave) if pred(n))
+        return at[0] if at else -1
+
+    lock = _first(lambda n: n in _calls_named(leave, "_lock_queue_group_for_player"))
+    veto = _first(lambda n: n in _calls_named(leave, "_group_game_positively_live"))
+    cancel = _first(lambda n: isinstance(n, ast.Constant)
+                    and isinstance(n.value, str)
+                    and "invalidation_reason='pre_match_leaver'" in n.value)
+    gates = [n for n in ast.walk(leave) if isinstance(n, ast.If)
+             and '("matched", "ready")' in (ast.get_source_segment(SRC, n.test) or "")]
+    assert min(lock, veto, cancel) > 0 and len(gates) == 1, (
+        lock, veto, cancel, len(gates))
+    assert lock < gates[0].lineno < veto < cancel <= gates[0].end_lineno, (
+        lock, gates[0].lineno, veto, cancel)
+    exits = [n for n in ast.walk(leave) if isinstance(n, ast.If) and n.body
+             and isinstance(n.body[-1], ast.Return)]
+    commits = [n.lineno for n in ast.walk(leave)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "commit" and lock < n.lineno < cancel]
+    stray = [ln for ln in commits
+             if not any(e.body[0].lineno <= ln <= e.body[-1].end_lineno
+                        for e in exits)]
+    assert stray == [], (
+        "a commit on the path from the lock to the cancel releases the series "
+        "lock", stray)
+    assert {"matched", "ready"} <= set(main._QUEUE_GROUP_STATUSES["team_queue"])
+    assert main._QUEUE_GROUP_SERIES_TABLES["team_queue"] == "team_series"
+    helper = "\n".join(code_lines_of(node_named("_lock_queue_group_for_player")))
+    assert "WHERE id = :sid FOR UPDATE" in helper, helper[:400]
+    # Negative control and twin (#391): a new reader is seen; a def that only
+    # NAMES a helper in prose is not.
+    assert veto_readers(ast.parse(_NEW_READER_DECOY)) == {"_team_idle_closer"}
+
+
 def test_every_value_the_settle_writes_is_read_from_the_locked_row():
     code = code_only(span("_team_dc_fallback_sweep_once"))
     joined = "\n".join(code)
@@ -2321,8 +2511,9 @@ SUPERSEDED_CLAIMS = (
     # ...and the account that REPLACED the first of those, which was wrong in
     # the other direction: it attributed the room-term deletion's safety to
     # the live-game veto where the round's own reason is that the deleted
-    # term could not refuse a row. Two attributions for one deletion means
-    # neither was read off the code (#405), so both are named here.
+    # term could refuse no row a working flow produces. Two attributions for
+    # one deletion means neither was read off the code (#405), so both are
+    # named here.
     "What carries that deletion is the sweep's LIVE-GAME VETO",
     # ...and the writer enumeration that counted three of the four.
     "Three writers end it",
@@ -2332,6 +2523,29 @@ SUPERSEDED_CLAIMS = (
     # opposite polarities of one claim. A claim moves between files (#432);
     # so does its refutation, and that is what this entry sweeps.
     "is carried by the live-game veto",
+    # ...and the four-writer enumeration that REPLACED "Three writers end it",
+    # which the round-8 cold lens found short as well: admin resolutions,
+    # completing game reports, queue-janitor cancels and the legacy grace
+    # lapse also move a marked row out of the open statuses. The migration
+    # now names roles and types no count, and the census derives the writers.
+    "Four writers end it",
+    "the FOURTH writer that ends a deferral",
+    "migration 326's header enumerates the four",
+    "The deferred-fallback sweep is the only UNATTENDED writer that settles a series",
+    "the marker can never be acted on again",
+    # ...and the two sentences that still asserted the retracted clear
+    # guarantee after the helper doc was narrowed to an ATTEMPT (cold lens,
+    # finding 2), with the room-term absolutes that rested on the same
+    # guarantee.
+    "either revival funnel clears the marker so that nothing settles it at all",
+    "production does not produce it, because issuing a room now clears the marker",
+    "That term could not refuse a row -- see the bound",
+    "the 214 s term could not refuse a row,",
+    "It could not refuse a row. An ordinary room",
+    # ...and the session sentence written from the enforced branch only (cold
+    # lens, finding 5): on the soft-fail branch the check returns and the
+    # ping locks, reads and publishes.
+    "a caller whose session does not verify never locks a series row",
 )
 
 # ...and the sentence that replaced each one, which must be present exactly
@@ -2345,8 +2559,38 @@ CORRECTED_CLAIMS = (
     ("main.py",
      "a swallowed database error"),
     ("main.py",
-     "The deferred-fallback sweep is the only UNATTENDED writer that settles a "
-     "series a fallback report declined to settle"),
+     "The deferred-fallback sweep is the unattended writer whose whole job is "
+     "settling a series a fallback report declined to settle. It is not the "
+     "only writer that ends a deferral."),
+    ("main.py",
+     "a revival funnel ATTEMPTS the marker clear, and only a clear whose "
+     "UPDATE ran leaves nothing for the sweep to settle"),
+    ("main.py",
+     "production reaches it only when a clear fails: issuing a room ATTEMPTS "
+     "the marker clear"),
+    ("main.py",
+     "the 214 s term could refuse no row a working flow produces"),
+    ("main.py",
+     "where enforcement is armed for this caller, a session that does not "
+     "verify raises there and no series row is locked"),
+    ("main.py",
+     "The lock changes WHERE a publication lands relative to a sweep pass, "
+     "not WHO may publish."),
+    ("main.py",
+     "That third place takes EVERY heartbeat that arrives after this pass's "
+     "lock is granted"),
+    ("main.py",
+     "a heartbeat that arrives DURING this lookup is ordered AFTER the "
+     "settlement"),
+    ("main.py", "This call is also a writer that ends a deferral."),
+    ("326_team_series_dc_fallback_at.sql",
+     "A deferral ends in one of two ways, and neither is a count to type "
+     "here."),
+    ("326_team_series_dc_fallback_at.sql",
+     "the marker cannot be acted on while the row stays out of them"),
+    ("test_sept16_dc_fallback_orderings.py",
+     "Evidence reaches a HELD sweep's gaps below in one way only: through "
+     "`main.presence_ping`, the real publisher"),
     ("main.py",
      "legacy in its WRITER -- no statement in this api sets that status any "
      "more"),
@@ -2383,12 +2627,8 @@ CORRECTED_CLAIMS = (
     ("main.py",
      "a BOUND and not a guarantee, since a resumed series with no live game "
      "in evidence at the tick is outside it"),
-    ("326_team_series_dc_fallback_at.sql",
-     "Four writers end it: a real-totals report inside the bound, a revival "
-     "funnel clearing the marker, a sweep tick after the bound, and the "
-     "room-issue write in the queue poll"),
     ("test_sept16_dc_fallback_shape.py",
-     "the 214 s term could not refuse a row, which "
+     "the 214 s term could refuse no row a working flow produces, which "
      "test_the_sweep_does_not_consult_the_room_clock sets out"),
 )
 

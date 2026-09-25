@@ -2380,7 +2380,7 @@
           ],
           "main",
           "presence_ping",
-          "888b9a00c4f04391a98265e023ce3bd81d3cc706"
+          "63804ac752fa43a048cce6326bc11b227c9d82e4"
         ],
         [
           "/api/v1/queue/count",
@@ -2758,7 +2758,7 @@
           ],
           "main",
           "team_queue_poll",
-          "c8ddaacd2d933724f298daef06c0a6cc8fe08fd1"
+          "45b9c83303c694422935a5cf49a468feae57a73a"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3326,7 +3326,7 @@
       [
         "main",
         "lifespan",
-        "dcb3ec1f55a87ad3f3c50a926372ebdd0515d0e5"
+        "c1ae65ad96702755c16dd229520e0827f222081a"
       ]
     ]
   },

@@ -1822,11 +1822,15 @@ async def _supervised(name: str, coro_factory):
 _JANITOR_SELFTEST_ROOTS = (
     ("main", "queue_cleanup_loop"),
     ("main", "team_queue_cleanup_loop"),
-    # The deferred-fallback sweep is the only UNATTENDED writer that settles a
-    # series a fallback report declined to settle -- a real-totals report
+    # The deferred-fallback sweep is the unattended writer whose whole job is
+    # settling a series a fallback report declined to settle. It is not the
+    # only writer that ends a deferral. A real-totals report
     # inside the bound settles it too, at the lead-forfeit completion or at the
-    # dc_incomplete exit, and either revival funnel clears the marker so that
-    # nothing settles it at all -- so it is janitor SQL in exactly the
+    # dc_incomplete exit; a revival funnel ATTEMPTS the marker clear, and only
+    # a clear whose UPDATE ran leaves nothing for the sweep to settle; and a
+    # queue-janitor cancel, an admin resolution or a completing game report can
+    # move the row out of the two open statuses as well -- the shape suite's
+    # writer census names every such writer. It is janitor SQL in exactly the
     # sense this self-test exists for: it runs unattended every minute and its
     # failure is silent. It also names a column migration 326 adds, which makes
     # the boot banner the loud half of the migration-before-api deploy order.
@@ -3661,10 +3665,17 @@ async def team_queue_cleanup_loop():
 # true; and a continuation series carries a real room with a NULL
 # room_issued_at, because the continuation INSERT does not stamp it, which
 # made the term true on arrival. There is a third shape -- a room issued AFTER
-# a marker was filed, which the term WOULD have refused -- and production does
-# not produce it, because issuing a room now clears the marker in the same
-# function that stamps it (the one such statement in this file); the
-# structural suite counts that operation file-wide. A check that cannot
+# a marker was filed, which the term WOULD have refused -- and production
+# reaches it only when a clear fails: issuing a room ATTEMPTS the marker clear
+# in the same function that stamps it (the one such statement in this file),
+# that attempt swallows whatever it raises, and a failed attempt leaves
+# exactly this shape. That is the swallowed-error residual the clear helper
+# records, and there the deletion does give up a refusal, for the 214 s after
+# the re-issue; what stands on that row is the live-game veto below, a bound
+# and not a guarantee. The structural suite counts the room-issue operation
+# file-wide, and the orderings suite settles this shape on the bound like the
+# other two. On every shape a working flow produces the term could not
+# refuse, and a check that cannot
 # refuse is worse than no check (#342, #431, #441), so it is DELETED rather
 # than patched (#310, #389). What narrows the uncovered part is the live-game
 # veto in the sweep below -- in-process evidence rather than a clock on a
@@ -3758,8 +3769,10 @@ async def _team_dc_fallback_sweep_once(db) -> int:
     # into a write on the strength of a comment (#302).
     #
     # ONE time term, not two. Round 4 also required the stored room to have
-    # been quiet for 214 s. That term could not refuse a row -- see the bound
-    # above -- so it is gone from both statements rather than left here reading
+    # been quiet for 214 s. That term could refuse no row a working flow
+    # produces, and the one row it could -- a room re-issued over a marker
+    # whose clear failed -- is the recorded residual the bound block above
+    # prices, so it is gone from both statements rather than left here reading
     # like a second condition somebody could rely on (#342, #441).
     due = (await db.execute(
         text("""
@@ -15625,8 +15638,16 @@ async def presence_ping(request: Request,
             # series do not queue behind each other's pings. A group id that
             # is not a team series matches no row and takes no lock; the ovt
             # and ffa branches below are unchanged. Taken AFTER the session
-            # check, so a caller whose session does not verify never locks a
-            # series row.
+            # check, and what that buys depends on the check's branch: where
+            # enforcement is armed for this caller, a session that does not
+            # verify raises there and no series row is locked; on the
+            # soft-fail branch -- enforcement off, a caller below
+            # STEAM_AUTH_MIN_VERSION whose account is not armed, or a failed
+            # session lookup -- the check logs one line and returns, and this
+            # ping takes the lock, reads membership and publishes exactly as
+            # a member's ping did before this lock existed. The lock changes
+            # WHERE a publication lands relative to a sweep pass, not WHO may
+            # publish.
             _im_series = (await db.execute(text(
                 "SELECT status FROM team_series WHERE id = :gid FOR SHARE"
             ), {"gid": _gid})).first()
@@ -38103,9 +38124,14 @@ async def team_queue_poll(steam_id: str, request: Request,
                 # no truer one screen away (#351).
                 # The deferred-fallback sweep no longer consults the room clock
                 # at all, and WHAT MAKES THAT DELETION SAFE IS THE DELETED
-                # TERM'S OWN VACUITY: the 214 s term could not refuse a row,
-                # which test_the_sweep_does_not_consult_the_room_clock sets
-                # out. It took nothing away, so nothing here replaces it --
+                # TERM'S OWN VACUITY: the 214 s term could refuse no row a
+                # working flow produces, which
+                # test_the_sweep_does_not_consult_the_room_clock sets out; the
+                # one row it could have refused -- a room re-issued over a
+                # marker whose clear FAILED, for 214 s after the issue -- is
+                # the swallowed-error residual this block opens by pricing.
+                # It took nothing from a working flow, so nothing here
+                # replaces it --
                 # and an earlier cut of this paragraph said the clear did,
                 # while the cut that replaced it said the veto did. Two
                 # attributions for one deletion means neither was read off
@@ -38122,11 +38148,18 @@ async def team_queue_poll(steam_id: str, request: Request,
                 # and the poll that issues the room is a matter of two
                 # requests, and that is exactly the kind of reasoning this
                 # call exists to stop anyone having to do (#432, #330).
-                # This call is also the FOURTH writer that ends a deferral,
-                # beside the in-bound real-totals report, the revival funnels
-                # and the sweep tick; migration 326's header enumerates the
-                # four, and a marker that vanished with no tick, no report and
-                # no funnel in the log was cleared here.
+                # This call is also a writer that ends a deferral. A deferral
+                # ends when the row leaves ('active','dc_paused') with the
+                # marker still set -- a sweep tick, the report path's
+                # lead-forfeit and dc_incomplete exits, a completing game
+                # report, an admin void or completion, a queue-janitor or
+                # queue-leave cancel and the legacy dc_paused lapse among them
+                # -- or when the marker itself is cleared, which only the
+                # helper's callers do: the revival funnels and this call. The
+                # shape suite's writer census derives both lists from this file
+                # and migration 326's header names the roles without a count,
+                # so a marker that vanished from a row still open, with no
+                # funnel in the log, was cleared here.
                 # test_sept16_dc_fallback_shape.py counts the room-issue
                 # OPERATION file-wide and requires this call beside it.
                 await _team_clear_dc_fallback_marker(db, me["series_id"])
