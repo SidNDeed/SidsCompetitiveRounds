@@ -21,6 +21,7 @@ import gzip
 import inspect
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -709,13 +710,56 @@ def test_the_operator_prune_sits_under_the_prefix_gated_in_middleware():
     assert auto_logs.internal_router.prefix.startswith("/api/v1/internal/")
 
 
+def _assert_336_adds_kind(sql):
+    """What this module needs from migration 336, stated over the file's
+    statements rather than over one spelling of them.
+
+    336 is the text production applied (main's file, not the lane's draft).
+    It adds the column under a CATALOG GUARD -- a plain ADD COLUMN inside a
+    DO block that first asks pg_attribute whether bug_reports.kind exists --
+    where the draft this test was first written against said ADD COLUMN IF
+    NOT EXISTS. Both are an add that a re-run survives. An unguarded ADD
+    COLUMN is not, and neither is a guard that asks about another column or
+    another table, or one whose END IF comes before the ADD. Comments are
+    stripped first, so prose that mentions the statement cannot stand in for
+    it.
+    """
+    code = re.sub(r"--[^\n]*", "", sql)
+    adds = list(re.finditer(
+        r"\bALTER\s+TABLE\s+bug_reports\s+ADD\s+COLUMN\s+(IF\s+NOT\s+EXISTS\s+)?kind\b",
+        code, re.IGNORECASE))
+    assert len(adds) == 1, (
+        "336 must add bug_reports.kind exactly once, not %d times" % len(adds))
+    add = adds[0]
+    if not add.group(1):
+        guard = None
+        for blk in re.finditer(r"\bDO\s+(\$\w*\$)(.*?)\1", code,
+                               re.DOTALL | re.IGNORECASE):
+            if blk.start(2) <= add.start() < blk.end(2):
+                head = code[blk.start(2):add.start()]
+                found = list(re.finditer(r"\bIF\s+NOT\s+EXISTS\s*\((.*?)\)\s*THEN\b",
+                                         head, re.DOTALL | re.IGNORECASE))
+                if found and not re.search(r"\bEND\s+IF\b", head[found[-1].end():],
+                                           re.IGNORECASE):
+                    guard = found[-1]
+        assert guard is not None, (
+            "336 adds bug_reports.kind with neither IF NOT EXISTS nor a catalog "
+            "guard around it, so a re-run of the file fails on the second ADD")
+        cond = guard.group(1)
+        assert re.search(r"\bpg_attribute\b", cond, re.IGNORECASE), cond
+        assert re.search(r"'bug_reports'::regclass", cond, re.IGNORECASE), cond
+        assert re.search(r"\battname\s*=\s*'kind'", cond, re.IGNORECASE), cond
+    assert "BEGIN;" in code and "COMMIT;" in code        # #340: psql -f wraps nothing
+    assert "CHECK (kind IN ('report', 'auto'))" in code  # the two kinds written here
+    assert "RAISE EXCEPTION" in code                     # a post-check that can fail
+
+
 def test_migration_336_is_the_one_that_adds_the_column_this_module_writes():
     sql = open(os.path.join(HERE, "..", "sql", "336_bug_reports_kind.sql"),
                encoding="utf-8").read()
-    assert "ADD COLUMN IF NOT EXISTS kind" in sql
-    assert "BEGIN;" in sql and "COMMIT;" in sql          # #340: psql -f wraps nothing
-    assert "CHECK (kind IN ('report', 'auto'))" in sql
-    assert "RAISE EXCEPTION" in sql                       # a post-check that can fail
+    _assert_336_adds_kind(sql)
+
+
 def _named_function(tree, name):
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:

@@ -14489,8 +14489,10 @@ async def _locked_in_other_queue(db: AsyncSession, player_id, joining_table: str
 # took; (b) mutating that helper's contract globally, which reaches many
 # leave/poll/lobby routes and still misses ranked; (c) having it acquire
 # identities itself, when it only ever knows the caller's own group and never
-# the counterparties chosen later. The why is written up in
-# ai-collab/rejoin/A1-BRIEF.md. What survives is a caller-owned loop:
+# the counterparties chosen later. Those three rejections are the whole of
+# the why. backend/tests/test_a1_identity_formation.py executes the loop's
+# primitives, and test_a1_formation_concurrency.py proves on a live server
+# that the barrier blocks. What survives is a caller-owned loop:
 #
 #   1. finish and COMMIT any independent preflight maintenance
 #   2. UNLOCKED discovery of the exact roster and the full lock footprint
@@ -42442,7 +42444,8 @@ async def team_series_report_dc(
     # independent current-game fact separates a stale low from an incorrect high.
     # The series-wide live-points columns cannot stand in: they are stored with
     # GREATEST across the series, so in game 2 or 3 they still carry game 1's
-    # crossing. Designed and specified in ai-collab/sept16-bugs/LOG.md.
+    # crossing. Nothing records that fact yet, so this paragraph is the whole
+    # of its specification.
     total_points = (t1_points_total or 0) + (t2_points_total or 0)
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────

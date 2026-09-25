@@ -16,7 +16,9 @@ rows, deterministic created_at order, an internal-key ack, and an in-memory
 sent-but-unacked set so an ack retry does not repost. #167 calls the one
 remaining gap -- a crash between send and ack -- "the correct at-least-once
 tradeoff". Migration 330 adds what that queue genuinely lacked and reuses
-everything else. The deviation is recorded in ai-collab/v1410/STATE.md §38.
+everything else. This docstring is the record of that deviation: the
+schema half is backend/sql/330_mail_discord_relay.sql, and
+backend/tests/test_mail_discord_relay.py runs the fan-out over pending_dms.
 
 HOW A REPLY FINDS ITS THREAD, AND WHY IT IS NOT INFERRED. Every DM carries a
 `relay_code` on its own final line. The code is minted and stored in the SAME
