@@ -1053,59 +1053,60 @@ namespace CompetitiveRounds
         // game (Discord, the bot) the badge stands as drawn: name, framed
         // empty area.
         //
-        // The art area is [94,646,172,750] -- 78x104. Its HEIGHT is the badge
-        // frame's full clear run: BadgeFrame.png's rails own y 642-645 and
-        // y 751-754, so 646..750 is every row the art can use, and the card's
-        // top and bottom edges meet the box.
+        // The art box is [92,648,167,749] -- 75x101 -- and the backing plate
+        // is the same rect. It is INSET from the badge frame's opening on
+        // purpose. BadgeFrame.png's rails own y 642-645 and y 751-754, and
+        // the opening's inner corners are rounded (~12 px radius): the right
+        // rail's inner edge runs from x=163 at row 646 to x=175 at row 658,
+        // mirrored over rows 738-750. Both overlays are opaque rectangles --
+        // the plate in C_BADGE_DARK, and the capture composited over its
+        // backing colour at alpha 255 -- so the earlier rects, the backing at
+        // [92,646] 80x104 and the art box at [94,646] 78x104, painted over
+        // those rounded corners: 44 frame pixels under the backing and 34
+        // under the drawn card, counted by pixel centre over the frame's
+        // alpha. That was the bleed on the Top Card thumbnail's right-hand
+        // corners. At 75x101 both overlays cover 0 frame pixels; at rows 648
+        // and 748 the frame begins at x=167, exactly where the rect ends.
         //
-        // The WIDTH is 78 and not 72 because of what fills the height. The
-        // vanilla card body (Canvas/Front/Background, the rect the four
-        // corner marks sit on) measures 351.9 x 479.9, aspect 0.7333, and
-        // preserveAspect fits by whichever axis runs out first. At 72x104
-        // the box is aspect 0.6923 -- NARROWER than the card -- so the fit
-        // is width-limited and the card draws 98.2 px tall, 5.8 px short of
-        // the box, which is corner marks that do not reach the rails
-        // (observation 1, 2026-09-21). At 78x104 the box is 0.75, wider than
-        // the card, so the fit is HEIGHT-limited: the card draws the full
-        // 104 px and the corner marks land on 646 and 750. The 1.7 px that
-        // 78 has over the exact-match 76.26 is deliberate slack, so a small
-        // error in the measured card aspect cannot flip the fit back to
-        // width-limited and reopen the gap; it costs under a pixel either
-        // side. Measured from the asset: the frame's inner clear area is
-        // x 62..174, so 94..172 is inside it, and the badge name's own ink
-        // ends at x=89, so the art clears the name by five pixels.
+        // The fit is still HEIGHT-limited. The vanilla card body
+        // (Canvas/Front/Background, the rect the four corner marks sit on)
+        // measures 351.9 x 479.9, aspect 0.7333; the box is 75/101 = 0.7426,
+        // wider than the card, so preserveAspect draws the card 101 px tall
+        // and 74.06 px wide, centred at x=92.47. The 0.94 px the box has over
+        // the exact-match width is slack, so a small error in the measured
+        // card aspect cannot flip the fit to width-limited. The cost: the
+        // corner marks stop 2 px short of the top and bottom rails (rows
+        // 646-647 and 749-750 show the face's own badge interior) instead of
+        // sitting on them. Rail contact without the bleed needs a per-pixel
+        // trim of the capture's corners -- the pre-composite alpha kept per
+        // card and a thumbnail texture of its own, since the thumbnail shares
+        // the full sprite's texture -- and that is a follow-up, not this.
         //
         // preserveAspect (CreatePanelCentred) does the scaling, and what it
         // scales is CardSnapshot's THUMBNAIL: the capture cropped to the
         // card's corner band, not the whole 380x600 render. That crop is
-        // what makes the corner marks meet this box -- the full render
+        // what lines the corner marks up with this box -- the full render
         // carries the camera's 8% wobble pad and the letterbox the fixed RT
         // aspect adds, and fitting THAT lands the card's own edge ~9-10 px
-        // inside the box (observation 1, 2026-09-21). The band is still
-        // taller than it is wide, so the fit stays HEIGHT-limited: the band
-        // fills 104 px vertically, takes whatever width its aspect gives,
-        // centred, with the framed backing showing either side. A band
-        // wider than the box would fit to width instead, which is the same
-        // rule and still never overlaps the name.
+        // inside the box (observation 1, 2026-09-21).
         //
         // Before 9a these were 60x77 and 50x73, inset and offset up-left
         // inside the old silhouette; the art did not reach the box edges.
         //
-        // The BACKING starts eight pixels further left than the art, at
-        // x=92 rather than x=100. That strip is what a pre-9a server face
-        // draws its badge_mark in ([92,654,144,722]), and a client carrying
-        // these constants against such a face shows its left sliver as a
-        // white bar beside the card (observation 2, 2026-09-21). The real
-        // close for that is deploying the 9a renderer; this covers the strip
-        // meanwhile and is harmless once it is deployed. It does not reach
-        // the name: the 9a face draws the card name in the x 64..96 column,
-        // and the name's own INK ends at x=89 measured over nine card names
-        // at the fitter's 19 px (ai-collab probe, 2026-09-21) -- three
-        // pixels of clearance. A larger badge-name font would eat that, so
-        // the clearance belongs to the measurement, not to the rect's edge.
+        // The BACKING starts at x=92 because that strip is what a pre-9a
+        // server face draws its badge_mark in ([92,654,144,722]), and a client
+        // carrying these constants against such a face would otherwise show
+        // its left sliver as a white bar beside the card (observation 2,
+        // 2026-09-21); the plate still covers all of it. It does not reach the
+        // name: the 9a face draws the card name in the x 64..96 column, and
+        // the name's own INK ends at x=89 measured over nine card names at the
+        // fitter's 19 px (ai-collab probe, 2026-09-21) -- three pixels of
+        // clearance for the plate and 3.47 for the drawn card. A larger
+        // badge-name font would eat that, so the clearance belongs to the
+        // measurement, not to the rect's edge.
         // Fractions of the face, top-left origin.
-        private const float TC_BACK_X = 92f / 750f, TC_BACK_Y = 646f / 1050f, TC_BACK_W = 80f / 750f, TC_BACK_H = 104f / 1050f;
-        private const float TC_ART_X = 94f / 750f, TC_ART_Y = 646f / 1050f, TC_ART_W = 78f / 750f, TC_ART_H = 104f / 1050f;
+        private const float TC_BACK_X = 92f / 750f, TC_BACK_Y = 648f / 1050f, TC_BACK_W = 75f / 750f, TC_BACK_H = 101f / 1050f;
+        private const float TC_ART_X = 92f / 750f, TC_ART_Y = 648f / 1050f, TC_ART_W = 75f / 750f, TC_ART_H = 101f / 1050f;
         private static readonly Color C_BADGE_DARK = new Color(0.08f, 0.08f, 0.10f, 1f);
         private static readonly Color C_FACE_DIM = new Color(0.42f, 0.42f, 0.48f, 1f);
 
@@ -1164,7 +1165,7 @@ namespace CompetitiveRounds
             // The THUMBNAIL, not the full snapshot: cropped to the card's
             // corner band so the corner marks reach this box's top and
             // bottom edges and the card's own name plate stays out of a
-            // 104 px picture. The full sprite is unchanged for every other
+            // 101 px picture. The full sprite is unchanged for every other
             // consumer (CardImageLoader, TabStatsOverlay, the card preview).
             bool show = !string.IsNullOrEmpty(card) && CardSnapshot.TryGetThumbSprite(card, out spr) && spr != null;
             if (!show)
