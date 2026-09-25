@@ -3859,7 +3859,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:42560 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:42577 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3925,7 +3925,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:42372 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:42389 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -3995,7 +3995,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:42275 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:42292 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -5179,6 +5179,23 @@ app.add_middleware(
 # Tournament endpoints (router module).
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
+
+# Animal title ladders (v1.41.0 item 12): the READ route only,
+# GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
+# progress bars from. Pure read, no writes, safe on the replica.
+#
+# The module's per-series completion hook is NOT called from here. Wiring it
+# into the four completion paths is a separate change on a separate tree, and
+# until it lands this route answers games=0 for every account — which the
+# client renders as NOT STARTED per line rather than as a countdown.
+#
+# Deliberately not naming that hook's symbol in this comment:
+# test_title_ladders.py decides whether to run its per-mode coverage assertion
+# by testing whether the symbol appears in this file at all, so a mention here
+# would switch that test on and fail it against four paths this change was
+# told not to touch. The gate is a substring test; a comment is not a call.
+import title_ladders
+app.include_router(title_ladders.router)
 
 
 # ── Version gate ───────────────────────────────────────────────
@@ -24587,10 +24604,10 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 # the catalogue, rather than matched on the `title_ladder_` sku prefix: a
 # prefix is a naming convention that a later sku can join by accident and that
 # a rename silently empties, which is the shape of a check that cannot fail
-# (#306/#342). Importing the module does NOT wire the ladder — the router is
-# still unmounted and the progression hook is still uncalled; see that
-# module's docstring, which records this import as the one production
-# reference that exists.
+# (#306/#342). This import wires nothing by itself. The ladder's read route is
+# mounted separately, by the one include_router line beside the tournaments
+# router; the progression hook is still uncalled; that module's docstring
+# records both production references.
 import title_ladders as _title_ladders
 
 _GRANTED_ONLY_TITLE_SKUS = _title_ladders.GRANTED_ONLY_SKUS
