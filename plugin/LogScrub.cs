@@ -29,6 +29,10 @@ namespace CompetitiveRounds
     ///  * THE ACCOUNT NAME on its own, in running text, with nothing path- or
     ///    address-shaped around it.
     ///
+    /// A third pass, which runs first, replaces one credential the game itself
+    /// writes into its log: the Steam login ticket (THE STEAM LOGIN TICKET,
+    /// below the path patterns).
+    ///
     /// WHAT "LOCAL PATHS" DOES NOT MEAN (Codex r1 MEDIUM, this class's three
     /// findings). The old wording invited the reading "any local path is
     /// removed", and that was never what the passes do. Stated as a bound
@@ -45,13 +49,20 @@ namespace CompetitiveRounds
     ///    to survive both passes while the consent said otherwise (Codex
     ///    client r2 MEDIUM).
     ///
+    ///    REPLACED — the hex after `Session Ticket: ` when it runs to at least
+    ///    <see cref="MinTicketHexChars"/> hex digits, which is the Steam login
+    ///    ticket in the game's "Steam Login success. Session Ticket: " line.
+    ///    It becomes `[redacted len=&lt;hex digits&gt; sha256=&lt;first 8 hex&gt;]`, the
+    ///    same text the Harmony layer writes when it rewrites that line
+    ///    before either log file sees it.
+    ///
     ///    NOT REMOVED — a local directory that is neither under a Users folder
     ///    nor the profile (a game on D:\Games, a UNC share that does not go
     ///    through Users, a POSIX home); the account name where it sits inside
     ///    a path or an address this process did not recognise, because it is
     ///    not "on its own" there; Steam IDs; display or player names; room and
     ///    series IDs; IP addresses; e-mail addresses; the machine's name;
-    ///    tokens.
+    ///    any token or credential other than that ticket.
     ///
     /// The Settings caption says the same thing in a player's words, and the
     /// two are edited together: a consent that claims more than this list is
@@ -180,6 +191,86 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
+        // ── THE STEAM LOGIN TICKET ──────────────────────────────────────
+        //
+        // ROUNDS' own Steam runtime (SteamPlatformRuntime.dll,
+        // FriendlyFoe.Steam.SteamRuntimeManager.OnAuthCallback) writes the
+        // first web-API ticket delivered to its callback into the log as
+        // "Steam Login success. Session Ticket: <hex>". The plugin requests
+        // its own ticket (SteamAuth), so that hex can be the credential
+        // /api/v1/auth/steam exchanges for a session, and the line lands in
+        // LogOutput.log and Player.log, both of which ride every bug report
+        // and automatic upload.
+        //
+        // Two layers share the helpers below. SteamTicketLogRedaction, a
+        // Harmony prefix on UnityEngine.Logger.Log, rewrites the line before
+        // either file sees it. Pass 0 of Scrub rewrites it in a bundle read
+        // from a log the game wrote before that patch was applied. Both write
+        // RedactedTicket's text, and the self-test asserts they agree on the
+        // game's line, so the two layers cannot drift into different output.
+        //
+        // The fingerprint is the first 8 hex digits of the SHA-256 of the hex
+        // text exactly as logged (the uppercase BitConverter form, the same
+        // string SteamAuth.OnWebTicket builds for the exchange). It is enough
+        // to tell whether two logs carry the same ticket; 32 bits of a digest
+        // do not give the ticket back.
+
+        /// <summary>The game's line up to and including the space before the
+        /// hex. The Harmony layer matches it at the start of a message.</summary>
+        internal const string SteamTicketLinePrefix = "Steam Login success. Session Ticket: ";
+
+        /// <summary>What pass 0 and the residue counter anchor on: the tail of
+        /// the prefix, so the line is still found behind a log-level tag or a
+        /// timestamp.</summary>
+        internal const string TicketMarker = "Session Ticket: ";
+
+        /// <summary>The shortest hex run after <see cref="TicketMarker"/> that
+        /// pass 0 treats as a ticket. A web-API ticket is hundreds of hex
+        /// digits long; the floor keeps a short hex word after the same two
+        /// words in some unrelated line out of the rule. Shared with the
+        /// residue counter for the reason <see cref="NameBoundaryBefore"/> is:
+        /// it is the policy, not an implementation of it.</summary>
+        internal const int MinTicketHexChars = 32;
+
+        private const string RedactedOpen = "[redacted ";
+
+        private static readonly Regex TicketPattern =
+            new Regex(Regex.Escape(TicketMarker) + "([0-9A-Fa-f]{" + MinTicketHexChars + ",})",
+                      RegexOptions.CultureInvariant);
+
+        /// <summary>`[redacted len=&lt;hex digits&gt; sha256=&lt;first 8 hex&gt;]` for
+        /// a ticket's hex text, the digest taken over that text's UTF-8 bytes
+        /// (one byte per hex digit).</summary>
+        internal static string RedactedTicket(string hex)
+        {
+            if (hex == null) hex = "";
+            byte[] digest;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                digest = sha.ComputeHash(Encoding.UTF8.GetBytes(hex));
+            var b = new StringBuilder(RedactedOpen).Append("len=").Append(hex.Length).Append(" sha256=");
+            for (int i = 0; i < 4; i++) b.Append(digest[i].ToString("x2"));
+            return b.Append(']').ToString();
+        }
+
+        /// <summary>The Harmony layer's rule: true, with the rewritten line,
+        /// when <paramref name="message"/> starts with
+        /// <see cref="SteamTicketLinePrefix"/>. Everything after the prefix is
+        /// taken as the ticket, whatever its shape: the prefix is the game's
+        /// own fixed text, so a line that carries it carries the ticket, and a
+        /// shape test here could only ever pass one through. A line already in
+        /// the redacted form comes back false, so a second pass is a no-op.
+        /// </summary>
+        internal static bool TryRedactSteamTicketLine(string message, out string redacted)
+        {
+            redacted = null;
+            if (message == null || !message.StartsWith(SteamTicketLinePrefix, StringComparison.Ordinal))
+                return false;
+            string rest = message.Substring(SteamTicketLinePrefix.Length);
+            if (rest.StartsWith(RedactedOpen, StringComparison.Ordinal)) return false;
+            redacted = SteamTicketLinePrefix + RedactedTicket(rest);
+            return true;
+        }
+
         /// <summary>Scrub with this process's own account name and profile
         /// directory. Reading them can throw on a locked-down host, which is
         /// why both reads are separately guarded and a failure to read leaves
@@ -202,6 +293,13 @@ namespace CompetitiveRounds
             {
                 int n = 0;
                 string s = text;
+
+                // 0. The Steam login ticket the game writes into its own log
+                //    (THE STEAM LOGIN TICKET, above). First, so no later pass
+                //    ever sees the hex; counted from the evaluator like the
+                //    others. The marker stays and the hex becomes the same
+                //    text the Harmony layer writes.
+                s = TicketPattern.Replace(s, m => { n++; return TicketMarker + RedactedTicket(m.Groups[1].Value); });
 
                 // 1. The profile directory as this process reports it, with
                 //    every separator inside it matched in ANY spelling. Runs
@@ -282,7 +380,8 @@ namespace CompetitiveRounds
         // control is silent is measuring nothing.
 
         /// <summary>Counts the residues the scrub exists to remove: any
-        /// `Users&lt;sep&gt;` in the four spellings, plus the bare account name.
+        /// `Users&lt;sep&gt;` in the four spellings, plus the bare account name,
+        /// plus a ticket-length hex run after `Session Ticket: `.
         /// This is the ASSERTION function — it is deliberately not the scrub's
         /// own regex set reused, so a broken pattern cannot certify itself.
         /// </summary>
@@ -312,7 +411,32 @@ namespace CompetitiveRounds
                                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                 n += rx.Matches(text).Count;
             }
+            // A ticket still in the text, found by an ordinal scan for the
+            // marker and a hand-counted hex run, not by TicketPattern: the
+            // same independence the path check above keeps from the scrub's
+            // regexes.
+            n += CountTicketResidues(text);
             return n;
+        }
+
+        private static int CountTicketResidues(string text)
+        {
+            int n = 0, i = 0;
+            while (true)
+            {
+                int at = text.IndexOf(TicketMarker, i, StringComparison.Ordinal);
+                if (at < 0) break;
+                int start = at + TicketMarker.Length, j = start;
+                while (j < text.Length && IsHexDigit(text[j])) j++;
+                if (j - start >= MinTicketHexChars) n++;
+                i = start;
+            }
+            return n;
+        }
+
+        private static bool IsHexDigit(char c)
+        {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
         }
 
         internal sealed class SelfTestResult
@@ -355,11 +479,35 @@ namespace CompetitiveRounds
             return b.ToString();
         }
 
+        /// <summary>A hex run of <paramref name="length"/> digits, assembled at
+        /// run time like the paths above, so the shipped DLL carries no
+        /// ticket-shaped literal for a later scan to have to explain away.
+        /// Every digit 0-F occurs in each run of 16, so the lowercase form
+        /// really exercises a-f.</summary>
+        private static string SyntheticHex(int length, bool upper)
+        {
+            string digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+            var b = new StringBuilder(length);
+            for (int i = 0; i < length; i++) b.Append(digits[(i * 7 + 3) % 16]);
+            return b.ToString();
+        }
+
         internal static SelfTestResult SelfTest()
         {
             var r = new SelfTestResult();
             const string user = "testuser";
             string profile = JoinUsers("C", Bsl, user);
+
+            // The ticket fixtures (pass 0). 468 digits is a 234-byte ticket in
+            // BitConverter's uppercase form, the game's own shape; the
+            // lowercase run sits exactly on the floor.
+            string ticketUpper = SyntheticHex(468, true);
+            string ticketLower = SyntheticHex(MinTicketHexChars, false);
+            string underFloor = SyntheticHex(MinTicketHexChars - 1, true);
+            string digest64 = SyntheticHex(64, false);
+            string ticketLine = SteamTicketLinePrefix + ticketUpper;
+            string redactedLine = SteamTicketLinePrefix + RedactedOpen + "len=5120 sha256=0a1b2c3d]";
+            const string tag = "[Info   : Unity Log] ";
 
             // (input, what the scrub must leave behind unchanged, "neg" when
             // the case must survive with NO replacement at all)
@@ -422,6 +570,21 @@ namespace CompetitiveRounds
                         Bsl + "testuser" + Bsl, "neg" },
                 new[] { "mail from testuser@example.com bounced", "testuser@example.com", "neg" },
                 new[] { "encoded %5Ctestuser%5Clog", "%5Ctestuser%5C", "neg" },
+                // THE STEAM LOGIN TICKET. The game's own line; a lowercase run
+                // exactly on the floor behind a BepInEx-style tag, so the
+                // marker is mid-line; and three that must come back untouched:
+                // a line already in the redacted form, a run one digit under
+                // the floor, and a 64-digit digest in a line with no marker.
+                // The fourth element, where present, is what the report prints
+                // in place of the input, so the report never writes a
+                // ticket-shaped run into LogOutput.log itself.
+                new[] { ticketLine, SteamTicketLinePrefix + RedactedOpen + "len=" + ticketUpper.Length + " sha256=", "",
+                        SteamTicketLinePrefix + "<" + ticketUpper.Length + " synthetic hex digits, uppercase>" },
+                new[] { tag + TicketMarker + ticketLower, TicketMarker + RedactedOpen + "len=" + ticketLower.Length + " sha256=", "",
+                        tag + TicketMarker + "<" + ticketLower.Length + " synthetic hex digits, lowercase>" },
+                new[] { redactedLine, redactedLine, "neg" },
+                new[] { tag + TicketMarker + underFloor, TicketMarker + underFloor, "neg" },
+                new[] { "bundle sha256 " + digest64 + " verified", digest64, "neg" },
             };
 
             foreach (var c in cases)
@@ -451,10 +614,41 @@ namespace CompetitiveRounds
                         .Append("before=").Append(before)
                         .Append(" after=").Append(after)
                         .Append(" reps=").Append(reps)
-                        .Append(" | in=").Append(input)
+                        .Append(" | in=").Append(c.Length > 3 ? c[3] : input)
                         .Append(" | out=").Append(outp ?? "(null)")
                         .Append('\n');
             }
+
+            // THE TICKET HELPERS, run directly. A known-answer vector for the
+            // digest (the SHA-256 of "abc" begins ba7816bf, FIPS 180-2
+            // appendix B.1), so a wrong hash or a wrong byte encoding reds here
+            // rather than in a reader's comparison. Then the two layers on the
+            // game's line: the Harmony helper's rewrite must equal pass 0's
+            // output exactly and leave no residue, and the helper must decline
+            // a line already redacted and a line without the prefix.
+            string kat = RedactedTicket("abc");
+            bool katOk = kat == RedactedOpen + "len=3 sha256=ba7816bf]";
+            if (katOk) r.Passed++; else r.Failed++;
+            r.Report.Append(katOk ? "PASS " : "FAIL ").Append("TICKET known-answer ").Append(kat).Append('\n');
+
+            string viaHarmony, ignored;
+            bool took = TryRedactSteamTicketLine(ticketLine, out viaHarmony);
+            int passReps;
+            string viaPass = Scrub(ticketLine, user, profile, out passReps);
+            bool agree = took && viaHarmony != null && viaHarmony == viaPass;
+            bool declinesRedacted = !TryRedactSteamTicketLine(redactedLine, out ignored);
+            bool declinesOther = !TryRedactSteamTicketLine("Steam Login success.", out ignored);
+            bool layersOk = agree && passReps == 1
+                            && CountResidues(ticketLine, user) > 0 && CountResidues(viaHarmony, user) == 0
+                            && declinesRedacted && declinesOther;
+            if (layersOk) r.Passed++; else r.Failed++;
+            r.Report.Append(layersOk ? "PASS " : "FAIL ")
+                    .Append("TICKET layers agree=").Append(agree)
+                    .Append(" reps=").Append(passReps)
+                    .Append(" declines-redacted=").Append(declinesRedacted)
+                    .Append(" declines-other=").Append(declinesOther)
+                    .Append(" | out=").Append(viaHarmony ?? "(null)")
+                    .Append('\n');
 
             // Negative control on the whole corpus: with the scrub NOT applied
             // the residue counter must be loudly non-zero, or every PASS above
