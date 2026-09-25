@@ -31,6 +31,7 @@ import itertools
 import os
 import pathlib
 import re
+import xml.etree.ElementTree as ET
 
 LF = chr(10)
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -3653,6 +3654,203 @@ def test_r12_l1_the_whole_client_source_map_is_the_compile_set(tmp_path, monkeyp
           "glob refused" % refusals)
 
 
+# ROUND 12 COLD LENS (R12CL1): an MSBuild file that swaps ApiClient.cs for a
+# file outside every map, and one that carries only a property.  `Zz*` names
+# no plugin member.
+_R12CL_SWAP = ("<Project>" + LF + "  <ItemGroup>" + LF
+               + '    <Compile Remove="ApiClient.cs" />' + LF
+               + '    <Compile Include="..' + chr(92) + "ZzElsewhere" + chr(92)
+               + 'ApiClient.cs" />' + LF + "  </ItemGroup>" + LF + "</Project>" + LF)
+_R12CL_QUIET = ("<Project>" + LF + "  <PropertyGroup>" + LF
+                + "    <ZzDebugProfile>zz</ZzDebugProfile>" + LF
+                + "  </PropertyGroup>" + LF + "</Project>" + LF)
+
+
+def _r12cl_nuget_props(extra=""):
+    """A NuGet-generated props file in NuGet's own shape -- one package content
+    file as a Compile item, one package build file as an Import -- with
+    `extra` before its end."""
+    bs = chr(92)
+    pkg = "$(NuGetPackageRoot)zz.package" + bs + "1.0.0" + bs
+    content = pkg + "contentfiles" + bs + "cs" + bs + "any" + bs + "ZzAttribute.cs"
+    build = pkg + "build" + bs + "Zz.Package.props"
+    return ('<?xml version="1.0" encoding="utf-8" standalone="no"?>' + LF
+            + '<Project ToolsVersion="14.0" '
+              'xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + LF
+            + "  <PropertyGroup>" + LF
+            + "    <NuGetPackageRoot Condition=\" '$(NuGetPackageRoot)' == '' \">"
+              "$(UserProfile)" + bs + ".nuget" + bs + "packages" + bs
+            + "</NuGetPackageRoot>" + LF + "  </PropertyGroup>" + LF
+            + "  <ItemGroup Condition=\" '$(Language)' == 'C#' \">" + LF
+            + '    <Compile Include="' + content + '" Condition="Exists(\''
+            + content + '\')">' + LF
+            + "      <NuGetPackageId>Zz.Package</NuGetPackageId>" + LF
+            + "    </Compile>" + LF + "  </ItemGroup>" + LF
+            + "  <ImportGroup>" + LF
+            + '    <Import Project="' + build + '" Condition="Exists(\'' + build
+            + '\')" />' + LF + "  </ImportGroup>" + LF + extra + "</Project>" + LF)
+
+
+def test_r12cl1_every_file_msbuild_reads_for_the_project_is_held_by_the_gate(tmp_path):
+    """R12CL1 (B2, B10, B11, B16, B19, through R11-L1's compile set): the gate
+    that makes the default compile glob the authority reads every file
+    MSBuild reads for the project from plugin/ itself -- the project file,
+    its .user file and every extension file under obj/ -- and refuses a
+    Directory.Packages.props or a Directory.Build.rsp as it refuses the
+    Directory.Build files.  On the tree nothing refuses.  On a scratch project
+    each case is judged by the gate and by the first-pass gate: a .user file
+    or an extension file that swaps ApiClient.cs for a file outside every
+    map, an Import in either, a property in the project file naming a file
+    MSBuild imports, a Directory.Packages.props, a Directory.Build.rsp,
+    NuGet's own props or targets carrying anything but NuGet's shape, and --
+    the sibling forms -- a property redefining the default glob, an Analyzer
+    item, a task's or a project reference's output into the Compile or
+    Analyzer items and an SDK reference each REFUSE the compile set, where
+    the first-pass gate gave no reason; NuGet's own shape, a .user or
+    extension file carrying only a property, and a task output adding
+    another item type are accepted."""
+    projects = sorted(p for p in PLUGIN.iterdir()
+                      if p.is_file() and p.suffix.lower() == ".csproj")
+    files, listing = _r12_msbuild_files(PLUGIN, projects)
+    assert listing == [], listing
+    problems = _r12_compile_authority_problems(PLUGIN)
+    assert problems == [], problems
+    shaped = 0
+    for _role, p, kind in files:
+        if kind == "nuget":
+            shaped += len([el for el in ET.fromstring(p.read_bytes()).iter()
+                           if _r12_local(el.tag).lower() in ("compile", "import")])
+    print("R12CL1 TREE: the gate read %d MSBuild file(s) of the project -- %s; "
+          "%d Compile item(s) and Import(s) in NuGet's own files, each in NuGet's "
+          "shape; no reason" % (len(files), ", ".join(r for r, _p, _k in files),
+                                shaped))
+
+    scratch = tmp_path / "plugin"
+    (scratch / "obj").mkdir(parents=True)
+    proj = scratch / "CompetitiveRounds.csproj"
+    proj.write_bytes(('<Project Sdk="Microsoft.NET.Sdk">' + LF + "</Project>"
+                      + LF).encode("utf-8"))
+    (scratch / "ApiClient.cs").write_bytes(_R12_NESTED_INERT.encode("utf-8"))
+    assert _r12_compile_authority_problems(scratch) == []
+    bs = chr(92)
+    user = "CompetitiveRounds.csproj.user"
+    ext_t = "obj/CompetitiveRounds.csproj.zz.targets"
+    ext_p = "obj/CompetitiveRounds.csproj.zz.props"
+    ng_p = "obj/CompetitiveRounds.csproj.nuget.g.props"
+    ng_t = "obj/CompetitiveRounds.csproj.nuget.g.targets"
+    imp = ("<Project>" + LF + '  <Import Project="zz.targets" />' + LF
+           + "</Project>" + LF)
+    hook = ('<Project Sdk="Microsoft.NET.Sdk">' + LF + "  <PropertyGroup>"
+            "<CustomAfterMicrosoftCommonTargets>zz.targets"
+            "</CustomAfterMicrosoftCommonTargets></PropertyGroup>" + LF
+            + "</Project>" + LF)
+    def sdk_body(inner):
+        return '<Project Sdk="Microsoft.NET.Sdk">' + LF + inner + "</Project>" + LF
+
+    def plain_body(inner):
+        return "<Project>" + LF + inner + "</Project>" + LF
+
+    output = ('  <Target Name="ZzTarget" BeforeTargets="CoreCompile"><CreateItem '
+              'Include="%s"><Output TaskParameter="Include" ItemName="%s" />'
+              "</CreateItem></Target>" + LF)
+    elsewhere = ".." + bs + "ZzElsewhere" + bs + "ApiClient.cs"
+    cases = (
+        ("a .user file that swaps ApiClient.cs for a file outside every map",
+         user, _R12CL_SWAP, True),
+        ("a .user file carrying an Import", user, imp, True),
+        ("a .user file carrying only a property", user, _R12CL_QUIET, False),
+        ("an extension targets file under obj/ that swaps ApiClient.cs",
+         ext_t, _R12CL_SWAP, True),
+        ("an extension props file under obj/ carrying an Import", ext_p, imp,
+         True),
+        ("an extension props file under obj/ carrying only a property",
+         ext_p, _R12CL_QUIET, False),
+        ("NuGet's props in NuGet's own shape", ng_p, _r12cl_nuget_props(),
+         False),
+        ("NuGet's props carrying a Compile Remove of ApiClient.cs", ng_p,
+         _r12cl_nuget_props('  <ItemGroup><Compile Remove="ApiClient.cs" />'
+                            "</ItemGroup>" + LF), True),
+        ("NuGet's props carrying a Compile Include outside the package root",
+         ng_p, _r12cl_nuget_props('  <ItemGroup><Compile Include="..' + bs
+                                  + "ZzElsewhere" + bs + 'ApiClient.cs" />'
+                                  "</ItemGroup>" + LF), True),
+        ("NuGet's props naming a package file that climbs out of the package "
+         "root", ng_p, _r12cl_nuget_props(
+             '  <ItemGroup><Compile Include="$(NuGetPackageRoot)..' + bs + ".."
+             + bs + "ZzElsewhere" + bs + 'ApiClient.cs" /></ItemGroup>' + LF),
+         True),
+        ("NuGet's props naming two files in one Include", ng_p,
+         _r12cl_nuget_props('  <ItemGroup><Compile Include="$(NuGetPackageRoot)zz'
+                            + bs + "a.cs;.." + bs + 'ApiClient.cs" /></ItemGroup>'
+                            + LF), True),
+        ("NuGet's targets carrying an Import outside the package root", ng_t,
+         "<Project>" + LF + '  <Import Project="..' + bs + 'zz.targets" />' + LF
+         + "</Project>" + LF, True),
+        ("NuGet's props that is not XML", ng_p, "<Project>" + LF, True),
+        ("the project file naming a file MSBuild imports through a property",
+         "CompetitiveRounds.csproj", hook, True),
+        ("a Directory.Packages.props in the project folder",
+         "Directory.Packages.props", "<Project />" + LF, True),
+        ("a Directory.Build.rsp in the project folder", "Directory.Build.rsp",
+         "-p:EnableDefaultCompileItems=false" + LF, True),
+        ("the project file excluding a folder from the default glob",
+         "CompetitiveRounds.csproj", sdk_body(
+             "  <PropertyGroup><DefaultItemExcludesInProjectFolder>Zz/**"
+             "</DefaultItemExcludesInProjectFolder></PropertyGroup>" + LF), True),
+        ("a .user file redefining the default glob's extension", user,
+         plain_body("  <PropertyGroup><DefaultLanguageSourceExtension>.zz"
+                    "</DefaultLanguageSourceExtension></PropertyGroup>" + LF),
+         True),
+        ("the project file carrying an Analyzer item", "CompetitiveRounds.csproj",
+         sdk_body('  <ItemGroup><Analyzer Include="..' + bs + 'ZzGenerator.dll" />'
+                  "</ItemGroup>" + LF), True),
+        ("a .user file adding a Compile item through a task output", user,
+         plain_body(output % (elsewhere, "Compile")), True),
+        ("an extension props file under obj/ taking a project reference's "
+         "output as an Analyzer", ext_p, plain_body(
+             '  <ItemGroup><ProjectReference Include="..' + bs + "ZzGen" + bs
+             + 'ZzGen.csproj" OutputItemType="Analyzer" /></ItemGroup>' + LF),
+         True),
+        ("an extension targets file under obj/ referencing an SDK", ext_t,
+         plain_body('  <Sdk Name="Zz.Sdk" />' + LF), True),
+        ("a .user file naming an SDK on its Project element", user,
+         '<Project Sdk="Zz.Sdk">' + LF + "</Project>" + LF, True),
+        ("a .user file whose task output adds another item type", user,
+         plain_body(output % ("zz", "ZzItems")), False),
+    )
+    refused = accepted = 0
+    for label, rel, body, want in cases:
+        f = scratch / rel
+        before = f.read_bytes() if f.exists() else None
+        f.write_bytes(body.encode("utf-8"))
+        try:
+            got = _r12_compile_authority_problems(scratch)
+            first = _r12_compile_authority_problems_first_pass(scratch)
+            if want:
+                assert got, "not refused: " + label
+                assert first == [], ("the first-pass gate read it", label, first)
+                try:
+                    _r12_compile_sources(scratch)
+                    raise AssertionError("the compile set was read past: " + label)
+                except AssertionError as exc:
+                    assert "not the default compile glob" in str(exc), (label,
+                                                                        str(exc))
+                refused += 1
+                print("R12CL1 CASE %s : REFUSED -- %s; the first-pass gate gave "
+                      "no reason" % (label, got[0]))
+            else:
+                assert got == [], (label, got)
+                assert sorted(_r12_compile_sources(scratch)) == ["ApiClient.cs"], label
+                accepted += 1
+                print("R12CL1 CASE %s : accepted" % label)
+        finally:
+            if before is None:
+                f.unlink()
+            else:
+                f.write_bytes(before)
+    assert (refused, accepted) == (20, 4), (refused, accepted)
+    print("R12CL1 GATE: %d case(s) refused where the first-pass gate gave no "
+          "reason; %d accepted" % (refused, accepted))
 def test_the_dc_fallback_watch_dies_with_the_room():
     """A watch carried across a room edge waits on an ACTOR NUMBER that now
     names somebody else.  Same lifetime, and the same three edges, as the
@@ -3837,16 +4035,57 @@ _CS_MEMBER = re.compile(
 # REFUSES -- raises, and every check built on it goes red -- when the project
 # folder holds other than one project file, the project is not SDK-style,
 # the project file carries a Compile item, a default-items switch, a
-# DefaultItemExcludes or output/intermediate path override, or an Import, or
-# a Directory.Build.props/.targets stands in plugin/ or any folder above it.
-# A folder the walk cannot list raises too.  Each refusal names the file by
-# its role, never by its path.
+# DefaultItemExcludes or output/intermediate path override, an Import or a
+# property naming a file MSBuild imports, or a Directory.Build.props/.targets
+# stands in plugin/ or any folder above it; the R12CL1 paragraphs below add
+# the files and the forms of the round-12 second pass.  A folder the walk
+# cannot list raises too.  Each refusal names the file by its role, never by
+# its path.
+#
+# ROUND-12 COLD LENS (R12CL1) -- EVERY FILE MSBUILD READS FOR THIS PROJECT
+# FROM plugin/ ITSELF IS HELD BY THE GATE, NOT THE PROJECT FILE ALONE.  The
+# SDK's own files import, besides the project file, `<project file>.user`
+# beside it (Microsoft.Common.CurrentVersion.targets) and every
+# `obj/<project file>.*.props` and `.*.targets` (Microsoft.Common.props and
+# Microsoft.Common.targets, through MSBuildProjectExtensionsPath, which is
+# obj/ while no override stands); NuGet.props imports a
+# Directory.Packages.props found in the project folder or above, and
+# MSBuild's command line reads a Directory.Build.rsp found there.
+# `_r12_msbuild_files` lists the .user file and the extension files beside
+# the project file, and the gate holds each to the same forms as the project
+# file, with one exception: NuGet's own `<project file>.nuget.g.props` and
+# `.nuget.g.targets` name the restored packages' content files as Compile
+# items and their build files as Imports, so there each Compile item must be
+# an Include of ONE file named under $(NuGetPackageRoot) -- no parent
+# segment, wildcard, list separator or further expansion -- and each Import
+# must name one .props or .targets file there the same way; any other
+# Compile item there, a Remove or an Update among them, refuses.  A
+# Directory.Packages.props or a Directory.Build.rsp in plugin/ or above
+# refuses by its presence, like the Directory.Build files.  A file the gate
+# cannot read, or cannot read as XML where it has to, refuses.
+#
+# THE SIBLING FORMS (R12CL1, the same pass): the forms themselves were swept
+# for other ways a file can move the compile off the default glob, and four
+# more refuse wherever the gate reads them -- a property redefining the
+# glob, its extension (DefaultLanguageSourceExtension) or its project-folder
+# exclude (DefaultItemExcludesInProjectFolder, DefaultExcludesInProjectFolder,
+# which the DefaultItemExcludes pattern never matched); an Analyzer item,
+# which can add generated code to the compile; a task's or a project
+# reference's output into the Compile or Analyzer items, or into an item
+# type named by an expansion; and an SDK reference other than the project's
+# own Microsoft.NET.Sdk, which imports that SDK's files.
 #
 # WHAT THIS DOES NOT SEE, so no sentence above is read as a promise about
-# it: a source the build adds from outside plugin/'s own tree -- a package's
-# content files, a file the SDK generates under obj/ (the assembly-info file)
-# -- is compiled but is not delivered plugin source; the notes carry it as a
-# residual.
+# it: a source the build adds from outside plugin/'s own tree -- a restored
+# package's content file (NuGet's props in this tree names one today), a
+# file the SDK generates under obj/ (the assembly-info file), the code a
+# restored package's analyzers generate -- is compiled but is not delivered
+# plugin source; a target that runs the compiler on inputs of its own,
+# rather than through the Compile items, is not modelled; and a restored
+# package's own build files, the package root NuGet's files name, and
+# MSBuild's machine-wide and per-user extension folders (the ImportBefore
+# and ImportAfter wildcards) lie outside plugin/'s tree and are not read.
+# The notes carry these as a residual.
 _R12_AUTHORITY_FORMS = (
     ("a Compile item", re.compile(r"<\s*Compile\b", re.I)),
     ("a default-items switch",
@@ -3855,15 +4094,145 @@ _R12_AUTHORITY_FORMS = (
     ("an output or intermediate path override",
      re.compile(r"\bBase(?:Output|IntermediateOutput)Path\b", re.I)),
     ("an Import", re.compile(r"<\s*Import\b", re.I)),
+    ("a property naming a file MSBuild imports", re.compile(
+        r"<\s*(?:Custom(?:Before|After)\w+|DirectoryBuild(?:Props|Targets)Path"
+        r"|DirectoryPackagesPropsPath|MSBuildProjectExtensionsPath"
+        r"|Import(?:DirectoryBuild|DirectoryPackages|ProjectExtension"
+        r"|UserLocationsByWildcard|ByWildcard)\w*)\b", re.I)),
+    # the sibling forms of the second pass (R12CL1)
+    ("a property redefining the default compile glob", re.compile(
+        r"\bDefault(?:LanguageSourceExtension|(?:Item)?ExcludesInProjectFolder)\b",
+        re.I)),
+    ("an Analyzer item", re.compile(r"<\s*Analyzer\b", re.I)),
+    ("an output into the Compile or Analyzer items", re.compile(
+        r"\b(?:ItemName|OutputItemType)\s*=\s*([\"'])\s*"
+        r"(?:(?:Compile|Analyzer)\s*\1|[$@%]\()", re.I)),
+    ("an SDK reference", re.compile(
+        r"<\s*Sdk\b|\bSdk\s*=\s*([\"'])(?!Microsoft\.NET\.Sdk\1)", re.I)),
 )
+# the two forms NuGet's own generated files carry, held to NuGet's shape
+_R12_NUGET_SHAPED = ("a Compile item", "an Import")
+_R12_PACKAGE_FILE = re.compile(r"\$\(NuGetPackageRoot\)(?!.*\.\.)[A-Za-z0-9_.+\-\\/]+")
 _R12_SDK_PROJECT = re.compile(r'<\s*Project\s+Sdk\s*=\s*"Microsoft\.NET\.Sdk"')
 _R12_EXCLUDED_TOP = ("bin", "obj")
-_R12_BUILD_FILES = ("Directory.Build.props", "Directory.Build.targets")
+_R12_BUILD_FILES = ("Directory.Build.props", "Directory.Build.targets",
+                    "Directory.Packages.props", "Directory.Build.rsp")
+
+
+def _r12_local(tag):
+    """An element's name without its XML namespace."""
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _r12_msbuild_files(plugin_dir, projects):
+    """([(role, path, kind)], [problem]) -- every file MSBuild reads for the
+    project in `plugin_dir` from plugin/ itself, the Directory files aside:
+    each project file, the `.user` file beside it, and every extension file
+    under plugin/'s own obj/ folder (R12CL1).  `kind` is `project`, `user`,
+    `nuget` (NuGet's own generated props or targets) or `extension`."""
+    files, problems = [], []
+    for p in projects:
+        files.append(("the project file", p, "project"))
+        user = p.with_name(p.name + ".user")
+        if user.exists():
+            files.append(("the project's .user file", user, "user"))
+    try:
+        ext_dirs = sorted(d for d in pathlib.Path(plugin_dir).iterdir()
+                          if d.name.lower() == "obj" and d.is_dir())
+    except OSError as exc:
+        return files, ["the project folder could not be listed (%s)"
+                       % type(exc).__name__]
+    for d in ext_dirs:
+        try:
+            entries = sorted(d.iterdir())
+        except OSError as exc:
+            problems.append("the project's obj/ folder could not be listed (%s)"
+                            % type(exc).__name__)
+            continue
+        for f in entries:
+            low = f.name.lower()
+            for p in projects:
+                stem = p.name.lower() + "."
+                if not (low.startswith(stem) and low.endswith((".props", ".targets"))):
+                    continue
+                ext = low.rsplit(".", 1)[1]
+                if low in (stem + "nuget.g.props", stem + "nuget.g.targets"):
+                    files.append(("NuGet's generated " + ext + " file", f, "nuget"))
+                else:
+                    files.append(("a project extension file (." + ext
+                                  + ") under obj/", f, "extension"))
+                break
+    return files, problems
+
+
+def _r12_nuget_shape_problems(role, path):
+    """[reason] -- each Compile item or Import in NuGet's generated file at
+    `path` that is not in NuGet's shape (R12CL1)."""
+    try:
+        root = ET.fromstring(path.read_bytes())
+    except (OSError, ET.ParseError) as exc:
+        return ["%s could not be read as XML (%s)" % (role, type(exc).__name__)]
+    out = []
+    for el in root.iter():
+        name = _r12_local(el.tag).lower()
+        attrs = dict((k.lower(), v.strip()) for k, v in el.attrib.items())
+        if name == "compile":
+            if (set(attrs) - {"include", "condition"}
+                    or not _R12_PACKAGE_FILE.fullmatch(attrs.get("include", ""))):
+                out.append("%s carries a Compile item that is not one package "
+                           "content file" % role)
+        elif name == "import":
+            proj = attrs.get("project", "")
+            if (set(attrs) - {"project", "condition"}
+                    or not _R12_PACKAGE_FILE.fullmatch(proj)
+                    or not proj.lower().endswith((".props", ".targets"))):
+                out.append("%s carries an Import that is not one package build "
+                           "file" % role)
+    return out
 
 
 def _r12_compile_authority_problems(plugin_dir):
     """[reason] -- why the SDK default compile glob is NOT the authority for
-    what the project in `plugin_dir` compiles; [] when it is (R11-L1)."""
+    what the project in `plugin_dir` compiles; [] when it is (R11-L1; R12CL1
+    for the files MSBuild reads besides the project file)."""
+    plugin_dir = pathlib.Path(plugin_dir)
+    projects = sorted(p for p in plugin_dir.iterdir()
+                      if p.is_file() and p.suffix.lower() == ".csproj")
+    out = []
+    if len(projects) != 1:
+        out.append("the project folder holds %d project files, not one"
+                   % len(projects))
+    files, listing = _r12_msbuild_files(plugin_dir, projects)
+    out.extend(listing)
+    for role, p, kind in files:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            out.append("%s could not be read (%s)" % (role, type(exc).__name__))
+            continue
+        if kind == "project" and not _R12_SDK_PROJECT.search(text):
+            out.append("the project file is not SDK-style")
+        for label, rx in _R12_AUTHORITY_FORMS:
+            if kind == "nuget" and label in _R12_NUGET_SHAPED:
+                continue
+            if rx.search(text):
+                out.append("%s carries %s" % (role, label))
+        if kind == "nuget":
+            out.extend(_r12_nuget_shape_problems(role, p))
+    here = plugin_dir.resolve()
+    for level, folder in enumerate([here] + list(here.parents)):
+        for name in _R12_BUILD_FILES:
+            if (folder / name).exists():
+                out.append("a %s stands %s" % (
+                    name, "in the project folder" if level == 0 else
+                    "%d folder(s) above the project folder" % level))
+    return out
+
+
+def _r12_compile_authority_problems_first_pass(plugin_dir):
+    """THE FIRST-PASS GATE, verbatim in behaviour: the project file and the
+    two Directory.Build files only.  Kept ONLY so `test_r12cl1_...` can show
+    what it did not read; nothing else calls it."""
     plugin_dir = pathlib.Path(plugin_dir)
     projects = sorted(p for p in plugin_dir.iterdir()
                       if p.is_file() and p.suffix.lower() == ".csproj")
@@ -3875,12 +4244,12 @@ def _r12_compile_authority_problems(plugin_dir):
         text = p.read_text(encoding="utf-8")
         if not _R12_SDK_PROJECT.search(text):
             out.append("the project file is not SDK-style")
-        for label, rx in _R12_AUTHORITY_FORMS:
+        for label, rx in _R12_AUTHORITY_FORMS[:5]:
             if rx.search(text):
                 out.append("the project file carries " + label)
     here = plugin_dir.resolve()
     for level, folder in enumerate([here] + list(here.parents)):
-        for name in _R12_BUILD_FILES:
+        for name in _R12_BUILD_FILES[:2]:
             if (folder / name).exists():
                 out.append("a %s stands %s" % (
                     name, "in the project folder" if level == 0 else
