@@ -394,7 +394,7 @@
           ],
           "main",
           "submit_bug_report",
-          "c12b8e5d95d3e4423efbaf1d78950df1d8ea48a8"
+          "32469a1f86dc98ccda221f4ee4b518b4e21f8f9b"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -403,7 +403,7 @@
           ],
           "main",
           "recent_bug_report_events",
-          "2009472bb026c902a6a7b900719074a4d0b9b2c9"
+          "121d20c8165732fd4699cb201a44b21fa6114117"
         ],
         [
           "/api/v1/bug-reports/recent",
@@ -421,7 +421,7 @@
           ],
           "main",
           "get_bug_report",
-          "0c31ff450ad882f4380383f8445ddd29ed4f011c"
+          "8b755db4ad28f1e8649074fe0abdbdf7acd74841"
         ],
         [
           "/api/v1/bug-reports/{report_id}/comment",
@@ -430,7 +430,7 @@
           ],
           "main",
           "admin_comment_on_bug_report",
-          "043135c4ae4751f1d8407d44023f1a82a9c78601"
+          "7eef8b2ed9677ed3d3e3d0a9e9b82cf70f4bef47"
         ],
         [
           "/api/v1/bug-reports/{report_id}/log",
@@ -439,7 +439,7 @@
           ],
           "main",
           "download_bug_report_log",
-          "bf428d1c52959ad555e2c0e796842af270be449c"
+          "8a291c5847a40ca1d7bdcaa0f691889a100ed855"
         ],
         [
           "/api/v1/bug-reports/{report_id}/status",
@@ -448,7 +448,7 @@
           ],
           "main",
           "admin_change_bug_report_status",
-          "fec81a027e2240afb052d6cea38e5d39ed78373d"
+          "506350c584a7e9f61aea3bd6584298ddb70527d5"
         ],
         [
           "/api/v1/cards",
@@ -529,7 +529,7 @@
           ],
           "main",
           "user_comment_on_bug_report",
-          "eb23007b1f1f37d764086fe44f2bfb90d4e35558"
+          "29288cd8c05db8b10045e4a7132d3976902e3938"
         ],
         [
           "/api/v1/internal/bug-reports/events/ack",
@@ -556,7 +556,7 @@
           ],
           "main",
           "internal_comment_on_bug_report",
-          "275153da49682e51c61b074a14e18b5f6cb0c202"
+          "944cffcf046f194117fe9c9843174b549cc1475e"
         ],
         [
           "/api/v1/internal/linked-players",
