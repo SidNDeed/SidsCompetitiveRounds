@@ -153,6 +153,26 @@ PREREQ = {
         INSERT INTO bug_reports (steam_id, description)
              VALUES ('76561190000000001', 'a pre-existing player-filed report');
     """,
+    # 337 is a plain data row into an EXISTING table; the columns it reads in
+    # its own post-check (artist_steam_id, stock_limit) were added by 109, not
+    # by 337 itself, so they belong in the prerequisite, not the migration.
+    "337": """
+        CREATE TABLE shop_items (
+            id              BIGSERIAL PRIMARY KEY,
+            sku             VARCHAR(64) UNIQUE NOT NULL,
+            kind            VARCHAR(16) NOT NULL,
+            name            VARCHAR(128) NOT NULL,
+            description     VARCHAR(256),
+            price           INTEGER NOT NULL CHECK (price >= 0),
+            rarity          VARCHAR(16) NOT NULL DEFAULT 'common',
+            rotation_pool   VARCHAR(32),
+            preview_color   VARCHAR(16),
+            catalog_ready   BOOLEAN NOT NULL DEFAULT TRUE,
+            artist_steam_id VARCHAR(20),
+            stock_limit     INTEGER,
+            released_at     TIMESTAMPTZ,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    """,
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -163,6 +183,7 @@ TABLES = {
     "332": ("pc_editions",),
     "333": ("pc_card_themes",),
     "336": ("bug_reports",),
+    "337": ("shop_items",),
 }
 
 MIGRATION_FILES = {
@@ -170,6 +191,7 @@ MIGRATION_FILES = {
     "332": "332_pc_edition_schedule.sql",
     "333": "333_pc_card_themes.sql",
     "336": "336_bug_reports_kind.sql",
+    "337": "337_demon_body_color.sql",
 }
 
 
@@ -328,7 +350,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -340,7 +362,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -353,7 +375,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -372,7 +394,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
