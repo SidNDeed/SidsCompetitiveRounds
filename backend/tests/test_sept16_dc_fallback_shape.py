@@ -2258,29 +2258,77 @@ def _is_direct_evidence_write(node):
     return False
 
 
+def _own_nodes(fn):
+    """Every node under `fn`, never descending into a def or class nested in
+    it: a nested def is a CALLEE, and its writes happen where it is named,
+    not where it is written."""
+    todo = list(ast.iter_child_nodes(fn))
+    while todo:
+        n = todo.pop()
+        yield n
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)):
+            todo.extend(ast.iter_child_nodes(n))
+
+
+def _callee_named(name, local, module):
+    """The def a bare name refers to from inside one def of the file: a def
+    nested in that one first, then a module-level def, else None."""
+    return local.get(name) or module.get(name)
+
+
 def held_window_writes(src):
-    """[(def name, line)] for every direct evidence write inside a held sweep.
+    """[(def name, line)] for every evidence write inside a held sweep.
 
     A window OPENS at a call of _gated_sweep(Session, <gate>, ...) and CLOSES
     at the first <gate>.set() after it, on the same name -- the release.
     Source order is run order here, because these bodies are straight-line
-    awaits. Every top-level def is read, helpers included: a window opened
-    in a shared helper is still a window.
+    awaits.
+
+    A WRITE IS FOLLOWED THROUGH THE CALL GRAPH (R8-L4). Round 8 correlated
+    windows and writes inside each top-level def only, so a held test that
+    called a helper performing the write stayed green: the write was never in
+    the caller's walk, and the helper's own walk held no window. Now every
+    def, module level or nested, is read on its own, and a bare name that
+    refers to a def of this file -- one nested in the reader first, then one
+    at module level -- is an event at the place it is NAMED: a WRITE there
+    when that def writes the map directly or through anything it names in
+    turn, and an OPEN there when that def returns still holding a window of
+    its own. A nested def is never read where it is written, only where it
+    is named. So a write reached through a call, a task, a callback handed to
+    whatever runs it, or a helper written before the window and called
+    inside it, is reported at the line that reaches it, under the def that
+    holds the window.
+
+    What it does not follow: a method called on an object, a def of another
+    module, and a def reached through a value computed at run time. A window
+    a callee leaves open is taken as open to the end of its caller, because
+    its gate is a name of the callee's; that over-reports a write the caller
+    makes after releasing it, which is the direction this check may fail in.
     """
-    out = []
-    for fn in ast.parse(src).body:
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        events = []
-        gates = set()
-        for n in ast.walk(fn):
+    tree = ast.parse(src)
+    kinds = (ast.FunctionDef, ast.AsyncFunctionDef)
+    module = {n.name: n for n in tree.body if isinstance(n, kinds)}
+    memo = {}
+
+    def read(fn, stack):
+        """(found, writes, leaves a window open) for one def."""
+        if id(fn) in memo:
+            return memo[id(fn)]
+        if id(fn) in stack:
+            return [], False, False     # a cycle adds nothing new
+        stack = stack | {id(fn)}
+        own = list(_own_nodes(fn))
+        local = {n.name: n for n in own if isinstance(n, kinds)}
+        events, gates = [], set()
+        for n in own:
             if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                     and n.func.id == "_gated_sweep"):
                 g = (n.args[1].id if len(n.args) > 1
                      and isinstance(n.args[1], ast.Name) else None)
                 gates.add(g)
                 events.append((n.lineno, n.col_offset, "open", g))
-        for n in ast.walk(fn):
+        for n in own:
             if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                     and n.func.attr == "set" and not n.args
                     and isinstance(n.func.value, ast.Name)
@@ -2288,15 +2336,33 @@ def held_window_writes(src):
                 events.append((n.lineno, n.col_offset, "close", n.func.value.id))
             elif _is_direct_evidence_write(n):
                 events.append((n.lineno, n.col_offset, "write", None))
-        held = []
+            elif (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                    and n.id != "_gated_sweep"):
+                callee = _callee_named(n.id, local, module)
+                if callee is not None and callee is not fn:
+                    _found, writes, opens = read(callee, stack)
+                    if writes:
+                        events.append((n.lineno, n.col_offset, "write", n.id))
+                    if opens:
+                        events.append((n.lineno, n.col_offset, "open", None))
+        held, found, writes = [], [], False
         for line, _col, kind, gate in sorted(events, key=lambda e: e[:2]):
             if kind == "open":
                 held.append(gate)
             elif kind == "close":
                 if gate in held:
                     held.remove(gate)
-            elif held:
-                out.append((fn.name, line))
+            else:
+                writes = True
+                if held:
+                    found.append((fn.name, line))
+        memo[id(fn)] = (found, writes, bool(held))
+        return memo[id(fn)]
+
+    out = []
+    for fn in ast.walk(tree):
+        if isinstance(fn, kinds):
+            out.extend(read(fn, frozenset())[0])
     return out
 
 
@@ -2359,6 +2425,95 @@ def test_no_ordering_scenario_writes_evidence_inside_a_held_sweep():
     assert [n for n, _ in held_window_writes(_HELD_WRITE_DECOY)] == [
         "test_decoy", "_shared_window"]
     assert held_window_writes(_PRE_WINDOW_WRITE_TWIN) == []
+
+
+# R8-L4: a write the held def never spells itself -- through a helper two
+# calls deep, and through a helper nested in the test and written BEFORE the
+# window opens. Round 8's walk reported neither.
+_HELPER_WRITE_DECOY = '''
+def _stamp(key):
+    main._in_match_touch(key)
+
+
+async def _stamp_via(key):
+    _stamp(key)
+
+
+async def test_decoy(Session, key):
+    gate = asyncio.Event()
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
+    await asyncio.sleep(0.5)
+    await _stamp_via(key)
+    gate.set()
+
+
+async def test_nested_decoy(Session, key):
+    def stamp():
+        main._in_match_seen[key] = time.monotonic()
+    gate = asyncio.Event()
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
+    stamp()
+    gate.set()
+'''
+# Its inert twin: the same helpers named only while no window is held, and a
+# helper WRITTEN inside a window but called after the release -- which a check
+# that read nested defs where they are written, not where they are called,
+# would redden.
+_HELPER_OUTSIDE_WINDOW_TWIN = '''
+def _stamp(key):
+    main._in_match_touch(key)
+
+
+async def _stamp_via(key):
+    _stamp(key)
+
+
+async def test_decoy(Session, key):
+    gate = asyncio.Event()
+    await _stamp_via(key)
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
+    await asyncio.sleep(0.5)
+    gate.set()
+    await _stamp_via(key)
+
+
+async def test_nested_decoy(Session, key):
+    gate = asyncio.Event()
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
+    def stamp():
+        main._in_match_seen[key] = time.monotonic()
+    gate.set()
+    stamp()
+'''
+
+
+def test_a_write_reached_through_a_call_inside_a_held_sweep_is_reported():
+    """R8-L4: a helper-hidden write inside a held window is named.
+
+    The two decoy writes are each reported at the line that reaches them,
+    under the test that holds the window; the twin -- the same helpers named
+    only outside any held window -- reports nothing.
+    """
+    lines = _HELPER_WRITE_DECOY.split("\n")
+    assert held_window_writes(_HELPER_WRITE_DECOY) == [
+        ("test_decoy", lines.index("    await _stamp_via(key)") + 1),
+        ("test_nested_decoy", lines.index("    stamp()") + 1)]
+    assert held_window_writes(_HELPER_OUTSIDE_WINDOW_TWIN) == []
+
+
+def test_the_held_window_check_follows_the_call_graph():
+    """R8-L4's named check, counted within the check's own span (#432): one
+    resolution of a name to a def of the file, and one walk that reads a def
+    without its nested defs."""
+    here = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in here.body if isinstance(n, ast.FunctionDef)
+              and n.name == "held_window_writes")
+    assert len(_calls_named(fn, "_callee_named")) == 1
+    assert len(_calls_named(fn, "_own_nodes")) == 1
 
 
 # ── Every reader of the live-game veto, classified ───────────────────────
