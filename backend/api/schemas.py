@@ -824,6 +824,15 @@ class HealthResponse(BaseModel):
     # it has no runtime signal of its own to read (#441: a postcondition that
     # cannot fail is worse than none). Absent on any build before Phase A.
     ffa_hold_fences: int | None = None
+    # rj_triage: which round of the quarantine triage view this build carries
+    # (main._RJ_TRIAGE_MARKER; 2 = round 2: PT3's lobby-wide labels need every
+    # comparison to have run, the read transaction holds automatic collection
+    # off, and a read whose session the server ended answers 503). A code
+    # constant, equal on both boxes by construction, probed by the release
+    # train and read by nothing else (#306): round 2 adds no route, so this
+    # value is what tells its build from the one before it. Absent on any
+    # build before round 2.
+    rj_triage: int | None = None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
