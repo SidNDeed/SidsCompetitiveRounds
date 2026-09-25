@@ -35626,13 +35626,21 @@ PENDING_DM_MAX_AGE_SECONDS = 21600
 # of every relay row, discarding the interleave the CTE had just computed --
 # so a batch that stopped early always shed relay rows, and the same relay
 # rows were reported unreached and re-selected indefinitely.
+#
+# The two classes are keyed on relay_code, never mail_id (v1.41.0 beta round
+# 2, finding 6). A relay row outlives its mail as a tombstone: the mail's
+# hard purge sets mail_id NULL (ON DELETE SET NULL) and relay_code stays, so
+# the code printed in the DM still answers. Keyed on mail_id, a tombstone was
+# an OPERATIONAL row: it skipped the relay consent recheck below and was sent
+# to a player who had turned the relay off. 330's two drain indexes were
+# already keyed on relay_code; these predicates now match them.
 _PENDING_DM_CLAIM_SQL = """
         WITH op AS (
             SELECT id, 0 AS cls,
                    row_number() OVER (ORDER BY created_at, id) AS rn
               FROM (SELECT id, created_at FROM pending_dms
                      WHERE delivered_at IS NULL AND NOT undeliverable
-                       AND cancelled_at IS NULL AND mail_id IS NULL
+                       AND cancelled_at IS NULL AND relay_code IS NULL
                        AND (claim_until IS NULL OR claim_until <= NOW())
                      ORDER BY created_at, id
                      LIMIT :lim FOR UPDATE SKIP LOCKED) o
@@ -35641,7 +35649,7 @@ _PENDING_DM_CLAIM_SQL = """
                    row_number() OVER (ORDER BY created_at, id) AS rn
               FROM (SELECT id, created_at FROM pending_dms
                      WHERE delivered_at IS NULL AND NOT undeliverable
-                       AND cancelled_at IS NULL AND mail_id IS NOT NULL
+                       AND cancelled_at IS NULL AND relay_code IS NOT NULL
                        AND (claim_until IS NULL OR claim_until <= NOW())
                        -- Consent is rechecked HERE, not only at enqueue.
                        -- A player who turns the relay off still has rows

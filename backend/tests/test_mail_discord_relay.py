@@ -103,7 +103,7 @@ needs_pg = pytest.mark.skipif(
 # Exactly this many tests in this module need the DSN. Pinned from OUT here
 # so that moving one behind the gate is a deliberate edit and not a silent
 # "1 skipped" that still reads as a clean run.
-LIVE_TESTS = 10
+LIVE_TESTS = 11
 
 
 def _read(path):
@@ -2732,6 +2732,77 @@ def test_turning_the_relay_off_withdraws_only_this_players_queued_mail():
     # to wait out a lease on a row nobody will ever send.
     assert not state["in flight relay"][1], (
         "a withdrawn row kept its claim: %s" % (state,))
+
+
+@needs_pg
+def test_a_tombstone_is_a_relay_row_to_the_claim_and_to_relay_off():
+    """Round 2 finding 6. A relay row outlives its mail as a tombstone:
+    deleting the mail sets mail_id NULL (ON DELETE SET NULL) and relay_code
+    stays. The claim's two classes and the relay-off withdrawal were keyed on
+    mail_id, so a tombstone was an OPERATIONAL row: the relay consent recheck
+    never saw it, and relay-off left it live.
+
+    Made the way production makes one: the fan-out queues player 1's relay
+    row, then the mail is deleted. (a) With player 1's relay turned off in the
+    players row -- the recheck's own input, not the withdrawal -- the claim
+    must not hand the tombstone out, while player 1's operational DM still
+    goes (the control: the claim ran, and the operational class does not ask
+    about the relay). With the relay back on, the tombstone is handed out, so
+    it sits in the relay class and not in neither. (b) The relay-off
+    withdrawal cancels it.
+
+    Control: key the three predicates on mail_id again -> (a) hands the
+    tombstone out with the relay off, and (b) leaves it live."""
+    import asyncpg
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        try:
+            await _seed(conn)
+            code = _code()
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code)
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content)"
+                " VALUES ('1', 'your bug report was answered')")
+            await conn.execute("DELETE FROM mail_messages WHERE id = $1", MAIL)
+            tomb = await conn.fetchrow(
+                "SELECT id::text AS id, mail_id, relay_code FROM pending_dms"
+                " WHERE steam_id = '1' AND relay_code = $1", code)
+
+            release = "UPDATE pending_dms SET claim_id = NULL, claim_until = NULL"
+            await conn.execute(
+                "UPDATE players SET mail_discord_relay = false WHERE steam_id = '1'")
+            off = [r["content"] for r in await _claim(conn)]
+            await conn.execute(release)
+            await conn.execute(
+                "UPDATE players SET mail_discord_relay = true WHERE steam_id = '1'")
+            on = [r["content"] for r in await _claim(conn)]
+            await conn.execute(release)
+
+            tag = await conn.execute(
+                _pg(mail_discord.RELAY_OFF_CANCEL_SQL, "sid"), "1")
+            cancelled = await conn.fetchval(
+                "SELECT cancelled_at IS NOT NULL FROM pending_dms"
+                " WHERE id::text = $1", tomb["id"] if tomb else "")
+            after = [r["content"] for r in await _claim(conn)]
+            return tomb, off, on, tag, cancelled, after
+        finally:
+            await conn.close()
+
+    tomb, off, on, tag, cancelled, after = _live(run)
+    assert tomb is not None and tomb["mail_id"] is None and tomb["relay_code"], (
+        "the seed did not make a tombstone: %r" % (tomb,))
+    assert "your bug report was answered" in off, (
+        "control: the operational DM was not handed out, so the claim proves "
+        "nothing: %r" % (off,))
+    assert "the DM body" not in off, (
+        "a tombstone was handed out to a player whose relay is off -- classed "
+        "operational, it skipped the consent recheck: %r" % (off,))
+    assert "the DM body" in on, (
+        "with the relay on, the tombstone was not handed out at all: %r" % (on,))
+    assert tag == "UPDATE 1" and cancelled, (
+        "relay-off left the tombstone live (%s, cancelled=%r)" % (tag, cancelled))
+    assert "the DM body" not in after, after
 
 
 def test_the_delete_route_cancels_only_for_the_player_who_deleted():

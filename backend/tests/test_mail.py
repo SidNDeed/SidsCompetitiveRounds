@@ -835,12 +835,14 @@ class FakeDb:
         # bot's `/mail relay off` and the client's mail-settings PUT both
         # run mail_discord.RELAY_OFF_CANCEL_SQL, which is defined once so
         # the two cannot drift into meaning different things (#329/#341).
+        # Keyed on relay_code, as the statement is (round 2 finding 6): a
+        # tombstone -- mail purged, mail_id NULL -- is still a relay row.
         if sql.startswith("UPDATE pending_dms SET cancelled_at = NOW()") \
                 and "WHERE steam_id = :sid" in sql:
             hit = 0
             for row in self.pending_dms:
                 if row.get("steam_id") == params["sid"] \
-                        and row.get("mail_id") is not None \
+                        and row.get("relay_code") is not None \
                         and row.get("cancelled_at") is None:
                     row["cancelled_at"] = NOW
                     hit += 1
@@ -1630,11 +1632,15 @@ def test_both_relay_toggles_run_the_same_withdrawal_statement():
     assert "UPDATE pending_dms SET cancelled_at" not in src_, (
         "the client toggle has grown its own copy of the withdrawal")
     # The statement withdraws UNDELIVERED mail rows for one player, and says
-    # so in its predicate rather than relying on the caller.
+    # so in its predicate rather than relying on the caller. A mail row is
+    # one with a relay_code: a tombstone has lost its mail_id and is still
+    # one (round 2 finding 6).
     flat = " ".join(_md.RELAY_OFF_CANCEL_SQL.split())
-    for clause in ("steam_id = :sid", "mail_id IS NOT NULL",
+    for clause in ("steam_id = :sid", "relay_code IS NOT NULL",
                    "delivered_at IS NULL", "cancelled_at IS NULL"):
         assert clause in flat, (clause, flat)
+    assert "mail_id" not in flat, (
+        "the withdrawal keys on mail_id again, which a tombstone lacks: " + flat)
     assert "DELETE" not in flat.upper(), flat
 
 

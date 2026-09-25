@@ -555,10 +555,14 @@ async def mail_relay_threads(
 # Undelivered only: a DM already sent is out, and the row has to survive so
 # the code in that DM still resolves. Cancelling rather than deleting is the
 # same reasoning as the mail-delete path.
+#
+# Keyed on relay_code, not mail_id (v1.41.0 beta round 2, finding 6): a queued
+# relay row whose mail has been purged is a tombstone with mail_id NULL, and
+# it is still this player's queued mail, so it is withdrawn with the rest.
 RELAY_OFF_CANCEL_SQL = (
     "UPDATE pending_dms SET cancelled_at = NOW(),"
     "       claim_id = NULL, claim_until = NULL"
-    " WHERE steam_id = :sid AND mail_id IS NOT NULL"
+    " WHERE steam_id = :sid AND relay_code IS NOT NULL"
     "   AND delivered_at IS NULL AND cancelled_at IS NULL")
 
 
