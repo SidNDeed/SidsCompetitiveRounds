@@ -9,8 +9,9 @@ automatic upload's contract through its stand-in (L6); and, from round 3,
 the harness's census of every schema and its one-schema binding (R2
 finding 1); and, from the round-3 addendum, the detail pane's triage
 notes; and, from round 4, the one sender of a terminate or a drop, the
-probe database's single claim and the whole connection record (R3
-finding 1) -- are carried below as DATA: the file, the exact
+probe database's single claim, the whole connection record (R3 finding 1)
+and the census of other sessions' temporary schemas (R3 finding 2) -- are
+carried below as DATA: the file, the exact
 text a plant replaces, the text it writes, and the test nodes it must turn RED
 (a mutant, which bypasses or weakens the function at that site) or leave
 GREEN (an inert twin at the same site, #391). Each plant is printed as a
@@ -111,17 +112,22 @@ SENDERS = T + "test_every_destructive_statement_goes_through_the_one_gate"
 SENDER_PROBES = T + "test_the_sender_census_finds_every_kind_of_second_sender"
 RECORDED = T + "test_a_recorded_connection_sends_a_terminate_or_a_drop_only_through_the_gate"
 TAKEN = T + "test_pg_a_probe_name_already_taken_is_a_refusal_never_a_drop"
+TEMP = [T + "test_pg_the_harness_refuses_another_sessions_temporary_object[%s]" % i
+        for i in ("temp_table", "temp_sequence")]
+TOAST_REUSE = T + "test_pg_the_census_admits_the_harnesss_own_toast_tables_on_a_reused_database"
 # Every live case that enters the harness on this tree. The two L6 cases
 # against the real auto-upload route are not here: without the route they
 # skip before the harness is entered, on every tree this file can see. Nor is
 # TAKEN: it stops at CREATE DATABASE, before the harness is entered.
 EVERY_PG_CASE = [R1, R1_NEG, DETAIL, DOWNLOAD, LIST, DISCORD, EVENTS, LEGACY_NEG, HEALTH,
                  ADMIN_COMMENT, STATUS_COMMENTS, INTERNAL_COMMENT, REPLY, FEED_COMMENT, DETAIL_COMMENT,
-                 CLAMPS, WINDOW, NAME_REFUSAL, *POPULATED, STANDIN_CONTRACT, *SHADOW, BIND, DETAIL_TRIAGE]
+                 CLAMPS, WINDOW, NAME_REFUSAL, *POPULATED, STANDIN_CONTRACT, *SHADOW, BIND, DETAIL_TRIAGE,
+                 *TEMP, TOAST_REUSE]
 # Of those, the cases that get past the refusals on the lane database: each
 # asserts from its own record that every refusal ran before its first
 # terminate or DROP.
-ENTERING = [c for c in EVERY_PG_CASE if c != NAME_REFUSAL and c not in POPULATED and c not in SHADOW]
+ENTERING = [c for c in EVERY_PG_CASE
+            if c != NAME_REFUSAL and c not in POPULATED and c not in SHADOW and c not in TEMP]
 
 Plant = namedtuple("Plant", "name control kind what edits checks")
 PLANTS = []
@@ -275,18 +281,21 @@ pair("M3-gate", "Env.__aenter__ no longer calls the scratch-name and population 
 # ── round 3, R2 finding 1: the census and the one-schema binding ──────────
 # Without the census call: every case that enters the harness goes RED on its
 # own entry assertion (the census did not run first); the foreign-table case
-# is entered; and the three same-named objects ahead of public are ACCEPTED --
-# the harness sends its terminate and its drops.
+# is entered; and the three same-named objects ahead of public and the two
+# temporary objects of another session are ACCEPTED -- the harness sends its
+# terminate and its drops.
 pair("M3-census", "_refuse_unless_scratch no longer calls the census",
      "        await _refuse_unless_only_fixtures(conn, name, lost)\n", "",
-     "the census", ENTERING + [POPULATED[3]] + SHADOW, TESTS)
+     "the census", ENTERING + [POPULATED[3]] + SHADOW + TEMP, TESTS)
 # The census narrowed to the public schema, round 2's scope: it still runs
-# first and still refuses a foreign public table, so only the three
-# same-named objects in a schema ahead of public show the difference.
+# first and still refuses a foreign public table, so the three same-named
+# objects in a schema ahead of public, the two temporary objects and the
+# reuse case's TOAST rows show the difference. (Round 4 moved the scope into
+# the WHERE line this plant and M5-temp-scope both edit.)
+CENSUS_WHERE = '    f" WHERE c.oid >= {FIRST_NORMAL_OID}"\n'
 pair("M3-census-scope", "the census reads the public schema only (round 2's scope)",
-     "    \" AND (n.nspname::text !~ '^pg_' OR n.nspname = ANY (pg_catalog.current_schemas(false)))\"\n",
-     "    \" AND n.nspname::text = 'public'\"\n",
-     "the census's scope", SHADOW, TESTS)
+     CENSUS_WHERE, "    f\" WHERE c.oid >= {FIRST_NORMAL_OID} AND n.nspname::text = 'public'\"\n",
+     "the census's scope", SHADOW + TEMP + [TOAST_REUSE], TESTS)
 pair("M3-bind-seed", "the seed engine is no longer bound to one schema at connect",
      "                                        connect_args=_BOUND_CONNECT,\n", "",
      "the seed engine's binding", [BIND], TESTS)
@@ -324,10 +333,21 @@ pair("M4-claim", "the probe's name is force-dropped before it is created (round 
      M4_CLAIM_SITE,
      "        await _send_destructive(admin, f'DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)', sent)\n"
      + M4_CLAIM_SITE,
-     "the probe's one claim", [TAKEN, NAME_REFUSAL, *POPULATED, *SHADOW, SENDERS, SENDER_PROBES], TESTS)
+     "the probe's one claim", [TAKEN, NAME_REFUSAL, *POPULATED, *SHADOW, *TEMP, SENDERS, SENDER_PROBES], TESTS)
 # A recorded connection that sends a terminate or a drop itself.
 pair("M4-runtime", "a recorded connection no longer refuses a terminate or a drop outside the gate",
      "        _refuse_outside_the_gate(sql)\n", "", "the gate at run time", [RECORDED], TESTS)
+
+# -- round 4, R3 finding 2: the census reads every schema -------------------
+# The census's scope back to round 3's: no pg_ schema off the search path,
+# so no other session's pg_temp_N and no pg_toast. The two temporary objects
+# are ACCEPTED (the harness ends the canary's session), and the reuse case
+# reads no TOAST row.
+pair("M5-temp-scope", "the census reads round 3's scope again: no other session's pg_temp_N, no pg_toast",
+     CENSUS_WHERE,
+     "    \" WHERE n.nspname::text <> ALL (ARRAY['pg_catalog', 'information_schema'])\"\n"
+     "    \" AND (n.nspname::text !~ '^pg_' OR n.nspname = ANY (pg_catalog.current_schemas(false)))\"\n",
+     "the census's schema scope", [*TEMP, TOAST_REUSE], TESTS)
 
 # ── round 2, L6: the automatic upload's contract, planted in the stand-in ──
 L6_SCRUB = "    scrubbed, counts, _ids = await asyncio.to_thread(_scrub_pass_one, log_blob)\n"

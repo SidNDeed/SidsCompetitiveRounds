@@ -39,7 +39,7 @@ naming the variable (the harness shape of test_ffa_quarantine_triage.py):
 Each case ends every other session on that database and drops and recreates
 its own tables there, so the harness REFUSES, before either, a database whose
 name lacks this lane's scratch marker, that holds any relation or sequence --
-in any schema a client can create or an unbound session's search path names --
+in any schema, another session's temporary schema included (round 4) --
 other than this harness's own fixtures, or whose fixture tables hold anything
 but its synthetic rows (rounds 2 and 3, M3). Every table and sequence the
 harness touches is named with its schema, public, and every connection that
@@ -552,16 +552,19 @@ ROUTES = (
 #           scr_bug391 lane-database gate, generalised from one literal to
 #           the lane's prefix, because this lane runs on more than one
 #           database (scr_ticket_redaction; the whole-suite run's own);
-#   CENSUS  every relation and sequence in every schema a client can create,
-#           and in any other schema an unbound session's search path names
-#           (pg_catalog and information_schema aside), is one of this
-#           harness's own fixtures, matched by name in BOUND_SCHEMA: a
+#   CENSUS  every relation and sequence in every schema -- pg_toast and
+#           every session's pg_temp_N and pg_toast_temp_N included (round 4,
+#           R3 finding 2), all but what initdb made -- is one of this
+#           harness's own fixtures, matched by name: in BOUND_SCHEMA a
 #           harness table or sequence by its own name, an index or a
-#           column-owned sequence by its table's (_foreign_objects), never
-#           by a count. A same-named table or sequence in a schema an
+#           column-owned sequence by its table's, and in pg_toast a TOAST
+#           table or its index by the table it stores for (_foreign_objects),
+#           never by a count. A same-named table or sequence in a schema an
 #           unbound search path reaches before public -- the object an
 #           unqualified DROP would have removed (round 3, R2 finding 1) -- is
-#           refused, and so is a table the harness never creates;
+#           refused; so is another session's temporary table or sequence,
+#           which ending that session would destroy (round 4), and a table
+#           the harness never creates;
 #   ROWS    every table the DROP names holds only this harness's own
 #           synthetic fixtures (rows keyed on ADMIN or REPORTER, nothing in
 #           shop_items). A database a real player's row lives in is refused
@@ -599,28 +602,39 @@ POPULATION = (
 NAME_GATE_SQL = "SELECT pg_catalog.current_database() /* ticket-redaction scratch-name gate */"
 ROWS_GATE_TAG = "/* ticket-redaction population gate */"
 CENSUS_TAG = "/* ticket-redaction census */"
-# One row per relation -- table, index, sequence, view, any pg_class kind --
-# in the schemas the census reads: every schema a client can create (a name
-# without the reserved pg_ prefix) and any other one an unbound session's
-# search path names, but pg_catalog and information_schema. `owner` is the
-# table an index belongs to, or the table whose column owns a sequence.
+# One row per relation -- table, index, sequence, view, TOAST table, any
+# pg_class kind -- in every schema (round 4, R3 finding 2): pg_toast and every
+# session's pg_temp_N and pg_toast_temp_N are read like public. The rows left
+# out are the ones initdb made -- the system catalogs, information_schema's
+# tables, their TOAST tables -- by PostgreSQL's own line between those and
+# everything made after (access/transam.h): OIDs below FirstNormalObjectId,
+# 16384, are assigned while initdb runs; the OID generator starts at it and
+# wraps back to it. On this server a fresh database holds no relation at or
+# above it, and every relation below it is in pg_catalog, information_schema
+# or pg_toast (round 4 notes). `owner` is the table an index belongs to, the
+# table whose column owns a sequence, or the table a TOAST table -- or that
+# TOAST table's index -- stores for.
+FIRST_NORMAL_OID = 16384
 CENSUS_SQL = (
     "SELECT n.nspname::text AS schema, c.relname::text AS name, c.relkind::text AS kind,"
     " n.nspname = ANY (pg_catalog.current_schemas(false)) AS on_path,"
-    " COALESCE(tn.nspname::text || '.' || t.relname::text,"
+    " COALESCE(bn.nspname::text || '.' || b.relname::text,"
+    " tn.nspname::text || '.' || t.relname::text,"
     " sn.nspname::text || '.' || s.relname::text) AS owner"
     " FROM pg_catalog.pg_class c"
     " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
     " LEFT JOIN pg_catalog.pg_index x ON x.indexrelid = c.oid"
     " LEFT JOIN pg_catalog.pg_class t ON t.oid = x.indrelid"
     " LEFT JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace"
+    " LEFT JOIN pg_catalog.pg_class b"
+    " ON b.reltoastrelid = CASE WHEN c.relkind = 't' THEN c.oid WHEN t.relkind = 't' THEN t.oid END"
+    " LEFT JOIN pg_catalog.pg_namespace bn ON bn.oid = b.relnamespace"
     " LEFT JOIN pg_catalog.pg_depend d ON c.relkind = 'S' AND d.objid = c.oid AND d.deptype IN ('a', 'i')"
     " AND d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass"
     " AND d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass"
     " LEFT JOIN pg_catalog.pg_class s ON s.oid = d.refobjid"
     " LEFT JOIN pg_catalog.pg_namespace sn ON sn.oid = s.relnamespace"
-    " WHERE n.nspname::text <> ALL (ARRAY['pg_catalog', 'information_schema'])"
-    " AND (n.nspname::text !~ '^pg_' OR n.nspname = ANY (pg_catalog.current_schemas(false)))"
+    f" WHERE c.oid >= {FIRST_NORMAL_OID}"
     " ORDER BY 1, 2 " + CENSUS_TAG)
 CENSUS_PATH_SQL = "SELECT pg_catalog.current_schemas(false)::text[] " + CENSUS_TAG
 _KINDS = {"r": "table", "p": "partitioned table", "v": "view", "m": "materialized view",
@@ -630,18 +644,20 @@ _KINDS = {"r": "table", "p": "partitioned table", "v": "view", "m": "materialize
 
 def _foreign_objects(census):
     """The census rows that are NOT this harness's own: the name-set match,
-    never a count. Admitted, in BOUND_SCHEMA only: a table named in
+    never a count. Admitted, in BOUND_SCHEMA: a table named in
     HARNESS_TABLES and a sequence named in FIXTURE_SEQUENCES; and what
-    PostgreSQL makes for such a table and drops with it -- its indexes, and a
-    sequence one of its columns owns -- by the qualified name of the table
-    it belongs to. Anything else, in any schema the census reads, is someone
-    else's."""
+    PostgreSQL makes for such a table and drops with it -- its indexes and a
+    sequence one of its columns owns, in BOUND_SCHEMA, and its TOAST table
+    and that TOAST table's index, in pg_toast (round 4) -- by the qualified
+    name of the table it belongs to. Anything else, in any schema, is
+    someone else's."""
     tables = {f"{BOUND_SCHEMA}.{t}" for t in HARNESS_TABLES}
     return [r for r in census
-            if not (r["schema"] == BOUND_SCHEMA
-                    and ((r["kind"] == "r" and r["name"] in HARNESS_TABLES)
-                         or (r["kind"] == "S" and r["name"] in FIXTURE_SEQUENCES)
-                         or (r["kind"] in ("i", "S") and r["owner"] in tables)))]
+            if not ((r["schema"] == BOUND_SCHEMA
+                     and ((r["kind"] == "r" and r["name"] in HARNESS_TABLES)
+                          or (r["kind"] == "S" and r["name"] in FIXTURE_SEQUENCES)
+                          or (r["kind"] in ("i", "S") and r["owner"] in tables)))
+                    or (r["schema"] == "pg_toast" and r["kind"] in ("t", "i") and r["owner"] in tables))]
 
 
 # A harness table or sequence named after one of these words, or inside
@@ -1485,6 +1501,7 @@ def test_pg_legacy_bundle_over_the_read_ceiling_is_redacted_before_the_window(mo
 RESOLVE_SQL = ("SELECT n.nspname::text FROM pg_catalog.pg_class c"
                " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
                " WHERE c.oid = pg_catalog.to_regclass($1)")
+BACKEND_ALIVE_SQL = "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid = $1"
 
 # The probe databases this run created and has not dropped: the only names
 # _drop_probe_database acts on.
@@ -1538,6 +1555,23 @@ async def _drop_probe_database(lane, name, sent, planted=frozenset()):
     _PROBES_CREATED.discard(name)
 
 
+async def _await_backend_exit(lane, sent, pid, tenths=100):
+    """Waits until backend `pid` has left pg_stat_activity, at most `tenths`
+    tenths of a second. PostgreSQL removes a backend's temporary objects on
+    its way out (RemoveTempRelationsCallback, a before_shmem_exit callback)
+    before it clears the backend's activity entry (an on_shmem_exit hook), so
+    a census after this reads none of them; one still there would be refused
+    by that census, not missed."""
+    conn = await _connect(lane, sent)
+    try:
+        for _ in range(tenths):
+            if not await conn.fetchval(BACKEND_ALIVE_SQL, pid):
+                return
+            await asyncio.sleep(0.1)
+    finally:
+        await conn.close()
+
+
 async def _drive_env_against_async(monkeypatch, tmp_path, probe, setup_sql, count_sql, resolve=None,
                                    planted=frozenset()):
     """Point the harness at a probe database `probe`, created here, holding
@@ -1556,6 +1590,7 @@ async def _drive_env_against_async(monkeypatch, tmp_path, probe, setup_sql, coun
     try:
         canary = await _connect(lane, record, database=probe)
         try:
+            canary_pid = await canary.fetchval("SELECT pg_catalog.pg_backend_pid()")
             await canary.execute(setup_sql)
             resolved = None
             if resolve:
@@ -1585,6 +1620,7 @@ async def _drive_env_against_async(monkeypatch, tmp_path, probe, setup_sql, coun
                 await canary.close()
             except Exception:
                 pass
+        await _await_backend_exit(lane, record, canary_pid)
     except BaseException:
         await _drop_probe_database(lane, probe, record, frozenset(planted))
         raise
@@ -1764,7 +1800,10 @@ def test_the_census_admits_the_harnesss_own_objects_by_name_and_nothing_else():
             _census_row("public", "players_pkey", "i", "public.players"),
             _census_row("public", "ix_players_steam_id", "i", "public.players"),
             _census_row("public", "bug_reports_bug_number_key", "i", "public.bug_reports"),
-            _census_row("public", "shop_items_sku_key", "i", "public.shop_items")]
+            _census_row("public", "shop_items_sku_key", "i", "public.shop_items"),
+            _census_row("pg_toast", "pg_toast_16500", "t", "public.bug_reports"),        # round 4: TOAST
+            _census_row("pg_toast", "pg_toast_16500_index", "i", "public.bug_reports"),
+            _census_row("pg_toast", "pg_toast_16510", "t", "public.bug_report_events")]
     assert _foreign_objects(own) == []
     for row in (_census_row("postgres", "players", "r"),               # same name, another schema
                 _census_row("shadow", "bug_reports_number_seq", "S"),  # same-named sequence, another schema
@@ -1775,7 +1814,15 @@ def test_the_census_admits_the_harnesss_own_objects_by_name_and_nothing_else():
                 _census_row("public", "orders_id_seq", "S", "public.orders"),
                 _census_row("public", "stray_seq", "S"),
                 _census_row("shadow", "players_pkey", "i", "shadow.players"),
-                _census_row("shadow", "shop_items_id_seq", "S", "public.shop_items")):
+                _census_row("shadow", "shop_items_id_seq", "S", "public.shop_items"),
+                _census_row("pg_toast", "pg_toast_16600", "t", "public.matches"),     # a foreign table's TOAST
+                _census_row("pg_toast", "pg_toast_16700", "t", "shadow.players"),     # a same-named table's
+                _census_row("pg_toast", "pg_toast_16800", "r", "public.players"),     # the right owner, a table
+                _census_row("public", "pg_toast_16500", "t", "public.bug_reports"),   # a TOAST kind off pg_toast
+                _census_row("pg_temp_3", "players", "r"),                             # another session's temporary
+                _census_row("pg_temp_3", "bug_reports_number_seq", "S"),              # table and sequence
+                _census_row("pg_toast_temp_3", "pg_toast_16900", "t", "pg_temp_3.players"),
+                _census_row("information_schema", "players", "r")):                   # a table in a system schema
         assert _foreign_objects(own + [row]) == [row], row
 
 
@@ -2092,6 +2139,84 @@ def test_pg_a_probe_name_already_taken_is_a_refusal_never_a_drop(monkeypatch, tm
         if probe in _PROBES_CREATED:
             run(_drop_probe_database(lane, probe, cleanup, planted={("public", "theirs")}))
     _assert_the_probe_cleanup(cleanup, probe)
+
+
+# -- round 4, R3 finding 2: another session's temporary objects -------------
+
+
+@pytest.mark.parametrize("kind", ["temp_table", "temp_sequence"])
+def test_pg_the_harness_refuses_another_sessions_temporary_object(monkeypatch, tmp_path, kind):
+    """The CENSUS refusal of a same-SESSION object (round 4, R3 finding 2):
+    the canary session -- another backend than the harness's refusal
+    connection -- holds a temporary table or sequence, named like a harness
+    fixture, in its own pg_temp_N schema, which no other session's search
+    path names. The probe's public schema is empty, so the NAME and ROWS
+    refusals pass it, and ending the canary's session would destroy the
+    object. The harness refuses before the first terminate or DROP, and the
+    canary and its object survive."""
+    probe = _probe_name(f"{SCRATCH_MARKER}_gate_temp")
+    assert SCRATCH_DB_RE.fullmatch(probe)
+    if kind == "temp_table":
+        obj, value = "players", 1
+        setup_sql = f"CREATE TEMP TABLE players (steam_id varchar(32)); INSERT INTO players VALUES ('{OUTSIDER}')"
+        read_sql = "SELECT count(*) FROM pg_temp.players"
+    else:
+        obj, value = "bug_reports_number_seq", 4242
+        setup_sql = ("CREATE TEMP SEQUENCE bug_reports_number_seq;"
+                     " SELECT pg_catalog.setval('pg_temp.bug_reports_number_seq', 4242)")
+        read_sql = "SELECT last_value FROM pg_temp.bug_reports_number_seq"
+    # the canary's own temporary schema, and the object read through it
+    count_sql = (f"SELECT n.nspname::text || ':' || ({read_sql})::text FROM pg_catalog.pg_namespace n"
+                 " WHERE n.oid = pg_catalog.pg_my_temp_schema()")
+    raised, sent, alive, rows, _, cleanup = _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql)
+    destructive = [" ".join(s.split())[:70] for s in sent if _destructive(s)]
+    assert not destructive, (f"the harness accepted {probe!r}: it sent {len(destructive)} terminate or DROP "
+                             f"statement(s), the first {destructive[0]!r}, and raised {raised!r}")
+    assert isinstance(raised, RuntimeError), f"the harness stopped without a refusal: {raised!r}"
+    assert alive and rows, f"the canary session did not survive the refusal: alive={alive}, read {rows!r}"
+    schema, _, read = rows.partition(":")
+    assert re.fullmatch(r"pg_temp_[0-9]+", schema) and read == str(value), \
+        f"the canary's temporary {obj} is not intact: {rows!r}"
+    message = str(raised)
+    assert repr(probe) in message and f"{schema}.{obj}" in message, message
+    assert NAME_GATE_SQL in sent and any(CENSUS_TAG in s for s in sent), sent
+    _assert_the_probe_cleanup(cleanup, probe)
+    print(f"REFUSED [{kind}]: {message}")
+    print(f"INTACT [{kind}]: {read_sql} -> {read}, read through the canary session ({schema}), still connected")
+
+
+def test_pg_the_census_admits_the_harnesss_own_toast_tables_on_a_reused_database(monkeypatch, tmp_path):
+    """The census reads pg_toast now (round 4), where PostgreSQL keeps a
+    TOAST table, and its index, for each harness table with an unbounded
+    text column. The proof that this is no false refusal on a database
+    already used: enter the harness, leave, read what the next entry's
+    census will read -- the first entry's TOAST tables and indexes, each
+    owned by a harness table -- and enter again on that same database."""
+    async def census_now(url):
+        seen = []
+        conn = await _connect(url, seen)
+        try:
+            return [dict(r) for r in await conn.fetch(CENSUS_SQL)]
+        finally:
+            await conn.close()
+
+    async def body():
+        async with Env(monkeypatch, tmp_path):
+            pass
+        between = await census_now(make_url(require_pg()))
+        async with Env(monkeypatch, tmp_path) as again:
+            sent = list(again.sent)
+        return between, sent
+
+    between, sent = run(body())
+    toast = [r for r in between if r["schema"] == "pg_toast"]
+    owners = {r["owner"] for r in toast}
+    assert {f"{BOUND_SCHEMA}.bug_reports", f"{BOUND_SCHEMA}.bug_report_events"} <= owners, \
+        f"the census read no TOAST table of the harness's own text columns: {toast}"
+    assert {r["kind"] for r in toast} == {"t", "i"}, toast
+    assert _foreign_objects(between) == [], f"the census refuses the harness's own objects: {_foreign_objects(between)}"
+    _assert_the_refusals_came_first(sent)
+    print(f"REUSED: the second entry's census read {len(toast)} pg_toast row(s), owned by {sorted(owners)}")
 
 
 # ── L6: the automatic post-match upload, as a CONTRACT ────────────────────
