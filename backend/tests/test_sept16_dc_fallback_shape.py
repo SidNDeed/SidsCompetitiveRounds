@@ -1320,13 +1320,57 @@ _ASSIGNS_DC_PLAYER_NULL = re.compile(r"(?<![\w.])dc_player_id\s*=\s*NULL", re.I)
 _ASSIGNS_MARKER_NULL = re.compile(r"(?<![\w.])dc_fallback_at\s*=\s*NULL", re.I)
 
 
-def sql_carried_by(node):
+def module_string_constants(tree):
+    """{name: text} for every name a module-level statement binds to a value
+    that carries string literals: the literals joined and whitespace-collapsed.
+
+    R8-L5. A writer whose SQL is a module-level constant -- `_X_SQL = "UPDATE
+    ..."`, then `text(_X_SQL)` inside the def -- carries no literal of its
+    own, so a census that read only a def's literals never saw it. As
+    generous as sql_carried_by, for the same reason: EVERY literal in the
+    bound value counts (a tuple of statements, a dict, an f-string's fixed
+    parts), a constant built from an earlier one carries that one's text too,
+    and a name bound twice carries both values, since either may be the one a
+    def reads.
+    """
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif (isinstance(node, (ast.AnnAssign, ast.AugAssign))
+              and node.value is not None):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        parts = []
+        for s in ast.walk(value):
+            if isinstance(s, ast.Constant) and isinstance(s.value, str):
+                parts.append(s.value)
+            elif (isinstance(s, ast.Name) and isinstance(s.ctx, ast.Load)
+                  and s.id in out):
+                parts.append(out[s.id])
+        if not parts:
+            continue
+        for t in targets:
+            for name in ast.walk(t):
+                if isinstance(name, ast.Name):
+                    out[name.id] = _WS.sub(
+                        " ", (out.get(name.id, "") + " " + " ".join(parts)))
+    return out
+
+
+def sql_carried_by(node, consts=None):
     """Every string literal in a def's body, joined and whitespace-collapsed.
 
     The SQL a function carries, read as text rather than as source lines: a
     statement re-indented, re-wrapped, or split across a different number of
     adjacent string pieces is the SAME text here. The docstring is dropped
     first -- prose about an operation is not the operation.
+
+    With `consts` -- module_string_constants of the def's own module -- the
+    text of every module-level constant the body NAMES is carried as well
+    (R8-L5): SQL written once at module level and handed to text() by name
+    is carried by each def that names it.
     """
     body = node.body
     if ast.get_docstring(node) is not None:
@@ -1336,6 +1380,9 @@ def sql_carried_by(node):
         for sub in ast.walk(stmt):
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
                 parts.append(sub.value)
+            elif (consts and isinstance(sub, ast.Name)
+                  and isinstance(sub.ctx, ast.Load) and sub.id in consts):
+                parts.append(consts[sub.id])
     return _WS.sub(" ", " ".join(parts))
 
 
@@ -1350,10 +1397,12 @@ def functions_updating_team_series(assignment, tree=None):
     reporting is what let a second funnel ship unhandled.
     """
     out = []
-    for n in (tree or TREE).body:
+    tree = tree or TREE
+    consts = module_string_constants(tree)
+    for n in tree.body:
         if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        sql = sql_carried_by(n)
+        sql = sql_carried_by(n, consts)
         if any(assignment.search(s.group(1))
                for u in _UPDATE_TEAM_SERIES.finditer(sql)
                for s in _SET_LIST.finditer(u.group(1))):
@@ -1748,11 +1797,14 @@ def deferral_writer_census(tree=None):
     a def in front of a reader, under-reporting is how the count went short.
     """
     out = {}
-    for n in (tree or TREE).body:
+    tree = tree or TREE
+    # R8-L5: the SQL a def names by a module-level constant is its SQL too.
+    consts = module_string_constants(tree)
+    for n in tree.body:
         if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         kinds = set()
-        for u in _UPDATE_TEAM_SERIES.finditer(sql_carried_by(n)):
+        for u in _UPDATE_TEAM_SERIES.finditer(sql_carried_by(n, consts)):
             for s in _SET_LIST.finditer(u.group(1)):
                 kinds |= {a.group(1) for a in _ASSIGNS_STATUS.finditer(s.group(1))
                           if a.group(1) not in OPEN_STATUSES}
@@ -1819,6 +1871,67 @@ def test_every_writer_that_ends_a_deferral_is_derived_and_none_is_counted():
     # docstring and the revival to 'active' are not.
     assert deferral_writer_census(ast.parse(_NEW_WRITER_DECOY)) == {
         "_team_void_on_rehost": {"cancelled", CLEARS_THE_MARKER}}
+
+
+# R8-L5: the same writer with its SQL bound to module-level constants, the
+# shape a per-def literal scan cannot see, beside two constants that must add
+# nothing: a revival to 'active' (an open status) and a log template handed to
+# text() exactly the way the writer's SQL is.
+_MODULE_SQL_WRITER_DECOY = '''
+_VOID_ON_REHOST_SQL = (
+    "UPDATE team_series SET status='cancelled', invalidation_reason='rehost'"
+    " WHERE id = :sid AND status IN ('active', 'dc_paused')")
+_REVIVE_ON_REHOST_SQL = "UPDATE team_series SET status = 'active' WHERE id = :sid"
+_REHOST_NOTE = "[TEAM] rehost voided series {sid}; status = {status}"
+
+
+async def _team_void_on_rehost(db, series_id):
+    await db.execute(text(_VOID_ON_REHOST_SQL), {"sid": series_id})
+
+
+async def _team_revive_on_rehost(db, series_id):
+    await db.execute(text(_REVIVE_ON_REHOST_SQL), {"sid": series_id})
+
+
+async def _team_note_rehost(db, series_id):
+    print(text(_REHOST_NOTE).text.format(sid=series_id, status="cancelled"))
+'''
+
+
+def test_a_writer_whose_sql_is_a_module_constant_is_counted():
+    """R8-L5: both team_series censuses read a module-level SQL constant.
+
+    The round-8 report found the writer census reading only the literals a
+    def carries, so a def that handed text() a constant by NAME was
+    invisible to it. The decoy is that writer: it must be counted, with its
+    kind, by the writer census, and its revival twin by the revival census
+    (the sibling that shares the blind spot, #432), while the log template
+    handed to text() the same way contributes nothing to either.
+    """
+    tree = ast.parse(_MODULE_SQL_WRITER_DECOY)
+    assert deferral_writer_census(tree) == {
+        "_team_void_on_rehost": {"cancelled"}}
+    assert functions_updating_team_series(_ASSIGNS_ACTIVE, tree) == [
+        "_team_revive_on_rehost"]
+    consts = module_string_constants(tree)
+    assert "UPDATE team_series SET status='cancelled'" in consts[
+        "_VOID_ON_REHOST_SQL"], consts
+
+
+def test_both_team_series_censuses_resolve_module_constants_once():
+    """R8-L5's named check, counted within each census's own span (#432).
+
+    Each census builds the module's constants exactly once and hands them to
+    every sql_carried_by call it makes, so no def is read without them.
+    """
+    here = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+    fns = {n.name: n for n in here.body if isinstance(n, ast.FunctionDef)}
+    for name in ("deferral_writer_census", "functions_updating_team_series"):
+        builds = _calls_named(fns[name], "module_string_constants")
+        assert len(builds) == 1, (name, len(builds))
+        reads = _calls_named(fns[name], "sql_carried_by")
+        assert reads and all(len(c.args) == 2 for c in reads), (
+            name, [len(c.args) for c in reads])
 
 
 def test_the_bound_sentence_is_one_sentence_in_every_copy():
