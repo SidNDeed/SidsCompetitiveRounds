@@ -270,18 +270,24 @@ class _Lab:
             await db.commit()
             return rows
 
-    async def series(self, *, t1_wins=1, t2_wins=0, game_recorded_secs_ago=600):
-        """Four fresh players and an active series. When a game is already
-        recorded, its team_matches row is dated `game_recorded_secs_ago`
-        seconds back: that row is the current game's opening."""
-        self._n += 1
-        base = _SID_BASE + self._n * 10
-        steams = [str(base + i) for i in range(1, 5)]
-        pids = [uuid.uuid4() for _ in range(4)]
-        for pid, steam in zip(pids, steams):
-            await self.sql("INSERT INTO players (id, steam_id, display_name)"
-                           " VALUES (:i, :s, :d)",
-                           {"i": pid, "s": steam, "d": "tdc" + steam[-4:]})
+    async def series(self, *, t1_wins=1, t2_wins=0, game_recorded_secs_ago=600,
+                     same_four_as=None):
+        """Four fresh players (or, with same_four_as, the same four in the same
+        slots as an earlier series) and an active series. When a game is
+        already recorded, its team_matches row is dated
+        `game_recorded_secs_ago` seconds back: that row is the current game's
+        opening."""
+        if same_four_as is not None:
+            steams, pids = same_four_as["steams"], same_four_as["pids"]
+        else:
+            self._n += 1
+            base = _SID_BASE + self._n * 10
+            steams = [str(base + i) for i in range(1, 5)]
+            pids = [uuid.uuid4() for _ in range(4)]
+            for pid, steam in zip(pids, steams):
+                await self.sql("INSERT INTO players (id, steam_id, display_name)"
+                               " VALUES (:i, :s, :d)",
+                               {"i": pid, "s": steam, "d": "tdc" + steam[-4:]})
         sid = uuid.uuid4()
         await self.sql(
             "INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,"
@@ -576,3 +582,30 @@ def test_a_reporter_on_the_leaving_team_is_still_refused(wired):
     err, settled = _run(go())
     assert err.status_code == 400 and "non-DC team" in str(err.detail), err
     assert settled[0] == "active", settled
+
+
+@needs_pg
+def test_the_same_four_can_lead_forfeit_twice(wired):
+    """team_matches is UNIQUE on (photon_room_id, t1a_id, t1b_id, t2a_id,
+    t2b_id), and the lead-forfeit writes a synthetic row. Its room is per
+    series, so the same four players in the same slots can lead-forfeit a
+    second series. This also runs the INSERT itself: built in the statement,
+    the room gave :sid two types and the INSERT could not be prepared."""
+    async def go():
+        async with _Lab() as lab:
+            first = await lab.series()
+            again = await lab.series(same_four_as=first)
+            for ser in (first, again):
+                await lab.post(ser, 0, 1, 1)
+                await _two_reports(lab, ser, HIGH, HIGH)
+            rooms = await lab.sql(
+                "SELECT series_id, photon_room_id FROM team_matches"
+                " WHERE dc_player_id IS NOT NULL ORDER BY created_at")
+            return (await lab.settlement(first), await lab.settlement(again),
+                    {r["series_id"]: r["photon_room_id"] for r in rooms}, first, again)
+
+    s1, s2, rooms, first, again = _run(go())
+    assert s1 == ("completed", 1, None, None, 1), s1
+    assert s2 == ("completed", 1, None, None, 1), s2
+    assert rooms == {first["sid"]: "dc_leadforfeit:%s" % first["sid"],
+                     again["sid"]: "dc_leadforfeit:%s" % again["sid"]}, rooms

@@ -42593,31 +42593,23 @@ async def team_series_report_dc(
     if rep_team is None or rep_team == dc_team:
         raise HTTPException(400, "reporter must be a member of the non-DC team")
 
-    # THE POINT TOTAL IS NOT YET A FACT THIS ENDPOINT OWNS. t1/t2_points_total
-    # arrive on the query string, outside the DC signature, as ONE seat's snapshot
-    # of a game that never produced a team_matches row. Two HONEST survivors can
-    # therefore submit different totals for the same abandoned game, and when the
-    # two straddle the threshold below, the outcome is settled by whichever request
-    # takes the series lock first: a completed series with ratings and gold in one
-    # order, dc_incomplete in the other. No dishonest client is required for that.
+    # THE REPORT'S POINT SNAPSHOT DECIDES NOTHING. t1/t2_points_total arrive on
+    # the query string, outside the DC signature, as ONE seat's snapshot of a game
+    # that never produced a team_matches row, and two HONEST survivors can submit
+    # different ones for the same abandoned game. While the rule below read them,
+    # a leave whose two snapshots straddled its threshold was settled by whichever
+    # report took the series lock first: a completed series with ratings and gold
+    # in one order, dc_incomplete in the other. Signing the values would not have
+    # helped: it authenticates the disagreement without resolving it.
     #
-    # What this comment used to say, and why it mattered: it called the exposure
-    # "lower impact (one 2v2 game; the lead-forfeit rule below ignores points
-    # entirely)". The rule four lines down does NOT ignore points — `total_points
-    # >= 2` is half of its condition. A false statement about the code directly
-    # beneath it is the stated reason this was left for a later pass. It also
-    # claimed to be "tracked in docs/SECURITY_ACTION_ITEMS.md", a file that has
-    # never existed in this repository's history, so it was tracked nowhere.
-    #
-    # Signing these values does not fix it: signing two differing honest snapshots
-    # authenticates the disagreement without resolving it. What the endpoint needs
-    # is a fact it records for the CURRENT game — "did this game cross two points",
-    # keyed by (series_id, game_ordinal) and written during play — because only an
-    # independent current-game fact separates a stale low from an incorrect high.
-    # The series-wide live-points columns cannot stand in: they are stored with
-    # GREATEST across the series, so in game 2 or 3 they still carry game 1's
-    # crossing. Nothing records that fact yet, so this paragraph is the whole
-    # of its specification.
+    # The rule now reads a fact the server records for the CURRENT game,
+    # _team_game_crossed_two: team_series_games, keyed by (series_id,
+    # game_ordinal) and raised by the team live-points POST during play. The
+    # series-wide live-points columns could not stand in for it: they are kept
+    # with GREATEST across the series, so in game 2 or 3 they still carry game
+    # 1's crossing. The snapshot is still summed here, logged when it disagrees
+    # with the record, and stored on the synthetic forfeit row below as the
+    # reporter's view of the game; none of those uses reaches the settlement.
     total_points = (t1_points_total or 0) + (t2_points_total or 0)
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
@@ -42626,9 +42618,8 @@ async def team_series_report_dc(
     # them), the WHOLE series completes to them. This is the rule Sid asked for:
     # you can't leave a 2v2 to dodge a loss once the other team is up a game,
     # while a break or restart with little play in it is never auto-decided.
-    # The point total is half the condition — this comment used to say the rule
-    # applied "regardless of the abandoned game's point total", which described
-    # the code as it has never been, and see the note above for what that cost.
+    # Real play is half the condition, and the server's per-game record answers
+    # it, never the report's snapshot (see the note above).
     #
     # Applies Glicko and gold through the shared helper so the forfeit win
     # actually moves the board (the old dc_decided/dc_forfeit paths completed the
@@ -42658,16 +42649,25 @@ async def team_series_report_dc(
         # 'dc_leadforfeit' were repaired by hand in migrations 099/108), so this is
         # a latent defect being closed, not an active one. Fits String(64): the
         # prefix plus a UUID is 51 characters.
+        #
+        # The room is built HERE, in Python, and bound as its own parameter. It
+        # used to be built in the statement, `'dc_leadforfeit:' || CAST(:sid AS
+        # text)`, which gave :sid two types in one statement (uuid for series_id,
+        # text inside the CAST). asyncpg prepares every statement and PostgreSQL
+        # deduces one type per parameter, so that INSERT could not be prepared
+        # at all (AmbiguousParameterError): every lead-forfeit failed with a 500
+        # and left the series unsettled. No test had ever run this branch.
         await db.execute(
             text("""INSERT INTO team_matches
                        (series_id, t1a_id, t1b_id, t2a_id, t2b_id,
                         t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total,
                         winner_team, dc_player_id, dc_at, ended_at, photon_room_id)
                    VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 0, 0, :t1p, :t2p,
-                           :wt, :dpid, NOW(), NOW(), 'dc_leadforfeit:' || CAST(:sid AS text))"""),
+                           :wt, :dpid, NOW(), NOW(), :forfeit_room)"""),
             {"sid": sid_uuid, "t1a": s["t1a_id"], "t1b": s["t1b_id"],
              "t2a": s["t2a_id"], "t2b": s["t2b_id"], "t1p": t1_points_total or 0,
-             "t2p": t2_points_total or 0, "wt": other_team, "dpid": dc_pid},
+             "t2p": t2_points_total or 0, "wt": other_team, "dpid": dc_pid,
+             "forfeit_room": f"dc_leadforfeit:{sid_uuid}"},
         )
         new_ratings = await _complete_team_series_with_ratings(
             db, sid_uuid, other_team, "dc_leadforfeit", dc_pid=dc_pid,
