@@ -12,8 +12,11 @@ it runs everywhere:
   * the sweep re-locks and re-checks, and cannot rate anything;
   * the sweep is registered as a PRIMARY-only scheduler and as a janitor
     self-test root;
-  * nothing awaits between the sweep's post-lock live-game veto and its
-    settlement write, so the veto cannot be read stale (round-4 HIGH);
+  * the sweep's settlement statement carries its own post-lock live-game
+    veto, and the one publisher of the evidence locks the series row before
+    its membership read, so no publication lands between the veto read and
+    the write (round-7c HIGH) -- and no orderings scenario stands in for
+    that publisher with a direct write while a sweep is held;
   * a caller that must not mutate has its own ROUTE rather than a flag on the
     mutating one -- the route holds no write, and the state endpoint has no
     lifecycle parameter left to ignore;
@@ -1945,6 +1948,147 @@ def test_the_publisher_census_rejects_a_second_door_into_the_map():
     joined = " | ".join(findings)
     assert "_heartbeat: stores into _in_match_seen directly" in joined, findings
     assert "_in_match_touch is referenced as a value" in joined, findings
+
+
+# ── No orderings scenario writes evidence inside a held sweep ────────────
+#
+# The round-8 cold lens (finding 1) found two orderings scenarios that put
+# evidence in the map by calling main._in_match_touch directly while the
+# sweep was held past its locked re-read -- a stimulus production cannot
+# produce, because the one publisher takes FOR SHARE on the series row first
+# and so waits for the sweep's commit -- and that asserted the opposite of
+# what production does. The defect is a CLASS, so the check is over the
+# whole orderings FILE (#432): every def, every held window, every way a
+# test can write the map without the publisher. A window held BEFORE the
+# lock is judged the same way: the real publisher is the one stimulus the
+# file may use while any sweep is held, and that costs nothing, since the
+# before-the-lock scenario already drives it.
+ORDERINGS = (pathlib.Path(__file__).resolve().parent
+             / "test_sept16_dc_fallback_orderings.py")
+
+
+def _is_direct_evidence_write(node):
+    """A call of X._in_match_touch, a store into X._in_match_seen[...], or
+    that map's update / setdefault / __setitem__ -- every way a test can put
+    evidence in the map without going through the publisher."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        f = node.func
+        if f.attr == "_in_match_touch":
+            return True
+        if (f.attr in ("update", "setdefault", "__setitem__")
+                and isinstance(f.value, ast.Attribute)
+                and f.value.attr == "_in_match_seen"):
+            return True
+    if isinstance(node, (ast.Assign, ast.AugAssign)):
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target])
+        return any(isinstance(t, ast.Subscript)
+                   and isinstance(t.value, ast.Attribute)
+                   and t.value.attr == "_in_match_seen" for t in targets)
+    return False
+
+
+def held_window_writes(src):
+    """[(def name, line)] for every direct evidence write inside a held sweep.
+
+    A window OPENS at a call of _gated_sweep(Session, <gate>, ...) and CLOSES
+    at the first <gate>.set() after it, on the same name -- the release.
+    Source order is run order here, because these bodies are straight-line
+    awaits. Every top-level def is read, helpers included: a window opened
+    in a shared helper is still a window.
+    """
+    out = []
+    for fn in ast.parse(src).body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        events = []
+        gates = set()
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    and n.func.id == "_gated_sweep"):
+                g = (n.args[1].id if len(n.args) > 1
+                     and isinstance(n.args[1], ast.Name) else None)
+                gates.add(g)
+                events.append((n.lineno, n.col_offset, "open", g))
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "set" and not n.args
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id in gates):
+                events.append((n.lineno, n.col_offset, "close", n.func.value.id))
+            elif _is_direct_evidence_write(n):
+                events.append((n.lineno, n.col_offset, "write", None))
+        held = []
+        for line, _col, kind, gate in sorted(events, key=lambda e: e[:2]):
+            if kind == "open":
+                held.append(gate)
+            elif kind == "close":
+                if gate in held:
+                    held.remove(gate)
+            elif held:
+                out.append((fn.name, line))
+    return out
+
+
+_HELD_WRITE_DECOY = '''
+async def test_decoy(Session, key):
+    gate = asyncio.Event()
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
+    await asyncio.sleep(0.5)
+    main._in_match_touch(key)
+    gate.set()
+
+
+async def _shared_window(Session, key):
+    release = asyncio.Event()
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, release, LOCK_STATEMENT, "before"))
+    main._in_match_seen[key] = time.monotonic()
+    release.set()
+'''
+# The same writes, each moved to BEFORE its window opens: the twin that a
+# check keyed on the write alone, rather than on the window, would redden.
+_PRE_WINDOW_WRITE_TWIN = '''
+async def test_decoy(Session, key):
+    gate = asyncio.Event()
+    main._in_match_touch(key)
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
+    await asyncio.sleep(0.5)
+    gate.set()
+
+
+async def _shared_window(Session, key):
+    release = asyncio.Event()
+    main._in_match_seen[key] = time.monotonic()
+    sweep = asyncio.create_task(
+        _gated_sweep(Session, release, LOCK_STATEMENT, "before"))
+    release.set()
+'''
+
+
+def test_no_ordering_scenario_writes_evidence_inside_a_held_sweep():
+    """The cold lens's finding 1, as a property of the orderings FILE.
+
+    While a sweep is held, the one way evidence may reach the map is the real
+    publisher, main.presence_ping, which takes its own lock and so shows what
+    production does with a heartbeat in that window: before the lock grant
+    it publishes and the settlement's veto reads it; after the grant it waits,
+    is ordered after the settlement and publishes nothing to a settled row.
+    A direct write stands for a heartbeat that production cannot deliver
+    there. The decoys are the negative control and its twin (#391).
+    """
+    src = ORDERINGS.read_text(encoding="utf-8")
+    windows = [n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "_gated_sweep"]
+    # A check with no window to judge would pass on any file (#342).
+    assert len(windows) >= 3, len(windows)
+    assert held_window_writes(src) == []
+    assert [n for n, _ in held_window_writes(_HELD_WRITE_DECOY)] == [
+        "test_decoy", "_shared_window"]
+    assert held_window_writes(_PRE_WINDOW_WRITE_TWIN) == []
 
 
 def test_every_value_the_settle_writes_is_read_from_the_locked_row():

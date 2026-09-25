@@ -3851,7 +3851,13 @@ async def _team_dc_fallback_sweep_once(db) -> int:
         # settlement statement and its commit, so the lookup's cost is paid
         # while nothing is decided. What keeps the veto CURRENT through the
         # write is not that ordering but the lock discipline described at the
-        # settlement statement.
+        # settlement statement. Under it a heartbeat that arrives DURING this
+        # lookup is ordered AFTER the settlement -- it waits for this pass's
+        # commit and publishes nothing to a settled row -- so in either order
+        # no heartbeat can land between the veto read and the write. The
+        # lookup's position is the integrator's statement shape (the settle's
+        # parameters bound immediately before the statement that carries
+        # them), and the structural suite holds it there.
         try:
             await _assert_no_service_subject(
                 db,
@@ -3900,9 +3906,16 @@ async def _team_dc_fallback_sweep_once(db) -> int:
         # for one, and SKIP LOCKED passed the row over, so nothing was settled
         # this tick; or it waits for the commit and reads the row as this pass
         # left it -- publishing if the row is still open and nothing if it is
-        # settled. test_sept16_dc_fallback_shape.py asserts the bind, the
-        # predicate and the publisher's lock, and counts the publishers; the
-        # orderings file queues a real ping between this read and the write.
+        # settled. That third place takes EVERY heartbeat that arrives after
+        # this pass's lock is granted -- during the locked re-read, during the
+        # service-subject lookup, while the statement is built and while it is
+        # awaited: each one waits, is ordered after the settlement, publishes
+        # nothing to a settled row and still renews its lease.
+        # test_sept16_dc_fallback_shape.py asserts the bind, the predicate and
+        # the publisher's lock, and counts the publishers; the orderings file
+        # sends a real ping into three of those windows -- after the lock
+        # grant, during the lookup, and between the veto read and the write --
+        # and asserts that it waits and publishes nothing.
         #
         # The UPDATE also re-states every other condition the settle rests on
         # -- status, a marker present, the marker past the bound on
@@ -15663,7 +15676,9 @@ async def presence_ping(request: Request,
             # Release the series lock before any other write: the lease
             # renewal and the presence stamp below each take row locks of
             # their own, and holding this one across them would put a ping
-            # into lock orders it has no business in.
+            # into lock orders it has no business in. The release comes
+            # AFTER the publication, so the evidence is in the map before a
+            # sweep waiting on this row can take it.
             await db.commit()
         except Exception:
             _im_ok = False

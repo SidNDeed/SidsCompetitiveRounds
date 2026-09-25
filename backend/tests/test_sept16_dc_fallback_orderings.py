@@ -624,13 +624,19 @@ class _GateOnStatement:
     is otherwise a race. This holds the sweep at the door of (or just past) a
     named statement so the gap is a place the test can stand.
 
-    Two kinds of ping stand in those gaps below, and they answer different
-    questions. `main._in_match_touch` called directly puts evidence into the
-    map at a chosen moment: it asks what the veto does with evidence that is
-    THERE. A ping through `main.presence_ping` is the real publisher, with its
-    own lock and its own membership read: it asks whether evidence can ARRIVE
-    at a moment the veto has already passed. The round-7c HIGH was a question
-    of the second kind that this file had only asked in the first form.
+    Evidence reaches a HELD sweep's gaps below in one way only: through
+    `main.presence_ping`, the real publisher, with its own lock and its own
+    membership read, asking whether evidence can ARRIVE at a moment the veto
+    has already passed and what becomes of a ping that tries. A direct call
+    into the evidence map (`main._in_match_touch`) stands for a ping that has
+    already COMPLETED, which production's one publisher can do before a
+    sweep holds the series lock or after it commits -- never while it holds
+    it, because the publisher is then waiting for that commit. Two scenarios
+    here once wrote the map directly inside a held window and asserted the
+    opposite of what production does (the round-8 cold lens), and the shape
+    suite's test_no_ordering_scenario_writes_evidence_inside_a_held_sweep
+    now refuses that shape anywhere in this file. The round-7c HIGH was an
+    arrival question this file had only asked with a direct write.
 
     It is the TEST's wrapper, around the session the test itself hands in:
     production code gets no seam it would have to carry, and the sweep runs
@@ -754,52 +760,6 @@ def test_the_sweep_skips_a_held_row_instead_of_queueing_behind_it():
     _drive(body)
 
 
-# ── Liveness is re-read after the lock is held ───────────────────────────
-
-
-def test_the_sweep_re_reads_liveness_after_taking_the_lock():
-    async def body():
-        engine, Session, ids = await _fresh_series()
-        sid = ids["sid"]
-        try:
-            with _harness_globals():
-                assert (await _fallback(Session, sid))["status"] == "deferred"
-                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
-
-                # Hold the sweep JUST PAST its locked read: the pre-lock veto
-                # has already been evaluated and found no evidence.
-                gate = asyncio.Event()
-                task = asyncio.create_task(
-                    _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
-                await asyncio.sleep(0.5)
-                assert not task.done(), "the sweep never reached its locked read"
-
-                # While it holds the lock, the four resume and the first
-                # in-match ping of the new room lands. The row's COLUMNS are
-                # unchanged -- status, marker and dueness all still say settle
-                # -- so the in-transaction re-check cannot see this. Only
-                # re-reading the veto can.
-                main._in_match_touch(str(sid))
-                gate.set()
-                assert await task == 0
-                assert (await _row(Session, sid))["status"] == "active"
-
-                # NEGATIVE CONTROL: the identical interleave with no ping
-                # settles. Without it, a sweep that had simply stopped working
-                # would pass the half above.
-                main._in_match_seen.clear()
-                gate2 = asyncio.Event()
-                task2 = asyncio.create_task(
-                    _gated_sweep(Session, gate2, LOCK_STATEMENT, "after"))
-                await asyncio.sleep(0.5)
-                gate2.set()
-                assert await task2 == 1
-                assert (await _row(Session, sid))["status"] == "dc_incomplete"
-        finally:
-            await engine.dispose()
-    _drive(body)
-
-
 # ── The deleted second refusal: the sweep does not read the room clock ───
 
 
@@ -813,12 +773,14 @@ def test_the_sweep_settles_on_the_bound_whatever_the_room_clock_says():
     with a NULL room_issued_at, which made the arm true on arrival. A check
     that cannot fail is worse than no check (#342, #441).
 
-    The two rows below are the two shapes production actually produces. Both
-    settle on the bound alone. The third -- a room stamped AFTER the marker --
-    is the shape the round-4 test manufactured to make the term look load-
-    bearing; production cannot produce it, because issuing a room clears the
-    marker (asserted file-wide in the shape suite), and it now settles too,
-    which is the whole content of the deletion.
+    The two rows below are the two shapes production ordinarily produces.
+    Both settle on the bound alone. The third -- a room stamped AFTER the
+    marker -- is the shape the round-4 test manufactured to make the term
+    look load-bearing. Production reaches it only when a clear fails:
+    issuing a room ATTEMPTS the marker clear in the same function (asserted
+    file-wide in the shape suite), and that attempt swallows what it
+    raises, so a failed clear leaves exactly this row. It settles on the
+    bound too, which is the whole content of the deletion.
     """
     async def body():
         engine, Session, ids = await _fresh_series()
@@ -862,9 +824,10 @@ def test_the_sweep_settles_on_the_bound_whatever_the_room_clock_says():
 
             # (c) The manufactured reverse ordering: a room stamped NOW on a
             # row whose marker is old. Under the deleted term this refused;
-            # now it settles. Production does not produce this row, and the
-            # structural suite is what holds that -- every site that stamps
-            # room_issued_at clears the marker in the same function.
+            # now it settles. Production reaches this row only when the
+            # room-issue clear fails: every site that stamps room_issued_at
+            # ATTEMPTS the clear in the same function (the structural suite
+            # counts that), and the attempt swallows what it raises.
             engine3, Session3, ids3 = await _fresh_series()
             sid3 = ids3["sid"]
             try:
@@ -883,76 +846,6 @@ def test_the_sweep_settles_on_the_bound_whatever_the_room_clock_says():
                     assert (await _row(Session3, sid3))["status"] == "dc_incomplete"
             finally:
                 await engine3.dispose()
-        finally:
-            await engine.dispose()
-    _drive(body)
-
-
-# ── The veto is the last read before the write ───────────────────────────
-
-
-SERVICE_LOOKUP_STATEMENT = "SELECT id::text FROM players"
-
-
-def test_a_heartbeat_during_the_service_subject_lookup_selects_the_veto():
-    """The round-4 HIGH, as a run rather than as a shape.
-
-    Liveness is in-process evidence and is only as current as the last moment
-    this coroutine held the event loop. Round 4 ran the awaited service-
-    subject lookup AFTER the post-lock veto; on a cold or hourly-expired cache
-    that lookup issues its own SELECT, and the await around it lets the
-    presence ping that publishes in-match evidence for this very series run to
-    completion. The veto's answer was then a reading of the past, and the
-    settlement write acted on it as if it were current.
-
-    So this scenario stands in that SELECT's gap and delivers the heartbeat
-    there. With the lookup hoisted above the veto, the veto reads the
-    heartbeat and refuses. The mutation that moves the lookup back below the
-    veto turns the first half of this test red, which is the control that it
-    is measuring the ordering and not merely that a sweep still works.
-    """
-    async def body():
-        engine, Session, ids = await _fresh_series()
-        sid = ids["sid"]
-        try:
-            with _harness_globals():
-                assert (await _fallback(Session, sid))["status"] == "deferred"
-                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
-
-                # Cold cache, so the service-subject assertion really does put
-                # a statement on the wire for the gate to catch.
-                main._service_player_uuid_cache = None
-                gate = asyncio.Event()
-                task = asyncio.create_task(
-                    _gated_sweep(Session, gate, SERVICE_LOOKUP_STATEMENT, "after"))
-                await asyncio.sleep(0.5)
-                assert not task.done(), (
-                    "the sweep never issued the service-subject lookup -- the "
-                    "cache was warm, or the assertion no longer runs per row")
-
-                # The four resume and the first in-match ping of the new room
-                # lands while that lookup is in flight.
-                main._in_match_touch(str(sid))
-                gate.set()
-                assert await task == 0, (
-                    "the sweep settled a row that published in-match evidence "
-                    "during its own service-subject lookup")
-                assert (await _row(Session, sid))["status"] == "active"
-
-                # NEGATIVE CONTROL: the identical interleave, same gate, same
-                # statement, no ping. It settles -- so the refusal above is the
-                # veto reading the heartbeat, not a sweep that stopped working
-                # or a gate that deadlocked it (#391).
-                main._in_match_seen.clear()
-                main._service_player_uuid_cache = None
-                gate2 = asyncio.Event()
-                task2 = asyncio.create_task(
-                    _gated_sweep(Session, gate2, SERVICE_LOOKUP_STATEMENT, "after"))
-                await asyncio.sleep(0.5)
-                assert not task2.done()
-                gate2.set()
-                assert await task2 == 1
-                assert (await _row(Session, sid))["status"] == "dc_incomplete"
         finally:
             await engine.dispose()
     _drive(body)
@@ -1436,6 +1329,215 @@ def test_a_ping_before_the_sweep_takes_its_lock_is_published_and_vetoes_it():
                 end = await _row(Session, sid)
                 assert end["status"] == "active", dict(end)
                 assert end["invalidation_reason"] is None
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+# ── A heartbeat after the lock grant is ordered after the settlement ─────
+
+
+SERVICE_LOOKUP_STATEMENT = "SELECT id::text FROM players"
+DECLINED_LINE = "[PRESENCE] in_match evidence not published"
+
+
+def _post_lock_window(capsys, needle):
+    """One real ping delivered while the sweep is held just past `needle`.
+
+    Shared by the two windows after the lock grant, which differ only in
+    where the sweep stands. Returns nothing; asserts the whole outcome.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        key = str(sid)
+        try:
+            with _harness_globals(), _presence_harness() as renewals:
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+                # Cold cache, so the service-subject assertion really puts
+                # its SELECT on the wire whichever window is being held.
+                main._service_player_uuid_cache = None
+
+                gate = asyncio.Event()
+                sweep = asyncio.create_task(
+                    _gated_sweep(Session, gate, needle, "after"))
+                await asyncio.sleep(0.5)
+                assert not sweep.done(), (
+                    "the sweep never reached the statement it is held past: "
+                    + needle)
+                assert key not in main._in_match_seen
+
+                ping = asyncio.create_task(_ping(Session, SID_T1B, sid))
+                await asyncio.sleep(1.0)
+                ping_waited = not ping.done()
+                published_while_held = key in main._in_match_seen
+
+                gate.set()
+                settled = await asyncio.wait_for(sweep, 15)
+                await asyncio.wait_for(ping, 15)
+                end = await _row(Session, sid)
+
+                assert ping_waited, (
+                    "the ping finished while the sweep held the series lock")
+                assert not published_while_held, (
+                    "a presence ping published in-match evidence for this "
+                    "series while the sweep held its lock")
+                assert settled == 1, settled
+                assert end["status"] == "dc_incomplete", dict(end)
+                assert end["invalidation_reason"] == "dc_manual_pending"
+                assert key not in main._in_match_seen, (
+                    "evidence was published for a series already settled")
+                # The ping reached a verified membership decision: "nothing
+                # published" is the route declining, not the route failing.
+                assert renewals == [(str(ids["t1b"]), "team", key)], renewals
+        finally:
+            await engine.dispose()
+    _drive(body)
+    assert DECLINED_LINE in capsys.readouterr().out, (
+        "the route never said it declined the publication")
+
+
+def test_a_ping_after_the_lock_is_granted_is_ordered_after_the_settlement(capsys):
+    """A heartbeat that arrives once the sweep holds the lock waits for it.
+
+    The sweep has taken FOR NO KEY UPDATE on the series row and passed its
+    locked re-read -- status, marker and dueness all say settle -- and is held
+    just past that read. A seat of this series now pings through the real
+    route. The route takes FOR SHARE on the same row before its membership
+    read, FOR SHARE conflicts with the sweep's lock, so the ping WAITS; when
+    the sweep commits, the ping reads the row as the sweep left it -- settled
+    -- and publishes nothing. A heartbeat that arrives after the lock grant is
+    ordered after the settlement: the row settles, the evidence is dropped,
+    and the ping still reaches its membership decision and renews its lease.
+
+    Until the round-8 cold lens this window was driven by a direct write into
+    the evidence map, with the row asserted to stay active. No production
+    caller can put evidence there while the sweep holds the lock, because the
+    one publisher is waiting; so the test asserted the opposite of what
+    production does, and a publisher with no lock at all (mutation H1-b) left
+    it green. Through the real route it is RED under H1-b, H1-d and H1-e.
+
+    ITS NEGATIVE CONTROL is the same ping delivered BEFORE the lock is
+    granted, test_a_ping_before_the_sweep_takes_its_lock_is_published_and_vetoes_it:
+    nothing makes that ping wait, it publishes, and the settlement statement's
+    veto refuses on it. Without that pairing this test would also pass on a
+    route that never publishes; the recorded renewal and the route's own
+    declined line make "nothing published" a decision the route took.
+    """
+    _post_lock_window(capsys, LOCK_STATEMENT)
+
+
+def test_a_ping_during_the_service_subject_lookup_is_ordered_after_the_settlement(capsys):
+    """The round-4 HIGH's window, asked of the real publisher.
+
+    Round 4 ran the awaited service-subject lookup AFTER the post-lock veto,
+    and on a cold or hourly-expired cache that lookup issues its own SELECT.
+    The concern was a presence ping running to completion inside that await
+    and publishing evidence the veto had already missed. So the sweep is held
+    just past that SELECT, with the lock held, and a seat pings through the
+    real route. It cannot run to completion there: its FOR SHARE waits for
+    the sweep's commit, and it then reads the settled row and publishes
+    nothing. The ping is ordered after the settlement, as in the test above.
+
+    That is also why the lookup's position relative to the veto read is not
+    something a run can see any more. Mutation L moves the lookup back between
+    the veto read and the write; under the lock discipline that changes no
+    outcome, so L is scored on the structural check that holds the
+    integrator's statement shape, and THIS test is the inert test the
+    mutation runner requires to stay GREEN under L. Until the round-8 cold
+    lens this window was driven by a direct write into the evidence map, with
+    the row asserted to stay active, which no production caller can do there.
+    """
+    _post_lock_window(capsys, SERVICE_LOOKUP_STATEMENT)
+
+
+# ── The publisher publishes under its lock, not after releasing it ───────
+
+
+class _HoldAfterCommit:
+    """A session wrapper that holds a ping just after its FIRST commit.
+
+    presence_ping's first commit is the one that releases its series lock;
+    the status read, the membership read and the publication all come before
+    it. Holding the ping there turns the gap between "the lock is released"
+    and "whatever the route does next" into a place the test can stand. The
+    route runs unmodified; the wrapper is the test's, around a session the
+    test hands in, as with _GateOnStatement.
+    """
+
+    def __init__(self, inner, gate, reached):
+        self._inner, self._gate, self._reached = inner, gate, reached
+        self.fired = False
+
+    async def commit(self):
+        await self._inner.commit()
+        if not self.fired:
+            self.fired = True
+            self._reached.set()
+            await self._gate.wait()
+
+    def __getattr__(self, name):          # execute, rollback, ...
+        return getattr(self._inner, name)
+
+
+def test_a_pings_evidence_is_in_the_map_before_its_series_lock_is_released():
+    """The route decides under FOR SHARE and publishes under it too.
+
+    The touch comes before the commit that releases the series lock. Here the
+    real ping is held just after that commit -- lock released, lease renewal
+    not yet run -- and a whole sweep pass runs in the gap. With the touch
+    before the commit, the evidence is already in the map when the lock is
+    released: the sweep's pass-1 filter reads it and the row stays open. With
+    the commit moved above the touch (mutation H1-f), a sweep could take the
+    lock the ping had just released, read no evidence and settle, and the
+    ping would then publish to a series the settlement never saw. H1-f was
+    killed only by the structural publisher check until the round-8 cold
+    lens asked for a run; this is that run.
+
+    NEGATIVE CONTROL (#391): once the ping has finished and its evidence is
+    aged past IN_MATCH_TTL_SEC, the same row settles on the next pass, so the
+    refusal above is the evidence and not a sweep that stopped working.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        key = str(sid)
+        try:
+            with _harness_globals(), _presence_harness() as renewals:
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+
+                gate, reached = asyncio.Event(), asyncio.Event()
+
+                async def held_ping():
+                    async with Session() as s:
+                        return await main.presence_ping(
+                            request=_PingRequest(), steam_id=SID_T1B,
+                            in_match=key, db=_HoldAfterCommit(s, gate, reached))
+
+                ping = asyncio.create_task(held_ping())
+                try:
+                    await asyncio.wait_for(reached.wait(), 15)
+                    published_before_release = key in main._in_match_seen
+                    settled = await _sweep(Session)
+                    during = await _row(Session, sid)
+                finally:
+                    gate.set()
+                await asyncio.wait_for(ping, 15)
+
+                assert published_before_release, (
+                    "the ping released its series lock before publishing, so "
+                    "a sweep pass could run in between and settle")
+                assert settled == 0, settled
+                assert during["status"] == "active", dict(during)
+                assert renewals == [(str(ids["t1b"]), "team", key)], renewals
+
+                # NEGATIVE CONTROL: the same row, the evidence aged out.
+                main._in_match_seen[key] = (
+                    time.monotonic() - (main.IN_MATCH_TTL_SEC * 2))
+                assert await _sweep(Session) == 1
+                assert (await _row(Session, sid))["status"] == "dc_incomplete"
         finally:
             await engine.dispose()
     _drive(body)
