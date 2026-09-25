@@ -5752,6 +5752,19 @@ _FFA_HOLD_FENCES = 1
 # Its sibling _FFA_GAME_NUMBER (the /health `ffa_game_number` word) is DERIVED
 # from two SQL literals rather than written here, so it is defined after
 # submit_ffa_match, whose insert it reads.
+# RJ-TRIAGE round 2, reported on /health as `rj_triage`. A marker whose only
+# purpose is to be probed (#306): nothing reads it and no behaviour depends on
+# it. 2 = this build carries the quarantine triage view's round 2: PT3's
+# lobby-wide labels need every comparison to have run, the read transaction
+# holds automatic collection off from before statement 1 until its COMMIT or
+# ROLLBACK returns, and a read whose session the server ended answers 503
+# however the driver reports the loss. The round adds no route -- the three
+# triage routes answer on the build before it -- and what it changes is
+# reached only through the admin view and the internal digest feed, so this
+# value is the release train's build discriminator for it. Both arms of the
+# route carry it; a box on the build before round 2 answers without the key.
+# Raise it when a later round of the view must be proven deployed.
+_RJ_TRIAGE_MARKER = 2
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -5765,6 +5778,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_steam_render=_pc_steam_render_word(),
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
+                              rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
@@ -5775,6 +5789,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
+                              rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER,
                               pc_card_themes=_pc_card_themes_word())
 
