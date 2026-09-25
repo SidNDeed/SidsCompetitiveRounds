@@ -380,9 +380,10 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     # one steam_id that both observe 11 rows both commit and the cap lands at
     # 13. There is no row to take FOR UPDATE here -- the row being counted is
     # the one about to be written -- which is exactly the case the repo keys an
-    # advisory lock on a VALUE for (#202/#203/#207; this same expression is at
-    # main.py:13198 and :15111). Held to commit, keyed per account, so it
-    # serialises one player's concurrent uploads and touches nobody else's.
+    # advisory lock on a VALUE for (#202/#203/#207; main.py takes the same lock
+    # in steam_auth and _enrollment_identity_gate). Held to commit, keyed per
+    # account, so it serialises one player's concurrent uploads and touches
+    # nobody else's.
     #
     # It is taken BEFORE the count deliberately: after it, the second caller
     # would already have read a stale number and the lock would protect

@@ -193,8 +193,9 @@ _RELAY_ROW_FROM = (
 # code is not one they can be quoting.
 #
 # NO time bound. The 24-hour window was a property of the GUESS, not of the
-# authorization: _mail_reply_core's envelope check (main.py:57530-57538) has
-# no time bound either, and a year-old thread is still the player's thread.
+# authorization: the envelope check in main.py's _mail_reply_core (the read
+# that loads `orig`) has no time bound either, and a year-old thread is
+# still the player's thread.
 # Once the player names the thread there is nothing for a window to protect.
 #
 # `d.cancelled_at IS NULL` is carried explicitly rather than left to

@@ -1375,9 +1375,9 @@ class MailMessage(Base):
     # DEFAULT 'game' is the only default -- see mail_discord_relay above, and
     # note that letting SQL supply a value is what `server_default` DECLARES,
     # not what omitting a default does. Nothing constructs a MailMessage
-    # through the ORM today -- both writers are raw INSERTs, main.py:57396
-    # which sets `via` explicitly and main.py:58193 which omits it so the
-    # broadcast takes 'game' -- so this is latent rather than live. The
+    # through the ORM today -- both writers are raw INSERTs in main.py:
+    # _mail_finish_send sets `via` explicitly, and admin_mail_broadcast omits
+    # it so the broadcast takes 'game' -- so this is latent rather than live. The
     # mapping exists precisely so that the day something does construct one,
     # the column is not sent as an explicit NULL against its own NOT NULL.
     via = Column(Text, nullable=False, server_default=FetchedValue())
