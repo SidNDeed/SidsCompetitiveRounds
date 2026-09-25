@@ -858,6 +858,21 @@ class HealthResponse(BaseModel):
     # Absent on any build before that batch, which is how the train reads the
     # old build.
     ovt_solo_split: int
+    # lead_forfeit_pergame: whether this build settles a 2v2 lead-forfeit from
+    # the server's own per-game record (team_series_games, migration 348) rather
+    # than the DC report's point snapshot (main._LEAD_FORFEIT_PERGAME; 1 =
+    # update_team_live_points' compiled code loads _record_team_game_points AND
+    # team_series_report_dc's loads _team_game_crossed_two). DERIVED from those
+    # two wirings when main is imported, never written down, so a build that
+    # lost either one reads 0 (#342). The release train's build discriminator
+    # for the lead-forfeit hotfix, which adds no route and no key to a GET
+    # answer both builds serve; equal on both boxes by construction, and read
+    # by nothing else (#306). It is a statement about the code only: whether
+    # migration 348 has been applied is proven by its own check. Declared
+    # without a default, so building the answer without it raises instead of
+    # silently leaving the key out. Absent on any build before that batch,
+    # which is how the train reads the old build.
+    lead_forfeit_pergame: int
     # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
     # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
     # by migration 333). `ready` once the map is non-empty, `empty` when the

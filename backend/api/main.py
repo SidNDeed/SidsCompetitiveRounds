@@ -6318,6 +6318,9 @@ _FFA_HOLD_FENCES = 1
 # route carry it; a box on the build before round 2 answers without the key.
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
+# Its sibling _LEAD_FORFEIT_PERGAME (the /health `lead_forfeit_pergame` word)
+# is DERIVED from the two 2v2 per-game wirings rather than written here, so
+# it is defined after team_series_report_dc, whose reader call it reads.
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6333,6 +6336,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
@@ -6344,6 +6348,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word())
 
 
@@ -41217,6 +41222,44 @@ async def team_series_report_dc(
         "dc_team_remaining": other_team,
         "reason": "awaiting_admin_resolution",
     }
+
+
+# -- The 2v2 lead-forfeit build marker (/health `lead_forfeit_pergame`) ----
+# team_series_report_dc completes a series to the team that stayed only when
+# that team was already a game up AND the abandoned game saw real play. This
+# build decides the second half from the server's own per-game record,
+# team_series_games (migration 348): update_team_live_points raises it during
+# play through _record_team_game_points, and the DC report reads it through
+# _team_game_crossed_two instead of the point snapshot in its own query
+# string. The batch adds no route and no key to any GET answer both builds
+# serve -- the record is written and read only by signed POSTs -- so this
+# word is what tells the new build from the old one. The release train
+# asserts it on both roles and reads any value but the expected one as the
+# old build; nothing else reads it (#306). It is a statement about the code
+# only: whether migration 348 has been applied is proven by its own check,
+# and until it is, every DC report settles as dc_incomplete.
+#
+# DERIVED, never written down (#342): 1 when update_team_live_points'
+# compiled code loads _record_team_game_points AND team_series_report_dc's
+# loads _team_game_crossed_two, else 0. Both are read from the endpoints'
+# code objects (co_names), not from their source text, so a comment, or a
+# string that quotes either helper's name, cannot move the value, and an
+# endpoint that stops loading its helper reads 0.
+def _lead_forfeit_loaded_name(code, name: str) -> str:
+    """`name` when it is one of the names `code` loads (co_names), else ''."""
+    return name if name in code.co_names else ""
+
+
+def _lead_forfeit_pergame_marker(writer: str, reader: str) -> int:
+    """1 when both names were found among the endpoints' loaded names, else 0."""
+    return int(bool(writer) and bool(reader))
+
+
+_LEAD_FORFEIT_PERGAME = _lead_forfeit_pergame_marker(
+    _lead_forfeit_loaded_name(update_team_live_points.__code__,
+                              "_record_team_game_points"),
+    _lead_forfeit_loaded_name(team_series_report_dc.__code__,
+                              "_team_game_crossed_two"))
 
 
 # ── 2v2 series continuation (recording-gap fix) ─────────────────────────────
