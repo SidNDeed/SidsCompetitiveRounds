@@ -28,6 +28,7 @@ Run: python -m pytest backend/tests/test_sept16_client_r2.py -q
 import bisect
 import functools
 import itertools
+import os
 import pathlib
 import re
 
@@ -3168,6 +3169,120 @@ def test_r11cl1_a_call_through_any_receiver_in_a_log_call_is_not_set_aside():
               tree_logs, walked))
 
 
+# ROUND 12 (R11-L1): a nested source carrying a second caller of the mutating
+# route -- the class B2 forbids.  `Zz*` names no plugin member.
+_R12_NESTED_CALLER = (
+    "namespace CompetitiveRounds" + LF + "{" + LF
+    + "    internal static class ZzNested" + LF + "    {" + LF
+    + "        internal static void ZzHidden(string sid)" + LF + "        {" + LF
+    + "            ApiClient.PollTeamSeriesStateAssemblyOnly(sid, null);" + LF
+    + "        }" + LF + "    }" + LF + "}" + LF)
+_R12_NESTED_INERT = _R12_NESTED_CALLER.replace(
+    "            ApiClient.PollTeamSeriesStateAssemblyOnly(sid, null);",
+    "            int zz = sid.Length;")
+
+
+def test_r12_l1_the_whole_client_source_map_is_the_compile_set(tmp_path, monkeypatch):
+    """R11-L1 (B2, B10, B11, B16, B19): both whole-client source maps are the
+    compile set -- every compiled source in any subfolder, keyed by its path
+    relative to plugin/.  On the tree: the default compile glob is the
+    authority and both maps equal the recursive walk.  On a scratch project:
+    a nested source carrying a second caller of the mutating route, and a
+    nested source sharing a top-level file's name, are both in both maps and
+    the caller census finds the nested caller, where the round-11 map missed
+    both; plugin/'s own obj and bin folders and a dot folder at any depth stay
+    out, a subfolder's own obj folder stays in; and each override of the
+    default glob is REFUSED."""
+    assert _r12_compile_authority_problems(PLUGIN) == []
+    tree = _r12_compile_sources()
+    top = sorted(p.name for p in PLUGIN.glob("*.cs"))
+    assert set(top) <= set(tree), sorted(set(top) - set(tree))
+    assert all((PLUGIN / k).is_file() for k in tree), sorted(tree)
+    assert _all_sources() == tree and _r7_plugin_sources() == tree
+    print("R11-L1 TREE: the default compile glob is the authority; %d compiled "
+          "sources, %d in a subfolder; both whole-client maps equal the compile "
+          "set" % (len(tree), len([k for k in tree if "/" in k])))
+
+    scratch = tmp_path / "plugin"
+    files = {
+        "CompetitiveRounds.csproj": '<Project Sdk="Microsoft.NET.Sdk">' + LF
+                                    + "</Project>" + LF,
+        "ApiClient.cs": _src("ApiClient.cs"),
+        "Plugin.cs": _src("Plugin.cs"),
+        "Zz/ZzNested.cs": _R12_NESTED_CALLER,
+        "Zz/ApiClient.cs": _R12_NESTED_INERT,
+        "Zz/obj/ZzInner.cs": _R12_NESTED_INERT,
+        "Zz/Deeper/.cache/ZzDot.cs": _R12_NESTED_CALLER,
+        "obj/ZzObj.cs": _R12_NESTED_CALLER,
+        "BIN/ZzBin.cs": _R12_NESTED_CALLER,
+        ".hidden/ZzHidden.cs": _R12_NESTED_CALLER,
+    }
+    for rel, body in files.items():
+        f = scratch / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(body.encode("utf-8"))
+    want = ["ApiClient.cs", "Plugin.cs", "Zz/ApiClient.cs", "Zz/ZzNested.cs",
+            "Zz/obj/ZzInner.cs"]
+    got = _r12_compile_sources(scratch)
+    assert sorted(got) == want, sorted(got)
+    assert got["ApiClient.cs"] == files["ApiClient.cs"]
+    assert got["Zz/ApiClient.cs"] == files["Zz/ApiClient.cs"]
+    old = _r12_round11_map(scratch)
+    assert sorted(old) == ["ApiClient.cs", "Plugin.cs"], sorted(old)
+    old_sites = _call_sites("PollTeamSeriesStateAssemblyOnly", old)
+    assert not any("ZzNested" in f for f, _m in old_sites), old_sites
+
+    monkeypatch.setitem(globals(), "PLUGIN", scratch)
+    assert _all_sources() == got, "the caller census's map is not the compile set"
+    assert _r7_plugin_sources() == got, "the census map is not the compile set"
+    sites = _call_sites("PollTeamSeriesStateAssemblyOnly")
+    assert ("Zz/ZzNested.cs", "ZzHidden") in sites, sites
+    assert sites != {("Plugin.cs", "PollAssemblyStateLoop")}, sites
+    assert not any(f.split("/")[0] in ("obj", "BIN", ".hidden") or "/." in f
+                   for f, _m in sites), sites
+    print("R11-L1 NESTED: the compile set of a scratch project holds %s; the "
+          "round-11 map held %s; the caller census found %s, so the one-caller "
+          "rule is REFUSED on it" % (", ".join(sorted(got)), ", ".join(sorted(old)),
+                                     ", ".join("%s:%s" % s for s in sorted(sites))))
+    monkeypatch.undo()
+    assert PLUGIN == ROOT / "plugin"
+
+    refusals = 0
+    proj = scratch / "CompetitiveRounds.csproj"
+    base = proj.read_bytes()
+    for label, body in (
+            ("a Compile item", '<Project Sdk="Microsoft.NET.Sdk">' + LF
+             + '  <ItemGroup><Compile Remove="Zz/**" /></ItemGroup>' + LF
+             + "</Project>" + LF),
+            ("a default-items switch", '<Project Sdk="Microsoft.NET.Sdk">' + LF
+             + "  <PropertyGroup><EnableDefaultCompileItems>false"
+             "</EnableDefaultCompileItems></PropertyGroup>" + LF + "</Project>" + LF),
+            ("an Import", '<Project Sdk="Microsoft.NET.Sdk">' + LF
+             + '  <Import Project="zz.props" />' + LF + "</Project>" + LF),
+            ("not SDK-style", "<Project>" + LF + "</Project>" + LF)):
+        proj.write_bytes(body.encode("utf-8"))
+        try:
+            _r12_compile_sources(scratch)
+            raise AssertionError("an override of the default glob was not "
+                                 "refused: " + label)
+        except AssertionError as exc:
+            assert "not the default compile glob" in str(exc), (label, str(exc))
+            print("R11-L1 AUTHORITY REFUSED (%s): %s" % (label, exc))
+        refusals += 1
+    proj.write_bytes(base)
+    (scratch / "Directory.Build.props").write_bytes(b"<Project />")
+    try:
+        _r12_compile_sources(scratch)
+        raise AssertionError("a Directory.Build.props was not refused")
+    except AssertionError as exc:
+        assert "Directory.Build.props stands in the project folder" in str(exc), str(exc)
+        print("R11-L1 AUTHORITY REFUSED (a Directory.Build.props): %s" % exc)
+    refusals += 1
+    print("R11-L1 COMPILE SET: nested and same-named sources enumerated by "
+          "their paths, excluded folders left out, %d overrides of the default "
+          "glob refused" % refusals)
+
+
 def test_the_dc_fallback_watch_dies_with_the_room():
     """A watch carried across a room edge waits on an ACTOR NUMBER that now
     names somebody else.  Same lifetime, and the same three edges, as the
@@ -3332,8 +3447,122 @@ _CS_MEMBER = re.compile(
     r"^ {8}(?:internal|private|public|protected)\s+[^;{}]*?\b([A-Za-z_0-9]+)\s*\(")
 
 
+# ROUND 12 (R11-L1, the round-11 review) -- THE WHOLE-CLIENT SOURCE MAP IS
+# THE COMPILE SET.  The project file is SDK-style with no Compile item and no
+# switch that turns the default items off, so what it compiles is the SDK's
+# default compile glob: every `**/*.cs` under plugin/, minus plugin/'s own
+# output and intermediate folders (bin, obj) and any folder whose name starts
+# with a dot, at any depth.  Both whole-client maps -- `_all_sources`, which
+# feeds the caller census, and `_r7_plugin_sources`, which feeds the
+# dead-status sweep, the ignored-read census, the claimed-prose scope and the
+# writer census -- used to glob plugin/'s TOP LEVEL only and key each entry
+# by its file NAME, so a source in a subfolder, compiled into the DLL, was
+# outside every one of those checks, and two sources sharing a name in
+# different folders could not both have been keys.  Both now return
+# `_r12_compile_sources()`: a recursive walk applying exactly those
+# exclusions, keyed by the path relative to plugin/ with forward slashes (a
+# top-level file's key is its name, as before).
+#
+# THE GLOB IS THE AUTHORITY ONLY WHILE NOTHING OVERRIDES IT, so the walk
+# REFUSES -- raises, and every check built on it goes red -- when the project
+# folder holds other than one project file, the project is not SDK-style,
+# the project file carries a Compile item, a default-items switch, a
+# DefaultItemExcludes or output/intermediate path override, or an Import, or
+# a Directory.Build.props/.targets stands in plugin/ or any folder above it.
+# A folder the walk cannot list raises too.  Each refusal names the file by
+# its role, never by its path.
+#
+# WHAT THIS DOES NOT SEE, so no sentence above is read as a promise about
+# it: a source the build adds from outside plugin/'s own tree -- a package's
+# content files, a file the SDK generates under obj/ (the assembly-info file)
+# -- is compiled but is not delivered plugin source; the notes carry it as a
+# residual.
+_R12_AUTHORITY_FORMS = (
+    ("a Compile item", re.compile(r"<\s*Compile\b", re.I)),
+    ("a default-items switch",
+     re.compile(r"\bEnableDefault(?:Compile)?Items\b", re.I)),
+    ("a DefaultItemExcludes override", re.compile(r"\bDefaultItemExcludes\b", re.I)),
+    ("an output or intermediate path override",
+     re.compile(r"\bBase(?:Output|IntermediateOutput)Path\b", re.I)),
+    ("an Import", re.compile(r"<\s*Import\b", re.I)),
+)
+_R12_SDK_PROJECT = re.compile(r'<\s*Project\s+Sdk\s*=\s*"Microsoft\.NET\.Sdk"')
+_R12_EXCLUDED_TOP = ("bin", "obj")
+_R12_BUILD_FILES = ("Directory.Build.props", "Directory.Build.targets")
+
+
+def _r12_compile_authority_problems(plugin_dir):
+    """[reason] -- why the SDK default compile glob is NOT the authority for
+    what the project in `plugin_dir` compiles; [] when it is (R11-L1)."""
+    plugin_dir = pathlib.Path(plugin_dir)
+    projects = sorted(p for p in plugin_dir.iterdir()
+                      if p.is_file() and p.suffix.lower() == ".csproj")
+    out = []
+    if len(projects) != 1:
+        out.append("the project folder holds %d project files, not one"
+                   % len(projects))
+    for p in projects:
+        text = p.read_text(encoding="utf-8")
+        if not _R12_SDK_PROJECT.search(text):
+            out.append("the project file is not SDK-style")
+        for label, rx in _R12_AUTHORITY_FORMS:
+            if rx.search(text):
+                out.append("the project file carries " + label)
+    here = plugin_dir.resolve()
+    for level, folder in enumerate([here] + list(here.parents)):
+        for name in _R12_BUILD_FILES:
+            if (folder / name).exists():
+                out.append("a %s stands %s" % (
+                    name, "in the project folder" if level == 0 else
+                    "%d folder(s) above the project folder" % level))
+    return out
+
+
+def _r12_excluded_dir(rel_base, name):
+    """Whether the folder `name`, inside `rel_base` (relative to plugin/), is
+    outside the default compile glob: a dot folder at any depth, or plugin/'s
+    own bin or obj folder (this file system ignores letter case)."""
+    return name.startswith(".") or (
+        rel_base == pathlib.Path(".") and name.lower() in _R12_EXCLUDED_TOP)
+
+
+def _r12_walk_error(exc):
+    raise exc
+
+
+def _r12_compile_sources(plugin_dir=None):
+    """{path relative to plugin/: text} for EVERY source the project
+    compiles, walked recursively under the SDK default compile glob; raises
+    when the glob is not the authority or a folder cannot be listed (R11-L1).
+    `plugin_dir` is handed in only by the R11-L1 test; otherwise plugin/."""
+    plugin_dir = pathlib.Path(PLUGIN if plugin_dir is None else plugin_dir)
+    problems = _r12_compile_authority_problems(plugin_dir)
+    if problems:
+        raise AssertionError("the plugin's compile set is not the default "
+                             "compile glob: " + "; ".join(problems))
+    out = {}
+    for base, dirs, files in os.walk(plugin_dir, onerror=_r12_walk_error):
+        rel_base = pathlib.Path(base).relative_to(plugin_dir)
+        dirs[:] = sorted(d for d in dirs if not _r12_excluded_dir(rel_base, d))
+        for f in sorted(files):
+            if f.lower().endswith(".cs"):
+                rel = (rel_base / f).as_posix()
+                out[rel] = (pathlib.Path(base) / f).read_text(encoding="utf-8")
+    return dict(sorted(out.items()))
+
+
+def _r12_round11_map(plugin_dir):
+    """THE ROUND-11 MAP, verbatim in behaviour: plugin/'s top level only,
+    keyed by file name.  Kept ONLY so `test_r12_l1_...` can show what it
+    missed; nothing else calls it."""
+    return {p.name: p.read_text(encoding="utf-8")
+            for p in sorted(pathlib.Path(plugin_dir).glob("*.cs"))}
+
+
 def _all_sources():
-    return {p.name: p.read_text(encoding="utf-8") for p in sorted(PLUGIN.glob("*.cs"))}
+    """{path relative to plugin/: text} for every compiled plugin source: the
+    caller census reads the compile set, never a listing (R11-L1)."""
+    return _r12_compile_sources()
 
 
 def _call_sites(method_name, sources=None):
@@ -7285,15 +7514,19 @@ _R8_API_WRITE = re.compile(
 
 
 def _r7_plugin_sources():
-    """{name: text} for EVERY C# source in the plugin, resolved at run time.
+    """{key: text} for EVERY C# source in the plugin, resolved at run time.
 
     The round-7 census read ApiClient.cs alone while the banner's inputs are
     `public static`, so a writer in NativeUI.cs, Plugin.cs or any file added
     later was outside the scan and the check would have stayed green on the
     case it exists to catch.  Globbing rather than listing the files means a
-    NEW file joins the census by existing (#330: sweep the siblings)."""
-    return {p.name: p.read_text(encoding="utf-8")
-            for p in sorted(PLUGIN.glob("*.cs"))}
+    NEW file joins the census by existing (#330: sweep the siblings).
+
+    Round 12 (R11-L1): that glob read plugin/'s top level only and keyed each
+    source by its name; the census now reads the compile set -- every
+    compiled source, in any subfolder, keyed by its path relative to
+    plugin/."""
+    return dict(_r12_compile_sources())
 
 
 _R8_DECL_HEAD = re.compile(
@@ -8357,7 +8590,9 @@ def test_r7cl_c4_the_banner_input_census_sees_every_write_form_and_every_source(
 
     # AND THE FILE SET IS RESOLVED, not listed: a new source joins by existing.
     import inspect
-    assert 'PLUGIN.glob("*.cs")' in inspect.getsource(_r7_plugin_sources)
+    body7 = inspect.getsource(_r7_plugin_sources)
+    assert body7.count("_r12_compile_sources(") == 1, body7
+    assert 'glob("*.cs")' not in body7, body7
 
 
 # ── B18, RE-EXECUTED RATHER THAN INHERITED (#308) ──────────────────────────
@@ -8816,9 +9051,12 @@ def test_r8_l3_every_deleted_mechanism_class_is_rejected_across_the_whole_plugin
     print("L3 DELETION SWEEP FILES: " + ", ".join(names))
     print("L3 DELETION SWEEP CLASSES: %d" % len(_R8_DELETED_CLASSES))
 
-    # the file set is the glob's, not a list that could have gone stale
+    # the file set is the compile set's, not a list that could have gone
+    # stale: every top-level source is in it and every key is a file (the
+    # nested half is test_r12_l1_...)
     on_disk = sorted(p.name for p in PLUGIN.glob("*.cs"))
-    assert names == on_disk, (names, on_disk)
+    assert set(on_disk) <= set(names), sorted(set(on_disk) - set(names))
+    assert all((PLUGIN / k).is_file() for k in names), names
     assert len(names) > 3, names
 
     hits = _r8_deleted_class_hits(sources)
@@ -9037,7 +9275,9 @@ def test_r8_l11_the_census_sees_every_csharp_write_form():
 
     # the file set is resolved, not listed
     import inspect
-    assert 'PLUGIN.glob("*.cs")' in inspect.getsource(_r7_plugin_sources)
+    body7 = inspect.getsource(_r7_plugin_sources)
+    assert body7.count("_r12_compile_sources(") == 1, body7
+    assert 'glob("*.cs")' not in body7, body7
 
 
 def test_r8_l11_the_banner_inputs_are_not_publicly_writable():
@@ -9454,7 +9694,8 @@ def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
     visible rather than asserted."""
     sources = _r7_plugin_sources()
     names = sorted(sources)
-    assert names == sorted(p.name for p in PLUGIN.glob("*.cs"))
+    assert set(p.name for p in PLUGIN.glob("*.cs")) <= set(names)
+    assert all((PLUGIN / k).is_file() for k in names), names
     hits = _r9_dead_literal_hits(sources)
     census = _r9_word_census(sources)
     print("L4 COMPLETE-LITERAL SWEEP: %d plugin sources, %d complete literals"
