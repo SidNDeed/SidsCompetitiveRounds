@@ -833,6 +833,15 @@ class HealthResponse(BaseModel):
     # value is what tells its build from the one before it. Absent on any
     # build before round 2.
     rj_triage: int | None = None
+    # ticket_redaction: whether this build applies the credential rule
+    # (main._TICKET_REDACTION_MARKER; 1 = log_redaction's Steam session ticket
+    # rule at the bug-report receive path before the first write, in the bundle
+    # scrub every stored-bundle door runs, and on the free-text fields every
+    # bug-report read door serves). A code constant, equal on both boxes by
+    # construction, probed by the release train and read by nothing else
+    # (#306): the batch adds no route, so this value is what tells its build
+    # from the one before it. Absent on any build before it.
+    ticket_redaction: int | None = None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup

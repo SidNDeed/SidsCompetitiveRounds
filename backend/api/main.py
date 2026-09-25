@@ -5766,6 +5766,17 @@ _FFA_HOLD_FENCES = 1
 # route carry it; a box on the build before round 2 answers without the key.
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
+# TICKET-REDACTION, reported on /health as `ticket_redaction`. A marker whose
+# only purpose is to be probed (#306): nothing reads it and no behaviour
+# depends on it. 1 = this build applies log_redaction's credential rule (the
+# Steam session ticket's value becomes its marker) at the bug-report receive
+# path before the first write, inside the bundle scrub that every door serving
+# a stored bundle runs, and on the free-text fields every bug-report read door
+# serves. The batch adds no route -- every door it changes answers on the build
+# before it -- so this value is the release train's build discriminator for it.
+# Both arms of the route carry it; a box on the build before answers without
+# the key. Raise it when a later change to the rule must be proven deployed.
+_TICKET_REDACTION_MARKER = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -5780,6 +5791,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
+                              ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
@@ -5791,6 +5803,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
+                              ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER,
                               pc_card_themes=_pc_card_themes_word())
 
