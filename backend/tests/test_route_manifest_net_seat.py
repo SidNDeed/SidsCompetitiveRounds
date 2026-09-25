@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 365   # quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 371   # v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 364   # quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 370   # v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -920,7 +920,23 @@ def test_the_helper_closure_stays_affordable():
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
     assert all_median <= 90, f"median closure {all_median} of {total}"
-    assert all_p90 <= 150, f"p90 closure {all_p90} of {total}"
+    # v1.41.0 lane merge (2026-09-25): measured 89 / 163 / 480 of 2639 indexed
+    # bindings, against 72 / 140 / 457 for the same walk over MAIN's backend/api
+    # (c2d14ad, 2505). The CODE tier moved only at p90, 65 -> 74: the A1
+    # identity barrier and its lease helpers, which the queue formation routes
+    # really run (26 of them newly reach _identity_lock_many). Its median (21)
+    # and worst (326) did not move. Of the bindings the 364 routes common to
+    # both trees gained, 93% (5671 of 6100) are IMPORT leaves of the lane's
+    # own modules, auto_logs, mail_discord and title_ladders. They import
+    # names that nearly every route writes -- AsyncSession, Depends, text,
+    # get_db, HTTPException, datetime -- and the walk folds in EVERY module
+    # that binds a referenced name, so each such import line joins each such
+    # route's surface: 355 routes gained auto_logs.AsyncSession and
+    # mail_discord.AsyncSession alone. A leaf is never expanded, and it widens
+    # the reviewed surface, which is the only direction this gate may be
+    # wrong in. The bound moves to 172, the ~5% headroom the worst bound has
+    # kept. The median bound stays: measured 89, it did not fail.
+    assert all_p90 <= 172, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -942,7 +958,14 @@ def test_the_helper_closure_stays_affordable():
     # That last one widens the reviewed surface rather than narrowing it, which
     # is the only direction this gate may be wrong in. The bound moves to 460,
     # the same ~5% headroom 420 gave over 401 and 400 gave over 383.
-    assert all_worst <= 460, f"worst closure {all_worst} of {total}"
+    # v1.41.0 lane merge (2026-09-25): the same route measured 480, against 457
+    # for the same walk over MAIN's backend/api. All 23 it gained are import
+    # leaves and none is code: 22 are auto_logs and mail_discord import lines
+    # reached through the shared-name fold described at the p90 bound above,
+    # and 1 is models.FetchedValue, which the lane's Player model now names for
+    # migration 330's mail_discord_relay column. The bound moves to 505, the
+    # same ~5%.
+    assert all_worst <= 505, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

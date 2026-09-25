@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "cc6c879c696baee1dd668d4d6859ca5e97a31b3d"
+          "7948e12724e1d7cc35bc1f3610a9fe4a19ef5abc"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -2443,7 +2443,7 @@
           ],
           "main",
           "queue_poll",
-          "e94e2d8411aecf55908a962f8f85dee6a5660ac9"
+          "ccc08b4fe197fc9d4df99745a5ec6f5a49ff79e3"
         ],
         [
           "/api/v1/queue/ready",
@@ -3314,6 +3314,66 @@
           "2e0955e1d74018a15e09e60be24ce675939fdaea"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "Static source review (v1.41.0 lane: auto_logs, mail_discord, title_ladders): over each route's whole reached surface no W1 private Match column is named, no SQL reads the matches table and the Match model is not used, so no W1 private Match column can reach this route's output.",
+      "routes": [
+        [
+          "/api/v1/internal/logs/auto/prune",
+          [
+            "POST"
+          ],
+          "auto_logs",
+          "run_auto_log_prune",
+          "6bf5dfdbddce9444776fdd824a4f4416377c6738"
+        ],
+        [
+          "/api/v1/internal/mail/relay-pref",
+          [
+            "POST"
+          ],
+          "mail_discord",
+          "mail_relay_pref",
+          "99de267163a6099a80d3a48c1ef85c98b3912ad4"
+        ],
+        [
+          "/api/v1/internal/mail/relay-threads",
+          [
+            "POST"
+          ],
+          "mail_discord",
+          "mail_relay_threads",
+          "179e5ddaf39ec55ddf1d672ff56177535bb7d682"
+        ],
+        [
+          "/api/v1/internal/mail/reply-from-discord",
+          [
+            "POST"
+          ],
+          "mail_discord",
+          "mail_reply_from_discord",
+          "272872fecad0e971b8b343cc7f441fb5bbacd9ed"
+        ],
+        [
+          "/api/v1/logs/auto",
+          [
+            "POST"
+          ],
+          "auto_logs",
+          "upload_auto_log",
+          "1c30b24f39bca17508db017a010083b9592a5efc"
+        ],
+        [
+          "/api/v1/players/{steam_id}/title-ladders",
+          [
+            "GET"
+          ],
+          "title_ladders",
+          "get_title_ladders",
+          "048abf0b5609e7e94c44470ccba0b3c0eb785746"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -3370,6 +3430,12 @@
     "GET /api/v1/tournaments/my-active-matches -> tournaments.my_active_matches",
     "GET /api/v1/tournaments/players/{steam_id}/tournaments -> tournaments.player_tournaments",
     "GET /api/v1/tournaments/players/{steam_id}/penalty -> tournaments.player_penalty",
+    "POST /api/v1/internal/mail/reply-from-discord -> mail_discord.mail_reply_from_discord",
+    "POST /api/v1/internal/mail/relay-threads -> mail_discord.mail_relay_threads",
+    "POST /api/v1/internal/mail/relay-pref -> mail_discord.mail_relay_pref",
+    "POST /api/v1/logs/auto -> auto_logs.upload_auto_log",
+    "POST /api/v1/internal/logs/auto/prune -> auto_logs.run_auto_log_prune",
+    "GET /api/v1/players/{steam_id}/title-ladders -> title_ladders.get_title_ladders",
     "GET /api/v1/health -> main.health_check",
     "GET /api/v1/mod-version -> main.get_mod_version",
     "GET /api/v1/internal/janitor-selftest -> main.get_janitor_selftest",
