@@ -311,7 +311,7 @@ class FakeDb:
         if "UPDATE players SET mail_from" in sql:
             self.players[params["me"]]["mail_from"] = params["v"]
             return _Res()
-        if "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code)" in sql:
+        if "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code, sender_steam_id)" in sql:
             # Item 5's relay fan-out. Mirrors the statement's own predicate
             # -- delivered envelopes, linked Discord, relay on -- so a send
             # test exercises the real path and the queue is observable.
@@ -330,6 +330,7 @@ class FakeDb:
                                              "content": params["content"],
                                              "mail_id": params["mid"],
                                              "relay_code": params["code"],
+                                             "sender_steam_id": params.get("sender") or None,
                                              "cancelled_at": None})
                     n += 1
             return _Res(rowcount=n)
@@ -1667,28 +1668,31 @@ def test_delete_account_handles_every_new_table_by_name():
                     ("UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid", 1),     # M11
                     ("UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid", 1),       # M11
                     ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1),                          # migration 300
-                    # item 5 / migration 330: a queued relay DM is a COPY of the
-                    # mail held outside the envelope tables, and mail_id's cascade
-                    # cannot reach it because this endpoint anonymises rather than
-                    # deletes. Both directions -- addressed to, and sent by.
-                    ("DELETE FROM pending_dms WHERE mail_id IS NOT NULL AND steam_id = :sid", 1),
-                    ("DELETE FROM pending_dms WHERE mail_id IN", 1)):
+                    # item 5 / migration 330: a relay DM row is a COPY of the
+                    # mail held outside the envelope tables, and nothing reaches
+                    # it by cascade -- this endpoint anonymises rather than
+                    # deletes, and a purged mail leaves the row as a tombstone.
+                    # Both directions -- addressed to, and sent by.
+                    ("text(_ERASE_RELAY_DMS_TO_SQL)", 1),
+                    ("text(_ERASE_RELAY_DMS_FROM_SQL)", 1)):
         assert src.count(stmt) == n, stmt
-    # ...and the WHOLE of each, predicate included. The second one was
-    # matched on its prefix, and the prefix does not contain the clause
-    # that decides whose rows go: `sender_id <> :pid` kept every DM this
-    # player sent and deleted everyone else's, and read as correct.
-    # Python folds adjacent literals into one Constant, so the statement
-    # is whole here even though no single line of source holds it.
-    stmts = {n.value for n in ast.walk(ast.parse(textwrap.dedent(src)))
-             if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-    for whole in (
-            "DELETE FROM pending_dms WHERE mail_id IS NOT NULL AND steam_id = :sid",
-            "DELETE FROM pending_dms WHERE mail_id IN"
-            " (SELECT id FROM mail_messages WHERE sender_id = :pid)"):
-        assert whole in stmts, (
-            "the queued-DM sweep does not run exactly this statement, so "
-            "its predicate is not the one this test names:\n  %s" % whole)
+    # ...and the WHOLE of each, predicate included; only the bind NAMES are
+    # left free. The sent-by one was once matched on its prefix, and the
+    # prefix does not contain the clause that decides whose rows go:
+    # `sender_id <> :pid` kept every DM this player sent and deleted
+    # everyone else's, and read as correct. Round 2 finding 8 moved both off
+    # a mail_id-only key, which a purged mail's tombstone no longer has.
+    # Which local each bind takes is proven by running them, in
+    # test_mail_discord_relay's erasure test, bound as this handler binds.
+    def _shape(sql):
+        return re.sub(r"(?<!:):[A-Za-z_]\w*", ":?", " ".join(sql.split()))
+    assert _shape(main._ERASE_RELAY_DMS_TO_SQL) == (
+        "DELETE FROM pending_dms WHERE relay_code IS NOT NULL AND steam_id = :?"), (
+        main._ERASE_RELAY_DMS_TO_SQL)
+    assert _shape(main._ERASE_RELAY_DMS_FROM_SQL) == (
+        "DELETE FROM pending_dms WHERE sender_steam_id = :?"
+        " OR mail_id IN (SELECT id FROM mail_messages WHERE sender_id = :?)"), (
+        main._ERASE_RELAY_DMS_FROM_SQL)
     # H3: the second envelope sweep and the revision row go AFTER the anonymising rewrite has been flushed
     rewrite = src.index('player.steam_id = f"deleted_')
     flush = src.index("await db.flush()", rewrite)
@@ -1697,7 +1701,8 @@ def test_delete_account_handles_every_new_table_by_name():
     # The relay queue goes after the flush too, and for the same reason: a
     # send racing the deletion either committed before the rewrite (its rows
     # are caught here) or blocks and then finds deleted_at set.
-    assert flush < src.index("DELETE FROM pending_dms") < src.index("await db.commit()", flush)
+    for const in ("_ERASE_RELAY_DMS_TO_SQL", "_ERASE_RELAY_DMS_FROM_SQL"):
+        assert flush < src.index(const) < src.index("await db.commit()", flush), const
     assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL and "FOR KEY SHARE OF p" in main._MAIL_BROADCAST_FANOUT_SQL
     # sent messages and the moderation evidence are retained (the recipients' and the moderators' property)
     assert "DELETE FROM mail_messages" not in src and "DELETE FROM moderation_cases" not in src

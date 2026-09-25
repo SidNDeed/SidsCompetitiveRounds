@@ -103,7 +103,7 @@ needs_pg = pytest.mark.skipif(
 # Exactly this many tests in this module need the DSN. Pinned from OUT here
 # so that moving one behind the gate is a deliberate edit and not a silent
 # "1 skipped" that still reads as a clean run.
-LIVE_TESTS = 12
+LIVE_TESTS = 14
 
 
 def _read(path):
@@ -1075,6 +1075,7 @@ CREATE TABLE pending_dms (
 SQL_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql")
 MIGRATION_330 = _read(os.path.join(SQL_DIR, "330_mail_discord_relay.sql"))
+MIGRATION_349 = _read(os.path.join(SQL_DIR, "349_pending_dms_sender_identity.sql"))
 
 
 def _pg(sql, *names):
@@ -1117,6 +1118,10 @@ def _code():
 
 
 MAIL = "33333333-3333-3333-3333-333333333333"
+# MAIL's sender, as _seed makes it: player 9999...'s steam id. The fan-out
+# binds it into the row's sender_steam_id (migration 349).
+SENDER_SID = "0"
+SENDER_PID = "99999999-9999-9999-9999-999999999999"
 # (id, steam_id, discord_id, relay_on, delivery, should_get_a_dm)
 CAST = [
     ("a", "1", "d1", True, "delivered", True),
@@ -1126,14 +1131,20 @@ CAST = [
 ]
 
 
-async def _seed(conn, apply_twice=True):
-    """Pre-330 tables, then the REAL migration -- applied twice by default,
-    because "idempotent and re-runnable" is a claim in the migration's own
-    header and a claim is not a test."""
+async def _seed(conn, apply_twice=True, with_349=True):
+    """Pre-330 tables, then the REAL migrations -- 330, then 349 -- each
+    applied twice by default, because "idempotent and re-runnable" is a
+    claim in each migration's own header and a claim is not a test.
+    `with_349=False` stops at 330, for the test that applies 349 over rows
+    written before it."""
     await conn.execute(BASE_SCHEMA)
     await conn.execute(MIGRATION_330)
     if apply_twice:
         await conn.execute(MIGRATION_330)
+    if with_349:
+        await conn.execute(MIGRATION_349)
+        if apply_twice:
+            await conn.execute(MIGRATION_349)
     await conn.execute(
         "INSERT INTO players (id, steam_id, discord_id, mail_discord_relay)"
         " VALUES ('99999999-9999-9999-9999-999999999999', '0', 'd0', true)")
@@ -1163,7 +1174,8 @@ def _asyncpg_sql():
     point -- the statement under test is the one production runs."""
     sql = mail_discord._RELAY_FANOUT_SQL
     return sql.replace("CAST(:content AS text)", "$1").replace(
-        "CAST(:mid AS uuid)", "$2").replace("CAST(:code AS text)", "$3")
+        "CAST(:mid AS uuid)", "$2").replace("CAST(:code AS text)", "$3").replace(
+        "CAST(:sender AS text)", "CAST($4 AS text)")
 
 
 @needs_pg
@@ -1175,7 +1187,7 @@ def test_the_fanout_dms_exactly_the_recipients_who_should_get_one():
         conn = await asyncpg.connect(DSN)
         try:
             await _seed(conn)
-            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code())
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code(), SENDER_SID)
             rows = await conn.fetch(
                 "SELECT steam_id FROM pending_dms WHERE mail_id = $1"
                 " ORDER BY steam_id", MAIL)
@@ -1311,7 +1323,7 @@ def test_deleting_a_mail_leaves_its_relay_dms_as_tombstones_and_nothing_else():
             await conn.execute(
                 "INSERT INTO pending_dms (steam_id, content) VALUES ('9', 'generic')")
             code = _code()
-            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code)
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code, SENDER_SID)
             queued = await conn.fetchval(
                 "SELECT COUNT(*) FROM pending_dms WHERE mail_id = $1", MAIL)
             await conn.execute("DELETE FROM mail_messages WHERE id = $1", MAIL)
@@ -1420,6 +1432,43 @@ def test_a_failed_fanout_never_takes_the_mail_with_it():
         assert db2.nested == 1, db2.nested
     finally:
         mail_discord._BOUND["discord_safe"] = prev
+
+
+def test_the_fanout_writes_who_sent_the_mail():
+    """Round 2 finding 8: the fan-out binds the sender's steam id into the
+    row's sender_steam_id -- the one thing on a tombstone that still says
+    who sent it. Run through queue_mail_relay with a recording session, so
+    the bind is checked where it is made and not only in the statement."""
+    class _Rec:
+        def __init__(self):
+            self.params = []
+
+        def begin_nested(self):
+            class _Cm:
+                async def __aenter__(self_):
+                    return None
+
+                async def __aexit__(self_, *a):
+                    return False
+            return _Cm()
+
+        async def execute(self, stmt, params=None):
+            self.params.append(dict(params or {}))
+            return types.SimpleNamespace(rowcount=1)
+
+    prev = mail_discord._BOUND.get("discord_safe")
+    mail_discord._BOUND["discord_safe"] = main._mail_discord_safe
+    try:
+        db = _Rec()
+        assert _run(mail_discord.queue_mail_relay(
+            db, mail_id=MAIL, sender_name="N", sender_steam_id="17",
+            subject="S", body="B")) == 1
+    finally:
+        mail_discord._BOUND["discord_safe"] = prev
+    assert [p.get("sender") for p in db.params] == ["17"], db.params
+    flat = " ".join(mail_discord._RELAY_FANOUT_SQL.split())
+    assert "relay_code, sender_steam_id)" in flat, flat
+    assert "NULLIF(CAST(:sender AS text), '')" in flat, flat
 
 
 def test_the_fanout_is_wrapped_in_a_savepoint_and_not_a_bare_try():
@@ -2466,7 +2515,7 @@ def test_a_relayed_mail_survives_the_whole_queue_and_comes_back_answerable():
         conn = await asyncpg.connect(DSN)
         try:
             await _seed(conn)
-            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code())
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code(), SENDER_SID)
 
             # 1. The poll hands the bot exactly one row, and it knows the row
             #    is a mail relay because mail_id is set.
@@ -2539,7 +2588,7 @@ def test_a_row_nothing_can_classify_is_given_up_on_at_the_cap():
         conn = await asyncpg.connect(DSN)
         try:
             await _seed(conn)
-            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code())
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code(), SENDER_SID)
             dm_id = str((await conn.fetchrow(
                 "SELECT id FROM pending_dms LIMIT 1"))["id"])
             seen = []
@@ -2611,7 +2660,7 @@ def test_neither_dm_class_starves_or_overtakes_the_other():
                     "INSERT INTO pending_dms (steam_id, content, created_at)"
                     " VALUES ('1', $1, now() - interval '10 minutes')",
                     "operational %d" % i)
-            await conn.execute(_asyncpg_sql(), "relay body", MAIL, _code())
+            await conn.execute(_asyncpg_sql(), "relay body", MAIL, _code(), SENDER_SID)
             held = [r["content"] for r in await _claim(conn)]
             await conn.execute("DELETE FROM pending_dms")
             # 2. The inversion: a bulk grant, every row of it past any age
@@ -2690,7 +2739,7 @@ def test_an_operational_dm_jumps_a_queue_full_of_relay_notifications():
         conn = await asyncpg.connect(DSN)
         try:
             await _seed(conn)
-            await conn.execute(_asyncpg_sql(), "relay body", MAIL, _code())
+            await conn.execute(_asyncpg_sql(), "relay body", MAIL, _code(), SENDER_SID)
             # A generic (operational) row, queued a minute LATER.
             await conn.execute(
                 "INSERT INTO pending_dms (steam_id, content, created_at)"
@@ -2888,7 +2937,7 @@ def test_a_tombstone_is_a_relay_row_to_the_claim_and_to_relay_off():
         try:
             await _seed(conn)
             code = _code()
-            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code)
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code, SENDER_SID)
             await conn.execute(
                 "INSERT INTO pending_dms (steam_id, content)"
                 " VALUES ('1', 'your bug report was answered')")
@@ -2983,6 +3032,202 @@ def test_the_recheck_route_answers_from_the_row(monkeypatch):
     assert out == {"live": {"cancelled": False},
                    "cancelled": {"cancelled": True},
                    "gone": {"cancelled": True}}, out
+
+
+def _erasure_binding(const):
+    """How delete_player_data binds one of its relay-DM statements: the
+    {bind: local-name} dict of its own `db.execute(text(<const>), {...})`
+    call, read from the handler's source. The live test replays the
+    statement with exactly that binding, so what runs is what the erasure
+    runs -- the statement AND which of its locals each bind takes."""
+    import inspect
+    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(main.delete_player_data)))
+    hits = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Call)
+                and getattr(node.args[0].func, "id", "") == "text"
+                and node.args[0].args
+                and isinstance(node.args[0].args[0], ast.Name)
+                and node.args[0].args[0].id == const
+                and isinstance(node.args[1], ast.Dict)):
+            hits.append({k.value: v.id for k, v in zip(node.args[1].keys,
+                                                        node.args[1].values)
+                         if isinstance(k, ast.Constant)
+                         and isinstance(v, ast.Name)})
+    assert len(hits) == 1, (const, hits)
+    return hits[0]
+
+
+async def _erase_as_the_handler_does(conn, steam_id, pid):
+    """Both relay-DM statements, in the handler's order, each bound as
+    delete_player_data binds it, with the handler's locals given here.
+    A bind the statement names and the call does not supply fails here, as
+    it would in SQLAlchemy; a key the call supplies and the statement does
+    not name is ignored, as SQLAlchemy ignores it."""
+    local = {"steam_id": steam_id, "pid": pid}
+    for const in ("_ERASE_RELAY_DMS_TO_SQL", "_ERASE_RELAY_DMS_FROM_SQL"):
+        binding = _erasure_binding(const)
+        sql = getattr(main, const)
+        names = list(dict.fromkeys(
+            _sql_re.findall(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)", sql)))
+        assert set(names) <= set(binding), (const, names, binding)
+        await conn.execute(_pg(sql, *names),
+                           *[local[binding[n]] for n in names])
+
+
+@needs_pg
+def test_the_erasure_takes_a_relay_tombstone_from_either_side():
+    """Round 2 finding 8. A relay row outlives its mail as a tombstone: the
+    purge sets mail_id NULL (ON DELETE SET NULL) and relay_code stays. Both
+    erasure statements were keyed on mail_id, so after a purge neither
+    found it: erasing the RECIPIENT left their raw Steam ID on the row, and
+    erasing the SENDER left the copied body and the sender's name.
+
+    Two fresh fixtures, each tombstone made the way production makes one
+    (the fan-out, then the mail deleted), each erasure run as
+    delete_player_data binds it. The fan-out's sender_steam_id is checked
+    on the tombstone first: it is what the sent-by half keys on.
+
+    Controls: erasing the recipient keeps another player's tombstone and
+    the erased player's own operational DM (relay rows, and theirs, only);
+    erasing the sender keeps a relay row somebody else sent.
+
+    Mutation control: key both statements on mail_id again -> the tombstone
+    survives both erasures."""
+    import asyncpg
+
+    async def recipient_side():
+        conn = await asyncpg.connect(DSN)
+        try:
+            await _seed(conn)
+            code = _code()
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code, SENDER_SID)
+            # another player's copy of the same mail -- a tombstone too, once
+            # the mail goes, and not the erased account's
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content, mail_id,"
+                " relay_code, sender_steam_id)"
+                " VALUES ('2', 'their copy', $1, $2, $3)", MAIL, _code(), SENDER_SID)
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content)"
+                " VALUES ('1', 'your bug report was answered')")
+            await conn.execute("DELETE FROM mail_messages WHERE id = $1", MAIL)
+            tomb = await conn.fetchrow(
+                "SELECT mail_id, relay_code, sender_steam_id FROM pending_dms"
+                " WHERE steam_id = '1' AND relay_code = $1", code)
+            pid = await conn.fetchval(
+                "SELECT id::text FROM players WHERE steam_id = '1'")
+            await _erase_as_the_handler_does(conn, "1", pid)
+            left = sorted(r["content"] for r in await conn.fetch(
+                "SELECT content FROM pending_dms"))
+            return tomb, left
+        finally:
+            await conn.close()
+
+    async def sender_side():
+        conn = await asyncpg.connect(DSN)
+        try:
+            await _seed(conn)
+            code = _code()
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, code, SENDER_SID)
+            # a relay row somebody else sent, its own mail already purged
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content, relay_code,"
+                " sender_steam_id) VALUES ('1', 'someone else wrote this',"
+                " $1, '5')", _code())
+            await conn.execute("DELETE FROM mail_messages WHERE id = $1", MAIL)
+            tomb = await conn.fetchrow(
+                "SELECT mail_id, relay_code, sender_steam_id FROM pending_dms"
+                " WHERE steam_id = '1' AND relay_code = $1", code)
+            await _erase_as_the_handler_does(conn, SENDER_SID, SENDER_PID)
+            left = sorted(r["content"] for r in await conn.fetch(
+                "SELECT content FROM pending_dms"))
+            return tomb, left
+        finally:
+            await conn.close()
+
+    rec, snd = _live(recipient_side), _live(sender_side)
+    for side, (tomb, left) in (("recipient", rec), ("sender", snd)):
+        assert tomb is not None and tomb["mail_id"] is None \
+            and tomb["relay_code"], (
+                "%s: the seed did not make a tombstone: %r" % (side, tomb))
+        assert tomb["sender_steam_id"] == SENDER_SID, (
+            "%s: the fan-out did not write who sent the mail: %r" % (side, tomb))
+        assert "the DM body" not in left, (
+            "erasing the %s left the tombstone: %s" % (side, left))
+    assert rec[1] == ["their copy", "your bug report was answered"], (
+        "erasing the recipient reached rows that are not their relay rows: "
+        "%s" % rec[1])
+    assert snd[1] == ["someone else wrote this"], (
+        "erasing the sender reached a row somebody else sent: %s" % snd[1])
+
+
+@needs_pg
+def test_349_backfills_the_sender_of_a_relay_row_written_before_it():
+    """The migration's backfill, run for real over rows written before the
+    column existed: a relay row whose mail still exists takes its sender
+    from the mail; one whose mail was already purged has nothing to take it
+    from and stays NULL (the residual 349's header states); an operational
+    row has no sender. The column is text, nullable, and not a foreign key
+    (one with ON DELETE SET NULL is the same gap again). A second run of the
+    file rewrites no row -- xmin unchanged."""
+    import asyncpg
+
+    other = "44444444-4444-4444-4444-444444444444"
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        try:
+            await _seed(conn, with_349=False)
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code)"
+                " VALUES ('1', 'before 349', $1, $2)", MAIL, _code())
+            await conn.execute(
+                "INSERT INTO mail_messages (id, sender_id, subject, body)"
+                " VALUES ($1, $2, 's', 'b')", other, SENDER_PID)
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code)"
+                " VALUES ('1', 'purged before 349', $1, $2)", other, _code())
+            await conn.execute("DELETE FROM mail_messages WHERE id = $1", other)
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content)"
+                " VALUES ('1', 'operational')")
+
+            async def snap():
+                return {r["content"]: (r["sender_steam_id"], r["xmin"])
+                        for r in await conn.fetch(
+                            "SELECT content, sender_steam_id, xmin::text AS xmin"
+                            "  FROM pending_dms")}
+
+            await conn.execute(MIGRATION_349)
+            first = await snap()
+            await conn.execute(MIGRATION_349)
+            second = await snap()
+            col = await conn.fetchrow(
+                "SELECT data_type, is_nullable FROM information_schema.columns"
+                " WHERE table_name = 'pending_dms'"
+                "   AND column_name = 'sender_steam_id'")
+            fks = await conn.fetchval(
+                "SELECT COUNT(*) FROM pg_constraint c"
+                "  JOIN pg_attribute a ON a.attrelid = c.conrelid"
+                "   AND a.attnum = ANY(c.conkey)"
+                " WHERE c.conrelid = 'pending_dms'::regclass AND c.contype = 'f'"
+                "   AND a.attname = 'sender_steam_id'")
+            return first, second, col, fks
+        finally:
+            await conn.close()
+
+    first, second, col, fks = _live(run)
+    assert first["before 349"][0] == SENDER_SID, first
+    assert first["purged before 349"][0] is None, first
+    assert first["operational"][0] is None, first
+    assert second == first, (
+        "the second run rewrote a row: %s -> %s" % (first, second))
+    assert col is not None and col["data_type"] == "text" \
+        and col["is_nullable"] == "YES", col
+    assert fks == 0, "sender_steam_id carries a foreign key"
 
 
 def test_the_delete_route_cancels_only_for_the_player_who_deleted():

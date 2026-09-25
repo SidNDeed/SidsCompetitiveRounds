@@ -99,10 +99,14 @@ def _need(name):
 
 # Typed binds throughout (#275/#448): asyncpg will not infer a parameter's
 # type from an INSERT ... SELECT's target column.
+#
+# sender_steam_id (migration 349): who sent the mail, written on the row so
+# the account erasure can still find a row whose mail has been purged
+# (v1.41.0 beta round 2, finding 8). NULLIF: an empty sender id names nobody.
 _RELAY_FANOUT_SQL = (
-    "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code)"
+    "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code, sender_steam_id)"
     " SELECT p.steam_id, CAST(:content AS text), CAST(:mid AS uuid),"
-    "        CAST(:code AS text)"
+    "        CAST(:code AS text), NULLIF(CAST(:sender AS text), '')"
     "   FROM mail_recipients r"
     "   JOIN players p ON p.id = r.recipient_id"
     "  WHERE r.message_id = CAST(:mid AS uuid)"
@@ -336,7 +340,8 @@ async def queue_mail_relay(db: AsyncSession, *, mail_id, sender_name: str,
                 async with db.begin_nested():
                     res = await db.execute(
                         text(_RELAY_FANOUT_SQL),
-                        {"content": content, "mid": str(mail_id), "code": code})
+                        {"content": content, "mid": str(mail_id), "code": code,
+                         "sender": sender_steam_id or ""})
                 return res.rowcount or 0
             except IntegrityError:
                 # Named rather than folded into the handler below, because

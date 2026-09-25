@@ -36016,6 +36016,28 @@ async def ack_lfp_pings(
 
 # ── Routes: Privacy ──────────────────────────────────────────
 
+# The account erasure's two relay-DM statements (v1.41.0 beta round 2,
+# finding 8). A relay row outlives its mail as a tombstone -- the janitor's
+# hard purge of the mail sets mail_id NULL (ON DELETE SET NULL) and keeps
+# relay_code -- so neither half may key on mail_id alone, or the row the
+# erasure most needs to find is the one it cannot.
+#
+# TO this account: every relay row addressed to it. relay_code is the class
+# key (finding 6): every relay row carries one, and the purge does not touch
+# it.
+_ERASE_RELAY_DMS_TO_SQL = (
+    "DELETE FROM pending_dms"
+    " WHERE relay_code IS NOT NULL AND steam_id = :sid")
+# SENT by this account: sender_steam_id (migration 349) is the sender the
+# fan-out writes on the row, and it survives the purge. The mail_id arm stays
+# beside it for a row written by an api that predates that column, while the
+# row's mail still exists.
+_ERASE_RELAY_DMS_FROM_SQL = (
+    "DELETE FROM pending_dms"
+    " WHERE sender_steam_id = :sid"
+    "    OR mail_id IN (SELECT id FROM mail_messages WHERE sender_id = :pid)")
+
+
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
 async def delete_player_data(steam_id: str, request: Request, sig: str = Query(...),
                              _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
@@ -36621,13 +36643,16 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.flush()
     await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})
-    # Item 5 (migration 330). A queued relay DM is a COPY of the mail held
+    # Item 5 (migration 330). A relay DM row is a COPY of the mail held
     # outside the envelope tables: the addressee's raw Steam ID, the body
     # text, the sender's display name as it read when the mail was sent, and
-    # the Discord message id once delivered. mail_id's ON DELETE CASCADE
-    # does not reach it, because this endpoint ANONYMISES the player row
-    # rather than deleting it and nothing deletes mail_messages (#437).
-    # Both directions go, and queued-DM rows only:
+    # the thread code. Nothing reaches it by cascade: this endpoint
+    # ANONYMISES the player row rather than deleting it (#437), and the
+    # janitor's hard purge of a mail sets the row's mail_id NULL and leaves
+    # it standing as a tombstone. Both directions go, relay rows only, each
+    # keyed on something the row keeps after its mail is purged
+    # (_ERASE_RELAY_DMS_TO_SQL / _ERASE_RELAY_DMS_FROM_SQL, round 2
+    # finding 8):
     #   - addressed TO this account: their property, and after the steam_id
     #     rewrite the poll's LEFT JOIN finds no player, so the row could
     #     never be delivered anyway -- it would sit here holding the data.
@@ -36635,11 +36660,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     #     display name baked in and, unlike a delivered mail, cannot be
     #     re-rendered from the anonymised row. The recipient keeps the mail
     #     itself in-game; only the notification is dropped.
-    await db.execute(text(
-        "DELETE FROM pending_dms WHERE mail_id IS NOT NULL AND steam_id = :sid"), {"sid": steam_id})
-    await db.execute(text(
-        "DELETE FROM pending_dms WHERE mail_id IN"
-        " (SELECT id FROM mail_messages WHERE sender_id = :pid)"), {"pid": pid})
+    await db.execute(text(_ERASE_RELAY_DMS_TO_SQL), {"sid": steam_id})
+    await db.execute(text(_ERASE_RELAY_DMS_FROM_SQL), {"sid": steam_id, "pid": pid})
 
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
