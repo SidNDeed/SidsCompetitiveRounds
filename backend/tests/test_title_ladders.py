@@ -17,8 +17,10 @@ Three things this file is here to stop:
 It also carries the per-MODE hook-coverage check: all four completion sites
 carry the hook, exactly one awaited call inside each — never "one call per
 function" as a global rule, which is the check that passes while a whole mode
-goes unhooked. 1v2 is the fifth symbol and is asserted the other way round: it
-must exist and must NOT be hooked, because it reports unrated.
+goes unhooked — and each call passes the reference EXPECTED_REFERENCE names:
+the series id, or for FFA the lobby id, since one lobby is one sitting. 1v2
+is the fifth symbol and is asserted the other way round: it must exist and
+must NOT be hooked, because it reports unrated.
 """
 
 import ast
@@ -63,6 +65,20 @@ EXCLUDED_SITES = {
     "ovt": "submit_ovt_match",
 }
 HOOK = "record_completed_games"
+
+# The reference each site's call passes, as ast.unparse renders it (design V3
+# section 12.3). The credit key is (player_id, reference_id), so this IS the
+# unit of credit: the series at 1v1 and at both 2v2 paths -- the same string
+# at both, so the key collapses them -- and for FFA the LOBBY, because one
+# lobby is one sitting however many games it plays (main.py's ffa_lobbies
+# model). str(match_id) there would be a per-game key: a two-game rated lobby
+# would credit twice.
+EXPECTED_REFERENCE = {
+    "1v1": "str(series.id)",
+    "2v2": "str(series_uuid)",
+    "2v2-settled": "str(series_uuid)",
+    "ffa": "str(lobby_uuid)",
+}
 
 
 def _read(path):
@@ -580,6 +596,8 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
         f"reference_id is the dedupe key: without it the PRIMARY KEY on "
         f"title_ladder_credits cannot collapse the two 2v2 completion paths "
         f"and one series credits twice.")
+    mismatched = reference_mismatches(counts)
+    assert not mismatched, "\n".join(mismatched)
 
     wrongly_hooked = [f"{mode}:{fn}" for mode, fn in EXCLUDED_SITES.items()
                       if hook_calls_in("\n".join(_function_span(lines, fn)))]
@@ -848,8 +866,11 @@ def test_one_reference_id_credits_once_however_many_times_it_arrives(monkeypatch
 def hook_calls_in(source):
     """Every CALL to the ladder hook in `source`, as structure rather than text.
 
-    One dict per call: whether it is awaited, and whether it carries the two
-    keyword arguments that make it dedupable. A comment or a string literal
+    One dict per call: whether it is awaited, whether it carries the two
+    keyword arguments that make it dedupable, and "reference" -- the
+    expression it passes as reference_id (_reference_of: a bare name is
+    followed to its one non-constant assignment in `source`, and anything
+    unresolvable is None, so it fails closed). A comment or a string literal
     cannot produce an entry, because this walks the parse tree.
 
     Module-level precisely so it can be tested. It was written, and driven
@@ -878,8 +899,70 @@ def hook_calls_in(source):
         kwargs = {k.arg for k in node.keywords}
         found.append({"awaited": id(node) in awaited,
                       "has_mode": "mode" in kwargs,
-                      "has_reference_id": "reference_id" in kwargs})
+                      "has_reference_id": "reference_id" in kwargs,
+                      "reference": _reference_of(node, tree)})
     return found
+
+
+def _reference_of(call, tree):
+    """What `call` passes as reference_id, unparsed; None when that cannot be
+    known.
+
+    A literal expression is its own answer. A bare Name is followed to the
+    single assignment to it in `tree` whose value is not a constant -- the
+    1v1 site writes `_lref = "?"` (a constant: the except clause's
+    placeholder) and then `_lref = str(series.id)` inside the try. The answer
+    is None, failing closed, when the keyword is missing or passed more than
+    once, when the name has no non-constant assignment or more than one, or
+    when anything binds or rebinds it other than a plain `name = value`
+    statement (a loop, `with` or comprehension target, an unpacking or
+    chained assignment, a walrus, an augmented or annotated assignment, a
+    parameter, an import, an except clause, a def or class, a match capture,
+    a global or nonlocal declaration): each of those can make the value
+    something this reading does not see."""
+    kws = [k for k in call.keywords if k.arg == "reference_id"]
+    if len(kws) != 1:
+        return None
+    value = kws[0].value
+    if not isinstance(value, ast.Name):
+        return ast.unparse(value)
+    name = value.id
+    plain = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Assign) and len(n.targets) == 1
+             and isinstance(n.targets[0], ast.Name) and n.targets[0].id == name]
+    stores = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)]
+    other = [n for n in ast.walk(tree)
+             if (isinstance(n, ast.arg) and n.arg == name)
+             or (isinstance(n, (ast.ExceptHandler, ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef, ast.MatchAs, ast.MatchStar)) and n.name == name)
+             or (isinstance(n, ast.MatchMapping) and n.rest == name)
+             or (isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names)
+             or (isinstance(n, ast.alias)
+                 and (n.asname or n.name.split(".")[0]) == name)]
+    if len(stores) != len(plain) or other:
+        return None
+    sources = [ast.unparse(n.value) for n in plain if not isinstance(n.value, ast.Constant)]
+    return sources[0] if len(sources) == 1 else None
+
+
+def reference_mismatches(counts):
+    """One line per call whose reference is not the one EXPECTED_REFERENCE
+    names for its mode. `counts` maps "mode:function" to hook_calls_in's
+    list -- the coverage test's own dict -- and the synthetic tests below
+    drive the same helper."""
+    out = []
+    for site, calls in sorted(counts.items()):
+        mode = site.split(":", 1)[0]
+        want = EXPECTED_REFERENCE.get(mode)
+        for call in calls:
+            if want is None or call["reference"] != want:
+                out.append(
+                    "%s passes reference_id %r; the credit key needs %r%s" % (
+                        site, call["reference"], want,
+                        " -- the FFA unit is the SITTING: one lobby, however "
+                        "many games it plays, is one credit" if mode == "ffa" else ""))
+    return out
 
 
 # A stand-in for a wired completion site. One statement per line, and a second
@@ -898,7 +981,8 @@ def test_the_coverage_scanner_sees_a_correct_call():
     """Control: without this, every test below passes on an empty result."""
     calls = hook_calls_in(WIRED_SITE)
     assert calls == [{"awaited": True, "has_mode": True,
-                      "has_reference_id": True}], calls
+                      "has_reference_id": True,
+                      "reference": "str(series.id)"}], calls
 
 
 def test_the_coverage_scanner_ignores_a_commented_out_call():
@@ -944,6 +1028,80 @@ def test_the_coverage_scanner_reads_an_indented_span():
     assert len(hook_calls_in(body)) == 1, (
         "the scanner could not read a span lifted out of a function; the "
         "coverage test feeds it exactly that")
+
+
+# The 1v1 site's shape: a constant placeholder for the except clause, the
+# real reference assigned inside the try, and the call passing the name.
+LREF_SITE = """
+async def submit_series(db, series, p1, p2):
+    if series.is_ranked:
+        _lref = "?"
+        try:
+            _lref = str(series.id)
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, [p1.id, p2.id], mode="1v1", reference_id=_lref)
+        except Exception as _lex:
+            print(_lref, _lex)
+"""
+
+# The FFA site's shape, with the reference left to fill in.
+FFA_SITE = """
+async def submit_ffa(db, report, id_by_steam, unrated, rated, lobby_uuid, match_id):
+    if rated:
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, [id_by_steam[p.steam_id] for p in report.players
+                         if p.steam_id not in unrated],
+                    mode="ffa", reference_id=REFERENCE)
+        except Exception as _lex:
+            print(_lex)
+"""
+
+
+def test_the_scanner_follows_a_name_to_its_one_real_assignment():
+    """`_lref = "?"` is a constant and is skipped; `_lref = str(series.id)`
+    is the one real assignment, so the call's reference is str(series.id)."""
+    calls = hook_calls_in(LREF_SITE)
+    assert [c["reference"] for c in calls] == ["str(series.id)"], calls
+    assert reference_mismatches({"1v1:submit_series": calls}) == []
+
+
+def test_the_scanner_refuses_a_name_assigned_twice():
+    """Two non-constant assignments: which one reaches the call is not
+    something a static reading can know, so the reference is None and the
+    site is reported rather than guessed."""
+    src = LREF_SITE.replace(
+        "            _lref = str(series.id)\n",
+        "            _lref = str(series.id)\n            _lref = str(series.other)\n")
+    assert src != LREF_SITE
+    calls = hook_calls_in(src)
+    assert [c["reference"] for c in calls] == [None], calls
+    assert len(reference_mismatches({"1v1:submit_series": calls})) == 1
+
+
+def test_the_scanner_refuses_a_name_bound_any_other_way():
+    """A loop target, and an unassigned name: both resolve to None."""
+    looped = LREF_SITE.replace(
+        "            _lref = str(series.id)\n",
+        "            for _lref in (str(series.id),):\n                pass\n")
+    unassigned = LREF_SITE.replace("            _lref = str(series.id)\n", "")
+    assert looped != LREF_SITE and unassigned != LREF_SITE
+    assert [c["reference"] for c in hook_calls_in(looped)] == [None]
+    assert [c["reference"] for c in hook_calls_in(unassigned)] == [None]
+
+
+def test_the_reference_check_reports_a_per_game_ffa_key():
+    """#391, both directions: an FFA-shaped site passing str(match_id) -- a
+    per-game key, the round-2 finding -- is reported, naming ffa and the
+    sitting; the same site passing str(lobby_uuid) passes."""
+    per_game = hook_calls_in(FFA_SITE.replace("REFERENCE", "str(match_id)"))
+    sitting = hook_calls_in(FFA_SITE.replace("REFERENCE", "str(lobby_uuid)"))
+    bad = reference_mismatches({"ffa:submit_ffa_match": per_game})
+    assert len(bad) == 1 and "ffa:submit_ffa_match" in bad[0], bad
+    assert "'str(match_id)'" in bad[0] and "SITTING" in bad[0], bad
+    assert reference_mismatches({"ffa:submit_ffa_match": sitting}) == []
 
 
 
