@@ -940,6 +940,20 @@ class Env:
                 "SELECT description, repro_steps, log_filename FROM public.bug_reports WHERE id = CAST(:i AS uuid)"),
                 {"i": str(rid)})).mappings().first()
 
+    async def set_triage_notes(self, rid, notes):
+        """A triage note written straight into a report's row: no route, bot
+        path or migration in this tree writes the column, so a case that needs
+        one stored writes it itself."""
+        await self.ex("UPDATE public.bug_reports SET triage_notes = :v WHERE id = CAST(:i AS uuid)",
+                      {"v": notes, "i": str(rid)})
+
+    async def triage_notes(self, rid):
+        """The stored triage_notes of a report, raw."""
+        async with self.seed.connect() as conn:
+            return (await conn.execute(text(
+                "SELECT triage_notes FROM public.bug_reports WHERE id = CAST(:i AS uuid)"),
+                {"i": str(rid)})).scalar()
+
     def stored_bundle(self, fname) -> str:
         return gzip.decompress((self.log_dir / fname).read_bytes()).decode("utf-8")
 
@@ -1327,6 +1341,40 @@ def test_pg_legacy_comment_is_served_redacted_in_the_detail_timeline(monkeypatch
     assert len(served) == 1, served
     assert_redacted(sent, served[0]["comment"], hx)
     assert sent in stored, "the stored row changed: T3 is read-time redaction"
+
+
+# -- the detail pane's triage notes (round 3 addendum) -------------------------
+
+TRIAGE_PLAIN = "seen twice on the same map; waiting on a second log before a fix"
+
+
+def test_pg_stored_triage_notes_are_served_redacted_in_the_detail_pane(monkeypatch, tmp_path):
+    """get_bug_report returns bug_reports.triage_notes, so it applies the rule
+    there as it does to description and repro_steps. Nothing in this tree
+    writes the column, so each note is written straight into the fixture
+    database. Three reports: a note holding a ticket is served with its
+    marker, a NULL note is served as None, and a note without a ticket is
+    served as stored; every stored note still holds what was written (T3 is
+    read-time redaction)."""
+    async def body():
+        async with Env(monkeypatch, tmp_path) as env:
+            hx, with_ticket = _comment_with_ticket("triage-notes")
+            notes = {"ticket": with_ticket, "null": None, "plain": TRIAGE_PLAIN}
+            served, stored = {}, {}
+            for case, note in notes.items():
+                rid, _ = await env.legacy_report(*legacy_texts()[1])
+                if note is not None:
+                    await env.set_triage_notes(rid, note)
+                served[case] = ok(await env.client.get(f"/api/v1/bug-reports/{rid}", params={
+                    "admin_steam_id": ADMIN, "hmac_signature": sig("bug_reports", rid)})).json()
+                stored[case] = await env.triage_notes(rid)
+            return hx, notes, served, stored
+
+    hx, notes, served, stored = run(body())
+    assert_redacted(notes["ticket"], served["ticket"]["triage_notes"], hx)
+    assert served["null"]["triage_notes"] is None
+    assert served["plain"]["triage_notes"] == notes["plain"]
+    assert stored == notes and hx in stored["ticket"], "a stored note changed: T3 is read-time redaction"
 
 
 # ── M2: the rule before every cut, at each cut's own boundary ──────────────

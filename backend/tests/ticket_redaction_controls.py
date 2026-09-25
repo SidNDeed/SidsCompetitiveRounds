@@ -7,7 +7,8 @@ the comment store (M1), the rule-before-the-cut order at every cut and the
 over-ceiling read's hold-back (M2), the harness's two refusals (M3) and the
 automatic upload's contract through its stand-in (L6); and, from round 3,
 the harness's census of every schema and its one-schema binding (R2
-finding 1) -- are carried below as DATA: the file, the exact
+finding 1); and, from the round-3 addendum, the detail pane's triage
+notes -- are carried below as DATA: the file, the exact
 text a plant replaces, the text it writes, and the test nodes it must turn RED
 (a mutant, which bypasses or weakens the function at that site) or leave
 GREEN (an inert twin at the same site, #391). Each plant is printed as a
@@ -101,12 +102,14 @@ STANDIN_CONTRACT = T + "test_pg_auto_log_contract_holds_on_the_stand_in"
 SHADOW = [T + "test_pg_the_harness_refuses_a_same_named_object_ahead_of_public[%s]" % i
           for i in ("user_schema_table", "database_path_table", "user_schema_sequence")]
 BIND = T + "test_pg_every_harness_connection_is_bound_to_one_schema"
+# round 3 addendum
+DETAIL_TRIAGE = T + "test_pg_stored_triage_notes_are_served_redacted_in_the_detail_pane"
 # Every live case that enters the harness on this tree. The two L6 cases
 # against the real auto-upload route are not here: without the route they
 # skip before the harness is entered, on every tree this file can see.
 EVERY_PG_CASE = [R1, R1_NEG, DETAIL, DOWNLOAD, LIST, DISCORD, EVENTS, LEGACY_NEG, HEALTH,
                  ADMIN_COMMENT, STATUS_COMMENTS, INTERNAL_COMMENT, REPLY, FEED_COMMENT, DETAIL_COMMENT,
-                 CLAMPS, WINDOW, NAME_REFUSAL, *POPULATED, STANDIN_CONTRACT, *SHADOW, BIND]
+                 CLAMPS, WINDOW, NAME_REFUSAL, *POPULATED, STANDIN_CONTRACT, *SHADOW, BIND, DETAIL_TRIAGE]
 # Of those, the cases that get past the refusals on the lane database: each
 # asserts from its own record that every refusal ran before its first
 # terminate or DROP.
@@ -166,6 +169,10 @@ pair("D2-detail-repro", "the detail pane serves the stored repro steps raw",
      '    out["repro_steps"] = _logred.redact_credentials(out["repro_steps"])\n',
      '    out["repro_steps"] = out["repro_steps"]\n',
      "read-time rule", [DETAIL])
+pair("D8-detail-triage", "the detail pane serves the stored triage notes raw",
+     '    out["triage_notes"] = _logred.redact_credentials(out["triage_notes"])\n',
+     '    out["triage_notes"] = out["triage_notes"]\n',
+     "read-time rule", [DETAIL_TRIAGE])
 pair("D3-list", "the admin list serves the stored description raw",
      '                description=_logred.redact_credentials(r["description"]),\n',
      '                description=r["description"],\n',
