@@ -35603,6 +35603,7 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 _BUG_LOG_SCRUB_VERSION = "2"             # 2 = the credential class above joined the ruleset
 _BUG_LOG_MAX_GZ = 8 * 1024 * 1024        # refuse a stored blob bigger than this
 _BUG_LOG_MAX_TEXT = 16 * 1024 * 1024     # gunzip ceiling
+_BUG_LOG_CARRY_MAX = 1 << 20             # longest unfinished ticket the over-ceiling read holds back
 _BUG_LOG_STEAMID_PROBE_MAX = 500         # distinct ids fed to the purge lookup
 
 # Quote characters are deliberately NOT in these exclusion classes: a path
@@ -35634,6 +35635,16 @@ def _read_bug_log_sync(path_str: str) -> str:
 
     Overflow keeps the TAIL. A log's recent lines are the ones that explain
     the crash; head-truncating a bundle discards the part being asked about.
+
+    Overflow applies the CREDENTIAL RULE BEFORE THE WINDOW CUTS. A text that
+    fits comes back whole and _scrub_pass_one applies the rule to all of it.
+    One that does not is cut to its tail here, and a tail cut made first can
+    drop a ticket's label and keep its value, which the rule, run afterwards,
+    no longer recognises. So every piece is redacted as it arrives, before
+    anything is dropped; only an unfinished end that the next piece could
+    still complete waits for it (log_redaction.settled_length). An unfinished
+    end longer than _BUG_LOG_CARRY_MAX is no ticket any client writes: the
+    read is refused rather than holding it without bound or cutting it.
     """
     p = _pathlib.Path(path_str)
     if not p.exists():
@@ -35650,12 +35661,24 @@ def _read_bug_log_sync(path_str: str) -> str:
         # [-N:] off that yields characters 1..N -- the beginning of the file,
         # under a banner promising the end of it (review MEDIUM). Stream the
         # remainder and keep a rolling window instead, so the banner is true.
-        window = data[-_BUG_LOG_MAX_TEXT:]
+        # The window holds REDACTED text only: `pending` is what has been read
+        # and not yet redacted, and it reaches the window through the rule.
+        window, pending, dropped = "", data, False
         while True:
             chunk = f.read(1 << 20)
+            pending += chunk
+            settled = _logred.settled_length(pending) if chunk else len(pending)
+            if len(pending) - settled > _BUG_LOG_CARRY_MAX:
+                raise ValueError(f"stored log holds an unfinished ticket-shaped run over "
+                                 f"{_BUG_LOG_CARRY_MAX} characters; not served")
+            window += _logred.redact_credentials(pending[:settled])
+            pending = pending[settled:]
+            if len(window) > _BUG_LOG_MAX_TEXT:
+                window, dropped = window[-_BUG_LOG_MAX_TEXT:], True
             if not chunk:
                 break
-            window = (window + chunk)[-_BUG_LOG_MAX_TEXT:]
+    if not dropped:
+        return window    # the markers alone brought it under the ceiling
     return ("[scrubber: bundle exceeded the read ceiling; OLDEST lines dropped, "
             "tail kept]\n") + window
 
@@ -35835,14 +35858,15 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     log_filename: str | None = None
     log_bytes_stored: int | None = None
     # No credential reaches storage (the bug-log posture above): the Steam
-    # session ticket's value becomes its marker in the bundle AND in the two
-    # free-text fields, where a pasted log line lands, before the first write
-    # of either -- the flush below writes the row, the open() writes the file.
-    # The bundle's pass runs in a worker thread, as the read-time scrub's does
-    # (_scrub_bug_log says what that does and does not buy).
-    log_blob = await asyncio.to_thread(_logred.redact_credentials, (req.log_text or "").strip())
-    description = _logred.redact_credentials(req.description.strip())
-    repro_steps = _logred.redact_credentials((req.repro_steps or "").strip()) or None
+    # session ticket's value is already its marker in the bundle AND in the two
+    # free-text fields, where a pasted log line lands. The rule ran in
+    # BugReportRequest's validators (schemas.py), over the text as the client
+    # sent it and BEFORE their length clamps -- a clamp made first can leave the
+    # rule too little of a ticket to recognise -- so none of the three, as the
+    # flush (the row) and the open() (the file) below write them, carries one.
+    log_blob = (req.log_text or "").strip()
+    description = req.description.strip()
+    repro_steps = (req.repro_steps or "").strip() or None
 
     report = BugReport(
         player_id=player.id if player else None,

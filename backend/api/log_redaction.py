@@ -30,6 +30,15 @@ WHAT IT DOES NOT DO
   timestamp); the hex in either case. A value already in marker form carries no
   hex run, so a second pass is a no-op.
 
+THE RULE RUNS BEFORE ANY CUT
+  Every reader that shortens a text (a length clamp, a head or tail window, a
+  snippet) applies the rule to the text as it has it FIRST. A cut made before
+  the rule can drop a ticket's label and keep its value, or keep a head of the
+  value shorter than 32 characters; either way the rule no longer recognises
+  what is left, and what is left is part of the credential. A reader that gets
+  its text in pieces uses settled_length() below to apply the rule to each
+  piece as it arrives without splitting a ticket between two pieces.
+
 WHY IT IS ITS OWN MODULE, STANDARD LIBRARY ONLY
   Three kinds of reader load this file: the api (every receive path and every
   read-back door of stored log text), a filter the ops wrapper can pipe a stored
@@ -91,6 +100,41 @@ def redact_credentials_counted(text):
 def redact_credentials(text):
     """The text with every ticket value replaced by its marker (see above)."""
     return redact_credentials_counted(text)[0]
+
+
+# The unfinished end of a text that is still arriving: the label, the spaces
+# and tabs after it and any hex after those, running to the very end. The next
+# piece can still complete it into a ticket, or lengthen a value that already
+# counts as one.
+_UNSETTLED_TAIL_RE = _lr_re.compile(r"Session Ticket:[ \t]*[0-9A-Fa-f]*\Z")
+_LABEL = "Session Ticket:"
+
+
+def settled_length(text: str) -> int:
+    """How many leading characters of `text` the rule can be applied to NOW,
+    when more text may still follow it.
+
+    For any continuation, redact_credentials(text[:n]) followed by the rule over
+    text[n:] + the continuation equals the rule over the whole. The part held
+    back is an unfinished end: the label with its spaces/tabs and any hex after
+    them running to the end, or the first characters of the label itself. No
+    match can straddle the returned index. When something is held back, the
+    index is the label's capital "S", and a match holds that character only as
+    its own first one. When nothing is held back, a match running on into the
+    next piece would begin with an unfinished end, which would have been held
+    back. A reader that applies the rule to a stream (a bundle read in pieces,
+    then cut to a window) redacts each settled prefix and carries the rest into
+    the next piece.
+    """
+    if not text:
+        return 0
+    m = _UNSETTLED_TAIL_RE.search(text)
+    if m:
+        return m.start()
+    for n in range(min(len(_LABEL) - 1, len(text)), 0, -1):
+        if text.endswith(_LABEL[:n]):
+            return len(text) - n
+    return len(text)
 
 
 def count_credentials(text) -> int:
