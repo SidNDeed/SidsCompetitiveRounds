@@ -421,7 +421,7 @@
           ],
           "main",
           "get_bug_report",
-          "0c31ff450ad882f4380383f8445ddd29ed4f011c"
+          "450bf926025212342f1e9ee6f557afe54167d834"
         ],
         [
           "/api/v1/bug-reports/{report_id}/comment",
