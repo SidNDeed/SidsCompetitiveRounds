@@ -308,6 +308,204 @@ namespace CompetitiveRounds
             return 1;
         }
 
+        // ── N19: phase-epoch provenance (change 26) ─────────────────────
+        //
+        // A pick phase is named by an epoch its master issues at the phase's
+        // cycle write (room cr_ffa_ep = "{E}:{issuer ActorNumber}"). Picks carry
+        // it (player cr_ffa_pe = "{nonce}:{E}:{g}:{c}:{card}") and the result
+        // carries it in its envelope (room cr_ffa_rep = "{E}:{issuer}:{g}:{c}:
+        // {entries}"). A seat collects, counts and applies only under the epoch
+        // it holds, and holds only an epoch of the present master that is not
+        // closed and not one it terminated, so a pick or result of any other
+        // phase is never read (design V10 N19(a)-(i)).
+
+        /// <summary>Two epochs name the same phase: both present and equal.</summary>
+        internal static bool SameEpoch(string a, string b)
+        {
+            return a != null && a == b;
+        }
+
+        /// <summary>N19(d)/(i): a peer's pick is adoption evidence only under this
+        /// phase's epoch and ahead of the phase's identity; under G only at the
+        /// phase's own game and cycle, so under G no peer pick moves the master
+        /// (ahead excludes its own identity).</summary>
+        internal static bool EpochEvidence(bool gate, bool sameEpoch, int pickGame, int pickCycle,
+                                           int phaseGame, int phaseCycle, bool ahead)
+        {
+            return sameEpoch && ahead && (!gate || (pickGame == phaseGame && pickCycle == phaseCycle));
+        }
+
+        /// <summary>N19(d): the manifest's owners other than the local seat, in
+        /// their order. An entry that did not resolve is 0, which is never
+        /// local.</summary>
+        internal static List<int> OthersOf(IList<int> owners, int local)
+        {
+            var others = new List<int>();
+            if (owners == null) return others;
+            for (int i = 0; i < owners.Count; i++)
+                if (owners[i] != local) others.Add(owners[i]);
+            return others;
+        }
+
+        /// <summary>N19(d): the detector's quorum: every other owner, capped at
+        /// 2 and at least 1. The local seat is never its own evidence.</summary>
+        internal static int EvidenceQuorum(IList<int> owners, int local)
+        {
+            int n = OthersOf(owners, local).Count;
+            return Math.Min(2, Math.Max(1, n));
+        }
+
+        /// <summary>Split a cr_ffa_ep value "{E}:{A}" at its last ':' into the
+        /// epoch and the issuing ActorNumber (null when absent or not an
+        /// integer). A null value gives a null epoch.</summary>
+        internal static void SplitEpochField(string raw, out string epoch, out int? issuer)
+        {
+            epoch = null;
+            issuer = null;
+            if (raw == null) return;
+            int i = raw.LastIndexOf(':');
+            if (i < 0) { epoch = raw; return; }
+            epoch = raw.Substring(0, i);
+            int a;
+            if (TryInt(raw.Substring(i + 1), out a)) issuer = a;
+        }
+
+        /// <summary>N19(b)/(i): the epoch a seat may hold from the room's
+        /// cr_ffa_ep, or null when it is missing, was not issued by the present
+        /// master (issuer), is already closed by the cached envelope (closed; rep
+        /// is that envelope's epoch field) or was terminated by this process
+        /// (finalized).</summary>
+        internal static string LiveEpoch(string rawEp, int masterActor, string rep, ICollection<string> finalized)
+        {
+            string e;
+            int? issuer;
+            SplitEpochField(rawEp, out e, out issuer);
+            if (string.IsNullOrEmpty(e)) return null;
+            if (!issuer.HasValue || issuer.Value != masterActor) return null;
+            if (e == rep) return null;
+            if (finalized != null && finalized.Contains(e)) return null;
+            return e;
+        }
+
+        /// <summary>N19(i): the epoch held after an evaluation is the live value,
+        /// so a refused or departed epoch clears the hold.</summary>
+        internal static string HeldEpoch(string pe, string live)
+        {
+            return live;
+        }
+
+        /// <summary>N19(i), the use-site check: the held epoch is usable only
+        /// while its issuer is the present master (-1: none).</summary>
+        internal static string EpochAtUse(string pe, int issuer, int masterActor)
+        {
+            return issuer == masterActor ? pe : null;
+        }
+
+        /// <summary>N19(i): the result a seat may apply, read from the envelope
+        /// "{E}:{A}:{g}:{c}:{entries}" only: E must be this seat's epoch, A the
+        /// present master and g:c this phase's identity; else null. An empty
+        /// entry list is an empty result. cr_ffa_res is never read.</summary>
+        internal static Dictionary<int, string> ResultFromEnvelope(string rawRep, string pe, int masterActor,
+                                                                  int game, int cycle)
+        {
+            if (rawRep == null) return null;
+            var parts = rawRep.Split(new[] { ':' }, 5);
+            if (parts.Length != 5) return null;
+            string e = parts[0];
+            if (string.IsNullOrEmpty(e) || IsIntegerText(e)) return null;
+            if (!SameEpoch(e, pe)) return null;
+            int issuer, g, c;
+            if (!TryInt(parts[1], out issuer) || !TryInt(parts[2], out g) || !TryInt(parts[3], out c)) return null;
+            if (issuer != masterActor) return null;
+            if (g != game || c != cycle) return null;
+            var result = new Dictionary<int, string>();
+            if (parts[4].Length > 0)
+            {
+                foreach (var pair in parts[4].Split('|'))
+                {
+                    int eq = pair.IndexOf('=');
+                    if (eq <= 0) continue;
+                    int pid;
+                    if (TryInt(pair.Substring(0, eq), out pid)) result[pid] = pair.Substring(eq + 1);
+                }
+            }
+            return result;
+        }
+
+        /// <summary>N19(i), the promotion reissue's refusal test: the envelope
+        /// names game:cycle, whatever its epoch and issuer.</summary>
+        internal static bool EnvelopeNames(string rawRep, int game, int cycle)
+        {
+            if (rawRep == null) return false;
+            var parts = rawRep.Split(new[] { ':' }, 5);
+            if (parts.Length != 5) return false;
+            int g, c;
+            return TryInt(parts[2], out g) && TryInt(parts[3], out c) && g == game && c == cycle;
+        }
+
+        /// <summary>N19(g): a phase that held an epoch records it as terminated at
+        /// every exit, an empty result and a bail included.</summary>
+        internal static bool FinalizesAtTermination(string pe, int applied)
+        {
+            return pe != null;
+        }
+
+        /// <summary>N19(c): the value this build writes to the legacy pick key.
+        /// It is always empty, so a current-build master never counts or
+        /// collects a pick of this build.</summary>
+        internal static string LegacyPickValue(string nonce, int game, int cycle, string card)
+        {
+            return "";
+        }
+
+        /// <summary>N19(c): the epoch-carrying pick, cr_ffa_pe.</summary>
+        internal static string PickValue(string nonce, string epoch, int game, int cycle, string card)
+        {
+            return nonce + ":" + epoch + ":" + game.ToString(CultureInfo.InvariantCulture) + ":"
+                   + cycle.ToString(CultureInfo.InvariantCulture) + ":" + card;
+        }
+
+        /// <summary>A parsed cr_ffa_pe value.</summary>
+        internal sealed class ParsedPick
+        {
+            internal string Epoch;
+            internal int Game, Cycle;
+            internal string Card;
+        }
+
+        /// <summary>N19(c): a cr_ffa_pe value of this room, or null: another
+        /// room, empty, the legacy shape (no epoch) or malformed.</summary>
+        internal static ParsedPick ParsePick(string value, string nonce)
+        {
+            if (value == null || nonce == null) return null;
+            string prefix = nonce + ":";
+            if (!value.StartsWith(prefix, StringComparison.Ordinal)) return null;
+            var parts = value.Substring(prefix.Length).Split(new[] { ':' }, 4);
+            if (parts.Length != 4) return null;
+            if (parts[0].Length == 0 || IsIntegerText(parts[0])) return null;
+            int g, c;
+            if (!TryInt(parts[1], out g) || !TryInt(parts[2], out c)) return null;
+            if (parts[3].Length == 0) return null;
+            return new ParsedPick { Epoch = parts[0], Game = g, Cycle = c, Card = parts[3] };
+        }
+
+        /// <summary>N19(a): a fresh phase epoch. No two phases share one.</summary>
+        internal static string NewEpoch()
+        {
+            return Guid.NewGuid().ToString("N");
+        }
+
+        private static bool TryInt(string s, out int v)
+        {
+            return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v);
+        }
+
+        private static bool IsIntegerText(string s)
+        {
+            int v;
+            return TryInt(s, out v);
+        }
+
         // ── N13: the numbered consumers ─────────────────────────────────
 
         /// <summary>The game a live-points send carries: RG, else the
@@ -334,6 +532,20 @@ namespace CompetitiveRounds
         internal static string N(int n)
         {
             return n >= 1 ? n.ToString(CultureInfo.InvariantCulture) : "none";
+        }
+
+        /// <summary>Why LiveEpoch refused a cr_ffa_ep value, for the log only:
+        /// missing, issuer, closed or finalized; null when it did not refuse.</summary>
+        internal static string EpochRefusal(string rawEp, int masterActor, string rep, ICollection<string> finalized)
+        {
+            string e;
+            int? issuer;
+            SplitEpochField(rawEp, out e, out issuer);
+            if (string.IsNullOrEmpty(e)) return "missing";
+            if (!issuer.HasValue || issuer.Value != masterActor) return "issuer";
+            if (e == rep) return "closed";
+            if (finalized != null && finalized.Contains(e)) return "finalized";
+            return null;
         }
 
         internal static string FrozeLine(int f, int cand, bool byTicket, string held, bool gate, int carry,
