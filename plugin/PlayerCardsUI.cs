@@ -2333,7 +2333,7 @@ namespace CompetitiveRounds
                 // "card" also opens the full-size card view on the first
                 // print, and "card:N" on print N — the prints carry different
                 // top cards, so N is how a second card's art gets measured.
-                // The Top card overlay is ~104/1050 of the face, so
+                // The Top card overlay is ~101/1050 of the face, so
                 // on a binder tile it is ~35 px tall and on this popup it is
                 // ~100 px: the popup is the only surface on this seat where
                 // the corner marks can be measured against the box edges to

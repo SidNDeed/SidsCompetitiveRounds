@@ -40,7 +40,7 @@ namespace CompetitiveRounds
     /// read is measuring a prediction, and every round of narrowing that prediction
     /// produced another case of it). One call covers every mode: this mod prefixes
     /// GetOtherPlayer itself while the free-for-all engine is driving the room
-    /// (FfaMode.cs:3752-3764) and otherwise it falls through to stock
+    /// (FfaMode.cs:3979-3991) and otherwise it falls through to stock
     /// GetClosestPlayerInTeam, mis-indexed liveness gate and all - and the ring
     /// reaches its own player through that same patched method
     /// (PlayerInRangeTrigger.cs:59-61). There is no branch here to disagree with it.
@@ -281,7 +281,7 @@ namespace CompetitiveRounds
         /// So both channels are handled the same way - the flags are untouched and
         /// the next tick tries again - and the success line is printed only where
         /// the room was actually told. The same polarity the room half of this API
-        /// is already read with at GameStateWatcher.cs:4843 (#276/#430).
+        /// is already read with at GameStateWatcher.cs:4927 (#276/#430).
         ///
         /// The refusal is stated through the BOUNDED sink, not Plugin.Log: the
         /// retry is per tick by design and a line per tick would bury it. Its
@@ -509,7 +509,7 @@ namespace CompetitiveRounds
         /// with the same argument. Everything that decides WHO - the candidate
         /// team, the roster order, the liveness gate and its mis-index, the
         /// comparison and its float behaviour, and the free-for-all substitution
-        /// this mod itself installs on that method (FfaMode.cs:3752-3764) - happens
+        /// this mod itself installs on that method (FfaMode.cs:3979-3991) - happens
         /// inside vanilla IL. There is nothing here to keep equivalent to it.
         ///
         /// A throw is caught and answered with vanilla-unchanged. Letting it

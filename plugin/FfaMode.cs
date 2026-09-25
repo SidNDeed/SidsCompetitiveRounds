@@ -2632,7 +2632,7 @@ namespace CompetitiveRounds
         /// (:227-236). Both online registration paths force-index: REMOTE
         /// bodies via Player.Start, whose forceIndex = PlayerID branch sits
         /// inside the !data.view.IsMine arm (Player.cs:88-96), and the LOCAL
-        /// body via this mod at Plugin.cs:3439-3441.
+        /// body via this mod at Plugin.cs:3482-3484.
         ///
         /// CORRECTED after Codex round b4yssbnuh. This comment first claimed
         /// the hole was reached by FFA compacting the list in
