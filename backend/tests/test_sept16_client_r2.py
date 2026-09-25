@@ -2499,6 +2499,176 @@ _R11_PURE_CALLS = frozenset((
     "string.IsNullOrEmpty", "string.IsNullOrWhiteSpace", "string.Equals",
     "String.IsNullOrEmpty", "String.IsNullOrWhiteSpace", "String.Equals"))
 
+# ROUND 12 (R11-L2, the round-11 review) -- AN UPPERCASE `String` CALL IS
+# PURE ONLY WHEN ITS BINDING IS ESTABLISHED.  The allow-list above exempted
+# `String.Equals`, `String.IsNullOrEmpty` and `String.IsNullOrWhiteSpace` by
+# their SPELLING, but `String` is an ordinary identifier: a type, field,
+# property, local, parameter, type parameter, namespace or using alias named
+# String in scope makes `String.Equals(...)` invoke THAT, and one with a side
+# effect inside a log call's arguments was set aside with the log call.  The
+# lowercase `string` is a keyword and always names System.String, so the
+# lowercase forms keep their exemption.  An uppercase form is now pure only
+# when `_r12_string_binding` finds no reason to doubt the binding, in the
+# compilation unit the statement belongs to AND in every delivered plugin
+# source (the compile set of R11-L1): the unit imports `System` (in its own
+# code, or through a `global using System;` in a delivered source); no
+# identifier escape stands in the code of either; every bare occurrence of
+# the identifier String in their code is a member access `String.<name>` -- a
+# declaration, a type use or any other form is a reason, erring toward
+# refusal; no namespace declaration carries a String component; and no using
+# directive names String other than as `System.String`.  The project file must
+# declare no using alias String either.  A statement judged WITHOUT its unit
+# is refused its uppercase forms: the binding is not established.  An
+# allow-listed name reached through `::` (`global::String.Equals`) is never
+# pure: `global::String` is not System.String.
+#
+# WHAT THIS DOES NOT SEE, so no sentence above is read as a promise about it:
+# a type named String that a REFERENCED assembly (the game's, Unity's,
+# Photon's, the loader's) declares in the global namespace or in the
+# plugin's own namespace -- C# looks up both before a compilation unit's own
+# `using System;` -- and a member named String that a base class from such
+# an assembly declares.  None is in any delivered source.  The walked
+# methods' classes are static, so their only base class is `object`; the
+# notes carry the referenced-assembly case as a residual.
+_R12_STRING_UPPER = frozenset(("String.IsNullOrEmpty", "String.IsNullOrWhiteSpace",
+                               "String.Equals"))
+_R12_STRING_IDENT = re.compile(r"(?<![\w@])@?String\b")
+# a using DIRECTIVE: no parenthesis, so a using statement or declaration that
+# calls something is read by the identifier rule instead
+_R12_USING = re.compile(r"(?m)^[ \t]*(?:global[ \t]+)?using[ \t]+([^;(){}]*);")
+_R12_NAMESPACE = re.compile(r"\bnamespace\s+([\w@.\s]+?)\s*[{;]")
+_R12_ESCAPE = re.compile(r"\\[uU][0-9A-Fa-f]{4}")
+# a character literal -- the code mask keeps it, and an escape inside one
+# (`'\u2028'`) names a character, never an identifier
+_R12_CHAR_LITERAL = re.compile(r"'(?:\\[^'\n]{1,9}|[^'\\\n])'")
+_R12_SYSTEM_STRING = re.compile(r"(?:global\s*::\s*)?System\s*\.\s*String\b")
+_R12_IMPORTS_SYSTEM = re.compile(r"(?m)^[ \t]*(?:global[ \t]+)?using[ \t]+System[ \t]*;")
+_R12_GLOBAL_SYSTEM = re.compile(r"(?m)^[ \t]*global[ \t]+using[ \t]+System[ \t]*;")
+# the raw pre-filter: every reason below needs one of these in the code, so a
+# source whose raw text carries neither needs no lexing
+_R12_RAW_REASON = re.compile(r"(?<![\w@])@?String\b|\\[uU][0-9A-Fa-f]{4}")
+
+
+def _r12_code_string_problems(code, text, name):
+    """[reason] -- why `code` (a source's code mask) could bind `String` to
+    something other than System.String; `text` is the source, for line
+    numbers, and `name` labels each reason."""
+    out = []
+    esc = _R12_ESCAPE.search(_R12_CHAR_LITERAL.sub(
+        lambda m: " " * len(m.group(0)), code))
+    if esc:
+        out.append("%s: an identifier escape stands in code at line %d"
+                   % (name, _cs_line(text, esc.start())))
+    skip = []
+    for m in _R12_USING.finditer(code):
+        skip.append((m.start(), m.end()))
+        rest = _R12_SYSTEM_STRING.sub(" ", m.group(1))
+        if _R12_STRING_IDENT.search(rest):
+            out.append("%s: a using directive names String at line %d"
+                       % (name, _cs_line(text, m.start())))
+    for m in _R12_NAMESPACE.finditer(code):
+        skip.append((m.start(), m.end()))
+        parts = [p.strip().lstrip("@") for p in m.group(1).split(".")]
+        if "String" in parts:
+            out.append("%s: a namespace with a String component at line %d"
+                       % (name, _cs_line(text, m.start())))
+    for m in _R12_STRING_IDENT.finditer(code):
+        if any(a <= m.start() < b for a, b in skip):
+            continue
+        q = _r11_prev(code, m.start())
+        if q >= 0 and (code[q] == "." or (code[q] == ":" and q > 0
+                                          and code[q - 1] == ":")):
+            continue                 # a qualified name: System.String, x::String
+        k = m.end()
+        while k < len(code) and code[k].isspace():
+            k += 1
+        j = k + 1
+        while j < len(code) and code[j].isspace():
+            j += 1
+        if (k < len(code) and code[k] == "." and j < len(code)
+                and (code[j].isalpha() or code[j] in "_@")):
+            continue                 # a member access String.<name>
+        out.append("%s: the identifier String at line %d is not a member "
+                   "access String.<name>" % (name, _cs_line(text, m.start())))
+    return out
+
+
+@functools.lru_cache(maxsize=256)
+def _r12_source_string_problems(text, name):
+    """The reasons of one C# source, cached by its text."""
+    if not _R12_RAW_REASON.search(text):
+        return ()
+    return tuple(_r12_code_string_problems(_cs_code_mask(text), text, name))
+
+
+@functools.lru_cache(maxsize=64)
+def _r12_imports_system(text, form):
+    """Whether `text` carries the using directive `form` in its CODE."""
+    rx = _R12_IMPORTS_SYSTEM if form == "any" else _R12_GLOBAL_SYSTEM
+    return bool(rx.search(text)) and bool(rx.search(_cs_code_mask(text)))
+
+
+def _r12_delivered_string_problems(sources=None, project_dir=None):
+    """(reasons, a global using System) over every delivered plugin source
+    and the project file."""
+    sources = _r12_compile_sources() if sources is None else sources
+    out, global_system = [], False
+    for name in sorted(sources):
+        out.extend(_r12_source_string_problems(sources[name], name))
+        global_system = global_system or _r12_imports_system(sources[name],
+                                                             "global")
+    for p in sorted(pathlib.Path(project_dir or PLUGIN).glob("*.csproj")):
+        if re.search(r'Alias\s*=\s*"@?String"', p.read_text(encoding="utf-8")):
+            out.append(p.name + ": a using item with the alias String")
+    return out, global_system
+
+
+@functools.lru_cache(maxsize=8)
+def _r12_tree_string_problems_at(plugin_dir):
+    """The delivered-source reasons of the project in `plugin_dir`, read once
+    per folder: the folder is the cache KEY, so a test that points PLUGIN
+    elsewhere can only add an entry beside the tree's (#744)."""
+    probs, glob_sys = _r12_delivered_string_problems(
+        _r12_compile_sources(pathlib.Path(plugin_dir)), plugin_dir)
+    return tuple(probs), glob_sys
+
+
+def _r12_tree_string_problems():
+    """The delivered-source reasons of the project PLUGIN names."""
+    return _r12_tree_string_problems_at(str(PLUGIN))
+
+
+def _r12_string_binding(unit, sources=None, project_dir=None):
+    """(established, reasons) -- whether `String` in the compilation unit
+    `unit` binds to System.String as far as the delivered sources show
+    (R11-L2).  `unit` None: not established.  `sources` is handed in only by
+    the R11-L2 test; otherwise the tree's compile set is read."""
+    if unit is None:
+        return False, ["the statement was judged without its compilation unit"]
+    reasons = list(_r12_source_string_problems(unit, "the unit"))
+    if sources is None:
+        others, glob_sys = _r12_tree_string_problems()
+    else:
+        others, glob_sys = _r12_delivered_string_problems(sources, project_dir)
+    reasons.extend(others)
+    if not _r12_imports_system(unit, "any") and not glob_sys:
+        reasons.append("the unit does not import System, so String does not "
+                       "bind to System.String")
+    return not reasons, reasons
+
+
+def _r12_pure_refusal(name, code, before, unit):
+    """None when the allow-listed invocation `name` is pure here; else the
+    reason it is not (R11-L2)."""
+    if before >= 0 and code[before] == ":":
+        return "(reached through ::, which is not System.String)"
+    if name in _R12_STRING_UPPER:
+        ok, reasons = _r12_string_binding(unit)
+        if not ok:
+            return "(its binding to System.String is not established: %s)" % (
+                reasons[0])
+    return None
+
 
 def _r11_log_arg_code(stmt):
     """The arguments of a log call as CODE -- literal text blanked, every
@@ -2576,12 +2746,21 @@ def _r11_callee(code, p):
     return j + 1, code[j + 1:end]
 
 
-def _r11_impure_calls(stmt):
+def _r11_impure_calls(stmt, unit=None, refusal=None):
     """[the nested calls, creations and other forms in a log call's arguments
     that this derivation cannot prove pure]; [] for a log call whose
     arguments invoke nothing but the allow-listed forms, and [] for a
     statement that is not a log call.  Every `(` is judged by what precedes
-    it (R11CL1, R11CL3), never by a name pattern."""
+    it (R11CL1, R11CL3), never by a name pattern.
+
+    `unit` is the text of the compilation unit the statement belongs to: an
+    allow-listed form is pure only when `refusal` finds no reason against it
+    there -- an uppercase `String` form needs its binding to System.String
+    established (R11-L2), so a statement judged without its unit is refused
+    those forms.  `refusal` defaults to `_r12_pure_refusal`; only
+    `_r11_impure_calls_round11` hands in another, to show what the round-11
+    reading set aside."""
+    refusal = _r12_pure_refusal if refusal is None else refusal
     code = _r11_log_arg_code(stmt)
     if code is None:
         return []
@@ -2593,6 +2772,10 @@ def _r11_impure_calls(stmt):
         name = re.sub(r"\s+", "", callee)
         before = _r11_prev(code, start)
         if name in _R11_PURE_CALLS and (before < 0 or code[before] != "."):
+            why = refusal(name, code, before, unit)
+            if why is None:
+                continue
+            calls.append(name + "(...) " + why)
             continue
         calls.append((name or "the expression before it") + "(...)")
     for mm in _R11_KEYWORDS.finditer(code):
@@ -2602,6 +2785,14 @@ def _r11_impure_calls(stmt):
             calls.append("`" + b + "` (an indexer, a creation, an initializer, "
                          "a block or a pattern)")
     return calls
+
+
+def _r11_impure_calls_round11(stmt):
+    """THE ROUND-11 READING (e5dfd3b), verbatim in behaviour: an allow-listed
+    name with no member dot before it is pure by its SPELLING alone.  Kept
+    ONLY so `test_r12_l2_...` can show that it set aside every shadowed form;
+    nothing else calls it."""
+    return _r11_impure_calls(stmt, refusal=lambda name, code, before, unit: None)
 
 
 def _r11_impure_calls_first_pass(stmt):
@@ -2627,18 +2818,20 @@ def _r11_impure_calls_first_pass(stmt):
     return calls
 
 
-def _r10cl_is_log_call(stmt):
+def _r10cl_is_log_call(stmt, unit=None):
     """A log call that cannot change a local: no assignment outside a string
     or a comparison, no increment or decrement, no `ref` or `out` argument --
     each read over the arguments as CODE, interpolation holes included -- and
-    no nested call this derivation cannot prove pure (R10-L3, R11CL1)."""
+    no nested call this derivation cannot prove pure (R10-L3, R11CL1), with
+    an uppercase `String` form pure only when its binding is established in
+    `unit`, the compilation unit the statement belongs to (R11-L2)."""
     code = _r11_log_arg_code(stmt)
     if code is None:
         return False
     bare = re.sub(r"[=!<>]=|=>", " ", code)
     return ("=" not in bare and "++" not in code and "--" not in code
             and not re.search(r"\b(?:ref|out)\s", code)
-            and not _r11_impure_calls(stmt))
+            and not _r11_impure_calls(stmt, unit))
 
 
 def _r11_is_log_call_first_pass(stmt):
@@ -2668,20 +2861,24 @@ def _r10cl_is_log_call_round10(stmt):
             and not re.search(r"\b(?:ref|out)\s", code))
 
 
-def _r10cl_walk(name, stmts, sequence, split=None, exempt=None):
+def _r10cl_walk(name, stmts, sequence, split=None, exempt=None, unit=None):
     """(slots, why): `stmts` walked against the KNOWN SEQUENCE, log calls set
     aside.  Every statement must be the next one the sequence names; one that
     is not is REFUSED, never skipped.  `split` and `exempt` default to this
     round's split table and log-call exemption; only the R10-L2 and R10-L3
-    tests hand in the round-10 ones, to show what those accepted."""
+    tests hand in the round-10 ones, to show what those accepted.  `unit` is
+    the compilation unit the statements belong to, which the default
+    exemption needs for the String binding (R11-L2)."""
     split = _R10CL_SPLIT if split is None else split
-    exempt = _r10cl_is_log_call if exempt is None else exempt
+    default = exempt is None or exempt is _r10cl_is_log_call
+    if default:
+        exempt = lambda s: _r10cl_is_log_call(s, unit)
     slots, k, logs = {}, 0, 0
     for s in stmts:
         if exempt(s):
             logs += 1
             continue
-        nested = _r11_impure_calls(s) if exempt is _r10cl_is_log_call else []
+        nested = _r11_impure_calls(s, unit) if default else []
         if nested:
             return None, ("a log call in %s is not set aside: %s -- its "
                           "arguments call %s, which this derivation cannot "
@@ -2719,7 +2916,7 @@ def _r10_outcome_model(ra, split=None):
     if not body:
         return None, "OutcomeOf's own text could not be delimited"
     slots, why = _r10cl_walk("OutcomeOf", _r10cl_statements(body), _R10CL_OUTCOME_SEQ,
-                             split=split)
+                             split=split, unit=ra)
     if slots is None:
         return None, why
     toks = _r10_outcome_tokens(ra)
@@ -2753,7 +2950,7 @@ def _r10_publish_model(ra):
     if not body:
         return None, "PublishOutcome's own text could not be delimited"
     slots, why = _r10cl_walk("PublishOutcome", _r10cl_statements(body),
-                             _R10CL_PUBLISH_SEQ)
+                             _R10CL_PUBLISH_SEQ, unit=ra)
     if slots is None:
         return None, why
     return (lambda series, outcome: (tag(series) + ":" + outcome)
@@ -2912,9 +3109,9 @@ def test_r10cl5_every_statement_of_the_read_and_the_publication_is_accounted_for
         assert o is not None and p is not None, (label, why_o, why_p)
 
     oslots, _w = _r10cl_walk("OutcomeOf", _r10cl_statements(
-        _method_body(ra, _R10_OUTCOME_SIG)), _R10CL_OUTCOME_SEQ)
+        _method_body(ra, _R10_OUTCOME_SIG)), _R10CL_OUTCOME_SEQ, unit=ra)
     pslots, _w = _r10cl_walk("PublishOutcome", _r10cl_statements(
-        _method_body(ra, _R10_PUBLISH_SIG)), _R10CL_PUBLISH_SEQ)
+        _method_body(ra, _R10_PUBLISH_SIG)), _R10CL_PUBLISH_SEQ, unit=ra)
     assert oslots is not None and pslots is not None
     print("R10CL5 STATEMENTS: OutcomeOf %d accounted (%d log call(s)), "
           "PublishOutcome %d accounted (%d log call(s)); planted forms refused "
@@ -3026,8 +3223,9 @@ def test_r11_l3_a_log_call_whose_arguments_call_a_helper_is_not_set_aside():
     body = _method_body(ra, _R10_PUBLISH_SIG)
     stmts = _r10cl_statements(body)
     logs = [s for s in stmts if _R10CL_LOG.match(s)]
-    assert logs and all(_r10cl_is_log_call(s) for s in logs), logs
-    slots, why = _r10cl_walk("PublishOutcome", stmts, _R10CL_PUBLISH_SEQ)
+    assert logs and all(_r10cl_is_log_call(s, ra) for s in logs), logs
+    slots, why = _r10cl_walk("PublishOutcome", stmts, _R10CL_PUBLISH_SEQ,
+                             unit=ra)
     assert slots is not None, why
 
     refused = 0
@@ -3040,8 +3238,8 @@ def test_r11_l3_a_log_call_whose_arguments_call_a_helper_is_not_set_aside():
         old, _w = _r10cl_walk("PublishOutcome", pb, _R10CL_PUBLISH_SEQ,
                               exempt=_r10cl_is_log_call_round10)
         assert old is not None, "the round-10 walk refused: " + line
-        assert not _r10cl_is_log_call(stmt), "still exempt: " + line
-        assert _r11_impure_calls(stmt), line
+        assert not _r10cl_is_log_call(stmt, src), "still exempt: " + line
+        assert _r11_impure_calls(stmt, src), line
         p, why_p = _r10_publish_model(src)
         assert p is None and "is not set aside" in why_p, (line, why_p)
         refused += 1
@@ -3049,8 +3247,9 @@ def test_r11_l3_a_log_call_whose_arguments_call_a_helper_is_not_set_aside():
 
     for line in _R11_PURE_LOG_CALLS:
         stmt = line.rstrip(";")
-        assert _r10cl_is_log_call(stmt), "no longer exempt: " + line
-        p, why_p = _r10_publish_model(plant(line))
+        src = plant(line)
+        assert _r10cl_is_log_call(stmt, src), "no longer exempt: " + line
+        p, why_p = _r10_publish_model(src)
         assert p is not None, (line, why_p)
     print("R10-L3 NESTED CALLS: %d planted forms refused, each exempted by the "
           "round-10 reading; %d pure forms still set aside; the tree's %d log "
@@ -3105,7 +3304,7 @@ def test_r11cl1_a_call_through_any_receiver_in_a_log_call_is_not_set_aside():
     for sig in (_R10_PUBLISH_SIG, _R10_OUTCOME_SIG):
         body = _method_body(ra, sig)
         logs = [s for s in _r10cl_statements(body) if _R10CL_LOG.match(s)]
-        assert all(_r10cl_is_log_call(s) for s in logs), logs
+        assert all(_r10cl_is_log_call(s, ra) for s in logs), logs
         tree_logs += len(logs)
     publish, why_p = _r10_publish_model(ra)
     assert publish is not None, why_p
@@ -3119,8 +3318,8 @@ def test_r11cl1_a_call_through_any_receiver_in_a_log_call_is_not_set_aside():
                      'Plugin.Log.LogInfo($"[2v2-DC] cleared {%s}")' % form):
             assert _r11_is_log_call_first_pass(stmt), (
                 "the first reading did not set aside: " + stmt)
-            assert not _r10cl_is_log_call(stmt), "still set aside: " + stmt
-            calls = _r11_impure_calls(stmt)
+            assert not _r10cl_is_log_call(stmt, ra), "still set aside: " + stmt
+            calls = _r11_impure_calls(stmt, ra)
             assert calls, stmt
             found.append(calls[0])
             refused += 1
@@ -3129,12 +3328,12 @@ def test_r11cl1_a_call_through_any_receiver_in_a_log_call_is_not_set_aside():
     for form in _R11CL_SPACED:
         stmt = 'Plugin.Log.LogInfo("[2v2-DC] cleared " + %s)' % form
         assert not _r11_is_log_call_first_pass(stmt), stmt
-        assert not _r10cl_is_log_call(stmt), "set aside: " + stmt
+        assert not _r10cl_is_log_call(stmt, ra), "set aside: " + stmt
         print("R11CL1 SPACED %s : refused by both readings -- %s"
-              % (form, _r11_impure_calls(stmt)[0]))
+              % (form, _r11_impure_calls(stmt, ra)[0]))
     for arg in _R11CL_PURE:
         stmt = "Plugin.Log.LogInfo(%s)" % arg
-        assert _r10cl_is_log_call(stmt), "no longer set aside: " + stmt
+        assert _r10cl_is_log_call(stmt, ra), "no longer set aside: " + stmt
         print("R11CL1 PURE %s : still set aside" % arg)
 
     # end to end: in the publication after Tag, and in the read after the
@@ -3167,6 +3366,177 @@ def test_r11cl1_a_call_through_any_receiver_in_a_log_call_is_not_set_aside():
           "each walked by the first reading" % (
               refused, len(_R11CL_FORMS), len(_R11CL_SPACED), len(_R11CL_PURE),
               tree_logs, walked))
+
+
+# ROUND 12 (R11-L2): the forms in which `String` need not name System.String.
+# Each is a compilation unit, or a delivered source beside the unit, built
+# from the tree's RoomActors.cs; `Zz*` names no plugin member, and the text is
+# judged, never run.  The shadow type's Equals changes a static on every call,
+# so a log call invoking it is not pure.
+_R12_UPPER_ARG = '"[2v2-DC] same " + String.Equals(tag, OutcomeProp)'
+_R12_LOWER_ARG = '"[2v2-DC] same " + string.Equals(tag, OutcomeProp)'
+_R12_SHADOW_TYPE = ("    internal static class String" + LF + "    {" + LF
+                    + "        internal static int Calls;" + LF
+                    + "        internal static bool Equals(string a, string b) "
+                    "{ Calls++; return a == b; }" + LF + "    }" + LF)
+
+
+def _r12_block(body):
+    return "namespace CompetitiveRounds" + LF + "{" + LF + body + "}" + LF
+
+
+def _r12_shadow_units(ra):
+    """{label: (unit, other sources or None, project folder or None)}."""
+    esc = "Str" + chr(92) + "u0069ng"
+    return {
+        "a type named String declared in the unit":
+            (ra + LF + _r12_block(_R12_SHADOW_TYPE), None, None),
+        "a type named String declared in another delivered source":
+            (ra, {"Zz/ZzString.cs": _r12_block(_R12_SHADOW_TYPE)}, None),
+        "a using alias String in the unit":
+            (ra.replace("using System;" + LF, "using System;" + LF
+                        + "using String = CompetitiveRounds.ZzShadow;" + LF, 1),
+             None, None),
+        "a global using alias String in another delivered source":
+            (ra, {"Zz/ZzUsings.cs": "global using String = "
+                  "CompetitiveRounds.ZzShadow;" + LF}, None),
+        "a field named String in the unit":
+            (ra + LF + _r12_block("    internal static class ZzHolder" + LF
+                                  + "    {" + LF + "        internal static "
+                                  "ZzShadow String = null;" + LF + "    }" + LF),
+             None, None),
+        "a type parameter named String in the unit":
+            (ra + LF + _r12_block("    internal static class ZzHolder" + LF
+                                  + "    {" + LF + "        internal static void "
+                                  "ZzF<String>() { }" + LF + "    }" + LF),
+             None, None),
+        "a namespace with a String component in another delivered source":
+            (ra, {"Zz/ZzNs.cs": "namespace CompetitiveRounds.String" + LF + "{"
+                  + LF + "    internal static class ZzShadowNs { }" + LF + "}"
+                  + LF}, None),
+        "an identifier escape in the unit's code":
+            (ra + LF + _r12_block("    internal static class ZzHolder" + LF
+                                  + "    {" + LF + "        internal static int "
+                                  + esc + ";" + LF + "    }" + LF), None, None),
+        "a unit that does not import System":
+            (ra.replace("using System;" + LF, "", 1), None, None),
+        "a using item with the alias String in the project file":
+            (ra, None, "alias"),
+    }
+
+
+def test_r12_l2_an_uppercase_string_call_is_exempt_only_when_its_binding_is_established(
+        tmp_path):
+    """R11-L2 (B9, and B20 through R10-L3): `String.Equals`,
+    `String.IsNullOrEmpty` and `String.IsNullOrWhiteSpace` inside a log call's
+    arguments are pure only when `String` is established to bind to
+    System.String.  On the tree the binding is established and the walked
+    methods' log calls are set aside.  Each shadow form -- a type, field,
+    type parameter, using alias or namespace named String in the unit or in
+    another delivered source, an identifier escape, a unit without
+    `using System;`, an alias in the project file, a call through `::`, and a
+    statement judged without its unit -- REFUSES the uppercase call, where the
+    round-11 reading set every one of them aside by spelling; the lowercase
+    keyword `string` stays exempt in every one of them; and end to end, an
+    uppercase call planted in the publication after Tag beside a shadow type
+    is refused where the same call with no shadow is still set aside."""
+    ra = _src("RoomActors.cs")
+    ok, reasons = _r12_string_binding(ra)
+    assert ok, reasons
+    tree_probs, _glob = _r12_tree_string_problems()
+    assert tree_probs == (), tree_probs
+    tree_logs = 0
+    for sig in (_R10_PUBLISH_SIG, _R10_OUTCOME_SIG):
+        logs = [s for s in _r10cl_statements(_method_body(ra, sig))
+                if _R10CL_LOG.match(s)]
+        assert all(_r10cl_is_log_call(s, ra) for s in logs), logs
+        tree_logs += len(logs)
+    assert tree_logs, "the walked methods carry no log call to judge"
+    publish, why_p = _r10_publish_model(ra)
+    assert publish is not None, why_p
+    print("R11-L2 TREE: the binding of String is established in RoomActors.cs "
+          "and across the %d delivered sources; the tree's %d log call(s) in "
+          "the two walked methods set aside" % (len(_r12_compile_sources()),
+                                                 tree_logs))
+
+    upper = "Plugin.Log.LogInfo(%s)" % _R12_UPPER_ARG
+    lower = "Plugin.Log.LogInfo(%s)" % _R12_LOWER_ARG
+    tree = _r12_compile_sources()
+    alias_dir = tmp_path / "alias"
+    alias_dir.mkdir()
+    (alias_dir / "CompetitiveRounds.csproj").write_bytes(
+        ('<Project Sdk="Microsoft.NET.Sdk">' + LF + "  <ItemGroup>" + LF
+         + '    <Using Include="CompetitiveRounds.ZzShadow" Alias="String" />'
+         + LF + "  </ItemGroup>" + LF + "</Project>" + LF).encode("utf-8"))
+    refused = 0
+    for label, (unit, others, proj) in _r12_shadow_units(ra).items():
+        assert _r11_impure_calls_round11(upper) == [], label
+        sources = dict(tree)
+        sources.update(others or {})
+        got, why = _r12_string_binding(
+            unit, sources, alias_dir if proj == "alias" else None)
+        assert not got and why, label
+        if others is None and proj is None:
+            # a unit-level form refuses the call itself, through the exemption
+            assert not _r10cl_is_log_call(upper, unit), "set aside: " + label
+            calls = _r11_impure_calls(upper, unit)
+            assert calls and "not established" in calls[0], (label, calls)
+            assert _r10cl_is_log_call(lower, unit), "lowercase refused: " + label
+        refused += 1
+        print("R11-L2 SHADOW %s : set aside by the round-11 reading, refused "
+              "now -- %s" % (label, why[0]))
+
+    colons = ('Plugin.Log.LogInfo("[2v2-DC] same " + '
+              'global::String.Equals(tag, OutcomeProp))')
+    assert _r11_impure_calls_round11(colons) == []
+    assert not _r10cl_is_log_call(colons, ra), colons
+    print("R11-L2 COLONS : set aside by the round-11 reading, refused now -- "
+          + _r11_impure_calls(colons, ra)[0])
+    assert not _r10cl_is_log_call(upper), "judged without its unit, set aside"
+    print("R11-L2 NO UNIT : refused -- " + _r11_impure_calls(upper)[0])
+    for form in ("String.IsNullOrEmpty(tag)", "String.IsNullOrWhiteSpace(tag)"):
+        stmt = 'Plugin.Log.LogInfo("[2v2-DC] empty " + %s)' % form
+        assert _r10cl_is_log_call(stmt, ra), "established, refused: " + form
+        shadow = _r12_shadow_units(ra)["a type named String declared in the unit"][0]
+        assert not _r10cl_is_log_call(stmt, shadow), "shadowed, set aside: " + form
+    assert _r10cl_is_log_call(upper, ra) and _r10cl_is_log_call(lower, ra)
+
+    # end to end: the publication after Tag, the shadow type in the same file.
+    # Each check judges the PLANTED statement in the unit it was planted in;
+    # the tree's own log calls are judged by the tree checks above, so a tree
+    # whose walked methods already carry an established uppercase call is
+    # still a tree this test accepts.
+    tag_line = "string tag = Tag(seriesId);"
+    j = ra.index(tag_line, ra.index(_R10_PUBLISH_SIG)) + len(tag_line)
+    k = ra.index(_R10_PUBLISH_SIG)
+    k = ra.rindex(LF, 0, k) + 1
+    member = "    " + _R12_SHADOW_TYPE.replace(LF, LF + "    ")[:-4]
+    planted_upper = ra[:j] + " " + upper + ";" + ra[j:]
+    shadowed = planted_upper[:k] + member + planted_upper[k:]
+    assert not _r10cl_is_log_call(upper, shadowed), "set aside beside the shadow"
+    calls = _r11_impure_calls(upper, shadowed)
+    assert calls and "not established" in calls[0], calls
+    p, why_p = _r10_publish_model(shadowed)
+    assert p is None and "is not set aside" in why_p, why_p
+    assert "not established" in why_p, why_p
+    print("R11-L2 REFUSED: " + why_p)
+    assert _r10cl_is_log_call(upper, planted_upper), "refused with no shadow"
+    p, why_p = _r10_publish_model(planted_upper)
+    assert p is not None, why_p
+    planted_lower = ra[:j] + " " + lower + ";" + ra[j:]
+    lower_shadowed = planted_lower[:k] + member + planted_lower[k:]
+    assert _r10cl_is_log_call(lower, lower_shadowed), "lowercase refused"
+    # the lowercase plant adds no refusal: the shadowed publication answers
+    # the same with and without it
+    p0, why0 = _r10_publish_model(ra[:k] + member + ra[k:])
+    p, why_p = _r10_publish_model(lower_shadowed)
+    assert (p is None) == (p0 is None), (why0, why_p)
+    assert p is not None or why_p == why0, (why0, why_p)
+    print("R11-L2 BINDING: %d shadow forms refused, each set aside by the "
+          "round-11 reading; the call through :: refused; a statement judged "
+          "without its unit refused; the lowercase keyword still set aside "
+          "beside every unit-level shadow; the uppercase call planted after Tag "
+          "refused beside a shadow type and still set aside with none" % refused)
 
 
 # ROUND 12 (R11-L1): a nested source carrying a second caller of the mutating
