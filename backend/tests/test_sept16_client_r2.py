@@ -31,6 +31,7 @@ import itertools
 import os
 import pathlib
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 
 LF = chr(10)
@@ -2517,8 +2518,9 @@ _R11_PURE_CALLS = frozenset((
 # the identifier String in their code is a member access `String.<name>` -- a
 # declaration, a type use or any other form is a reason, erring toward
 # refusal; no namespace declaration carries a String component; and no using
-# directive names String other than as `System.String`.  The project file must
-# declare no using alias String either.  A statement judged WITHOUT its unit
+# directive names String other than as `System.String`.  No MSBuild file the
+# project reads may declare a using alias String either (R12CL2, below, reads
+# every spelling MSBuild accepts).  A statement judged WITHOUT its unit
 # is refused its uppercase forms: the binding is not established.  An
 # allow-listed name reached through `::` (`global::String.Equals`) is never
 # pure: `global::String` is not System.String.
@@ -2545,9 +2547,16 @@ _R12_CHAR_LITERAL = re.compile(r"'(?:\\[^'\n]{1,9}|[^'\\\n])'")
 _R12_SYSTEM_STRING = re.compile(r"(?:global\s*::\s*)?System\s*\.\s*String\b")
 _R12_IMPORTS_SYSTEM = re.compile(r"(?m)^[ \t]*(?:global[ \t]+)?using[ \t]+System[ \t]*;")
 _R12_GLOBAL_SYSTEM = re.compile(r"(?m)^[ \t]*global[ \t]+using[ \t]+System[ \t]*;")
+# ROUND-12 COLD LENS (R12CL2): every character of the Unicode category Cf (a
+# formatting character).  C# removes one from an identifier before comparing
+# it, so `Str<U+200B>ing` written in code is the identifier String.
+_R12_FORMAT_CHARS = "".join(chr(c) for c in range(0x110000)
+                            if unicodedata.category(chr(c)) == "Cf")
+_R12_FORMAT_CHAR = re.compile("[" + re.escape(_R12_FORMAT_CHARS) + "]")
 # the raw pre-filter: every reason below needs one of these in the code, so a
-# source whose raw text carries neither needs no lexing
-_R12_RAW_REASON = re.compile(r"(?<![\w@])@?String\b|\\[uU][0-9A-Fa-f]{4}")
+# source whose raw text carries none needs no lexing
+_R12_RAW_REASON = re.compile(r"(?<![\w@])@?String\b|\\[uU][0-9A-Fa-f]{4}|"
+                             + _R12_FORMAT_CHAR.pattern)
 
 
 def _r12_code_string_problems(code, text, name):
@@ -2555,11 +2564,16 @@ def _r12_code_string_problems(code, text, name):
     something other than System.String; `text` is the source, for line
     numbers, and `name` labels each reason."""
     out = []
-    esc = _R12_ESCAPE.search(_R12_CHAR_LITERAL.sub(
-        lambda m: " " * len(m.group(0)), code))
+    bare = _R12_CHAR_LITERAL.sub(lambda m: " " * len(m.group(0)), code)
+    esc = _R12_ESCAPE.search(bare)
     if esc:
         out.append("%s: an identifier escape stands in code at line %d"
                    % (name, _cs_line(text, esc.start())))
+    # a byte-order mark at the very start of a file is not code (R12CL2)
+    fmt = _R12_FORMAT_CHAR.search(bare, 1 if bare.startswith("\ufeff") else 0)
+    if fmt:
+        out.append("%s: a formatting character stands in code at line %d"
+                   % (name, _cs_line(text, fmt.start())))
     skip = []
     for m in _R12_USING.finditer(code):
         skip.append((m.start(), m.end()))
@@ -2609,18 +2623,152 @@ def _r12_imports_system(text, form):
     return bool(rx.search(text)) and bool(rx.search(_cs_code_mask(text)))
 
 
+# ROUND-12 COLD LENS (R12CL2) -- A USING ALIAS IN AN MSBUILD FILE IS READ AS
+# MSBUILD READS IT, NOT BY ITS SPELLING.  The first pass looked for a using
+# alias String in the project file with one pattern, a double-quoted
+# `Alias="String"` attribute.  MSBuild accepts the same Using item with a
+# single-quoted attribute, with the alias as a child `<Alias>` element, with
+# a character reference in either, with the item and metadata names in any
+# letter case, as an Update of an item, and in any file it imports, and the
+# SDK writes each into `global using String = ...;` under obj/, which the
+# compile set leaves out.  `_r12_msbuild_string_problems` now parses every
+# MSBuild file the gate lists (the project file, its .user file and its
+# extension files, NuGet's included) as XML, so quoting and character
+# references are resolved by the parser; it finds every element named Using,
+# in any letter case, wherever it stands, and reads its alias from every
+# attribute and every child element named Alias, in any letter case, with
+# MSBuild's own `%XX` escapes decoded, as a task reads an item's metadata.  An
+# alias is a reason when, compared as C# compares identifiers -- surrounding
+# space dropped, a leading `@` dropped, every `\uXXXX` and `\UXXXXXXXX`
+# escape decoded, every formatting character removed -- it is `String`, and
+# when it carries an MSBuild expansion (`$(`, `@(`, `%(`), which this reading
+# does not evaluate.  A Using item whose Include or Update carries an
+# expansion is a reason for the same cause -- an Include from another item
+# list brings that list's metadata, an alias among it -- and so is a task
+# output adding Using items (`<Output ItemName="Using" />`, the item type
+# compared in any letter case, or named by an expansion).  A file it cannot
+# read, or read as XML, is a reason.
+# The same comparison reaches the sources: a formatting character in a
+# source's code (a byte-order mark at its very start aside) is a reason, as
+# an identifier escape is.
+#
+# WHAT THIS DOES NOT SEE: a Using item added by a restored package's own
+# build files or by MSBuild's machine-wide or per-user extension folders,
+# which lie outside plugin/'s tree; the notes carry it with the
+# referenced-assembly case as a residual.
+_R12_CS_UNICODE_ESCAPE = re.compile(r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})")
+_R12_MSBUILD_EXPANSION = ("$(", "@(", "%(")
+# MSBuild's own escape: `%` and two hex digits stand for one character, and a
+# task reads an item's metadata with every one decoded
+_R12_MSBUILD_ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def _r12_msbuild_unescape(value):
+    """`value` as a task reads an item's metadata: every `%XX` decoded."""
+    return _R12_MSBUILD_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), value)
+
+
+def _r12_cs_identifier(value):
+    """`value` as C# compares an identifier -- surrounding space dropped, a
+    leading `@` dropped, every unicode escape decoded, every formatting
+    character removed -- or None when an escape names no character."""
+    v = value.strip()
+    if v.startswith("@"):
+        v = v[1:]
+    try:
+        v = _R12_CS_UNICODE_ESCAPE.sub(
+            lambda m: chr(int(m.group(1) or m.group(2), 16)), v)
+    except (ValueError, OverflowError):
+        return None
+    if v.startswith("@"):
+        v = v[1:]
+    return _R12_FORMAT_CHAR.sub("", v)
+
+
+def _r12_msbuild_alias_reason(value):
+    """Why a Using item's alias `value` could name String, or None."""
+    if any(x in value for x in _R12_MSBUILD_EXPANSION):
+        return "an alias carrying an MSBuild expansion this reading does not evaluate"
+    value = _r12_msbuild_unescape(value)
+    name = _r12_cs_identifier(value)
+    if name is None:
+        return "an alias whose escape names no character"
+    if name == "String":
+        return "the alias String"
+    return None
+
+
+def _r12_output_names_using(el):
+    """Whether the task output `el` adds items of the type Using -- the type
+    compared in any letter case -- or names its item type by an expansion
+    this reading does not evaluate."""
+    for k, v in el.attrib.items():
+        if k.lower() == "itemname" and (
+                v.strip().lower() == "using"
+                or any(x in v for x in _R12_MSBUILD_EXPANSION)):
+            return True
+    return False
+
+
+def _r12_msbuild_string_problems(project_dir):
+    """[reason] -- every using alias that could name String, in any spelling
+    MSBuild accepts, in every MSBuild file the gate lists for the project in
+    `project_dir` (R12CL2)."""
+    project_dir = pathlib.Path(project_dir)
+    projects = sorted(p for p in project_dir.iterdir()
+                      if p.is_file() and p.suffix.lower() == ".csproj")
+    files, listing = _r12_msbuild_files(project_dir, projects)
+    out = list(listing)
+    for role, p, _kind in files:
+        try:
+            root = ET.fromstring(p.read_bytes())
+        except (OSError, ET.ParseError) as exc:
+            out.append("%s could not be read as XML (%s)" % (role, type(exc).__name__))
+            continue
+        for el in root.iter():
+            if (_r12_local(el.tag).lower() == "output"
+                    and _r12_output_names_using(el)):
+                out.append("%s: a using item made by a task output this "
+                           "reading does not evaluate" % role)
+                continue
+            if _r12_local(el.tag).lower() != "using":
+                continue
+            spec = [v for k, v in el.attrib.items()
+                    if k.lower() in ("include", "update")]
+            if any(x in v for v in spec for x in _R12_MSBUILD_EXPANSION):
+                out.append("%s: a using item with its items from an MSBuild "
+                           "expansion this reading does not evaluate" % role)
+            values = [v for k, v in el.attrib.items() if k.lower() == "alias"]
+            values += ["".join(ch.itertext()) for ch in el
+                       if _r12_local(ch.tag).lower() == "alias"]
+            for v in values:
+                why = _r12_msbuild_alias_reason(v)
+                if why:
+                    out.append("%s: a using item with %s" % (role, why))
+    return out
+
+
+def _r12_project_alias_first_pass(project_dir):
+    """THE FIRST-PASS READING of the project file, verbatim in behaviour: one
+    pattern over each project file's text.  Kept ONLY so `test_r12cl2_...`
+    can show the spellings it did not see; nothing else calls it."""
+    out = []
+    for p in sorted(pathlib.Path(project_dir).glob("*.csproj")):
+        if re.search(r'Alias\s*=\s*"@?String"', p.read_text(encoding="utf-8")):
+            out.append(p.name + ": a using item with the alias String")
+    return out
+
+
 def _r12_delivered_string_problems(sources=None, project_dir=None):
     """(reasons, a global using System) over every delivered plugin source
-    and the project file."""
+    and every MSBuild file the gate lists (R12CL2)."""
     sources = _r12_compile_sources() if sources is None else sources
     out, global_system = [], False
     for name in sorted(sources):
         out.extend(_r12_source_string_problems(sources[name], name))
         global_system = global_system or _r12_imports_system(sources[name],
                                                              "global")
-    for p in sorted(pathlib.Path(project_dir or PLUGIN).glob("*.csproj")):
-        if re.search(r'Alias\s*=\s*"@?String"', p.read_text(encoding="utf-8")):
-            out.append(p.name + ": a using item with the alias String")
+    out.extend(_r12_msbuild_string_problems(project_dir or PLUGIN))
     return out, global_system
 
 
@@ -3851,6 +3999,156 @@ def test_r12cl1_every_file_msbuild_reads_for_the_project_is_held_by_the_gate(tmp
     assert (refused, accepted) == (20, 4), (refused, accepted)
     print("R12CL1 GATE: %d case(s) refused where the first-pass gate gave no "
           "reason; %d accepted" % (refused, accepted))
+
+
+def test_r12cl2_a_using_alias_string_in_any_msbuild_spelling_refuses_the_binding(
+        tmp_path):
+    """R12CL2 (B9, and B20 through R10-L3): a using alias that could name
+    String is read from every MSBuild file the gate lists as MSBuild reads it
+    -- parsed as XML, the item and metadata names in any letter case, the
+    alias an attribute or a child element with MSBuild's `%XX` escapes
+    decoded, compared as C# compares identifiers -- and an alias, an item
+    list or a task output the reading cannot evaluate is a reason.  On the
+    tree there is none.  Each spelling below REFUSES the binding of String,
+    where the first-pass pattern saw only the double-quoted attribute and its
+    `@` form; a project file that is not XML refuses it; a formatting
+    character inside an identifier in a delivered source's code refuses it,
+    and the uppercase call beside it; a different alias, a longer name, a
+    Using item with no alias, an Alias on another item type, an escape
+    spelling another name, a task output adding another item type and a
+    formatting character inside a string literal leave it established."""
+    ra = _src("RoomActors.cs")
+    assert _r12_msbuild_string_problems(PLUGIN) == []
+    tree = _r12_compile_sources()
+    bs = chr(92)
+    inc = 'Include="CompetitiveRounds.ZzShadow"'
+    prop = "  <PropertyGroup><ZzAlias>String</ZzAlias></PropertyGroup>" + LF
+    zz_item = ("  <ItemGroup><ZzItem Include='CompetitiveRounds.ZzShadow' "
+               "Alias='String' /></ItemGroup>" + LF)
+    zz_output = ('  <Target Name="ZzTarget" BeforeTargets="GenerateGlobalUsings">'
+                 '<CreateItem Include="CompetitiveRounds.ZzShadow" '
+                 'AdditionalMetadata="Alias=String"><Output '
+                 'TaskParameter="Include" ItemName="%s" /></CreateItem>'
+                 "</Target>" + LF)
+
+    def project(d, kind, item, extra):
+        (d / "obj").mkdir(parents=True)
+        body = "<ItemGroup>" + LF + "    " + item + LF + "  </ItemGroup>" + LF
+        (d / "CompetitiveRounds.csproj").write_bytes((
+            '<Project Sdk="Microsoft.NET.Sdk">' + LF + extra
+            + ("  " + body if kind == "csproj" else "") + "</Project>"
+            + LF).encode("utf-8"))
+        other = ("<Project>" + LF + "  " + body + "</Project>" + LF).encode("utf-8")
+        if kind == "user":
+            (d / "CompetitiveRounds.csproj.user").write_bytes(other)
+        if kind == "ext":
+            (d / "obj" / "CompetitiveRounds.csproj.zz.props").write_bytes(other)
+        return d
+
+    forms = (
+        ("a double-quoted attribute", "csproj",
+         '<Using %s Alias="String" />' % inc, "", True),
+        ("a single-quoted attribute", "csproj",
+         "<Using %s Alias='String' />" % inc, "", False),
+        ("a child element", "csproj",
+         "<Using %s><Alias>String</Alias></Using>" % inc, "", False),
+        ("a character reference in the attribute", "csproj",
+         '<Using %s Alias="&#83;tring" />' % inc, "", False),
+        ("a character reference in the child element", "csproj",
+         "<Using %s><Alias>&#x53;tring</Alias></Using>" % inc, "", False),
+        ("surrounding space", "csproj", '<Using %s Alias=" String " />' % inc,
+         "", False),
+        ("a verbatim @ prefix", "csproj", '<Using %s Alias="@String" />' % inc,
+         "", True),
+        ("a unicode escape", "csproj",
+         ('<Using %s Alias="' % inc) + bs + 'u0053tring" />', "", False),
+        ("a formatting character", "csproj",
+         '<Using %s Alias="Str&#x200B;ing" />' % inc, "", False),
+        ("lower-case item and metadata names", "csproj",
+         '<using include="CompetitiveRounds.ZzShadow" alias="String" />', "",
+         False),
+        ("an MSBuild property", "csproj", '<Using %s Alias="$(ZzAlias)" />' % inc,
+         prop, False),
+        ("an Update of the item", "csproj",
+         "<Using Update=\"CompetitiveRounds.ZzShadow\" Alias='String' />", "",
+         False),
+        ("the project's .user file", "user", "<Using %s Alias='String' />" % inc,
+         "", False),
+        ("an extension file under obj/", "ext",
+         "<Using %s><Alias>String</Alias></Using>" % inc, "", False),
+        ("an MSBuild escape", "csproj", '<Using %s Alias="%%53tring" />' % inc,
+         "", False),
+        ("an MSBuild escape of the verbatim @", "csproj",
+         '<Using %s Alias="%%40String" />' % inc, "", False),
+        ("items included from another item list", "csproj",
+         '<Using Include="@(ZzItem)" />', zz_item, False),
+        ("a task output adding Using items", "csproj", '<ZzHolder Include="x" />',
+         zz_output % "Using", False),
+    )
+    refused = seen_first = 0
+    for i, (label, kind, item, extra, seen) in enumerate(forms):
+        d = project(tmp_path / ("f%02d" % i), kind, item, extra)
+        got, why = _r12_string_binding(ra, tree, d)
+        alias = [w for w in why if "using item" in w]
+        assert not got and alias, (label, why)
+        first = _r12_project_alias_first_pass(d)
+        assert bool(first) == seen, (label, first)
+        refused += 1
+        seen_first += 1 if seen else 0
+        print("R12CL2 FORM %s : REFUSED -- %s; the first-pass pattern %s" % (
+            label, alias[0], "saw it" if seen else "did not see it"))
+    d = tmp_path / "notxml"
+    (d / "obj").mkdir(parents=True)
+    (d / "CompetitiveRounds.csproj").write_bytes(
+        ('<Project Sdk="Microsoft.NET.Sdk">' + LF).encode("utf-8"))
+    got, why = _r12_string_binding(ra, tree, d)
+    assert not got and any("could not be read as XML" in w for w in why), why
+    print("R12CL2 NOT XML: a project file that is not XML REFUSED -- " + why[-1])
+
+    twins = (
+        ("a different alias", "<Using %s Alias='ZzAlias' />" % inc, ""),
+        ("a longer name", "<Using %s><Alias>Strings</Alias></Using>" % inc, ""),
+        ("a Using item with no alias", '<Using Include="System" />', ""),
+        ("an Alias on another item type", "<ZzItem Include='x' Alias='String' />",
+         ""),
+        ("an MSBuild escape naming ZzString",
+         '<Using %s Alias="Zz%%53tring" />' % inc, ""),
+        ("a task output adding another item type", '<ZzHolder Include="x" />',
+         zz_output % "ZzItems"),
+    )
+    for i, (label, item, extra) in enumerate(twins):
+        d = project(tmp_path / ("t%02d" % i), "csproj", item, extra)
+        got, why = _r12_string_binding(ra, tree, d)
+        assert got, (label, why)
+        print("R12CL2 TWIN %s : established" % label)
+
+    zw = chr(0x200B)
+    cf_ident = _r12_block("    internal static class ZzHolder" + LF + "    {" + LF
+                          + "        internal static int Str" + zw + "ing;" + LF
+                          + "    }" + LF)
+    cf_text = cf_ident.replace("int Str" + zw + "ing;",
+                               'string ZzText = "a' + zw + 'b";')
+    assert not _R12_STRING_IDENT.search(cf_ident)
+    got, why = _r12_string_binding(ra, dict(tree, **{"Zz/ZzCf.cs": cf_ident}))
+    fmt = [w for w in why if "formatting character" in w]
+    assert not got and fmt, why
+    upper = "Plugin.Log.LogInfo(%s)" % _R12_UPPER_ARG
+    assert _r10cl_is_log_call(upper, ra)
+    assert not _r10cl_is_log_call(upper, ra + LF + cf_ident), "set aside"
+    print("R12CL2 SOURCE: a formatting character inside an identifier in a "
+          "delivered source's code REFUSED -- %s; the identifier pattern alone "
+          "does not match it, and the uppercase call beside it in the unit is "
+          "not set aside" % fmt[0])
+    got, why = _r12_string_binding(ra, dict(tree, **{"Zz/ZzCf.cs": cf_text}))
+    assert got, why
+    print("R12CL2 SOURCE TWIN: the same character inside a string literal : "
+          "established")
+    print("R12CL2 BINDING: %d MSBuild spelling(s) refused, %d of them seen by "
+          "the first-pass pattern; a project file that is not XML refused; a "
+          "formatting character in code refused; %d twin(s) established"
+          % (refused, seen_first, len(twins) + 1))
+
+
 def test_the_dc_fallback_watch_dies_with_the_room():
     """A watch carried across a room edge waits on an ACTOR NUMBER that now
     names somebody else.  Same lifetime, and the same three edges, as the
