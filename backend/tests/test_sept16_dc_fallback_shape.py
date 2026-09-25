@@ -467,15 +467,124 @@ def _missing_named_sources(sources):
     return [n for n in NAMED_CLIENT_SOURCES if n not in have]
 
 
+# The tokens _cs_code_only stops at, one pattern per lexer state. Everything
+# between two of them is copied in one slice, which is what keeps a pass over
+# the frozen client representation's 3.3 MB of source to a fraction of a
+# second rather than a character-by-character walk of it.
+_CS_CODE = re.compile(r'//|/\*|\$@"|@\$"|@"|\$"|"|\'')
+_CS_CODE_IN_HOLE = re.compile(r'//|/\*|\$@"|@\$"|@"|\$"|"|\'|[{}]')
+_CS_STRING = {
+    # (verbatim, interpolated): what can end, escape or open a hole in it
+    (False, False): re.compile(r'\\.|"|\n', re.S),
+    (False, True): re.compile(r'\\.|"|\n|\{\{|\}\}|\{', re.S),
+    (True, False): re.compile(r'""|"'),
+    (True, True): re.compile(r'""|"|\{\{|\}\}|\{'),
+}
+
+
+def _cs_code_only(txt):
+    """C# source with every comment blanked and every literal kept (B15).
+
+    A route call or a response read is LIVE CODE or it is nothing. A call the
+    client half deleted and left behind in a `//` line, or a parse wrapped in
+    `/* ... */`, neither calls nor reads, and a check that counted it passed
+    on a tree that did neither (the round-8 report, R8-L3). So both client
+    readers below search what this returns, never the raw file.
+
+    A lexer and not a regular expression, because a comment marker inside a
+    literal is text: `"http://host/..."` carries `//`, a verbatim string
+    doubles its quotes (`@"a""b"`), an interpolated string's `{hole}` can hold
+    a string of its own, and a char literal can hold the quote (`'"'`) that
+    would otherwise open one. A comment becomes spaces of the same length with
+    its newlines kept, so a line or column of the result is the source's. A
+    raw literal (three or more quotes) is kept whole; an interpolated raw
+    literal is not modelled, and no client source uses one.
+    """
+    out = []
+    i, n = 0, len(txt)
+    holes = []      # [verbatim, brace depth] per interpolated string whose hole is open
+    string = None   # (verbatim, interpolated) while inside a string's text
+    while i < n:
+        if string is not None:
+            m = _CS_STRING[string].search(txt, i)
+            if m is None:
+                out.append(txt[i:])
+                break
+            out.append(txt[i:m.end()])
+            i = m.end()
+            tok = m.group(0)
+            if tok == "{":
+                holes.append([string[0], 1])
+                string = None
+            elif tok in ('"', "\n"):
+                string = None
+            continue        # an escape, a doubled quote or brace: still text
+        m = (_CS_CODE_IN_HOLE if holes else _CS_CODE).search(txt, i)
+        if m is None:
+            out.append(txt[i:])
+            break
+        out.append(txt[i:m.start()])
+        i = m.start()
+        tok = m.group(0)
+        if tok in ("{", "}"):
+            holes[-1][1] += 1 if tok == "{" else -1
+            out.append(tok)
+            i += 1
+            if holes[-1][1] == 0:
+                string = (holes.pop()[0], True)
+        elif tok == "//":
+            j = txt.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+        elif tok == "/*":
+            j = txt.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append(re.sub(r"[^\n]", " ", txt[i:j]))
+            i = j
+        elif tok == "'":
+            if txt.startswith("\\", i + 1):
+                k = txt.find("'", i + 3, i + 12)
+            else:
+                k = i + 2 if txt.startswith("'", i + 2) else -1
+            if k > 0:
+                out.append(txt[i:k + 1])
+                i = k + 1
+            else:
+                out.append(tok)
+                i += 1
+        elif tok == '"':
+            k = i
+            while k < n and txt[k] == '"':
+                k += 1
+            if k - i >= 3:
+                end = txt.find('"' * (k - i), k)
+                end = n if end < 0 else end + (k - i)
+                out.append(txt[i:end])
+                i = end
+            else:
+                out.append(tok)
+                i += 1
+                string = (False, False)
+        else:               # an opener: $@" @$" @" $"
+            out.append(tok)
+            i += len(tok)
+            string = ("@" in tok, "$" in tok)
+    return "".join(out)
+
+
 def _carries_the_client_half(root):
-    """(sources, carries) for one candidate tree: do its sources call the route."""
+    """(sources, carries) for one candidate tree: do its sources call the route.
+
+    In LIVE code: the search reads the source with its comments blanked, so a
+    call left behind in a comment is not a call (R8-L3, B15)."""
     sources, _layout = _client_sources_in(root)
     for p in sources:
         try:
             txt = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if _STATUS_ROUTE_CALL.search(txt):
+        if _STATUS_ROUTE_CALL.search(_cs_code_only(txt)):
             return sources, True
     return sources, False
 
@@ -670,14 +779,15 @@ def _client_lane_sources():
 
 
 def _deferral_names_in(sources):
-    """Every dc_deferred* JSON key these C# sources read."""
+    """Every dc_deferred* JSON key these C# sources read, in LIVE code: a key
+    named only inside a comment is not read (R8-L3, B15)."""
     read = set()
     for p in sources:
         try:
             txt = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        read |= set(re.findall(r'"(dc_deferred[A-Za-z0-9_]*)"', txt))
+        read |= set(re.findall(r'"(dc_deferred[A-Za-z0-9_]*)"', _cs_code_only(txt)))
     return read
 
 
@@ -961,6 +1071,101 @@ def test_the_client_half_discriminator_answers_its_three_cases(tmp_path):
         'string url = baseUrl + "/api/v1/team/series/" + seriesId + "/status";\n',
         encoding="utf-8")
     assert _carries_the_client_half(tmp_path / "post")[1] is True
+
+
+def test_a_route_call_or_field_read_left_only_in_a_comment_is_not_counted(tmp_path):
+    """B15 (R8-L3): a comment is not a call and not a read.
+
+    The round-8 report found both client readers searching the raw file, so a
+    tree whose route call and field parses had been deleted from live code and
+    left behind in comments still passed the cross-lane check. Each arm below
+    is a planted tree. The first is that shape and must answer "does not call
+    the route, reads no field"; the second is its inert twin -- the same call
+    and parses in live code beside an unrelated comment. The rest are the
+    literal forms a comment marker or a quote can hide in, each of which a
+    reader that only knew `//` would misread.
+    """
+    fields = {"dc_deferred", "dc_deferred_seconds_remaining",
+              "dc_deferred_bound_seconds"}
+
+    def tree(name, api):
+        plug = tmp_path / name / "plugin"
+        plug.mkdir(parents=True)
+        (plug / "ApiClient.cs").write_text(api, encoding="utf-8")
+        (plug / "NativeUI.cs").write_text("namespace X { }\n", encoding="utf-8")
+        return _carries_the_client_half(tmp_path / name)
+
+    # 1. The call and every read left only in comments: not the client half.
+    sources, carries = tree("commented", (
+        '// string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";\n'
+        '/* return HasJsonKey(resp, "dc_deferred")\n'
+        '       && HasJsonKey(resp, "dc_deferred_seconds_remaining"); */\n'
+        'int n = 0; // ExtractJsonInt(resp, "dc_deferred_bound_seconds");\n'
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";\n'))
+    assert len(sources) == 2 and carries is False, (sources, carries)
+    assert _deferral_names_in(sources) == set()
+
+    # 2. The inert twin: the same call and reads in live code, and an
+    #    unrelated comment elsewhere.
+    sources, carries = tree("live", (
+        '// the deferral banner reads three fields\n'
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";\n'
+        'bool ok = HasJsonKey(resp, "dc_deferred")\n'
+        '    && HasJsonKey(resp, "dc_deferred_seconds_remaining")\n'
+        '    && HasJsonKey(resp, "dc_deferred_bound_seconds");\n'))
+    assert carries is True and _deferral_names_in(sources) == fields
+
+    # 3. A comment marker inside a literal is text ...
+    sources, carries = tree("markers", (
+        'string u = "http://" + host + "/api/v1/team/series/" + id + "/status";\n'
+        'string v = "/* not a comment */"; int w = 1;\n'
+        'bool b = HasJsonKey(resp, "dc_deferred");\n'))
+    assert carries is True and _deferral_names_in(sources) == {"dc_deferred"}
+
+    # 4. ... a char literal holding a quote opens no string, so the comment
+    #    after it is still a comment ...
+    sources, carries = tree("chars", (
+        "if (c == '\"' || c == '\\'') { } // HasJsonKey(resp, \"dc_deferred\")\n"
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";\n'))
+    assert carries is False and _deferral_names_in(sources) == set()
+
+    # 5. ... a verbatim string doubles its quotes and may carry `//` ...
+    sources, carries = tree("verbatim", (
+        'var m = Regex.Matches(json, @"""url""\\s*:\\s*""([^""]+)"" // x");\n'
+        '// HasJsonKey(resp, "dc_deferred_bound_seconds");\n'
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";\n'))
+    assert carries is True and _deferral_names_in(sources) == set()
+
+    # 6. ... and an interpolated hole may hold a string of its own.
+    sources, carries = tree("holes", (
+        'string url = $"{(tls ? "https" : "http")}://h/api/v1/team/series/{id}/status";\n'
+        '/* $"{x}" */ bool b = HasJsonKey(resp, "dc_deferred_seconds_remaining");\n'))
+    assert carries is True
+    assert _deferral_names_in(sources) == {"dc_deferred_seconds_remaining"}
+
+
+def test_each_client_reader_strips_comments_once_before_it_searches():
+    """R8-L3's named check, counted within each reader's own span (#432).
+
+    Each of the two readers calls _cs_code_only exactly once, and the call IS
+    the text its search reads -- the route pattern's .search in one, the
+    field re.findall in the other -- so no raw copy of the file can reach
+    either search beside it.
+    """
+    here = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+    fns = {n.name: n for n in here.body if isinstance(n, ast.FunctionDef)}
+    for name, method, arg in (("_carries_the_client_half", "search", 0),
+                              ("_deferral_names_in", "findall", 1)):
+        strips = _calls_named(fns[name], "_cs_code_only")
+        assert len(strips) == 1, (name, len(strips))
+        searches = [c for c in ast.walk(fns[name])
+                    if isinstance(c, ast.Call)
+                    and isinstance(c.func, ast.Attribute)
+                    and c.func.attr == method]
+        assert len(searches) == 1, (name, method, len(searches))
+        assert (len(searches[0].args) > arg
+                and searches[0].args[arg] is strips[0]), (
+            name, "searches something other than the stripped text")
 
 
 def test_an_unstable_read_of_the_other_lane_is_reported_as_unstable(tmp_path):
