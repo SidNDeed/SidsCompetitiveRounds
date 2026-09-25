@@ -798,13 +798,19 @@ def test_a_the_profile_card_reads_the_podium_maps_without_refreshing_or_granting
         for c in (main._podium_cache, main._podium_2v2_cache, main._podium_ffa_cache):
             c.clear()
         assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})   # cold: nothing, no refresh
-        main._podium_cache.update({"map": {"abc": 1}, "at": time.monotonic()})
-        main._podium_ffa_cache.update({"map": {"fff": 3}, "at": time.monotonic()})
+        # a FILLED cache, as a successful refresh leaves it: `ok` is what marks the
+        # fill as a success, and the read serves nothing from a cache without it
+        main._podium_cache.update({"map": {"abc": 1}, "at": time.monotonic(), "ok": True})
+        main._podium_ffa_cache.update({"map": {"fff": 3}, "at": time.monotonic(), "ok": True})
         m, m2, mf = main._podium_maps_cached((main.TITLE_PODIUM_SKU, main.TITLE_PODIUM_2V2_SKU))
         assert (m, m2, mf) == ({"abc": 1}, {}, {})                                  # only the asked-for ladders
         m["zzz"] = 2
         assert "zzz" not in main._podium_cache["map"], "a copy, never the cache itself"
         assert main._podium_maps_cached((None, "")) == ({}, {}, {})
+        # a refresh that failed but stamped `at` anyway is not a fill: the same map is not served
+        main._podium_cache["ok"] = False
+        assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})
+        main._podium_cache["ok"] = True
         # round 2: a map the boards have not refreshed for longer than the bound is not served
         main._podium_cache["at"] = time.monotonic() - main._PODIUM_CACHED_MAX_AGE_S - 1
         assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})
