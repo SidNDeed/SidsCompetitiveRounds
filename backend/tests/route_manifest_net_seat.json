@@ -385,7 +385,7 @@
           ],
           "main",
           "list_bug_reports",
-          "0ddeb1525c5e7d222cd74c35e641b3d7ec52f3f8"
+          "1562edc2bea2015fb1bc013d715bbe26807077d4"
         ],
         [
           "/api/v1/bug-reports",
@@ -394,7 +394,7 @@
           ],
           "main",
           "submit_bug_report",
-          "a1c2e55f50f41b7012e9c9201f70340b6b73ba9c"
+          "32469a1f86dc98ccda221f4ee4b518b4e21f8f9b"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -403,7 +403,7 @@
           ],
           "main",
           "recent_bug_report_events",
-          "c275547be4039736b86b6ea5070b17ec09b2cef7"
+          "121d20c8165732fd4699cb201a44b21fa6114117"
         ],
         [
           "/api/v1/bug-reports/recent",
@@ -412,7 +412,7 @@
           ],
           "main",
           "recent_bug_reports",
-          "902b0c1ddeed8cdc5142a2bb27b22d4630a5b42c"
+          "0296386ae437a559bfdf498512721af4b3cd70b3"
         ],
         [
           "/api/v1/bug-reports/{report_id}",
@@ -421,7 +421,7 @@
           ],
           "main",
           "get_bug_report",
-          "a3d92ed7e223c2f9d425a44e303ae18f09e348e7"
+          "8b755db4ad28f1e8649074fe0abdbdf7acd74841"
         ],
         [
           "/api/v1/bug-reports/{report_id}/comment",
@@ -439,7 +439,7 @@
           ],
           "main",
           "download_bug_report_log",
-          "4279a582ec185b3f2bd8704c237ef58243b85c61"
+          "8a291c5847a40ca1d7bdcaa0f691889a100ed855"
         ],
         [
           "/api/v1/bug-reports/{report_id}/status",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "a959363a5f323072ddcdbe57c119adbaeb3c8927"
+          "de81a76d80a2af21524cc338251c6936989151f0"
         ],
         [
           "/api/v1/i18n/approved",
