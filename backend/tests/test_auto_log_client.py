@@ -353,9 +353,23 @@ def test_turning_the_setting_off_stops_a_transfer_already_running():
     assert "already reached the server stays there" in caption, (
         "the caption promises a cancellation stronger than Abort() gives")
 
-    upload = AUTO_LOG.read_text(encoding="utf-8")
-    assert "abortIf: () => !Enabled" in upload, (
-        "the uploader does not hand the request a live enable predicate")
+    # The live predicate asks BOTH switches (round 2 finding 4): the setting
+    # alone let an upload outlive a revoked data consent. It reads them
+    # through the same two delegates as the dispatch gates, and those default
+    # to the real setting and consent. A shape pin only: the consent sentinel
+    # (AutoLogUpload.RunConsentSentinel) is what runs the predicate.
+    upload = code_of(AUTO_LOG.read_text(encoding="utf-8"))
+    assert upload.count("abortIf: () => !_enabledNow() || !_consentNow()") == 1, (
+        "the uploader does not hand the request a live predicate over both switches")
+    assert "_enabledNow = () => Enabled;" in upload and \
+        "_consentNow = () => Plugin.DataConsentGranted;" in upload, (
+        "the switch delegates no longer default to the real setting and consent")
+    assert upload.count('if (!_consentNow()) { NoteSkip("data reporting is not consented"); return; }') == 2, (
+        "a dispatch gate no longer reads the consent delegate the in-flight check reads")
+    assert "Plugin.DataConsentGranted" not in upload.replace(
+        "_consentNow = () => Plugin.DataConsentGranted;", "").replace(
+        "realConsent() != Plugin.DataConsentGranted", ""), (
+        "a consent read bypasses the delegate the in-flight check reads")
 
     raw = code_of(API_CLIENT.read_text(encoding="utf-8"),
                   "private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,")

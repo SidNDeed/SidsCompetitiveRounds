@@ -169,6 +169,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<string> BroadcastTestReporterElectionSentinel; // broadcast seat only — any new value runs the 2v2 DC reporter-election self-test once
+        internal static ConfigEntry<string> BroadcastTestAutoLogConsentSentinel; // broadcast seat only — any new value runs the automatic-log consent-abort self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
         internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0..PortraitRender.PresetSlotCount()-1 = the saved face slot (#370 — NOT 0-9; playerFaces has ten entries but only eight are authorable). Anything outside that range resolves to -1, and is rewritten to -1 once the real slot count has been discovered — it is NOT clamped to the top slot (that silently re-rendered someone else's face onto the card).
         internal static ConfigEntry<string> BinderSort;                  // Player Cards (item 20): the binder order, stored as the BinderSortRules.Mode member NAME (never the ordinal, which changes meaning when a mode is inserted). Written by the header button alone; an unrecognised name falls back to Name.
@@ -1112,6 +1113,10 @@ namespace CompetitiveRounds
             BroadcastTestReporterElectionSentinel = Config.Bind(
                 "Broadcast", "TestReporterElectionSentinel", "",
                 "Broadcast seat only: set to any NEW value to run the 2v2 disconnect reporter-election self-test once (synthetic rooms only, nothing is sent); the result is logged as [REPORTER-ELECTION-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestAutoLogConsentSentinel = Config.Bind(
+                "Broadcast", "TestAutoLogConsentSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the automatic-log consent self-test once (synthetic bundles against a stub transport: nothing is sent, and the real setting and data consent are read but never written); the result is logged as [AUTO-LOG-CONSENT-SENTINEL] PASS/FAIL. A value present at startup never runs."
             );
             BroadcastTestMapSkinTourSeconds = Config.Bind(
                 "Broadcast", "TestMapSkinTourSeconds", 0,
@@ -2275,6 +2280,20 @@ namespace CompetitiveRounds
             DevReporterElectionSentinelTest();
         }
 
+        // v1.41.0 beta round 2 finding 4: [Broadcast] TestAutoLogConsentSentinel,
+        // the same grammar and identity gate as the two levers above.
+        private static string _lastTestAutoLogConsentSentinel;
+        private void TickTestAutoLogConsentSentinel()
+        {
+            if (Plugin.BroadcastTestAutoLogConsentSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestAutoLogConsentSentinel.Value ?? "").Trim();
+            if (_lastTestAutoLogConsentSentinel == null) { _lastTestAutoLogConsentSentinel = raw; return; }
+            if (raw == _lastTestAutoLogConsentSentinel) return;
+            _lastTestAutoLogConsentSentinel = raw;
+            if (raw.Length == 0) return;
+            AutoLogUpload.DevConsentSentinelTest();
+        }
+
         /// <summary>The 2v2 DC reporter election's self-test (round 2 finding 2).
         /// Runs every survivor of synthetic four-seat rooms through
         /// DcReporterElection.ShouldReport, the rule OnPlayerLeftRoom runs, and
@@ -2954,6 +2973,7 @@ namespace CompetitiveRounds
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestReporterElectionSentinel(); } catch { }
+            try { TickTestAutoLogConsentSentinel(); } catch { }
             try { TickTestPlayerCards(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }

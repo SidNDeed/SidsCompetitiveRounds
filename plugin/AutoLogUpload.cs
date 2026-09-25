@@ -134,6 +134,34 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── The two switches, and the transport (v1.41.0 beta round 2, finding 4) ──
+        //
+        // An automatic upload needs BOTH of the player's permissions: this
+        // feature's own setting (Enabled) and the global data consent
+        // (Plugin.DataConsentGranted). Every question this file asks about them
+        // goes through the two delegates below: the room-exit gates, the gates
+        // at dispatch, and the dispatched request's abortIf, which asks the
+        // same two questions once a frame for as long as the request is open.
+        // So withdrawing EITHER one mid-transfer aborts the transfer. It used
+        // to be the setting alone: consent revoked while the setting stayed on
+        // let an upload already on the wire finish.
+        //
+        // They are delegates, and so is the send, for the consent sentinel
+        // (RunConsentSentinel, at the end of this class). It has to revoke
+        // consent in the middle of a transfer, and the player's real consent
+        // is not something a self-test may write: it is saved to the cfg, and
+        // ApiClient.OnConsentChanged answers a revoke by turning ranked off and
+        // dropping the local caches. So for the length of one synchronous call
+        // the sentinel points these three at its own switches and its own stub
+        // transport, and it restores all three in a finally. Nothing else
+        // assigns them.
+        private static Func<bool> _enabledNow = () => Enabled;
+        private static Func<bool> _consentNow = () => Plugin.DataConsentGranted;
+
+        private delegate void AutoLogSender(byte[] body, Action<bool, long, string> done, Func<bool> abortIf);
+        private static AutoLogSender _send =
+            (body, done, abortIf) => ApiClient.SubmitAutoLogBody(body, done, abortIf: abortIf);
+
         /// <summary>Per-frame upkeep from the always-on persistent tick, so no
         /// join path can forget it. Cheap: four reads and a boolean OR while in
         /// a room, one comparison while at the menu.</summary>
@@ -233,8 +261,8 @@ namespace CompetitiveRounds
                 if (_inFlight) return;
                 if (_bundling) { NoteSkip("the previous room's bundle is still being built"); return; }
 
-                if (!Enabled) { NoteSkip("the setting is off"); return; }
-                if (!Plugin.DataConsentGranted) { NoteSkip("data reporting is not consented"); return; }
+                if (!_enabledNow()) { NoteSkip("the setting is off"); return; }
+                if (!_consentNow()) { NoteSkip("data reporting is not consented"); return; }
                 if (!gameRan) { NoteSkip("no game ran in that room"); return; }
                 if (string.IsNullOrEmpty(SteamAuth.SessionToken)) { NoteSkip("no Steam session on this client"); return; }
                 if (Time.realtimeSinceStartup - _lastUploadAt < MIN_UPLOAD_GAP_SECONDS)
@@ -319,9 +347,7 @@ namespace CompetitiveRounds
         }
 
         /// <summary>MAIN THREAD, from Tick. Consumes at most one finished
-        /// bundle per frame and does the only two things that could not be
-        /// done on the worker: the dedup compare against the last upload, and
-        /// starting the request.</summary>
+        /// bundle per frame and hands it to Dispatch.</summary>
         private static void PumpFinishedBundle()
         {
             BundleResult r;
@@ -332,7 +358,15 @@ namespace CompetitiveRounds
             }
             if (r == null) return;
             _bundling = false;
+            Dispatch(r);
+        }
 
+        /// <summary>MAIN THREAD. Does the only two things that could not be
+        /// done on the worker: the dedup compare against the last upload, and
+        /// starting the request. Its own member so the consent sentinel runs
+        /// THIS code on a synthetic bundle, never a copy of it.</summary>
+        private static void Dispatch(BundleResult r)
+        {
             try
             {
                 if (!string.IsNullOrEmpty(r.Diagnostic))
@@ -345,11 +379,11 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning("[AUTO-LOG] not uploading: " + (r.Failure ?? "no body was produced"));
                     return;
                 }
-                // The setting can be turned off, or the session lost, while the
-                // bundle was being built. Re-check rather than inherit the
-                // answer from the frame the room closed on.
-                if (!Enabled) { NoteSkip("the setting was turned off while the bundle was being built"); return; }
-                if (!Plugin.DataConsentGranted) { NoteSkip("data reporting is not consented"); return; }
+                // The setting can be turned off, consent revoked or the session
+                // lost while the bundle was being built. Re-check rather than
+                // inherit the answer from the frame the room closed on.
+                if (!_enabledNow()) { NoteSkip("the setting was turned off while the bundle was being built"); return; }
+                if (!_consentNow()) { NoteSkip("data reporting is not consented"); return; }
                 if (_endpointAbsent || _inFlight) return;
                 if (r.Hash == _lastUploadedHash)
                 {
@@ -360,25 +394,28 @@ namespace CompetitiveRounds
                 int chars = r.Chars, scrubbed = r.Scrubbed, hash = r.Hash;
                 string mode = r.Mode;
                 _inFlight = true;
-                ApiClient.SubmitAutoLogBody(r.Body,
+                _send(r.Body,
                     (ok, code, resp) =>
                     {
                         _inFlight = false;
                         if (!ok && resp == ApiClient.RequestCancelledMarker)
                         {
-                            // The player turned the setting off while this was
-                            // on the wire, and the transfer was ABORTED rather
-                            // than completed-and-discarded. That is what makes
-                            // the consent's "nothing is sent while this is off"
-                            // true of a dispatched request and not only of a
-                            // future one (Codex client r2 MEDIUM).
+                            // The player withdrew permission while this was on
+                            // the wire (turned the setting off, or revoked data
+                            // consent: round 2 finding 4), and the transfer was
+                            // ABORTED rather than completed-and-discarded. That
+                            // is what makes the consent's "nothing is sent while
+                            // this is off" true of a dispatched request and not
+                            // only of a future one (Codex client r2 MEDIUM).
                             //
                             // Neither the debounce nor the dedup hash is
                             // written: nothing was accepted, so a later
                             // re-enable must not be made to wait five minutes
                             // for an upload that never happened, and the
                             // unsent bundle must not be remembered as sent.
-                            Plugin.Log.LogInfo("[AUTO-LOG] upload cancelled — the setting was turned off mid-transfer");
+                            Plugin.Log.LogInfo("[AUTO-LOG] upload cancelled — "
+                                + (_enabledNow() ? "data consent was revoked" : "the setting was turned off")
+                                + " mid-transfer");
                             return;
                         }
                         // Every other arm consumes the debounce, including
@@ -418,7 +455,10 @@ namespace CompetitiveRounds
                     // This is the whole of "never while this is off": the
                     // gates above stop a NEW dispatch, and this one stops a
                     // dispatched transfer the moment permission is withdrawn.
-                    abortIf: () => !Enabled);
+                    // It asks the gates' own two questions through the same
+                    // two delegates: the setting alone let a transfer outlive
+                    // a revoked data consent (round 2 finding 4).
+                    abortIf: () => !_enabledNow() || !_consentNow());
             }
             catch (Exception ex)
             {
@@ -490,6 +530,172 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogInfo($"[LOG-SCRUB] selftest summary: {r.Passed} passed, {r.Failed} failed");
             }
             catch (Exception ex) { Plugin.Log?.LogWarning("[LOG-SCRUB] self-test failed to run: " + ex.GetType().Name); }
+        }
+
+        // ── Consent sentinel (v1.41.0 beta round 2, finding 4) ─────────────────
+        //
+        // Runs Dispatch, the code a finished bundle takes, on synthetic bundles
+        // against a stub transport that polls the real abortIf once a "frame",
+        // as PostRequestRaw does. Two transfers: on one the player revokes data
+        // consent at frame 3 with the setting left on (the report's case); on
+        // the other the setting goes off at frame 3 with consent left granted.
+        // Each must run unaborted while both switches are on, abort on the
+        // frame the switch goes, and then take the RequestCancelledMarker
+        // branch: the in-flight flag clears and neither the debounce nor the
+        // dedup hash is written. A third bundle, handed over with consent
+        // already revoked, must not reach the transport at all: the gates and
+        // the in-flight check ask the same two questions.
+        //
+        // Nothing is sent: the stub is the only transport the sentinel's
+        // dispatches can reach, installed first and removed last. Nothing is
+        // persisted: every static Dispatch can write is saved first and
+        // restored in the finally, and the player's real setting and consent
+        // are read, never written. What does reach the log is the cancellation
+        // branch's own "[AUTO-LOG] upload cancelled" line, once per transfer:
+        // it is that branch running, and the verdict line follows it.
+
+        internal const string ConsentSentinelTag = "[AUTO-LOG-CONSENT-SENTINEL]";
+
+        /// <summary>A debounce value no answer arm can write: every arm but the
+        /// cancellation writes Time.realtimeSinceStartup, which is never
+        /// negative. Unchanged after the answer means the cancellation branch
+        /// ran, not merely that an answer arrived.</summary>
+        private const float SentinelDebounceProbe = -12345f;
+
+        /// <summary>The dedup hash the sentinel plants. Its bundles hash one
+        /// higher, so the dedup gate lets them through and the success arm
+        /// would overwrite this with theirs.</summary>
+        private const int SentinelHashProbe = 0x5E471;
+
+        /// <summary>Returns the verdict line; `pass` is the verdict. MAIN
+        /// THREAD, one synchronous call: no frame passes while the sentinel's
+        /// switches and transport are installed, so a real upload's abortIf is
+        /// never polled against them.</summary>
+        internal static string RunConsentSentinel(out bool pass)
+        {
+            pass = true;
+            int checks = 0;
+            string detail = "";
+
+            AutoLogSender realSend = _send;
+            Func<bool> realEnabled = _enabledNow, realConsent = _consentNow;
+            bool savedInFlight = _inFlight, savedAbsent = _endpointAbsent;
+            float savedAt = _lastUploadAt, savedSkipAt = _skipLoggedAt;
+            int savedHash = _lastUploadedHash;
+            try
+            {
+                // The installed delegates answer what the switches say right
+                // now, whichever state the player has them in. Read-only.
+                checks++;
+                if (realEnabled() != Enabled || realConsent() != Plugin.DataConsentGranted)
+                { pass = false; detail += " live-switches:disagree"; }
+
+                int sends = 0;
+                Func<bool> abortIf = null;
+                Action<bool, long, string> answer = null;
+                _send = (body, done, predicate) => { sends++; answer = done; abortIf = predicate; };
+
+                bool setting = true, consent = true;
+                _enabledNow = () => setting;
+                _consentNow = () => consent;
+
+                foreach (string withdrawn in new[] { "consent", "setting" })
+                {
+                    setting = true; consent = true;
+                    sends = 0; abortIf = null; answer = null;
+                    _inFlight = false;
+                    _endpointAbsent = false;
+                    _lastUploadAt = SentinelDebounceProbe;
+                    _lastUploadedHash = SentinelHashProbe;
+
+                    Dispatch(SentinelBundle());
+                    checks++;
+                    if (sends != 1 || abortIf == null || answer == null || !_inFlight)
+                    { pass = false; detail += " " + withdrawn + ":not-dispatched"; continue; }
+
+                    int abortedAt = -1;
+                    for (int frame = 0; frame < 6 && abortedAt < 0; frame++)
+                    {
+                        if (frame == 3)
+                        {
+                            if (withdrawn == "consent") consent = false;
+                            else setting = false;
+                        }
+                        bool stop = false;
+                        try { stop = abortIf(); } catch { }
+                        if (stop) abortedAt = frame;
+                    }
+                    checks++;
+                    if (abortedAt != 3)
+                    { pass = false; detail += " " + withdrawn + ":aborted-at-" + abortedAt; continue; }
+
+                    // What SubmitAutoLogBody hands back for an aborted request:
+                    // no response (status 0) and the marker.
+                    answer(false, 0, ApiClient.RequestCancelledMarker);
+                    checks++;
+                    if (_inFlight) { pass = false; detail += " " + withdrawn + ":still-in-flight"; }
+                    checks++;
+                    if (_lastUploadAt != SentinelDebounceProbe) { pass = false; detail += " " + withdrawn + ":debounce-written"; }
+                    checks++;
+                    if (_lastUploadedHash != SentinelHashProbe) { pass = false; detail += " " + withdrawn + ":hash-written"; }
+                }
+
+                // A bundle handed over after consent was revoked never reaches
+                // the transport. NoteSkip's line for it is muted by priming its
+                // 30 s throttle; the finally puts the throttle back.
+                setting = true; consent = false;
+                sends = 0;
+                _inFlight = false;
+                _skipLoggedAt = Time.realtimeSinceStartup;
+                Dispatch(SentinelBundle());
+                checks++;
+                if (sends != 0 || _inFlight) { pass = false; detail += " gate:dispatched-without-consent"; }
+            }
+            catch (Exception ex)
+            {
+                pass = false;
+                detail += " threw:" + ex.GetType().Name;
+            }
+            finally
+            {
+                _enabledNow = realEnabled;
+                _consentNow = realConsent;
+                _inFlight = savedInFlight;
+                _endpointAbsent = savedAbsent;
+                _lastUploadAt = savedAt;
+                _skipLoggedAt = savedSkipAt;
+                _lastUploadedHash = savedHash;
+                _send = realSend;
+            }
+            return ConsentSentinelTag + " " + (pass ? "PASS" : "FAIL") + ": " + checks + " checks" + detail;
+        }
+
+        private static BundleResult SentinelBundle()
+        {
+            return new BundleResult
+            {
+                Body = new byte[] { (byte)'{', (byte)'}' },
+                Hash = SentinelHashProbe + 1,
+                Chars = 2,
+                Scrubbed = 0,
+                Mode = "sentinel",
+            };
+        }
+
+        /// <summary>[Broadcast] TestAutoLogConsentSentinel's entry: runs the
+        /// sentinel once and logs its line.</summary>
+        internal static void DevConsentSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = RunConsentSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning(ConsentSentinelTag + " FAIL: threw " + ex.Message);
+            }
         }
     }
 }

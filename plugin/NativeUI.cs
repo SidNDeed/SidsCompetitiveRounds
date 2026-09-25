@@ -14206,8 +14206,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
              *
              * AND THE OFF SWITCH REACHES A REQUEST ALREADY ON THE WIRE, TO
              * THE EXACT EXTENT THE MECHANISM ALLOWS. Turning the setting off
-             * aborts it (AutoLogUpload passes `abortIf: () => !Enabled` into
-             * SubmitAutoLogBody); it used to stop only the NEXT dispatch,
+             * aborts it, and so does revoking data consent: AutoLogUpload's
+             * abortIf asks both, once a frame (round 2 finding 4; it used to
+             * ask the setting alone). It used to stop only the NEXT dispatch,
              * which made the sentence false in exactly the moment a player
              * changing their mind cares about.
              *
