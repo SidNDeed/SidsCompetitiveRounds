@@ -791,6 +791,8 @@ namespace CompetitiveRounds
                 Unit(r, "U-OPEN-2", g2 == 4 && c == 4, I(g2) + ":" + I(c));
                 int g3 = MasterOpenerGame(false, NoGame, 0, NoGame, NoGame, out c);
                 Unit(r, "U-OPEN-3", g3 == 1 && c == 1, I(g3) + ":" + I(c));
+                int g4 = MasterOpenerGame(false, 1, 1, 3, 4, out c);
+                Unit(r, "U-OPEN-4", g4 == 1 && c == 2, I(g4) + ":" + I(c));
             }
 
             // LivePointsGame(gate, roomGame, candidate, held, counter), counter 3
@@ -810,6 +812,187 @@ namespace CompetitiveRounds
             Unit(r, "U-LB-2", LeaverStampSource(6, 6) == 6, I(LeaverStampSource(6, 6)));
             Unit(r, "U-LEFT-1", LeftInGame(7, 7), B(LeftInGame(7, 7)));
             Unit(r, "U-LEFT-2", !LeftInGame(5, 7), B(LeftInGame(5, 7)));
+
+            RunRoundTwoUnits(r);
+        }
+
+        private static string S(string s) { return s ?? "(null)"; }
+
+        private static string L(List<int> l)
+        {
+            if (l == null) return "(null)";
+            var sb = new StringBuilder("{");
+            for (int i = 0; i < l.Count; i++) { if (i > 0) sb.Append(','); sb.Append(I(l[i])); }
+            return sb.Append('}').ToString();
+        }
+
+        private static string D(Dictionary<int, string> d)
+        {
+            if (d == null) return "(null)";
+            var keys = new List<int>(d.Keys);
+            keys.Sort();
+            var sb = new StringBuilder("{");
+            for (int i = 0; i < keys.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(I(keys[i])).Append(':').Append(d[keys[i]]);
+            }
+            return sb.Append('}').ToString();
+        }
+
+        private static bool SameList(List<int> a, params int[] b)
+        {
+            if (a == null || a.Count != b.Length) return false;
+            for (int i = 0; i < b.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        /// <summary>V10 section 5's unit cases for changes 24-26 and 25 (the
+        /// round-2 delta; U-OPEN-4 sits with U-OPEN-1..3).</summary>
+        private static void RunRoundTwoUnits(SelfTestResult r)
+        {
+            // SameEpoch (N19)
+            Unit(r, "U-EP-1", SameEpoch("e1", "e1"), B(SameEpoch("e1", "e1")));
+            Unit(r, "U-EP-2", !SameEpoch("e1", "e2"), B(SameEpoch("e1", "e2")));
+            Unit(r, "U-EP-3", !SameEpoch(null, null), B(SameEpoch(null, null)));
+            Unit(r, "U-EP-4", !SameEpoch("e1", null), B(SameEpoch("e1", null)));
+
+            // EpochEvidence(gate, sameEpoch, pickGame, pickCycle, phaseGame, phaseCycle, ahead) (N19(d), (i))
+            bool ev1 = EpochEvidence(true, true, 4, 1, 4, 1, true);
+            Unit(r, "U-EVID-1", ev1, B(ev1));
+            bool ev2 = EpochEvidence(true, true, 2, 1, 1, 1, true);
+            Unit(r, "U-EVID-2", !ev2, B(ev2));
+            bool ev3 = EpochEvidence(false, true, 2, 1, 1, 1, true);
+            Unit(r, "U-EVID-3", ev3, B(ev3));
+            bool ev4 = EpochEvidence(true, false, 4, 1, 4, 1, true);
+            Unit(r, "U-EVID-4", !ev4, B(ev4));
+            bool ev5 = EpochEvidence(true, true, 4, 1, 4, 1, false);
+            Unit(r, "U-EVID-5", !ev5, B(ev5));
+            bool ev6 = EpochEvidence(true, true, 1, 3, 1, 2, true);
+            Unit(r, "U-EVID-6", !ev6, B(ev6));
+            bool ev7 = EpochEvidence(false, true, 1, 3, 1, 2, true);
+            Unit(r, "U-EVID-7", ev7, B(ev7));
+
+            // OthersOf(owners, local) (N19(d))
+            var o1 = OthersOf(new List<int> { 1, 2, 3 }, 1);
+            Unit(r, "U-OTH-1", SameList(o1, 2, 3), L(o1));
+            var o2 = OthersOf(new List<int> { 2, 3 }, 1);
+            Unit(r, "U-OTH-2", SameList(o2, 2, 3), L(o2));
+            var o3 = OthersOf(new List<int> { 1 }, 1);
+            Unit(r, "U-OTH-3", SameList(o3), L(o3));
+            var o4 = OthersOf(new List<int> { 3, 1, 2 }, 1);
+            Unit(r, "U-OTH-4", SameList(o4, 3, 2), L(o4));
+
+            // EvidenceQuorum(owners, local) (N19(d))
+            int q1 = EvidenceQuorum(new List<int> { 1 }, 1);
+            Unit(r, "U-QUORUM-1", q1 == 1, I(q1));
+            int q2 = EvidenceQuorum(new List<int> { 1, 2 }, 1);
+            Unit(r, "U-QUORUM-2", q2 == 1, I(q2));
+            int q3 = EvidenceQuorum(new List<int> { 1, 2, 3 }, 1);
+            Unit(r, "U-QUORUM-3", q3 == 2, I(q3));
+            int q4 = EvidenceQuorum(new List<int> { 1, 2, 3, 4, 5, 6 }, 1);
+            Unit(r, "U-QUORUM-4", q4 == 2, I(q4));
+            int q5 = EvidenceQuorum(new List<int> { 2, 3 }, 1);
+            Unit(r, "U-QUORUM-5", q5 == 2, I(q5));
+
+            // LiveEpoch(rawEp, masterActor, rep, finalized) (N19(b))
+            var noneFinal = new HashSet<string>();
+            string le1 = LiveEpoch("e1:3", 3, "e0", noneFinal);
+            Unit(r, "U-LEP-1", le1 == "e1", S(le1));
+            string le2 = LiveEpoch("e1:3", 4, "e0", noneFinal);
+            Unit(r, "U-LEP-2", le2 == null, S(le2));
+            string le3 = LiveEpoch("e1:3", 3, "e1", noneFinal);
+            Unit(r, "U-LEP-3", le3 == null, S(le3));
+            string le4 = LiveEpoch("e1:3", 3, "e0", new HashSet<string> { "e1" });
+            Unit(r, "U-LEP-4", le4 == null, S(le4));
+            string le5 = LiveEpoch(null, 3, "e0", noneFinal);
+            Unit(r, "U-LEP-5", le5 == null, S(le5));
+            string le6 = LiveEpoch("e1", 3, "e0", noneFinal);
+            Unit(r, "U-LEP-6", le6 == null, S(le6));
+
+            // HeldEpoch(pe, live) (N19(i))
+            string he1 = HeldEpoch(null, null);
+            Unit(r, "U-HE-1", he1 == null, S(he1));
+            string he2 = HeldEpoch("e1", null);
+            Unit(r, "U-HE-2", he2 == null, S(he2));
+            string he3 = HeldEpoch("e1", "e2");
+            Unit(r, "U-HE-3", he3 == "e2", S(he3));
+            string he4 = HeldEpoch(null, "e1");
+            Unit(r, "U-HE-4", he4 == "e1", S(he4));
+
+            // EpochAtUse(pe, issuer, masterActor) (N19(i), the use-site check)
+            string us1 = EpochAtUse("e1", 3, 3);
+            Unit(r, "U-USE-1", us1 == "e1", S(us1));
+            string us2 = EpochAtUse("e1", 3, 4);
+            Unit(r, "U-USE-2", us2 == null, S(us2));
+            string us3 = EpochAtUse("e1", 3, -1);
+            Unit(r, "U-USE-3", us3 == null, S(us3));
+            string us4 = EpochAtUse(null, -1, 3);
+            Unit(r, "U-USE-4", us4 == null, S(us4));
+
+            // ResultFromEnvelope(rawRep, pe, masterActor, game, cycle) (N19(i))
+            var en1 = ResultFromEnvelope("e1:3:4:1:3=Leach", "e1", 3, 4, 1);
+            Unit(r, "U-ENV-1", en1 != null && en1.Count == 1 && en1.ContainsKey(3) && en1[3] == "Leach", D(en1));
+            var en2 = ResultFromEnvelope("e1:3:4:1:3=Leach", "e2", 3, 4, 1);
+            Unit(r, "U-ENV-2", en2 == null, D(en2));
+            var en3 = ResultFromEnvelope("e1:3:4:1:3=Leach", "e1", 4, 4, 1);
+            Unit(r, "U-ENV-3", en3 == null, D(en3));
+            var en4 = ResultFromEnvelope("e1:3:3:1:3=Leach", "e1", 3, 4, 1);
+            Unit(r, "U-ENV-4", en4 == null, D(en4));
+            var en5 = ResultFromEnvelope("4:1:3=Leach", "e1", 3, 4, 1);
+            Unit(r, "U-ENV-5", en5 == null, D(en5));
+            var en6 = ResultFromEnvelope("e1:3:4:1:3=Leach", null, 3, 4, 1);
+            Unit(r, "U-ENV-6", en6 == null, D(en6));
+            var en7 = ResultFromEnvelope("e1:3:4:1:", "e1", 3, 4, 1);
+            Unit(r, "U-ENV-7", en7 != null && en7.Count == 0, D(en7));
+
+            // FinalizesAtTermination(pe, applied) (N19(g))
+            Unit(r, "U-FIN-1", FinalizesAtTermination("e1", 1), B(FinalizesAtTermination("e1", 1)));
+            Unit(r, "U-FIN-2", FinalizesAtTermination("e1", 0), B(FinalizesAtTermination("e1", 0)));
+            Unit(r, "U-FIN-3", !FinalizesAtTermination(null, 0), B(FinalizesAtTermination(null, 0)));
+
+            // LegacyPickValue(nonce, game, cycle, card) (N19(c))
+            string lg1 = LegacyPickValue("ffa_2", 4, 3, "Leach");
+            Unit(r, "U-LEGACY-1", lg1 == "", "\"" + S(lg1) + "\"");
+            string lg2 = LegacyPickValue("ffa_2", -1, 0, "");
+            Unit(r, "U-LEGACY-2", lg2 == "", "\"" + S(lg2) + "\"");
+
+            // PickValue and ParsePick (N19(c))
+            string pv1 = PickValue("ffa_2", "e1", 4, 3, "Leach");
+            Unit(r, "U-PV-1", pv1 == "ffa_2:e1:4:3:Leach", S(pv1));
+            var pp2 = ParsePick("ffa_2:e1:4:3:Leach", "ffa_2");
+            Unit(r, "U-PV-2", pp2 != null && pp2.Epoch == "e1" && pp2.Game == 4 && pp2.Cycle == 3 && pp2.Card == "Leach",
+                 pp2 == null ? "(null)" : pp2.Epoch + "," + I(pp2.Game) + "," + I(pp2.Cycle) + "," + pp2.Card);
+            var pp3 = ParsePick("ffa_2:4:3:Leach", "ffa_2");
+            Unit(r, "U-PV-3", pp3 == null, pp3 == null ? "(null)" : pp3.Epoch);
+            var pp4 = ParsePick("", "ffa_2");
+            Unit(r, "U-PV-4", pp4 == null, pp4 == null ? "(null)" : pp4.Epoch);
+
+            // ReopensOnPromotion(gate, isMaster, phaseGame) (change 24, N12(f))
+            Unit(r, "U-PROM-1", ReopensOnPromotion(true, true, NoGame), B(ReopensOnPromotion(true, true, NoGame)));
+            Unit(r, "U-PROM-2", !ReopensOnPromotion(false, true, NoGame), B(ReopensOnPromotion(false, true, NoGame)));
+            Unit(r, "U-PROM-3", !ReopensOnPromotion(true, false, NoGame), B(ReopensOnPromotion(true, false, NoGame)));
+            Unit(r, "U-PROM-4", !ReopensOnPromotion(true, true, 1), B(ReopensOnPromotion(true, true, 1)));
+
+            // AuthoritativeClose(isMaster, hasManifest, hasEpoch) (change 24, N19(h))
+            Unit(r, "U-CLOSE-1", AuthoritativeClose(true, true, true), B(AuthoritativeClose(true, true, true)));
+            Unit(r, "U-CLOSE-2", !AuthoritativeClose(true, false, true), B(AuthoritativeClose(true, false, true)));
+            Unit(r, "U-CLOSE-3", !AuthoritativeClose(false, true, true), B(AuthoritativeClose(false, true, true)));
+            Unit(r, "U-CLOSE-4", !AuthoritativeClose(false, false, true), B(AuthoritativeClose(false, false, true)));
+            Unit(r, "U-CLOSE-5", !AuthoritativeClose(true, true, false), B(AuthoritativeClose(true, true, false)));
+
+            // KeyedReadsAllowed(gate, game) (change 25(a))
+            Unit(r, "U-KEYED-1", KeyedReadsAllowed(true, 4), B(KeyedReadsAllowed(true, 4)));
+            Unit(r, "U-KEYED-2", !KeyedReadsAllowed(true, NoGame), B(KeyedReadsAllowed(true, NoGame)));
+            Unit(r, "U-KEYED-3", KeyedReadsAllowed(false, 0), B(KeyedReadsAllowed(false, 0)));
+
+            // CounterAfterRoomChange(gate, lastName, name, counter) (change 25(b))
+            int rs1 = CounterAfterRoomChange(true, "ffa_1", "ffa_1", 4);
+            Unit(r, "U-RESETG-1", rs1 == 0, I(rs1));
+            int rs2 = CounterAfterRoomChange(false, "ffa_1", "ffa_1", 4);
+            Unit(r, "U-RESETG-2", rs2 == 4, I(rs2));
+            int rs3 = CounterAfterRoomChange(false, "ffa_1", "ffa_2", 4);
+            Unit(r, "U-RESETG-3", rs3 == 0, I(rs3));
         }
 
         // SITTING-MODEL-BEGIN
