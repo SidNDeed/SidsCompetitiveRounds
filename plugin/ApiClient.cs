@@ -14475,10 +14475,13 @@ namespace CompetitiveRounds
         }
 
         /// <summary>POST /team/series/{id}/report-dc. Called from
-        /// Cr2v2DiagCallbacks.OnPlayerLeftRoom when the lowest-Steam-ID remaining
-        /// client detects a mid-series DC. Server applies the 2v2 DC rule (any
-        /// match abandoned with >=2 total points → non-DC team wins) and starts
-        /// the 5-min sticky-team requeue grace window.</summary>
+        /// Cr2v2DiagCallbacks.OnPlayerLeftRoom on each surviving seat that
+        /// DcReporterElection elects after a mid-series DC. The server completes
+        /// the series to the team that stayed only when that team was already a
+        /// game up AND its own per-game record shows the abandoned game reached two
+        /// points; otherwise the series goes to dc_incomplete for an admin. The
+        /// point totals sent here are logged and kept on the forfeit row, never
+        /// used to decide.</summary>
         public static void ReportTeamSeriesDc(
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
             int t1PointsTotal, int t2PointsTotal)

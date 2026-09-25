@@ -168,6 +168,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
+        internal static ConfigEntry<string> BroadcastTestReporterElectionSentinel; // broadcast seat only — any new value runs the 2v2 DC reporter-election self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
         internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0..PortraitRender.PresetSlotCount()-1 = the saved face slot (#370 — NOT 0-9; playerFaces has ten entries but only eight are authorable). Anything outside that range resolves to -1, and is rewritten to -1 once the real slot count has been discovered — it is NOT clamped to the top slot (that silently re-rendered someone else's face onto the card).
         internal static ConfigEntry<string> BinderSort;                  // Player Cards (item 20): the binder order, stored as the BinderSortRules.Mode member NAME (never the ordinal, which changes meaning when a mode is inserted). Written by the header button alone; an unrecognised name falls back to Name.
@@ -1107,6 +1108,10 @@ namespace CompetitiveRounds
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
                 "Broadcast seat only: set to any NEW value to run the cr_gstats W1-sentinel self-test once (design v6 section 1); the result is logged as [GSTATS-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestReporterElectionSentinel = Config.Bind(
+                "Broadcast", "TestReporterElectionSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the 2v2 disconnect reporter-election self-test once (synthetic rooms only, nothing is sent); the result is logged as [REPORTER-ELECTION-SENTINEL] PASS/FAIL. A value present at startup never runs."
             );
             BroadcastTestMapSkinTourSeconds = Config.Bind(
                 "Broadcast", "TestMapSkinTourSeconds", 0,
@@ -2253,6 +2258,43 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[GSTATS-SENTINEL] FAIL: lever threw {ex.Message}"); }
         }
 
+        // v1.41.0 beta round 2 finding 2: [Broadcast] TestReporterElectionSentinel,
+        // the same once-per-distinct-NEW-value grammar and identity gate as the
+        // TestGstatsSentinel lever above.
+        private static string _lastTestReporterElectionSentinel;
+        private void TickTestReporterElectionSentinel()
+        {
+            if (Plugin.BroadcastTestReporterElectionSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestReporterElectionSentinel.Value ?? "").Trim();
+            if (_lastTestReporterElectionSentinel == null) { _lastTestReporterElectionSentinel = raw; return; }
+            if (raw == _lastTestReporterElectionSentinel) return;
+            _lastTestReporterElectionSentinel = raw;
+            if (raw.Length == 0) return;
+            DevReporterElectionSentinelTest();
+        }
+
+        /// <summary>The 2v2 DC reporter election's self-test (round 2 finding 2).
+        /// Runs every survivor of synthetic four-seat rooms through
+        /// DcReporterElection.ShouldReport, the rule OnPlayerLeftRoom runs, and
+        /// checks that the failing states from the report (no survivor can read
+        /// the teams, and the lowest id in the room is the leaver's own teammate)
+        /// now leave a reporter the server accepts, while rooms whose teams are
+        /// readable elect exactly as before. Nothing is sent. Logs
+        /// [REPORTER-ELECTION-SENTINEL] PASS/FAIL.</summary>
+        internal static void DevReporterElectionSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = DcReporterElection.RunSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"{DcReporterElection.SentinelTag} FAIL: threw {ex.Message}");
+            }
+        }
+
         // Sept 10: synthetic Player Card tiles (PlayerCardsUI.DevSeedTiles), same
         // once-per-distinct-value grammar and identity gate as the sentinel lever.
         private static string _lastTestPlayerCards;
@@ -2909,6 +2951,7 @@ namespace CompetitiveRounds
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
+            try { TickTestReporterElectionSentinel(); } catch { }
             try { TickTestPlayerCards(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
@@ -4042,18 +4085,18 @@ namespace CompetitiveRounds
         /// one-member team, and a one-member team is always its own lowest id: every such
         /// seat elected itself and the reporter count could reach every survivor in the
         /// room instead of the two the election is designed to allow (r3 finding).
-        /// Anything outside {0,1} is UNKNOWN, which is the value the election already
-        /// handles by falling back to the room-wide rule.</para></summary>
+        /// Anything outside {0,1} is UNKNOWN. A seat that meets an unknown team, its
+        /// own or the leaver's, reports the disconnect itself rather than trusting
+        /// the room-wide rule to find a seat the server accepts (round 2 finding 2;
+        /// DcReporterElection holds the rule and the parse).</para></summary>
         private static int TeamIdOf(Photon.Realtime.Player pl)
         {
             try
             {
                 if (pl == null || pl.CustomProperties == null) return -1;
                 object v;
-                if (!pl.CustomProperties.TryGetValue(Player.VAR_TEAMID, out v) || v == null) return -1;
-                int t;
-                if (!int.TryParse(v.ToString(), out t)) return -1;
-                return (t == 0 || t == 1) ? t : -1;
+                if (!pl.CustomProperties.TryGetValue(Player.VAR_TEAMID, out v)) return -1;
+                return DcReporterElection.ParseTeamId(v);
             }
             catch { return -1; }
         }
@@ -4116,10 +4159,12 @@ namespace CompetitiveRounds
             try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
             catch { }
 
-            // 2v2 DC reporting: when a player drops mid-series, the lowest-Steam-ID
-            // remaining client reports the DC to the server. Server awards the
-            // current match to the non-DC team (if total points >= 2) and starts
-            // the 5-min sticky-team requeue grace window.
+            // 2v2 DC reporting: when a player drops mid-series, the surviving seats
+            // the election below picks report the DC to the server. The server
+            // completes the series to the team that stayed only when that team was
+            // already a game up AND its own per-game record shows the abandoned game
+            // reached two points; otherwise the series goes to dc_incomplete for an
+            // admin to resolve.
             //
             // STRICTLY 2v2: the widened IsActive() also fires this callback in
             // ovt_ rooms, where ActiveTeamSeriesId can be a STALE id from an
@@ -4189,41 +4234,20 @@ namespace CompetitiveRounds
 
                 int dcTeam = TeamIdOf(p);
                 int myTeam = TeamIdOf(PhotonNetwork.LocalPlayer);
-                bool teamsKnown = dcTeam >= 0 && myTeam >= 0;
 
-                // TWO independent reasons to report, OR'd. This shape is chosen so the
-                // election can never do WORSE than the room-wide one it replaces.
-                //
-                //   lowestOverall  — the old rule, unchanged. True on AT LEAST one
-                //                    surviving seat whatever anyone advertises, which
-                //                    is the property that matters; see the bound below
-                //                    for when it is true on more than one.
-                //   lowestOnMyTeam — the new rule: I look like a member of the team
-                //                    that did not lose a player, and I am the lowest
-                //                    id among the seats that also look that way.
-                //
-                // An earlier version STOOD DOWN when it looked like the DC'd player's
-                // teammate. That could reach zero reporters, which is the one outcome
-                // worse than the bug being fixed: `t_id` is advertised per seat, and a
-                // leaver whose advertised team does not match its real one flips the
-                // real non-DC survivors into standing down while the one seat still
-                // willing to report is the one the server refuses (r2 HIGH). Keeping
-                // the old elector as a floor means the server always receives at least
-                // one report, and the team rule can only ADD a report from a seat it
-                // will accept. Duplicates are cheap — the series is closed by whichever
-                // lands first and the rest no-op.
-                //
-                // THE BOUND, stated honestly. At least one reporter, always: that is
-                // the property worth having and it holds unconditionally. At most two
-                // only while every survivor advertises a parseable `u_id` — a seat
-                // that does not is invisible to the census, so its peers cannot defer
-                // to it, and with two such seats every survivor can believe it is the
-                // lowest and all of them report. That is the direction this election
-                // deliberately errs in, and the duplicate reports no-op; it is stated
-                // here because the previous wording claimed "exactly one" as if it
-                // were unconditional (r4 finding).
-                bool lowestOverall = true;
-                bool lowestOnMyTeam = teamsKnown && myTeam != dcTeam;
+                // The rule, its three reasons to report and its bound live in
+                // DcReporterElection.ShouldReport, the same code its sentinel runs
+                // (round 2 finding 2). An earlier version STOOD DOWN when it looked like
+                // the DC'd player's teammate. That could reach zero reporters, which is
+                // the one outcome worse than the bug being fixed: `t_id` is advertised
+                // per seat, and a leaver whose advertised team does not match its real
+                // one flips the real non-DC survivors into standing down while the one
+                // seat still willing to report is the one the server refuses (r2 HIGH).
+                // So the room-wide rule stays as a floor, the team rule can only ADD a
+                // report, and a seat that cannot read the teams reports as well.
+                // Duplicates are cheap: the first accepted report settles the series
+                // and the rest no-op.
+                var census = new List<DcReporterElection.Peer>();
                 foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
                 {
                     if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
@@ -4231,23 +4255,22 @@ namespace CompetitiveRounds
                     string ppSid = null;
                     if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
                         ppSid = pp.CustomProperties["u_id"]?.ToString();
-                    if (string.IsNullOrEmpty(ppSid) || ppSid.StartsWith("photon_")) continue;
-                    long ppVal;
-                    if (!long.TryParse(ppSid, out ppVal) || ppVal >= myVal) continue;
-                    lowestOverall = false;
-                    // Defer the TEAM claim only to a peer that also looks eligible.
-                    // Deferring to one the server would refuse is how this produced no
-                    // report at all in the first place.
-                    if (lowestOnMyTeam && TeamIdOf(pp) == myTeam) lowestOnMyTeam = false;
-                    if (!lowestOverall && !lowestOnMyTeam) break;
+                    census.Add(new DcReporterElection.Peer(ppSid, TeamIdOf(pp)));
                 }
-                if (!lowestOverall && !lowestOnMyTeam) return;
-                if (!lowestOverall)
+                bool lowestOverall, teamsKnown;
+                if (!DcReporterElection.ShouldReport(myVal, myTeam, dcTeam, census,
+                        out lowestOverall, out teamsKnown)) return;
+                if (!teamsKnown)
+                    Plugin.Log.LogInfo($"[2v2-DC] reporting with the teams unreadable (my t_id={myTeam}, "
+                        + $"leaver t_id={dcTeam}); the server accepts only the team that stayed");
+                else if (!lowestOverall)
                     Plugin.Log.LogInfo("[2v2-DC] reporting as the non-disconnected team's lowest id "
                         + "(another seat holds the room-wide election)");
 
-                // Pull current point totals from the in-game state. Per the DC rule,
-                // a match with combined points >= 2 awards the match to the non-DC team.
+                // The in-game score rides along for the server's log and the forfeit
+                // row's history only. Whether the abandoned game saw real play is
+                // decided from the server's own per-game record, never from these
+                // (round 2 finding 1).
                 int t1Points = GameStateWatcher.LastP1Points;
                 int t2Points = GameStateWatcher.LastP2Points;
                 ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points);

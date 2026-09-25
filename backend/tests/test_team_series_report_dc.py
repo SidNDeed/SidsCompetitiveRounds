@@ -609,3 +609,36 @@ def test_the_same_four_can_lead_forfeit_twice(wired):
     assert s2 == ("completed", 1, None, None, 1), s2
     assert rooms == {first["sid"]: "dc_leadforfeit:%s" % first["sid"],
                      again["sid"]: "dc_leadforfeit:%s" % again["sid"]}, rooms
+
+
+@needs_pg
+@pytest.mark.parametrize("played", [True, False], ids=["game-crossed-two", "game-did-not"])
+def test_every_survivor_reporting_settles_the_series_once(wired, played):
+    """Round 2 finding 2: a seat that cannot read the teams now reports the
+    disconnect itself, so all three survivors can report one leave. The
+    server's F6 gate refuses the leaver's teammate (400, nothing written), the
+    first report from the team that stayed settles the series, and the second
+    finds it settled. One settlement, one forfeit row at most."""
+    async def go():
+        async with _Lab() as lab:
+            ser = await lab.series()
+            if played:
+                await lab.post(ser, 0, 1, 1)
+            with pytest.raises(HTTPException) as refused:
+                await lab.report_dc(ser, reporter_seat=3, dc_seat=2, **HIGH)
+            after_refusal = await lab.settlement(ser)
+            first = await lab.report_dc(ser, reporter_seat=1, dc_seat=2, **HIGH)
+            second = await lab.report_dc(ser, reporter_seat=0, dc_seat=2, **LOW)
+            return refused.value, after_refusal, first, second, await lab.settlement(ser)
+
+    refused, after_refusal, first, second, settled = _run(go())
+    assert refused.status_code == 400, refused
+    assert after_refusal == ("active", None, None, None, 0), after_refusal
+    assert first.get("ignored") is not True, first
+    assert second.get("ignored") is True, second
+    if played:
+        assert settled == ("completed", 1, None, None, 1), settled
+        assert len(wired) == 1, wired
+    else:
+        assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
+        assert wired == [], wired
