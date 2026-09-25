@@ -297,15 +297,33 @@ namespace CompetitiveRounds
         }
 
         /// <summary>A numberless master with no live value opens a namespace:
-        /// 1:1 at the opening draw; after a point the field's game and cycle +
-        /// 1 (1:1 when the field is absent). The caller assigns neither the
-        /// counter nor ACQUIRED from it.</summary>
-        internal static int MasterOpenerGame(bool openingDraw, int fieldGame, int fieldCycle, out int cycle)
+        /// 1:1 at the opening draw; else its own phase identity in this game
+        /// (change 23: recorded wherever the phase identity is set, current
+        /// only in the same Room object and N10 sequence) with the next cycle;
+        /// else the field's game and cycle + 1; else 1:1. The caller assigns
+        /// neither the counter nor ACQUIRED from it.</summary>
+        internal static int MasterOpenerGame(bool openingDraw, int ownGame, int ownCycle, int fieldGame, int fieldCycle,
+                                             out int cycle)
         {
             if (openingDraw) { cycle = 1; return 1; }
+            if (ownGame >= 1) { cycle = ownCycle + 1; return ownGame; }
             if (fieldGame >= 1) { cycle = fieldCycle + 1; return fieldGame; }
             cycle = 1;
             return 1;
+        }
+
+        /// <summary>Change 24, N12(f): under G, a seat that is master inside a
+        /// phase with no phase identity opens the namespace at once.</summary>
+        internal static bool ReopensOnPromotion(bool gate, bool isMaster, int phaseGame)
+        {
+            return gate && isMaster && phaseGame < 1;
+        }
+
+        /// <summary>Change 24 with N19(h): a master closes a phase only with a
+        /// manifest and an epoch held for use.</summary>
+        internal static bool AuthoritativeClose(bool isMaster, bool hasManifest, bool hasEpoch)
+        {
+            return isMaster && hasManifest && hasEpoch;
         }
 
         // ── N19: phase-epoch provenance (change 26) ─────────────────────
@@ -751,11 +769,11 @@ namespace CompetitiveRounds
             // MasterOpenerGame
             {
                 int c;
-                int g1 = MasterOpenerGame(true, 4, 3, out c);
+                int g1 = MasterOpenerGame(true, 2, 3, 4, 3, out c);
                 Unit(r, "U-OPEN-1", g1 == 1 && c == 1, I(g1) + ":" + I(c));
-                int g2 = MasterOpenerGame(false, 4, 3, out c);
+                int g2 = MasterOpenerGame(false, NoGame, 0, 4, 3, out c);
                 Unit(r, "U-OPEN-2", g2 == 4 && c == 4, I(g2) + ":" + I(c));
-                int g3 = MasterOpenerGame(false, NoGame, NoGame, out c);
+                int g3 = MasterOpenerGame(false, NoGame, 0, NoGame, NoGame, out c);
                 Unit(r, "U-OPEN-3", g3 == 1 && c == 1, I(g3) + ":" + I(c));
             }
 
@@ -918,6 +936,9 @@ namespace CompetitiveRounds
                 internal int PinFrozen = -1;
                 internal Phase Ph;
                 internal string PendingPick;
+                // change 23: the own phase identity, its Room object and N10 sequence
+                internal int OwnG = NoGame, OwnC, OwnSeq = -1;
+                internal object OwnObj;
                 // observation and script truth
                 internal int FirstLatchGame = -1, FirstLatchPhys = -1;
                 internal object FirstLatchObj;
@@ -1272,6 +1293,7 @@ namespace CompetitiveRounds
                     s.Leavers.Clear();
                     s.LatchedGame = -1; s.LatchPendingSince = -1; s.LatchActive = false;
                     s.PinFrozen = -1; s.PendingPick = null;
+                    s.OwnG = NoGame; s.OwnC = 0; s.OwnSeq = -1; s.OwnObj = null;
                     s.TruthTarget = null; s.ExpAdvert = null;
                 }
 
@@ -1290,6 +1312,24 @@ namespace CompetitiveRounds
                 }
 
                 private static void SetAcquired(Seat s, int g) { s.AcquiredGame = g; s.AcquiredRoom = s.Obj; }
+
+                /// <summary>Change 23: FfaMode.RecordOwnIdentity (a new-build seat).</summary>
+                private static void RecordOwn(Seat s, int g, int c)
+                {
+                    if (s.Current || g < 1) return;
+                    s.OwnG = g;
+                    s.OwnC = c;
+                    s.OwnObj = s.Obj;
+                    s.OwnSeq = s.LocalGameSeq;
+                }
+
+                /// <summary>Change 23: FfaMode.OwnIdentityNow.</summary>
+                private static int OwnNow(Seat s, out int c)
+                {
+                    bool current = s.OwnG >= 1 && s.OwnSeq == s.LocalGameSeq && SameIncarnation(s.OwnObj, s.Obj);
+                    c = current ? s.OwnC : 0;
+                    return current ? s.OwnG : NoGame;
+                }
 
                 private static void ClearTicket(Seat s)
                 {
@@ -1689,10 +1729,13 @@ namespace CompetitiveRounds
                         else if (ph.Game < 1 && IsMaster(s))
                         {
                             bool openingDraw = winnerActor < 0 && s.CycleNumber == 1;
-                            int oc;
-                            ph.Game = MasterOpenerGame(openingDraw, ef != null ? ef.G : NoGame, ef != null ? ef.C : 0, out oc);
+                            int oc, ownC;
+                            int ownG = OwnNow(s, out ownC);
+                            ph.Game = MasterOpenerGame(openingDraw, ownG, ownC, ef != null ? ef.G : NoGame,
+                                                       ef != null ? ef.C : 0, out oc);
                             ph.Cycle = oc;
                         }
+                        RecordOwn(s, ph.Game, ph.Cycle);
                     }
                     if (IsMaster(s) && ph.Game >= 1
                         && WriteRoom(s, KCyc, CycValue(ph.Game, ph.Cycle, ph.Pickers)) && !s.Current)
@@ -1743,6 +1786,7 @@ namespace CompetitiveRounds
                 {
                     ph.Game = ad.G;
                     ph.Cycle = ad.C;
+                    RecordOwn(s, ad.G, ad.C);
                     s.GameNumber = ad.G;
                     s.CycleNumber = ad.C;
                     ph.Manifest = new List<int>(ad.Ids);
@@ -1873,6 +1917,7 @@ namespace CompetitiveRounds
                 {
                     ph.Game = g;
                     ph.Cycle = c;
+                    RecordOwn(s, g, c);
                     s.GameNumber = g;
                     s.CycleNumber = c;
                     if (manifest != null) ph.Manifest = new List<int>(manifest);
@@ -1947,11 +1992,13 @@ namespace CompetitiveRounds
                     return got;
                 }
 
+                /// <summary>FfaMode.CountStillPresent, production-faithful (change
+                /// 24): no null guard, and at least 1.</summary>
                 private static int CountStillPresent(Seat s, List<int> manifest)
                 {
                     int n = 0;
-                    if (manifest != null) foreach (var pid in manifest) if (ByActor(s.R, pid) != null) n++;
-                    return n;
+                    foreach (var pid in manifest) if (ByActor(s.R, pid) != null) n++;
+                    return Math.Max(1, n);
                 }
 
                 // ── the game: starts, cycles, points, edge ────────────────

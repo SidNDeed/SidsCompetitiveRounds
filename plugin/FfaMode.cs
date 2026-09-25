@@ -585,6 +585,13 @@ namespace CompetitiveRounds
         /// <summary>N19(d): the peers already logged as "pick ignored" in the
         /// current phase (once per phase and peer).</summary>
         private static readonly HashSet<int> pickIgnoredLogged = new HashSet<int>();
+        /// <summary>RJ-DRIFT change 23: this seat's own phase identity in the
+        /// current game, recorded (with a game of 1 or more) wherever
+        /// phaseGame and phaseCycle are set, bound to its Room object and N10
+        /// sequence. The numberless opener takes it before the field's.</summary>
+        private static int ownIdGame = FfaNumberingRules.NoGame, ownIdCycle;
+        private static object ownIdRoom;
+        private static int ownIdSeq = -1;
 
         // Log-once latches, per game (reset at the start edge).
         private static bool numLogLivePointsCand, numLogLivePointsDecline;
@@ -2641,11 +2648,14 @@ namespace CompetitiveRounds
                 {
                     // N12(e): a numberless master with no live value opens the
                     // namespace: the room constant 1 at the game's first opening
-                    // draw, else the field's game with the next cycle. It sets
-                    // the phase identity only: neither the counter nor ACQUIRED.
+                    // draw, else this seat's own identity in this game with the
+                    // next cycle (change 23), else the field's game with the
+                    // next cycle. It sets the phase identity only: neither the
+                    // counter nor ACQUIRED.
                     bool openingDraw = roundWinnerTeam < 0 && cycleNumber == 1;
-                    int oc;
-                    game = FfaNumberingRules.MasterOpenerGame(openingDraw,
+                    int oc, ownCycle;
+                    int ownGame = OwnIdentityNow(out ownCycle);
+                    game = FfaNumberingRules.MasterOpenerGame(openingDraw, ownGame, ownCycle,
                         entryField != null ? entryField.Item1 : FfaNumberingRules.NoGame,
                         entryField != null ? entryField.Item2 : 0, out oc);
                     cycle = oc;
@@ -2659,6 +2669,7 @@ namespace CompetitiveRounds
             }
             phaseGame = game;
             phaseCycle = cycle;
+            RecordOwnIdentity(game, cycle);
 
             if (PhotonNetwork.IsMasterClient && game >= 1)
             {
@@ -2701,6 +2712,7 @@ namespace CompetitiveRounds
                         SetAcquired(game);
                         phaseGame = game;
                         phaseCycle = cycle;
+                        RecordOwnIdentity(game, cycle);
                         RepublishLocalPickFor(phaseNonce, game, cycle);
                         break;
                     }
@@ -2714,6 +2726,7 @@ namespace CompetitiveRounds
                         manifest = adopted.Item3;
                         phaseGame = game;
                         phaseCycle = cycle;
+                        RecordOwnIdentity(game, cycle);
                         // Nothing has been published this early (the pick UI
                         // starts below), so this is a no-op today — kept so the
                         // rule "every adoption re-stamps" holds at EVERY site
@@ -2729,6 +2742,19 @@ namespace CompetitiveRounds
                         RepublishLocalPickFor(phaseNonce, game, cycle);
                         break;
                     }
+                }
+                // RJ-DRIFT change 24, N12(f): under G, a seat that became master
+                // inside this phase with no identity opens at once (a cached
+                // LIVE field, else the opener over its own picker set), always
+                // with a fresh epoch, and publishes it; its manifest ends the
+                // wait.
+                if (FfaNumberingRules.ReopensOnPromotion(gate, PhotonNetwork.IsMasterClient, phaseGame))
+                {
+                    var opened = OpenOnPromotion(roundWinnerTeam, pickerIds, phaseNonce);
+                    game = opened.Item1;
+                    cycle = opened.Item2;
+                    manifest = opened.Item3;
+                    break;
                 }
                 // Master migration: if the original master died before
                 // publishing, the new master publishes.
@@ -2886,6 +2912,7 @@ namespace CompetitiveRounds
                 cycleNumber = newCycle;
                 phaseGame = newGame;
                 phaseCycle = newCycle;
+                RecordOwnIdentity(newGame, newCycle);
                 if (newManifest != null) manifest = newManifest;
                 if (asMaster)
                 {
@@ -3052,6 +3079,22 @@ namespace CompetitiveRounds
                             }
                         }
                     }
+                    // RJ-DRIFT change 24, N12(f), in the result loop: as in the
+                    // wait, plus adoptIdentity's resets, so the adopt-settling
+                    // window below applies to the opened identity. This seat's
+                    // pick UI never started (it had no identity), so its own
+                    // pick is not collected this cycle (R18).
+                    if (FfaNumberingRules.ReopensOnPromotion(gate, PhotonNetwork.IsMasterClient, phaseGame))
+                    {
+                        var opened = OpenOnPromotion(roundWinnerTeam, pickerIds, phaseNonce);
+                        game = opened.Item1;
+                        cycle = opened.Item2;
+                        manifest = opened.Item3;
+                        adoptedAt = Time.realtimeSinceStartup;
+                        lastGotCount = 0;
+                        lastPublishedPhotonDeadline = -1.0;
+                        rawCycleAtResultEntry = opened.Item4;
+                    }
                     if (PhotonNetwork.IsMasterClient)
                     {
                         // Authoritative deadline: republished on every change
@@ -3079,7 +3122,9 @@ namespace CompetitiveRounds
                     // N19(h)/(i): a master closes only under the epoch it holds
                     // for use; with none the loop runs on to the bail.
                     string closeEpoch = PhotonNetwork.IsMasterClient ? EpochForUse() : null;
-                    if (PhotonNetwork.IsMasterClient && closeEpoch != null)
+                    // Change 24: no close without a manifest or an epoch (N19(h)).
+                    if (FfaNumberingRules.AuthoritativeClose(PhotonNetwork.IsMasterClient, manifest != null,
+                                                             closeEpoch != null))
                     {
                         bool allIn = got.Count >= CountStillPresent(manifest);
                         // Propagation barrier: never CLOSE the window inside
@@ -3356,6 +3401,72 @@ namespace CompetitiveRounds
             if (rep == null) return null;
             int i = rep.IndexOf(':');
             return i >= 0 ? rep.Substring(0, i) : rep;
+        }
+
+        /// <summary>Change 23: record the phase identity as this seat's own in
+        /// this Room object and game (N10 sequence). A game below 1 records
+        /// nothing, so a later numberless phase keeps the last one.</summary>
+        private static void RecordOwnIdentity(int game, int cycle)
+        {
+            if (game < 1) return;
+            ownIdGame = game;
+            ownIdCycle = cycle;
+            ownIdRoom = PhotonNetwork.CurrentRoom;
+            ownIdSeq = localGameSeq;
+        }
+
+        /// <summary>Change 23: the own identity, only while its Room object and
+        /// N10 sequence are current; else NoGame.</summary>
+        private static int OwnIdentityNow(out int cycle)
+        {
+            bool current = ownIdGame >= 1 && ownIdSeq == localGameSeq
+                           && FfaNumberingRules.SameIncarnation(ownIdRoom, PhotonNetwork.CurrentRoom);
+            cycle = current ? ownIdCycle : 0;
+            return current ? ownIdGame : FfaNumberingRules.NoGame;
+        }
+
+        /// <summary>Change 24, N12(f): a seat promoted to master inside a phase
+        /// with no identity takes a cached LIVE field (as the entry does:
+        /// counter and ACQUIRED included), else runs the opener with its local
+        /// picker set as the manifest (phase identity only). It always issues
+        /// a fresh epoch, writes the identity (ticket on true), re-stamps its
+        /// pending pick and logs. Returns game, cycle, manifest and the value
+        /// written.</summary>
+        private static Tuple<int, int, List<int>, string> OpenOnPromotion(int roundWinnerTeam, List<int> pickerIds,
+                                                                         string phaseNonce)
+        {
+            int game, cycle;
+            List<int> manifest;
+            var field = ParseCycleProp(ReadRawRoomProp(PropCycle));
+            if (field != null && LiveNow(field.Item1, field.Item2))
+            {
+                game = field.Item1;
+                cycle = field.Item2;
+                manifest = field.Item3;
+                gameNumber = game;
+                cycleNumber = cycle;
+                SetAcquired(game);
+            }
+            else
+            {
+                bool openingDraw = roundWinnerTeam < 0 && cycleNumber == 1;
+                int oc, ownCycle;
+                int ownGame = OwnIdentityNow(out ownCycle);
+                game = FfaNumberingRules.MasterOpenerGame(openingDraw, ownGame, ownCycle,
+                    field != null ? field.Item1 : FfaNumberingRules.NoGame,
+                    field != null ? field.Item2 : 0, out oc);
+                cycle = oc;
+                manifest = pickerIds;
+            }
+            phaseGame = game;
+            phaseCycle = cycle;
+            RecordOwnIdentity(game, cycle);
+            IssuePhaseEpoch(game, cycle);
+            string value = $"{game}:{cycle}:{string.Join(",", manifest)}";
+            if (WriteCycleProp(value, phaseEpoch)) ArmTicket(game);
+            RepublishLocalPickFor(phaseNonce, game, cycle);
+            Plugin.Log.LogInfo($"[FFA-NUM] pick identity opener {game}:{cycle} on promotion");
+            return Tuple.Create(game, cycle, manifest, value);
         }
 
         /// <summary>N19(a): this seat, as master, issues a fresh epoch and holds
