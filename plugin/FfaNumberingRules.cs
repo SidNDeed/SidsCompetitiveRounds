@@ -175,6 +175,22 @@ namespace CompetitiveRounds
             return a != null && ReferenceEquals(a, b);
         }
 
+        /// <summary>Change 25(a): a keyed read, publication or adoption needs
+        /// a phase game of 1 or more only under G. Under G false a seat keys,
+        /// reads and adopts as the pin did, a counter of 0 included.</summary>
+        internal static bool KeyedReadsAllowed(bool gate, int game)
+        {
+            return !gate || game >= 1;
+        }
+
+        /// <summary>Change 25(b): the counter after a Room-object change: 0
+        /// under G or when the room's name changed; under G false with the
+        /// same name it is kept, as the pin's name test kept it.</summary>
+        internal static int CounterAfterRoomChange(bool gate, string lastName, string name, int counter)
+        {
+            return (gate || lastName != name) ? 0 : counter;
+        }
+
         /// <summary>A snapshot takes and returns a value only while the Room
         /// object that armed it is current.</summary>
         internal static bool SnapshotArmed(object armedIn, object room)
@@ -1518,6 +1534,8 @@ namespace CompetitiveRounds
                 {
                     var room = s.R;
                     object prevStartObj = s.LastStartObj;
+                    int keptBefore = s.GameNumber;
+                    string lastNameBefore = s.LastGameRoomName;
                     int rg = NoGame;
                     bool gate = false;
                     if (s.Current) StartCurrent(s);
@@ -1535,7 +1553,11 @@ namespace CompetitiveRounds
                         _game.StartRG[s] = rg;
                         _game.StartG[s] = gate;
                         _game.FirstInEntry[s] = !ReferenceEquals(prevStartObj, s.Obj);
-                        if (!s.Current && _game.FirstInEntry[s] && (s.GameNumber != 1 || s.LocalGameSeq != 1))
+                        // RESET, scoped by change 25(b): the sequence is 1; the
+                        // counter is 1 under G or after a name change, else the
+                        // kept counter + 1.
+                        int wantCounter = s.GateLatch || lastNameBefore != room.Name ? 1 : keptBefore + 1;
+                        if (!s.Current && _game.FirstInEntry[s] && (s.GameNumber != wantCounter || s.LocalGameSeq != 1))
                             Fail("RESET g" + I(room.PhysGame) + " " + s.Name + " counter " + I(s.GameNumber)
                                  + " sequence " + I(s.LocalGameSeq));
                     }
@@ -1546,9 +1568,13 @@ namespace CompetitiveRounds
                     var room = s.R;
                     object roomObj = s.Obj;
                     ClearTicket(s);
+                    // Change 25(b): the G latch is taken before the Room-object
+                    // test reads it.
+                    s.GateLatch = DriftGateNow(s);
+                    s.GateLatchRoom = roomObj;
                     if (RoomObjectChanged(s.LastGameRoom, roomObj, s.LastGameRoomName, room.Name))
                     {
-                        s.GameNumber = 0;
+                        s.GameNumber = CounterAfterRoomChange(s.GateLatch, s.LastGameRoomName, room.Name, s.GameNumber);
                         s.LocalGameSeq = 0;
                         s.Leavers.Clear();
                         s.AcquiredGame = NoGame;
@@ -1558,8 +1584,6 @@ namespace CompetitiveRounds
                     }
                     s.AcquiredGame = NoGame;
                     s.AcquiredRoom = null;
-                    s.GateLatch = DriftGateNow(s);
-                    s.GateLatchRoom = roomObj;
                     bool carryHere = SameIncarnation(s.CarryRoom, roomObj);
                     bool prevHere = SameIncarnation(s.StartedInRoom, roomObj);
                     int prevRG = prevHere ? s.RoomGame : NoGame;
@@ -1726,7 +1750,7 @@ namespace CompetitiveRounds
                             ph.Manifest = new List<int>(ef.Ids);
                             SetAcquired(s, ph.Game);
                         }
-                        else if (ph.Game < 1 && IsMaster(s))
+                        else if (!KeyedReadsAllowed(ph.Gate, ph.Game) && IsMaster(s))
                         {
                             bool openingDraw = winnerActor < 0 && s.CycleNumber == 1;
                             int oc, ownC;
@@ -1737,7 +1761,7 @@ namespace CompetitiveRounds
                         }
                         RecordOwn(s, ph.Game, ph.Cycle);
                     }
-                    if (IsMaster(s) && ph.Game >= 1
+                    if (IsMaster(s) && KeyedReadsAllowed(ph.Gate, ph.Game)
                         && WriteRoom(s, KCyc, CycValue(ph.Game, ph.Cycle, ph.Pickers)) && !s.Current)
                         ArmTicket(s, ph.Game);
                     StepPhase(s);
@@ -1756,8 +1780,8 @@ namespace CompetitiveRounds
                                 WaitBody(s, ph);
                                 if (ph.Manifest == null) return;
                             }
-                            if (ph.Manifest == null && ph.Game >= 1) ph.Manifest = new List<int>(ph.Pickers);
-                            if (ph.Game >= 1)
+                            if (ph.Manifest == null && KeyedReadsAllowed(ph.Gate, ph.Game)) ph.Manifest = new List<int>(ph.Pickers);
+                            if (KeyedReadsAllowed(ph.Gate, ph.Game))
                             {
                                 MasterPublishSeed(s, ph.Game);
                                 ph.LatchWait = T;
@@ -1779,7 +1803,7 @@ namespace CompetitiveRounds
 
                 private static bool Ahead(Cyc c, Phase ph)
                 {
-                    return c != null && ph.Game >= 1 && (c.G > ph.Game || (c.G == ph.Game && c.C > ph.Cycle));
+                    return c != null && KeyedReadsAllowed(ph.Gate, ph.Game) && (c.G > ph.Game || (c.G == ph.Game && c.C > ph.Cycle));
                 }
 
                 private static void TakeField(Seat s, Phase ph, Cyc ad)
@@ -1794,7 +1818,7 @@ namespace CompetitiveRounds
 
                 private void WaitBody(Seat s, Phase ph)
                 {
-                    if (ph.Game >= 1)
+                    if (KeyedReadsAllowed(ph.Gate, ph.Game))
                     {
                         ph.Manifest = ReadCycleManifest(s, ph.Game, ph.Cycle);
                         if (ph.Manifest != null) return;
@@ -1820,14 +1844,14 @@ namespace CompetitiveRounds
                             if (!regimeNow && Ahead(ad, ph)) { TakeField(s, ph, ad); return; }
                         }
                     }
-                    if (IsMaster(s) && ph.Game >= 1 && T - ph.Start > 2.0
+                    if (IsMaster(s) && KeyedReadsAllowed(ph.Gate, ph.Game) && T - ph.Start > 2.0
                         && WriteRoom(s, KCyc, CycValue(ph.Game, ph.Cycle, ph.Pickers)) && !s.Current)
                         ArmTicket(s, ph.Game);
                 }
 
                 private void BeginResult(Seat s, Phase ph)
                 {
-                    ph.IPick = ph.Game >= 1 && ph.Manifest != null && ph.Manifest.Contains(s.Actor);
+                    ph.IPick = KeyedReadsAllowed(ph.Gate, ph.Game) && ph.Manifest != null && ph.Manifest.Contains(s.Actor);
                     if (ph.IPick)
                     {
                         s.PendingPick = "c" + s.Name + I(ph.Cycle);
@@ -1849,7 +1873,7 @@ namespace CompetitiveRounds
 
                 private void ResultBody(Seat s, Phase ph)
                 {
-                    if (ph.Game >= 1 && ReadCycleResult(s, ph.Game, ph.Cycle)) { ph.Stage = 3; return; }
+                    if (KeyedReadsAllowed(ph.Gate, ph.Game) && ReadCycleResult(s, ph.Game, ph.Cycle)) { ph.Stage = 3; return; }
                     double now = T;
                     if (IsMaster(s))
                     {
@@ -1876,7 +1900,7 @@ namespace CompetitiveRounds
                             else if (np != null && !regimeNow && Ahead(np, ph)) Adopt(s, ph, np.G, np.C, np.Ids, false, rawNow);
                         }
                     }
-                    var got = ph.Game >= 1 && ph.Manifest != null ? CollectPicks(s, ph) : new Dictionary<int, string>();
+                    var got = KeyedReadsAllowed(ph.Gate, ph.Game) && ph.Manifest != null ? CollectPicks(s, ph) : new Dictionary<int, string>();
                     if (got.Count > ph.LastGot)
                     {
                         ph.LastGot = got.Count;
@@ -1891,7 +1915,7 @@ namespace CompetitiveRounds
                     else
                     {
                         double sh;
-                        if (ph.Game >= 1 && TryReadDeadline(s, ph.Game, ph.Cycle, out sh) && sh > 0) ph.Deadline = sh;
+                        if (KeyedReadsAllowed(ph.Gate, ph.Game) && TryReadDeadline(s, ph.Game, ph.Cycle, out sh) && sh > 0) ph.Deadline = sh;
                     }
                     if (IsMaster(s))
                     {
