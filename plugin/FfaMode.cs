@@ -345,6 +345,15 @@ namespace CompetitiveRounds
         public static float MatchStartRealtime => matchStartRealtime;
 
         // ── Per-game witness (RJ-3) ──
+        //
+        // V1410-BETA: THIS BUILD'S REPORT ELECTION DOES NOT READ IT.
+        // GameStateWatcher.TryReportFfaMatch elects by presence, the rule
+        // v1.40.3 and main apply, because a beta room mixes this client with
+        // 1.40.3 seats that publish no witness (the RJ-3 note there says
+        // why). The property is still published and re-published, so the
+        // witness election can be restored at that one call; every "the
+        // election reads" or "falls back" below describes that design, not
+        // this build.
 
         /// <summary>PLAYER property carrying the highest FFA game number this
         /// seat observed the START of. Published by

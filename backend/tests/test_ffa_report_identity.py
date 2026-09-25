@@ -27,6 +27,11 @@ drawn from, and nothing re-derived it when that state moved.
    production path actually asks for the shared key and no longer builds one
    out of a local clock.
 
+One deliberate deviation rides with these (V1410-BETA, D-C R1): the filing
+path elects by PRESENCE, the rule v1.40.3 and main apply, and never reads the
+witness of item 2, because a beta room mixes this client with 1.40.3 seats
+that publish none. The last test in this file pins it.
+
 Spans are taken with `code_of`, which brace-counts on a mask and strips
 comments, so a brace inside a literal cannot end a span early and a comment
 that merely names an identifier cannot satisfy an assertion about code
@@ -408,3 +413,37 @@ def test_the_report_rules_file_stays_free_of_the_engine():
         assert banned not in src, (
             "FfaReportRules references %s and can no longer be executed by the "
             "harness" % banned)
+
+
+# ── 4. V1410-BETA: the filing path elects by presence (D-C R1) ────────────
+
+FILING = "private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)"
+
+
+def test_the_filing_path_elects_by_presence_and_never_reads_the_witness():
+    """A beta room mixes this client with 1.40.3 seats, and only this client
+    publishes cr_ffa_gw. Electing on it makes a lone tester the only witness,
+    so it always elects itself while the 1.40.3 seats elect the lowest present
+    seat, and two seats file one game whenever those differ. The beta elects by
+    presence -- the rule v1.40.3 and main apply -- and keeps the frozen key,
+    which the tests above pin.
+
+    Decided on the comment-stripped span, so a comment that names the witness
+    cannot satisfy or break it. Control: restore the census loop's
+    `FfaMode.WitnessedGameOf(pp)` read, or pass `witnessSteams` as the
+    election's second argument -> red.
+    """
+    filing = code_of(_plugin("GameStateWatcher.cs"), FILING)
+    for needle in ("WitnessedGameOf", "PropGameWitness", "cr_ffa_gw", "witnessSteams"):
+        assert needle not in filing, (
+            "the filing path reads the witness again (%r); the beta elects by "
+            "presence" % needle)
+    calls = re.findall(r"FfaReportRules\.ElectReporter\(([^;]*)\);", filing)
+    assert len(calls) == 1, (
+        "expected one election in the filing path, found %d" % len(calls))
+    args = [a.strip() for a in calls[0].split(",")]
+    assert args[:2] == ["presentSteams", "null"], (
+        "the electorate is %r, not the present fighters alone" % (args[:2],))
+    # ...over the fighters the census loop adds, and nothing else.
+    assert filing.count("presentSteams.Add(") == 1, (
+        "presentSteams is filled from %d sites" % filing.count("presentSteams.Add("))

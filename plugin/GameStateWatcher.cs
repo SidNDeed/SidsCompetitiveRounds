@@ -6649,17 +6649,20 @@ namespace CompetitiveRounds
                     // so the two cannot disagree: this hook is the only site
                     // that clears this seat's per-game tallies, so the seat
                     // that carries game N is exactly the seat that holds game
-                    // N's scores. The reporter election reads it at game over.
+                    // N's scores. The lane design's reporter election read it
+                    // at game over; this build elects by presence and does not
+                    // (the RJ-3 note in TryReportFfaMatch), and the property is
+                    // still published so that design can be restored.
                     clearProps[FfaMode.PropGameWitness] = FfaMode.GameNumber;
                     PhotonNetwork.LocalPlayer?.SetCustomProperties(clearProps);
                     Plugin.Log.LogInfo($"[FFA] witness published {FfaMode.PropGameWitness}={FfaMode.GameNumber}");
                 }
                 catch (Exception wex)
                 {
-                    // Not fatal and not silent: an unpublished witness makes
-                    // this seat ineligible to report, which the election's
-                    // fallback covers — but it is the thing to look for if a
-                    // sitting reports witness-fallback.
+                    // Not fatal and not silent. This build's report election
+                    // does not read the witness (TryReportFfaMatch), so a
+                    // failed publish changes no reporter; the line stays for
+                    // the lane design's diagnostics.
                     Plugin.Log.LogWarning($"[FFA] witness publish failed: {wex.Message}");
                 }
 
@@ -6941,29 +6944,26 @@ namespace CompetitiveRounds
 
             var entries = new List<ApiClient.FfaReportPlayer>();
             var presentSteams = new List<string>();
-            // RJ-3: present fighters that also WITNESSED this game's start.
-            // Derived from replicated properties, so seats that have RECEIVED
-            // those properties agree. It is NOT the same set on every client
-            // unconditionally, and the difference is deliberate: a seat that
-            // has received no witness property at all falls back to the
-            // merely-present electorate while its peers do not, and two seats
-            // then submit. FfaReportRules.ElectReporter chooses that over
-            // nobody submitting, and FfaMode.RepublishGameWitness narrows the
-            // window by re-publishing after an adoption.
-            //
-            // WHAT MAKES THE DUPLICATE SURVIVABLE, precisely (the earlier
-            // wording leaned on "both reports carry one key" as though it were
-            // unconditional — Codex client r2). Two seats carry one key when
-            // both FROZE the same published game number at the game-over edge,
-            // which is the case whenever they can read the room property at
-            // all. A seat that froze nothing does not file a second key: it
-            // does not file, full stop (FfaReportRules.ReportRoomId returns
-            // null and the caller refuses). So the possible outcomes are one
-            // key from one seat, one key from two seats, or — when the seats
-            // disagree about the published number — one report and one refusal
-            // the server must answer terminally. There is no path on which
-            // this client mints a second key for the same physical game.
-            var witnessSteams = new List<string>();
+            // RJ-3: present fighters that also WITNESSED this game's start
+            // (FfaMode.PropGameWitness) were the lane design's electorate.
+            // THIS BUILD DOES NOT READ THEM (V1410-BETA deviation, D-C R1).
+            // The election below is FfaReportRules.ElectReporter over the
+            // present fighters alone, the lowest present Steam ID, which is
+            // the rule v1.40.3 and main apply. A beta room mixes this client
+            // with 1.40.3 seats, and only this client publishes the witness:
+            // a witness election there makes a lone tester the only witness,
+            // so it always elects itself, while the 1.40.3 seats elect the
+            // lowest present seat, and two seats file one game whenever those
+            // differ. By presence every seat applies one rule to the same
+            // fighters. The frozen key is unchanged: a seat that froze no game
+            // number does not file (FfaReportRules.CanFile in OnFfaGameOver),
+            // so an elected tester without one files nothing, which loses the
+            // result rather than settling a game twice. What this gives back:
+            // the case RJ-3 closed is open again here, exactly as on v1.40.3
+            // and main. A seat that relaunched into the room mid-sitting is
+            // present with the per-game tables OnFfaMatchStarted cleared, and
+            // when it holds the lowest Steam ID it is elected and files the
+            // game's scoreboard from them.
             string winnerSteam = null;
 
             // Census: the FFA report roster is fighters only — a spectator
@@ -7064,13 +7064,6 @@ namespace CompetitiveRounds
                     endStats = EndStatsFor(sid),
                 });
                 presentSteams.Add(sid);
-                // Witness test, read from the replicated property rather than
-                // from anything this seat knows privately: a locally-privileged
-                // input would make this client's eligible set differ from the
-                // one its peers compute for it, which is the split-brain #280
-                // describes. -1 (no property) covers both the relaunched seat
-                // and a pre-1.41.0 client.
-                if (FfaMode.WitnessedGameOf(pp) >= FfaMode.GameNumber) witnessSteams.Add(sid);
                 if (teamId == winnerTeam) winnerSteam = sid;
             }
 
@@ -7133,61 +7126,29 @@ namespace CompetitiveRounds
                 return false;
             }
 
-            // Reporter election: lowest Steam ID among the players who
-            // WITNESSED this game's start (all FFA players carry the mod — the
-            // queue is the only entry path).
+            // Reporter election: lowest Steam ID among the PRESENT fighters,
+            // the rule v1.40.3 and main apply (all FFA players carry the mod —
+            // the queue is the only entry path). No witness list is passed;
+            // the RJ-3 note at the top of this method says why this build
+            // does not elect on cr_ffa_gw. With a null list ElectReporter
+            // still keeps its TOTAL property: when any present id parses it
+            // names exactly the seat main's loop names, and when none parses
+            // its ordinal pass still names one seat rather than every seat
+            // electing itself (#430).
             //
-            // RJ-3: membership used to be the whole qualifier, and the tallies
-            // shipped at the bottom of this method come from THIS client's
-            // per-game tables, which OnFfaMatchStarted clears. A seat that
-            // relaunched into the room mid-sitting is present, holds the lowest
-            // Steam ID as often as anyone else, and has empty tables — so it
-            // was elected and submitted a scoreboard for a game it never saw.
-            //
-            // THE ELECTION STAYS TOTAL. An empty eligible set falls back to the
-            // old rule rather than refusing: a guard that only the seats it
-            // disqualifies would evaluate is how a sitting ends with nobody
-            // submitting and silently voids itself (#430). The fallback is
-            // min(presentSteams), which every client computes identically, so
-            // the all-ineligible case still elects exactly one reporter. The
-            // narrow mixed case — one client sees witness properties and
-            // another sees none at all — can elect two, and that direction is
-            // chosen deliberately, because nobody reporting loses the sitting
-            // outright.
-            //
-            // WHAT TWO ELECTORS FILE, and what makes the duplicate visible at
-            // all: both keys are FfaReportRules.ReportRoomId over the game
-            // number this seat FROZE at the game-over edge — not a live read
+            // WHAT TWO ELECTORS FILE, if seats ever disagree about who is
+            // present: both keys are FfaReportRules.ReportRoomId over the game
+            // number each seat FROZE at the game-over edge — not a live read
             // of cr_ffa_cyc, which the host rolls into the next game, and not
-            // a local counter, which drift adoption moves per seat. Two
-            // electors of the same physical game therefore present the same
-            // string, and a seat that froze no number files nothing at all.
-            //
-            // CORRECTED (Codex client r2): what stood here asserted that the
-            // second insert "answers with the FIRST report's idempotent echo,
-            // or HTTP 409" as a fact about the deployed server. That is the
-            // REQUIRED behaviour, not a property this file can promise — the
-            // build this client shipped against keyed settlement on the
-            // client's own suffix. The required server behaviour is: settle
-            // only when the key's game tail equals the lobby's games_played+1
-            // under the lobby lock, echo an exact resubmission, refuse every
-            // other tail terminally. This client's half is what it can
-            // guarantee, and it is the same on either backend: one key per
-            // physical game, a 409 or 403 treated as terminal at attempt 1,
-            // and no re-keying of a refused report, so the losing seat's
-            // outbox drops the entry instead of retrying it for ever.
-            //
-            // None of that was even possible before the shared key. The two
-            // seats stamped their own clocks and their own game counters into
-            // the room id, so the ids differed, nothing could collide, and one
-            // game settled twice.
-            string lowest = FfaReportRules.ElectReporter(presentSteams, witnessSteams, out bool witnessFallback);
-            if (witnessFallback && presentSteams.Count > 0)
-                Plugin.Log.LogWarning($"[FFA-REPORT] witness-fallback: no seat carries "
-                                      + $"{FfaMode.PropGameWitness}>={FfaMode.GameNumber} among {presentSteams.Count} present "
-                                      + "— electing on presence alone");
-            else if (!witnessFallback && witnessSteams.Count < presentSteams.Count)
-                Plugin.Log.LogInfo($"[FFA-REPORT] witnesses {witnessSteams.Count}/{presentSteams.Count} for game {FfaMode.GameNumber}");
+            // a local counter, which drift adoption moves per seat — so two
+            // electors of one physical game present the same string, and a
+            // seat that froze no number files nothing at all. The server's
+            // required behaviour is to settle only the tail equal to the
+            // lobby's games_played+1 under the lobby lock, echo an exact
+            // resubmission and refuse every other tail terminally; this
+            // client's half is one key per physical game, a 409 or 403 treated
+            // as terminal at attempt 1, and no re-keying of a refused report.
+            string lowest = FfaReportRules.ElectReporter(presentSteams, null, out bool _);
             if (lowest == null) lowest = localSteamId;
             if (lowest != localSteamId)
             {
