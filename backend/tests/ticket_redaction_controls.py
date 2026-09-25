@@ -8,7 +8,9 @@ over-ceiling read's hold-back (M2), the harness's two refusals (M3) and the
 automatic upload's contract through its stand-in (L6); and, from round 3,
 the harness's census of every schema and its one-schema binding (R2
 finding 1); and, from the round-3 addendum, the detail pane's triage
-notes -- are carried below as DATA: the file, the exact
+notes; and, from round 4, the one sender of a terminate or a drop, the
+probe database's single claim and the whole connection record (R3
+finding 1) -- are carried below as DATA: the file, the exact
 text a plant replaces, the text it writes, and the test nodes it must turn RED
 (a mutant, which bypasses or weakens the function at that site) or leave
 GREEN (an inert twin at the same site, #391). Each plant is printed as a
@@ -104,9 +106,15 @@ SHADOW = [T + "test_pg_the_harness_refuses_a_same_named_object_ahead_of_public[%
 BIND = T + "test_pg_every_harness_connection_is_bound_to_one_schema"
 # round 3 addendum
 DETAIL_TRIAGE = T + "test_pg_stored_triage_notes_are_served_redacted_in_the_detail_pane"
+# round 4
+SENDERS = T + "test_every_destructive_statement_goes_through_the_one_gate"
+SENDER_PROBES = T + "test_the_sender_census_finds_every_kind_of_second_sender"
+RECORDED = T + "test_a_recorded_connection_sends_a_terminate_or_a_drop_only_through_the_gate"
+TAKEN = T + "test_pg_a_probe_name_already_taken_is_a_refusal_never_a_drop"
 # Every live case that enters the harness on this tree. The two L6 cases
 # against the real auto-upload route are not here: without the route they
-# skip before the harness is entered, on every tree this file can see.
+# skip before the harness is entered, on every tree this file can see. Nor is
+# TAKEN: it stops at CREATE DATABASE, before the harness is entered.
 EVERY_PG_CASE = [R1, R1_NEG, DETAIL, DOWNLOAD, LIST, DISCORD, EVENTS, LEGACY_NEG, HEALTH,
                  ADMIN_COMMENT, STATUS_COMMENTS, INTERNAL_COMMENT, REPLY, FEED_COMMENT, DETAIL_COMMENT,
                  CLAMPS, WINDOW, NAME_REFUSAL, *POPULATED, STANDIN_CONTRACT, *SHADOW, BIND, DETAIL_TRIAGE]
@@ -291,6 +299,35 @@ mutant("M3-qualify-mutant", "M3-qualify", "one drop names its table without the 
        [(TESTS, M3_DROP_LINE, "DROP TABLE IF EXISTS players RESTRICT;\n")], [BIND])
 twin("M3-qualify-twin", "M3-qualify", "a SQL comment inside the same drop",
      [(TESTS, M3_DROP_LINE, "DROP TABLE IF EXISTS public.players RESTRICT /* the twin */;\n")], [BIND])
+
+# -- round 4, R3 finding 1: one sender, one claim, the whole record ---------
+# A second sender: a raw execute of a drop's text outside the gate. The
+# census of the file goes RED, and so do its closure probes (the file itself
+# now holds an unexplained sender). The twin puts a benign execute at the
+# same spot, the drop's text only in its comment.
+M4_SENDER_SITE = '            return await conn.fetchval("SELECT current_user")\n'
+mutant("M4-sender-mutant", "M4-sender", "a second sender: a raw execute of a drop's text in _lane_role",
+       [(TESTS, M4_SENDER_SITE,
+         '            await conn.execute("DROP TABLE IF EXISTS public.zzz_probe")\n' + M4_SENDER_SITE)],
+       [SENDERS, SENDER_PROBES])
+twin("M4-sender-twin", "M4-sender", "a benign execute at the same spot, the drop's text only in its comment",
+     [(TESTS, M4_SENDER_SITE,
+       '            await conn.execute("SELECT 1")  # DROP TABLE IF EXISTS public.zzz_probe\n' + M4_SENDER_SITE)],
+     [SENDERS, SENDER_PROBES])
+# Round 3's claim: the probe's name force-dropped before it is created, here
+# through the gate. The taken-name case goes RED (the holder's database is
+# gone); every refusal case goes RED on its whole record, which now holds
+# the drop (Env's own record never did -- how round 3's checks missed it);
+# and the census goes RED (the gate called from a path it does not name).
+M4_CLAIM_SITE = "        await admin.execute(f'CREATE DATABASE \"{name}\"')\n"
+pair("M4-claim", "the probe's name is force-dropped before it is created (round 3's claim)",
+     M4_CLAIM_SITE,
+     "        await _send_destructive(admin, f'DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)', sent)\n"
+     + M4_CLAIM_SITE,
+     "the probe's one claim", [TAKEN, NAME_REFUSAL, *POPULATED, *SHADOW, SENDERS, SENDER_PROBES], TESTS)
+# A recorded connection that sends a terminate or a drop itself.
+pair("M4-runtime", "a recorded connection no longer refuses a terminate or a drop outside the gate",
+     "        _refuse_outside_the_gate(sql)\n", "", "the gate at run time", [RECORDED], TESTS)
 
 # ── round 2, L6: the automatic upload's contract, planted in the stand-in ──
 L6_SCRUB = "    scrubbed, counts, _ids = await asyncio.to_thread(_scrub_pass_one, log_blob)\n"

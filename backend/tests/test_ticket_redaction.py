@@ -44,9 +44,13 @@ other than this harness's own fixtures, or whose fixture tables hold anything
 but its synthetic rows (rounds 2 and 3, M3). Every table and sequence the
 harness touches is named with its schema, public, and every connection that
 sends a statement after those refusals is bound to that schema at connect
-(round 3).
+(round 3). Every terminate and every drop the harness sends on a raw
+connection goes through one function, _send_destructive; the only other
+destructive text in this file is the DROP block the seed engine sends, and a
+test reads this file to check both (round 4).
 """
 
+import ast
 import asyncio
 import gzip
 import hashlib
@@ -55,6 +59,7 @@ import inspect
 import os
 import random
 import re
+import secrets
 import subprocess
 import sys
 import uuid
@@ -676,25 +681,51 @@ def _destructive(sql: str) -> bool:
 
 class _Recorded:
     """An asyncpg connection that writes each statement into `sent` BEFORE it
-    sends it: the record the M3 checks read."""
+    sends it: the record the M3 checks read. A terminate or a drop
+    (_destructive) it refuses, unsent and unrecorded: one reaches a raw
+    connection only through _send_destructive (round 4)."""
 
     def __init__(self, conn, sent):
         self._conn, self._sent = conn, sent
 
-    async def execute(self, sql, *args):
+    async def _send(self, method, sql, args):
+        _refuse_outside_the_gate(sql)
         self._sent.append(sql)
-        return await self._conn.execute(sql, *args)
+        return await getattr(self._conn, method)(sql, *args)
+
+    async def execute(self, sql, *args):
+        return await self._send("execute", sql, args)
 
     async def fetchval(self, sql, *args):
-        self._sent.append(sql)
-        return await self._conn.fetchval(sql, *args)
+        return await self._send("fetchval", sql, args)
 
     async def fetch(self, sql, *args):
-        self._sent.append(sql)
-        return await self._conn.fetch(sql, *args)
+        return await self._send("fetch", sql, args)
 
     async def close(self):
         await self._conn.close()
+
+
+def _refuse_outside_the_gate(sql):
+    if _destructive(sql):
+        raise RuntimeError("a terminate or a drop reached a recorded connection outside _send_destructive, "
+                           f"the one sender: {' '.join(sql.split())[:80]!r}")
+
+
+async def _send_destructive(conn, sql, sent):
+    """THE GATE (round 4, R3 finding 1): the one function in this file that
+    sends a terminate or a drop on a raw connection. `sent` is required and
+    must be the record `conn` writes into -- the list its caller keeps and
+    reads back -- and the statement is written there before it is sent, as
+    _Recorded writes every other one. It sends nothing _destructive() does
+    not match. Its callers are the destructive paths _GATE_CALLERS names;
+    _sender_census reads this file for any other sender."""
+    if not _destructive(sql):
+        raise RuntimeError(f"_send_destructive sends terminates and drops only: {' '.join(sql.split())[:80]!r}")
+    if not isinstance(conn, _Recorded) or conn._sent is not sent:
+        raise RuntimeError("_send_destructive sends only on a recorded connection, into the record it writes")
+    sent.append(sql)
+    return await conn._conn.execute(sql)
 
 
 async def _connect(url, sent, database=None, **settings):
@@ -803,9 +834,9 @@ async def _clean_slate(url, sent):
     _refuse_unless_scratch establishes before this runs (Env.__aenter__)."""
     conn = await _connect(url, sent, search_path=BOUND_SCHEMA)
     try:
-        await conn.execute("SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
-                           " WHERE datname = pg_catalog.current_database()"
-                           " AND pid <> pg_catalog.pg_backend_pid()")
+        await _send_destructive(conn, "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
+                                      " WHERE datname = pg_catalog.current_database()"
+                                      " AND pid <> pg_catalog.pg_backend_pid()", sent)
     finally:
         await conn.close()
 
@@ -1442,34 +1473,93 @@ def test_pg_legacy_bundle_over_the_read_ceiling_is_redacted_before_the_window(mo
 # ── M3: the harness refuses a wrong or populated database ─────────────────
 
 
+# Each refusal case drives the harness against a probe database made for it
+# (round 4, R3 finding 1). Its name is new (_probe_name); CREATE DATABASE runs
+# once, and a name that is taken stops the case there -- a refusal, never a
+# drop. After the case the probe is censused, and dropped through the gate
+# only if this run created it and it holds nothing the harness or the case
+# did not make (_drop_probe_database). Every statement every connection of
+# the case sends is recorded, and the case judges that whole record, not
+# Env's alone.
+
 RESOLVE_SQL = ("SELECT n.nspname::text FROM pg_catalog.pg_class c"
                " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
                " WHERE c.oid = pg_catalog.to_regclass($1)")
 
+# The probe databases this run created and has not dropped: the only names
+# _drop_probe_database acts on.
+_PROBES_CREATED = set()
 
-def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql, resolve=None):
-    """Point the harness at a sacrificial database `probe` holding what
-    `setup_sql` puts there, with one canary session open on it, and enter it
-    exactly as every case does. Returns what __aenter__ raised (None if it
-    entered), every statement it sent, whether the canary session survived,
-    what `count_sql` reads afterwards, and -- when `resolve` names an object
-    -- the schema a fresh, unbound session finds it in when it names it
-    without one. The database is dropped after."""
-    async def body():
-        lane = make_url(require_pg())
-        admin = await _connect(lane, [])
+
+def _probe_name(prefix):
+    """`prefix` and 16 random lowercase hexadecimal characters, so a name
+    that carries the scratch marker still fullmatches SCRATCH_DB_RE. Never a
+    process id: the OS reuses those, and clients on other hosts sharing the
+    server can hold the same one."""
+    return f"{prefix}_{secrets.token_hex(8)}"
+
+
+async def _create_probe_database(lane, name, sent):
+    """CREATE DATABASE `name`, once. A name that is already taken raises here
+    (asyncpg's DuplicateDatabaseError, SQLSTATE 42P04) and the case fails:
+    no retry under another name, and nothing is dropped."""
+    admin = await _connect(lane, sent)
+    try:
+        await admin.execute(f'CREATE DATABASE "{name}"')
+    finally:
+        await admin.close()
+    _PROBES_CREATED.add(name)
+
+
+async def _drop_probe_database(lane, name, sent, planted=frozenset()):
+    """A probe database's cleanup, the one place this file drops a database.
+    Refused for a name this run did not create. Then a census of every
+    relation and sequence in it (CENSUS_SQL, on a connection to it), and the
+    drop only if each one is this harness's own (_foreign_objects) or one the
+    case planted, by (schema, name); anything else is a refusal naming it,
+    and the database is left in place."""
+    if name not in _PROBES_CREATED:
+        raise RuntimeError(f"{name!r} is not a probe database this run created; it is left alone")
+    conn = await _connect(lane, sent, database=name)
+    try:
+        census = await conn.fetch(CENSUS_SQL)
+    finally:
+        await conn.close()
+    stray = [r for r in _foreign_objects(census) if (r["schema"], r["name"]) not in planted]
+    if stray:
+        shown = "; ".join(f"{r['schema']}.{r['name']} ({_KINDS.get(r['kind'], r['kind'])})" for r in stray[:10])
+        raise RuntimeError(f"probe database {name!r} holds {len(stray)} object(s) that neither this harness nor "
+                           f"its case made: {shown}. It is left in place.")
+    admin = await _connect(lane, sent)
+    try:
+        await _send_destructive(admin, f'DROP DATABASE "{name}" WITH (FORCE)', sent)
+    finally:
+        await admin.close()
+    _PROBES_CREATED.discard(name)
+
+
+async def _drive_env_against_async(monkeypatch, tmp_path, probe, setup_sql, count_sql, resolve=None,
+                                   planted=frozenset()):
+    """Point the harness at a probe database `probe`, created here, holding
+    what `setup_sql` puts there, with one canary session open on it, and
+    enter it exactly as every case does. Returns what __aenter__ raised (None
+    if it entered); every statement sent from the probe's creation to the
+    canary's exit, on every connection -- the probe's creator, the canary,
+    the resolver and Env's own; whether the canary session survived; what
+    `count_sql` reads afterwards; when `resolve` names an object, the schema
+    a fresh, unbound session finds it in when it names it without one; and
+    the cleanup's own record, the probe's census and then its drop
+    (_drop_probe_database, with `planted`)."""
+    lane = make_url(require_pg())
+    record = []     # every connection of this call writes here (round 4, item 4)
+    await _create_probe_database(lane, probe, record)
+    try:
+        canary = await _connect(lane, record, database=probe)
         try:
-            await admin.execute(f'DROP DATABASE IF EXISTS "{probe}" WITH (FORCE)')
-            await admin.execute(f'CREATE DATABASE "{probe}"')
-        finally:
-            await admin.close()
-        canary = None
-        try:
-            canary = await _connect(lane, [], database=probe)
             await canary.execute(setup_sql)
             resolved = None
             if resolve:
-                fresh = await _connect(lane, [], database=probe)
+                fresh = await _connect(lane, record, database=probe)
                 try:
                     resolved = await fresh.fetchval(RESOLVE_SQL, resolve)
                 finally:
@@ -1485,33 +1575,45 @@ def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql, resol
                 raised = ex
             if entered:
                 await env.__aexit__(None, None, None)
+            record.extend(getattr(env, "sent", []))     # Env's own record: its refusals, slate and seed engine
             try:
                 alive, rows = True, await canary.fetchval(count_sql)
             except Exception:
                 alive, rows = False, None
-            return raised, list(getattr(env, "sent", [])), alive, rows, resolved
         finally:
-            if canary is not None:
-                try:
-                    await canary.close()
-                except Exception:
-                    pass
-            admin = await _connect(lane, [])
             try:
-                await admin.execute(f'DROP DATABASE IF EXISTS "{probe}" WITH (FORCE)')
-            finally:
-                await admin.close()
+                await canary.close()
+            except Exception:
+                pass
+    except BaseException:
+        await _drop_probe_database(lane, probe, record, frozenset(planted))
+        raise
+    cut = len(record)
+    await _drop_probe_database(lane, probe, record, frozenset(planted))
+    return raised, record[:cut], alive, rows, resolved, record[cut:]
 
-    return run(body())
+
+def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql, resolve=None, planted=frozenset()):
+    return run(_drive_env_against_async(monkeypatch, tmp_path, probe, setup_sql, count_sql, resolve, planted))
+
+
+def _assert_the_probe_cleanup(cleanup, probe):
+    """The cleanup's own record: the probe's census ran, and after it one
+    terminate-or-drop was sent, naming this probe."""
+    census = next((i for i, s in enumerate(cleanup) if CENSUS_TAG in s), None)
+    destructive = [i for i, s in enumerate(cleanup) if _destructive(s)]
+    assert census is not None, f"the probe's cleanup ran no census: {cleanup}"
+    assert len(destructive) == 1 and destructive[0] > census and f'"{probe}"' in cleanup[destructive[0]], \
+        f"the probe's cleanup did not send exactly one drop, of {probe!r}, after its census: {cleanup}"
 
 
 def test_pg_the_harness_refuses_a_database_without_the_scratch_marker(monkeypatch, tmp_path):
     """The NAME refusal alone: the database holds only a fixture row, which
     the ROWS refusal would accept, so the name is all that stands between its
     sessions and tables and the terminate and DROP."""
-    probe = f"ticket_redaction_gate_probe_{os.getpid()}"
+    probe = _probe_name("ticket_redaction_gate_probe")
     assert not SCRATCH_DB_RE.fullmatch(probe)
-    raised, sent, alive, rows, _ = _drive_env_against(
+    raised, sent, alive, rows, _, cleanup = _drive_env_against(
         monkeypatch, tmp_path, probe,
         f"CREATE TABLE public.players (steam_id varchar(32)); INSERT INTO public.players VALUES ('{REPORTER}')",
         "SELECT count(*) FROM public.players")
@@ -1520,6 +1622,7 @@ def test_pg_the_harness_refuses_a_database_without_the_scratch_marker(monkeypatc
     assert NAME_GATE_SQL in sent, sent
     assert [s for s in sent if _destructive(s)] == [], "a terminate or DROP was sent before the refusal"
     assert alive and rows == 1, "the canary session or its table did not survive the refusal"
+    _assert_the_probe_cleanup(cleanup, probe)
 
 
 @pytest.mark.parametrize("setup_sql,table,gate", [
@@ -1535,15 +1638,17 @@ def test_pg_the_harness_refuses_a_populated_scratch_database(monkeypatch, tmp_pa
     """The ROWS refusal: a database named with the marker, holding a row keyed
     on someone other than this harness's fixtures, or a shop item; and the
     CENSUS refusal of a table the harness never creates."""
-    probe = f"{SCRATCH_MARKER}_gate_populated_{os.getpid()}"
+    probe = _probe_name(f"{SCRATCH_MARKER}_gate_populated")
     assert SCRATCH_DB_RE.fullmatch(probe)
-    raised, sent, alive, rows, _ = _drive_env_against(
-        monkeypatch, tmp_path, probe, setup_sql, f"SELECT count(*) FROM public.{table}")
+    raised, sent, alive, rows, _, cleanup = _drive_env_against(
+        monkeypatch, tmp_path, probe, setup_sql, f"SELECT count(*) FROM public.{table}",
+        planted={("public", table)})
     assert isinstance(raised, RuntimeError), f"the harness entered a populated {probe!r}: {raised!r}"
     assert repr(probe) in str(raised) and table in str(raised), str(raised)
     assert NAME_GATE_SQL in sent and any(gate in s for s in sent), sent
     assert [s for s in sent if _destructive(s)] == [], "a terminate or DROP was sent before the refusal"
     assert alive and rows == 1, "the canary session or its row did not survive the refusal"
+    _assert_the_probe_cleanup(cleanup, probe)
 
 
 # ── round 3, R2 finding 1: the census and the one-schema binding ──────────
@@ -1551,11 +1656,12 @@ def test_pg_the_harness_refuses_a_populated_scratch_database(monkeypatch, tmp_pa
 SHADOW_SCHEMA = "ticket_redaction_shadow"
 
 
-def _lane_role():
-    """The role this file connects as. The default search path is
-    "$user", public: a schema named for this role comes first."""
+def _lane_role(sent):
+    """The role this file connects as, read on a connection that records
+    into `sent`. The default search path is "$user", public: a schema named
+    for this role comes first."""
     async def body():
-        conn = await _connect(make_url(require_pg()), [])
+        conn = await _connect(make_url(require_pg()), sent)
         try:
             return await conn.fetchval("SELECT current_user")
         finally:
@@ -1600,11 +1706,13 @@ def test_pg_the_harness_refuses_a_same_named_object_ahead_of_public(monkeypatch,
     the connecting role's own ("$user", first on the default path), or one
     the database's own search_path setting puts first. It is refused before
     the first terminate or DROP; the object and the canary session survive."""
-    probe = f"{SCRATCH_MARKER}_gate_shadow_{os.getpid()}"
+    probe = _probe_name(f"{SCRATCH_MARKER}_gate_shadow")
     assert SCRATCH_DB_RE.fullmatch(probe)
-    schema, obj, setup_sql, read_sql, intact = _shadow_case(variant, _lane_role(), probe)
-    raised, sent, alive, rows, resolved = _drive_env_against(
-        monkeypatch, tmp_path, probe, setup_sql, read_sql, resolve=obj)
+    role_sent = []
+    schema, obj, setup_sql, read_sql, intact = _shadow_case(variant, _lane_role(role_sent), probe)
+    raised, sent, alive, rows, resolved, cleanup = _drive_env_against(
+        monkeypatch, tmp_path, probe, setup_sql, read_sql, resolve=obj, planted={(schema, obj)})
+    sent = role_sent + sent     # the role's read too: every connection this case opened
     assert resolved == schema, f"setup: an unbound session finds {obj} in {resolved!r}, not {schema!r}"
     destructive = [" ".join(s.split())[:70] for s in sent if _destructive(s)]
     assert not destructive, (f"the harness accepted {probe!r}: it sent {len(destructive)} terminate or DROP "
@@ -1615,6 +1723,7 @@ def test_pg_the_harness_refuses_a_same_named_object_ahead_of_public(monkeypatch,
     assert NAME_GATE_SQL in sent and any(CENSUS_TAG in s for s in sent), sent
     assert alive and rows == intact, \
         f"{schema}.{obj} or the canary session did not survive the refusal: alive={alive}, read {rows!r}"
+    _assert_the_probe_cleanup(cleanup, probe)
     print(f"REFUSED [{variant}]: {message}")
     print(f"INTACT [{variant}]: {read_sql} -> {rows!r}, read through the canary session, still connected")
 
@@ -1690,6 +1799,299 @@ def test_the_binding_check_finds_a_fixture_named_without_its_schema():
               'SELECT count(*) FROM "postgres".players',
               "CREATE INDEX ix ON players (steam_id)"):
         assert _unbound_references([s]), s
+
+
+# -- round 4, R3 finding 1: one sender of a terminate or a drop -------------
+#
+# A terminate or a drop the harness sends on a raw connection goes through
+# _send_destructive, and a recorded connection refuses one sent any other way
+# (_Recorded). The seed engine sends the DROP block's statements, as round 3
+# left it. _sender_census reads this file and returns every place that could
+# send one besides those two, with its line and why:
+#   - the text of a terminate or a drop (_SENDER_WORDS, in any string but a
+#     docstring) anywhere except in a call of the gate, the DROP block, the
+#     pattern itself, or a function that holds such text only as data
+#     (_DATA_ONLY). Every string, not only a send's argument: a statement
+#     reaches a send through a variable too, as the DROP block itself does;
+#   - a send, or a connection opened, inside a _DATA_ONLY function;
+#   - a database driver imported or used outside _connect, so every raw
+#     connection is a recorded one;
+#   - a recorded connection's _conn or _sent reached outside _Recorded and
+#     the gate;
+#   - the DROP block used anywhere but Env.__aenter__'s one loop;
+#   - the gate called from a function _GATE_CALLERS does not name, or
+#     defined other than once at module level;
+#   - a connection recording into no list its caller keeps;
+#   - an engine made anywhere but the seed engine in Env.__aenter__.
+
+_SENDER_WORDS = re.compile(
+    r"pg_terminate_backend|\bDROP\s+(?:DATABASE|SCHEMA|TABLE|SEQUENCE|INDEX|VIEW|MATERIALIZED|OWNED|TYPE"
+    r"|FUNCTION|EXTENSION|ROLE)\b|\(\s*FORCE\s*\)", re.IGNORECASE)
+_SEND_METHODS = frozenset({"execute", "executemany", "fetch", "fetchval", "fetchrow", "exec_driver_sql"})
+_GATE = "_send_destructive"
+# Every caller of the gate, by name: the two destructive paths -- the slate a
+# case takes (#753) and a probe database's cleanup -- and the gate's own unit
+# test, which sends only to a stand-in connection (_FakeConnection).
+_GATE_UNIT_TEST = "test_a_recorded_connection_sends_a_terminate_or_a_drop_only_through_the_gate"
+_GATE_CALLERS = frozenset({"_clean_slate", "_drop_probe_database", _GATE_UNIT_TEST})
+# The functions that hold a terminate's or a drop's text only as data: the
+# classifier, the binding check's fixtures, the census's own probes.
+_DATA_ONLY = frozenset({"_destructive", "test_the_binding_check_finds_a_fixture_named_without_its_schema",
+                        "test_the_sender_census_finds_every_kind_of_second_sender"})
+_DRIVERS = frozenset({"asyncpg", "psycopg", "psycopg2", "pg8000"})
+_OPENERS = frozenset({"_connect", _GATE, "Env", "run", "create_async_engine", "create_engine",
+                      "_drive_env_against", "_drive_env_against_async", "_create_probe_database",
+                      "_drop_probe_database", "_clean_slate", "_refuse_unless_scratch", "_lane_role"})
+
+
+def _sender_census(source):
+    """(unexplained, accounted) for the module text `source`: every place
+    that could send a terminate or a drop and is not accounted for, as
+    (line, why), and every destructive path and text that is, as (what,
+    where) -- so the census shows what it found, not only that it found
+    nothing wrong (#732)."""
+    tree = ast.parse(source)
+    docs = {id(n.body[0].value) for n in ast.walk(tree)
+            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.body and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)
+            and isinstance(n.body[0].value.value, str)}
+    unexplained, accounted, drop_uses, gate_defs = [], [], [], []
+
+    def visit(node, scope, as_data):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == _GATE and not isinstance(node, ast.ClassDef):
+                gate_defs.append(scope)
+            scope = scope + (node.name,)
+        where = ".".join(scope) or "module level"
+        data_only = any(s in _DATA_ONLY for s in scope)
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Assign) and not scope and any(
+                isinstance(t, ast.Name) and t.id in ("DROP", "_SENDER_WORDS") for t in node.targets):
+            as_data = True
+            accounted.append(("module text", node.targets[0].id))
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs
+                and _SENDER_WORDS.search(node.value) and not (as_data or data_only or _GATE in scope)):
+            unexplained.append((line, f"the text of a terminate or a drop, outside the gate, in {where}"))
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            if any(n.split(".")[0] in _DRIVERS for n in names) and scope != ("_connect",):
+                unexplained.append((line, f"a database driver imported in {where}, not in _connect"))
+        if isinstance(node, ast.Name) and node.id in _DRIVERS and scope != ("_connect",):
+            unexplained.append((line, f"a database driver used in {where}, not in _connect"))
+        if isinstance(node, ast.Name) and node.id == "DROP" and isinstance(node.ctx, ast.Load):
+            drop_uses.append(scope)
+        if (isinstance(node, ast.Attribute) and node.attr in ("_conn", "_sent")
+                and "_Recorded" not in scope and _GATE not in scope):
+            unexplained.append((line, f"a recorded connection's {node.attr} reached in {where}"))
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            if data_only and (name in _OPENERS or (isinstance(f, ast.Attribute) and name in _SEND_METHODS)):
+                unexplained.append((line, f"{name}() in {where}, which holds that text only as data"))
+            if name in ("create_async_engine", "create_engine") and scope != ("Env", "__aenter__"):
+                unexplained.append((line, f"an engine made in {where}, not the seed engine"))
+            if name == "_connect":
+                sent = node.args[1] if len(node.args) > 1 else next(
+                    (k.value for k in node.keywords if k.arg == "sent"), None)
+                if not isinstance(sent, ast.Name):
+                    unexplained.append((line, f"a connection in {where} that records into no list its caller keeps"))
+            if name == _GATE:
+                if any(s in _GATE_CALLERS for s in scope):
+                    accounted.append(("gate call", where))
+                else:
+                    unexplained.append((line, f"the gate called from {where}, which _GATE_CALLERS does not name"))
+                as_data = True      # what it is handed is sent through the gate
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope, as_data)
+
+    visit(tree, (), False)
+    if gate_defs != [()]:
+        unexplained.append((0, f"{_GATE} is not defined exactly once, at module level: {gate_defs}"))
+    if drop_uses == [("Env", "__aenter__")]:
+        accounted.append(("DROP block sent", "Env.__aenter__"))
+    else:
+        unexplained.append((0, f"the DROP block is used other than by Env.__aenter__'s one loop: {drop_uses}"))
+    return sorted(unexplained), sorted(accounted)
+
+
+def test_every_destructive_statement_goes_through_the_one_gate():
+    """Round 4, item 1, read from this file's own text: nothing sends a
+    terminate or a drop but the gate, called from the two destructive paths,
+    and the DROP block's one loop; and the census found exactly those, so
+    its empty list is a finding, not a census that read nothing."""
+    unexplained, accounted = _sender_census(open(__file__, encoding="utf-8").read())
+    assert unexplained == [], f"a second sender of a terminate or a drop: {unexplained}"
+    assert accounted == [("DROP block sent", "Env.__aenter__"), ("gate call", "_clean_slate"),
+                         ("gate call", "_drop_probe_database"), ("gate call", f"{_GATE_UNIT_TEST}.body"),
+                         ("gate call", f"{_GATE_UNIT_TEST}.body"), ("module text", "DROP"),
+                         ("module text", "_SENDER_WORDS")], accounted
+    print(f"CENSUS: 0 unexplained; accounted {accounted}")
+
+
+def test_the_sender_census_finds_every_kind_of_second_sender():
+    """The census's closure probes (#757), each appended to this file's own
+    text in memory -- nothing is written: every kind of second sender is
+    found, at the probe's own line, and every inert twin is not."""
+    own = open(__file__, encoding="utf-8").read()
+    base = len(own.splitlines())
+    finds = {
+        "a raw execute of a drop's text":
+            'async def _zz(conn):\n    await conn.execute("DROP TABLE IF EXISTS public.zzz_probe")\n',
+        "a drop's text held in a variable, sent later":
+            'async def _zz(conn):\n    sql = "DROP SCHEMA zzz_probe CASCADE"\n    await conn.execute(sql)\n',
+        "a drop's text through a forwarding helper":
+            'async def _zz(env):\n    await env.ex("DROP TABLE public.zzz_probe")\n',
+        "a terminate through an engine's connection":
+            'async def _zz(conn):\n    await conn.execute(text("SELECT pg_terminate_backend(42)"))\n',
+        "a FORCE variant held at module level":
+            'ZZ_PROBE = \'DROP DATABASE "zzz_probe" WITH (FORCE)\'\n',
+        "a second raw connection":
+            'async def _zz():\n    import asyncpg\n    return await asyncpg.connect()\n',
+        "a reach past the record":
+            'async def _zz(conn):\n    await conn._conn.execute("SELECT 1")\n',
+        "a second use of the DROP block":
+            'def _zz():\n    return DROP.split(";")\n',
+        "the gate from a path not named":
+            'async def _zz(conn, sent):\n    await _send_destructive(conn, "SELECT 1", sent)\n',
+        "an unrecorded connection":
+            'async def _zz(url):\n    return await _connect(url, [])\n',
+        "a second engine":
+            'def _zz():\n    return create_async_engine("postgresql+asyncpg://zzz_probe")\n',
+        "a send from a function that holds a drop's text as data":
+            'async def test_the_binding_check_finds_a_fixture_named_without_its_schema(conn):\n'
+            '    await conn.fetch("SELECT 1")\n',
+    }
+    twins = {
+        "a drop's text in a comment, beside a benign execute":
+            'async def _zz(conn):\n    await conn.execute("SELECT 1")  # DROP TABLE IF EXISTS public.zzz_probe\n',
+        "a drop's text in a docstring":
+            'async def _zz(conn):\n    """DROP TABLE IF EXISTS public.zzz_probe"""\n    await conn.execute("SELECT 1")\n',
+        "prose that says drop":
+            'def _zz():\n    raise RuntimeError("refusing to drop it, or its sessions")\n',
+        "a recorded connection":
+            'async def _zz(url, sent):\n    return await _connect(url, sent)\n',
+    }
+    for what, probe in finds.items():
+        unexplained, _ = _sender_census(own + "\n\n" + probe)
+        assert unexplained, f"the census missed {what}"
+        assert all(line > base or line == 0 for line, _ in unexplained), (what, unexplained)
+    for what, probe in twins.items():
+        unexplained, _ = _sender_census(own + "\n\n" + probe)
+        assert unexplained == [], (what, unexplained)
+    print(f"PROBES: {len(finds)} found, {len(twins)} inert twins not")
+
+
+class _FakeConnection:
+    """Stands in for an asyncpg connection in the gate's unit test: writes
+    down each statement that reaches it."""
+
+    def __init__(self):
+        self.got = []
+
+    async def execute(self, sql, *args):
+        self.got.append(sql)
+        return "SENT"
+
+    async def fetchval(self, sql, *args):
+        self.got.append(sql)
+
+    async def fetch(self, sql, *args):
+        self.got.append(sql)
+        return []
+
+    async def close(self):
+        pass
+
+
+def test_a_recorded_connection_sends_a_terminate_or_a_drop_only_through_the_gate(monkeypatch):
+    """The gate at run time (round 4, item 1): every send method of a
+    recorded connection refuses what _destructive() matches -- unsent and
+    unrecorded -- and the gate sends it, written into the record first. The
+    gate refuses a record that is not the connection's own, a connection
+    that is not recorded, and a statement _destructive() does not match. No
+    real terminate or drop is written here: the classifier is pointed at a
+    marker for this case."""
+    marker = "ticket-redaction-gate-marker"
+    monkeypatch.setattr(sys.modules[__name__], "_destructive", lambda sql: marker in sql)
+    marked, plain = f"SELECT '{marker}'", "SELECT 1"
+
+    async def body():
+        fake, sent, elsewhere = _FakeConnection(), [], []
+        conn = _Recorded(fake, sent)
+        refused = []
+        for method in ("execute", "fetchval", "fetch"):
+            try:
+                await getattr(conn, method)(marked)
+            except RuntimeError:
+                refused.append(method)
+        await conn.execute(plain)
+        before_gate = (list(fake.got), list(sent))
+        gate_refused = 0
+        for args in ((conn, plain, sent), (conn, marked, elsewhere), (fake, marked, sent)):
+            try:
+                await _send_destructive(*args)
+            except RuntimeError:
+                gate_refused += 1
+        answer = await _send_destructive(conn, marked, sent)
+        return refused, before_gate, gate_refused, answer, list(fake.got), list(sent), elsewhere
+
+    refused, before_gate, gate_refused, answer, got, sent, elsewhere = run(body())
+    assert refused == ["execute", "fetchval", "fetch"], f"a recorded connection sent a marked statement: {refused}"
+    assert before_gate == (["SELECT 1"], ["SELECT 1"]), before_gate
+    assert gate_refused == 3, gate_refused
+    assert (answer, got, sent, elsewhere) == ("SENT", ["SELECT 1", marked], ["SELECT 1", marked], []), \
+        (answer, got, sent, elsewhere)
+
+
+def test_pg_a_probe_name_already_taken_is_a_refusal_never_a_drop(monkeypatch, tmp_path):
+    """Round 4, item 2 (R3 finding 1): the probe's name is taken -- by a
+    database this case makes first, with a session open on it and a row in
+    it -- and the harness is pointed at that name. It stops at CREATE
+    DATABASE: the error propagates, nothing is terminated or dropped, and
+    the database, its session and its row are all still there after."""
+    probe = _probe_name(f"{SCRATCH_MARKER}_gate_taken")
+    lane = make_url(require_pg())
+
+    async def body():
+        record = []
+        await _create_probe_database(lane, probe, record)      # someone's database, at the probe's name
+        holder = await _connect(lane, record, database=probe)
+        try:
+            await holder.execute("CREATE TABLE public.theirs (v int); INSERT INTO public.theirs VALUES (7)")
+            try:
+                await _drive_env_against_async(monkeypatch, tmp_path, probe, "SELECT 1", "SELECT 1")
+                second = None
+            except Exception as ex:
+                second = ex
+            try:
+                kept = await holder.fetchval("SELECT v FROM public.theirs")
+            except Exception as ex:
+                kept = ex
+        finally:
+            try:
+                await holder.close()
+            except Exception:
+                pass
+        check = await _connect(lane, record)
+        try:
+            present = await check.fetchval("SELECT count(*) FROM pg_catalog.pg_database WHERE datname = $1", probe)
+        finally:
+            await check.close()
+        return second, kept, present, record
+
+    cleanup = []
+    try:
+        second, kept, present, record = run(body())
+        assert getattr(second, "sqlstate", None) == "42P04", \
+            f"the second claim of {probe!r} was not refused as a duplicate database: {second!r}"
+        assert kept == 7, f"the holder's session or its row did not survive the second claim: {kept!r}"
+        assert present == 1, f"{probe!r} is gone"
+        assert [s for s in record if _destructive(s)] == [], "a terminate or DROP was sent"
+        print(f"REFUSED [taken]: {type(second).__name__}: {second}")
+    finally:
+        if probe in _PROBES_CREATED:
+            run(_drop_probe_database(lane, probe, cleanup, planted={("public", "theirs")}))
+    _assert_the_probe_cleanup(cleanup, probe)
 
 
 # ── L6: the automatic post-match upload, as a CONTRACT ────────────────────
