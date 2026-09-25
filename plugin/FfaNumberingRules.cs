@@ -996,22 +996,29 @@ namespace CompetitiveRounds
         }
 
         // SITTING-MODEL-BEGIN
-        /// <summary>RJ-DRIFT V4 section 5: the walk model. Pure C#. It calls the
-        /// production rule functions above, and FfaReportRules' GameKeySnapshot
-        /// and ElectReporter, at the sites where FfaMode and GameStateWatcher
-        /// call them, and re-implements none of them (#391). Photon is modelled
-        /// as one FIFO queue per sender and receiver, each with its own stall
-        /// switch (#428): a seat sees its own room and player property writes
-        /// only when they echo back, and a pre-join stage merges locally. PUN's
-        /// fresh Room object per entry is a fresh token per entry, compared by
-        /// reference. Every walk states its expected values before it runs; each
-        /// walk case prints its per-seat start and freeze lines as TRACE lines,
-        /// then one verdict line, "PASS walk-Dx Wy | ..." or "FAIL walk-Dx Wy |
-        /// ...". A walk that differs from V4's prose says so where it is scripted.</summary>
+        /// <summary>RJ-DRIFT V4 section 5, with V10's additions: the walk model.
+        /// Pure C#. It calls the production rule functions above, and
+        /// FfaReportRules' GameKeySnapshot and ElectReporter, at the sites where
+        /// FfaMode and GameStateWatcher call them, and re-implements none of them
+        /// (#391). Photon is modelled as one FIFO queue per sender and receiver,
+        /// each with its own stall switch (#428): a seat sees its own room and
+        /// player property writes only when they echo back, and a pre-join stage
+        /// merges locally. PUN's fresh Room object per entry is a fresh token per
+        /// entry, compared by reference. A new-build seat runs N19 (change 26) at
+        /// FfaMode's sites; a current-build seat runs the pin. The model ledger
+        /// numbers the room's pick phases g{G}.{n} (the opening draw is 1) and
+        /// records every epoch's issuer and every published value's writer and
+        /// phase; NO-REPLAY, EPOCH, USE, SOURCE and CARDS read only the ledger,
+        /// never a production field. Every walk states its expected values before
+        /// it runs; each walk case prints its per-seat start and freeze lines as
+        /// TRACE lines, then one verdict line, "PASS walk-Dx Wy | ..." or "FAIL
+        /// walk-Dx Wy | ...". A walk that differs from the design's prose says so
+        /// where it is scripted.</summary>
         internal static class SittingModel
         {
             private const string KCyc = "cr_ffa_cyc", KRes = "cr_ffa_res", KDl = "cr_ffa_dl", KSeq = "cr_ffa_seq";
-            private const string KGw = "cr_ffa_gw", KRg = "cr_ffa_rg", KPick = "cr_ffa_pk";
+            private const string KGw = "cr_ffa_gw", KRg = "cr_ffa_rg", KPick = "cr_ffa_pk", KPe = "cr_ffa_pe";
+            private const string KEp = "cr_ffa_ep", KRep = "cr_ffa_rep";
             private const double TickS = 0.5, LatencyS = 0.2, RoundS = 20.0, BetweenGamesS = 10.0;
 
             internal static void RunAll(SelfTestResult r)
@@ -1065,11 +1072,31 @@ namespace CompetitiveRounds
                 internal readonly HashSet<int> Locked = new HashSet<int>();
             }
 
+            /// <summary>The ledger's record of one published value: its writer and
+            /// the room pick phase that wrote it (a re-stamp is written in the
+            /// phase it runs in).</summary>
+            private sealed class Prov
+            {
+                internal Seat Writer;
+                internal int Serial;
+                internal string Label;
+            }
+
+            /// <summary>The ledger's record of one phase epoch: its issuer and the
+            /// room pick phase that issued it.</summary>
+            private sealed class EpochRec
+            {
+                internal Seat Issuer;
+                internal int Serial;
+                internal string Label;
+            }
+
             private sealed class Room
             {
                 internal readonly string Name;
                 internal readonly bool Checked;
                 internal readonly Dictionary<string, string> Props = new Dictionary<string, string>();
+                internal readonly Dictionary<string, Prov> PropProv = new Dictionary<string, Prov>();
                 internal readonly List<Seat> Present = new List<Seat>();
                 internal readonly Stub Stub = new Stub();
                 internal int NextActor = 1;
@@ -1089,6 +1116,10 @@ namespace CompetitiveRounds
                 internal string RawAtEntry, RawAtResultEntry, Nonce;
                 internal bool Gate, WasMaster, IPick;
                 internal int RgNow, LastGot;
+                // N19: the ledger's room phase, the round winner, and the watch
+                // steps' last master and last-seen values
+                internal int Serial, Winner, LastMaster;
+                internal string RawCycSeen, RawEpSeen;
             }
 
             private sealed class Msg
@@ -1099,6 +1130,7 @@ namespace CompetitiveRounds
                 internal bool RoomProp;
                 internal string Key;
                 internal object Val;
+                internal Prov Prov;
             }
 
             private sealed class Seat
@@ -1135,6 +1167,22 @@ namespace CompetitiveRounds
                 internal int PinFrozen = -1;
                 internal Phase Ph;
                 internal string PendingPick;
+                // N19 (change 26): the held epoch and its issuer, the process-wide
+                // FINALIZED set (a relaunch empties it), and V9's held pick
+                internal string PE;
+                internal int PEIssuer = -1;
+                internal HashSet<string> Finalized = new HashSet<string>();
+                internal bool HoldPick;
+                internal string HeldPick;
+                // the ledger: the record of every value this seat holds, kept as
+                // its property dictionaries keep the values; and the room phases
+                // this seat terminated (never reset)
+                internal Dictionary<string, Prov> LocalProv = new Dictionary<string, Prov>();
+                internal Dictionary<string, Prov> AuthProv = new Dictionary<string, Prov>();
+                internal Dictionary<string, Prov> RoomViewProv = new Dictionary<string, Prov>();
+                internal readonly Dictionary<Seat, Dictionary<string, Prov>> ViewProv =
+                    new Dictionary<Seat, Dictionary<string, Prov>>();
+                internal readonly HashSet<int> Terminated = new HashSet<int>();
                 // change 23: the own phase identity, its Room object and N10 sequence
                 internal int OwnG = NoGame, OwnC, OwnSeq = -1;
                 internal object OwnObj;
@@ -1151,14 +1199,16 @@ namespace CompetitiveRounds
 
             /// <summary>A game's options: entry orders ('1', '2', '3' for V4's i, ii,
             /// iii), the number of points, hooks, the seats that skip the edge
-            /// (P6), and a report lost in flight.</summary>
+            /// (P6), and a report lost in flight. AfterResult (V7) fires one tick
+            /// after a cycle's first result write, so that write is delivered
+            /// before the hook's event.</summary>
             private sealed class Opts
             {
                 internal readonly Dictionary<Seat, char> Order = new Dictionary<Seat, char>();
                 internal readonly HashSet<Seat> SkipEdge = new HashSet<Seat>();
                 internal int Points = 4;
                 internal Func<int, bool> Entries;
-                internal Action<int> AfterEntries, AfterCycle, AfterPoint;
+                internal Action<int> AfterEntries, AfterCycle, AfterPoint, AfterResult;
                 internal Seat LostReport;
             }
 
@@ -1175,6 +1225,14 @@ namespace CompetitiveRounds
                 internal readonly Dictionary<Seat, bool> FirstInEntry = new Dictionary<Seat, bool>();
                 internal bool G1;
                 internal bool StartChecked;
+                // CARDS: a scripted disturbance, the game's room phases, each
+                // phase's closed manifest and each seat's applied result
+                internal bool Disturbed;
+                internal readonly List<int> Phases = new List<int>();
+                internal readonly Dictionary<int, string> PhaseLabel = new Dictionary<int, string>();
+                internal readonly Dictionary<int, List<int>> Manifest = new Dictionary<int, List<int>>();
+                internal readonly Dictionary<int, Dictionary<Seat, Dictionary<int, string>>> Applied =
+                    new Dictionary<int, Dictionary<Seat, Dictionary<int, string>>>();
             }
 
             private sealed partial class Model
@@ -1190,6 +1248,15 @@ namespace CompetitiveRounds
                 private readonly List<string> _counts = new List<string>();
                 private int _nextSteam = 1001;
                 private GameRec _game;
+                // the ledger: the room pick phase (serial and label g{G}.{n}),
+                // every epoch's issuer, and the counts the PASS line prints
+                private int _serial, _phaseN;
+                private string _label = "g0.0";
+                private readonly Dictionary<string, EpochRec> _epochs = new Dictionary<string, EpochRec>();
+                private int _sourceChecks, _useChecks;
+                private readonly List<string> _cards = new List<string>();
+                private bool _playing, _injectNext, _afterResultPending, _afterResultFired;
+                private Opts _opts;
 
                 internal Model(SelfTestResult r, string id) { _r = r; _id = id; }
 
@@ -1200,8 +1267,14 @@ namespace CompetitiveRounds
                     foreach (var t in _trace) _r.Report.Append("TRACE ").Append(_id).Append(' ').Append(t).Append('\n');
                     bool ok = _fails.Count == 0;
                     if (ok) _r.Passed++; else _r.Failed++;
+                    // The positive arms' counts: LIVE-F per game, CARDS per game
+                    // (applied of expected), and the applied results SOURCE and the
+                    // epoch uses USE checked in the walk.
+                    string pass = "LIVE-F " + string.Join(" ", _counts.ToArray())
+                                  + " | CARDS " + (_cards.Count > 0 ? string.Join(" ", _cards.ToArray()) : "none")
+                                  + " | SOURCE " + I(_sourceChecks) + " | USE " + I(_useChecks);
                     _r.Report.Append(ok ? "PASS " : "FAIL ").Append(_id).Append(" | ")
-                        .Append(ok ? "LIVE-F " + string.Join(" ", _counts.ToArray()) : string.Join("; ", _fails.ToArray()))
+                        .Append(ok ? pass : string.Join("; ", _fails.ToArray()))
                         .Append('\n');
                 }
 
@@ -1232,31 +1305,48 @@ namespace CompetitiveRounds
 
                 private static bool IsMaster(Seat s) { return s.R != null && s.R.Master == s; }
 
-                private void Send(Seat from, bool roomProp, string key, object val)
+                private void Send(Seat from, bool roomProp, string key, object val, Prov prov)
                 {
                     foreach (var to in from.R.Present)
                         _queue.Add(new Msg { From = from, To = to, Owner = from, ToObj = to.Obj, Due = T + LatencyS,
-                                             RoomProp = roomProp, Key = key, Val = val });
+                                             RoomProp = roomProp, Key = key, Val = val, Prov = prov });
                 }
+
+                /// <summary>The ledger's record of a value this seat writes now.</summary>
+                private Prov NewProv(Seat s) { return new Prov { Writer = s, Serial = _serial, Label = _label }; }
 
                 private bool WriteRoom(Seat s, string key, string val)
                 {
                     if (s.R == null) return false;
+                    var prov = NewProv(s);
                     if (val == null) s.R.Props.Remove(key); else s.R.Props[key] = val;
-                    Send(s, true, key, val);
+                    MergeProv(s.R.PropProv, key, val, prov);
+                    Send(s, true, key, val, prov);
                     return true;
                 }
 
                 private void WriteOwn(Seat s, string key, object val)
                 {
-                    if (s.R == null) { Merge(s.Local, key, val); return; }
+                    var prov = NewProv(s);
+                    if (s.R == null)
+                    {
+                        Merge(s.Local, key, val);
+                        MergeProv(s.LocalProv, key, val, prov);
+                        return;
+                    }
                     Merge(s.Auth, key, val);
-                    Send(s, false, key, val);
+                    MergeProv(s.AuthProv, key, val, prov);
+                    Send(s, false, key, val, prov);
                 }
 
                 private static void Merge(Dictionary<string, object> d, string key, object val)
                 {
                     if (val == null) d.Remove(key); else d[key] = val;
+                }
+
+                private static void MergeProv(Dictionary<string, Prov> d, string key, object val, Prov prov)
+                {
+                    if (val == null) d.Remove(key); else d[key] = prov;
                 }
 
                 private void Deliver()
@@ -1278,20 +1368,51 @@ namespace CompetitiveRounds
                         if (m.RoomProp)
                         {
                             if (m.Val == null) m.To.RoomView.Remove(m.Key); else m.To.RoomView[m.Key] = (string)m.Val;
+                            MergeProv(m.To.RoomViewProv, m.Key, m.Val, m.Prov);
                         }
-                        else if (m.Owner == m.To) Merge(m.To.Local, m.Key, m.Val);
+                        else if (m.Owner == m.To)
+                        {
+                            Merge(m.To.Local, m.Key, m.Val);
+                            MergeProv(m.To.LocalProv, m.Key, m.Val, m.Prov);
+                        }
                         else
                         {
                             Dictionary<string, object> v;
                             if (m.To.View.TryGetValue(m.Owner, out v)) Merge(v, m.Key, m.Val);
+                            Dictionary<string, Prov> pv;
+                            if (m.To.ViewProv.TryGetValue(m.Owner, out pv)) MergeProv(pv, m.Key, m.Val, m.Prov);
                         }
                     }
                 }
 
-                internal void Stall(Seat from, Seat to) { _stalled.Add(from.Name + ">" + to.Name); }
+                internal void Stall(Seat from, Seat to) { _stalled.Add(from.Name + ">" + to.Name); Disturb(); }
                 internal void Unstall(Seat from, Seat to) { _stalled.Remove(from.Name + ">" + to.Name); }
-                internal void StallInbound(Seat to) { foreach (var p in _seats) _stalled.Add(p.Name + ">" + to.Name); }
+                internal void StallInbound(Seat to)
+                {
+                    foreach (var p in _seats) _stalled.Add(p.Name + ">" + to.Name);
+                    Disturb();
+                }
                 internal void UnstallInbound(Seat to) { foreach (var p in _seats) _stalled.Remove(p.Name + ">" + to.Name); }
+
+                /// <summary>CARDS applies only to a game in which no join, leave,
+                /// relaunch, promotion, stall, held pick or injection is scripted:
+                /// each of those scripted during a checked game marks it, and a stall
+                /// still in place, or an injection made before it, marks it at its
+                /// start.</summary>
+                private void Disturb()
+                {
+                    if (_playing && _game != null) _game.Disturbed = true;
+                }
+
+                /// <summary>V5's Inject: a seat's counter and sequence, set between
+                /// games (as W7.4 sets them); the next game is disturbed.</summary>
+                internal void Inject(Seat s, int counter, int seq)
+                {
+                    s.GameNumber = counter;
+                    s.LocalGameSeq = seq;
+                    _injectNext = true;
+                    Disturb();
+                }
 
                 internal void Advance(double seconds)
                 {
@@ -1303,6 +1424,14 @@ namespace CompetitiveRounds
                 {
                     T += TickS;
                     Deliver();
+                    if (_afterResultPending)
+                    {
+                        // V7's AfterResult: one tick after the result write, which
+                        // this Deliver has delivered.
+                        _afterResultPending = false;
+                        _afterResultFired = true;
+                        _opts.AfterResult(_phaseN);
+                    }
                     for (int i = 0; i < _seats.Count; i++)
                     {
                         var s = _seats[i];
@@ -1349,6 +1478,24 @@ namespace CompetitiveRounds
                 {
                     string v;
                     return s.RoomView.TryGetValue(key, out v) ? v : null;
+                }
+
+                /// <summary>The ledger's record of the player property p holds, as this
+                /// seat sees it (its own echo when p is this seat).</summary>
+                private static Prov ProvOf(Seat s, Seat p, string key)
+                {
+                    Dictionary<string, Prov> d;
+                    if (p == s) d = s.LocalProv;
+                    else if (!s.ViewProv.TryGetValue(p, out d)) return null;
+                    Prov v;
+                    return d.TryGetValue(key, out v) ? v : null;
+                }
+
+                /// <summary>The ledger's record of the room property this seat sees.</summary>
+                private static Prov RoomProvOf(Seat s, string key)
+                {
+                    Prov v;
+                    return s.RoomViewProv.TryGetValue(key, out v) ? v : null;
                 }
 
                 private static int PublishedGameNumber(Seat s)
@@ -1410,15 +1557,21 @@ namespace CompetitiveRounds
                     s.Obj = new object();
                     s.Actor = room.NextActor++;
                     s.Auth = new Dictionary<string, object>(s.Local);
+                    s.AuthProv = new Dictionary<string, Prov>(s.LocalProv);
                     s.RoomView = new Dictionary<string, string>(room.Props);
+                    s.RoomViewProv = new Dictionary<string, Prov>(room.PropProv);
                     s.View.Clear();
+                    s.ViewProv.Clear();
                     foreach (var p in room.Present)
                     {
                         s.View[p] = new Dictionary<string, object>(p.Auth);
                         p.View[s] = new Dictionary<string, object>(s.Auth);
+                        s.ViewProv[p] = new Dictionary<string, Prov>(p.AuthProv);
+                        p.ViewProv[s] = new Dictionary<string, Prov>(s.AuthProv);
                     }
                     room.Present.Add(s);
                     if (room.Master == null) room.Master = s;
+                    Disturb();
                 }
 
                 internal void Join(Seat s, Room room, string path) { Join(s, room, path, false); }
@@ -1431,14 +1584,21 @@ namespace CompetitiveRounds
 
                 private void RemoveFromRoom(Seat s)
                 {
+                    Disturb();
                     var room = s.R;
                     room.Present.Remove(s);
-                    foreach (var p in room.Present) p.View.Remove(s);
+                    foreach (var p in room.Present)
+                    {
+                        p.View.Remove(s);
+                        p.ViewProv.Remove(s);
+                    }
                     s.R = null;
                     s.Obj = null;
                     s.Ph = null;
                     s.View.Clear();
+                    s.ViewProv.Clear();
                     s.RoomView = new Dictionary<string, string>();
+                    s.RoomViewProv = new Dictionary<string, Prov>();
                     if (room.InGame && !s.Spectator && !s.NoMod)
                         foreach (var p in room.Present)
                             if (!p.Spectator && !p.NoMod) RecordLeaver(p, s, room);
@@ -1494,9 +1654,15 @@ namespace CompetitiveRounds
                     s.PinFrozen = -1; s.PendingPick = null;
                     s.OwnG = NoGame; s.OwnC = 0; s.OwnSeq = -1; s.OwnObj = null;
                     s.TruthTarget = null; s.ExpAdvert = null;
+                    s.LocalProv = new Dictionary<string, Prov>();
+                    s.AuthProv = new Dictionary<string, Prov>();
+                    s.PE = null; s.PEIssuer = -1;
+                    s.Finalized = new HashSet<string>();
+                    s.HoldPick = false; s.HeldPick = null;
+                    Disturb();
                 }
 
-                internal void Promote(Seat s) { s.Spectator = false; }
+                internal void Promote(Seat s) { s.Spectator = false; Disturb(); }
 
                 // ── FfaMode's numbering state (design V4 §4) ──────────────
 
@@ -1616,6 +1782,11 @@ namespace CompetitiveRounds
                     string advert = AdvertAtJoin(s.AdvertTarget, s.AdvertKey, joinTarget);
                     Merge(s.Local, KGw, WitnessAtJoin(WitnessOf(s, s)));
                     Merge(s.Local, KRg, advert);
+                    // N19(c): both pick keys staged empty before the join.
+                    Merge(s.Local, KPick, "");
+                    Merge(s.Local, KPe, "");
+                    s.LocalProv.Remove(KPick);
+                    s.LocalProv.Remove(KPe);
                 }
 
                 private bool EvaluateFollow(Seat s, bool gate, int rgNow)
@@ -1647,6 +1818,12 @@ namespace CompetitiveRounds
                 private void OnRoomLeft(Seat s)
                 {
                     Merge(s.Local, KPick, "");
+                    s.LocalProv.Remove(KPick);
+                    if (!s.Current)
+                    {
+                        Merge(s.Local, KPe, "");   // N19(c)
+                        s.LocalProv.Remove(KPe);
+                    }
                     s.GameNumber = 0;
                     if (!s.Current)
                     {
@@ -1661,6 +1838,7 @@ namespace CompetitiveRounds
                     CardSeqReset(s);
                     s.Ph = null;
                     s.PendingPick = null;
+                    s.HeldPick = null;
                 }
 
                 private void RecordLeaver(Seat p, Seat leaver, Room room)
@@ -1893,6 +2071,204 @@ namespace CompetitiveRounds
 
                 internal void Enter(Seat s) { EnterPhase(s, _winnerNow); }
 
+                // ── N19 (change 26) in the model ──────────────────────────
+                //
+                // A new-build seat holds FfaMode's phaseEpoch and its issuer
+                // (Seat.PE, Seat.PEIssuer) and the process-wide FINALIZED set
+                // (Seat.Finalized, emptied only by a relaunch); each call below
+                // is FfaMode's, over the production rule functions. The ledger
+                // records each epoch's issuer and room phase (_epochs) and each
+                // published value's writer and room phase (Prov); EPOCH, USE,
+                // SOURCE, NO-REPLAY and CARDS read only the ledger. A
+                // current-build seat reads and writes no N19 key.
+
+                private static int MasterActorOf(Seat s)
+                {
+                    return s.R != null && s.R.Master != null ? s.R.Master.Actor : -1;
+                }
+
+                /// <summary>FfaMode.CachedEnvelopeEpoch: the epoch field of the
+                /// cached result envelope.</summary>
+                private static string CachedEnvelopeEpoch(Seat s)
+                {
+                    string rep = Raw(s, KRep);
+                    if (rep == null) return null;
+                    int i = rep.IndexOf(':');
+                    return i >= 0 ? rep.Substring(0, i) : rep;
+                }
+
+                /// <summary>FfaMode.WriteCycleProp: the identity and, with an epoch,
+                /// cr_ffa_ep "{E}:{actor}", sent back to back on every link, so
+                /// every receiver takes both in one delivery.</summary>
+                private bool WriteCycle(Seat s, string value, string epoch)
+                {
+                    if (!WriteRoom(s, KCyc, value)) return false;
+                    if (epoch != null) WriteRoom(s, KEp, epoch + ":" + I(s.Actor));
+                    return true;
+                }
+
+                /// <summary>FfaMode.WriteResultProp: cr_ffa_res and the envelope
+                /// cr_ffa_rep "{E}:{actor}:{value}", back to back.</summary>
+                private void WriteResult(Seat s, string value, string epoch)
+                {
+                    WriteRoom(s, KRes, value);
+                    WriteRoom(s, KRep, epoch + ":" + I(s.Actor) + ":" + value);
+                }
+
+                /// <summary>FfaMode.IssuePhaseEpoch. The ledger records the issuer and
+                /// the room phase.</summary>
+                private void IssueEpoch(Seat s)
+                {
+                    s.PE = NewEpoch();
+                    s.PEIssuer = s.Actor;
+                    _epochs[s.PE] = new EpochRec { Issuer = s, Serial = _serial, Label = _label };
+                }
+
+                /// <summary>FfaMode.EpochForUse (N19(i)'s use-site check). USE checks
+                /// the epoch returned, from the ledger's issuer record, at every call:
+                /// none, or one whose issuer is the room's present master.</summary>
+                private string EpochForUse(Seat s, bool publish)
+                {
+                    string e = EpochAtUse(s.PE, s.PEIssuer, MasterActorOf(s));
+                    if (e == null && s.PE != null)
+                    {
+                        s.PE = HeldEpoch(s.PE, null);
+                        s.PEIssuer = -1;
+                    }
+                    _useChecks++;
+                    EpochRec r;
+                    if (e != null && _epochs.TryGetValue(e, out r) && (s.R == null || r.Issuer != s.R.Master))
+                        Fail("USE " + _label + " " + s.Name + (publish ? " published" : " read")
+                             + " under the epoch of departed " + r.Issuer.Name);
+                    return e;
+                }
+
+                /// <summary>FfaMode.EpochForWrite: the held epoch for use, else a
+                /// fresh one (fresh: the caller re-stamps its pending pick).</summary>
+                private string EpochForWrite(Seat s, out bool fresh)
+                {
+                    string e = EpochForUse(s, true);
+                    if (e != null) { fresh = false; return e; }
+                    IssueEpoch(s);
+                    fresh = true;
+                    return s.PE;
+                }
+
+                /// <summary>EPOCH, from the ledger: a held epoch is not one of a room
+                /// phase this seat terminated, and its issuer is the present master.</summary>
+                private void CheckHeldEpoch(Seat s)
+                {
+                    EpochRec r;
+                    if (s.PE == null || !_epochs.TryGetValue(s.PE, out r)) return;
+                    if (s.Terminated.Contains(r.Serial))
+                        Fail("EPOCH " + _label + " " + s.Name + " holds the epoch of its terminated " + r.Label);
+                    if (s.R == null || r.Issuer != s.R.Master)
+                        Fail("EPOCH " + _label + " " + s.Name + " holds the epoch of departed " + r.Issuer.Name);
+                }
+
+                /// <summary>FfaMode.EvaluatePhaseEpoch: PE = HeldEpoch(PE, live), live
+                /// none on a master and LiveEpoch over cr_ffa_ep otherwise; a
+                /// different non-null value re-stamps the pending pick.</summary>
+                private void EvaluateEpoch(Seat s, Phase ph)
+                {
+                    string raw = Raw(s, KEp);
+                    string live = IsMaster(s) ? null : LiveEpoch(raw, MasterActorOf(s), CachedEnvelopeEpoch(s), s.Finalized);
+                    string before = s.PE;
+                    s.PE = HeldEpoch(s.PE, live);
+                    if (s.PE == null)
+                    {
+                        s.PEIssuer = -1;
+                        return;
+                    }
+                    if (live != null && s.PE == live)
+                    {
+                        string e;
+                        int? issuer;
+                        SplitEpochField(raw, out e, out issuer);
+                        s.PEIssuer = issuer ?? -1;
+                    }
+                    CheckHeldEpoch(s);
+                    if (s.PE != before) Restamp(s, ph);
+                }
+
+                /// <summary>FfaMode.EpochMasterCheck: on a master change since the
+                /// last one seen (recorded at the entry), evaluate.</summary>
+                private void EpochMasterCheck(Seat s, Phase ph)
+                {
+                    int now = MasterActorOf(s);
+                    if (now == ph.LastMaster) return;
+                    ph.LastMaster = now;
+                    EvaluateEpoch(s, ph);
+                }
+
+                /// <summary>FfaMode.EpochChangeCheck (a non-master): evaluate on a
+                /// change of cr_ffa_cyc or cr_ffa_ep since the last evaluation point.</summary>
+                private void EpochChangeCheck(Seat s, Phase ph)
+                {
+                    string cyc = Raw(s, KCyc), ep = Raw(s, KEp);
+                    if (cyc == ph.RawCycSeen && ep == ph.RawEpSeen) return;
+                    ph.RawCycSeen = cyc;
+                    ph.RawEpSeen = ep;
+                    EvaluateEpoch(s, ph);
+                }
+
+                /// <summary>FfaMode.ResultPresentEitherKey.</summary>
+                private static bool ResultPresentEitherKey(Seat s, int g, int c)
+                {
+                    return ReadCycleResult(s, g, c) || EnvelopeNames(Raw(s, KRep), g, c);
+                }
+
+                /// <summary>FfaLocalPickUI's publish. The pin writes its keyed
+                /// cr_ffa_pk; the new build writes cr_ffa_pk through LegacyPickValue
+                /// and, under the epoch held for use, cr_ffa_pe (N19(c), (h)). The
+                /// pick is recorded as pending either way.</summary>
+                private void PublishPick(Seat s, Phase ph, string card)
+                {
+                    if (s.Current)
+                        WriteOwn(s, KPick, ph.Nonce + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":" + card);
+                    else
+                    {
+                        string ep = EpochForUse(s, true);
+                        WriteOwn(s, KPick, LegacyPickValue(ph.Nonce, ph.Game, ph.Cycle, card));
+                        if (ep != null) WriteOwn(s, KPe, PickValue(ph.Nonce, ep, ph.Game, ph.Cycle, card));
+                    }
+                    s.PendingPick = card;
+                }
+
+                /// <summary>FfaMode.RepublishLocalPickFor: the pending pick at the
+                /// phase's identity; a no-op with none pending.</summary>
+                private void Restamp(Seat s, Phase ph)
+                {
+                    if (s.PendingPick == null) return;
+                    if (s.Current)
+                    {
+                        WriteOwn(s, KPick, ph.Nonce + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":" + s.PendingPick);
+                        return;
+                    }
+                    string ep = EpochForUse(s, true);
+                    WriteOwn(s, KPick, LegacyPickValue(ph.Nonce, ph.Game, ph.Cycle, s.PendingPick));
+                    if (ep != null) WriteOwn(s, KPe, PickValue(ph.Nonce, ep, ph.Game, ph.Cycle, s.PendingPick));
+                }
+
+                /// <summary>V9's HoldPick: the seat's next pick is chosen but neither
+                /// published nor recorded as pending, as a pick UI still open.</summary>
+                internal void HoldPick(Seat s)
+                {
+                    s.HoldPick = true;
+                    Disturb();
+                }
+
+                /// <summary>V9's Pick: the held pick is published at the seat's live
+                /// phase identity, as FfaLocalPickUI does, in one synchronous call; a
+                /// no-op with no held pick.</summary>
+                internal void Pick(Seat s)
+                {
+                    if (s.HeldPick == null || s.Ph == null || s.R == null) return;
+                    string card = s.HeldPick;
+                    s.HeldPick = null;
+                    PublishPick(s, s.Ph, card);
+                }
+
                 private void EnterPhase(Seat s, int winnerActor)
                 {
                     var room = s.R;
@@ -1905,7 +2281,10 @@ namespace CompetitiveRounds
                     ph.AdoptedAt = -999;
                     ph.LastPublishedDl = -1;
                     ph.Nonce = room.Name;
+                    ph.Winner = winnerActor;
+                    ph.Serial = _serial;
                     s.PendingPick = null;
+                    s.HeldPick = null;
                     ph.Pickers = new List<int>();
                     foreach (var p in room.Present) if (!p.Spectator && p.Actor != winnerActor) ph.Pickers.Add(p.Actor);
                     ph.Pickers.Sort();
@@ -1917,6 +2296,15 @@ namespace CompetitiveRounds
                     }
                     else
                     {
+                        // N19(b)/(i): the hold starts empty at every entry; a
+                        // non-master evaluates at its entry read, and the watch
+                        // steps below start from these values.
+                        s.PE = null;
+                        s.PEIssuer = -1;
+                        ph.RawCycSeen = ph.RawAtEntry;
+                        ph.RawEpSeen = Raw(s, KEp);
+                        ph.LastMaster = MasterActorOf(s);
+                        if (!IsMaster(s)) EvaluateEpoch(s, ph);
                         ph.Gate = GateNow(s);
                         ph.RgNow = RoomGameOf(s);
                         bool follow = EvaluateFollow(s, ph.Gate, ph.RgNow);
@@ -1944,9 +2332,16 @@ namespace CompetitiveRounds
                         }
                         RecordOwn(s, ph.Game, ph.Cycle);
                     }
-                    if (IsMaster(s) && KeyedReadsAllowed(ph.Gate, ph.Game)
-                        && WriteRoom(s, KCyc, CycValue(ph.Game, ph.Cycle, ph.Pickers)) && !s.Current)
-                        ArmTicket(s, ph.Game);
+                    if (IsMaster(s) && KeyedReadsAllowed(ph.Gate, ph.Game))
+                    {
+                        if (s.Current) WriteRoom(s, KCyc, CycValue(ph.Game, ph.Cycle, ph.Pickers));
+                        else
+                        {
+                            // N19(a): a fresh epoch at every entry write.
+                            IssueEpoch(s);
+                            if (WriteCycle(s, CycValue(ph.Game, ph.Cycle, ph.Pickers), s.PE)) ArmTicket(s, ph.Game);
+                        }
+                    }
                     StepPhase(s);
                 }
 
@@ -2001,6 +2396,13 @@ namespace CompetitiveRounds
 
                 private void WaitBody(Seat s, Phase ph)
                 {
+                    if (!s.Current)
+                    {
+                        // N19(i): a master change evaluates before this iteration's
+                        // read or publish; then N19(b), a non-master on a change.
+                        EpochMasterCheck(s, ph);
+                        if (!IsMaster(s)) EpochChangeCheck(s, ph);
+                    }
                     if (KeyedReadsAllowed(ph.Gate, ph.Game))
                     {
                         ph.Manifest = ReadCycleManifest(s, ph.Game, ph.Cycle);
@@ -2022,14 +2424,82 @@ namespace CompetitiveRounds
                             {
                                 TakeField(s, ph, ad);
                                 SetAcquired(s, ad.G);
+                                Restamp(s, ph);
                                 return;
                             }
-                            if (!regimeNow && Ahead(ad, ph)) { TakeField(s, ph, ad); return; }
+                            if (!regimeNow && Ahead(ad, ph)) { TakeField(s, ph, ad); Restamp(s, ph); return; }
                         }
                     }
-                    if (IsMaster(s) && KeyedReadsAllowed(ph.Gate, ph.Game) && T - ph.Start > 2.0
-                        && WriteRoom(s, KCyc, CycValue(ph.Game, ph.Cycle, ph.Pickers)) && !s.Current)
-                        ArmTicket(s, ph.Game);
+                    // Change 24, N12(f): a seat that became master inside this wait
+                    // with no identity opens at once; its manifest ends the wait.
+                    if (!s.Current && ReopensOnPromotion(ph.Gate, IsMaster(s), ph.Game))
+                    {
+                        OpenOnPromotion(s, ph);
+                        return;
+                    }
+                    ReopenCheck(s, ph);
+                    if (IsMaster(s) && KeyedReadsAllowed(ph.Gate, ph.Game) && T - ph.Start > 2.0)
+                    {
+                        if (s.Current) WriteRoom(s, KCyc, CycValue(ph.Game, ph.Cycle, ph.Pickers));
+                        else
+                        {
+                            // N19(a): the held epoch is re-sent; a master holding none
+                            // issues a fresh one and re-stamps its pending pick.
+                            bool fresh;
+                            string ep = EpochForWrite(s, out fresh);
+                            if (WriteCycle(s, CycValue(ph.Game, ph.Cycle, ph.Pickers), ep)) ArmTicket(s, ph.Game);
+                            if (fresh) Restamp(s, ph);
+                        }
+                    }
+                }
+
+                /// <summary>FfaMode.OpenOnPromotion (change 24, N12(f)): a cached LIVE
+                /// field, taken as the entry takes it, else the opener over the local
+                /// picker set; always a fresh epoch; the write (the ticket on true),
+                /// the re-stamp. Returns the value written.</summary>
+                private string OpenOnPromotion(Seat s, Phase ph)
+                {
+                    var field = ParseCyc(Raw(s, KCyc));
+                    List<int> manifest;
+                    if (field != null && LiveNow(s, field.G, field.C))
+                    {
+                        ph.Game = field.G;
+                        ph.Cycle = field.C;
+                        manifest = new List<int>(field.Ids);
+                        s.GameNumber = field.G;
+                        s.CycleNumber = field.C;
+                        SetAcquired(s, field.G);
+                    }
+                    else
+                    {
+                        bool openingDraw = ph.Winner < 0 && s.CycleNumber == 1;
+                        int oc, ownC;
+                        int ownG = OwnNow(s, out ownC);
+                        ph.Game = MasterOpenerGame(openingDraw, ownG, ownC, field != null ? field.G : NoGame,
+                                                   field != null ? field.C : 0, out oc);
+                        ph.Cycle = oc;
+                        manifest = new List<int>(ph.Pickers);
+                    }
+                    RecordOwn(s, ph.Game, ph.Cycle);
+                    IssueEpoch(s);
+                    string value = CycValue(ph.Game, ph.Cycle, manifest);
+                    if (WriteCycle(s, value, s.PE)) ArmTicket(s, ph.Game);
+                    Restamp(s, ph);
+                    ph.Manifest = manifest;
+                    if (s.R != null && s.R.Checked)
+                        _trace.Add("g" + I(s.R.PhysGame) + " " + s.Name + " opener " + I(ph.Game) + ":" + I(ph.Cycle)
+                                   + " on promotion");
+                    return value;
+                }
+
+                /// <summary>CLOSE-SAFE's second clause, from the seat's state (never
+                /// from ReopensOnPromotion, the thing under test): past the N12(f)
+                /// point, a master under G holds an identity.</summary>
+                private void ReopenCheck(Seat s, Phase ph)
+                {
+                    if (s.Current || !IsMaster(s) || !ph.Gate || ph.Game >= 1 || s.R == null || !s.R.Checked) return;
+                    Fail("CLOSE-SAFE g" + I(s.R.PhysGame) + " c" + I(_phaseN) + " " + s.Name
+                         + " master without identity did not reopen");
                 }
 
                 private void BeginResult(Seat s, Phase ph)
@@ -2037,8 +2507,13 @@ namespace CompetitiveRounds
                     ph.IPick = KeyedReadsAllowed(ph.Gate, ph.Game) && ph.Manifest != null && ph.Manifest.Contains(s.Actor);
                     if (ph.IPick)
                     {
-                        s.PendingPick = "c" + s.Name + I(ph.Cycle);
-                        WriteOwn(s, KPick, ph.Nonce + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":" + s.PendingPick);
+                        string card = "c" + s.Name + I(ph.Cycle);
+                        if (s.HoldPick)
+                        {
+                            s.HoldPick = false;
+                            s.HeldPick = card;
+                        }
+                        else PublishPick(s, ph, card);
                     }
                     ph.Deadline = ph.Start + 45.0;
                     ph.AdoptedAt = -999;
@@ -2050,26 +2525,52 @@ namespace CompetitiveRounds
                     if (IsMaster(s))
                     {
                         var pre = DetectAhead(s, ph);
-                        if (pre != null) Adopt(s, ph, pre.G, pre.C, null, true, null);
+                        if (pre != null) AdoptFromPicks(s, ph, pre);
                     }
                 }
 
                 private void ResultBody(Seat s, Phase ph)
                 {
-                    if (KeyedReadsAllowed(ph.Gate, ph.Game) && ReadCycleResult(s, ph.Game, ph.Cycle)) { ph.Stage = 3; return; }
+                    if (s.Current)
+                    {
+                        if (KeyedReadsAllowed(ph.Gate, ph.Game) && ReadCycleResult(s, ph.Game, ph.Cycle))
+                        {
+                            Applied(s, ph, ParseResult(Raw(s, KRes)), RoomProvOf(s, KRes), null);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        // N19(i): a master change evaluates before the read; the
+                        // result comes only from the envelope, under the epoch held
+                        // for use and the present master.
+                        EpochMasterCheck(s, ph);
+                        if (KeyedReadsAllowed(ph.Gate, ph.Game))
+                        {
+                            string ep = EpochForUse(s, false);
+                            var res = ResultFromEnvelope(Raw(s, KRep), ep, MasterActorOf(s), ph.Game, ph.Cycle);
+                            if (res != null)
+                            {
+                                Applied(s, ph, res, RoomProvOf(s, KRep), ep);
+                                return;
+                            }
+                        }
+                    }
                     double now = T;
                     if (IsMaster(s))
                     {
                         var ahead = DetectAhead(s, ph);
-                        if (ahead != null) Adopt(s, ph, ahead.G, ahead.C, null, true, null);
+                        if (ahead != null) AdoptFromPicks(s, ph, ahead);
                     }
                     else
                     {
+                        // N19(b): after the read, a non-master evaluates on a change.
+                        if (!s.Current) EpochChangeCheck(s, ph);
                         string rawNow = Raw(s, KCyc);
                         var np = rawNow != ph.RawAtResultEntry ? ParseCyc(rawNow) : null;
                         if (s.Current)
                         {
-                            if (Ahead(np, ph)) Adopt(s, ph, np.G, np.C, np.Ids, false, rawNow);
+                            if (Ahead(np, ph)) Adopt(s, ph, np.G, np.C, np.Ids, false, rawNow, " (field change)");
                         }
                         else
                         {
@@ -2078,9 +2579,10 @@ namespace CompetitiveRounds
                             if (regimeNow && LiveNow(s, np.G, np.C))
                             {
                                 SetAcquired(s, np.G);
-                                Adopt(s, ph, np.G, np.C, np.Ids, false, rawNow);
+                                Adopt(s, ph, np.G, np.C, np.Ids, false, rawNow, " (field change)");
                             }
-                            else if (np != null && !regimeNow && Ahead(np, ph)) Adopt(s, ph, np.G, np.C, np.Ids, false, rawNow);
+                            else if (np != null && !regimeNow && Ahead(np, ph))
+                                Adopt(s, ph, np.G, np.C, np.Ids, false, rawNow, " (field change)");
                         }
                     }
                     var got = KeyedReadsAllowed(ph.Gate, ph.Game) && ph.Manifest != null ? CollectPicks(s, ph) : new Dictionary<int, string>();
@@ -2093,15 +2595,44 @@ namespace CompetitiveRounds
                     {
                         ph.WasMaster = true;
                         ph.Deadline = Math.Max(ph.Deadline, now + 20.0);
+                        // N19(i), the promotion reissue: while no result exists under
+                        // either key, the identity is written with a fresh epoch (the
+                        // hold was cleared at the master change); else a cardless bail.
+                        if (!s.Current && KeyedReadsAllowed(ph.Gate, ph.Game))
+                        {
+                            if (!ResultPresentEitherKey(s, ph.Game, ph.Cycle))
+                                Adopt(s, ph, ph.Game, ph.Cycle, null, true, null, " as master (promotion reissue)");
+                            else
+                            {
+                                Terminate(s, ph, new Dictionary<int, string>());
+                                return;
+                            }
+                        }
                     }
+                    // Change 24, N12(f), in the result loop, with the adoption's resets.
+                    if (!s.Current && ReopensOnPromotion(ph.Gate, IsMaster(s), ph.Game))
+                    {
+                        string opened = OpenOnPromotion(s, ph);
+                        ph.AdoptedAt = T;
+                        ph.LastGot = 0;
+                        ph.LastPublishedDl = -1;
+                        ph.RawAtResultEntry = opened;
+                    }
+                    ReopenCheck(s, ph);
                     if (IsMaster(s)) PublishDeadline(s, ph);
                     else
                     {
                         double sh;
                         if (KeyedReadsAllowed(ph.Gate, ph.Game) && TryReadDeadline(s, ph.Game, ph.Cycle, out sh) && sh > 0) ph.Deadline = sh;
                     }
-                    if (IsMaster(s))
+                    // Change 24 with N19(h): the new build closes only as master with
+                    // a manifest and an epoch held for use; the pin closes as master.
+                    string closeEp = !s.Current && IsMaster(s) ? EpochForUse(s, true) : null;
+                    bool closes = s.Current ? IsMaster(s) : AuthoritativeClose(IsMaster(s), ph.Manifest != null, closeEp != null);
+                    if (closes)
                     {
+                        if (ph.Manifest == null && s.R != null && s.R.Checked)
+                            Fail("CLOSE-SAFE g" + I(s.R.PhysGame) + " c" + I(_phaseN) + " " + s.Name + " close without a manifest");
                         bool allIn = got.Count >= CountStillPresent(s, ph.Manifest);
                         bool settling = !allIn && (now - ph.AdoptedAt) < 20.0;
                         if (settling)
@@ -2111,16 +2642,100 @@ namespace CompetitiveRounds
                         }
                         if (allIn || (now > ph.Deadline && !settling))
                         {
-                            WriteRoom(s, KRes, ResValue(ph.Game, ph.Cycle, got));
+                            string value = ResValue(ph.Game, ph.Cycle, got);
+                            if (s.Current) WriteRoom(s, KRes, value);
+                            else WriteResult(s, value, closeEp);
                             OnResultWritten(s, ph);
-                            ph.Stage = 3;
+                            Closed(s, ph, got, closeEp);
                             return;
                         }
                     }
-                    if (now > ph.Deadline + 15.0 && now - ph.Start > 20.0) ph.Stage = 3;
+                    if (now > ph.Deadline + 15.0 && now - ph.Start > 20.0) Terminate(s, ph, new Dictionary<int, string>());
                 }
 
-                private void Adopt(Seat s, Phase ph, int g, int c, List<int> manifest, bool asMaster, string observedRaw)
+                /// <summary>A result read and applied. NO-REPLAY (the ledger's phase of
+                /// the value read) and, for the new build, SOURCE.</summary>
+                private void Applied(Seat s, Phase ph, Dictionary<int, string> res, Prov prov, string ep)
+                {
+                    if (s.R != null && s.R.Checked)
+                    {
+                        if (prov != null && prov.Serial != _serial)
+                            Fail("REPLAY " + s.Name + " applied " + I(ph.Game) + ":" + I(ph.Cycle) + " at " + _label
+                                 + ", written at " + prov.Label);
+                        if (!s.Current) SourceCheck(s, ph, prov != null ? prov.Writer : null, ep);
+                    }
+                    Terminate(s, ph, res);
+                }
+
+                /// <summary>The master's own close, applied as its result: SOURCE, the
+                /// phase's manifest for CARDS, and AfterResult's deferral.</summary>
+                private void Closed(Seat s, Phase ph, Dictionary<int, string> got, string ep)
+                {
+                    if (s.R != null && s.R.Checked)
+                    {
+                        if (!s.Current) SourceCheck(s, ph, s, ep);
+                        if (_game != null) _game.Manifest[ph.Serial] = new List<int>(ph.Manifest);
+                        if (_opts != null && _opts.AfterResult != null && !_afterResultFired) _afterResultPending = true;
+                    }
+                    Terminate(s, ph, got);
+                }
+
+                /// <summary>SOURCE, from the ledger: the result was written by the
+                /// issuer of the epoch the seat holds, and that issuer is the present
+                /// master.</summary>
+                private void SourceCheck(Seat s, Phase ph, Seat writer, string ep)
+                {
+                    _sourceChecks++;
+                    EpochRec r;
+                    Seat issuer = ep != null && _epochs.TryGetValue(ep, out r) ? r.Issuer : null;
+                    if (writer == null || issuer == null || writer != issuer || issuer != s.R.Master)
+                        Fail("SOURCE " + _label + " " + s.Name + " applied " + I(ph.Game) + ":" + I(ph.Cycle)
+                             + " written by " + (writer != null ? writer.Name : "none") + ", epoch issued by "
+                             + (issuer != null ? issuer.Name : "none"));
+                }
+
+                /// <summary>Every exit of the result loop (a read, the close, a bail):
+                /// N19(g)'s terminal record through FinalizesAtTermination, the
+                /// ledger's terminated room phase, and the applied result for CARDS.</summary>
+                private void Terminate(Seat s, Phase ph, Dictionary<int, string> applied)
+                {
+                    ph.Stage = 3;
+                    if (!s.Current)
+                    {
+                        if (FinalizesAtTermination(s.PE, applied.Count)) s.Finalized.Add(s.PE);
+                        s.Terminated.Add(ph.Serial);
+                    }
+                    if (s.R != null && s.R.Checked && _game != null)
+                    {
+                        Dictionary<Seat, Dictionary<int, string>> bySeat;
+                        if (!_game.Applied.TryGetValue(ph.Serial, out bySeat))
+                        {
+                            bySeat = new Dictionary<Seat, Dictionary<int, string>>();
+                            _game.Applied[ph.Serial] = bySeat;
+                        }
+                        bySeat[s] = applied;
+                    }
+                }
+
+                private static Dictionary<int, string> ParseResult(string raw)
+                {
+                    var d = new Dictionary<int, string>();
+                    if (raw == null) return d;
+                    var parts = raw.Split(new[] { ':' }, 3);
+                    if (parts.Length != 3 || parts[2].Length == 0) return d;
+                    foreach (var pair in parts[2].Split('|'))
+                    {
+                        int eq = pair.IndexOf('=');
+                        if (eq <= 0) continue;
+                        bool ok;
+                        int pid = ParseInt(pair.Substring(0, eq), out ok);
+                        if (ok) d[pid] = pair.Substring(eq + 1);
+                    }
+                    return d;
+                }
+
+                private void Adopt(Seat s, Phase ph, int g, int c, List<int> manifest, bool asMaster, string observedRaw,
+                                   string why)
                 {
                     ph.Game = g;
                     ph.Cycle = c;
@@ -2131,18 +2746,47 @@ namespace CompetitiveRounds
                     if (asMaster)
                     {
                         ph.Manifest = new List<int>(ph.Pickers);
-                        if (WriteRoom(s, KCyc, CycValue(g, c, ph.Pickers)) && !s.Current) ArmTicket(s, g);
+                        if (s.Current) WriteRoom(s, KCyc, CycValue(g, c, ph.Pickers));
+                        else
+                        {
+                            // N19(a): the held epoch is re-sent, or a fresh one issued.
+                            bool fresh;
+                            string ep = EpochForWrite(s, out fresh);
+                            if (WriteCycle(s, CycValue(g, c, ph.Pickers), ep)) ArmTicket(s, g);
+                        }
                     }
-                    if (s.PendingPick != null)
-                        WriteOwn(s, KPick, ph.Nonce + ":" + I(g) + ":" + I(c) + ":" + s.PendingPick);
+                    Restamp(s, ph);
                     ph.AdoptedAt = T;
                     ph.LastGot = 0;
                     ph.LastPublishedDl = -1;
                     if (observedRaw != null) ph.RawAtResultEntry = observedRaw;
                     if (s.Current) WriteOwn(s, KGw, s.GameNumber);   // the pin's witness re-stamp
                     if (s.R != null && s.R.Checked)
-                        _trace.Add("g" + I(s.R.PhysGame) + " " + s.Name + " adopt " + I(g) + ":" + I(c)
-                                   + (asMaster ? " as master (pick evidence)" : " (field change)"));
+                        _trace.Add("g" + I(s.R.PhysGame) + " " + s.Name + " adopt " + I(g) + ":" + I(c) + why);
+                }
+
+                /// <summary>A master's adoption from pick evidence: NO-REPLAY's
+                /// adoption clause (the ledger's phase of every counted pick) and,
+                /// under G, SAME-GAME and SAME-CYCLE; then the adoption.</summary>
+                private void AdoptFromPicks(Seat s, Phase ph, Votes v)
+                {
+                    if (s.R != null && s.R.Checked)
+                    {
+                        foreach (var pv in v.From)
+                        {
+                            if (pv == null || pv.Serial == _serial) continue;
+                            Fail("REPLAY " + s.Name + " adopted " + I(v.Id.G) + ":" + I(v.Id.C) + " at " + _label
+                                 + " from picks written at " + pv.Label);
+                            break;
+                        }
+                        if (!s.Current && ph.Gate)
+                        {
+                            string over = " adopted " + I(v.Id.G) + ":" + I(v.Id.C) + " over " + I(ph.Game) + ":" + I(ph.Cycle);
+                            if (v.Id.G != ph.Game) Fail("SAME-GAME g" + I(s.R.PhysGame) + " " + s.Name + over);
+                            else if (v.Id.C != ph.Cycle) Fail("SAME-CYCLE g" + I(s.R.PhysGame) + " " + s.Name + over);
+                        }
+                    }
+                    Adopt(s, ph, v.Id.G, v.Id.C, null, true, null, " as master (pick evidence)");
                 }
 
                 private static int PickGameOf(Seat s, Seat p, string prefix, out int cycle)
@@ -2158,41 +2802,93 @@ namespace CompetitiveRounds
                     return ok1 && ok2 ? g : -1;
                 }
 
-                private static Cyc DetectAhead(Seat s, Phase ph)
+                private sealed class Votes
+                {
+                    internal Cyc Id;
+                    internal List<Prov> From;
+                }
+
+                private static void Vote(Dictionary<string, List<Prov>> counts, List<string> order, string key, Prov prov)
+                {
+                    List<Prov> l;
+                    if (!counts.TryGetValue(key, out l))
+                    {
+                        l = new List<Prov>();
+                        counts[key] = l;
+                        order.Add(key);
+                    }
+                    l.Add(prov);
+                }
+
+                /// <summary>DetectAheadPickIdentity. The pin (a current-build seat)
+                /// counts every manifest peer's cr_ffa_pk, itself included, against
+                /// Min(2, Max(1, n - 1)). The new build runs N19(d): OthersOf the
+                /// manifest's owners (0 for an unresolved entry), ParsePick over
+                /// cr_ffa_pe, EpochEvidence under the epoch held for use, and
+                /// EvidenceQuorum. The votes keep each counted pick's ledger record.</summary>
+                private Votes DetectAhead(Seat s, Phase ph)
                 {
                     if (ph.Manifest == null) return null;
-                    var counts = new Dictionary<string, int>();
+                    var counts = new Dictionary<string, List<Prov>>();
                     var order = new List<string>();
-                    foreach (var pid in ph.Manifest)
+                    int quorum;
+                    if (s.Current)
                     {
-                        var p = ByActor(s.R, pid);
-                        if (p == null) continue;
-                        int c;
-                        int g = PickGameOf(s, p, ph.Nonce + ":", out c);
-                        if (g < 0) continue;
-                        if (g > ph.Game || (g == ph.Game && c > ph.Cycle))
+                        foreach (var pid in ph.Manifest)
                         {
-                            string key = I(g) + ":" + I(c);
-                            int n;
-                            counts[key] = (counts.TryGetValue(key, out n) ? n : 0) + 1;
-                            if (!order.Contains(key)) order.Add(key);
+                            var p = ByActor(s.R, pid);
+                            if (p == null) continue;
+                            int c;
+                            int g = PickGameOf(s, p, ph.Nonce + ":", out c);
+                            if (g < 0) continue;
+                            if (g > ph.Game || (g == ph.Game && c > ph.Cycle))
+                                Vote(counts, order, I(g) + ":" + I(c), ProvOf(s, p, KPick));
                         }
+                        quorum = Math.Min(2, Math.Max(1, ph.Manifest.Count - 1));
                     }
-                    int quorum = Math.Min(2, Math.Max(1, ph.Manifest.Count - 1));
+                    else
+                    {
+                        string pe = EpochForUse(s, false);
+                        var owners = new List<int>();
+                        foreach (var pid in ph.Manifest) owners.Add(ByActor(s.R, pid) != null ? pid : 0);
+                        foreach (int actor in OthersOf(owners, s.Actor))
+                        {
+                            if (actor == 0) continue;
+                            var p = ByActor(s.R, actor);
+                            var pick = ParsePick(StrProp(s, p, KPe), ph.Nonce);
+                            if (pick == null) continue;
+                            bool ahead = pick.Game > ph.Game || (pick.Game == ph.Game && pick.Cycle > ph.Cycle);
+                            bool same = SameEpoch(pick.Epoch, pe);
+                            if (EpochEvidence(ph.Gate, same, pick.Game, pick.Cycle, ph.Game, ph.Cycle, ahead))
+                                Vote(counts, order, I(pick.Game) + ":" + I(pick.Cycle), ProvOf(s, p, KPe));
+                        }
+                        quorum = EvidenceQuorum(owners, s.Actor);
+                    }
                     foreach (var key in order)
-                        if (counts[key] >= quorum) return ParseCyc(key + ":");
+                        if (counts[key].Count >= quorum) return new Votes { Id = ParseCyc(key + ":"), From = counts[key] };
                     return null;
                 }
 
-                private static Dictionary<int, string> CollectPicks(Seat s, Phase ph)
+                /// <summary>CollectPicks. The pin collects cr_ffa_pk at its key; the
+                /// new build collects cr_ffa_pe only under the epoch held for use
+                /// (N19(e)), and nothing with none.</summary>
+                private Dictionary<int, string> CollectPicks(Seat s, Phase ph)
                 {
                     var got = new Dictionary<int, string>();
+                    string key = KPick;
                     string prefix = ph.Nonce + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":";
+                    if (!s.Current)
+                    {
+                        string ep = EpochForUse(s, false);
+                        if (ep == null) return got;
+                        key = KPe;
+                        prefix = ph.Nonce + ":" + ep + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":";
+                    }
                     foreach (var pid in ph.Manifest)
                     {
                         var p = ByActor(s.R, pid);
                         if (p == null) continue;
-                        string v = StrProp(s, p, KPick);
+                        string v = StrProp(s, p, key);
                         if (v != null && v.StartsWith(prefix, StringComparison.Ordinal) && v.Length > prefix.Length)
                             got[pid] = v.Substring(prefix.Length);
                     }
@@ -2229,7 +2925,13 @@ namespace CompetitiveRounds
                     room.PhysGame++;
                     room.InGame = true;
                     room.FieldPoints = 0;
-                    if (room.Checked) _game = ParseSpec(room.PhysGame, spec);
+                    if (room.Checked)
+                    {
+                        _game = ParseSpec(room.PhysGame, spec);
+                        _game.Disturbed = _injectNext || _stalled.Count > 0;
+                    }
+                    _injectNext = false;
+                    _playing = room.Checked;
                 }
 
                 /// <summary>One game: the start edges, the cycles and their points
@@ -2270,11 +2972,24 @@ namespace CompetitiveRounds
                     foreach (var s in Fighters(room)) StartSeat(s);
                     StartChecks(room);
                     room.InGame = false;
+                    _playing = false;
                 }
 
                 private void Cycle(Room room, int c, int winnerActor, Opts o)
                 {
                     _winnerNow = winnerActor;
+                    // The ledger's room pick phase g{G}.{n}; the opening draw is 1.
+                    _serial++;
+                    _phaseN = c;
+                    _label = "g" + I(room.PhysGame) + "." + I(c);
+                    _opts = o;
+                    _afterResultPending = false;
+                    _afterResultFired = false;
+                    if (room.Checked && _game != null)
+                    {
+                        _game.Phases.Add(_serial);
+                        _game.PhaseLabel[_serial] = _label;
+                    }
                     bool handled = o != null && o.Entries != null && o.Entries(c);
                     if (!handled)
                     {
@@ -2298,6 +3013,12 @@ namespace CompetitiveRounds
                     if (c == 1) StartChecks(room);
                     if (o != null && o.AfterEntries != null) o.AfterEntries(c);
                     RunPhases();
+                    if (_afterResultPending)
+                    {
+                        _afterResultPending = false;
+                        _afterResultFired = true;
+                        o.AfterResult(c);
+                    }
                 }
 
                 private void PointAt(Room room)
@@ -2332,6 +3053,7 @@ namespace CompetitiveRounds
                     }
                     room.InGame = false;
                     if (room.Checked) EdgeChecks(room, ran);
+                    _playing = false;
                 }
 
                 /// <summary>GameStateWatcher's FFA edge: freeze (N1), carry (N2), the
@@ -2428,10 +3150,11 @@ namespace CompetitiveRounds
 
                 // ── expectations ──────────────────────────────────────────
 
-                /// <summary>"RG A4 B4 C- D4; F 4; CAND 4; CS A4 S1; G 0; N 2": a token
-                /// that starts with a capital names one seat; any other token is
-                /// the value for every fighter; N sets the game's key (default: the
-                /// physical game).</summary>
+                /// <summary>"RG A4 B4 C- D4; F 4; CAND 4; CS A4 S1; G 0; N 2; XG 1": a
+                /// token that starts with a capital names one seat; any other token
+                /// is the value for every fighter; N sets the game's key (default:
+                /// the physical game); XG exempts the game from AGREE-G (R6: the walk
+                /// scripts a join between start edges).</summary>
                 private static GameRec ParseSpec(int n, string spec)
                 {
                     var g = new GameRec { N = n, Key = n };
@@ -2600,12 +3323,16 @@ namespace CompetitiveRounds
                     }
                     Expected("RG", misses);
                     if (vals.Count > 1) Fail("two numbers g" + I(g.N) + " RG{" + string.Join(",", rgs.ToArray()) + "}");
-                    if (gates.Count > 1) Fail("AGREE-G g" + I(g.N) + " G{" + string.Join(",", gs.ToArray()) + "}");
+                    // AGREE-G, unless the walk scripts a join between start edges
+                    // (R6), which its spec states with "XG 1".
+                    if (gates.Count > 1 && !g.Global.ContainsKey("XG"))
+                        Fail("AGREE-G g" + I(g.N) + " G{" + string.Join(",", gs.ToArray()) + "}");
                     g.G1 = starters > 0 && allG1;
                 }
 
                 /// <summary>At each game-over edge: EXPECTED (F, cand, CS, G, advert),
-                /// LIVE-F with its count, AGREE-F, AGREE-E, PROVENANCE and AGREE-CS.</summary>
+                /// LIVE-F with its count, AGREE-F, AGREE-E, PROVENANCE, AGREE-CS, and
+                /// CARDS with its count.</summary>
                 private void EdgeChecks(Room room, List<Seat> ran)
                 {
                     var g = _game;
@@ -2752,6 +3479,39 @@ namespace CompetitiveRounds
                         }
                         if (bad) Fail("AGREE-CS g" + n + " CS{" + string.Join(",", list.ToArray()) + "}");
                     }
+
+                    // CARDS (V6): in an undisturbed G-1 game whose ending master runs
+                    // the new build, every present fighter applied every picker's card
+                    // of every room phase, per the ledger's closed manifests and the
+                    // results the seats applied; the counts print on PASS.
+                    if (g.G1 && !g.Disturbed && master != null && IsFighter(master) && !master.Current)
+                    {
+                        int applied = 0, total = 0;
+                        foreach (int serial in g.Phases)
+                        {
+                            string label = g.PhaseLabel[serial];
+                            List<int> man;
+                            if (!g.Manifest.TryGetValue(serial, out man))
+                            {
+                                Fail("CARDS " + label + " no result written");
+                                continue;
+                            }
+                            Dictionary<Seat, Dictionary<int, string>> bySeat;
+                            g.Applied.TryGetValue(serial, out bySeat);
+                            foreach (var s in Fighters(room))
+                            {
+                                Dictionary<int, string> res = null;
+                                if (bySeat != null) bySeat.TryGetValue(s, out res);
+                                int k = 0;
+                                foreach (int pid in man) if (res != null && res.ContainsKey(pid)) k++;
+                                applied += k;
+                                total += man.Count;
+                                if (k != man.Count)
+                                    Fail("CARDS " + label + " " + s.Name + " applied " + I(k) + " of " + I(man.Count) + " picks");
+                            }
+                        }
+                        _cards.Add("g" + n + ":" + I(applied) + "/" + I(total));
+                    }
                 }
 
                 /// <summary>AGREE-P, G-1 games: at the master's result write, every seat
@@ -2811,7 +3571,9 @@ namespace CompetitiveRounds
                 }
             }
 
-            /// <summary>The 67 walk cases of V4 section 5, scripted from section 3.
+            /// <summary>The 77 walk cases of V10 section 5 (V4's 67; W6.10 and W7.8
+            /// from V5; W6.11-W6.14 and W7.9 from V6; W6.15 and W7.10 from V7;
+            /// W7.11 from V8), scripted from section 3.
             /// Orders: '1' = (i), '2' = (ii), '3' = (iii); an order label applies
             /// to the seat's next start. Rooms: ffa_2 (key 987561) is the sitting,
             /// ffa_1 (key 654704) the earlier room.</summary>
@@ -2875,6 +3637,12 @@ namespace CompetitiveRounds
                     Case(r, "walk-D6 W6.8d", m => W68(m, true));
                     Ordered(r, "walk-D6 W6.9", (m, o) => W69(m, o, false));
                     Case(r, "walk-D6 W6.9p", m => W69(m, '1', true));
+                    Case(r, "walk-D6 W6.10", W610);
+                    Case(r, "walk-D6 W6.11", W611);
+                    Case(r, "walk-D6 W6.12", W612);
+                    Case(r, "walk-D6 W6.13", W613);
+                    Case(r, "walk-D6 W6.14", W614);
+                    Case(r, "walk-D6 W6.15", W615);
 
                     Case(r, "walk-D12 W7.1", W71);
                     Case(r, "walk-D12 W7.2", W72);
@@ -2883,6 +3651,10 @@ namespace CompetitiveRounds
                     Case(r, "walk-D12 W7.5", W75);
                     Case(r, "walk-D12 W7.6", W76);
                     Case(r, "walk-D12 W7.7", W77);
+                    Case(r, "walk-D12 W7.8", W78);
+                    Case(r, "walk-D12 W7.9", W79);
+                    Case(r, "walk-D12 W7.10", W710);
+                    Case(r, "walk-D12 W7.11", W711);
                 }
 
                 // ── D3 ────────────────────────────────────────────────────
@@ -3144,17 +3916,15 @@ namespace CompetitiveRounds
                     m.Games(room, 3, "G 0");
                 }
 
-                /// <summary>W6.3n differs from V4's prose. With D the point winner,
-                /// C's pick alone meets the production quorum
-                /// Math.Min(2, Math.Max(1, manifest - 1)) = 1 and B adopts. And the
-                /// detector (DetectAheadPickIdentity) also counts every manifest
-                /// peer's RETAINED pick, B's own included: after cycle 3, B's, C's
-                /// and D's picks all read 4:3, which is ahead of B's 3:4, so B adopts
-                /// 4:3 at its first result pre-pass (W6.3q reaches F 4 that way, not
-                /// through 4:4). The no-quorum state is therefore scripted by delay:
-                /// C's traffic to B is held from point 1 and D's from point 2, so B
-                /// sees B 4:3, C 4:1 and D 4:2 (three identities, no quorum) and
-                /// never receives a 4:4 pick; both are released after cycle 4.</summary>
+                /// <summary>W6.3q and W6.3n. Under N19 C's and D's retained 4:3 picks
+                /// carry A's epoch E43, while B, master after A's drop, holds its own
+                /// fresh E44, so SameEpoch refuses them at B's result pre-pass in
+                /// every delivery order, and B never counts its own pick (OthersOf).
+                /// In W6.3q C and D time out, publish 4:4 under E44, and B adopts 4:4
+                /// from them (quorum 2), so F is 4. W6.3n's no-quorum state is
+                /// scripted by delay (round 1's script d1): C's traffic to B is held
+                /// from point 1 and D's from point 2, so B never receives a 4:4 pick;
+                /// both are released after cycle 4.</summary>
                 private static void W63(Model m, bool noQuorum)
                 {
                     var room = m.NewRoom("ffa_2");
@@ -3226,11 +3996,13 @@ namespace CompetitiveRounds
                 }
 
                 /// <summary>W6.6 (variant 0, ordinary leaves), W6.6s (1: A's inbound
-                /// stalls right after its 1:1 write) and W6.7a (2: fast same-name
-                /// re-entries). S keeps the room; A, B, C and D re-enter in turn, so
-                /// S receives the role when D leaves and hands it to A. W6.6s plays
-                /// game 4 as the opening draw and one point: in a longer game A's
-                /// stale cache would reopen at 3:k+1 at its next entry.</summary>
+                /// stalls right after its 1:1 write, until after game 4's edge) and
+                /// W6.7a (2: fast same-name re-entries). S keeps the room; A, B, C
+                /// and D re-enter in turn, so S receives the role when D leaves and
+                /// hands it to A. W6.6s plays game 4's four points (code-report F4):
+                /// A's cache keeps game 3's finalized 3:4, and at each later entry
+                /// its opener takes its own identity in this game first (change 23),
+                /// so A opens 1:2, 1:3 and 1:4 with ticket 1.</summary>
                 private static void W66(Model m, char ord, int variant)
                 {
                     var room = m.NewRoom("ffa_2");
@@ -3254,7 +4026,6 @@ namespace CompetitiveRounds
                     }
                     if (variant == 1)
                     {
-                        o4.Points = 1;
                         o4.Entries = c =>
                         {
                             if (c != 1) return false;
@@ -3288,10 +4059,16 @@ namespace CompetitiveRounds
                     m.StartOnly(room, null);
                 }
 
-                /// <summary>W6.8 and W6.8d (delayed). In W6.8d V4 arms B's ticket at
-                /// the new master's 2 s republish of 1:1; this model does not run that
-                /// timer, so B's ticket arms at its next cycle's entry write, still in
-                /// game 1. The numbers are V4's.</summary>
+                /// <summary>W6.8 and W6.8d (delayed). W6.8d follows the corrected
+                /// ordering (round-10 F12): A's seed and 1:1 write reach B in cycle
+                /// 1's first tick, before B's slow start and its entry, so B takes
+                /// 1:1 at entry, passes the latch and samples non-master while A is
+                /// master; A leaves after the entries (AfterEntries(1)), so B is
+                /// promoted inside its result loop, where the promotion reissue
+                /// (ResultBody, as FfaMode's result-loop reissue) issues B's fresh
+                /// epoch, writes 1:1 and arms ticket 1. No manifest-wait republish is
+                /// involved; the design text at V10:24 and V10:1582 says otherwise.
+                /// The numbers are V4's.</summary>
                 private static void W68(Model m, bool delayed)
                 {
                     var room = m.NewRoom("ffa_2");
@@ -3346,6 +4123,217 @@ namespace CompetitiveRounds
                     m.StartOnly(room, "N 3");
                 }
 
+                /// <summary>W6.10 (V5): an identity-less promotion before the host's
+                /// publication. A's outbound is held from its start edge, and A
+                /// leaves 10 s after its opening-draw entry, which promotes B inside
+                /// its result loop with no identity, so N12(f) opens 1:1. The
+                /// opener's manifest is B's picker set taken at its entry, which
+                /// holds the departed A, as production's pickerIds does (V10 names
+                /// {B,C,D}); no assertion reads it.</summary>
+                private static void W610(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var s = m.Abcd();
+                    Seat A = s[0], B = s[1], C = s[2], D = s[3];
+                    m.S0(room, null, s);
+                    foreach (var x in new[] { B, C, D })
+                    {
+                        m.Leave(x);
+                        m.Join(x, room, "ready");
+                    }
+                    m.Advance(1.0);
+                    m.Stall(A, B);
+                    m.Stall(A, C);
+                    m.Stall(A, D);
+                    var o4 = new Opts();
+                    o4.Entries = c =>
+                    {
+                        if (c != 1) return false;
+                        m.Enter(B);   // order ii: each entry follows its start
+                        m.Enter(C);
+                        m.Enter(D);
+                        m.Enter(A);
+                        m.Tick();
+                        m.Advance(9.5);
+                        m.Leave(A);
+                        return true;
+                    };
+                    m.Play(room, "RG A4 B- C- D-; CAND 1; F -; CS 1", o4);
+                    m.Unstall(A, B);
+                    m.Unstall(A, C);
+                    m.Unstall(A, D);
+                    m.Play(room, "N 2", null);
+                }
+
+                /// <summary>W6.11 (V6): a split-G positive quorum. Game 1 is W6.9's
+                /// with D beside C. Z leaves after it, so A is master; D relaunches
+                /// and rejoins through FenceRefuse after A's game-2 start and before
+                /// B's and C's, so A latches G 1 and B, C and D G 0 (AGREE-G exempt:
+                /// a scripted join between start edges, R6).</summary>
+                private static void W611(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var Z = m.NewSeat("Z");
+                    var A = m.NewSeat("A");
+                    var B = m.NewSeat("B");
+                    var C = m.NewSeat("C");
+                    var D = m.NewSeat("D");
+                    m.JoinAll(room, Z, A, B, C, D);
+                    var o1 = With(A, '1');
+                    o1.SkipEdge.Add(A);
+                    m.Play(room, "RG Z1 A- B1 C1 D1; F A-; CAND A-", o1);
+                    m.Leave(Z);
+                    m.Relaunch(D);
+                    var o2 = new Opts();
+                    o2.Order[B] = '1';
+                    o2.Order[C] = '1';
+                    o2.Entries = c =>
+                    {
+                        if (c != 1) return false;
+                        m.Join(D, room, "ready", true);
+                        m.Enter(A);
+                        m.Tick();
+                        m.StartSeat(B);
+                        m.StartSeat(C);
+                        m.StartSeat(D);
+                        m.Enter(B);
+                        m.Enter(C);
+                        m.Enter(D);
+                        return true;
+                    };
+                    m.Play(room, "G A1 B0 C0 D0; RG A- B2 C2 D-; CAND 1; F -; CS A1 B2 C2 D1; XG 1", o2);
+                    m.Leave(D);
+                    m.Play(room, "N 2", null);
+                }
+
+                /// <summary>W6.12 (V6): a delayed prior-phase delivery. W6.3's
+                /// precondition; C's and D's traffic to B is held from point 2 and
+                /// released inside B's cycle-4 phase, after its entry write and
+                /// before its result-entry pre-pass.</summary>
+                private static void W612(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var s = m.Abcd();
+                    Seat A = s[0], B = s[1], C = s[2], D = s[3];
+                    RefusedD(m, room, s);
+                    var o4 = new Opts();
+                    o4.AfterPoint = c =>
+                    {
+                        if (c == 2)
+                        {
+                            m.Stall(C, B);
+                            m.Stall(D, B);
+                        }
+                        if (c != 3) return;
+                        m.Leave(A);
+                        B.GameNumber = 3;   // B's L 3 against its RG 4, as W6.3
+                    };
+                    o4.Entries = c =>
+                    {
+                        if (c != 4) return false;
+                        m.Enter(B);
+                        m.Unstall(C, B);
+                        m.Unstall(D, B);
+                        m.Enter(C);
+                        m.Enter(D);
+                        return true;
+                    };
+                    m.Play(room, "G 0; F B4 C4 D4", o4);
+                    m.StartOnly(room, null);
+                }
+
+                /// <summary>W6.13 (V6): the local seat absent from the manifest. C's
+                /// stage is refused at its first join, so G is 0; Inject sets C's
+                /// counter and sequence to 4 after game 3, so C keys 5:c in game 4
+                /// while A and B key 4:c.</summary>
+                private static void W613(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var A = m.NewSeat("A");
+                    var B = m.NewSeat("B");
+                    var C = m.NewSeat("C");
+                    m.Join(A, room, "ready");
+                    m.Join(B, room, "ready");
+                    m.Join(C, room, "ready", true);
+                    m.Advance(1.0);
+                    m.Games(room, 3, "G 0");
+                    m.Inject(C, 4, 4);
+                    m.Play(room, "G 0; F 4; CS A4 B4 C5", null);
+                    m.StartOnly(room, "G 0");
+                }
+
+                /// <summary>W6.14 (V6): a bail's terminal record. A's traffic to C is
+                /// held from after the cycle-2 entries (A's 4:2 write delivered)
+                /// until after the cycle-3 entries, so C bails at 4:2 with nothing
+                /// applied and holds no epoch at its cycle-3 entry.</summary>
+                private static void W614(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var s = m.Abcd();
+                    Seat A = s[0], C = s[2];
+                    m.S0(room, null, s);
+                    var o4 = new Opts();
+                    o4.AfterEntries = c =>
+                    {
+                        if (c == 2) m.Stall(A, C);
+                        if (c == 3) m.Unstall(A, C);
+                    };
+                    m.Play(room, null, o4);
+                    m.StartOnly(room, null);
+                }
+
+                /// <summary>W6.15 (V7): same-game ahead-cycle picks at a G-true
+                /// successor. W6.6's room, S keeping it: A, B and C re-enter after
+                /// game 3's edge and D relaunches, so S hands the role to A; D
+                /// rejoins through FenceRefuse after A's and B's start edges and
+                /// before C's, a split latch G{A1,B1,C0,D0} (AGREE-G exempt, R6).
+                /// A-to-B traffic is held from A's start edge, released for 1 s
+                /// after cycle 1's result and held again until after the edge; A
+                /// leaves after the cycle-3 entries.</summary>
+                private static void W615(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var s = m.Abcd();
+                    var S = m.NewSeat("S");
+                    S.Spectator = true;
+                    Seat A = s[0], B = s[1], C = s[2], D = s[3];
+                    WithKeeper(m, room, s, S, false, null);
+                    foreach (var x in new[] { A, B, C })
+                    {
+                        m.Leave(x);
+                        m.Join(x, room, "ready");
+                    }
+                    m.Relaunch(D);
+                    m.Advance(1.0);
+                    m.Stall(A, B);
+                    var o4 = new Opts();
+                    o4.Order[C] = '1';
+                    o4.Entries = c =>
+                    {
+                        if (c != 1) return false;
+                        m.Join(D, room, "ready", true);
+                        m.Enter(A);
+                        m.Tick();
+                        m.StartSeat(C);
+                        m.StartSeat(D);
+                        m.Enter(B);
+                        m.Enter(C);
+                        m.Enter(D);
+                        return true;
+                    };
+                    o4.AfterCycle = c =>
+                    {
+                        if (c != 1) return;
+                        m.Unstall(A, B);
+                        m.Advance(1.0);
+                        m.Stall(A, B);
+                    };
+                    o4.AfterEntries = c => { if (c == 3) m.Leave(A); };
+                    m.Play(room, "G B1 C0 D0; RG -; CAND 1; F -; CS 1; XG 1", o4);
+                    m.Unstall(A, B);
+                    m.Play(room, "G 0; N 2", null);
+                }
+
                 // ── D12 ───────────────────────────────────────────────────
 
                 private static void W71(Model m)
@@ -3365,7 +4353,9 @@ namespace CompetitiveRounds
                     m.S0(room, "G 0", s);
                     s[1].GameNumber = 4;   // a double start (R9): L 5 and W 5 at game 4
                     s[2].GameNumber = 4;
-                    m.Play(room, "G 0; F A- B5 C5 D-; CAND 5; CS A4 B5 C5 D4", null);
+                    // V6 (N19): B's and C's 5:c picks ride cr_ffa_pk only, which A's
+                    // detector never reads, so A keeps 4:c and ticket 4; F 4 on all.
+                    m.Play(room, "G 0; F 4; CAND 4; CS A4 B5 C5 D4", null);
                     m.StartOnly(room, null);
                 }
 
@@ -3383,12 +4373,12 @@ namespace CompetitiveRounds
                 /// 4), and P's and Q's counter and sequence to 1, so that fresh picks
                 /// from the new seats do not out-vote Z; X keeps counter and sequence
                 /// 3, which gives V4's stamp inputs (sequence 7, counter 5) when P
-                /// leaves game 7. The expectations are V4's. They hold only if the
-                /// pick-evidence detector ignores retained picks of a finalized cycle:
-                /// as built, X's, P's and Q's game-3 picks still read 3:4, ahead of
-                /// Z's 2:1, and meet the quorum at Z's first result pre-pass
-                /// (DetectAheadPickIdentity, unchanged since the pin), so Z adopts 3:4
-                /// and this walk is red for that reason.</summary>
+                /// leaves game 7. The expectations are V4's. Under N19 no new-build
+                /// seat publishes a non-empty cr_ffa_pk (LegacyPickValue), so Z's
+                /// detector, which reads only cr_ffa_pk, finds at most its own
+                /// retained 3:4, one vote below its quorum of 2. At 901ed11 X's, P's
+                /// and Q's retained 3:4 met that quorum at Z's first pre-pass and Z
+                /// adopted it; C-LEGACY restores that.</summary>
                 private static void W74(Model m)
                 {
                     var room = m.NewRoom("ffa_2");
@@ -3458,6 +4448,127 @@ namespace CompetitiveRounds
                     m.Join(s[3], room, "ready", true);
                     m.Advance(1.0);
                     m.Games(room, 3, "G 0");
+                }
+
+                /// <summary>W7.8 (V5): a mixed room, a mid-game return under G 0
+                /// (change 25). B runs the current build. C drops after cycle 2 of
+                /// game 4 by an ordinary leave and returns after cycle 3 into a new
+                /// Room object; its cycle-4 entry precedes A's 4:4 publish, so with
+                /// counter 0 it keys 0:c and adopts A's 4:4 on the change. Its cycle
+                /// number survives the leave (as production's cycleNumber does), so
+                /// it keys 0:3 there, not V10's 0:4; no assertion reads it.</summary>
+                private static void W78(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var s = m.Abcd();
+                    Seat A = s[0], B = s[1], C = s[2], D = s[3];
+                    B.Current = true;
+                    m.S0(room, "G 0", s);
+                    var o4 = new Opts();
+                    o4.AfterCycle = c =>
+                    {
+                        if (c == 2) m.Leave(C);
+                        else if (c == 3) m.Join(C, room, "pending");
+                    };
+                    o4.Entries = c =>
+                    {
+                        if (c != 4) return false;
+                        m.Enter(C);
+                        m.Enter(A);
+                        m.Tick();
+                        m.Enter(B);
+                        m.Enter(D);
+                        return true;
+                    };
+                    m.Play(room, "G 0; F A4 B4 C- D4; CS 4", o4);
+                    m.Play(room, "G 0; RG A5 C- D5; F 5; CS 5", With(C, '1'));
+                    m.StartOnly(room, "G 0");
+                }
+
+                /// <summary>W7.9 (V6): a legacy clear held across the next pre-pass.
+                /// X (new build, the lowest ActorNumber), Z (current build), P and Q;
+                /// G 0. P's and Q's traffic to Z is held from right after their
+                /// game-3 cycle-4 publishes until after Z's first game-4 pre-pass,
+                /// which runs in cycle 1's first tick (released after the cycle-1
+                /// entries). Inject sets Z's counter and sequence to 1 and X leaves,
+                /// so Z is master in game 4.</summary>
+                private static void W79(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var X = m.NewSeat("X");
+                    var Z = m.NewSeat("Z");
+                    var P = m.NewSeat("P");
+                    var Q = m.NewSeat("Q");
+                    Z.Current = true;
+                    m.JoinAll(room, X, Z, P, Q);
+                    m.Play(room, "G 0", null);
+                    m.Play(room, "G 0", null);
+                    var o3 = new Opts();
+                    o3.AfterCycle = c =>
+                    {
+                        if (c != 4) return;
+                        m.Stall(P, Z);
+                        m.Stall(Q, Z);
+                    };
+                    m.Play(room, "G 0", o3);
+                    m.Leave(X);
+                    m.Inject(Z, 1, 1);
+                    var o4 = new Opts();
+                    o4.AfterEntries = c =>
+                    {
+                        if (c != 1) return;
+                        m.Unstall(P, Z);
+                        m.Unstall(Q, Z);
+                    };
+                    m.Play(room, "G 0; N 2; RG P4 Q4; F 2; CS Z2 P4 Q4", o4);
+                    m.StartOnly(room, "G 0; N 3");
+                }
+
+                /// <summary>W7.10 (V7): a new-to-current handoff with a result-only
+                /// overwrite. A (new build, the lowest ActorNumber), Z (current
+                /// build) and P; G 0. Inject sets A's counter and sequence to 2 after
+                /// game 3, so A keys 3:c in game 4; A leaves one tick after its
+                /// cycle-1 result write (AfterResult(1)), which every seat has
+                /// received by then, so Z is promoted inside its result loop.</summary>
+                private static void W710(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var A = m.NewSeat("A");
+                    var Z = m.NewSeat("Z");
+                    var P = m.NewSeat("P");
+                    Z.Current = true;
+                    m.S0(room, "G 0", A, Z, P);
+                    m.Inject(A, 2, 2);
+                    var o4 = new Opts();
+                    o4.AfterResult = c => { if (c == 1) m.Leave(A); };
+                    m.Play(room, "G 0; F Z4 P4", o4);
+                    m.StartOnly(room, "G 0");
+                }
+
+                /// <summary>W7.11 (V8; publication boundary at V9): an open
+                /// departed-issuer epoch through a new-to-current handoff. A, Z
+                /// (current build) and P; G 0; no injection. HoldPick(P) before game
+                /// 4 keeps P's cycle-1 pick unpublished and unrecorded through its
+                /// entry; A leaves after the cycle-1 entries and Pick(P) publishes it
+                /// right after, before P's next evaluation.</summary>
+                private static void W711(Model m)
+                {
+                    var room = m.NewRoom("ffa_2");
+                    var A = m.NewSeat("A");
+                    var Z = m.NewSeat("Z");
+                    var P = m.NewSeat("P");
+                    Z.Current = true;
+                    m.S0(room, "G 0", A, Z, P);
+                    var o4 = new Opts();
+                    o4.AfterEntries = c =>
+                    {
+                        if (c != 1) return;
+                        m.Leave(A);
+                        m.Pick(P);
+                    };
+                    m.HoldPick(P);
+                    m.Play(room, "G 0; F Z4 P4", o4);
+                    m.StartOnly(room, "G 0");
                 }
             }
         }
