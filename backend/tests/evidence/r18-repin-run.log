@@ -1,0 +1,52 @@
+script    backend/tests/evidence/repin-last.py
+cwd       <repo>
+capture   backend/tests/evidence/r18-repin-run.log
+
+== closing evidence check, over this directory as committed ==
+cwd       <repo>/backend
+started   2026-09-23 21:21:58 UTC
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k committed_evidence or assembled_from_its_run or round_eight_control or round_seven_control or production_file or runner_carries or control_tally or counts_the_checks or new_controls_a_report or residual_reach or negation_admits or repin_trailer or inert_twin
+.............                                                            [100%]
+13 passed, 154 deselected in 6.69s
+closing rc=0
+
+== route manifest re-pin, by its own tool ==
+cwd       <repo>
+started   2026-09-23 21:22:06 UTC
+command   python backend\tests\repin_route_manifest.py
+manifest rows      : 362
+fingerprinted      : 361
+rows rewritten now : 0
+MOVED vs HEAD      : 0
+ENTRY POINTS moved vs HEAD: 0
+(dry run; pass --write)
+repin rc=0
+
+== the final-tip attribution sweep ==
+cwd       <repo>
+command   python backend/tests/evidence/repin-last.py (derive_trailer, then foreign_attributions over every message this tip carries)
+trailer   Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>  (derived from the branch, not typed)
+  about to commit (run log)  clean
+  about to commit (report)   clean
+  HEAD~0                     clean
+  HEAD~1                     clean
+  HEAD~2                     clean
+  HEAD~3                     clean
+  HEAD~4                     clean
+  HEAD~5                     clean
+  HEAD~6                     clean
+  HEAD~7                     clean
+sweep rc=0
+
+== the untracked client contract, by digest ==
+cwd       <repo>
+command   python backend/tests/evidence/repin-last.py (contract_digests over the documents REPIN_CONTRACT_BEFORE, REPIN_CONTRACT and REPIN_CONTRACT_COPY name; no path is printed)
+  before  md5    63329c0b1d713caec21b6d5abca88af5  (the contract as the previous round's review read it)
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  after   md5    63329c0b1d713caec21b6d5abca88af5  (the contract as this round leaves it, the worktree's copy)
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  copy    md5    63329c0b1d713caec21b6d5abca88af5  (the same contract, the main checkout's copy)
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  after and copy: EQUAL
+contract rc=0
+

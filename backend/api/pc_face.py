@@ -1418,9 +1418,13 @@ def _draw_chip(image: Image.Image, x_right: int, y: int, full: str, short: str,
 # The name column is sized against BadgeFrame.png's own INK, not against the
 # badge rect: the frame's rails and corner arcs own the box edges, so a run
 # measured off the 112 px rect puts the first and last glyphs on the frame.
-# At x 64..84 the frame is clear from y 654 to y 742, which is where
-# rects.badge_name comes from. The column's WIDTH caps the line height (Kalam
-# -Bold's line box is 20 px at 12) and its HEIGHT caps the advance.
+# At x 64..96 the frame is clear from y 654 to y 742, which is where
+# rects.badge_name comes from -- [64, 654, 96, 742], a 32 px column, ending
+# four pixels before the artwork region at x=100. (An earlier version of this
+# comment said x 64..84 and called it a 20 px column, and the same 20 recurred
+# further down the file. The 20 predates a widening and survived in prose on
+# both sides of it, while the numbers below -- and the rect itself -- are the
+# 32.) The column's WIDTH caps the line height and its HEIGHT caps the advance.
 # ONE size, and a long name is CUT rather than shrunk (Sid, 2026-09-19:
 # "truncating is preferable to smaller text here"). The earlier rule stepped
 # down a ladder until the whole name fitted, which kept every name complete but
@@ -1481,8 +1485,9 @@ def _draw_badge_name(image: Image.Image, name: str, rgb: tuple[int, int, int],
     # Centre on the INK, not on the metric box. `_draw_text`'s "m" anchor
     # subtracts line.height / 2, and that height carries the font's descent
     # whether or not this name has a descender -- rotated, that asymmetry
-    # becomes a sideways wander of about 2 px in a 20 px column, correlated
-    # with nothing a reader can see.
+    # becomes a sideways wander of about 2 px across the 32 px column,
+    # correlated with nothing a reader can see. (32, not the 20 an earlier
+    # version of this line said: rects.badge_name is [64, 654, 96, 742].)
     centre_x = (box[0] + box[2]) / 2.0
     centre_y = (box[1] + box[3]) / 2.0
     left = int(round(centre_x - (ink[0] + ink[2]) / 2.0))

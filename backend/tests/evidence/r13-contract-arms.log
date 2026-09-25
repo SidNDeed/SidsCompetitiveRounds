@@ -1,0 +1,27 @@
+script    <repo>/backend/tests/evidence/contract-arm-consistency.sh
+capture   <repo>/backend/tests/evidence/<round>-contract-arms.log
+command   bash <repo>/backend/tests/evidence/contract-arm-consistency.sh <contract>
+contract  <the lane's client resync contract, under the gitignored scratch>
+bash      5.3.15(1)-release
+started   2026-09-22T16:34:56Z
+
+LIVE   the document as this round leaves it
+  live    : disposition -> REDIRECT — keep the entry, re-sign it ONCE at the advertised `expected_game`, submit 
+  live    : second-refusal bound stated: 1; recovery re-signs the same entry: 1
+  live    : CONSISTENT
+
+MUTANT the table row says drop again (the round-8 HIGH, restored)
+  mutant  : disposition -> TERMINAL - drop the entry 
+  mutant  : second-refusal bound stated: 1; recovery re-signs the same entry: 1
+  mutant  : CONTRADICTION - no-REDIRECT says-drop
+
+INERT  a doubled space inside that same cell, the rule left alone
+  inert   : disposition -> REDIRECT  — keep the entry, re-sign it ONCE at the advertised `expected_game`, submit 
+  inert   : second-refusal bound stated: 1; recovery re-signs the same entry: 1
+  inert   : CONSISTENT
+
+RESULT: live CONSISTENT, mutant CONTRADICTION (red), inert CONSISTENT
+        (green). The check reds on the edit that actually happened --
+        a disposition cell written in one pass against a recovery rule
+        written in another -- and not on a reword beside it.
+finished  2026-09-22T16:34:58Z

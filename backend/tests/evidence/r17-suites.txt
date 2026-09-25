@@ -1,0 +1,171 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-23 (round 17)
+======================================================================
+
+stdout: r17-suite-run.log
+
+Never concurrently: the two halves share this landing's local PostgreSQL
+databases, and a concurrent pair would have them fighting over the same
+scratch databases and reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN, its output directory and its round tag from the
+environment. This round does not change it. The per-half pytest logs are
+written OUTSIDE the repository, and so was this capture until the pair had
+finished: a capture sitting in this directory is untracked-and-not-ignored,
+which is exactly the set the fence walks, so a run redirected straight into it
+would fingerprint its own growing log and report MOVED.
+
+== WHAT THIS ROUND CHANGED ==
+Round 16 carried the lane's picks onto main's tip, on this branch; nothing is
+merged. This round adds the build discriminator the release train needs to
+deploy that tree, and nothing else. The landing adds no
+route and no key to any GET answer both builds serve, so /health now reports
+`ffa_game_number` in both of its arms. The value is derived when main is
+imported, from the two SQL literals the landing introduced: it reads 1 when
+the ffa_matches insert names game_number and the prior-game lookup binds both
+lobby_id and game_number, and 0 when either literal loses the column.
+HealthResponse declares the field, and test_health_ffa_game_number_marker.py
+pins all of it and runs its own controls on a copy of main.py. The route
+manifest was then re-pinned by its own tool, in its own commit: the health
+handler's fingerprint moved and no other row did.
+
+So the tree under test is round 16's, plus that one handler's answer and that
+one test file.
+
+== THE ENVIRONMENT IS ROUND 16'S ==
+Main's four other database-gated families were set for BOTH halves, each on a
+database of this landing's own, and their opt-out variables were removed:
+
+  LADDER_TEST_PG_DSN         the title ladders          database rjland_ladder
+  SCR_MIGRATION_TEST_PG_DSN  migration headers, re-runs database rjland_migr
+  PC_EDITION_TEST_PG_DSN     the card edition rollover  database rjland_pced
+  BUG392_TEST_PG_DSN         the departure-cause walks  database scr_bug392
+    with BUG392_TESTS_REQUIRED set, so that family fails rather than skips
+    when its database is missing
+
+The question the two halves answer is still the lane's -- what the FFA checks
+do with and without their database -- so the difference between the halves is
+still the FFA-gated checks and nothing else. The FFA variable names
+rjland_suites. scr_bug392 sits on this sitting's private local instance, and
+the other four on the shared local instance under this landing's own prefix.
+The activity view of both instances, read immediately before the pair
+started, showed no session on any database but the reading one.
+
+The instrument prints only its own command, so none of these variables is in
+the verbatim block below; this section is where they are stated.
+
+== THIS REPORT IS ITS OWN RUN'S OUTPUT ==
+The narrative above the marker is written; everything below it is the exact
+bytes of the log named in the `stdout:` header. This file is ASSEMBLED by
+backend/tests/evidence/assemble-evidence.py, which REFUSES to write it at all
+when a number in the narrative is absent from that log. Two rules decide what
+a number is -- a count next to a term a run reports in, and any integer of
+three digits or more that is not one of the typed exempt shapes -- and the
+assembler's self-test asserts both fire and both stay quiet.
+
+The invocation of each half is printed by the script immediately before it
+runs, and is in the verbatim block below rather than quoted up here.
+
+== THE FENCE, and what it holds this round ==
+A suite that overlaps an edit to its own tree certifies nothing. So the tree
+is fingerprinted by backend/tests/evidence/tree-fingerprint.sh at the start
+and again at the end; the instrument re-derives its set at every call --
+tracked files differing from HEAD, and files present but untracked -- and the
+paths are part of the value, so an addition or a removal moves it even when
+every surviving file is untouched. The script refuses to run at all when the
+fingerprint comes back empty.
+
+Every tracked change of this round -- the health marker, the re-pin of the
+route manifest, and the negations that admit this round's captures -- was
+COMMITTED before the pair, so no tracked file differs from HEAD. What the
+fence lists is the one path this round produced before the pair: the capture
+of the committed mutation runner's single run at this tip,
+r17-mutation-run.log. That run refused at a gate in front of its anchor
+pre-check, and the capture is its refusal in its own words: the runner derives the new-controls
+control's swap from the newest mutation-controls report, and
+r16-mutation-controls.txt lists no control as new in its round, so there was
+nothing to take out of its list. It made no mutation and wrote no file. It
+is committed with this report, unchanged.
+
+Ignored paths stay out, by `--exclude-standard`, which is also why the
+per-half pytest logs go outside the repository.
+
+== the route manifest was re-pinned BEFORE this pair ==
+The health handler is the one handler this round changed, so its fingerprint
+is the one the manifest's own tool rewrote, in its own commit, before any
+evidence ran; the route-manifest gate in both halves below is run against
+that re-pin. The wrapper that runs last of all runs the manifest's tool once more and
+reports its rewritten-row count; no handler moved after the re-pin commit, so
+the count has to be zero.
+
+== what the numbers mean ==
+The skip count in the opt-out summary IS a check, not a footnote: an opt-out
+run that skipped as few as the live run did is a live run wearing the opt-out's
+name. The two halves are two different questions, and `env -u` is what keeps
+them that way.
+
+== the difference between the halves, and it reconciles ==
+The two summary lines are in the verbatim block below, each under the command
+that produced it:
+
+  opt-out   1887 passed, 38 skipped, 5 warnings in 750.29s (0:12:30)
+  live DSN  1919 passed, 6 skipped, 5 warnings in 909.44s (0:15:09)
+
+The live half runs the FFA-gated checks the opt-out half skips, so the
+difference has to appear twice in the same two lines: the live half's surplus
+of passes and the opt-out half's surplus of skips are the same set of checks.
+Here the live half passes exactly as many more checks as the opt-out half
+skips more, and neither line carries a failure. Two numbers from two
+different columns of the same two lines agreeing is the check; a
+disagreement there would be a finding, not a rounding error.
+
+Those four figures are the assembler's subject, not decoration. Each is a count
+next to a term the run reports in, so each must appear in the log below as the
+same integer beside the same term or this file does not get written.
+
+== against r16-suites.txt, named rather than copied ==
+Round 16's pair ran the same suite, in the same environment, on the landed
+tree before this round's commits. The only difference either half is expected
+to show is the new test file's own tests, which need no database and so pass
+in both halves; the node-by-node comparison with round 16's tree is kept with
+this round's notes, outside the repository. No previous round's figure is
+quoted here: every number in this narrative has to appear in the log below it
+or the assembler refuses to write the file, and a number from a DIFFERENT run
+cannot.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any, so its absence from a line quoted verbatim IS the zero, and it
+is re-derivable from this file alone. Both halves also returned rc=0, printed
+immediately above the line they describe.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r17-suite-run.log ==========
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r17-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      1 paths differ from HEAD or are untracked; fingerprinted before and after
+  031d2169677225441c00f23275bc39f7  backend/tests/evidence/r17-mutation-run.log
+=== opt-out started 18:01:38 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1887 passed, 38 skipped, 5 warnings in 750.29s (0:12:30)
+=== live DSN started 18:14:16 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1919 passed, 6 skipped, 5 warnings in 909.44s (0:15:09)
+=== tree re-fingerprinted 18:29:33 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 1 paths, each byte-identical to the pre-run fingerprint
+=== done 18:29:33 ===

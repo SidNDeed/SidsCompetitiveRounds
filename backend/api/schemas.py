@@ -824,6 +824,40 @@ class HealthResponse(BaseModel):
     # it has no runtime signal of its own to read (#441: a postcondition that
     # cannot fail is worse than none). Absent on any build before Phase A.
     ffa_hold_fences: int | None = None
+    # rj_triage: which round of the quarantine triage view this build carries
+    # (main._RJ_TRIAGE_MARKER; 2 = round 2: PT3's lobby-wide labels need every
+    # comparison to have run, the read transaction holds automatic collection
+    # off, and a read whose session the server ended answers 503). A code
+    # constant, equal on both boxes by construction, probed by the release
+    # train and read by nothing else (#306): round 2 adds no route, so this
+    # value is what tells its build from the one before it. Absent on any
+    # build before round 2.
+    rj_triage: int | None = None
+    # ffa_game_number: whether this build keys an FFA game on the number the
+    # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
+    # names game_number, migration 327's column, AND the prior-game lookup
+    # binds (lobby_id, game_number)). DERIVED from those two SQL literals when
+    # main is imported, never written down, so a build that lost either one
+    # reads 0 (#342). The release train's build discriminator for the rejoin
+    # live-defects batch, which adds no route and no key to a GET answer both
+    # builds serve; equal on both boxes by construction, and read by nothing
+    # else (#306). Declared without a default, so building the answer without
+    # it raises instead of silently leaving the key out. Absent on any build
+    # before that batch, which is how the train reads the old build.
+    ffa_game_number: int
+    # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
+    # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
+    # by migration 333). `ready` once the map is non-empty, `empty` when the
+    # startup read found nothing.
+    #
+    # It is the release train's build discriminator for this batch, and it is
+    # the batch's OWN positive signal rather than a version stamp: the map is
+    # loaded once at startup from a table 333 creates, so `ready` says the new
+    # code is running AND its migration landed. `empty` says the code is there
+    # and the data is not, which must read as neither build and stop the train
+    # (#441: the value a broken feature reports must not look like success).
+    # Absent on any build before this batch, which is how the old build reads.
+    pc_card_themes: str | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
@@ -1031,6 +1065,27 @@ class BugReportSummary(BaseModel):
     description: str
     has_log: bool
     log_bytes: int | None
+    # WHAT PUT THE ROW HERE: 'report' = a player filed it from the F5 form,
+    # 'auto' = the automatic post-match log upload wrote it (migration 336).
+    # Carried so admin triage can tell the two apart. Without it they are
+    # indistinguishable in the list, while every triage affordance the pane
+    # offers -- a status change, a comment -- reads as acting on a ticket a
+    # player filed and is waiting on an answer to.
+    #
+    # Appended last and defaulted, and the default buys exactly ONE thing: an
+    # older admin CLIENT ignores the extra key. It buys nothing against a
+    # database without the column. `list_bug_reports` names `kind` in its raw
+    # SELECT, so on a box whose 336 has not run that statement fails and the
+    # list does not render at all -- a default on the response model cannot
+    # supply a column the query never got back. MIGRATION 336 GOES FIRST AND
+    # THAT IS MANDATORY; 336's own header carries the order and the full
+    # reader/writer inventory. An earlier version of this comment offered the
+    # reverse order as survivable, which reads as permission to deploy the api
+    # first. It is not restated here in its own words on purpose: the standing
+    # check that keeps this sentence honest reads the whole block and does not
+    # model retraction, so a quoted wrong claim is indistinguishable from a
+    # made one (#666).
+    kind: str = "report"
 
 
 class BugReportEventEntry(BaseModel):
@@ -1605,6 +1660,36 @@ class FfaMatchResponse(BaseModel):
     xp_gained: int = 0          # reporter's own
     gold_gained: int = 0        # reporter's own
     message: str = "FFA match recorded"
+    # ── The lobby's authoritative progress (RJ-3 round 4) ─────────────────
+    # Every answer given once the lobby row has been LOCKED carries these,
+    # acceptances and refusals alike (a refusal carries them in its error body
+    # — see main.py's FfaReportRefusal). Two classes of answer are raised
+    # before there is a lobby row to read and therefore carry none: the
+    # integrity 400s (malformed roster, missing room id, bad signature) and the
+    # 404s (unknown player, lobby not found). A consumer reads them when they
+    # are present rather than assuming they always are.
+    #
+    # They exist because the game number a report names comes from the seats'
+    # own physical game counter, published by the host and frozen once per
+    # game: one terminally refused report leaves that number ahead of the
+    # server for the rest of the sitting, and every later game is then refused
+    # too. A client resynchronises from these instead — the consumer is
+    # specified by RJ-CLIENT-RESYNC-CONTRACT.md in the rejoin lane's review
+    # bundle, which is not a file in this repository, and no shipped client
+    # reads these fields yet.
+    #   games_played  — settled games of this sitting, INCLUDING this one when
+    #                   this answer settled it.
+    #   expected_game — the number the lobby's NEXT report has to name; always
+    #                   games_played + 1.
+    #   settled_game  — set only when the report NAMED a number and the lobby
+    #                   already holds a row for that same number: which number
+    #                   that is. A consumer drops such an outbox entry as
+    #                   terminal instead of retrying it, which is why an answer
+    #                   to a report that named no number never carries it.
+    # Additive: a client that reads none of them behaves exactly as before.
+    games_played: int = 0
+    expected_game: int = 0
+    settled_game: int | None = None
 
 
 class FfaLeaderboardEntry(BaseModel):

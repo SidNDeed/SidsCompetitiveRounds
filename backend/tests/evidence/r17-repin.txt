@@ -1,0 +1,167 @@
+The route manifest re-pin, RUN LAST, with the order as evidence
+===============================================================
+
+stdout: r17-repin-run.log
+
+Instrument: backend/tests/evidence/repin-last.py, which produces this
+file as its OUTPUT. Nothing here is typed and nothing is appended
+afterwards -- the r6 lens found the previous round's report edited
+after its own tool had run, which left the manifest result no longer
+last, and an instrument that writes the record is the only shape that
+cannot regress to that.
+
+== the ordering, as something a reader can check ==
+The wrapper refuses to run at all while `git status --porcelain` has
+any line in it. It was empty, so every other edit of this round --
+source, tests, instruments, the other evidence files -- was already
+committed before the re-pin ran, and nothing was left that could be
+edited after it.
+
+  HEAD at the re-pin     f1908b4fb0f71af5c6659c00f2664e7abd974c66
+  tree of that commit    af2e0a78adaa6bb97ddb74db600181994b4f311f
+  subject                The round-17 suite pair, its report, and the mutation runner's capture
+  run at                 2026-09-23 19:00:41 UTC
+
+== which commit carries which file, from git rather than from me ==
+Round 11's report said the commit that added it added only it. That
+commit added two paths -- the report and the run log it quotes --
+because both were written together and staged together by hand, and
+a sentence about a commit written before that commit exists is a
+claim nothing checks. The wrapper makes both commits now, one path
+each, and the two listings below are git's own.
+
+The run log went FIRST, in a commit of its own. Immediately after
+making it the wrapper ran `git show --name-only --format= HEAD`,
+which printed:
+
+  backend/tests/evidence/r17-repin-run.log
+
+Then it wrote this file, staged it with `git add -- backend/tests/evidence/r17-repin.txt`,
+and ran `git diff --cached --name-only`, which printed:
+
+  backend/tests/evidence/r17-repin.txt
+
+That listing is what the last commit of this round contains: this
+report, and nothing else. The run log is in the commit before it,
+and the round's source, tests, instruments and other evidence are in
+the commit before that -- which is the HEAD named above, the tree
+the re-pin actually ran against.
+
+== the capture this report is assembled from, and who names it ==
+The log named in the header above is OPENED by this wrapper rather
+than redirected into it by a caller, so its name is decided in one
+function and used in three places: the file that is opened, the
+`capture` header written into that file, and the check that this
+repository's ignore rules re-include it. That check runs before
+anything is written, so a name this tree could not carry stops the
+round here instead of at the `git add` that ends it. The test that
+pairs producers with patterns reads the name by CALLING that
+function, which is why the pairing cannot drift from the file.
+
+== the client contract, which no commit carries ==
+The lane's client resync contract is an untracked document, so
+no commit of this round carries its edit, and this record
+carries its state instead. The wrapper computed these from the
+three documents the environment named -- by role, never by
+path, because all three are outside this repository -- and they
+are in the run log below under their own invocation line:
+
+  before  md5    63329c0b1d713caec21b6d5abca88af5
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  after   md5    63329c0b1d713caec21b6d5abca88af5
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  copy    md5    63329c0b1d713caec21b6d5abca88af5
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+
+`before` is the contract as the previous round's review read it,
+`after` the worktree's copy this round leaves, and `copy` the
+main checkout's. The wrapper refuses before it writes anything
+when `after` and `copy` differ, so this record exists only for a
+round that left one contract.
+
+== the attribution these two commits carry, and where it came from ==
+The trailer is DERIVED from the branch's most recent commits and
+appended by one function, rather than typed into this file. The
+previous round left it as a literal here and recorded that as a
+residual: nothing compared the constant with the sitting running
+the wrapper, so a sitting that forgot it committed under the
+previous sitting's attribution and no check reddened. The run
+below names what was derived, and the sweep beside it reads every
+message this tip carries -- the two about to be committed and the
+branch's most recent -- exempting exactly that one derived line.
+An attribution anywhere else refuses the round before a commit is
+made rather than entering the record.
+
+== what the wrapper checked before it wrote this ==
+A pytest run cannot cover the file that records it: the file is
+written after the run, by construction. So the closing check below
+covers every other report in this directory, and the rules this
+directory enforces are applied by the wrapper to THIS file before it
+is written -- the assembler's claim rules and the invocation rule,
+imported from evidence_rules.py and assemble-evidence.py rather than
+restated here, because a rule with two implementations drifts. If
+either refuses, nothing is written.
+
+== what a clean result means here ==
+`rows rewritten now : 0` is the result this round requires. The
+manifest already held every fingerprint the committed tree produces,
+so the tool changed nothing -- the positive statement that the
+committed manifest and the committed code agree. A non-zero count
+here would mean the tree moved after the suites certified it.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+------------------------------------------------------------------------------
+========== r17-repin-run.log ==========
+script    backend/tests/evidence/repin-last.py
+cwd       <repo>
+capture   backend/tests/evidence/r17-repin-run.log
+
+== closing evidence check, over this directory as committed ==
+cwd       <repo>/backend
+started   2026-09-23 19:00:41 UTC
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k committed_evidence or assembled_from_its_run or round_eight_control or round_seven_control or production_file or runner_carries or control_tally or counts_the_checks or new_controls_a_report or residual_reach or negation_admits or repin_trailer or inert_twin
+.............                                                            [100%]
+13 passed, 154 deselected in 9.49s
+closing rc=0
+
+== route manifest re-pin, by its own tool ==
+cwd       <repo>
+started   2026-09-23 19:00:53 UTC
+command   python backend\tests\repin_route_manifest.py
+manifest rows      : 362
+fingerprinted      : 361
+rows rewritten now : 0
+MOVED vs HEAD      : 0
+ENTRY POINTS moved vs HEAD: 0
+(dry run; pass --write)
+repin rc=0
+
+== the final-tip attribution sweep ==
+cwd       <repo>
+command   python backend/tests/evidence/repin-last.py (derive_trailer, then foreign_attributions over every message this tip carries)
+trailer   Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>  (derived from the branch, not typed)
+  about to commit (run log)  clean
+  about to commit (report)   clean
+  HEAD~0                     clean
+  HEAD~1                     clean
+  HEAD~2                     clean
+  HEAD~3                     clean
+  HEAD~4                     clean
+  HEAD~5                     clean
+  HEAD~6                     clean
+  HEAD~7                     clean
+sweep rc=0
+
+== the untracked client contract, by digest ==
+cwd       <repo>
+command   python backend/tests/evidence/repin-last.py (contract_digests over the documents REPIN_CONTRACT_BEFORE, REPIN_CONTRACT and REPIN_CONTRACT_COPY name; no path is printed)
+  before  md5    63329c0b1d713caec21b6d5abca88af5  (the contract as the previous round's review read it)
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  after   md5    63329c0b1d713caec21b6d5abca88af5  (the contract as this round leaves it, the worktree's copy)
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  copy    md5    63329c0b1d713caec21b6d5abca88af5  (the same contract, the main checkout's copy)
+          sha256 4d6e3c6991ae7c06c4b760ebf1f253e03b75c7e9c971f2e15c00f98113c6bb6a
+  after and copy: EQUAL
+contract rc=0
+

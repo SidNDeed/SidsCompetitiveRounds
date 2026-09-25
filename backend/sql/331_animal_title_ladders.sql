@@ -23,6 +23,19 @@
 -- by anything that can name the sku. This is a deliberate deviation from
 -- the item plan, which proposed the new name.
 --
+-- DEPLOY ORDER: THIS FILE FIRST, THE API SECOND.
+-- -----------------------------------------------
+-- In the batch's standard form, so the order can be read off every file in
+-- the same place instead of inferred from prose -- which is what a reader at
+-- deploy time actually needs, and what 333 omitted entirely. For THIS file
+-- the order is the batch's convention rather than a hard requirement: no
+-- path that runs today queries `title_ladders` or the new `shop_items` rows
+-- (the progression hook is uncalled and the router unmounted), and the one
+-- production reference -- main reading `title_ladders.GRANTED_ONLY_SKUS` --
+-- is a python constant baked into the image, not a query. Both orders work;
+-- migration-first is the order the batch deploys in and the one this file is
+-- verified under.
+--
 -- SAFE TO RUN BEFORE THE API, and the reason is the catalog_ready column
 -- rather than an absence of readers. An earlier draft of this header said
 -- the new rows were "inert until something grants them" while also calling
@@ -73,8 +86,18 @@
 --
 --   * clean apply commits: 48 shop_items, 48 title_ladders, 8 ordinary-pool
 --     entry rungs, 40 granted-only, ZERO tier-1 rungs left ready to sell.
---   * re-running is a genuine no-op -- same final state, only "already
---     exists, skipping" notices.
+--   * re-running reaches the same final state with only "already exists,
+--     skipping" notices. That was true of the FINAL STATE and NOT of the
+--     writes: the title_ladders insert was ON CONFLICT DO UPDATE, so every
+--     re-run rewrote all 48 rows, and the catalog_ready repair was ungated,
+--     so a re-run after the future activation release would have taken the
+--     eight entry rungs back off sale. Both are fixed above and both are now
+--     asserted by backend/tests/test_migration_reruns.py, which applies this
+--     file twice against a live cluster and compares each row's VALUE AND ITS
+--     xmin -- a rewrite-to-the-same-value is invisible to anything weaker.
+--     Re-verified 2026-09-19 under `psql -f` (production's own invocation)
+--     and under asyncpg: second run, zero rows written, zero objects
+--     replaced.
 --   * BOTH shop_items triggers are inert for this file, and neither is
 --     obvious from reading it. `gate_new_face_shop_item` fires BEFORE INSERT
 --     but only acts on kind = 'face'. `stamp_shop_item_catalog_release`
@@ -105,6 +128,66 @@
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 
+-- HAS THIS FILE RUN BEFORE? Captured BEFORE the CREATE TABLEs below, because
+-- the absence of `title_ladders` is the only first-run marker available --
+-- this repo keeps no migrations ledger.
+--
+-- WHICH OF THIS FILE'S STATEMENTS ARE GUARDED, AND WHICH ARE NOT. The three
+-- `CREATE TABLE IF NOT EXISTS` statements run unconditionally while the
+-- `CREATE INDEX` below is guarded on the catalog, and the difference was
+-- measured rather than assumed, and measured one holder at a time:
+-- re-applying this file completes with any ONE of those three tables held by
+-- an ordinary reader, and again with that one table held by an ordinary
+-- writer, whereas the index's `IF NOT EXISTS` spelling takes SHARE before
+-- it looks for the name and stops every writer to title_ladders for as long
+-- as it queues. This paragraph used to settle the question for all of them at
+-- once, on the grounds that re-establishing correct schema is a no-op -- true
+-- of what a statement WRITES and not of what it LOCKS, and the lock is the
+-- part of a re-run that ordinary traffic on a live primary can be stopped by.
+-- See the index's own comment for the measurement and
+-- `test_a_second_run_takes_no_blocking_lock` for the standing check.
+--
+-- AND THE REST OF WHAT A RE-RUN ISSUES, NAMED FOR THE SAME REASON. The
+-- sentence above settles the two kinds of SCHEMA statement against each other
+-- and stops, which reads as though those were the whole file. They are not.
+-- Outside every guard block this file also issues a `CREATE TEMP TABLE` (the
+-- first-run marker below), a `COMMENT ON TABLE`, two `INSERT INTO` statements
+-- and an `UPDATE` -- five kinds of statement in all, counted off the file
+-- rather than remembered: the disclosure check in `test_migration_headers`
+-- parses this file and reds if it issues a kind this header does not name,
+-- matching on a word boundary inside THIS comment block rather than anywhere
+-- in the file, because `UPDATE` and `CREATE TABLE IF NOT EXISTS` each appear
+-- elsewhere in these comments for unrelated reasons. That
+-- check exists because 332's equivalent sentence named two of its three
+-- statements, read as exhaustive, and nothing in the suite could disagree
+-- with it.
+--
+-- What they WRITE on a re-run is the separate question, and it is the one the
+-- post-checks at the foot of this file answer. The `CREATE TEMP TABLE` is
+-- session-local and dropped at COMMIT. The `COMMENT ON TABLE` re-sets the
+-- same text. Both `INSERT INTO` statements are `ON CONFLICT (sku) DO
+-- NOTHING`, so a re-run adds no row and rewrites none. The `UPDATE` is the catalog_ready
+-- repair, which keys on how MANY tier-1 rungs are ready rather than on
+-- whether this file has run before, and is a no-op in every state but the
+-- one it exists to correct.
+--
+-- WHAT IT IS AND IS NOT USED FOR. It is read by ONE thing: the money
+-- post-check at the foot of this file, which admits eight ready tier-1 rungs
+-- as the later activation release's doing and admits nothing but zero on a
+-- first run, where that release cannot have happened yet.
+--
+-- It does NOT decide the catalog_ready repair any more. It used to, and that
+-- was the wrong question asked of the right flag: "has this file run before"
+-- is TRUE both after the activation release, where the repair would revoke a
+-- live purchase, and on the ordinary re-run that is the documented remedy for
+-- a rung wrongly flagged ready -- where the repair is the only thing that
+-- clears it. One boolean cannot mean both (#430). The repair keys on how MANY
+-- tier-1 rungs are ready instead; see the statement itself.
+CREATE TEMP TABLE _m331_state ON COMMIT DROP AS
+SELECT EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'title_ladders') AS already_applied;
+
 -- The catalogue: which sku is which rung of which line, and what it costs
 -- in games. PRIMARY KEY is the sku and NOT (line, tier), because rat's tier
 -- 4 is TWO rungs -- Rat King and Rat Queen, either of which is rung 4 --
@@ -117,7 +200,27 @@ CREATE TABLE IF NOT EXISTS title_ladders (
     threshold  INTEGER     NOT NULL CHECK (threshold >= 0)
 );
 
-CREATE INDEX IF NOT EXISTS idx_title_ladders_line ON title_ladders (line, tier);
+-- Guarded on the catalog rather than spelled `IF NOT EXISTS`, which decides
+-- the same thing and decides it too late: CREATE INDEX takes its SHARE lock
+-- on the table before it looks for the name, so on a re-run that spelling
+-- stops every WRITER to title_ladders for as long as it queues, and with the
+-- lock_timeout above it aborts the file instead of waiting. Measured on
+-- PostgreSQL 16.9: re-applying this file with one writer holding ROW
+-- EXCLUSIVE on title_ladders died with "canceling statement due to lock
+-- timeout". The three CREATE TABLE IF NOT EXISTS statements are left alone:
+-- the same probe re-applies this file with each of those tables held by a
+-- reader and by a writer and it completes, so whatever lock they take is one
+-- ordinary traffic does not conflict with. That is what was measured; it is
+-- not a claim that they take none.
+DO $m331idx$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'idx_title_ladders_line') THEN
+    CREATE INDEX idx_title_ladders_line ON title_ladders (line, tier);
+  END IF;
+END $m331idx$;
 
 -- Per-player progress on one line. `games` COUNTS COMPLETED SERIES, not
 -- individual games -- the column keeps the shorter name, but one best-of-three
@@ -256,9 +359,19 @@ INSERT INTO title_ladders (sku, line, tier, threshold) VALUES
     ('title_ladder_shark_4', 'shark', 4, 75),
     ('title_ladder_shark_5', 'shark', 5, 150),
     ('title_ladder_shark_6', 'shark', 6, 300)
-ON CONFLICT (sku) DO UPDATE SET line = EXCLUDED.line, tier = EXCLUDED.tier, threshold = EXCLUDED.threshold;
+-- ON CONFLICT DO NOTHING, NOT DO UPDATE. An earlier version of this statement
+-- rewrote line/tier/threshold on every re-run. That looks harmless -- the
+-- values come from the same generator -- but it makes a re-run a WRITE to
+-- every one of the 48 rows, and it means this file silently reverts any
+-- correction made to the table since, on a table whose thresholds are exactly
+-- what an operator might correct in place. Re-running a migration must change
+-- nothing. Drift between this file and `title_ladders.LADDERS` is caught by
+-- `test_migration_rows_match_module`, which is the right place for it: a test
+-- that reports a difference, not a migration that quietly imposes one.
+ON CONFLICT (sku) DO NOTHING;
 
--- FINAL-STATE REPAIR, and the reason it is a separate statement.
+-- FINAL-STATE REPAIR: ALL EIGHT OR NONE, and the reason it is a separate
+-- statement.
 --
 -- The shop_items INSERT above is ON CONFLICT (sku) DO NOTHING, which leaves a
 -- row that already exists EXACTLY as it was. Writing catalog_ready = FALSE in
@@ -270,14 +383,47 @@ ON CONFLICT (sku) DO UPDATE SET line = EXCLUDED.line, tier = EXCLUDED.tier, thre
 -- 1000-gold purchase for a ladder whose progression hook is not wired.
 --
 -- So state the invariant as an operation on the FINAL state instead of
--- trusting the insert literals. Idempotent, and it cannot widen anything:
--- it only ever clears the flag, never sets it.
+-- trusting the insert literals. The question is then only WHEN the statement
+-- must hold back, because it is a repair in one direction and a revocation in
+-- the other: after the later release that flips these rungs TRUE alongside
+-- the progression hook, a repair that always ran would take eight live,
+-- purchasable rungs off sale on the next replay of this file, silently.
+--
+-- WHAT IT KEYS ON, and what it used to key on. It used to key on
+-- `already_applied` -- "has this file run before" -- and that one boolean was
+-- carrying two different questions (#430). A rung flipped TRUE early, by a
+-- hand edit or a half-applied activation or an operator trying the shop, is
+-- exactly the state re-applying this file is the documented remedy for, and
+-- `already_applied` is TRUE in that case too. So the remedy did nothing, and
+-- the post-check below reported the rung instead of clearing it.
+--
+-- It keys on the COUNT instead. This file leaves none of the eight ready;
+-- the activation release sets all eight, and it does so in one statement, so
+-- eight of eight is the state this file must not touch. One to seven is a
+-- state neither of them ends on, and it is the one that has to be cleared --
+-- toward off-sale, which is the conservative direction for a purchase
+-- (#283). The post-check below fails closed if any survive.
+--
+-- WHAT THIS ASKS OF THE FUTURE ACTIVATION RELEASE: set the eight in ONE
+-- statement. If it ever lands them in several, re-applying this file between
+-- two of them clears what it has done so far. That is the conservative
+-- direction and it is recoverable by re-running that release, but it is a
+-- real constraint and it is stated here rather than assumed.
+--
+-- The count is read from the snapshot this statement began with, so the rows
+-- it is updating cannot change the answer underneath it.
+--
+-- This statement still only ever CLEARS the flag; nothing here can put a rung
+-- on sale.
 UPDATE shop_items si
    SET catalog_ready = FALSE
   FROM title_ladders tl
  WHERE tl.sku = si.sku
    AND tl.tier = 1
-   AND si.catalog_ready IS TRUE;
+   AND si.catalog_ready IS TRUE
+   AND (SELECT COUNT(*)
+          FROM title_ladders t2 JOIN shop_items s2 ON s2.sku = t2.sku
+         WHERE t2.tier = 1 AND s2.catalog_ready IS TRUE) < 8;
 
 -- Post-checks. Each one can actually fail: they are counted against the
 -- rows this file just wrote, not against a constant that was copied from
@@ -289,7 +435,9 @@ DECLARE
     n_entry    INTEGER;
     n_hidden   INTEGER;
     bad        INTEGER;
+    v_applied  BOOLEAN;
 BEGIN
+    SELECT already_applied INTO v_applied FROM _m331_state;
     SELECT COUNT(*) INTO n_items FROM shop_items WHERE sku LIKE 'title\_ladder\_%';
     SELECT COUNT(*) INTO n_ladders FROM title_ladders;
     IF n_items <> 48 THEN
@@ -300,10 +448,10 @@ BEGIN
     END IF;
 
     -- Tier 1 is in the ORDINARY POOL and priced; every higher rung is
-    -- granted only. Note what this count does NOT assert: readiness. Tier-1
-    -- rungs are deliberately left catalog_ready = FALSE by the repair above,
-    -- so they are not on sale -- the separate post-check further down is the
-    -- one that enforces that. Saying "purchasable" here would contradict it.
+    -- granted only. Note what this count does NOT assert: readiness. Whether
+    -- a tier-1 rung is on sale is the separate post-check further down --
+    -- none of them is, until the activation release flips all eight -- and
+    -- saying "purchasable" here would contradict it.
     SELECT COUNT(*) INTO n_entry
       FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku
      WHERE tl.tier = 1 AND si.rotation_pool IS NULL AND si.price > 0;
@@ -349,11 +497,34 @@ BEGIN
     -- listed by /shop/items and costs 1000 gold, and the ladder it starts
     -- cannot advance yet. Counted AFTER the repair above, so it fails only if
     -- the repair was removed or could not reach the row.
+    --
+    -- THE STATES THIS DISTINGUISHES. None ready is this file's own state.
+    -- Eight ready is the activation release's, which flips them together with
+    -- the progression hook -- failing there would make that release's own
+    -- database un-migratable, so it is reported instead, and "the ladders are
+    -- live" is worth seeing in a deploy log. Anything between the two is a
+    -- state no release produces; the repair above clears exactly that case,
+    -- so reaching it here means the repair could not, and it is the case
+    -- where a player can spend 1000 gold on a ladder that cannot advance.
+    -- That one fails, on a re-run as much as on a first run.
+    --
+    -- On a FIRST run eight-of-eight is not the activation release either --
+    -- that release comes after this file -- so the first-run arm admits none
+    -- and nothing else.
     SELECT COUNT(*) INTO bad
       FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku
      WHERE tl.tier = 1 AND si.catalog_ready IS TRUE;
-    IF bad > 0 THEN
-        RAISE EXCEPTION 'title ladders: % tier-1 rung(s) are catalog_ready and would be on sale for a ladder that cannot advance', bad;
+    IF NOT v_applied THEN
+        IF bad > 0 THEN
+            RAISE EXCEPTION 'title ladders: % tier-1 rung(s) are catalog_ready on this file''s first run and would be on sale for a ladder that cannot advance; the repair above did not reach them', bad;
+        END IF;
+        RAISE NOTICE 'title ladders: first application -- 48 rungs, 8 entry rungs held off sale';
+    ELSIF bad = 0 THEN
+        RAISE NOTICE 'title ladders: already applied; the 8 entry rungs are held off sale.';
+    ELSIF bad = 8 THEN
+        RAISE NOTICE 'title ladders: already applied; all 8 entry rungs are catalog_ready -- the activation release has run, and this re-run left that flag alone.';
+    ELSE
+        RAISE EXCEPTION 'title ladders: % of the 8 tier-1 rungs are catalog_ready, which is neither this file''s state (none) nor the activation release''s (all 8). The repair above clears a partial set, so this means it could not reach these rows -- each one is listed by /shop/items at 1000 gold for a ladder whose progression hook is not wired', bad;
     END IF;
 END $$;
 

@@ -1,6 +1,18 @@
-# PINNED BY DIGEST, not by tag. `python:3.12-slim` is a moving tag, and this
-# image's bytes feed `renderer_fp` -- the Player Cards face key -- through
-# `runtime_provenance()`. Two consequences, and the first is the one that bites:
+# PINNED BY DIGEST, not by tag. `python:3.12-slim` is a moving tag, and what
+# this image supplies feeds `renderer_fp` -- the Player Cards face key --
+# through `runtime_provenance()`.
+#
+# WHAT IS ACTUALLY HASHED, stated exactly, because an earlier version of this
+# comment said "this image's bytes" and that is not what happens.
+# `runtime_provenance()` records the interpreter VERSION STRING, Pillow's and
+# `regex`'s version strings, a per-feature record for zlib / freetype2 /
+# harfbuzz / fribidi / raqm, the layout engine name, and a digest over SELECTED
+# PILLOW FILES. Nothing walks the base image, the interpreter binary, or
+# libfribidi's bytes. So a rebuild that changed a shared library WITHOUT moving
+# any of those strings would produce the SAME fingerprint over different
+# pixels, which fails in the quiet direction -- and is why the digest pin below
+# matters more rather than less. Two consequences, and the first is the one
+# that bites:
 #
 #   1. The primary and the standby are built from this file at DIFFERENT times.
 #      If the tag moves in between, the two boxes bake different interpreter and

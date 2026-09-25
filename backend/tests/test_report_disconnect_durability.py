@@ -2001,23 +2001,72 @@ def test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain():
     removes it is the transaction ending at the item boundary (#204).
 
     Read structurally rather than by string: each loop commits, and nothing
-    commits after the loops."""
+    commits after the loops.
+
+    r7 added a FOURTH way out of an iteration. A refund can now refuse (one
+    bettor's balance does not cover the stake their wager records), and
+    `_refund_or_skip` contains that at the item boundary: it ROLLS BACK and
+    returns None, and the loop takes the next series. A rollback ends the
+    transaction and releases the item's locks exactly as a commit does, so
+    that exit satisfies this property -- but it is credited here only because
+    the helper's rollback is ASSERTED below, never assumed from its name."""
     tree = ast.parse(textwrap.dedent(inspect.getsource(main._prune_stale_series)))
     fn = tree.body[0]
 
-    def _commits(node):
+    def _calls_named(node, attr):
         return [n for n in ast.walk(node)
                 if isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Attribute)
-                and n.func.attr == "commit"]
+                and n.func.attr == attr]
+
+    def _commits(node):
+        return _calls_named(node, "commit")
+
+    # The containment helper, and the rollback that makes its sentinel safe.
+    helper = next((n for n in fn.body
+                   if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+                   and n.name == "_refund_or_skip"), None)
+    assert helper is not None, (
+        "the refusal-containment helper is gone; a refused refund would leave "
+        "_prune_stale_series entirely and end the whole sweep")
+    assert _calls_named(helper, "rollback"), (
+        "_refund_or_skip returns its skip sentinel without ending the "
+        "transaction, so the loop would take the next series still holding "
+        "the locks it took for this one")
+
+    def _skips(loop):
+        """Continues that are the refusal skip: `if <n> is None: continue`,
+        where <n> was assigned from _refund_or_skip in this same loop."""
+        assigned = {t.id for node in ast.walk(loop)
+                    if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Await)
+                    and isinstance(node.value.value, ast.Call)
+                    and isinstance(node.value.value.func, ast.Name)
+                    and node.value.value.func.id == "_refund_or_skip"
+                    for t in node.targets if isinstance(t, ast.Name)}
+        out = []
+        for node in ast.walk(loop):
+            if not isinstance(node, ast.If):
+                continue
+            test = node.test
+            if not (isinstance(test, ast.Compare)
+                    and isinstance(test.left, ast.Name)
+                    and test.left.id in assigned
+                    and len(test.ops) == 1 and isinstance(test.ops[0], ast.Is)
+                    and isinstance(test.comparators[0], ast.Constant)
+                    and test.comparators[0].value is None):
+                continue
+            out += [n for n in node.body if isinstance(n, ast.Continue)]
+        return out
 
     loops = [n for n in fn.body if isinstance(n, ast.For)]
     assert len(loops) == 3, f"expected the three prune modes, found {len(loops)}"
     for index, loop in enumerate(loops):
         commits = _commits(loop)
         continues = [n for n in ast.walk(loop) if isinstance(n, ast.Continue)]
+        skips = _skips(loop)
         assert commits, f"prune loop {index} never ends its transaction"
-        assert len(commits) >= len(continues) + 1, (
+        assert len(commits) + len(skips) >= len(continues) + 1, (
             f"prune loop {index} has a path that skips an item while still "
             f"holding the locks it took for it"
         )
@@ -2100,8 +2149,22 @@ def test_each_prune_mode_re_asks_its_whole_selection_under_its_own_lock():
 
     # ...and mode 1 takes that lock BEFORE it moves any gold, which is the
     # order the admin reversal takes on the same rows.
+    #
+    # r7 routes all three modes' refunds through `_refund_or_skip`, the nested
+    # helper that contains a refused refund at the ITEM boundary, so the gold
+    # no longer moves through a call spelled `_refund_series_bets(` inside the
+    # loop. The property is the same one and is asserted against whichever
+    # spelling the loop uses -- and if it uses NEITHER, that is an assertion
+    # failure naming the property, not a ValueError out of `str.index`. The
+    # previous form died on the missing substring before it compared anything,
+    # which reports a red for the wrong reason and tells a reader nothing
+    # about whether the lock still precedes the gold (#342's rule (b): make
+    # the mismatch visible in the output rather than inferable from a crash).
     tail = src[src.index("for sid, player1_id, player2_id, prune_reason in abandon_rows:"):]
-    assert tail.index("_still_a = ") < tail.index("_refund_series_bets("), (
+    refunds = [where for where in (tail.find("_refund_or_skip("),
+                                   tail.find("_refund_series_bets(")) if where != -1]
+    assert refunds, "mode 1 no longer refunds the series it abandons at all"
+    assert tail.index("_still_a = ") < min(refunds), (
         "mode 1 refunds before it locks the series it is refunding"
     )
 

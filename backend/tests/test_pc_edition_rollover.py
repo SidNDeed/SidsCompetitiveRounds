@@ -16,11 +16,31 @@ equivalent to moving the clock forwards, and it keeps every assertion about
 the SUCCESSOR's anchor an absolute date rather than a relative one.
 
 There is no pytest-asyncio in this suite, so each test is a sync function that
-runs one coroutine, exactly like test_a1_predicate_sql.py. Skips unless
-PC_EDITION_TEST_PG_DSN is set, so the ordinary suite is unaffected:
+runs one coroutine, exactly like test_a1_predicate_sql.py.
 
-    PC_EDITION_TEST_PG_DSN="postgresql+asyncpg://postgres@127.0.0.1:55432/pctest" \\
+RUNNING IT
+----------
+    PC_EDITION_TEST_PG_DSN="postgresql://postgres@127.0.0.1:55432/pctest" \\
         python -m pytest tests/test_pc_edition_rollover.py -q
+
+EITHER SPELLING. This file drives SQLAlchemy and so needs
+`postgresql+asyncpg://`; its concurrency sibling connects with asyncpg
+directly and so needs the plain `postgresql://`. They are gated by the SAME
+variable, so one exported value has to satisfy both, and each normalises what
+it was given (`_as_asyncpg` here, `_as_plain` there). Before that, exporting
+the plain form made all ten tests here die in `create_async_engine` on a
+missing psycopg2 -- SQLAlchemy's default driver for a bare `postgresql://` --
+while the sibling passed, and exporting the `+asyncpg` form would have moved
+the failure to the sibling instead. One variable that cannot be set correctly
+for both readers is not a gate, and the cross-module assertion that keeps them
+agreeing lives in the sibling's
+`test_both_gated_modules_accept_either_dsn_spelling`.
+
+Without the DSN these tests FAIL by name rather than skipping. A skip is a run
+that proved nothing while reporting exit 0, which is exactly how this module
+sat dead on the run that was verifying the rollover fix. Set
+PC_EDITION_TEST_PG_OPTOUT=1 to waive the coverage deliberately -- an ordinary
+unit run on a machine with no cluster -- and the failures become named skips.
 """
 import asyncio
 import datetime as _dt
@@ -36,22 +56,70 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 import main
 
 DSN_VAR = "PC_EDITION_TEST_PG_DSN"
-DSN = os.environ.get(DSN_VAR)
 
-# Setting a NEAR-MISS variable name gives "9 skipped, exit 0", which reads as a
-# clean run in any summary that reports pass/fail rather than collected count --
-# measured, not hypothetical: it happened on the run that verified the rollover
-# fix, and the whole module silently checked nothing. Export
-# PC_EDITION_TESTS_REQUIRED=1 to turn "no DSN" into a hard failure instead of a
-# skip, so a CI job or a deliberate verification run cannot pass by collecting
-# nothing. The default stays a skip: the ordinary suite must not need Postgres.
-REQUIRED = os.environ.get("PC_EDITION_TESTS_REQUIRED") == "1"
-if REQUIRED and not DSN:
-    raise RuntimeError(
-        "PC_EDITION_TESTS_REQUIRED=1 but %s is unset -- refusing to report a clean "
-        "run for a module that would collect nothing. Check the variable NAME." % DSN_VAR)
-pytestmark = pytest.mark.skipif(
-    not DSN, reason="%s unset; live-Postgres rollover check" % DSN_VAR)
+
+def _as_asyncpg(dsn):
+    """The SQLAlchemy async form, whichever of the three spellings came in.
+
+    `create_async_engine("postgresql://...")` does not fail over to an async
+    driver: it resolves the dialect's DEFAULT DBAPI, which is psycopg2, and
+    raises ModuleNotFoundError in a suite that has never installed it. The
+    failure names psycopg2 and says nothing about the DSN, which is how it
+    cost a whole run to read.
+
+    Rewriting the scheme is safe because the scheme is the only thing that
+    differs -- host, port, user, database and query string are identical in
+    both spellings, and asyncpg is the only PostgreSQL driver this repo
+    installs, so there is no spelling here that legitimately means psycopg2.
+    A DSN with some other scheme is passed through untouched rather than
+    coerced: guessing at an unrecognised one would turn a clear error into an
+    obscure one.
+    """
+    if not dsn:
+        return dsn
+    for prefix in ("postgresql+asyncpg://", "postgresql://", "postgres://"):
+        if dsn.startswith(prefix):
+            return "postgresql+asyncpg://" + dsn[len(prefix):]
+    return dsn
+
+
+DSN = _as_asyncpg(os.environ.get(DSN_VAR))
+
+# THE DEFAULT IS A FAILURE, NOT A SKIP, and that polarity is the fix.
+#
+# Setting a NEAR-MISS variable name gave "10 skipped, exit 0", which reads as
+# a clean run in any summary that reports pass/fail rather than collected
+# count -- measured, not hypothetical: it happened on the run that verified
+# the rollover fix, and the whole module silently checked nothing. The first
+# attempt at closing that was an OPT-IN switch (PC_EDITION_TESTS_REQUIRED=1),
+# which fixes the hole only for a caller who already suspects it. Nobody who
+# mistypes the DSN name also remembers to set the second variable, so the
+# default run went on proving nothing.
+#
+# So: no DSN means every test here FAILS, by name, saying what did not run.
+# To waive it deliberately -- an ordinary unit run on a machine with no
+# cluster -- export PC_EDITION_TEST_PG_OPTOUT=1 and the failures become named
+# skips. The waiver is a decision somebody makes and can be seen making, which
+# is the difference between this and the old default.
+OPTOUT_VAR = "PC_EDITION_TEST_PG_OPTOUT"
+OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
+
+
+@pytest.fixture(autouse=True)
+def _require_live_pg():
+    """Applied to every test in this module; see the note above."""
+    if DSN:
+        return
+    if OPTOUT:
+        pytest.skip("%s is unset and %s=1: live-Postgres rollover coverage "
+                    "deliberately waived for this run." % (DSN_VAR, OPTOUT_VAR))
+    pytest.fail(
+        "%s is unset, so the rollover was not exercised against a server at "
+        "all -- the anchor arithmetic, the READ COMMITTED re-check and the "
+        "partial unique index are the whole subject here and none of them can "
+        "be read off the source. Point it at a throwaway cluster (see this "
+        "module's docstring), or set %s=1 to waive the coverage deliberately."
+        % (DSN_VAR, OPTOUT_VAR))
 
 CHANNEL = "900000000000000001"   # not a real channel id; nothing here posts
 

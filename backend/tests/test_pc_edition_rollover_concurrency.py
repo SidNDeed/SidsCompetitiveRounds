@@ -13,9 +13,12 @@ the UPDATE's own quals against the new row version after the lock wait
 
 WHY THIS FILE EXISTS
 --------------------
-`test_pc_edition_rollover.py` passes 9/9 both before and after that change, and
-it is right to: not one of its cases edits a schedule mid-flight, so they show
-the fix broke nothing and say nothing about whether it does anything. The
+`test_pc_edition_rollover.py` passes in full both before and after that change,
+and it is right to: not one of its cases edits a schedule mid-flight, so they
+show the fix broke nothing and say nothing about whether it does anything.
+(Its test COUNT is asserted in test_janitor_walker.py and is deliberately not
+restated here: a count written into a neighbouring file's prose is a number
+nobody updates, and this one said 9 while that module held 10.) The
 binding assertion elsewhere checks the statement's TEXT SHAPE, which cannot
 tell a working fix from an inert one either.
 
@@ -45,15 +48,27 @@ direction, and it is silent -- an operator gets no signal that a pass declined.
 
 RUNNING IT
 ----------
-    PC_EDITION_TEST_PG_DSN="postgresql://postgres@127.0.0.1:5432/pctest" \\
+    PC_EDITION_TEST_PG_DSN="postgresql://postgres@127.0.0.1:55432/pctest" \\
         python -m pytest backend/tests/test_pc_edition_rollover_concurrency.py
 
 Note this file wants a PLAIN DSN (asyncpg connects directly, because the point
 is two independent sessions), not the `postgresql+asyncpg://` SQLAlchemy form
-the sibling file takes. Both spellings are accepted; the `+asyncpg` is stripped.
+the sibling file takes -- and the sibling is gated by the SAME variable, so one
+exported value has to satisfy both readers. Each normalises what it was given:
+`_as_plain` here, `_as_asyncpg` there, and
+`test_both_gated_modules_accept_either_dsn_spelling` below is what keeps the
+pair honest. Neither direction was safe before it: the plain form killed all
+ten of the sibling's tests in `create_async_engine` on a missing psycopg2, and
+the `+asyncpg` form would have moved the failure here instead.
+
+Without the DSN the live cases FAIL by name rather than skipping -- nine
+scenarios that skip silently certify nothing while the run reports exit 0. Set
+PC_EDITION_TEST_PG_OPTOUT=1 to waive them deliberately; the four structural
+tests in this file run either way.
 """
 import asyncio
 import datetime as _dt
+import functools
 import os
 import sys
 
@@ -78,12 +93,69 @@ _GATE = "PC_EDITION_TEST_PG_DSN"
 _NEAR_MISSES = ("PC_TEST_PG_DSN", "PC_EDITION_DSN", "PCTEST_DSN",
                 "PC_EDITION_TEST_DSN", "PC_EDITIONS_TEST_PG_DSN")
 
-_DSN = (os.environ.get(_GATE) or "").replace("postgresql+asyncpg://",
-                                             "postgresql://")
+def _as_plain(dsn):
+    """The libpq form asyncpg connects with, whichever spelling came in.
 
-_needs_pg = pytest.mark.skipif(
-    not _DSN or asyncpg is None,
-    reason="%s unset; live-Postgres concurrency check" % _GATE)
+    `asyncpg.connect` rejects a `postgresql+asyncpg://` URI outright -- the
+    `+asyncpg` is SQLAlchemy's dialect selector and is not part of a libpq
+    connection URI. A DSN with some other scheme is passed through untouched;
+    coercing one this function does not recognise would trade a clear error
+    for an obscure one.
+    """
+    if not dsn:
+        return ""
+    if dsn.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
+    return dsn
+
+
+_DSN = _as_plain(os.environ.get(_GATE))
+
+# THE DEFAULT IS A FAILURE, NOT A SKIP. Nine live cases that skip silently are
+# nine cases that certify nothing while the run reports exit 0, and the
+# near-miss guard below only catches the operator who set SOME variable -- it
+# says nothing to the run that set none. `_needs_pg` is a decorator rather
+# than a mark because a mark cannot fail; it can only skip.
+#
+# PC_EDITION_TEST_PG_OPTOUT=1 turns the failures into named skips, for an
+# ordinary unit run on a machine with no cluster. Same variable as the sibling
+# module: the two are waived together or not at all, because waiving one and
+# not the other is the half-covered state neither file can detect.
+_OPTOUT_VAR = "PC_EDITION_TEST_PG_OPTOUT"
+_OPTOUT = os.environ.get(_OPTOUT_VAR) == "1"
+
+
+def _require_live_pg():
+    if _DSN and asyncpg is not None:
+        return
+    if _OPTOUT:
+        pytest.skip("%s is unset and %s=1: live-Postgres concurrency coverage "
+                    "deliberately waived for this run." % (_GATE, _OPTOUT_VAR))
+    if asyncpg is None:
+        pytest.fail(
+            "asyncpg is not installed, so the two-connection concurrency "
+            "scenarios did not run. Install it, or set %s=1 to waive them "
+            "deliberately." % _OPTOUT_VAR)
+    pytest.fail(
+        "%s is unset, so no concurrency scenario ran: the lock wait, the "
+        "EvalPlanQual re-check and the pre-fix control are the whole subject "
+        "here and none of them exists outside a live server. Point it at a "
+        "throwaway cluster (see this module's docstring), or set %s=1 to waive "
+        "the coverage deliberately." % (_GATE, _OPTOUT_VAR))
+
+
+def _needs_pg(fn):
+    """Fail-by-default gate for one live case.
+
+    `functools.wraps` carries `pytestmark` across, so a `@pytest.mark.parametrize`
+    applied UNDER this decorator still parametrizes, and `__wrapped__` lets
+    pytest see the real signature for those parameters.
+    """
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        _require_live_pg()
+        return fn(*args, **kwargs)
+    return _wrapper
 
 CHANNEL = "900000000000000001"       # not a real channel id; nothing here posts
 
@@ -331,25 +403,114 @@ def test_the_scenario_table_still_contains_its_controls():
 def test_a_near_miss_gate_variable_does_not_read_as_a_clean_run():
     """Runs always. The hole this closes was found by walking into it.
 
-    With the gate variable misspelled, every gated test skips and pytest exits
-    0 -- indistinguishable from a clean run in any summary that reports
-    pass/fail rather than collected count. If something DSN-shaped is set under
-    a near-miss name and the real gate is not, that is a misconfiguration, and
-    it should be red.
+    It is now the SECOND line of defence rather than the only one: since the
+    live cases fail by default, a misspelled gate produces nine named failures
+    on its own. This still earns its place, because those failures say "no
+    DSN" and this one says WHICH near miss is set -- the difference between
+    knowing the coverage did not run and knowing why.
     """
     if os.environ.get(_GATE):
         return
     typo = sorted(v for v in _NEAR_MISSES if os.environ.get(v))
     assert not typo, (
         "%s is set but %s is not, so every concurrency scenario in this file "
-        "silently skipped and the run still exited 0. Set %s."
-        % (", ".join(typo), _GATE, _GATE))
+        "was gated out. Set %s." % (", ".join(typo), _GATE, _GATE))
+
+
+def test_the_live_cases_fail_rather_than_skip_without_a_dsn():
+    """The gate's POLARITY, asserted -- because the gate cannot assert itself.
+
+    Every other test in this file either runs against a server or is gated
+    out; none of them can observe what the gate does to the others. This one
+    calls the gate directly, with the environment pretended empty, and
+    requires a FAILURE. Reverting `_require_live_pg`'s `pytest.fail` to a
+    `pytest.skip` -- which is exactly the shape this module shipped with --
+    reddens here and nowhere else.
+    """
+    import unittest.mock as _mock
+    with _mock.patch.dict(os.environ, {}, clear=True):
+        with _mock.patch.object(sys.modules[__name__], "_DSN", ""):
+            with _mock.patch.object(sys.modules[__name__], "_OPTOUT", False):
+                with pytest.raises(BaseException) as caught:
+                    _require_live_pg()
+    assert caught.type is not None
+    assert "Skipped" not in caught.type.__name__, (
+        "with no DSN and no explicit waiver, the gate SKIPPED. A skipped live "
+        "case reports exit 0 for coverage that did not run, which is the "
+        "defect this polarity exists to remove.")
+    assert _GATE in str(caught.value), (
+        "the refusal does not name the variable that would fix it: %s"
+        % caught.value)
+
+
+def test_the_optout_turns_the_failure_into_a_named_skip():
+    """The other half: a deliberate waiver has to be possible, and it has to
+    say so. Without this, the test above is satisfied by a gate that fails
+    unconditionally and cannot be waived at all."""
+    import unittest.mock as _mock
+    with _mock.patch.dict(os.environ, {}, clear=True):
+        with _mock.patch.object(sys.modules[__name__], "_DSN", ""):
+            with _mock.patch.object(sys.modules[__name__], "_OPTOUT", True):
+                with pytest.raises(BaseException) as caught:
+                    _require_live_pg()
+    assert "Skipped" in caught.type.__name__, (
+        "%s=1 did not produce a skip: %r" % (_OPTOUT_VAR, caught.type))
+    assert _OPTOUT_VAR in str(caught.value), (
+        "the skip does not say that the coverage was waived on purpose")
+
+
+def test_both_gated_modules_accept_either_dsn_spelling():
+    """Runs always. ONE variable, TWO readers, TWO incompatible URI dialects.
+
+    This module connects with asyncpg, which rejects `postgresql+asyncpg://`.
+    The sibling drives SQLAlchemy, whose bare `postgresql://` resolves to
+    psycopg2 -- a driver this repo does not install -- so it raises
+    ModuleNotFoundError naming a module nobody mentioned. Whichever spelling
+    an operator exported, one of the two modules died, and turning the gates
+    from skip to fail is what finally made that visible: ten of the sibling's
+    tests went red on a cluster that was up and reachable, for a reason that
+    was not in the failure text.
+
+    So each module normalises, and this asserts the pair rather than either
+    half: whichever of the three spellings goes in, this file gets something
+    asyncpg accepts and the sibling gets something SQLAlchemy routes to
+    asyncpg. The two forms are proven DIFFERENT first, so a normalisation
+    collapsed to the identity function cannot satisfy this quietly.
+    """
+    import test_pc_edition_rollover as sibling
+
+    plain = "postgresql://postgres@127.0.0.1:5432/pctest"
+    sqla = "postgresql+asyncpg://postgres@127.0.0.1:5432/pctest"
+    assert plain != sqla, "the control: the two spellings must actually differ"
+
+    for given in (plain, sqla, "postgres://postgres@127.0.0.1:5432/pctest"):
+        mine = _as_plain(given)
+        assert not mine.startswith("postgresql+asyncpg://"), (
+            "asyncpg.connect rejects the SQLAlchemy dialect prefix, and %r "
+            "left it on: %r" % (given, mine))
+        theirs = sibling._as_asyncpg(given)
+        assert theirs.startswith("postgresql+asyncpg://"), (
+            "create_async_engine would resolve %r to psycopg2 and raise "
+            "ModuleNotFoundError: %r" % (given, theirs))
+        assert theirs.endswith("@127.0.0.1:5432/pctest"), theirs
+        assert mine.endswith("@127.0.0.1:5432/pctest"), mine
+
+    # A scheme neither function recognises is handed back untouched rather
+    # than rewritten into something that looks valid and is not.
+    assert _as_plain("mysql://x") == "mysql://x"
+    assert sibling._as_asyncpg("mysql://x") == "mysql://x"
 
 
 # ── two janitors at once ────────────────────────────────────────────────────
-# Both backend boxes run the same janitor loop, and a pass that overruns its
-# interval overlaps the next one. That is a rollover racing a ROLLOVER, which
-# nothing above exercises: every scenario there races it against an operator.
+# NOT "both backend boxes run this loop" -- they do not, and an earlier version
+# of this comment said they did. `lifespan` starts every write scheduler,
+# including the Player Cards janitor this rollover lives in, ONLY on the
+# branch where IS_REPLICA is false; the standby prints "[REPLICA] BOOTING AS
+# READ REPLICA: write schedulers disabled" and starts none of them. The race
+# is therefore WITHIN one process: a pass that overruns its interval overlaps
+# the next one on the same box. That is a rollover racing a ROLLOVER, which
+# nothing above exercises -- every scenario there races it against an operator
+# -- and it is worth measuring whichever process the two passes belong to.
 
 
 def _no_close_guard(sql):

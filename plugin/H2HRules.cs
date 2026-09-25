@@ -696,8 +696,11 @@ namespace CompetitiveRounds
                 // consulted the way ApiClient consults it, so the binding
                 // write-back and the lifecycle answer are under test too
                 // (review r7 LOW). Rendered as verdict/attested-id/bound.
-                const string OPP = "76561190000000001";
-                const string OTHER = "76561190000000002";
+                // Inert fixtures, compared and concatenated ordinally and never
+                // parsed. Deliberately NOT account-shaped, so a byte scan of the
+                // shipped assembly can tell a fixture from an identifier.
+                const string OPP = "10000000000000001";
+                const string OTHER = "10000000000000002";
                 IssuedPairState? none = null;
                 Check("issued:none-held", Consult(ref none, 7, "ranked_r", OPP, 3, 2), "NotIssued/-/none");
                 IssuedPairState? pair = new IssuedPairState { Gen = 7, RoomName = "ranked_r", OpponentSteamId = OPP,

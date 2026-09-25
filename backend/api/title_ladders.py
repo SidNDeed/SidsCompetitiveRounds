@@ -18,7 +18,7 @@ Three pieces live here and nothing else does:
     which take numbers and return numbers, no database, no clock.
   * ``record_completed_games`` — the hook the four completion paths WILL
     call, and the ``GET /api/v1/players/{steam_id}/title-ladders`` read route
-    the client DOES draw the progress bar from. The route is served; the hook
+    the client DOES draw the progress bar from. The route is mounted; the hook
     is not called. See WHAT IS NOT WIRED below.
 
 WHAT IS NOT HERE. No mail. A rung-up should tell the player, and the system
@@ -28,9 +28,15 @@ caller decides what to do with it. No client rendering: rung names are
 ``shop_items`` rows like every other title and render through the existing
 title path.
 
-WHAT IS NOT WIRED. This module is the DATA HALF of item 12. ONE of its two
-halves is still unwired, and which one has changed since this paragraph was
-written — read both points below rather than the heading.
+WHAT IS NOT WIRED. This module is the DATA HALF of item 12. ``main``
+imports it for two things: it mounts ``router`` (point 2 below), and it
+reads ``GRANTED_ONLY_SKUS`` to carve the forty earned rungs out of the
+shop-owner exemption, on the ``/shop/items`` listing and on the set-active
+ownership check. ONE thing is still unwired: the hook (point 1). Earlier
+versions of this paragraph said main did not import this module at all, and
+then that it imported it only for that constant; each was true of the tree it
+was written in, and each is the kind of claim that goes stale the moment
+anything else reads from here.
 
   1. THE HOOK. Nothing in main.py calls ``record_completed_games``. The four
      call sites belong to a rewrite of the lease surface that is in flight in
@@ -39,15 +45,14 @@ written — read both points below rather than the heading.
      docstring for the exact call shape, and note in particular that 2v2 has
      TWO completion paths, not one.
   2. THE ROUTER — WIRED, and this entry used to say the opposite. main.py
-     imports this module and calls ``app.include_router(title_ladders.router)``
-     (main.py:4627-4628), so ``GET /api/v1/players/{steam_id}/title-ladders``
-     IS served and the client's Titles tab reads it. The old text — "main.py
-     never calls include_router, so the route answers 404 in production" — was
-     the claim a reader used to decide the route could not be the source of a
-     404 they were looking at. It can; that 404 is an unknown account, and it
-     now carries ``NO_ACCOUNT_MARKER`` so the client can say so.
-     The sentence above about production "not importing this module AT ALL"
-     went with it: main.py imports it.
+     imports this module and calls ``app.include_router(title_ladders.router)``,
+     so ``GET /api/v1/players/{steam_id}/title-ladders`` IS served by a box
+     running this tree, and the client's shop Titles section reads it. The old
+     text — "main.py never calls include_router, so the route answers 404 in
+     production" — was the claim a reader used to decide the route could not
+     be the source of a 404 they were looking at. It can; that 404 is an
+     unknown account, and it now carries ``NO_ACCOUNT_MARKER`` so the client
+     can say so.
 
 Migration 331 is therefore inert on its own: every tier-1 rung lands
 ``catalog_ready = FALSE``, so nothing is listed, nothing can be bought, and no
@@ -249,6 +254,16 @@ ALL_SKUS = tuple(r["sku"] for r in ALL_RUNGS)
 # activation migration flips to ``catalog_ready = TRUE``. `/shop/items` filters
 # on readiness, so it surfaces NONE of these today — see ENTRY_POOL above.
 ENTRY_SKUS = tuple(r["sku"] for r in ALL_RUNGS if r["tier"] == 1)
+# The forty rungs above the first. These are EARNED, never bought and never
+# auto-owned: `main._is_shop_owner` treats its accounts as owning every
+# cosmetic and lists them the whole hidden pool, and both of those are wrong
+# for a progression rung. An account that holds all forty by fiat is an
+# account for which the ladder has no rungs left, and "wearing Shark God"
+# stops meaning "finished 300 rated series". main.py reads this set to carve
+# the rungs out of that exemption on BOTH surfaces -- the /shop/items listing
+# and the set-active ownership check -- because carving out only the listing
+# leaves the equip reachable by sku for anything that can name one.
+GRANTED_ONLY_SKUS = frozenset(r["sku"] for r in ALL_RUNGS if r["tier"] > 1)
 
 
 def max_tier(line: str) -> int:
@@ -334,9 +349,16 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
             db, [p1.id, p2.id], mode="1v1", reference_id=str(series.id))
 
     Inside the completing transaction, after the result is settled, before the
-    commit. It writes only its own three tables plus `players.active_title_id`,
-    takes no lock the caller does not already hold, and returns [] for a
-    player on no ladder — which is almost everyone.
+    commit. Its WRITE FOOTPRINT is FOUR tables, not the three named after this
+    module: `title_ladder_credits` (the once-per-completion gate),
+    `title_ladder_progress` (the counter and the stored tier),
+    `players.active_title_id` (the auto-equip) AND `player_items` -- every
+    granted rung goes through `main._grant_title_item`, which inserts the
+    ownership row. That fourth one is the write that actually gives the player
+    the title, and an earlier version of this paragraph left it out, which
+    made the footprint read as ladder-local when it reaches the shared
+    inventory table. It takes no lock the caller does not already hold, and
+    returns [] for a player on no ladder — which is almost everyone.
 
     THERE ARE FOUR CALL SITES ACROSS THREE MODES, NOT ONE PER MODE. 2v2
     completes in two different places: `submit_team_match` and
@@ -397,11 +419,12 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
     rung of the line being credited — a player who switched to another line
     mid-series keeps their choice.
     """
-    # Late import, deferred so this module stays importable on its own — by
-    # its tests now, and by main when the wiring lands. NOTE: main does not
-    # import this module today (router unmounted, hook uncalled), so the
-    # dependency currently runs in this direction only. An earlier comment
-    # here asserted the opposite as though it were already true.
+    # Late import, and it has to stay late: `main` imports THIS module at its
+    # own module level (to mount `router` and to read GRANTED_ONLY_SKUS), so a
+    # module-level `from main import ...` here would be a genuine import
+    # cycle. Deferring it to call time keeps the cycle out of the import graph
+    # and keeps this module importable on its own, which is how its tests load
+    # it.
     from main import _grant_title_item
 
     events = []

@@ -1,0 +1,79 @@
+Round-6 mutation controls, executed 2026-09-20
+==============================================
+
+Seven controls. For each: the MUTATION is applied to production source, the
+named test is run and must FAIL (the red line is printed); the file is
+restored; an INERT edit is applied at the SAME site and the same test must
+PASS. A test that reddens for any edit at all measures a line's shape rather
+than the behaviour, which is what the negative control exists to catch (#391).
+
+Runner: backend/tests/evidence/mutation-runner.py. Round 6 ran it from a
+gitignored scratch directory and named it there, which is a reference nobody
+reading this repository can follow (the round-7 finding on this file); round 7
+committed it, with its repository root derived from its own location and its
+DSN taken from the environment, and carrying round 7's controls after these
+seven. All seven below are re-run there on the round-7 tree, so this file is
+the round-6 record and r7-mutation-controls.txt is the current one.
+
+Files are restored from byte-exact in-memory copies, never with
+`git checkout --` or `git restore` (#290/#401), and the md5 of every touched
+file is compared before and after.
+
+Control -> test:
+  refund-clamps-the-delta              test_a_refund_moves_the_exact_stake_and_never_a_clamped_one
+  refund-class-swept                   test_no_refund_in_the_file_still_clamps_its_delta
+  variant-scan-unbounded               test_the_variant_scan_is_bounded_by_the_quota_it_claims
+  settlement-takes-for-update          test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself
+  settled-game-without-a-named-number  test_an_answer_names_a_settled_game_only_when_the_report_named_it
+  insert-failure-answers-bare          test_every_reachable_insert_failure_answers_with_the_lobbys_progress
+  binding-sweep-posonly                test_every_call_in_main_binds_to_the_function_it_names
+
+One of these negative controls fired on its first pass: reflowing the
+`insert-failure-answers-bare` call across two lines reddened its test, which
+proved the assertion measured a line's SHAPE and not the answer. The assertion
+was rewritten against the whitespace-flattened source and the pair re-ran
+clean. That is the outcome a negative control exists to produce, so it is
+recorded rather than re-run until it passed.
+
+------------------------------------------------------------------------------
+anchor pre-check: 7 controls, every anchor resolves exactly once
+
+======================================================================
+CONTROL refund-clamps-the-delta -> test_a_refund_moves_the_exact_stake_and_never_a_clamped_one
+  mutant   rc=1  1 failed, 134 deselected in 17.74s
+    RED: E   AssertionError: assert 'COALESCE(gold_spent, 0) >= CAST(:amt AS integer)' in 'async def _return_stake_exactly(db: AsyncSession, player_id, amount,\n                                *, reason: str,...player_id=player_id, amount=int(amount),\n                           reason=reason, reference_id=str(reference_id)))\n'
+  inert    rc=0  1 passed, 134 deselected in 14.45s
+======================================================================
+CONTROL refund-class-swept -> test_no_refund_in_the_file_still_clamps_its_delta
+  mutant   rc=1  1 failed, 134 deselected in 31.52s
+    RED: E   AssertionError: assert 'GREATEST(0,...E(gold_spent' not in '\n    UPDAT...ked\nblocked'
+  inert    rc=0  1 passed, 134 deselected in 27.19s
+======================================================================
+CONTROL variant-scan-unbounded -> test_the_variant_scan_is_bounded_by_the_quota_it_claims
+  mutant   rc=1  1 failed, 134 deselected in 15.04s
+    RED: E   assert "status = 'pending'" in 'photon_room_id IS NULL"\n        ), {"m": mode, "g": group_id})).scalars().all():\n            if _quarantine_same_payload(prior, body):\n                return "variant", True\n    return None, True\n'
+  inert    rc=0  1 passed, 134 deselected in 15.80s
+======================================================================
+CONTROL settlement-takes-for-update -> test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself
+  mutant   rc=1  1 failed, 134 deselected in 16.33s
+    RED: E   AssertionError: assert 'FOR NO KEY UPDATE' in 'SELECT * FROM ffa_lobbies WHERE id = :lid FOR UPDATE'
+  inert    rc=0  1 passed, 134 deselected in 16.21s
+======================================================================
+CONTROL settled-game-without-a-named-number -> test_an_answer_names_a_settled_game_only_when_the_report_named_it
+  mutant   rc=1  1 failed, 134 deselected in 17.72s
+    RED: E   AssertionError: assert 'settled_game' not in {'games_played': 4, 'expected_game': 5, 'settled_game': 3}
+  inert    rc=0  1 passed, 134 deselected in 16.08s
+======================================================================
+CONTROL insert-failure-answers-bare -> test_every_reachable_insert_failure_answers_with_the_lobbys_progress
+  mutant   rc=1  1 failed, 134 deselected in 18.18s
+    RED: E   assert 'raise HTTPE...ert failed")' not in '@app.post("...ame_number))'
+  inert    rc=0  1 passed, 134 deselected in 14.34s
+======================================================================
+CONTROL binding-sweep-posonly -> test_every_call_in_main_binds_to_the_function_it_names
+  mutant   rc=1  1 failed, 134 deselected in 23.53s
+    RED: E   AssertionError: main.py:44608: _quarantine_on_file() missing=['mode', 'room', 'group_id', 'body'] unknown=['mode', 'room', 'group_id', 'body'] duplicated=[]
+  inert    rc=0  1 passed, 134 deselected in 23.63s
+======================================================================
+restored main.py: byte-identical
+
+7 controls: 7 RED under mutation, 7 GREEN under the inert edit.

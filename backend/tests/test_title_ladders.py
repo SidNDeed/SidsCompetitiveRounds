@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import textwrap
+import uuid
 
 import pytest
 
@@ -332,8 +333,15 @@ def test_migration_is_transactional_and_self_checking():
     # sql` assertion green on the strength of the seven that remained.
     assert "RAISE WARNING" not in sql, (
         "a post-check warns instead of raising; a warning does not roll back")
-    assert sql.count("RAISE EXCEPTION") == 8, (
-        "the number of post-checks changed (found %d, expected 8). That may "
+    # Moved from 8 to 9 ON PURPOSE, which is what this assertion asks of
+    # anyone who changes that file. The ninth is the arm that fails when the
+    # tier-1 rungs come out neither all off sale (this file's own state) nor
+    # all eight ready (the activation release's). The repair above clears a
+    # partial set, so a partial set surviving means it could not reach those
+    # rows, and each survivor is a 1000-gold listing for a ladder that cannot
+    # advance. It replaces a RAISE NOTICE that reported that state as healthy.
+    assert sql.count("RAISE EXCEPTION") == 9, (
+        "the number of post-checks changed (found %d, expected 9). That may "
         "well be correct -- but it is a deliberate change to this file's "
         "safety net, so move the number on purpose rather than letting a "
         "deleted check pass unnoticed." % sql.count("RAISE EXCEPTION"))
@@ -1057,6 +1065,47 @@ def test_the_owner_append_does_not_filter_on_readiness():
         "comment at 331 that calls it one is now wrong. Update it.")
 
 
+def test_the_listing_decides_visibility_with_the_same_predicate_as_equip():
+    """ONE PREDICATE, NOT TWO THAT AGREE.
+
+    The carve-out is decided by `_auto_owned`, and the equip path calls it.
+    The listing used to spell the same rule a second time in SQL --
+    `sku NOT IN (...) OR id IN (...)` -- under a comment claiming the two
+    surfaces could not drift. They could: an edit to `_auto_owned` moved the
+    equip path and left the listing exactly as it was, and nothing here went
+    red, because every listing test agreed with both copies.
+
+    So the sharing is asserted structurally rather than inferred from the two
+    happening to agree today. Read off the AST of `list_shop_items` and
+    scoped the same way as the test above: the statements that build and
+    consume the achievement append must CALL `_auto_owned`, and must not name
+    the carve-out set directly, which is how the second copy was spelled.
+    """
+    lines = _read(MAIN_PY).split("\n")
+    span = _function_span(lines, "list_shop_items")
+    assert span is not None, "list_shop_items was renamed or moved"
+    tree = ast.parse("\n".join(span))
+
+    leaves = (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Expr, ast.Return)
+    append = [n for n in ast.walk(tree)
+              if isinstance(n, leaves)
+              and ("'ach_q'" in ast.dump(n) or "'pool'" in ast.dump(n))]
+    assert append, (
+        "no statement in list_shop_items builds or consumes the achievement "
+        "append any more, so this test has nothing to look at")
+
+    dumped = " ".join(ast.dump(n) for n in append)
+    assert "_auto_owned" in dumped, (
+        "the achievement append no longer calls _auto_owned, so the listing "
+        "decides the shop-owner carve-out by some other route. Whatever that "
+        "route says today, it is a SECOND statement of one rule and it will "
+        "drift from the equip path -- the defect this closes.")
+    assert "_GRANTED_ONLY_TITLE_SKUS" not in dumped, (
+        "the achievement append names the carve-out set directly again. That "
+        "is the second copy: it is how the rule was spelled in SQL, and it "
+        "agrees with _auto_owned only until one of the two is edited.")
+
+
 
 def _paren_list(text, open_at):
     """The comma-separated items inside the parenthesis starting at `open_at`.
@@ -1130,6 +1179,531 @@ def test_ovt_is_excluded_while_it_reports_unrated():
         "ladder and move it from EXCLUDED_SITES to COMPLETION_SITES (or "
         "record why it stays out). This is a design call, not a test fix."
         % written)
+
+
+# ── The migration and the hook, EXECUTED against a real PostgreSQL ─────────
+#
+# Everything above this line reads source, parses SQL, or drives the hook
+# against a fake session. That leaves two things unproven, and they are the
+# two that matter most here:
+#
+#   * migration 331 is never RUN by its own suite, so a syntax-only mutation
+#     -- a missing comma, a constraint that cannot be created, a post-check
+#     whose SELECT does not parse -- stays green all the way to the deploy
+#     (#313: `MIN(uuid)` reads as obviously correct and does not exist).
+#   * the once-per-completion gate is the PRIMARY KEY on
+#     `title_ladder_credits`, and the fake session above answers the credit
+#     INSERT from a counter of its own. Changing the real statement's
+#     `ON CONFLICT ... DO NOTHING` to `DO UPDATE` leaves that fake returning
+#     exactly what it returned before, so the double-credit the key exists to
+#     stop is invisible. The fake tests the hook's REACTION to a refused
+#     credit; only the server tests whether the credit is refused.
+#
+# Same gate and same polarity as the rollover modules: no DSN is a FAILURE,
+# PC_EDITION_TEST_PG_OPTOUT=1 waives it deliberately.
+
+LADDER_DSN_VAR = "LADDER_TEST_PG_DSN"
+LADDER_DSN = (os.environ.get(LADDER_DSN_VAR) or "").replace(
+    "postgresql+asyncpg://", "postgresql://")
+LADDER_OPTOUT_VAR = "LADDER_TEST_PG_OPTOUT"
+LADDER_OPTOUT = os.environ.get(LADDER_OPTOUT_VAR) == "1"
+
+try:
+    import asyncpg as _asyncpg
+except ImportError:                                    # pragma: no cover
+    _asyncpg = None
+
+
+def _require_live_pg():
+    """Fail, not skip. A skipped live case reports exit 0 for coverage that
+    did not run, and this file's whole live half is one module-level gate
+    away from disappearing that way."""
+    if LADDER_DSN and _asyncpg is not None:
+        return
+    if LADDER_OPTOUT:
+        pytest.skip("%s is unset and %s=1: live-Postgres ladder coverage "
+                    "deliberately waived." % (LADDER_DSN_VAR, LADDER_OPTOUT_VAR))
+    if _asyncpg is None:
+        pytest.fail("asyncpg is not installed, so migration 331 was not executed "
+                    "and the credit key was not exercised. Install it, or set "
+                    "%s=1 to waive deliberately." % LADDER_OPTOUT_VAR)
+    pytest.fail(
+        "%s is unset, so migration 331 was never RUN and the once-per-series "
+        "credit key was never exercised -- the two things in this file that no "
+        "amount of source reading can settle. Point it at a throwaway cluster, "
+        "or set %s=1 to waive the coverage deliberately."
+        % (LADDER_DSN_VAR, LADDER_OPTOUT_VAR))
+
+
+LADDER_PREREQ = """
+CREATE TABLE players (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    steam_id        VARCHAR(32) UNIQUE,
+    display_name    VARCHAR(64),
+    active_title_id BIGINT);
+CREATE TABLE shop_items (
+    id              BIGSERIAL PRIMARY KEY,
+    sku             VARCHAR(64) UNIQUE NOT NULL,
+    kind            VARCHAR(16) NOT NULL,
+    name            VARCHAR(128) NOT NULL,
+    description     VARCHAR(256),
+    price           INTEGER NOT NULL CHECK (price >= 0),
+    rarity          VARCHAR(16) NOT NULL DEFAULT 'common',
+    rotation_pool   VARCHAR(32),
+    preview_color   VARCHAR(16),
+    catalog_ready   BOOLEAN NOT NULL DEFAULT TRUE,
+    released_at     TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE player_items (
+    player_id       UUID NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    item_id         BIGINT NOT NULL REFERENCES shop_items(id) ON DELETE CASCADE,
+    purchased_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    purchase_price  INTEGER NOT NULL,
+    royalty_paid    INTEGER,
+    royalty_rate_pct SMALLINT,
+    royalty_artist_steam_id VARCHAR(20),
+    royalty_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (player_id, item_id));
+"""
+
+
+async def _live_schema(conn, schema, migration_sql):
+    await conn.execute('CREATE SCHEMA "%s"' % schema)
+    await conn.execute('SET search_path TO "%s"' % schema)
+    await conn.execute(LADDER_PREREQ)
+    await conn.execute(migration_sql)
+
+
+def _ladder_schema_name():
+    return "ladder_%s" % uuid.uuid4().hex[:10]
+
+
+def test_the_migration_applies_against_a_real_server():
+    """331, RUN. Not parsed, not regex-matched -- executed, post-checks and
+    all, on the version of PostgreSQL the primary runs.
+
+    This is the test a syntax-only mutation reddens. Every other assertion
+    about this file in this module is satisfied by SQL that would abort on its
+    first statement.
+    """
+    _require_live_pg()
+    schema = _ladder_schema_name()
+    sql = io.open(MIGRATION, encoding="utf-8").read()
+
+    async def _go():
+        conn = await _asyncpg.connect(LADDER_DSN)
+        try:
+            await _live_schema(conn, schema, sql)
+            rungs = await conn.fetchval("SELECT count(*) FROM title_ladders")
+            items = await conn.fetchval(
+                "SELECT count(*) FROM shop_items WHERE sku LIKE 'title!_ladder!_%' ESCAPE '!'")
+            on_sale = await conn.fetchval(
+                "SELECT count(*) FROM title_ladders tl JOIN shop_items si "
+                "    ON si.sku = tl.sku "
+                " WHERE tl.tier = 1 AND si.catalog_ready IS TRUE")
+            hidden = await conn.fetchval(
+                "SELECT count(*) FROM title_ladders tl JOIN shop_items si "
+                "    ON si.sku = tl.sku "
+                " WHERE tl.tier > 1 AND si.rotation_pool = 'achievement'")
+            return rungs, items, on_sale, hidden
+        finally:
+            try:
+                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            finally:
+                await conn.close()
+
+    rungs, items, on_sale, hidden = _run(_go())
+    assert rungs == len(tl.ALL_SKUS) == 48, (rungs, len(tl.ALL_SKUS))
+    assert items == 48, items
+    assert on_sale == 0, (
+        "%d entry rung(s) came out of a clean apply on sale for 1000 gold, for "
+        "a ladder whose progression hook is not wired" % on_sale)
+    assert hidden == len(tl.GRANTED_ONLY_SKUS) == 40, (hidden, len(tl.GRANTED_ONLY_SKUS))
+
+
+def _ladder_engine(schema):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    engine = create_async_engine(
+        LADDER_DSN.replace("postgresql://", "postgresql+asyncpg://"),
+        connect_args={"server_settings": {"search_path": schema}},
+        poolclass=None)
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def _credit_twice(schema, migration_sql, *, reference_ids):
+    """Set a player on rung 1 of rat, then call the hook once per reference_id
+    against the REAL statements, and report what actually landed."""
+    from sqlalchemy import text as _text
+
+    conn = await _asyncpg.connect(LADDER_DSN)
+    try:
+        await _live_schema(conn, schema, migration_sql)
+    finally:
+        await conn.close()
+
+    engine, session = _ladder_engine(schema)
+    try:
+        async with session() as db:
+            pid = (await db.execute(_text(
+                "INSERT INTO players (steam_id, display_name) "
+                "VALUES ('76561190000000099', 'Ladder Tester') RETURNING id"
+            ))).scalar_one()
+            await db.execute(_text(
+                "UPDATE players SET active_title_id = "
+                "  (SELECT id FROM shop_items WHERE sku = 'title_ladder_rat_1') "
+                " WHERE id = :pid"), {"pid": pid})
+            # Nine games in already: the tenth crosses rat's tier-2 threshold,
+            # so a second credit for the same series would move a real rung
+            # rather than just a counter.
+            await db.execute(_text(
+                "INSERT INTO title_ladder_progress (player_id, line, games, tier) "
+                "VALUES (:pid, 'rat', 9, 1)"), {"pid": pid})
+            await db.commit()
+
+            events = []
+            for ref in reference_ids:
+                events.append(await tl.record_completed_games(
+                    db, [pid], mode="2v2", reference_id=ref))
+                await db.commit()
+
+            games = (await db.execute(_text(
+                "SELECT games FROM title_ladder_progress "
+                " WHERE player_id = :pid AND line = 'rat'"), {"pid": pid})).scalar_one()
+            credits = (await db.execute(_text(
+                "SELECT count(*) FROM title_ladder_credits WHERE player_id = :pid"),
+                {"pid": pid})).scalar_one()
+            return events, games, credits
+    finally:
+        await engine.dispose()
+        conn = await _asyncpg.connect(LADDER_DSN)
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+def test_one_series_credits_once_against_the_real_primary_key():
+    """THE DEDUPE, DRIVEN THROUGH POSTGRESQL.
+
+    2v2 settles in two places and a report can be retried, so one series
+    reaches this hook more than once by construction. `title_ladder_credits`
+    PRIMARY KEY (player_id, reference_id) plus `ON CONFLICT DO NOTHING
+    RETURNING 1` is the whole gate: the writer that wins the insert is the one
+    that increments.
+
+    Changing that `DO NOTHING` to a `DO UPDATE` makes the second arrival
+    return a row, credit again, and -- with the player seeded one game short
+    of the threshold -- hand out a rung for a series they played once. The
+    fake-session version of this test cannot see that mutation, because the
+    fake decides for itself what the second insert returns.
+    """
+    _require_live_pg()
+    sql = io.open(MIGRATION, encoding="utf-8").read()
+    events, games, credits = _run(_credit_twice(
+        _ladder_schema_name(), sql, reference_ids=["series-7", "series-7"]))
+
+    assert credits == 1, (
+        "the same reference_id produced %d credit rows; the PRIMARY KEY is the "
+        "only thing between a forfeit-settled 2v2 series and a double credit"
+        % credits)
+    assert games == 10, (
+        "the games counter reached %d for ONE series -- the second arrival was "
+        "not refused" % games)
+    assert len(events[0]) == 1 and events[0][0]["to_tier"] == 2, events[0]
+    assert events[1] == [], (
+        "the repeat arrival emitted an upgrade event: %s" % (events[1],))
+
+
+def test_two_different_series_each_credit_once():
+    """The positive control. Without it, the test above is satisfied by a hook
+    that refuses every credit after the first for any reason at all."""
+    _require_live_pg()
+    sql = io.open(MIGRATION, encoding="utf-8").read()
+    events, games, credits = _run(_credit_twice(
+        _ladder_schema_name(), sql, reference_ids=["series-7", "series-8"]))
+
+    assert credits == 2, credits
+    assert games == 11, games
+    assert len(events[0]) == 1, events[0]
+
+
+# ── the shop-owner exemption and the ladder ──────────────────────────────────
+#
+# `SHOP_OWNER_STEAM_IDS` auto-owns every shop item, which is right for a
+# cosmetic and wrong for a rung: a rung above the first is GRANTED by finishing
+# rated series while wearing the rung below it. Two surfaces read that
+# exemption -- the `/shop/items` achievement append and `_set_active_cosmetic`
+# -- and the carve-out has to hold on BOTH, because one of them alone leaves
+# the other reachable by naming a sku (#279: a flag names a line, the defect
+# is a class).
+#
+# The listing half is exercised against a real server further down, because
+# the predicate is a SQL WHERE clause and a fake session decides for itself
+# what a WHERE returns. The equip half is a pure branch and is driven here.
+
+OWNER_STEAM = sorted(main.SHOP_OWNER_STEAM_IDS)[0]
+PLAIN_STEAM = "76561190000000042"
+
+
+def _a_granted_only_rung():
+    return sorted(tl.GRANTED_ONLY_SKUS)[0]
+
+
+def _an_entry_rung():
+    entry = [r["sku"] for r in tl.ALL_RUNGS if r["sku"] not in tl.GRANTED_ONLY_SKUS]
+    assert entry, "every rung is granted-only; the carve-out would swallow the ladder"
+    return sorted(entry)[0]
+
+
+def test_the_exemption_covers_every_cosmetic_except_a_granted_only_rung():
+    """The shared predicate, as a truth table. Both surfaces call this one
+    function, so this is where the rule is stated once."""
+    assert main._auto_owned(OWNER_STEAM, "title_gold") is True
+    assert main._auto_owned(OWNER_STEAM, _an_entry_rung()) is True
+    assert main._auto_owned(OWNER_STEAM, _a_granted_only_rung()) is False
+    # and it is an exemption, not a grant: a normal account owns nothing by it
+    assert main._auto_owned(PLAIN_STEAM, "title_gold") is False
+    assert main._auto_owned(None, "title_gold") is False
+    assert len(tl.GRANTED_ONLY_SKUS) == 40, len(tl.GRANTED_ONLY_SKUS)
+
+
+class _Row:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _EquipRes:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _EquipDb:
+    """Enough session for `_set_active_cosmetic`: a player, an item, and
+    whatever `player_items` holds. Records whether ownership was consulted at
+    all, which is the thing the exemption skips."""
+
+    def __init__(self, player, item, owned=None):
+        self.player, self.item, self.owned = player, item, owned
+        self.ownership_reads = 0
+        self.committed = 0
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        if "FROM player_items" in sql:
+            self.ownership_reads += 1
+            return _EquipRes(self.owned)
+        if "FROM shop_items" in sql:
+            return _EquipRes(self.item)
+        if "FROM players" in sql:
+            return _EquipRes(self.player)
+        return _EquipRes(None)
+
+    async def commit(self):
+        self.committed += 1
+
+
+def _equip(db, steam_id, item_id, monkeypatch, secret="equip-secret"):
+    import hashlib
+    import hmac as _hmac
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", secret)
+    sig = _hmac.new(secret.encode(), ("title:%s:%d" % (steam_id, item_id)).encode(),
+                    hashlib.sha256).hexdigest()
+    return _run(main._set_active_cosmetic(db, steam_id, "title", "title", item_id, sig))
+
+
+def test_an_exempt_account_cannot_equip_a_rung_it_has_not_earned(monkeypatch):
+    """The rung is real, the signature is valid, the account is exempt -- and
+    the ladder never advanced, so `player_items` has no row. Refused, and the
+    player's active title is left alone. A rung that can be worn without being
+    earned is not a rung."""
+    player = _Row(id=uuid.uuid4(), steam_id=OWNER_STEAM, active_title_id=None)
+    item = _Row(id=77, kind="title", sku=_a_granted_only_rung(), name="Rat II")
+    db = _EquipDb(player, item, owned=None)
+    with pytest.raises(Exception) as ex:
+        _equip(db, OWNER_STEAM, 77, monkeypatch)
+    assert getattr(ex.value, "status_code", None) == 403, ex.value
+    assert db.ownership_reads == 1, "the exemption skipped the ownership check"
+    assert player.active_title_id is None
+    assert db.committed == 0
+
+
+def test_an_exempt_account_equips_a_rung_it_actually_owns(monkeypatch):
+    """The positive control for the refusal above: the same account, the same
+    rung, once the grant exists."""
+    player = _Row(id=uuid.uuid4(), steam_id=OWNER_STEAM, active_title_id=None)
+    item = _Row(id=77, kind="title", sku=_a_granted_only_rung(), name="Rat II")
+    db = _EquipDb(player, item, owned=_Row(player_id=player.id, item_id=77))
+    out = _equip(db, OWNER_STEAM, 77, monkeypatch)
+    assert out["status"] == "set" and out["item_id"] == 77
+    assert player.active_title_id == 77
+    assert db.committed == 1
+
+
+def test_the_exemption_still_covers_an_ordinary_cosmetic(monkeypatch):
+    """The carve-out is a carve-OUT. An exempt account still equips a normal
+    title it does not own, and the ownership table is not even consulted --
+    which is what makes the read count above evidence rather than decoration."""
+    player = _Row(id=uuid.uuid4(), steam_id=OWNER_STEAM, active_title_id=None)
+    item = _Row(id=5, kind="title", sku="title_gold", name="Gold")
+    db = _EquipDb(player, item, owned=None)
+    out = _equip(db, OWNER_STEAM, 5, monkeypatch)
+    assert out["status"] == "set"
+    assert db.ownership_reads == 0, "an ordinary cosmetic went through an ownership check"
+
+
+def test_an_entry_rung_is_still_covered_by_the_exemption(monkeypatch):
+    """Tier 1 is bought, not granted, so it is an ordinary shop row and the
+    exemption covers it. Pinning this keeps the carve-out from widening into
+    'no ladder sku ever' the next time somebody reaches for a sku prefix."""
+    player = _Row(id=uuid.uuid4(), steam_id=OWNER_STEAM, active_title_id=None)
+    item = _Row(id=9, kind="title", sku=_an_entry_rung(), name="Rat")
+    db = _EquipDb(player, item, owned=None)
+    assert _equip(db, OWNER_STEAM, 9, monkeypatch)["status"] == "set"
+    assert db.ownership_reads == 0
+
+
+def test_a_normal_account_is_unaffected_by_either_half(monkeypatch):
+    """Nothing above may have changed what an ordinary account can do: it
+    still cannot equip what it does not own, rung or otherwise."""
+    for sku in (_a_granted_only_rung(), "title_gold"):
+        player = _Row(id=uuid.uuid4(), steam_id=PLAIN_STEAM, active_title_id=None)
+        item = _Row(id=11, kind="title", sku=sku, name="X")
+        db = _EquipDb(player, item, owned=None)
+        with pytest.raises(Exception) as ex:
+            _equip(db, PLAIN_STEAM, 11, monkeypatch)
+        assert getattr(ex.value, "status_code", None) == 403, (sku, ex.value)
+        assert db.ownership_reads == 1, sku
+
+
+# ── the listing half, against a real server ──────────────────────────────────
+#
+# `/shop/items` decides this in SQL, so the fake-session shape used above
+# cannot see it: the fake would answer whatever it was scripted to answer and
+# the WHERE clause would go unevaluated. The tables come from the ORM metadata
+# rather than hand-written DDL so the model's own column list is what gets
+# created; NOT NULL columns whose default lives in Python get a server default
+# so the migration's raw INSERTs behave as they do in production.
+
+_FILL_DEFAULTS = """
+DO $fill$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT table_name AS t, column_name AS c, data_type AS d
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND is_nullable = 'NO' AND column_default IS NULL
+  LOOP
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN %I SET DEFAULT %s', r.t, r.c,
+      CASE WHEN r.d LIKE 'timestamp%' THEN 'NOW()'
+           WHEN r.d = 'boolean' THEN 'FALSE'
+           WHEN r.d IN ('integer','bigint','smallint','numeric','double precision','real') THEN '0'
+           WHEN r.d = 'uuid' THEN 'gen_random_uuid()'
+           WHEN r.d = 'ARRAY' THEN quote_literal('{}')
+           ELSE quote_literal('') END);
+  END LOOP;
+END $fill$;
+"""
+
+
+async def _live_listing(schema, migration_sql, *, steam_id, grant_skus=(), extra_pool_sku=None):
+    """Apply 331 to a throwaway schema, optionally grant some rows, and return
+    what `/shop/items` actually lists for `steam_id`."""
+    import models
+    from sqlalchemy import text as _text
+
+    conn = await _asyncpg.connect(LADDER_DSN)
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+    finally:
+        await conn.close()
+
+    engine, session = _ladder_engine(schema)
+    try:
+        async with engine.begin() as c:
+            await c.run_sync(models.Base.metadata.create_all,
+                             tables=[models.Player.__table__,
+                                     models.ShopItem.__table__,
+                                     models.PlayerItem.__table__])
+        conn = await _asyncpg.connect(LADDER_DSN)
+        try:
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(_FILL_DEFAULTS)
+            await conn.execute(migration_sql)
+        finally:
+            await conn.close()
+
+        async with session() as db:
+            pool = (await db.execute(_text(
+                "SELECT count(*) FROM shop_items WHERE rotation_pool = 'achievement'"
+            ))).scalar_one()
+            if extra_pool_sku:
+                await db.execute(_text(
+                    "INSERT INTO shop_items (sku, kind, name, price, rarity, rotation_pool,"
+                    "                        catalog_ready)"
+                    " VALUES (:sku, 'title', 'Slayer', 0, 'rare', 'achievement', TRUE)"),
+                    {"sku": extra_pool_sku})
+            db.add(models.Player(steam_id=steam_id, display_name="Exempt"))
+            await db.commit()
+            pid = (await db.execute(_text(
+                "SELECT id FROM players WHERE steam_id = :s"), {"s": steam_id})).scalar_one()
+            for sku in grant_skus:
+                await db.execute(_text(
+                    "INSERT INTO player_items (player_id, item_id, purchase_price)"
+                    " SELECT :pid, id, 0 FROM shop_items WHERE sku = :sku"),
+                    {"pid": pid, "sku": sku})
+            await db.commit()
+            out = await main.list_shop_items(request=None, steam_id=steam_id, db=db)
+            return pool, {i["sku"]: i for i in out["items"]}
+    finally:
+        await engine.dispose()
+        conn = await _asyncpg.connect(LADDER_DSN)
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+def test_the_privileged_listing_shows_no_unearned_rung():
+    """THE LISTING HALF, RUN. All forty granted-only rungs are in the table
+    and the exempt account owns none of them, so none may be listed. Listing
+    them turns a ladder into a dropdown -- and each one would arrive marked
+    `owned`, because the same exemption decides that flag."""
+    _require_live_pg()
+    sql = io.open(MIGRATION, encoding="utf-8").read()
+    pool, listed = _run(_live_listing(_ladder_schema_name(), sql, steam_id=OWNER_STEAM))
+    assert pool == 40, ("the fixture did not seed the hidden pool: %d rows" % pool)
+    leaked = sorted(sku for sku in listed if sku in tl.GRANTED_ONLY_SKUS)
+    assert leaked == [], ("%d unearned rung(s) listed to the exempt account: %s"
+                          % (len(leaked), leaked[:3]))
+
+
+def test_the_privileged_listing_still_shows_a_rung_that_was_granted():
+    """The positive control. Without it the assertion above is satisfied by a
+    listing that dropped the achievement pool entirely -- which would hide an
+    owner's earned rung and take its Set Active button with it (v1.32)."""
+    _require_live_pg()
+    sql = io.open(MIGRATION, encoding="utf-8").read()
+    earned = _a_granted_only_rung()
+    _pool, listed = _run(_live_listing(_ladder_schema_name(), sql,
+                                       steam_id=OWNER_STEAM, grant_skus=[earned]))
+    assert earned in listed, "an earned rung was not listed to its owner"
+    assert listed[earned]["owned"] is True
+    assert [s for s in listed if s in tl.GRANTED_ONLY_SKUS] == [earned]
+
+
+def test_the_privileged_listing_still_shows_the_rest_of_the_hidden_pool():
+    """And the carve-out stays a carve-out on this surface too: a hidden-pool
+    row that is NOT a ladder rung -- a slayer or podium title -- is still
+    listed to the exempt account, owned, exactly as before."""
+    _require_live_pg()
+    sql = io.open(MIGRATION, encoding="utf-8").read()
+    _pool, listed = _run(_live_listing(_ladder_schema_name(), sql, steam_id=OWNER_STEAM,
+                                       extra_pool_sku="title_slayer_probe"))
+    assert "title_slayer_probe" in listed, "the exemption stopped covering the hidden pool"
+    assert listed["title_slayer_probe"]["owned"] is True
 
 
 # ── The release migration, EXECUTED ────────────────────────────────

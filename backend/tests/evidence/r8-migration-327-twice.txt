@@ -1,0 +1,186 @@
+Migration 327 applied TWICE through `psql -f`, 2026-09-20 (round 8)
+===================================================================
+
+The way the deploy applies it: `psql -f`, not asyncpg's simple-query path,
+because the file carries its own BEGIN/COMMIT and `psql -f` does not wrap a
+file in a transaction (#340). Run against local PostgreSQL 16.9 on this seat.
+
+Instrument: backend/tests/evidence/migration-327-twice.sh, against the table in
+backend/tests/evidence/migration-327-fixture.sql. Both are committed beside
+this report and take their connection from the environment.
+
+== what round 8 changed about this file, and why ==
+
+ROUND 7 CARRIED A USAGE TEMPLATE WHERE ITS INVOCATION BELONGS. The header said
+how the script COULD be called; it did not say how it WAS. Those are different
+claims, and only one of them is evidence: a template is satisfied by any run,
+including one against another database or another migration file. The script
+now prints the command, the interpreter, both file paths and the database
+immediately above the runs, and that block is the first thing below this note.
+
+THE PATHS ARE REPOSITORY-RELATIVE BECAUSE THE SCRIPT MAKES THEM SO. psql echoes
+whatever path it was handed in every NOTICE it raises, so the absolute paths
+round 7 passed put this seat's checkout into the log, and round 7 removed them
+from the transcript afterwards. Editing a log to make it true is the wrong end:
+the script now cd's to the repository root and names both files relative to it,
+so the line psql prints is already the line this file should carry. It reads
+`psql:backend/tests/evidence/migration-327-fixture.sql:2` below, and nothing in
+this file has been edited after the run.
+
+== what the run proves, in order ==
+  * the backfill numbers every row whose room tail is derivable, and leaves
+    the `_r0` and `_r99999` rows NULL rather than inventing a number;
+  * the post-check raises only for a row that WAS derivable and was left NULL;
+  * the SECOND run changes no row -- the two dumps are diffed and the diff is
+    empty -- so re-applying the migration is a no-op, not a second backfill;
+  * NOT NULL and the 1..999 CHECK both hold afterwards;
+  * a writer row keeps the number the inserting statement supplied;
+  * an UNNUMBERED insert, which the old api still makes in the migration-first
+    window, is numbered by the trigger from its room tail rather than refused.
+
+== the results, quoted from the run below ==
+  run 1 rc=0 and run 2 rc=0
+  IDENTICAL: the second run changed no row
+  rows_total 8, still_null 0, out_of_domain 0
+  ck_ffa_matches_game_number_domain present; attnotnull = t
+  rmA_writer_r9  -> game_number 42, source `writer`     (supplied, kept)
+  rmA_oldapi_r7  -> game_number  7, source `room_tail`  (unnumbered, trigger)
+
+The migration number is NOT renumbered this round; 327 keeps its number and the
+twice-run evidence below is what stands behind it.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+------------------------------------------------------------------------------
+== invocation ==
+script    backend/tests/evidence/migration-327-twice.sh
+cwd       <repo> (the script cd's there; every path below is relative to it)
+psql      psql (PostgreSQL) 16.9
+fixture   backend/tests/evidence/migration-327-fixture.sql
+migration backend/sql/327_ffa_game_number.sql
+database  rj327r8 on <host>:<port> as <user>, dropped and recreated above
+command   PSQL=<psql> PGHOST=<host> PGPORT=<port> PGUSER=<user> \
+            MIG327_DB=rj327r8 bash backend/tests/evidence/migration-327-twice.sh
+started   2026-09-20 21:58:26 UTC
+
+== fixture ==
+psql:backend/tests/evidence/migration-327-fixture.sql:2: NOTICE:  table "ffa_matches" does not exist, skipping
+fixture applied
+
+== migration 327, run 1 ==
+BEGIN
+SET
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+CREATE INDEX
+CREATE FUNCTION
+psql:backend/sql/327_ffa_game_number.sql:199: NOTICE:  trigger "trg_ffa_matches_game_number" for relation "ffa_matches" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+UPDATE 4
+DO
+UPDATE 4
+psql:backend/sql/327_ffa_game_number.sql:314: NOTICE:  ffa_matches.game_number: 4 row(s) from the room tail, 4 sequenced
+DO
+ALTER TABLE
+DO
+COMMIT
+run 1 rc=0
+
+== rows after run 1 ==
+   photon_room_id    | game_number | game_number_source 
+---------------------+-------------+--------------------
+ orphan_room_no_tail |           1 | sequence
+ rmA_211531_r1       |           1 | room_tail
+ rmA_211532_r1       |           1 | room_tail
+ rmA_212540_r2       |           2 | room_tail
+ rmB_100000_r4       |           4 | room_tail
+ rmB_101000_r0       |           5 | sequence
+ rmB_102000_r99999   |           6 | sequence
+ rmB_no_tail_here    |           7 | sequence
+(8 rows)
+
+
+== migration 327, run 2 (idempotence) ==
+BEGIN
+SET
+psql:backend/sql/327_ffa_game_number.sql:78: NOTICE:  column "game_number" of relation "ffa_matches" already exists, skipping
+ALTER TABLE
+psql:backend/sql/327_ffa_game_number.sql:79: NOTICE:  column "game_number_source" of relation "ffa_matches" already exists, skipping
+ALTER TABLE
+psql:backend/sql/327_ffa_game_number.sql:91: NOTICE:  column "score_target_frozen" of relation "ffa_matches" already exists, skipping
+ALTER TABLE
+psql:backend/sql/327_ffa_game_number.sql:92: NOTICE:  column "score_target_played" of relation "ffa_matches" already exists, skipping
+ALTER TABLE
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+psql:backend/sql/327_ffa_game_number.sql:109: NOTICE:  relation "idx_ffa_matches_lobby_game" already exists, skipping
+CREATE INDEX
+CREATE FUNCTION
+DROP TRIGGER
+CREATE TRIGGER
+UPDATE 0
+DO
+UPDATE 0
+psql:backend/sql/327_ffa_game_number.sql:314: NOTICE:  ffa_matches.game_number: 4 row(s) from the room tail, 4 sequenced
+DO
+ALTER TABLE
+DO
+COMMIT
+run 2 rc=0
+
+== rows after run 2 ==
+   photon_room_id    | game_number | game_number_source 
+---------------------+-------------+--------------------
+ orphan_room_no_tail |           1 | sequence
+ rmA_211531_r1       |           1 | room_tail
+ rmA_211532_r1       |           1 | room_tail
+ rmA_212540_r2       |           2 | room_tail
+ rmB_100000_r4       |           4 | room_tail
+ rmB_101000_r0       |           5 | sequence
+ rmB_102000_r99999   |           6 | sequence
+ rmB_no_tail_here    |           7 | sequence
+(8 rows)
+
+
+== diff of the two dumps (empty means row-identical) ==
+IDENTICAL: the second run changed no row
+
+== the column's guarantees, after two runs ==
+ rows_total | still_null | out_of_domain 
+------------+------------+---------------
+          8 |          0 |             0
+(1 row)
+
+              conname              
+-----------------------------------
+ ck_ffa_matches_game_number_domain
+(1 row)
+
+ attnotnull 
+------------
+ t
+(1 row)
+
+
+== the WRITER row: a number the inserting statement supplied is kept ==
+ photon_room_id | game_number | game_number_source 
+----------------+-------------+--------------------
+ rmA_writer_r9  |          42 | writer
+(1 row)
+
+
+== the OLD api's unnumbered insert, during the migration-first window ==
+ photon_room_id | game_number | game_number_source 
+----------------+-------------+--------------------
+ rmA_oldapi_r7  |           7 | room_tail
+(1 row)
+

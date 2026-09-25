@@ -1,0 +1,36 @@
+script    <repo>/backend/tests/evidence/freeze-guard-control.sh
+capture   <repo>/backend/tests/evidence/<round>-freeze-guard.log
+cwd       <repo>
+command   bash <repo>/backend/tests/evidence/freeze-guard-control.sh
+guard     bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+bash      5.3.15(1)-release
+started   2026-09-23T14:19:53Z
+
+pre-check the tracked probe target is byte-identical to HEAD, and the
+          untracked probe path does not exist
+
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+baseline  0 paths fingerprinted; round-8 method holds 0 captured paths
+
+GREEN  inert    no edit between two calls -> fingerprint unchanged
+
+RED    class A  a file created mid-run -> fingerprint MOVED (detected)
+           1c1
+           < 
+           ---
+           > 1b234f2ba0a6ac3f3a0603acb23a4b57  backend/tests/freeze_guard_probe.tmp
+       round 8  the captured-once list reports UNCHANGED for the same edit
+
+RED    class B  an unmodified tracked file edited mid-run -> fingerprint MOVED (detected)
+           1c1
+           < 
+           ---
+           > 4fb759e495edf97bba8bf455fb554bfa  backend/sql/169_match_report_quarantine.sql
+       round 8  the captured-once list reports UNCHANGED for the same edit
+
+restored backend/sql/169_match_report_quarantine.sql md5 c976d6ceceedfe2ea04e727d501ed231 matches the pre-run md5
+restored the whole-tree fingerprint is back to its pre-control value
+
+RESULT: 1 inert GREEN, 2 mutation classes RED under the new guard and
+        UNDETECTED under round 8's, every touched file restored
+finished  2026-09-23T14:19:56Z

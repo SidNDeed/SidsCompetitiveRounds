@@ -1,6 +1,6 @@
 -- 297_mail.sql — in-game mail (Sept 6 batch, Group 4 item b, server half).
 --
--- Design: ai-collab/sept6-triage/group4-design-v2.md §b (B-1 .. B-14). The
+-- Sept 6 batch Group 4 item b, items B-1 .. B-14. The
 -- shape decisions that cost a review round, so they are not re-litigated here:
 --
 --   * mail_recipients is the immutable ADDRESS ENVELOPE: who was addressed, as

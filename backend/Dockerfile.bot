@@ -16,8 +16,8 @@ ENV PYTHONUNBUFFERED=1
 # retries slow font-cache builds in the read-only home.
 ENV MPLCONFIGDIR=/tmp
 # chat-downloader REMOVED (Aug 19): 0.2.8 — its latest release, from 2023 —
-# is parse-broken against current YouTube page variants (reproduced; evidence
-# in ai-collab/streaming-design-addendum-chat.md). The bridge now polls the
+# is parse-broken against current YouTube page variants, reproduced against a
+# live broadcast before it was removed. The bridge now polls the
 # official YouTube Data API over aiohttp instead; the scraper mechanism is
 # deleted, not bypassed (#310). Do not reintroduce it.
 # PINNED, for the same reason as the base image and with one extra: this file

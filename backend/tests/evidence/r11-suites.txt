@@ -1,0 +1,207 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-22 (round 11)
+======================================================================
+
+stdout: r11-suite-run.log
+
+Never concurrently: the two modes share one local PostgreSQL instance, and a
+concurrent pair would have them fighting over the same scratch databases and
+reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN, its output directory and its round tag from the
+environment. The per-half pytest logs are written OUTSIDE the repository; the
+fence section below says why.
+
+== WHAT THIS ROUND CHANGED IN THE INSTRUMENT ==
+Two things, and both are about a name.
+
+THE ROUND TAG HAS NO DEFAULT ANY MORE. It used to read `${SUITE_TAG:-r10}`.
+That is a baked-in round number with a longer fuse than the literal round 10
+replaced: a caller who forgot the variable would have had this round's two
+halves overwrite the previous round's captures, under the previous round's
+names, with a green run and nothing to see. There is nothing to fall back to
+that is not somebody else's evidence, so the script refuses when the variable
+is unset and names why. The same defect in three other places -- the mutation
+runner's suites path, the re-pin wrapper's two output names, and the
+new-controls control's own anchor and mutant -- is closed the other way, by
+deriving the value; this one had nothing to derive from, so it refuses.
+
+THE CARRIAGE RETURNS ARE STRIPPED IN THE INSTRUMENT, which closes round 10's
+carried deviation rather than repeating it. Two of the captured lines arrive
+as CRLF because they are tailed from a pytest log the interpreter wrote
+through a translating stream, while the rest of the capture and every other
+file under this directory is LF. Round 10 normalised them when the capture was
+copied into the report, and recorded that as a deviation because moving it
+would have meant re-running the pair to buy it.
+
+It was never cosmetic. A report that mixed the two conventions could not
+survive its own mutation control: the runner records a file's newline
+convention when it first reads it and writes that one convention back, so a
+mixed file comes back uniform, differs from the bytes it started as, and is
+reported by the runner's md5 comparison as not restored -- correctly. The
+report has to be uniform for the control that mutates it to be able to put it
+back.
+
+So this round, which forces a pair anyway, moved it: the two `tail` lines that
+produce those bytes pipe through `tr -d '\r'`. NO NORMALISATION IS APPLIED TO
+THIS CAPTURE AT THE COPY STEP. The log below is this run's stdout, byte for
+byte, with no step between the run and the file.
+
+== THIS REPORT IS ITS OWN RUN'S OUTPUT ==
+The narrative above the marker is written; everything below it is the exact
+bytes of the log named in the `stdout:` header. This file is ASSEMBLED by
+backend/tests/evidence/assemble-evidence.py, which REFUSES to write it at all
+when a number in the narrative is absent from that log. Two rules decide what
+a number is -- a count next to a term a run reports in, and any integer of
+three digits or more that is not one of the typed exempt shapes -- and the
+assembler's self-test asserts both fire and both stay quiet, so a typo in
+either pattern reds rather than passing for ever.
+
+That self-test now also states how many checks it made, and states it as the
+number of checks it RAN. It used to print a constant written beside the body,
+and the constant was one short: it said 33 where the run invoked its check 34
+times, on the one instrument here whose whole purpose is to refuse a number a
+run did not produce. That is the r10 lens's third finding, and it is closed in
+assemble-evidence.py by making the checks records and the count their number.
+
+The invocation of each half is printed by the script immediately before it
+runs, and is in the verbatim block below rather than quoted up here. A report
+that quotes its own commands twice has two places to keep true, and only one
+of them is the one that ran.
+
+== THE FENCE, and the claim it is allowed to make ==
+A suite that overlaps an edit to its own tree certifies nothing, and a sentence
+saying it did not is a claim written from the one state its author had in mind.
+So the tree is fingerprinted by backend/tests/evidence/tree-fingerprint.sh at
+the start and again at the end, and the instrument RE-DERIVES its set at every
+call: `git diff --name-only HEAD` for tracked files differing from HEAD, and
+`git ls-files --others --exclude-standard` for files present but untracked. The
+paths are part of the value, so an addition or a removal moves the fingerprint
+even when every surviving file is untouched, and an unreadable path prints an
+EMPTY hash rather than being skipped. The script refuses to run at all if the
+fingerprint comes back empty.
+
+This round the instrument printed 10 paths, and the closing UNCHANGED line below
+is the fence's verdict over the paths listed at the top -- this round's whole
+working set, the tests, the two rules, the two new instruments and the shell
+wrappers together, each byte-identical at the end to its hash at the start.
+
+THE FENCE IS ALSO WHY THIS IS THE ONLY PAIR QUOTED. Every pair this round
+started before its last source edit was discarded rather than reported. A pair
+certifies the tree it read; a pair that predates an edit certifies a tree that
+no longer exists, whatever its summary line says.
+
+That guard is not an argument; it is run, with its negative control, in
+r11-mutation-controls.txt: each edit class is PERFORMED and the guard is
+required to notice, no edit at all is required to leave it quiet, and round 8's
+captured-once method is run side by side over the same two mutations and
+reports UNCHANGED for both.
+
+Ignored paths stay out, by `--exclude-standard`. That is what lets this round
+edit its own notes and its contract while the pair runs -- no suite reads them
+-- and it is also why the per-half pytest logs go outside the repository.
+Anything a run WRITES inside the repository and does not ignore moves this
+value, correctly.
+
+== no route handler moved this round, and the re-pin says so ==
+Every finding the r10 lens raised is in the tests, the instruments or the
+contract. No file under backend/api/ is touched, so no route moved, so the
+route manifest was already current when this pair started. The re-pin that
+runs LAST, in r11-repin.txt, is therefore an ordering proof end to end rather
+than a repair: the count it reports has to be zero, which is the positive
+statement that nothing moved between the tree this pair certified and the tree
+the commit holds.
+
+== what the numbers mean ==
+The skip count in the opt-out summary IS a check, not a footnote: an opt-out
+run that skipped as few as the live run did is a live run wearing the opt-out's
+name. The two halves are two different questions, and `env -u` is what keeps
+them that way.
+
+== the difference between the halves, and it reconciles ==
+The two summary lines are in the verbatim block below, each under the command
+that produced it:
+
+  opt-out   1740 passed, 44 skipped
+  live DSN  1769 passed, 15 skipped
+
+The live half runs the PostgreSQL-gated checks the opt-out half skips, so the
+difference has to appear twice in the same two lines. It does: 44 - 15 is the
+count of gated checks the live run executes, and 1769 - 1740 is the same count
+read from the other column. Two numbers from two different columns of the same
+two lines agreeing is the check; a disagreement there would be a finding, not a
+rounding error.
+
+Those four figures are the assembler's subject, not decoration. Each is a count
+next to a term the run reports in, so each must appear in the log below as the
+same integer beside the same term or this file does not get written -- which is
+what the mutation control `suites-report-carries-an-underived-number`
+demonstrates by putting a figure here that no run can print.
+
+THE PREDICTION, WRITTEN BEFORE THE RUN WAS READ. This round adds three tests
+and none of them is live-gated: they exercise the assembler's own check count,
+the agreement between a report's new-control list and the inventory, and the
+residual-reach rule's two directions, and not one of them touches PostgreSQL.
+So the arithmetic predicts that BOTH halves gain three passes, that NEITHER
+half's skip count moves, and therefore that the gated-check difference between
+the halves is exactly what round 10's pair reported. That is a check rather
+than a description: a new test that moved a skip count would mean a gate
+nobody intended, and a new test that moved neither count would mean a test
+that was never collected.
+
+No round-10 figure is quoted here, deliberately. Every number in this narrative
+has to appear in the log below it or the assembler refuses to write the file,
+and a number from a DIFFERENT run cannot. Where a comparison needs the other
+round's figures, the other round's report is named instead of copied -- which
+is the same rule one level up: a claim that cannot be traced to the artifact
+under it does not belong in the artifact.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any, so its absence from a line quoted verbatim IS the zero, and it
+is re-derivable from this file alone. Both halves also returned rc=0, printed
+immediately above the line they describe.
+
+Each summary line DOES carry an xfailed count -- a test marked
+expected-to-fail, which did -- and that is not a failure count. The gate used
+for these reports tests the TERM rather than the substring, and carries that
+shape and its negative twin as assertions that run every time it is imported.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r11-suite-run.log ==========
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      10 paths differ from HEAD or are untracked; fingerprinted before and after
+  3c60fa9362cdf5efc4140e1294a8e44b  backend/tests/evidence/assemble-evidence.py
+  658fe99152bb8f086048070c1121e827  backend/tests/evidence/evidence_rules.py
+  ec913076eb1c1f74313f2fd6f7d1a226  backend/tests/evidence/mutation-runner.py
+  36620e8cb0a8cee1341d2d1f702a585b  backend/tests/evidence/r10-mutation-controls.txt
+  eceb23b5051f2a942f62c3c879387154  backend/tests/evidence/repin-last.py
+  10b8212f2e7bb2f6576cb36ea5d8b647  backend/tests/evidence/residual-reach-control.py
+  cdb3642de49482f6ea8c7e0a6a820a6a  backend/tests/evidence/residual_rules.py
+  a4710b8b77c631a1117d8a5a05dcf4d7  backend/tests/evidence/run-both-suites.sh
+  ffb23adc8447bee0dd32391c92c1faf2  backend/tests/evidence/run-pg-controls.sh
+  4f931228fdc4cbc8d05f3e05cfc7dff0  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 02:53:10 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1740 passed, 44 skipped, 1 xfailed, 2 warnings in 572.39s (0:09:32)
+=== live DSN started 03:02:46 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1769 passed, 15 skipped, 1 xfailed, 2 warnings in 567.57s (0:09:27)
+=== tree re-fingerprinted 03:12:17 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 10 paths, each byte-identical to the pre-run fingerprint
+=== done 03:12:18 ===

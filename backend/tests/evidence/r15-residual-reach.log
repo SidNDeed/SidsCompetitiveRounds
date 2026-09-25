@@ -1,0 +1,32 @@
+script    <repo>/backend/tests/evidence/residual-reach-control.py
+cwd       <repo>
+rule      <repo>/backend/tests/evidence/residual_rules.py
+document  <the lane's contract, under the gitignored scratch>
+python    3.12.10
+capture   <repo>/backend/tests/evidence/<round>-residual-reach.log
+started   2026-09-23 08:25:19 UTC
+
+LIVE   the document as it stands
+  command   python backend/tests/evidence/residual_rules.py <the lane's contract, under the gitignored scratch>
+  live     CLEAN: every item carries one integrity-reach tag, the tally is the tags' own count, and no other line states a reach
+
+MUTANT A  the superseded prose count, put back where it stood
+  command   python backend/tests/evidence/residual_rules.py <a copy of it, in a temporary directory>
+  mutant A REFUSED: 1 problem(s) in the residual list:
+  mutant A the section states the reach outside a tag and outside the tally paragraph: ...ection. by hand. This is the one item in this list that can move a rating. - **A se...
+
+MUTANT B  one item's tag removed, the count left as it was
+  command   python backend/tests/evidence/residual_rules.py <a copy of it, in a temporary directory>
+  mutant B REFUSED: 2 problem(s) in the residual list:
+  mutant B the item at line 937 carries 0 integrity-reach tags and the rule needs exactly one: - **Two seats whose last advertisement at the game-over edge
+  mutant B the tally says 2 of 6 and the tags say 1 of 6
+
+INERT  a wording change beside a tag, no claim touched
+  command   python backend/tests/evidence/residual_rules.py <a copy of it, in a temporary directory>
+  inert    CLEAN: every item carries one integrity-reach tag, the tally is the tags' own count, and no other line states a reach
+
+RESULT: live CLEAN, mutant A REFUSED, mutant B REFUSED, inert
+        CLEAN. The rule reds on a second statement of the reach
+        and on an item that states none, and stays quiet on a
+        reword beside them. The document was read, never written.
+finished  2026-09-23 08:25:20 UTC

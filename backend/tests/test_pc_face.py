@@ -1052,20 +1052,165 @@ def test_no_top_card_draws_no_badge():
         assert not _differs(baseline, blank), value
 
 
+def _ink_mask(image):
+    """The drawn shape, binarised and cropped to itself -- `None` if nothing
+    was drawn. Comparing two of these compares WHERE the ink is, without
+    asking the two paths to agree on antialias values."""
+    flat = image.getchannel("A").point(lambda a: 255 if a > 0 else 0)
+    box = flat.getbbox()
+    return None if box is None else flat.crop(box)
+
+
 def test_badge_name_never_lands_on_the_frame():
     """The column is sized against BadgeFrame.png's own ink, not against the
     badge rect: the frame's rails and corner arcs own the box edges, so a run
     measured off the 112 px rect puts the first and last glyphs on the frame.
 
-    Every seeded name, at both sizes."""
-    frame = pc_face._asset("BadgeFrame.png", "card").convert("RGBA")
-    solid = frame.getchannel("A").point(lambda a: 255 if a > 0 else 0)
-    for name, _theme, ink, _source in rows():
-        layer = Image.new("RGBA", (pc_face.CARD_W, pc_face.CARD_H), (0, 0, 0, 0))
-        pc_face._draw_badge_name(layer, name, _rgb(ink), 1.0)
-        drawn = layer.getchannel("A").point(lambda a: 255 if a > 0 else 0)
-        overlap = ImageChops.multiply(drawn, solid)
-        assert overlap.getbbox() is None, name
+    Every seeded name, at both render sizes, each against THAT size's own
+    BadgeFrame asset. The claim used to be the same sentence over a body that
+    loaded only the card asset and called the renderer only at scale 1.0 --
+    which left the tile unmeasured, and the tile is the tight one: its 16 px
+    column is the bound `_badge_name_fit` has to step the size down into, so a
+    fit that stopped one pixel short would land on the frame there and nowhere
+    else."""
+    covered = set()
+    for size, scale, canvas in (("card", 1.0, (pc_face.CARD_W, pc_face.CARD_H)),
+                                ("tile", 0.5, (pc_face.TILE_W, pc_face.TILE_H))):
+        frame = pc_face._asset("BadgeFrame.png", size).convert("RGBA")
+        assert frame.size == canvas, (size, frame.size, canvas)
+        solid = frame.getchannel("A").point(lambda a: 255 if a > 0 else 0)
+        for name, _theme, ink, _source in rows():
+            rgb = _rgb(ink)
+            layer = Image.new("RGBA", canvas, (0, 0, 0, 0))
+            pc_face._draw_badge_name(layer, name, rgb, scale)
+            drawn = _ink_mask(layer)
+            assert drawn is not None, (size, name)
+            overlap = ImageChops.multiply(
+                layer.getchannel("A").point(lambda a: 255 if a > 0 else 0), solid)
+            assert overlap.getbbox() is None, (size, name)
+
+            # ...and clear of the frame WITHOUT the clip having bought it. The
+            # renderer multiplies the layer by the column rect, so ink pushed
+            # past the column is silently shaved rather than composited onto
+            # the frame: on that reading alone this assertion could not fail.
+            # The whole rotated line must survive, shape for shape.
+            fitted, px = pc_face._badge_name_fit(name, size)
+            line, _w = pc_face._render_text_line(fitted, px, pc_face._rgba(rgb), "script")
+            whole = _ink_mask(line.transpose(Image.Transpose.ROTATE_90))
+            assert drawn.size == whole.size, (size, name, drawn.size, whole.size)
+            assert drawn.tobytes() == whole.tobytes(), (size, name)
+        covered.add(size)
+    assert covered == {"card", "tile"}, covered
+
+
+def test_badge_name_reads_upward_not_downward():
+    """`_draw_badge_name` rotates the rendered line with ROTATE_90, and the
+    comment beside it states the consequence: source column 0 becomes the
+    BOTTOM row, so the first glyph sits lowest and the name reads UPWARD.
+
+    Nothing else in this file pins that direction. ROTATE_270 produces the
+    same colour, the same bounding box, the same card/tile parity and the same
+    ink centring -- it just reads the name downward, which is the one property
+    a reader would notice and no assertion would. This one compares the drawn
+    pixels against BOTH rotations of the same line and requires the upward
+    one, with the two rotations proven distinct first so the comparison cannot
+    be vacuous."""
+    name, ink = "Poison", CARD_THEMES["Poison"]
+    fitted, px = pc_face._badge_name_fit(name, "card")
+    assert fitted == name, fitted            # an asymmetric run, drawn whole
+
+    line, _width = pc_face._render_text_line(fitted, px, pc_face._rgba(ink), "script")
+    upward = _ink_mask(line.transpose(Image.Transpose.ROTATE_90))
+    downward = _ink_mask(line.transpose(Image.Transpose.ROTATE_270))
+    assert upward.tobytes() != downward.tobytes(), (
+        "the control: a name whose two rotations agree could not tell them apart"
+    )
+
+    layer = Image.new("RGBA", (pc_face.CARD_W, pc_face.CARD_H), (0, 0, 0, 0))
+    pc_face._draw_badge_name(layer, name, ink, 1.0)
+    drawn = _ink_mask(layer)
+    assert drawn.size == upward.size, (drawn.size, upward.size)
+    assert drawn.tobytes() == upward.tobytes(), "the name reads downward"
+    assert drawn.tobytes() != downward.tobytes()
+
+
+def test_the_badge_column_comments_state_the_rect_the_layout_holds():
+    """The badge-column geometry is asserted in PROSE three times in pc_face
+    and was nowhere checked.
+
+    That is how `x 64..84` and `a 20 px column` survived a widening and went
+    on describing a rect that had become `[64, 654, 96, 742]`. Correcting the
+    words fixes today; pinning them to the layout is what stops the next
+    widening from re-opening the same finding, because a rect change now has
+    to move this test.
+
+    Both directions are required. The rect alone would pass over comments that
+    still said 20, and the comment text alone would pass over a rect that had
+    moved underneath it.
+    """
+    rect = pc_face.LAYOUT["rects"]["badge_name"]
+    assert rect == [64, 654, 96, 742], (
+        "the badge-name column moved to %r. The comments around "
+        "_draw_badge_name state its numbers in prose; move them in the same "
+        "commit." % (rect,))
+    assert rect[2] - rect[0] == 32, rect
+
+    src = Path(pc_face.__file__).read_text(encoding="utf-8")
+    assert "[64, 654, 96, 742]" in src, (
+        "no comment in pc_face.py names the badge-name rect, so the prose "
+        "around it can drift from the layout unobserved again")
+    assert "32 px column" in src, (
+        "the comments no longer state the column WIDTH; `20 px` is what they "
+        "said across a widening")
+    # The LIVE sentence, asserted positively. A negative grep for the
+    # retracted `x 64..84` cannot be used here: the correction quotes the old
+    # number in order to retract it, so the stale string is present on purpose
+    # and `not in` fails on the fix itself. What must be true is that the
+    # describing sentence names the real bounds.
+    assert "At x 64..96 the frame is clear from y 654 to y 742" in src, (
+        "the sentence that describes the clear span of BadgeFrame.png no "
+        "longer matches the rect above it")
+
+
+def test_the_dockerfile_does_not_overstate_what_the_fingerprint_hashes():
+    """`api/Dockerfile`'s header explains why the base image is pinned by
+    digest, and it used to justify the pin by saying the image's BYTES feed
+    `renderer_fp`. They do not: `runtime_provenance()` records version
+    STRINGS, per-feature records and a digest over selected Pillow files, and
+    nothing walks the base image, the interpreter binary or a shared library.
+
+    The correction matters in the unsafe direction -- a rebuild that changed
+    libfribidi without moving any of those strings would keep the fingerprint
+    over different pixels -- so what the function actually returns is pinned
+    here rather than left as prose that was right once.
+    """
+    import platform as _platform
+
+    prov = pc_face.runtime_provenance()
+    assert sorted(prov) == ["PIL", "features", "layout_engine",
+                            "package_digest", "python", "regex"], sorted(prov)
+    assert prov["python"] == _platform.python_version()
+    assert isinstance(prov["features"], dict) and prov["features"]
+
+    dockerfile = (Path(pc_face.__file__).parent / "Dockerfile").read_text(
+        encoding="utf-8")
+    header = dockerfile[:dockerfile.find("FROM ")]
+    # Positive only. The header retracts "this image's bytes" by quoting it,
+    # so a `not in` grep for the old claim fails on the correction rather than
+    # on a regression -- the same trap the badge-geometry check walked into.
+    assert "WHAT IS ACTUALLY HASHED" in header, (
+        "the Dockerfile header no longer states what feeds the fingerprint, "
+        "which is the whole content of the correction")
+    # The exact live sentence, not a case-folded keyword: `VERSION STRING`
+    # upper-cased also matches the "version strings" two lines below, so the
+    # loose form stayed green over a header that had gone back to claiming the
+    # image's bytes.
+    assert "records the interpreter VERSION STRING" in header, (
+        "the Dockerfile header no longer says WHAT is actually hashed, which "
+        "is the correction that makes the digest pin matter more rather than "
+        "less")
+    assert "SELECTED\n# PILLOW FILES" in header.upper(), (
+        "the header no longer says the Pillow digest is over SELECTED files")
 
 
 def test_badge_name_card_tile_parity():

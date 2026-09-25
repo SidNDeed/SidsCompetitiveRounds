@@ -354,6 +354,49 @@ namespace CompetitiveRounds
             return null;
         }
 
+        /// <summary>Bug 392 item B: the transport-silence line, or null.
+        ///
+        /// NOT one of the four states above and deliberately not evaluated
+        /// with them. Those are a quality read built from closed 1 s windows
+        /// on a plain-1v1 fighter seat, behind the [Network] LagNotices opt-in
+        /// (default off). This line is a warning that the match connection is
+        /// failing RIGHT NOW: it is decided from this seat's own socket
+        /// receive gap in GameStateWatcher.SampleConnectionQuality, which runs
+        /// on the tracked-match frame tick — TickFrame returns early for a
+        /// spectator and when nothing is being tracked, and the FFA game-start
+        /// path sets isTracking, which is why the reported FFA sitting was
+        /// producing these samples. It is NOT behind the opt-in, because a
+        /// warning nobody has switched on is a feature that ships inert
+        /// (#438/#443). The setting still governs the four quality states
+        /// exactly as it did.</summary>
+        internal static string TransportSilenceLine()
+        {
+            try
+            {
+                double now = TransportExit.NowSeconds();
+                // The post-disconnect line first: once the connection is gone
+                // there is nothing left to pre-warn about. The two are
+                // mutually exclusive by construction (NoteTransportLoss clears
+                // the silence notice); the order here means the screen still
+                // cannot carry both if a later caller raises them together.
+                //
+                // NOT a new catalogue entry: this is the same string the toast
+                // already shows, so both surfaces say the same words and the
+                // existing es/ru/uk/sv entries cover it. The toast stays where
+                // it is — it is the nicer surface when it is available — but
+                // it is no longer the only one carrying the message, because
+                // it renders nothing when the player has notifications off or
+                // a critical cue owns the slot.
+                if (TransportExit.TransportLossActive(now))
+                    return I18n.Tr("Match interrupted - the connection to the match server was lost");
+                int silentMs;
+                if (!TransportExit.SilenceNoticeActive(now, out silentMs)) return null;
+                return I18n.TrF("No data from the match server for {0}s - you may be dropped",
+                                TransportExit.SilenceSeconds(silentMs));
+            }
+            catch { return null; }
+        }
+
         // ── production wrapper ───────────────────────────────────────────
 
         private static readonly Slot[] _slots = NewSlots();

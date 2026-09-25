@@ -6,6 +6,7 @@ so tests mirror the process layout used by uvicorn and the Discord bot.
 
 from pathlib import Path
 import hashlib
+import os
 import sys
 
 import pytest
@@ -41,28 +42,91 @@ for path in (str(API_ROOT), str(BACKEND_ROOT), str(TESTS_ROOT)):
 # saved a file, and a run whose numbers are worth quoting is a standing-start
 # run on a tree nobody is touching.
 
-_SOURCE_ROOTS = (API_ROOT, BACKEND_ROOT, TESTS_ROOT)
+REPO_ROOT = BACKEND_ROOT.parent
+SQL_ROOT = BACKEND_ROOT / "sql"
+TOOLS_ROOT = REPO_ROOT / "tools"
+ASSETS_ROOT = API_ROOT / "assets"
+PLUGIN_ROOT = REPO_ROOT / "plugin"
+
+# WHAT A SOURCE-READING GATE IN THIS SUITE CAN ACTUALLY REACH, which is a much
+# larger set than `backend/**/*.py`. The gates in this repo read, between them:
+# api and test modules (`inspect.getsource`, AST walks), the SQL migrations
+# (every "the migration says X" assertion), `tools/*.py` and its JSON (the
+# theme generator, the i18n source), the renderer's JSON assets and fonts
+# (face layout, catalogue, the font lock), and `plugin/*.cs` (the client-side
+# contract checks). An earlier version of this walk globbed `*.py`
+# NON-recursively over three directories, so a change to any of the rest moved
+# the tree under a running suite and this check reported nothing -- a guard
+# that cannot fail over most of what it claims to watch (#342/#441).
+#
+# Directories are walked RECURSIVELY and filtered by suffix; `__pycache__` and
+# `.git` are pruned because neither is an input any gate reads and both churn
+# on their own during a run, which would make the report cry wolf.
+#
+# FONT BINARIES ARE DELIBERATELY OUT. The two font files alone are 29 MiB, no
+# gate reads a font's BYTES, and the set of fonts that is meant to be present
+# is pinned by `fonts.lock.json` -- which IS stamped, so a font swapped under
+# a running suite still shows up as a moved lock file. Adding 29 MiB to two
+# passes per session to watch something nothing reads is how a diagnostic
+# becomes the reason people turn diagnostics off. Card PNGs stay: the face
+# tests load them.
+_SOURCE_TREES = (
+    (API_ROOT, (".py", ".json")),
+    (TESTS_ROOT, (".py", ".json")),
+    (SQL_ROOT, (".sql",)),
+    (TOOLS_ROOT, (".py", ".json")),
+    (ASSETS_ROOT, (".json", ".png")),
+    (PLUGIN_ROOT, (".cs",)),
+)
+# Files sitting directly in backend/ (discord_bot.py, Dockerfile.bot, the
+# compose file) rather than in one of the trees above.
+_SOURCE_FILES_IN = ((BACKEND_ROOT, (".py", ".yml", ".sql")),)
+_PRUNED_DIRS = {"__pycache__", ".git", ".pytest_cache", "node_modules", "bin", "obj"}
+
 _TREE_STAMPS = pytest.StashKey[object]()
 
 
 def _source_stamps() -> dict[str, tuple[int, str]]:
-    """(size, content digest) for every module a source-reading gate can reach.
+    """(size, content digest) for every input a source-reading gate can reach.
 
     CONTENT, not mtime: the edit this exists to catch is a comment splice, and
     a splice can preserve the byte count and land inside one timestamp tick.
-    Roughly 20 MB to read, twice per run."""
+
+    The volume is deliberately NOT asserted in this comment. An earlier
+    version put a number here ("roughly 20 MB per pass") that was about three
+    times the truth, and the set has since widened, so any number written down
+    is a claim that rots. `test_conftest_tree_walk.py` measures it instead and
+    fails if a pass grows past a stated ceiling -- a number that is checked
+    rather than one that is asserted in prose.
+    """
     stamps: dict[str, tuple[int, str]] = {}
-    for root in _SOURCE_ROOTS:
+
+    def _stamp(path):
         try:
-            paths = sorted(root.glob("*.py"))
+            data = path.read_bytes()
+        except OSError:                # deleted or locked mid-walk
+            return
+        stamps[str(path)] = (len(data), hashlib.blake2b(data, digest_size=16).hexdigest())
+
+    for root, suffixes in _SOURCE_FILES_IN:
+        try:
+            entries = sorted(root.iterdir())
         except OSError:
             continue
-        for path in paths:
-            try:
-                data = path.read_bytes()
-            except OSError:            # deleted or locked mid-walk
-                continue
-            stamps[str(path)] = (len(data), hashlib.blake2b(data, digest_size=16).hexdigest())
+        for path in entries:
+            if path.is_file() and path.suffix in suffixes:
+                _stamp(path)
+
+    for root, suffixes in _SOURCE_TREES:
+        if not root.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in _PRUNED_DIRS)
+            base = Path(dirpath)
+            for name in sorted(filenames):
+                path = base / name
+                if path.suffix in suffixes:
+                    _stamp(path)
     return stamps
 
 

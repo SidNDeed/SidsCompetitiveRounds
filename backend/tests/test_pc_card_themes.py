@@ -11,6 +11,10 @@ looked like before this feature existed.
      unreadable at 9 px on #12141A.
 """
 
+import ast
+import asyncio
+import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -105,14 +109,50 @@ def test_the_migration_asserts_its_own_end_state():
         assert f"'{canonical}'" in sql, canonical
 
 
-@pytest.mark.skipif(not GENERATOR.exists(), reason="generator not in this checkout")
+def _generator_prerequisites():
+    """Why the generator CANNOT run here, or None if it can.
+
+    The distinction this draws is the whole point. "The ROUNDS assets are not
+    installed on this machine" is a property of the machine and a legitimate
+    skip. "The generator ran and exited non-zero" is a RESULT -- a parse that
+    no longer matches the assets, or a failed self-check -- and turning that
+    into a skip hides the one outcome this test exists to report while the run
+    still says exit 0 (#342).
+
+    Checked BEFORE running, so the verdict never has to be inferred from an
+    exit code that would otherwise mean several different things.
+    """
+    if not GENERATOR.exists():
+        return "the generator is not in this checkout"
+    if importlib.util.find_spec("UnityPy") is None:
+        return "UnityPy is not installed, so no asset can be read here"
+    game = os.environ.get(
+        "SCR_ROUNDS_DATA",
+        r"C:\Program Files (x86)\Steam\steamapps\common\ROUNDS\ROUNDS_Data")
+    if not Path(game).is_dir():
+        return "the ROUNDS assets are not installed here (%s)" % game
+    return None
+
+
 def test_the_migration_matches_the_generator():
-    """A hand-edited hex in the SQL is a colour nothing can reproduce. Skipped
-    where the ROUNDS assets are absent -- the parse reads them directly."""
+    """A hand-edited hex in the SQL is a colour nothing can reproduce.
+
+    Skipped only where the generator's INPUTS are absent. Once they are
+    present, any non-zero exit is a FAILURE: that exit is how the tool reports
+    a parse error (2) or a failed self-check, and those are exactly the events
+    that must not be swallowed.
+    """
+    unavailable = _generator_prerequisites()
+    if unavailable:
+        pytest.skip(unavailable)
+
     proc = subprocess.run([sys.executable, str(GENERATOR), "--emit-sql"],
                           capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        pytest.skip(f"generator could not run here: {proc.stderr.strip()[:200]}")
+    assert proc.returncode == 0, (
+        "the theme generator exited %d with its inputs present. That is a parse "
+        "failure or a failed self-check, not an unavailable machine, and "
+        "migration 333's values are unreproducible until it is fixed.\n"
+        "stderr: %s" % (proc.returncode, proc.stderr.strip()[:1000]))
 
     row = re.compile(r"\(\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*,"
                      r"\s*'(#[0-9A-Fa-f]{6})'\s*,\s*'(#[0-9A-Fa-f]{6})'\s*\)")
@@ -120,3 +160,95 @@ def test_the_migration_matches_the_generator():
                  for m in row.finditer(proc.stdout)]
     assert generated, "the generator emitted no rows"
     assert generated == rows(), "migration 333 has drifted from the parse that produced it"
+
+
+def test_the_generator_self_check_passes():
+    """`--control` runs migration 221's two recorded colours back through the
+    parser and returns non-zero if either fails to reproduce.
+
+    Its own test, so a self-check failure reports as itself rather than being
+    folded into the comparison above -- and asserted rather than skipped, for
+    the same reason.
+    """
+    unavailable = _generator_prerequisites()
+    if unavailable:
+        pytest.skip(unavailable)
+    proc = subprocess.run([sys.executable, str(GENERATOR), "--control"],
+                          capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, (
+        "the theme generator's own controls failed (exit %d). Migration 221's "
+        "recorded colours no longer reproduce from the assets, so nothing "
+        "derived from this parse can be trusted.\nstdout: %s\nstderr: %s"
+        % (proc.returncode, proc.stdout.strip()[-1000:], proc.stderr.strip()[:1000]))
+
+
+# ── The production loader the autouse fixture stands in for ────────────────
+
+def test_startup_loads_the_card_theme_map():
+    """conftest seeds `main._PC_CARD_THEMES` for every test in this suite. That
+    is necessary -- a test process never runs `lifespan` -- and it is also a
+    MASK: with the map pre-seeded, DELETING the production load leaves every
+    renderer test green while a real boot serves an empty map and every face
+    route refuses (`_pc_renderer_unavailable`).
+
+    So the startup call is asserted from main's own AST rather than from
+    behaviour the fixture already supplied. Removing the
+    `await _pc_load_card_themes(...)` line from `lifespan` reddens this and
+    nothing else in the suite.
+    """
+    main_py = Path(__file__).resolve().parents[1] / "api" / "main.py"
+    tree = ast.parse(main_py.read_text(encoding="utf-8"))
+    lifespan = next((n for n in ast.walk(tree)
+                     if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+                     and n.name == "lifespan"), None)
+    assert lifespan is not None, "main.lifespan is gone"
+
+    awaited = []
+    for node in ast.walk(lifespan):
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+            fn = node.value.func
+            name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+            if name:
+                awaited.append(name)
+    assert "_pc_load_card_themes" in awaited, (
+        "main.lifespan does not await _pc_load_card_themes. Production would "
+        "boot with an empty card->ink map, every face route would refuse, and "
+        "this suite would stay green because conftest seeds the map itself.")
+
+
+def test_the_loader_populates_the_map_from_the_table():
+    """And the loader has to actually load. The AST check alone would pass
+    over a function that had been gutted to a no-op."""
+    import main
+
+    class _Rows:
+        def __init__(self, rows_):
+            self._rows = rows_
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _DB:
+        async def execute(self, _statement, _params=None):
+            return _Rows([{"card_name": "Poison", "hex": "#00934C"},
+                          {"card_name": "Bad Hex", "hex": "not-a-colour"}])
+
+    before = dict(main._PC_CARD_THEMES)
+    try:
+        main._PC_CARD_THEMES.clear()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(main._pc_load_card_themes(_DB()))
+        finally:
+            loop.close()
+        assert main._PC_CARD_THEMES.get("Poison") == (0x00, 0x93, 0x4C), (
+            "the startup loader did not put the table's ink into the map: %r"
+            % (main._PC_CARD_THEMES,))
+        assert "Bad Hex" not in main._PC_CARD_THEMES, (
+            "an unparsable hex was admitted to the map as a cache key")
+    finally:
+        main._PC_CARD_THEMES.clear()
+        main._PC_CARD_THEMES.update(before)

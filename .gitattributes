@@ -1,0 +1,2 @@
+# Evidence files are compared byte for byte with the runs they record: no line-ending conversion.
+backend/tests/evidence/** -text

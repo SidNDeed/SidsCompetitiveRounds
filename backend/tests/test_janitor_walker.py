@@ -470,13 +470,16 @@ def test_the_shipped_rollover_sql_pins_both_arms_to_utc():
 def test_the_live_postgres_rollover_module_cannot_silently_collect_nothing():
     """Guard the DSN-gated sibling from the outside, where it always runs.
 
-    test_pc_edition_rollover.py is skipped whole unless its DSN variable is
-    set, so on most machines it contributes nothing -- and a NEAR-MISS
-    variable name produces "9 skipped, exit 0", which reads as a clean run.
-    That is a whole suite that cannot fail. This test lives here, outside the
-    gate, and pins the two things that would make the skip invisible: the
-    exact variable NAME, and how many live tests the module is supposed to
-    contain. Deleting a test there, or renaming the gate, goes red here.
+    test_pc_edition_rollover.py used to be SKIPPED whole unless its DSN
+    variable was set, so on most machines it contributed nothing -- and a
+    NEAR-MISS variable name produced "10 skipped, exit 0", which reads as a
+    clean run. It now FAILS by default and can be waived only by an explicit
+    opt-out, which is the actual fix. This test stays as the thing that
+    notices if that polarity is quietly put back, and it pins the three facts
+    that would otherwise make a silent skip invisible: the exact DSN variable
+    NAME, the opt-out NAME, and how many live tests the module is supposed to
+    contain. Deleting a test there, renaming either variable, or reverting the
+    gate to an unconditional skip goes red here.
     """
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "test_pc_edition_rollover.py")
@@ -488,9 +491,9 @@ def test_the_live_postgres_rollover_module_cannot_silently_collect_nothing():
         "deliberate, change the number here in the same commit -- do not delete "
         "this assertion, it is the only thing that notices. Found: %r"
         % (len(names), names))
-    # AST, not substring. `'PC_EDITION_TESTS_REQUIRED' in src` is satisfied by
+    # AST, not substring. `'PC_EDITION_TEST_PG_OPTOUT' in src` is satisfied by
     # the COMMENT that explains the variable, so gutting the assignment to
-    # `REQUIRED = False` left that check green -- measured, on this very guard,
+    # `OPTOUT = False` left that check green -- measured, on this very guard,
     # which is why it now reads the parsed module instead of its text.
     tree = ast.parse(src)
 
@@ -527,12 +530,35 @@ def test_the_live_postgres_rollover_module_cannot_silently_collect_nothing():
                 env_reads.add(arg.value)
             elif isinstance(arg, ast.Name) and arg.id in consts:
                 env_reads.add(consts[arg.id])
-    assert "PC_EDITION_TESTS_REQUIRED" in env_reads, (
-        "the escape hatch is gone: nothing in the module READS "
-        "PC_EDITION_TESTS_REQUIRED, so a missing DSN can only ever skip. "
-        "environ keys actually read: %r" % sorted(env_reads))
+    assert "PC_EDITION_TEST_PG_OPTOUT" in env_reads, (
+        "nothing in the module READS PC_EDITION_TEST_PG_OPTOUT, so either the "
+        "waiver is gone (every machine without a cluster now fails, with no "
+        "way to say so deliberately) or the gate has gone back to skipping by "
+        "default. environ keys actually read: %r" % sorted(env_reads))
     assert gate in env_reads, (
         "the module declares DSN_VAR but never reads that environment variable")
+
+    # THE POLARITY ITSELF, read out of the parsed module: the DSN gate's
+    # refusal path must call pytest.fail, not pytest.skip. This is the one
+    # assertion that distinguishes "coverage did not run and said so" from
+    # "coverage did not run and the summary said exit 0", and it is the exact
+    # revert that would otherwise be invisible from outside the module.
+    gatefn = next((n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and n.name == "_require_live_pg"), None)
+    assert gatefn is not None, (
+        "test_pc_edition_rollover.py no longer defines _require_live_pg, so "
+        "nothing forces a missing DSN to be reported at all")
+    calls = {n.func.attr for n in ast.walk(gatefn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and isinstance(n.func.value, ast.Name) and n.func.value.id == "pytest"}
+    assert "fail" in calls, (
+        "the rollover module's DSN gate no longer calls pytest.fail: a run "
+        "without a cluster goes back to reporting a clean exit for ten tests "
+        "that did not execute. pytest calls found in the gate: %r" % sorted(calls))
+    assert "skip" in calls, (
+        "the gate can no longer SKIP, so the deliberate waiver has no effect "
+        "and a machine with no cluster cannot run the ordinary suite")
 
 
 

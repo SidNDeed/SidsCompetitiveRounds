@@ -1,0 +1,238 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-22 (round 12)
+======================================================================
+
+stdout: r12-suite-run.log
+
+Never concurrently: the two modes share one local PostgreSQL instance, and a
+concurrent pair would have them fighting over the same scratch databases and
+reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN, its output directory and its round tag from the
+environment. The per-half pytest logs are written OUTSIDE the repository; the
+fence section below says why, and this round that reason grew a second half.
+
+== WHAT THIS ROUND CHANGED IN THE INSTRUMENT ==
+One line, and it is what pairs this script with the repository's ignore rules.
+
+THE SCRIPT NOW PRINTS THE NAME OF THE CAPTURE IT IS REDIRECTED INTO. Every
+producer under this directory does, in a `capture` header line of its own
+stdout, because the evidence-log re-inclusion in `.gitignore` is no longer a
+blanket `*.log`. It is one pattern per producer, and the two sets are compared
+in both directions by a committed test: a pattern no producer names reds, and
+a capture a producer names that no pattern admits reds. The r7 lens raised the
+blanket rule as a LOW on bar item B12 -- a rule that admits anything cannot
+refuse anything (#342) -- and this line is this instrument's half of the
+closure.
+
+THE APPLY PASS SHARPENED WHAT "NAMES" MEANS, and this report is re-assembled
+under the same name because it is the same round read a second time. Seven
+producers here are REDIRECTED into their capture by a caller and print the
+name they were given. The eighth, repin-last.py, OPENS its own capture, and
+its only declaration was a comment beside the expression that built that name
+-- prose, which the derivation admits by design and which can be left standing
+when the expression moves. The name is now a value one function returns: the
+wrapper opens the file under it, writes it into that file's own `capture`
+header, and REFUSES to run at all when this repository's ignore rules do not
+re-include it, so a name the tree could not carry stops the round before the
+run rather than at the `git add` that ends it. The pairing test LOADS that
+module and CALLS the function, so for all eight the pattern is paired with
+something a run produces rather than with a sentence written beside it.
+
+THE CAPTURE ITSELF IS STILL WRITTEN OUTSIDE THE REPOSITORY, and this round
+that stopped being only about the per-half pytest logs. The re-inclusion above
+means a capture sitting in this directory is UNTRACKED-AND-NOT-IGNORED, which
+is exactly the set the fence walks. A run redirected straight into this
+directory would therefore fingerprint its own growing log, compare it with
+itself and report MOVED -- which is what the first pair of this round did, and
+why that pair is not the one quoted here. The capture is copied in after every
+run of the round has finished.
+
+== THIS REPORT IS ITS OWN RUN'S OUTPUT ==
+The narrative above the marker is written; everything below it is the exact
+bytes of the log named in the `stdout:` header. This file is ASSEMBLED by
+backend/tests/evidence/assemble-evidence.py, which REFUSES to write it at all
+when a number in the narrative is absent from that log. Two rules decide what
+a number is -- a count next to a term a run reports in, and any integer of
+three digits or more that is not one of the typed exempt shapes -- and the
+assembler's self-test asserts both fire and both stay quiet, so a typo in
+either pattern reds rather than passing for ever.
+
+The invocation of each half is printed by the script immediately before it
+runs, and is in the verbatim block below rather than quoted up here. A report
+that quotes its own commands twice has two places to keep true, and only one
+of them is the one that ran.
+
+== THE FENCE, and the claim it is allowed to make ==
+A suite that overlaps an edit to its own tree certifies nothing, and a sentence
+saying it did not is a claim written from the one state its author had in mind.
+So the tree is fingerprinted by backend/tests/evidence/tree-fingerprint.sh at
+the start and again at the end, and the instrument RE-DERIVES its set at every
+call: `git diff --name-only HEAD` for tracked files differing from HEAD, and
+`git ls-files --others --exclude-standard` for files present but untracked. The
+paths are part of the value, so an addition or a removal moves the fingerprint
+even when every surviving file is untouched, and an unreadable path prints an
+EMPTY hash rather than being skipped. The script refuses to run at all if the
+fingerprint comes back empty.
+
+This pair ran LAST, and the instrument printed 13 paths. The closing UNCHANGED
+line below is the fence's verdict over the paths listed at the top -- the
+endpoint, the test module, the ignore rules, the route manifest, the two
+instruments this pass edited, and this round's own control logs and reports --
+each byte-identical at the end to its hash at the start, and each still
+byte-identical in the commit that carries it.
+
+THE ORDER IS WHY THE SET IS THIS ONE. The build pass ran its pair FIRST, when
+none of this round's evidence existed and the fence could not have covered it.
+The apply pass inherited that evidence COMMITTED, so it sits inside the fence,
+and running the controls after the pair would have left fingerprinted paths
+rewritten once the fence had closed. So every control, the mutation run and
+the PostgreSQL selection ran BEFORE this pair and their reports were assembled
+before it started. Nothing the fence lists is written afterwards. What is
+written afterwards is this report and the assembly record, and neither can
+exist before the run it quotes -- which is why the directory is checked again,
+as committed, by the re-pin wrapper that runs last of all.
+
+THE FENCE IS ALSO WHY THIS IS THE ONLY PAIR QUOTED. This one is the apply
+pass's and it REPLACES the build pass's, whose tree moved under it when the
+lens findings were closed. Before that one the round discarded three more, and
+their reasons are kept here because they are the round's and not one
+sitting's. The FIRST redirected its captures into this directory: the
+re-inclusion makes such a file untracked-and-not-ignored, so the fence walked
+its own growing log, compared it with itself and reported MOVED. It said so,
+and the pair went. The SECOND was green on both halves and went anyway,
+because a mutation control that ran after it came back with its MUTANT GREEN
+-- the derivation it was proving could be satisfied by a MENTION of a capture
+name rather than by a producer naming it -- and the fix for that is an edit to
+the test module. The THIRD was green too and went for the same kind of reason:
+the closing evidence rule refused this round's assembly report because the
+producer's log carried no EXECUTED result, and the fix is a closing check
+inside that producer.
+
+None of them is in this file, and the rule is the same each time: a pair
+that predates an edit to its own tree certifies a tree that no longer exists,
+whatever its summary line says. Each pair costs about twenty minutes, which is
+the price of the rule and not an argument against it.
+
+That guard is not an argument; it is run, with its negative control, in
+r12-mutation-controls.txt: each edit class is PERFORMED and the guard is
+required to notice, no edit at all is required to leave it quiet, and the older
+captured-once method is run side by side over the same two mutations and
+reports UNCHANGED for both.
+
+Ignored paths stay out, by `--exclude-standard`. That is what lets this round
+edit its own notes and its contract while the pair runs -- no suite reads them
+-- and it is also why the per-half pytest logs go outside the repository.
+Anything a run WRITES inside the repository and does not ignore moves this
+value, correctly.
+
+== one route handler moved this round, and the manifest was re-pinned before
+   this pair ran ==
+The endpoint's refusal helper was reordered, so `main.submit_ffa_match`'s
+fingerprint moved. A suite run against a tree whose route manifest disagrees
+with its own code certifies a tree nobody will ship, so the manifest was
+re-pinned with its own tool BEFORE this pair started and the result is in the
+working set the fence lists. The re-pin that runs LAST, in r12-repin.txt, is
+therefore still an ordering proof rather than a repair: the count it reports
+has to be zero, which is the positive statement that nothing moved between the
+tree this pair certified and the tree the commit holds.
+
+== what the numbers mean ==
+The skip count in the opt-out summary IS a check, not a footnote: an opt-out
+run that skipped as few as the live run did is a live run wearing the opt-out's
+name. The two halves are two different questions, and `env -u` is what keeps
+them that way.
+
+== the difference between the halves, and it reconciles ==
+The two summary lines are in the verbatim block below, each under the command
+that produced it:
+
+  opt-out   1742 passed, 44 skipped
+  live DSN  1771 passed, 15 skipped
+
+The live half runs the PostgreSQL-gated checks the opt-out half skips, so the
+difference has to appear twice in the same two lines. It does: 44 -
+15 is the count of gated checks the live run executes, and 1771 -
+1742 is the same count read from the other column. Two numbers from two
+different columns of the same two lines agreeing is the check; a disagreement
+there would be a finding, not a rounding error.
+
+Those four figures are the assembler's subject, not decoration. Each is a count
+next to a term the run reports in, so each must appear in the log below as the
+same integer beside the same term or this file does not get written -- which is
+what the mutation control `suites-report-carries-an-underived-number`
+demonstrates by putting a figure here that no run can print.
+
+THE ARITHMETIC THIS ROUND PREDICTS, and what it would mean if it failed. This
+round adds two tests and neither is live-gated: one drives both arms of the
+endpoint's 503 answer through the real refusal helper and reads the bodies the
+endpoint's own handler builds, and the other compares the evidence-log
+re-inclusion patterns with the captures the producers name. It also REPLACES a
+live test rather than adding one -- the missed-update recovery walk, rewritten
+to go through the endpoint end to end instead of settling behind it -- so the
+live-gated count does not move. So both halves gain two passes, neither half's
+skip count moves, and the gated-check difference between the halves is
+unchanged from the previous round's pair. A new test that moved a skip count
+would mean a gate nobody intended; a new test that moved neither count would
+mean a test that was never collected.
+
+No previous round's figure is quoted here, deliberately. Every number in this
+narrative has to appear in the log below it or the assembler refuses to write
+the file, and a number from a DIFFERENT run cannot. Where a comparison needs the
+other round's figures, the other round's report is named instead of copied --
+which is the same rule one level up: a claim that cannot be traced to the
+artifact under it does not belong in the artifact.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any, so its absence from a line quoted verbatim IS the zero, and it
+is re-derivable from this file alone. Both halves also returned rc=0, printed
+immediately above the line they describe.
+
+Each summary line DOES carry an xfailed count -- a test marked
+expected-to-fail, which did -- and that is not a failure count. The gate used
+for these reports tests the TERM rather than the substring, and carries that
+shape and its negative twin as assertions that run every time it is imported.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r12-suite-run.log ==========
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r12-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      13 paths differ from HEAD or are untracked; fingerprinted before and after
+  4653ade08b8b4f4e38abe79e2c1e74d5  .gitignore
+  4c402f7520803603518fab9ccf7af46d  backend/api/main.py
+  9e8c09b7cdbd39b85be395ebf0e1cf62  backend/tests/evidence/mutation-runner.py
+  5e11b77cedf58185edc37976665fc2df  backend/tests/evidence/r12-citation-pin.log
+  c7b73ec37a3a425ab9c2bff466c42a71  backend/tests/evidence/r12-freeze-guard.log
+  9ee0193e3e5740ff14dc39cddcd4bc3d  backend/tests/evidence/r12-mutation-controls.txt
+  4bfda9eb00646ab6d4f1d7fa87577037  backend/tests/evidence/r12-mutation-run.log
+  d61385199f719252106f38c8dcbeeb72  backend/tests/evidence/r12-pg-controls.log
+  019d129c2a6c2b46c0ad11f164c352b5  backend/tests/evidence/r12-postgresql-controls.txt
+  6d0a4448fd9da84168dc5761184bfe86  backend/tests/evidence/r12-residual-reach.log
+  65268cd1f59fc4d9d78faa3ff11ed93d  backend/tests/evidence/repin-last.py
+  a67065827b001e370b0e87ee4da48f64  backend/tests/route_manifest_net_seat.json
+  6283e790f0037b631bddc1d657bd0408  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 14:07:19 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1742 passed, 44 skipped, 1 xfailed, 2 warnings in 587.27s (0:09:47)
+=== live DSN started 14:17:10 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1771 passed, 15 skipped, 1 xfailed, 2 warnings in 588.20s (0:09:48)
+=== tree re-fingerprinted 14:27:03 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 13 paths, each byte-identical to the pre-run fingerprint
+=== done 14:27:05 ===

@@ -1,0 +1,213 @@
+script    <repo>/backend/tests/evidence/contract-arm-consistency.sh
+capture   <repo>/backend/tests/evidence/<round>-contract-arms.log
+command   bash <repo>/backend/tests/evidence/contract-arm-consistency.sh <contract> <previous revision>
+contract  <the lane's client resync contract, under the gitignored scratch>
+previous  <the same contract as the round-10 review read it, a scratch copy>
+rules     <repo>/backend/tests/evidence/contract_arm_rules.py
+bash      5.3.15(1)-release
+python    3.12.10
+started   2026-09-23T08:25:20Z
+
+LIVE     the document as this round leaves it
+  live     statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  live     statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  live     statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py --all <contract>
+  operations found: 57; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5
+  NEGATED line 110 [re-sign]: a delivered entry is never re-signed for its retry, whatever the answer to it carried
+  NEGATED line 279 [re-sign]: The entry is not re-signed at any number and is not sent again
+  NEGATED line 283 [re-key]: **retry the SAME body later, change nothing, never re-key on it**
+  HARM line 300 [re-key]: Re-keying such a delivery at the free number would settle a conflicting account as though it were a second physical game
+  HARM line 300 [moved-number]: Re-keying such a delivery at the free number would settle a conflicting account as though it were a second physical game
+  NEGATED line 305 [re-sign]: One of those two costs is recoverable and the other is not, so the entry is dropped, the seat derives its NEXT key from `expected_game`, and nothing i
+  NEGATED line 321 [re-sign]: **A queued payload may not be edited in place, and it is never re-signed.
+  CHANNEL line 327 [re-sign]: The client does own a one-shot re-signing channel on its live-points path
+  NEGATED line 337 [moved-number]: Number N+1 must not be submitted before N has had its answer, or the second is refused for being ahead and the first is then refused for being behind.
+  NEGATED line 434 [re-key]: **retry the SAME body later, and never re-key on it.
+  NEGATED line 476 [re-identify]: one entry, frozen at the first write, never split and never re-identified.
+  NEGATED line 480 [re-sign]: So the number a seat writes into that field is the last one the server advertised to it, taken from whatever answer advertised it, and an entry ALREAD
+  HARM line 484 [re-key]: A rule that let the ENTRY be re-keyed, or that minted a second entry beside it, would let one physical game be delivered twice
+  CONTROL line 490 [redirect]: the walks call it on an answered entry only inside the branch their redirect mutation controls execute.
+  CONTROL line 491 [re-key]: `recovery-re-keys-the-parked-delivery` MOVES the entry
+  CONTROL line 492 [re-file]: it pops the parked delivery and re-files it under a new key.
+  CONTROL line 503 [redirect]: `terminal-arm-redirects-the-refused-entry` answers a `settled_game` refusal by re-signing the entry at the free number, which is the second settlement
+  CONTROL line 504 [re-sign]: `terminal-arm-redirects-the-refused-entry` answers a `settled_game` refusal by re-signing the entry at the free number, which is the second settlement
+  CONTROL line 508 [redirect]: And the arm table's own row is held against this section by `contract-arm-consistency.sh`, whose mutant writes "REDIRECT
+  CONTROL line 508 [re-sign]: keep the entry, re-sign it ONCE" back into it.
+  CONTROL line 509 [re-key]: `retry-re-keys-the-parked-entry` answers a retryable 503 by writing its advertised number into the entry before the entry goes out again
+  CONTROL line 518 [re-sign]: every re-signing, re-keying or redirecting word anywhere in it, every send at a moved number and every entry adopting a number must be negated, marked
+  CONTROL line 518 [re-key]: every re-signing, re-keying or redirecting word anywhere in it, every send at a moved number and every entry adopting a number must be negated, marked
+  CONTROL line 518 [redirect]: every re-signing, re-keying or redirecting word anywhere in it, every send at a moved number and every entry adopting a number must be negated, marked
+  CONTROL line 519 [adopt]: every re-signing, re-keying or redirecting word anywhere in it, every send at a moved number and every entry adopting a number must be negated, marked
+  CONTROL line 522 [redirect]: Its plant controls put a redirect sentence in three sections the round-14 check never read, and `class-scan-reads-only-the-arm-table` narrows the scan
+  NEGATED line 561 [re-sign]: No second entry is opened and nothing is re-signed
+  HARM line 576 [re-key]: Re-keying such a delivery at the free number would settle a conflicting account as a second physical game
+  HARM line 576 [moved-number]: Re-keying such a delivery at the free number would settle a conflicting account as a second physical game
+  NEXT-GAME line 581 [adopt]: So the entry is dropped, the seat adopts `expected_game` for its NEXT key, and one entry leaves the outbox by exactly one of three doors
+  NEGATED line 591 [re-identify]: Nothing is filed twice and nothing is re-identified.
+  NEGATED line 635 [re-key]: - **No same-reporter re-keying
+  NEGATED line 666 [re-sign]: It is never an edit of a queued payload in place, never re-signed at any number, and never a second entry filed beside the one the seat holds
+  CHANNEL line 668 [re-sign]: The one-shot re-signed resend at `ApiClient.cs:2773` belongs to the live-points channel
+  HISTORICAL line 692 [moved-number]: Round 8's reading reached that state by a seat redelivering its own refused game under a new number, and **the terminal disposition removes exactly th
+  NEGATED line 876 [re-key]: - **Recovery never re-keys an entry**
+  HISTORICAL line 885 [re-sign]: Round 12's rule behind this closure re-signed a refused entry at the advertised number
+  NEGATED line 1036 [re-sign]: So the body is never resent unchanged AND never re-signed at another number
+  REFUTED line 1070 [re-sign]: That response carried, by its field, the refuted instruction to re-sign this entry at the advertised number, and "send this body back unchanged" by it
+  REFUTED line 1072 [re-sign]: a consumer resolving it on the field made the refuted re-signed resubmission of a delivery the server did not keep
+  CHANNEL line 1120 [rewriteOnRefusal]: A 409 marks a live-points entry permanent and then, if it carries a `rewriteOnRefusal` and has not already used it, gets exactly ONE re-signed resend 
+  CHANNEL line 1120 [re-sign]: A 409 marks a live-points entry permanent and then, if it carries a `rewriteOnRefusal` and has not already used it, gets exactly ONE re-signed resend 
+  HARM line 1125 [rewriteOnRefusal]: A report entry carrying a `rewriteOnRefusal` on a `settled_game` 409 would be the refuted redirect, which re-signs one physical game at another number
+  REFUTED line 1125 [redirect]: A report entry carrying a `rewriteOnRefusal` on a `settled_game` 409 would be the refuted redirect, which re-signs one physical game at another number
+  REFUTED line 1126 [re-sign]: A report entry carrying a `rewriteOnRefusal` on a `settled_game` 409 would be the refuted redirect, which re-signs one physical game at another number
+  NEGATED line 1134 [re-sign]: **Never retried, and never re-signed
+  CHANNEL line 1236 [re-sign]: On a wrong-game 409 whose detail names `expected_game=N`, the live-points path re-signs ONE resend with that number and sends it.
+  NEGATED line 1240 [re-sign]: a report entry is never re-signed.
+  HARM line 1259 [moved-number]: it cannot tell a behind seat's later game from a second account of the game already settled at the number the report named, so a resend at the free nu
+  CHANNEL line 1265 [re-sign]: a detail-string number can be read, a live-points payload can be re-signed and resent once, and an older server that sends no marker gives up exactly 
+  NEGATED line 1268 [re-sign]: a report entry is never re-signed, and never resent at another number, on any arm.
+  NEGATED line 1268 [moved-number]: a report entry is never re-signed, and never resent at another number, on any arm.
+  NEGATED line 1281 [re-sign]: the body is never resent, whatever the attempt count is, and it is never re-signed at another number.
+  NEGATED line 1313 [re-sign]: A report entry is never re-signed.
+  REFUTED line 1316 [redirect]: and a test that sees a second signature for one entry is testing the refuted redirect
+  NEGATED line 1327 [moved-number]: never a delivery under the advertised number.
+  HISTORICAL line 1471 [re-sign]: round 12 rewrote §1, §3a.1–§3a.5, §4 and §5 around two dispositions for the 503 status and around round 12's rule that recovery re-signs a parked deli
+  live     class: CLEAN (rc=0, unadmitted 0) -- GREEN as expected
+
+PREVIOUS the revision the round-10 review read, which this scan exists to see
+  previous statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  previous statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  previous statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <previous revision>
+  operations found: 44; CONTROL 6, HARM 6, HISTORICAL 1, NEGATED 14, NEXT-GAME 1, UNADMITTED 16
+  UNADMITTED line 282 [adopt]: keep the entry, adopt the number
+  UNADMITTED line 324 [re-sign]: Re-signing is possible
+  UNADMITTED line 605 [re-key]: - **The same-reporter re-keying the client design refuses under G1–G3 cannot arise here, because a seat never mints a number and never opens a second 
+  UNADMITTED line 624 [re-sign]: the same entry re-signed so its room-id FIELD carries the advertised number where a retryable answer did advertise one
+  UNADMITTED line 680 [re-sign]: on a RETRYABLE answer, redeliver THAT SAME ENTRY, re-signed so its room-id field carries the advertised number, oldest first, one at a time, each wait
+  UNADMITTED line 1017 [re-sign]: That response said "re-sign this entry at the advertised number" by its field and "send this body back unchanged" by its status at the same time, and 
+  UNADMITTED line 1019 [re-sign]: That response said "re-sign this entry at the advertised number" by its field and "send this body back unchanged" by its status at the same time, and 
+  UNADMITTED line 1066 [rewriteOnRefusal]: A 409 marks the entry permanent and then, if it carries a `rewriteOnRefusal` and has not already used it, gets exactly ONE re-signed resend before the
+  UNADMITTED line 1067 [re-sign]: A 409 marks the entry permanent and then, if it carries a `rewriteOnRefusal` and has not already used it, gets exactly ONE re-signed resend before the
+  UNADMITTED line 1103 [adopt]: keep the entry, adopt the advertised number
+  UNADMITTED line 1104 [adopt]: keep the entry, adopt the advertised number
+  UNADMITTED line 1105 [adopt]: keep the entry, adopt the advertised number
+  UNADMITTED line 1177 [re-sign]: On a wrong-game 409 whose detail names `expected_game=N`, it re-signs ONE resend with that number and sends it.
+  UNADMITTED line 1206 [re-sign]: a detail-string number can be read, a payload can be re-signed and resent once, and an older server that sends no marker gives up exactly as before
+  UNADMITTED line 1251 [re-sign]: A re-signed resend, if the lane builds one, signs the NEW room id
+  UNADMITTED line 1401 [re-sign]: round 12 rewrote §1, §3a.1–§3a.5, §4 and §5 around two dispositions for the 503 status and around the rule that recovery re-signs a parked delivery un
+  previous class: RED (rc=1, unadmitted 16) -- RED as expected
+
+MUTANT 1 the table row REDIRECTS again (the round-9 HIGH, restored)
+  invoke   awk: rewrite the 409-with-settled_game row's disposition cell to REDIRECT, into <mutant.md>
+  mutant 1 statements: disposition -> REDIRECT - keep the entry, re-sign it ONCE at the advertised expected_game, submit 
+  mutant 1 statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  mutant 1 statements: CONTRADICTION - no-TERMINAL no-drop no-capture says-redirect
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <mutant.md>
+  operations found: 59; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5, UNADMITTED 2
+  UNADMITTED line 279 [redirect]: REDIRECT - keep the entry, re-sign it ONCE at the advertised expected_game, submit
+  UNADMITTED line 279 [re-sign]: REDIRECT - keep the entry, re-sign it ONCE at the advertised expected_game, submit
+  mutant 1 class: RED (rc=1, unadmitted 2) -- RED as expected
+
+INERT 1  a doubled space inside that same cell, the rule left alone
+  invoke   sed: double the space after the cell's TERMINAL phrase, into <inert.md>
+  inert 1  statements: disposition -> TERMINAL for the entry  — drop it; the server has already kept it for review 
+  inert 1  statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  inert 1  statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <inert.md>
+  operations found: 57; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5
+  inert 1  class: CLEAN (rc=0, unadmitted 0) -- GREEN as expected
+
+MUTANT 2 the STATUS SECTION makes the same answer retryable, table intact
+  invoke   sed: rewrite the status section's TERMINAL sentence to RETRYABLE with a re-sign, into <mutant2.md>
+  mutant 2 statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  mutant 2 statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 0
+  mutant 2 statements: CONTRADICTION - no-status-section-rule
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <mutant2.md>
+  operations found: 58; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5, UNADMITTED 1
+  UNADMITTED line 1031 [re-sign]: - **an answer carrying `settled_game` is RETRYABLE - re-sign the entry ONCE at the advertised number.
+  mutant 2 class: RED (rc=1, unadmitted 1) -- RED as expected
+
+INERT 2  a doubled space after that same sentence, the rule left alone
+  invoke   sed: double the space after that sentence, into <inert2.md>
+  inert 2  statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  inert 2  statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  inert 2  statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <inert2.md>
+  operations found: 57; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5
+  inert 2  class: CLEAN (rc=0, unadmitted 0) -- GREEN as expected
+
+PLANT A  a redirect sentence, written as a rule
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py --plant A redirect <contract> <plant-A-redirect.md>
+  planted  redirect sentence at line 1130 of 1549 (inside section 4's precedent passage; under ## 4. Terminal vs retryable, precisely)
+  plant A  statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  plant A  statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  plant A  statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <plant-A-redirect.md>
+  operations found: 58; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5, UNADMITTED 1
+  UNADMITTED line 1130 [re-sign]: it is re-signed once at the advertised number and sent again.
+  plant A  class: RED at the planted line 1130 and nowhere else (rc=1, unadmitted 1) -- RED as expected
+
+TWIN A   the unchanged-resend sentence at the same site
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py --plant A unchanged <contract> <plant-A-unchanged.md>
+  planted  unchanged sentence at line 1130 of 1549 (inside section 4's precedent passage; under ## 4. Terminal vs retryable, precisely)
+  twin A   statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  twin A   statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  twin A   statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <plant-A-unchanged.md>
+  operations found: 57; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5
+  twin A   class: CLEAN (rc=0, unadmitted 0) -- GREEN as expected
+
+PLANT B  a redirect sentence, written as a rule
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py --plant B redirect <contract> <plant-B-redirect.md>
+  planted  redirect sentence at line 719 of 1548 (inside the redelivery table, the parked-body row; under ### 3a.5 What each seat does)
+  plant B  statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  plant B  statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  plant B  statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <plant-B-redirect.md>
+  operations found: 58; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5, UNADMITTED 1
+  UNADMITTED line 719 [re-sign]: on a RETRYABLE answer that advertised a number, redeliver the entry re-signed at the advertised number. on a RETRYABLE answer, redeliver THAT SAME ENT
+  plant B  class: RED at the planted line 719 and nowhere else (rc=1, unadmitted 1) -- RED as expected
+
+TWIN B   the unchanged-resend sentence at the same site
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py --plant B unchanged <contract> <plant-B-unchanged.md>
+  planted  unchanged sentence at line 719 of 1548 (inside the redelivery table, the parked-body row; under ### 3a.5 What each seat does)
+  twin B   statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  twin B   statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  twin B   statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <plant-B-unchanged.md>
+  operations found: 57; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5
+  twin B   class: CLEAN (rc=0, unadmitted 0) -- GREEN as expected
+
+PLANT C  a redirect sentence, written as a rule
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py --plant C redirect <contract> <plant-C-redirect.md>
+  planted  redirect sentence at line 1540 of 1550 (in the last hundred lines; under ## 10. Client pin manifest)
+  plant C  statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  plant C  statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  plant C  statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <plant-C-redirect.md>
+  operations found: 59; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5, UNADMITTED 2
+  UNADMITTED line 1540 [re-key]: Recovery re-keys a parked delivery to the advertised `expected_game` and submits it once more.
+  UNADMITTED line 1540 [moved-number]: Recovery re-keys a parked delivery to the advertised `expected_game` and submits it once more.
+  plant C  class: RED at the planted line 1540 and nowhere else (rc=1, unadmitted 2) -- RED as expected
+
+TWIN C   the unchanged-resend sentence at the same site
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py --plant C unchanged <contract> <plant-C-unchanged.md>
+  planted  unchanged sentence at line 1540 of 1550 (in the last hundred lines; under ## 10. Client pin manifest)
+  twin C   statements: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  twin C   statements: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  twin C   statements: CONSISTENT
+  invoke   python <repo>/backend/tests/evidence/contract_arm_rules.py <plant-C-unchanged.md>
+  operations found: 57; CHANNEL 6, CONTROL 13, HARM 7, HISTORICAL 3, NEGATED 22, NEXT-GAME 1, REFUTED 5
+  twin C   class: CLEAN (rc=0, unadmitted 0) -- GREEN as expected
+
+tally     class scans RED as expected: 6; class scans CLEAN as expected: 6
+RESULT: live CONSISTENT and CLEAN; both statement mutants CONTRADICTION
+        and RED on the class scan; both statement twins CONSISTENT and
+        CLEAN; each of the three planted redirect sentences RED at its
+        own planted line and nowhere else, while the round-14 statement
+        check read every one of them CONSISTENT; each same-site
+        unchanged-resend twin CLEAN. The class is read over the whole
+        document, so a redirect written back into any section reds, and
+        a sentence stating the unchanged resend in the same words does
+        not.
+finished  2026-09-23T08:25:33Z

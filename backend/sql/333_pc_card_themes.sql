@@ -88,11 +88,25 @@
 --     FirepowerYellow #CABB3A   CR 9.36
 --     NatureBrown     #92CC20   CR 9.54
 --
+-- DEPLOY ORDER: THIS FILE FIRST, THE API SECOND.
+-- -----------------------------------------------
+-- The new api QUERIES THIS TABLE AT STARTUP. `lifespan` awaits
+-- `_pc_load_card_themes`, on BOTH roles and before it yields, so a box that
+-- boots the new code against a database without `pc_card_themes` fails that
+-- read on the boot path rather than on the first face request. The reverse
+-- order is entirely safe and is the state the two-SHA order passes through:
+-- the OLD api does not know this table exists, the schema is purely additive,
+-- and an unread table costs nothing.
+--
 -- Explicit transaction: the deploy wrapper invokes `psql -f`, which does NOT
 -- wrap a file in one (#340) -- every statement would otherwise autocommit and
 -- a failed post-check would report a failed deploy over already-committed
--- data. Idempotent statement by statement, and the post-check asserts the END
--- STATE rather than trusting that the INSERT is what produced it.
+-- data. Idempotent statement by statement -- and that is asserted rather than
+-- asserted-and-hoped: the INSERT's `DO UPDATE` carries a `WHERE` so an
+-- unchanged row is not rewritten and its `seeded_at` is not reset, which is
+-- what "a re-run changes nothing" has to mean if it is to mean anything. The
+-- post-check asserts the END STATE rather than trusting that the INSERT is
+-- what produced it.
 
 BEGIN;
 
@@ -172,11 +186,27 @@ INSERT INTO pc_card_themes (card_name, theme, hex, source_hex) VALUES
     ('Toxic Cloud', 'PoisonGreen', '#00934C', '#00934C'),
     ('Trickster', 'DestructiveRed', '#D15757', '#CC4646'),
     ('Wind Up', 'FirepowerYellow', '#CABB3A', '#CABB3A')
+-- DO UPDATE ... WHERE, and the WHERE is what makes a re-run a no-op. Without
+-- it, every re-run rewrote all 67 rows and reset all 67 `seeded_at` values to
+-- now() -- which contradicted this file's own idempotence claim and destroyed
+-- the one thing that column exists to carry: WHEN a colour was last actually
+-- derived from the assets. `IS DISTINCT FROM` over the row constructors, so a
+-- NULL on either side compares as a value instead of swallowing the test.
+--
+-- The DO UPDATE itself stays, because regenerating after a ROUNDS update is
+-- the documented way a changed colour reaches this table. On such a run only
+-- the rows that actually changed are written, and only those take a fresh
+-- seeded_at -- which is the difference between "somebody re-ran the seed" and
+-- "three cards changed colour", and the second is what a reader of seeded_at
+-- is asking.
 ON CONFLICT (card_name) DO UPDATE
     SET theme      = EXCLUDED.theme,
         hex        = EXCLUDED.hex,
         source_hex = EXCLUDED.source_hex,
-        seeded_at  = now();
+        seeded_at  = now()
+  WHERE (pc_card_themes.theme, pc_card_themes.hex, pc_card_themes.source_hex)
+        IS DISTINCT FROM
+        (EXCLUDED.theme, EXCLUDED.hex, EXCLUDED.source_hex);
 
 DO $$
 DECLARE
