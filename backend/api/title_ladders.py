@@ -18,8 +18,9 @@ Three pieces live here and nothing else does:
     which take numbers and return numbers, no database, no clock.
   * ``record_completed_games`` — the hook the four completion paths WILL
     call, and the ``GET /api/v1/players/{steam_id}/title-ladders`` read route
-    the client WILL draw the progress bar from. Neither is reachable in
-    production today; see WHAT IS NOT WIRED below.
+    the client draws the progress bar from. The route is served (main.py
+    mounts ``router``); the hook is not called yet -- see WHAT IS NOT WIRED
+    below.
 
 WHAT IS NOT HERE. No mail. A rung-up should tell the player, and the system
 mail + Discord relay that would carry that message is a different item's
@@ -28,15 +29,16 @@ caller decides what to do with it. No client rendering: rung names are
 ``shop_items`` rows like every other title and render through the existing
 title path.
 
-WHAT IS NOT WIRED. This module is the DATA HALF of item 12. Production
-imports it for exactly ONE thing: ``main`` reads ``GRANTED_ONLY_SKUS`` to
-carve the forty earned rungs out of the shop-owner exemption, on the
-``/shop/items`` listing and on the set-active ownership check. That import
-mounts no route and calls no hook. (An earlier version of this docstring said
-production did not import this module at all, which was true when it was
-written and is the kind of claim that goes stale the moment anything reads a
-constant from here.) Two things are still unwired, and an earlier version
-named only the first — which is why the second is spelled out here.
+WHAT IS NOT WIRED. This module is the DATA HALF of item 12 plus its read
+route. Production references it in exactly TWO places: ``main`` reads
+``GRANTED_ONLY_SKUS`` to carve the forty earned rungs out of the shop-owner
+exemption, on the ``/shop/items`` listing and on the set-active ownership
+check; and ``main`` mounts ``router`` with one ``include_router`` line.
+Neither reference calls the hook. (Earlier versions of this docstring said
+production did not import this module at all, and then that it imported it
+for one constant and mounted no route; each was true when written and went
+stale the moment main.py gained a reference.) One thing is still unwired, and
+the second item records the one that no longer is.
 
   1. THE HOOK. Nothing in main.py calls ``record_completed_games``. The four
      call sites belong to a rewrite of the lease surface that is in flight in
@@ -44,11 +46,12 @@ named only the first — which is why the second is spelled out here.
      the failure this was deliberately kept out of. See that function's
      docstring for the exact call shape, and note in particular that 2v2 has
      TWO completion paths, not one.
-  2. THE ROUTER. main.py never calls ``include_router`` for the ``router``
-     defined below, so ``GET /api/v1/players/{steam_id}/title-ladders``
-     answers 404 in production. The route is written and unit-tested; it is
-     not served. Do not cite it as the client's progress surface until an
-     ``include_router`` line exists.
+  2. THE ROUTER -- MOUNTED. main.py includes the ``router`` defined below
+     exactly once, so ``GET /api/v1/players/{steam_id}/title-ladders`` is
+     served; ``backend/tests/test_title_ladder_route_contract.py`` pins the
+     mount and every key the client reads. Until the hook above is wired, no
+     code path writes a ``title_ladder_progress`` row, so the route answers
+     games=0 and tier=1 on every line for every account.
 
 Migration 331 is therefore inert on its own: every tier-1 rung lands
 ``catalog_ready = FALSE``, so nothing is listed, nothing can be bought, and no
