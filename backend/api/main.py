@@ -36253,11 +36253,13 @@ async def get_bug_report(
         out["player_id"] = str(out["player_id"])
     out["created_at"] = out["created_at"].isoformat() if out["created_at"] else None
     out["updated_at"] = out["updated_at"].isoformat() if out["updated_at"] else None
-    # Read-time credential rule on the two free-text fields (the bundle got it
-    # inside _scrub_bug_log): rows stored before it reached ingest still hold
-    # the text they were sent.
+    # Read-time credential rule on the stored free-text columns (the bundle got
+    # it inside _scrub_bug_log): rows stored before it reached ingest still hold
+    # the text they were sent, and triage_notes gets it whatever wrote it --
+    # every door that returns stored bug-report text applies the rule.
     out["description"] = _logred.redact_credentials(out["description"])
     out["repro_steps"] = _logred.redact_credentials(out["repro_steps"])
+    out["triage_notes"] = _logred.redact_credentials(out["triage_notes"])
     out["log_text"] = log_text
     # The scrub receipt, on THIS door too. The download endpoint returns it as
     # an X-Scrub-Version header, and the posture comment claimed the version
