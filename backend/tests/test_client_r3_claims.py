@@ -244,14 +244,34 @@ def test_the_corrected_403_doc_does_not_put_the_game_number_behind_a_403():
     span = main_py[i:j]
     seen = span.split("HTTPException(403")
     assert len(seen) > 1, "no 403 in the endpoint at all -- wrong span"
-    for piece in seen[1:]:
-        detail = piece.split(")")[0].lower()
+    refusals = [piece.split(")")[0] for piece in seen[1:]]
+    # The quarantine work merged from main for the v1.41.0 beta routes this
+    # endpoint's terminal refusals through _ffa_record_and_refuse, whose status
+    # defaults to 409 and is 403 only where a call passes status=403. Each call
+    # is read whole: its arguments carry parentheses of their own, and every
+    # call in this endpoint ends at the ")" that closes its last line.
+    calls = []
+    k = span.find("_ffa_record_and_refuse(")
+    while k >= 0:
+        calls.append(span[k:span.index(")" + chr(10), k) + 1])
+        k = span.find("_ffa_record_and_refuse(", k + 1)
+    refusals += [c for c in calls if "status=403" in c]
+    for detail in refusals:
         for word in ("game limit", "duplicate", "games_played", "game number"):
-            assert word not in detail, (
+            assert word not in detail.lower(), (
                 "the endpoint now answers 403 to %r; the client doc says it "
                 "does not" % word)
-    assert 'HTTPException(409, "Lobby game limit reached")' in span, (
-        "the limit refusal is no longer the settled code the doc names")
+    # The limit refusal is the settled 409: the literal the lane's backend
+    # raises, or main's one helper call that leaves the default status alone.
+    if 'HTTPException(409, "Lobby game limit reached")' not in span:
+        limit = [c for c in calls if 'detail="Lobby game limit reached"' in c]
+        assert len(limit) == 1, (
+            "the limit refusal is neither the literal 409 nor one refusal-helper call")
+        assert "status=" not in limit[0], (
+            "the limit refusal overrides the helper's status: " + limit[0])
+        helper = main_py[main_py.index("async def _ffa_record_and_refuse("):]
+        assert "status: int = 409" in helper[:helper.index("):")], (
+            "the refusal helper's default status is no longer the settled 409")
     assert "_ffa_replay_echo" in span, (
         "the idempotent echo the doc names is gone from the endpoint")
 
