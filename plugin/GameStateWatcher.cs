@@ -1907,6 +1907,11 @@ namespace CompetitiveRounds
             // local_freeze_focused_count / local_freeze_total_sec, so EVERY freeze
             // figure this seat has ever reported was inflated about 2x, and anything
             // concluded from that series needs re-checking before it is trusted.
+            // A PEER's copy of the first two rides cr_gstats fields 9-10, and a
+            // client from before this fix still sends the inflated count there. So
+            // the payload declares this definition as field 24 (PeerFreezeStats.
+            // Epoch), and a match report carries a peer's freeze counters only when
+            // the peer declared it; otherwise they go as absent (round 2 finding 3).
             // dt remains in the log line as an observation; it trips nothing.
             long nowMs = _tickStopwatch.ElapsedMilliseconds;
             if (_lastTickStopwatchMs >= 0)
@@ -2204,6 +2209,14 @@ namespace CompetitiveRounds
         /// garbled field, a future era we do not understand - is UNKNOWN, and
         /// unknown must render and report as absent rather than as zero.</summary>
         public static bool OppBulletStatsUsable => OppBulletStatsEpoch == BULLET_STATS_EPOCH;
+
+        // Round 2 finding 3: the same statement for the FREEZE counters (fields
+        // 9-10), declared as field 24. PeerFreezeStats holds the definition, the
+        // parse and the report fields; this is the per-peer state the receiver
+        // fills from the same payload as the counters. 0 = the peer never said.
+        internal const int FREEZE_STATS_EPOCH = PeerFreezeStats.Epoch;
+        public static int OppFreezeStatsEpoch { get; private set; }
+        public static bool OppFreezeStatsUsable => PeerFreezeStats.Usable(OppFreezeStatsEpoch);
         public static int OppStatMacroSuspectSeconds { get; private set; }
         public static int OppStatMacroPeakKeysPerSecond { get; private set; }
         public static int OppStatMacroPeakClicksPerSecond { get; private set; }
@@ -2299,6 +2312,37 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[GSTATS-SENTINEL] {(pass ? "PASS" : "FAIL")}: {sentinels.Count} sentinels x 2 runs (success + injected exception){detail}");
         }
 
+        /// <summary>Round 2 finding 3 -- the freeze-counting epoch's self-test, run
+        /// by the same TestGstatsSentinel lever. PeerFreezeStats.RunSentinel sends
+        /// synthetic old- and new-format payloads (4 and 4 freezes each) through
+        /// the receiver's parse, the usability gate and the report's two fields:
+        /// the old format must come out absent, the new one as a trusted 4 and 4.
+        /// This adds the one check only the game can make, that the REAL payload
+        /// builder declares the epoch at field 24. BuildGstatsPayload is called
+        /// directly with advanceSequence:false, as DevGstatsSentinelTest does, so
+        /// nothing is broadcast. Logs [FREEZE-EPOCH-SENTINEL] PASS/FAIL.</summary>
+        internal static void DevFreezeEpochSentinelTest()
+        {
+            try
+            {
+                int seqBefore = gstatsSeq;
+                string[] built = BuildGstatsPayload(0, advanceSequence: false).Split('|');
+                bool seqMoved = gstatsSeq != seqBefore;
+                bool pass;
+                string line = PeerFreezeStats.RunSentinel(out pass, built);
+                if (seqMoved)
+                {
+                    pass = false;
+                    line = PeerFreezeStats.SentinelTag + " FAIL: the payload builder advanced the sequence; " + line;
+                }
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"{PeerFreezeStats.SentinelTag} FAIL: threw {ex.Message}");
+            }
+        }
+
         private static string BuildGstatsPayload(int recentFps, bool advanceSequence)
         {
             if (advanceSequence) gstatsSeq++;
@@ -2320,7 +2364,10 @@ namespace CompetitiveRounds
                 // Field 23 - #308 part 6 bullet-stats epoch. Every consumer of
                 // this payload gates on parts.Length >= N, so appending is
                 // backward-compatible: an old peer simply never sees it.
-                $"|{BULLET_STATS_EPOCH}";
+                $"|{BULLET_STATS_EPOCH}" +
+                // Field 24 - round 2 finding 3 freeze-counting epoch, for fields
+                // 9-10 (PeerFreezeStats). Appended on the same terms.
+                $"|{FREEZE_STATS_EPOCH}";
         }
 
         private static void BroadcastGstatsImmediate()
@@ -2499,8 +2546,16 @@ namespace CompetitiveRounds
                                         if (parts.Length >= 4)
                                             oppBlockTimeline.Add(parts[2] + ":" + parts[3]);
                                     }
-                                    oppFreezeCount = int.Parse(parts[8]);
-                                    oppFreezeFocusedCount = int.Parse(parts[9]);
+                                    // The counters and the definition they were
+                                    // counted under come from this ONE payload
+                                    // (round 2 finding 3). A garbled count throws
+                                    // before any of the three is assigned, so the
+                                    // previous payload's triple stands together.
+                                    int _fzCount, _fzFocused, _fzEpoch;
+                                    PeerFreezeStats.TryRead(parts, out _fzCount, out _fzFocused, out _fzEpoch);
+                                    oppFreezeCount = _fzCount;
+                                    oppFreezeFocusedCount = _fzFocused;
+                                    OppFreezeStatsEpoch = _fzEpoch;
                                     oppRecvGapCount = int.Parse(parts[10]);
                                 }
                                 else if (parts.Length >= 6 && parts[0] == "0" && parts[1] == "0")
@@ -6204,6 +6259,9 @@ namespace CompetitiveRounds
                     oppHbGapCount: oppHbGapCount,
                     oppFreezeCount: oppFreezeCount,
                     oppFreezeFocusedCount: oppFreezeFocusedCount,
+                    // Round 2 finding 3: a peer that did not declare our freeze
+                    // definition has its two counters sent as null (absent).
+                    oppFreezeStatsKnown: OppFreezeStatsUsable,
                     oppRecvGapCount: oppRecvGapCount,
                     // July 22 item 1: cumulative Hit%/Block% pair timelines +
                     // per-point timestamps for the new hover graphs.
@@ -6527,6 +6585,7 @@ namespace CompetitiveRounds
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
             oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
+            OppFreezeStatsEpoch = 0;   // round 2 finding 3: unknown until a peer says otherwise
             _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
             _activationSuccessCredited = true;
@@ -8348,6 +8407,7 @@ namespace CompetitiveRounds
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
             oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
+            OppFreezeStatsEpoch = 0;   // round 2 finding 3: unknown until a peer says otherwise
             _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
             _activationSuccessCredited = true;

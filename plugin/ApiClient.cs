@@ -7720,6 +7720,11 @@ namespace CompetitiveRounds
             int localRecvGapCount = 0, int localRecvGapMaxMs = 0,
             int oppHbGapCount = 0,
             int oppFreezeCount = 0, int oppFreezeFocusedCount = 0,
+            // Round 2 finding 3: false => the peer did not declare our freeze
+            // counting definition (PeerFreezeStats), so both counters go as null.
+            // Defaults to false: a caller that never asked gets "absent", not a
+            // number counted under a definition nobody checked.
+            bool oppFreezeStatsKnown = false,
             int oppRecvGapCount = 0,
             // July 22 item 3 — latency timelines (own 3s samples; opp via
             // gstats field 12) + opp average for the history "Ping:" tag.
@@ -7843,8 +7848,9 @@ namespace CompetitiveRounds
             sb.Append($"\"local_recv_gap_count\":{localRecvGapCount},");
             sb.Append($"\"local_recv_gap_max_ms\":{localRecvGapMaxMs},");
             sb.Append($"\"opp_hb_gap_count\":{oppHbGapCount},");
-            sb.Append($"\"opp_freeze_count\":{oppFreezeCount},");
-            sb.Append($"\"opp_freeze_focused_count\":{oppFreezeFocusedCount},");
+            // Round 2 finding 3: null when the peer's freeze definition is not
+            // ours (the schema's own "absent"; ge=0 would 422 a negative).
+            sb.Append(PeerFreezeStats.ReportFields(oppFreezeStatsKnown, oppFreezeCount, oppFreezeFocusedCount));
             sb.Append($"\"opp_recv_gap_count\":{oppRecvGapCount},");
             sb.Append($"\"local_ping_timeline\":\"{Escape(ClampTimeline(localPingTimeline))}\",");
             sb.Append($"\"opp_ping_timeline\":\"{Escape(ClampTimeline(oppPingTimeline))}\",");

@@ -1107,7 +1107,7 @@ namespace CompetitiveRounds
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
-                "Broadcast seat only: set to any NEW value to run the cr_gstats W1-sentinel self-test once (design v6 section 1); the result is logged as [GSTATS-SENTINEL] PASS/FAIL. A value present at startup never runs."
+                "Broadcast seat only: set to any NEW value to run the cr_gstats self-tests once: the W1 sentinel (design v6 section 1) and the freeze-counting epoch check; the results are logged as [GSTATS-SENTINEL] and [FREEZE-EPOCH-SENTINEL] PASS/FAIL. A value present at startup never runs."
             );
             BroadcastTestReporterElectionSentinel = Config.Bind(
                 "Broadcast", "TestReporterElectionSentinel", "",
@@ -2256,6 +2256,8 @@ namespace CompetitiveRounds
             if (raw.Length == 0) return;
             try { GameStateWatcher.DevGstatsSentinelTest(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[GSTATS-SENTINEL] FAIL: lever threw {ex.Message}"); }
+            // Round 2 finding 3: the freeze-counting epoch rides the same payload.
+            GameStateWatcher.DevFreezeEpochSentinelTest();
         }
 
         // v1.41.0 beta round 2 finding 2: [Broadcast] TestReporterElectionSentinel,
