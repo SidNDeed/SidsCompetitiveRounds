@@ -158,8 +158,9 @@ def test_the_derivation_reads_each_wiring_and_nothing_beside_it():
         return namespace["f"].__code__
 
     writer = code_of(
-        "async def f(db, sid, t1_points, t2_points):\n"
-        "    await _record_team_game_points(db, sid, t1_points, t2_points)\n"
+        "async def f(db, sid, t1_points, t2_points, _game, _slot, _attested):\n"
+        "    await _record_team_game_points(db, sid, t1_points, t2_points,"
+        " _game, _slot, _attested)\n"
         "    await db.commit()\n")
     reader = code_of(
         "async def f(db, sid, s, total_points, wins):\n"
@@ -312,7 +313,8 @@ def _controls(nl):
     file, so a control can neither miss its target nor hit a second one --
     which is also why each anchor names an endpoint's own call line, never the
     binding's copy of the name."""
-    writer_call = "    await %s(db, sid, t1_points, t2_points)" % WRITER
+    writer_call = ("    await %s(db, sid, t1_points, t2_points, _game, _slot, _attested)"
+                   % WRITER)
     reader_line = "            and await %s(db, sid_uuid, s, total_points)):" % READER
     reader_cond = "    if ((other_team_existing_wins or 0) >= 1" + nl + reader_line
     pre_fix_cond = "    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:"

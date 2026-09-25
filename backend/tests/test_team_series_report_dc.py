@@ -1,19 +1,26 @@
 """2v2 disconnect settlement: the lead-forfeit rule reads a per-game record the
 server writes during play, never the DC report's own point snapshot
-(v1.41.0 beta review, round 2, finding 1).
+(v1.41.0 beta review, round 2, finding 1), and names the game by its identity,
+never by when a post arrived (the same review, round 1 of the hotfix).
 
 team_series_report_dc completes a series to the team that stayed only when
 that team was already a game up AND the abandoned game saw real play (two
 points). The second half used to be the report's query-string snapshot, so two
 honest survivors holding different snapshots of one game got different
 settlements depending on which report took the series lock first. It is now
-team_series_games (migration 348), raised by the team live-points POST.
+team_series_games (migrations 348 and 351), written by the team live-points
+POST: one row per game, named by the series, its recorded games plus one and
+the sitting's room, holding which seat posted which pair. The DC report asks
+whether any history in which the game did not reach two points could have
+produced that record. No time is read (main.py, the comment above
+_team_game_identity).
 
 STRUCTURAL (always runs, no database): the condition that opens the
 lead-forfeit branch asks the per-game record and compares no snapshot.
 
-LIVE (TEAM_DC_TEST_PG_DSN). Row locks, upserts and timestamps are PostgreSQL
-behaviour, so these run the real endpoints against a real server:
+LIVE (TEAM_DC_TEST_PG_DSN). Row locks, upserts and the record's bit
+arithmetic are PostgreSQL behaviour, so these run the real endpoints against a
+real server:
 
     TEAM_DC_TEST_PG_DSN="postgresql+asyncpg://postgres@127.0.0.1:55432/scratch_teamdc" \\
         python -m pytest backend/tests/test_team_series_report_dc.py -q
@@ -36,7 +43,6 @@ import hmac
 import inspect
 import os
 import textwrap
-import time
 import urllib.parse as _urlparse
 import uuid
 
@@ -92,15 +98,27 @@ needs_pg = pytest.mark.skipif(
 
 SQL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql")
 MIGRATION_348 = os.path.join(SQL_DIR, "348_team_series_games.sql")
+# Applied after 348 when present. A tree from before it has no such file, so
+# the file also runs, unchanged, against that older tree.
+MIGRATION_351 = os.path.join(SQL_DIR, "351_team_series_games_identity.sql")
 
 SECRET = "teamdc-test-secret"
 ROOM = "teamdc_room"
+# The room a relock's next sitting is issued. Like a real one it is not the
+# old room with a suffix, so neither room passes for the other.
+ROOM_NEXT = "teamdc_next"
 
 # Deliberately outside the real SteamID64 space.
 _SID_BASE = 90000000000700000
 
 
-# ── structural ───────────────────────────────────────────────────────────────
+def _bit(t1, t2, seat):
+    """The record's bit for seat `seat` (0..3 = t1a, t1b, t2a, t2b) posting the
+    pair t1-t2, each side capped at 2: bit 4 * (3 * t1 + t2) + seat."""
+    return 1 << (4 * (3 * min(t1, 2) + min(t2, 2)) + seat)
+
+
+# -- structural ---------------------------------------------------------------
 
 def _lead_forfeit_if():
     """The `if` whose body writes the synthetic lead-forfeit team_matches row."""
@@ -156,7 +174,7 @@ def test_the_live_points_post_raises_the_per_game_record():
     assert src.count("_record_team_game_points(") == 1, src
 
 
-# ── live ─────────────────────────────────────────────────────────────────────
+# -- live ---------------------------------------------------------------------
 
 _PREREQ = """
 ALTER TABLE team_series
@@ -217,11 +235,14 @@ def _dc_sig(reporter, series_id, dc_player):
 
 
 class _Lab:
-    """One throwaway schema holding the tables the two endpoints touch."""
+    """One throwaway schema holding the tables the two endpoints touch.
+    `with_identity=False` stops after migration 348 (the API-before-351
+    deploy order)."""
 
-    def __init__(self, with_games_table=True):
+    def __init__(self, with_games_table=True, with_identity=True):
         self.schema = "teamdc_" + uuid.uuid4().hex[:12]
         self.with_games_table = with_games_table
+        self.with_identity = with_identity
         self.engine = None
         self.sm = None
         self._n = 0
@@ -249,6 +270,8 @@ class _Lab:
             await conn.execute(_FILL_DEFAULTS)
             if self.with_games_table:
                 await conn.execute(_read(MIGRATION_348))
+                if self.with_identity and os.path.exists(MIGRATION_351):
+                    await conn.execute(_read(MIGRATION_351))
         finally:
             await conn.close()
         return self
@@ -271,9 +294,10 @@ class _Lab:
             return rows
 
     async def series(self, *, t1_wins=1, t2_wins=0, game_recorded_secs_ago=600):
-        """Four fresh players and an active series. When a game is already
-        recorded, its team_matches row is dated `game_recorded_secs_ago`
-        seconds back: that row is the current game's opening."""
+        """Four fresh players and an active series in room ROOM. A game
+        already recorded gets its team_matches row dated
+        `game_recorded_secs_ago` seconds back. The record rule reads no time;
+        the date is what the window this rule replaced measured from."""
         self._n += 1
         base = _SID_BASE + self._n * 10
         steams = [str(base + i) for i in range(1, 5)]
@@ -308,6 +332,16 @@ class _Lab:
              "w": winner, "room": "%s_g%d_%s" % (ROOM, n, str(sid)[:8]),
              "ago": int(secs_ago)})
 
+    async def relock(self, ser, new_room):
+        """A relock as production does it: the room is cleared and relocked_at
+        stamped, then the next sitting is issued its own room."""
+        await self.sql("UPDATE team_series SET photon_room_id = NULL,"
+                       " room_issued_at = NULL, relocked_at = clock_timestamp()"
+                       " WHERE id = :sid", {"sid": ser["sid"]})
+        await self.sql("UPDATE team_series SET photon_room_id = :r,"
+                       " room_issued_at = NOW() WHERE id = :sid",
+                       {"sid": ser["sid"], "r": new_room})
+
     async def post(self, ser, seat, t1, t2):
         """One team live-points post from seat `seat` (0..3), through the real
         endpoint."""
@@ -318,14 +352,15 @@ class _Lab:
                 reporter_steam_id=reporter,
                 sig=_live_sig(str(ser["sid"]), reporter, t1, t2), db=db)
 
-    async def report_dc(self, ser, *, reporter_seat, dc_seat, t1_total, t2_total):
+    async def report_dc(self, ser, *, reporter_seat, dc_seat, t1_total, t2_total,
+                        room=ROOM):
         reporter = ser["steams"][reporter_seat]
         dc = ser["steams"][dc_seat]
         async with self.sm() as db:
             return await main.team_series_report_dc(
                 series_id=str(ser["sid"]), reporter_steam_id=reporter,
                 dc_player_steam_id=dc, t1_points_total=t1_total,
-                t2_points_total=t2_total, photon_room_id=ROOM,
+                t2_points_total=t2_total, photon_room_id=room,
                 hmac_sig=_dc_sig(reporter, str(ser["sid"]), dc), db=db)
 
     async def settlement(self, ser):
@@ -339,11 +374,12 @@ class _Lab:
         return (row["status"], row["winner_team"], row["dc_team_remaining"],
                 row["invalidation_reason"], forfeits)
 
-    async def game_row(self, ser, ordinal):
+    async def game_row(self, ser, ordinal, room=ROOM):
         rows = await self.sql(
-            "SELECT game_ordinal, max_points_sum, crossed_at FROM team_series_games"
-            " WHERE series_id = :sid AND game_ordinal = :o",
-            {"sid": ser["sid"], "o": ordinal})
+            "SELECT game_ordinal, sitting_room, pair_seats, attested_max_sum"
+            "  FROM team_series_games"
+            " WHERE series_id = :sid AND game_ordinal = :o AND sitting_room = :r",
+            {"sid": ser["sid"], "o": ordinal, "r": room})
         return rows[0] if rows else None
 
 
@@ -377,9 +413,9 @@ HIGH = dict(t1_total=1, t2_total=1)
 LOW = dict(t1_total=1, t2_total=0)
 
 
-async def _two_reports(lab, ser, first, second):
-    a = await lab.report_dc(ser, reporter_seat=0, dc_seat=2, **first)
-    b = await lab.report_dc(ser, reporter_seat=1, dc_seat=2, **second)
+async def _two_reports(lab, ser, first, second, room=ROOM):
+    a = await lab.report_dc(ser, reporter_seat=0, dc_seat=2, room=room, **first)
+    b = await lab.report_dc(ser, reporter_seat=1, dc_seat=2, room=room, **second)
     return a, b
 
 
@@ -390,7 +426,11 @@ def test_the_settlement_is_the_same_whichever_survivor_reports_first(wired, play
     observed by the live-points channel, two honest survivor snapshots on
     either side of the two-point line, submitted high-first on one series and
     low-first on the other. Before the fix, order decided: high-first completed
-    the series with ratings, low-first sent it to dc_incomplete."""
+    the series with ratings, low-first sent it to dc_incomplete.
+
+    The played game shows 1-1 from TWO seats. A 1-1 from one seat alone could
+    be the previous game's irregular seat (a relaunched or late-starting
+    client) and proves nothing; two seats cannot both be."""
     async def go():
         async with _Lab() as lab:
             outcomes = {}
@@ -398,6 +438,7 @@ def test_the_settlement_is_the_same_whichever_survivor_reports_first(wired, play
                 ser = await lab.series()
                 await lab.post(ser, 0, 1, 0)
                 if played:
+                    await lab.post(ser, 0, 1, 1)
                     await lab.post(ser, 1, 1, 1)
                 first, second = (HIGH, LOW) if order == "high-first" else (LOW, HIGH)
                 a, b = await _two_reports(lab, ser, first, second)
@@ -438,7 +479,7 @@ def test_the_record_is_per_game_not_the_series_latch(wired):
 
     latch, g1, g2, settled = _run(go())
     assert latch >= 2
-    assert g1 is not None and g1["crossed_at"] is not None, g1
+    assert g1 is not None and g1["pair_seats"] == _bit(1, 1, 0), g1
     assert g2 is None, g2
     assert settled[0] == "dc_incomplete", settled
 
@@ -447,7 +488,8 @@ def test_the_record_is_per_game_not_the_series_latch(wired):
 def test_a_previous_games_post_recorded_after_its_report_does_not_count(wired):
     """A post that left a client during game 1 and landed just after game 1's
     report is filed under game 2 (the server's count has moved on). It carries
-    game 1's points, so inside the settle window it must not count."""
+    game 1's points: a pair game 1 could have left behind, so it proves
+    nothing about game 2, however soon or late after the report it lands."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series(game_recorded_secs_ago=0)   # report just landed
@@ -457,25 +499,25 @@ def test_a_previous_games_post_recorded_after_its_report_does_not_count(wired):
             return row, await lab.settlement(ser)
 
     row, settled = _run(go())
-    assert row is not None and row["crossed_at"] is not None, row   # filed under game 2
+    assert row is not None and row["pair_seats"] == _bit(2, 1, 1), row  # filed under game 2
     assert settled[0] == "dc_incomplete", settled
     assert wired == []
 
 
 @needs_pg
-def test_a_crossing_posted_after_the_settle_window_counts(wired, monkeypatch):
-    """The same stale post, then a genuine re-post once the window has passed
-    (the window is shortened to one second here; the rule is the same)."""
-    monkeypatch.setattr(main, "_TEAM_GAME_SETTLE_SECONDS", 1)
-
+def test_a_crossing_counts_by_its_pairs_not_by_its_distance_from_the_report(wired):
+    """No window. The same stale post on two series, both just after game 1's
+    report. On the second, two seats also post game 2's genuine first-round
+    1-1 straight away, with no wait for any window: that series completes,
+    while the stale post alone settles nothing."""
     async def go():
         async with _Lab() as lab:
             stale = await lab.series(game_recorded_secs_ago=0)
             await lab.post(stale, 1, 2, 1)
             fresh = await lab.series(game_recorded_secs_ago=0)
             await lab.post(fresh, 1, 2, 1)
-            time.sleep(1.3)
-            await lab.post(fresh, 0, 1, 1)                     # the 20 s re-post, later
+            await lab.post(fresh, 0, 1, 1)
+            await lab.post(fresh, 2, 1, 1)
             await _two_reports(lab, stale, LOW, LOW)
             await _two_reports(lab, fresh, LOW, LOW)
             return await lab.settlement(stale), await lab.settlement(fresh)
@@ -487,32 +529,44 @@ def test_a_crossing_posted_after_the_settle_window_counts(wired, monkeypatch):
 
 @needs_pg
 def test_a_relock_opens_the_game_again(wired):
-    """A resume replays the same game number over the dead sitting's row. The
-    dead sitting's crossing predates the relock stamp and must not count; the
-    control series, identical but never relocked, completes."""
+    """A resume replays the same game number in a new sitting: the relock
+    clears the room and stamps relocked_at, and the next sitting is issued its
+    own room. The dead sitting's posts that land after that are filed under
+    the new sitting's first game, where nothing bounds what they carry, so
+    even two seats' 1-1 there settles nothing. The control series, identical
+    but never relocked, completes."""
     async def go():
         async with _Lab() as lab:
             relocked = await lab.series()
-            await lab.post(relocked, 0, 1, 1)
-            await lab.sql("UPDATE team_series SET relocked_at = clock_timestamp()"
-                          " WHERE id = :sid", {"sid": relocked["sid"]})
+            await lab.post(relocked, 0, 1, 1)                  # the dead sitting
+            await lab.relock(relocked, ROOM_NEXT)
+            await lab.post(relocked, 0, 1, 1)                  # its re-sends, landing late
+            await lab.post(relocked, 1, 1, 1)
             control = await lab.series()
             await lab.post(control, 0, 1, 1)
-            await _two_reports(lab, relocked, HIGH, HIGH)
+            await lab.post(control, 1, 1, 1)
+            await _two_reports(lab, relocked, HIGH, HIGH, room=ROOM_NEXT)
             await _two_reports(lab, control, LOW, LOW)
-            return await lab.settlement(relocked), await lab.settlement(control)
+            return (await lab.settlement(relocked), await lab.settlement(control),
+                    await lab.game_row(relocked, 2), await lab.game_row(relocked, 2, ROOM_NEXT))
 
-    relocked, control = _run(go())
+    relocked, control, dead_row, next_row = _run(go())
     assert relocked[0] == "dc_incomplete", relocked
     assert control[:2] == ("completed", 1), control
+    assert dead_row["pair_seats"] == _bit(1, 1, 0), dead_row
+    assert next_row["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 1), next_row
 
 
 @needs_pg
 def test_a_post_below_two_never_clears_a_crossing(wired):
+    """Bits are only OR-ed: later posts below two points (a relaunched seat's
+    lower view, a seat still at 0-0) add their own bits, clear none, and the
+    record still proves the crossing."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
             await lab.post(ser, 0, 1, 1)
+            await lab.post(ser, 1, 1, 1)
             before = await lab.game_row(ser, 2)
             await lab.post(ser, 3, 1, 0)
             await lab.post(ser, 2, 0, 0)
@@ -520,9 +574,11 @@ def test_a_post_below_two_never_clears_a_crossing(wired):
             return before, after
 
     before, after = _run(go())
-    assert before["crossed_at"] is not None
-    assert after["crossed_at"] == before["crossed_at"]
-    assert after["max_points_sum"] == 2
+    assert before["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 1), before
+    assert after["pair_seats"] == (before["pair_seats"] | _bit(1, 0, 3)
+                                   | _bit(0, 0, 2)), after
+    assert after["attested_max_sum"] == 0, after
+    assert not main._team_game_unplayed_fits("second", after["pair_seats"], 0)
 
 
 @needs_pg
