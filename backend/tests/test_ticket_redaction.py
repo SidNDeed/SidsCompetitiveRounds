@@ -23,9 +23,9 @@ mounted on a test app, against a real PostgreSQL:
     and repro steps' 8000-character head, the reply's 2000-character head and
     the over-ceiling bundle read's window -- where a cut made first leaves the
     rule too little to recognise;
-  * the automatic post-match upload (L6), a CONTRACT: the route is not on this
-    tree, so its two cases skip here and run at merge; the same checker runs
-    on this tree against a stand-in with the real route's write path;
+  * the automatic post-match upload (L6), a CONTRACT: its module is not on
+    this tree, so its two cases skip here and run at merge; the same checker
+    runs on this tree against a stand-in with the real route's write path;
   * /api/v1/health: `ticket_redaction` == 1 on both arms.
 
 Every ticket value here is COMPOSED at run time from a SHA-256 of a fixture
@@ -1346,33 +1346,43 @@ def test_pg_the_harness_refuses_a_populated_scratch_database(monkeypatch, tmp_pa
 # the shared scrub, main._scrub_pass_one -- which carries the credential rule
 # -- runs on the upload BEFORE its bundle is written, and a ticket straddling
 # the upload's own clamp is not stored in part. The two cases against the
-# real route skip here and run at merge; the third runs the same checker here
-# against ticket_redaction_autolog_standin, which carries the real route's
-# write path, and the controls plant the defects in it.
+# real module skip ONLY where backend/api/auto_logs.py is absent -- here --
+# and run at merge; the third runs the same checker here against
+# ticket_redaction_autolog_standin, which carries the real route's write
+# path, and the controls plant the defects in it.
 
 AUTO_ROUTE = "/api/v1/logs/auto"
 STANDIN_ROUTE = "/api/v1/ticket-redaction-standin/logs/auto"
 AUTO_TOKEN = "ticket-redaction-session-token"
+AUTO_LOGS_SRC = os.path.join(os.path.dirname(LOG_REDACTION_SRC), "auto_logs.py")
 
 
-def _auto_log_route():
-    hits = [r for r in main.app.routes
+def _require_auto_logs():
+    """backend/api/auto_logs.py, imported. The case SKIPS only when this tree
+    has no such file, the expected result here. A file that is present but
+    does not import, or carries no POST route at AUTO_ROUTE, FAILS: the
+    contract is then unjudged, which is not the same as absent. The route
+    comes from the module's own router, so the contract does not depend on
+    how, or whether, main.app mounts it."""
+    if not os.path.exists(AUTO_LOGS_SRC):
+        pytest.skip("backend/api/auto_logs.py is not on this tree (it lives on the v1.41.0 branches): "
+                    "this case runs at merge, when the module lands. The same checker runs here "
+                    "against the stand-in (test_pg_auto_log_contract_holds_on_the_stand_in).")
+    import auto_logs
+    hits = [r for r in auto_logs.router.routes
             if getattr(r, "path", None) == AUTO_ROUTE and "POST" in (getattr(r, "methods", None) or ())]
-    return hits[0] if hits else None
+    assert len(hits) == 1, f"backend/api/auto_logs.py carries no single POST {AUTO_ROUTE}: {hits}"
+    return auto_logs
 
 
-def _auto_log_ceiling():
-    import schemas
-    return getattr(schemas, "BUG_REPORT_LOG_MAX_CHARS", 12_000_000)
-
-
-def _require_auto_log_route():
-    route = _auto_log_route()
-    if route is None:
-        pytest.skip("POST /api/v1/logs/auto is not on this tree (backend/api/auto_logs.py lives on the "
-                    "v1.41.0 branches): this case runs at merge, when the route lands. The same checker "
-                    "runs here against the stand-in (test_pg_auto_log_contract_holds_on_the_stand_in).")
-    return route
+def _auto_log_ceiling(auto_logs):
+    """The length the module's own request model clamps log_text to, read by
+    driving the model with a plain text 5 characters over it, so the straddle
+    case sits on the real cut and cannot pass by missing it."""
+    ceiling = auto_logs.BUG_REPORT_LOG_MAX_CHARS
+    got = auto_logs.AutoLogRequest.model_validate({"steam_id": REPORTER, "log_text": "x" * (ceiling + 5)})
+    assert len(got.log_text) == ceiling, (len(got.log_text), ceiling)
+    return ceiling
 
 
 class _ScrubSpy:
@@ -1404,9 +1414,10 @@ def _assert_scrubbed_before_the_write(calls, fname):
         "the shared scrub ran only after this upload's bundle was written"
 
 
-async def _arm_the_real_auto_route(env, monkeypatch):
+async def _arm_the_real_auto_route(env, monkeypatch, auto_logs):
     """What the real route reads before its body: a session row for the token,
-    and the strict session check (satisfied for REPORTER only)."""
+    and the strict session check (satisfied for REPORTER only); then the
+    module's own router, mounted on the test app."""
     await env.ex("CREATE TABLE steam_sessions (token_hash text PRIMARY KEY, steam_id varchar(32) NOT NULL)")
     await env.ex("INSERT INTO steam_sessions (token_hash, steam_id) VALUES (:h, :s)",
                  {"h": hashlib.sha256(AUTO_TOKEN.encode()).hexdigest(), "s": REPORTER})
@@ -1415,16 +1426,15 @@ async def _arm_the_real_auto_route(env, monkeypatch):
         return steam_id == REPORTER
 
     monkeypatch.setattr(main, "_strict_steam_session_ok", session_ok)
-    route = _auto_log_route()
-    env.app.add_api_route(route.path, route.endpoint, methods=["POST"])
+    env.app.include_router(auto_logs.router)
 
 
 def test_pg_auto_log_route_scrubs_before_it_writes(monkeypatch, tmp_path):
-    _require_auto_log_route()
+    auto_logs = _require_auto_logs()
 
     async def body():
         async with Env(monkeypatch, tmp_path) as env:
-            await _arm_the_real_auto_route(env, monkeypatch)
+            await _arm_the_real_auto_route(env, monkeypatch, auto_logs)
             spy = _ScrubSpy(monkeypatch, tmp_path)
             hx = synthetic_hex("auto-real", 256)
             sent = LOG_HEAD + GAME_PREFIX + hx + "\n" + LOG_TAIL
@@ -1436,12 +1446,12 @@ def test_pg_auto_log_route_scrubs_before_it_writes(monkeypatch, tmp_path):
 
 
 def test_pg_auto_log_route_redacts_before_its_clamp(monkeypatch, tmp_path):
-    _require_auto_log_route()
-    ceiling = _auto_log_ceiling()
+    auto_logs = _require_auto_logs()
+    ceiling = _auto_log_ceiling(auto_logs)
 
     async def body():
         async with Env(monkeypatch, tmp_path) as env:
-            await _arm_the_real_auto_route(env, monkeypatch)
+            await _arm_the_real_auto_route(env, monkeypatch, auto_logs)
             spy = _ScrubSpy(monkeypatch, tmp_path)
             hx = synthetic_hex("auto-real-cut", 256)
             sent = LOG_HEAD + LABEL + hx + filler(ceiling - 24)
