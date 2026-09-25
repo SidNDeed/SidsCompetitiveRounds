@@ -192,8 +192,9 @@ def test_the_repeated_key_names_are_real():
 
 
 def test_zero_progress_answers_a_full_board_with_nothing_owned():
-    """What every account looks like until the completion hook ships: eight
-    lines, 48 rungs, games 0, tier 1, nothing owned, nothing active. The
+    """What an account with no ladder progress looks like -- any account
+    until it completes a rated series wearing a rung: eight lines, 48 rungs,
+    games 0, tier 1, nothing owned, nothing active. The
     client renders this as NOT STARTED per line -- which it can only do if
     `owned` is present and false rather than absent."""
     a = _answer()

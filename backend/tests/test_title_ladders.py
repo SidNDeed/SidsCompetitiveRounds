@@ -14,12 +14,11 @@ Three things this file is here to stop:
     ``/shop/items`` appends and what the purchase path refuses, the rungs
     become invisible to their owners and buyable by anyone — #151, exactly.
 
-It also carries the per-MODE hook-coverage check. That one is INERT today and
-says so out loud: the four completion sites are not wired yet. The moment the
-first one is, it asserts all four and exactly one call inside each — never
-"one call per function" as a global rule, which is the check that passes while
-a whole mode goes unhooked. 1v2 is the fifth symbol and is asserted the other
-way round: it must exist and must NOT be hooked, because it reports unrated.
+It also carries the per-MODE hook-coverage check: all four completion sites
+carry the hook, exactly one awaited call inside each — never "one call per
+function" as a global rule, which is the check that passes while a whole mode
+goes unhooked. 1v2 is the fifth symbol and is asserted the other way round: it
+must exist and must NOT be hooked, because it reports unrated.
 """
 
 import ast
@@ -542,7 +541,7 @@ def test_every_completion_symbol_exists():
 
 
 def test_hook_coverage_is_per_mode_once_anything_is_wired():
-    """INERT UNTIL THE HOOKS LAND, and it says so rather than passing quietly.
+    """Every rated completion path credits the ladder, exactly once.
 
     The check that must never be written is "exactly one call per function":
     it passes with 2v2's forfeit path unhooked, because that path is a
@@ -551,9 +550,12 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
     none, since an unrated mode crediting a rated-only ladder is the same
     class of defect pointing the other way."""
     src = _read(MAIN_PY)
-    if HOOK not in src:
-        pytest.skip(f"{HOOK} is not wired into main.py yet — hooks are blocked "
-                    f"behind another session's rewrite of the lease surface")
+    # This used to skip while the hooks were unwired. They are wired, so a
+    # main.py that no longer names the hook is a regression, not a state to
+    # wait out: it fails.
+    assert HOOK in src, (
+        f"main.py no longer names {HOOK} at all: every rated completion path "
+        f"has lost its ladder credit")
     lines = src.split("\n")
     counts = {}
     for mode, fn in COMPLETION_SITES.items():
@@ -850,10 +852,9 @@ def hook_calls_in(source):
     keyword arguments that make it dedupable. A comment or a string literal
     cannot produce an entry, because this walks the parse tree.
 
-    Module-level precisely so it can be tested. The coverage test that uses it
-    skips until the hook is wired, and a scanner whose first real run is the
-    day it has to be right is not a check (#313) -- so the tests below drive it
-    against synthetic sources now.
+    Module-level precisely so it can be tested. It was written, and driven
+    against the synthetic sources below, before the hook was wired: a scanner
+    whose first real run is the day it has to be right is not a check (#313).
     """
     src = textwrap.dedent(source)
     try:
@@ -903,9 +904,9 @@ def test_the_coverage_scanner_sees_a_correct_call():
 def test_the_coverage_scanner_ignores_a_commented_out_call():
     """The defect the token count had: a commented call read as coverage.
 
-    This is not hypothetical for this item -- the hooks are deliberately
-    unwired and the likeliest first draft of the wiring is a commented
-    placeholder left behind at the site.
+    This was not hypothetical for this item: while the hooks were unwired,
+    the likeliest first draft of the wiring was a commented placeholder left
+    behind at a site.
     """
     src = WIRED_SITE.replace("        events = await", "        # events = await")
     assert hook_calls_in(src) == [], "a commented-out call counted as wired"
@@ -1239,8 +1240,9 @@ def test_the_migration_applies_against_a_real_server():
     assert rungs == len(tl.ALL_SKUS) == 48, (rungs, len(tl.ALL_SKUS))
     assert items == 48, items
     assert on_sale == 0, (
-        "%d entry rung(s) came out of a clean apply on sale for 1000 gold, for "
-        "a ladder whose progression hook is not wired" % on_sale)
+        "%d entry rung(s) came out of a clean apply on sale for 1000 gold. 331 "
+        "lands them unlisted; opening them for sale is a decision of its own, "
+        "not a side effect of the migration" % on_sale)
     assert hidden == len(tl.GRANTED_ONLY_SKUS) == 40, (hidden, len(tl.GRANTED_ONLY_SKUS))
 
 

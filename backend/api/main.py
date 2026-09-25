@@ -5180,20 +5180,18 @@ app.add_middleware(
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
 
-# Animal title ladders (v1.41.0 item 12): the READ route only,
+# Animal title ladders (v1.41.0 item 12): the READ route,
 # GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
-# progress bars from. Pure read, no writes, safe on the replica.
+# progress bars from. Pure read, no writes, safe on the replica: one
+# REPEATABLE READ, READ ONLY snapshot per request.
 #
-# The module's per-series completion hook is NOT called from here. Wiring it
-# into the four completion paths is a separate change on a separate tree, and
-# until it lands this route answers games=0 for every account — which the
-# client renders as NOT STARTED per line rather than as a countdown.
-#
-# Deliberately not naming that hook's symbol in this comment:
-# test_title_ladders.py decides whether to run its per-mode coverage assertion
-# by testing whether the symbol appears in this file at all, so a mention here
-# would switch that test on and fail it against four paths this change was
-# told not to touch. The gate is a substring test; a comment is not a call.
+# The module's per-series completion hook is not called from here. The four
+# rated completion paths call it themselves -- submit_match (1v1),
+# submit_team_match and _complete_team_series_with_ratings (2v2) and
+# submit_ffa_match (FFA) -- each inside a savepoint of its own, so a failed
+# credit is logged and dropped and never costs the completion. 1v2 reports
+# unrated and is not hooked. test_title_ladders.py asserts that set per mode,
+# each call's reference id, and exactly four calls in this file.
 import title_ladders
 app.include_router(title_ladders.router)
 
@@ -8268,6 +8266,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         label="1v1-complete")
             except Exception as pcex:
                 print(f"[PC-EARNED] 1v1 grant failed for series {series.id}: {pcex}")
+            _lref = "?"
+            try:
+                _lref = str(series.id)
+                _lpids = [p1.id, p2.id]
+                async with db.begin_nested():
+                    await title_ladders.record_completed_games(
+                        db, _lpids, mode="1v1", reference_id=_lref)
+            except Exception as _lex:
+                print(f"[LADDER-CREDIT] 1v1 credit dropped (series={_lref}): {_lex}")
         else:
             series_status = "active"
 
@@ -24604,10 +24611,10 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 # the catalogue, rather than matched on the `title_ladder_` sku prefix: a
 # prefix is a naming convention that a later sku can join by accident and that
 # a rename silently empties, which is the shape of a check that cannot fail
-# (#306/#342). This import wires nothing by itself. The ladder's read route is
-# mounted separately, by the one include_router line beside the tournaments
-# router; the progression hook is still uncalled; that module's docstring
-# records both production references.
+# (#306/#342). This import wires nothing by itself: the ladder's read route is
+# mounted by the one include_router line beside the tournaments router, and
+# the progression hook is called from the four rated completion paths
+# themselves; that module's docstring records every production reference.
 import title_ladders as _title_ladders
 
 _GRANTED_ONLY_TITLE_SKUS = _title_ladders.GRANTED_ONLY_SKUS
@@ -39946,6 +39953,12 @@ async def _complete_team_series_with_ratings(
                 label=f"team-{reason}")
     except Exception as pcex:
         print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
+    try:
+        async with db.begin_nested():
+            await title_ladders.record_completed_games(
+                db, gids, mode="2v2-settled", reference_id=str(series_uuid))
+    except Exception as _lex:
+        print(f"[LADDER-CREDIT] 2v2-settled credit dropped for {series_uuid} ({reason}): {_lex}")
 
     # Free the queue rows.
     await _lock_queue_rows_ordered(db, "team_queue", gids)
@@ -49164,14 +49177,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     await _assert_no_service_subject(db, affected_steam_ids=steams)
     if not (report.photon_room_id or "").strip():
         raise HTTPException(400, "photon_room_id is required")
-    # §6 casual path: the ranked AUTHORITY is the LOBBY ROW, decided below the
-    # lobby lock as `rated = lobby.is_ranked AND report.is_ranked` — this
-    # early site fires before the row is loaded, so it can no longer
-    # hard-reject. A crafted is_ranked=false still cannot open an economy
-    # side channel: the server ANDs it against the row it froze at Start, and
-    # a FALSE claim against a ranked lobby only DOWNGRADES the crafter's own
-    # game to casual — quarantine-class skew, handled below. An old client
-    # always sends true, which the AND makes correct for both lobby kinds.
+    # §6 casual path: the ranked AUTHORITY is the LOBBY ROW alone, decided
+    # below the lobby lock as `rated = _lobby_ranked`; the report's is_ranked
+    # is not part of it. A claim that disagrees with the row is logged as
+    # skew evidence and otherwise ignored, so a crafted is_ranked=false opens
+    # no economy side channel and downgrades nothing. This early site fires
+    # before the row is loaded, so it can no longer hard-reject. An old
+    # client always sends true, which is never consulted.
 
     # The winner-holds-the-unique-round-maximum rule used to answer a bare 400
     # right here, above the lobby read — so an all-zero scoreboard, the exact
@@ -50202,6 +50214,15 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                     label="ffa-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] ffa grant failed for {match_id}: {pcex}")
+    if rated:
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, [id_by_steam[p.steam_id] for p in report.players
+                         if p.steam_id not in unrated],
+                    mode="ffa", reference_id=str(lobby_uuid))  # the sitting's id, not the game's
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] ffa credit dropped for lobby {lobby_uuid} (match {match_id}): {_lex}")
 
     # Settle FFA bets. Codex round-2 review finds 3+4: keyed by the game's
     # REAL identity, never by arrival order — an outbox-delayed game-1 report
@@ -53166,6 +53187,12 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     label="team-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] team grant failed for {series_uuid}: {pcex}")
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, gids, mode="2v2", reference_id=str(series_uuid))
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] 2v2 credit dropped for {series_uuid}: {_lex}")
 
         # Free the queue rows so all 4 can re-queue.
         await _lock_queue_rows_ordered(

@@ -16,11 +16,10 @@ Three pieces live here and nothing else does:
     from it, so the table and this file cannot drift apart silently.
   * the pure rules — ``tier_for_games``, ``rungs_at_tier``, ``next_rung`` —
     which take numbers and return numbers, no database, no clock.
-  * ``record_completed_games`` — the hook the four completion paths WILL
+  * ``record_completed_games`` — the hook the four rated completion paths
     call, and the ``GET /api/v1/players/{steam_id}/title-ladders`` read route
-    the client draws the progress bar from. The route is served (main.py
-    mounts ``router``); the hook is not called yet -- see WHAT IS NOT WIRED
-    below.
+    the client draws the progress bar from. Both are reached from main.py --
+    see HOW PRODUCTION REACHES THIS MODULE below.
 
 WHAT IS NOT HERE. No mail. A rung-up should tell the player, and the system
 mail + Discord relay that would carry that message is a different item's
@@ -29,34 +28,38 @@ caller decides what to do with it. No client rendering: rung names are
 ``shop_items`` rows like every other title and render through the existing
 title path.
 
-WHAT IS NOT WIRED. This module is the DATA HALF of item 12 plus its read
-route. Production references it in exactly TWO places: ``main`` reads
-``GRANTED_ONLY_SKUS`` to carve the forty earned rungs out of the shop-owner
-exemption, on the ``/shop/items`` listing and on the set-active ownership
-check; and ``main`` mounts ``router`` with one ``include_router`` line.
-Neither reference calls the hook. (Earlier versions of this docstring said
-production did not import this module at all, and then that it imported it
-for one constant and mounted no route; each was true when written and went
-stale the moment main.py gained a reference.) One thing is still unwired, and
-the second item records the one that no longer is.
+HOW PRODUCTION REACHES THIS MODULE. In three places, and no others:
 
-  1. THE HOOK. Nothing in main.py calls ``record_completed_games``. The four
-     call sites belong to a rewrite of the lease surface that is in flight in
-     another branch, and two sessions meeting inside those function bodies is
-     the failure this was deliberately kept out of. See that function's
-     docstring for the exact call shape, and note in particular that 2v2 has
-     TWO completion paths, not one.
-  2. THE ROUTER -- MOUNTED. main.py includes the ``router`` defined below
-     exactly once, so ``GET /api/v1/players/{steam_id}/title-ladders`` is
-     served; ``backend/tests/test_title_ladder_route_contract.py`` pins the
-     mount and every key the client reads. Until the hook above is wired, no
-     code path writes a ``title_ladder_progress`` row, so the route answers
-     games=0 and tier=1 on every line for every account.
+  1. THE HOOK. main.py calls ``record_completed_games`` once in each of the
+     four rated completion paths -- ``submit_match`` (1v1),
+     ``submit_team_match`` and ``_complete_team_series_with_ratings`` (2v2:
+     the reported path and the after-the-fact settlement), and
+     ``submit_ffa_match`` (FFA) -- each call inside a savepoint of its own,
+     so a failed credit is logged as ``[LADDER-CREDIT] ... dropped`` and
+     never costs the completion. The reference_id is the 1v1 series id, the
+     team series id at both 2v2 paths, and for FFA the lobby id: one lobby is
+     one sitting, however many games it plays. 1v2 (``submit_ovt_match``)
+     reports unrated and is not hooked. ``backend/tests/test_title_ladders.py``
+     asserts the set per mode, each call's reference expression, and that
+     main.py holds exactly those four calls.
+  2. THE ROUTER. main.py includes the ``router`` defined below exactly once,
+     so ``GET /api/v1/players/{steam_id}/title-ladders`` is served;
+     ``backend/tests/test_title_ladder_route_contract.py`` pins the mount and
+     every key the client reads.
+  3. THE CARVE-OUT. ``main`` reads ``GRANTED_ONLY_SKUS`` to take the forty
+     earned rungs out of the shop-owner exemption, on the ``/shop/items``
+     listing and on the set-active ownership check.
 
-Migration 331 is therefore inert on its own: every tier-1 rung lands
-``catalog_ready = FALSE``, so nothing is listed, nothing can be bought, and no
-progress row is ever written. That inertness is what makes the data half safe
-to deploy ahead of the wiring, and it is deliberate rather than incidental.
+(Earlier versions of this docstring said production did not import this
+module at all, then that it imported it for one constant and mounted no
+route, then that the hook was not called yet; each was true when written and
+went stale the moment main.py gained a reference.)
+
+Migration 331 still lists nothing: every tier-1 rung lands ``catalog_ready =
+FALSE``, so nothing is listed and nothing can be bought, and the only account
+that can wear a rung -- so the only one the hook can credit -- is the
+shop-owner exemption's. Opening the entry rungs for sale is a decision of its
+own, not a consequence of the wiring.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -399,9 +402,10 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
     chosen to match the completion paths rather than to differ from them:
     `submit_match` locks its players with `sorted(pids, key=str)` and
     `FOR NO KEY UPDATE`, and the 2v2 completion helper takes the same sorted
-    pass (#202). Those two were READ; the OVT and FFA paths were not, so
-    whoever wires those two sites should confirm the same discipline there
-    before assuming this re-locks rather than waits. The progress row is an
+    pass (#202). `submit_team_match` and `submit_ffa_match` take the same
+    sorted pass over every player they credit before their call (FFA's is the
+    players pass ahead of its placements), so at all four sites this
+    re-locks rather than waits; 1v2 is not hooked. The progress row is an
     upsert rather than a lock-then-write: it
     may not exist yet, and a gate on a row that does not exist locks nothing
     (#203/#207). `games` is only ever moved by a delta (#326).
