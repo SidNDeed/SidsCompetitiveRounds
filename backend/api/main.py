@@ -6301,7 +6301,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_steam_render=_pc_steam_render_word(),
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
-                              ffa_game_number=_FFA_GAME_NUMBER,
+                              ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
@@ -6311,7 +6311,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
-                              ffa_game_number=_FFA_GAME_NUMBER,
+                              ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
 
 
@@ -42884,6 +42884,39 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         xp_bonuses=_rep_labels)
 
 
+# -- The 1v2 solo-seat build marker (/health `ovt_solo_split`) -------------
+# A 1v2 series keeps one solo-versus-duo split for every game. Once a series
+# holds a recorded game, submit_ovt_match refuses a report that puts another
+# of its three players in the solo seat: it answers 403 "Reported solo seat
+# does not match the series" before anything is written, and logs the refusal
+# with both splits. The batch adds no route and no key to any GET answer both
+# builds serve -- the refusal rides only the report answer, which needs a
+# signed report -- so this word is what tells the new build from the old one.
+# The release train asserts it on both roles and reads any value but the
+# expected one as the old build; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): 1 when submit_ovt_match's compiled
+# string constants carry both the refusal's HTTPException detail and the
+# trailing literal segment of its log line, else 0. Both are read from the
+# endpoint's code object, not from its source text, so a comment beside
+# either cannot move the value, and an edit to either string reads 0.
+def _ovt_const_literal(code, text: str) -> str:
+    """`text` when it is one of `code`'s compiled constants, else ''."""
+    return text if text in code.co_consts else ""
+
+
+def _ovt_solo_split_marker(detail: str, log_segment: str) -> int:
+    """1 when both literals were found among the endpoint's constants, else 0."""
+    return int(bool(detail) and bool(log_segment))
+
+
+_OVT_SOLO_SPLIT = _ovt_solo_split_marker(
+    _ovt_const_literal(submit_ovt_match.__code__,
+                       "Reported solo seat does not match the series"),
+    _ovt_const_literal(submit_ovt_match.__code__,
+                       " recorded game(s); a series keeps one solo-versus-duo split for every game"))
+
+
 @app.get("/api/v1/ovt/series/active", tags=["1v2 Matches"])
 async def ovt_series_active(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
     """The caller's live 1v2 series (for the in-game HUD), if any."""
@@ -50299,6 +50332,9 @@ def _ffa_game_number_marker(insert_sql: str, lookup_sql: str) -> int:
 
 _FFA_GAME_NUMBER = _ffa_game_number_marker(
     _ffa_match_insert_literal(submit_ffa_match.__code__), _FFA_PRIOR_GAME_SQL)
+# Its sibling _OVT_SOLO_SPLIT (the /health `ovt_solo_split` word) is derived
+# the same way, from two of submit_ovt_match's compiled string constants, and
+# is defined right after that endpoint.
 
 
 _FFA_LB_SORTS = {
