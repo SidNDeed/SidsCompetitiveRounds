@@ -13389,6 +13389,50 @@ async def _strict_steam_session_ok(request, steam_id: str, db: AsyncSession) -> 
     return await _seat_attestation_verdict(request, steam_id, db) == SEAT_VERIFIED
 
 
+class _NotOwnSeat(Exception):
+    """An in-match claim naming a seat the request's own session does not name.
+    Raised inside presence_ping's guarded block, which drops the claim the way
+    it drops every other refusal there; the ping itself is still answered."""
+
+
+async def _session_seat(request, db: AsyncSession) -> str | None:
+    """The steam_id of the session the request's X-Session-Token names, or
+    None when it names none: no token, a token no session row carries, or a
+    lookup that failed.
+
+    A DIFFERENT QUESTION OF THE SAME ROW. _check_steam_session asks whether the
+    CLAIMED steam_id is established, and where enforcement is not armed for the
+    caller it records the answer in one log line and returns.
+    _seat_attestation_verdict asks whether the session is verified, current
+    and the claimed id's. This asks only whose session the request carries,
+    and it is answered on every branch: expiry and verification are not read,
+    because a client holding its own expired or unverified session is still
+    the holder of that session. A caller that must act only for the
+    requester's own seat compares its claim with this.
+
+    WHAT THE ANSWER IS WORTH follows the mint, and this does not change it:
+    while STEAM_WEB_API_KEY is set, /auth/steam issues a session only for the
+    steam_id a Steam ticket verified; while it is unset, the mint issues an
+    unverified session for whatever steam_id it is handed, and a session then
+    names the seat it was minted for and proves nothing stronger.
+
+    Never raises. The read is inside a SAVEPOINT for the reason
+    _seat_attestation_verdict gives: under asyncpg a caught statement error
+    still leaves the whole transaction aborted (#235), and the caller's next
+    statement must not inherit that."""
+    try:
+        token = request.headers.get("X-Session-Token") if request is not None else None
+        if not token:
+            return None
+        async with db.begin_nested():
+            row = (await db.execute(text(
+                "SELECT steam_id FROM steam_sessions WHERE token_hash = :th"
+            ), {"th": hashlib.sha256(token.encode()).hexdigest()})).first()
+        return None if row is None else row[0]
+    except Exception:
+        return None
+
+
 def _mark_session_verified(request, ok):
     """Stamp the session verdict on the request. Fail-quiet: a caller reading
     it back defaults to False, and a request object without `state` (internal
@@ -14069,7 +14113,14 @@ async def _lease_renew(db: AsyncSession, player_id, mode: str, group_id=None,
         a lease since re-acquired for a different game.
       * per-player only        — the caller renews THEIR OWN lease. One member
         must never be able to renew the whole group, or a single lying client
-        holds everyone. Spoofing then costs only self-exclusion.
+        holds everyone. This function renews whatever player_id it is handed,
+        so WHOSE lease that is, is the caller's decision. presence_ping's
+        in-game renewal reaches it only for the seat the request's own
+        session names (its seat binding, residual 26), on every branch of
+        the session check. The lobby-seat renewals in the queue polls, which
+        test_every_lease_renewer_is_classified names, renew the seat of the
+        id their request names, under the session check's own policy,
+        which soft-fails where enforcement is not armed for the caller.
       * max_total_seconds      — optional ceiling on TOTAL life since acquire,
         for renewal sources that are merely "a client is running" rather than
         "a game is happening". The 30-minute CHECK in migration 174 bounds one
@@ -15598,11 +15649,13 @@ async def presence_ping(request: Request,
     #
     # Codex batch find 8: this is DESTRUCTION-VETO evidence, so it must be
     # authenticated — an unauthenticated ping naming a public series id could
-    # hold any group open forever. Trust the claim only when (a) the pinger's
-    # session checks out (the client stamps X-Session-Token on every request)
-    # and (b) the pinger is a recorded MEMBER of the named group. A failed
-    # check silently drops the claim — the ping itself (presence, last_seen)
-    # is still honoured, and old clients never send in_match at all.
+    # hold any group open forever. Trust the claim only when (a) the session
+    # check passes where it is armed, (b) the claimed steam_id is the seat the
+    # request's own session names -- on every branch of that check (the client
+    # stamps X-Session-Token on every request) -- and (c) that seat is a
+    # recorded MEMBER of the named group. A failed check drops the claim —
+    # the ping itself (presence, last_seen) is still answered, and old clients
+    # never send in_match at all.
     if in_match:
         _im_ok = False
         _im_mode = None
@@ -15614,6 +15667,27 @@ async def presence_ping(request: Request,
             # still needs (#235).
             _gid = UUID(in_match)
             await _check_steam_session(request, steam_id, db)
+            # THE CLAIM ACTS ONLY FOR THE REQUESTER'S OWN SEAT (residual 26),
+            # on EVERY branch of the check above. Where enforcement is armed
+            # for this caller a session that does not verify raises there;
+            # everywhere else the check logs one line and returns, and nothing
+            # up to here ties the claimed steam_id to anything the request
+            # carries. So the claim is compared with the seat the request's own
+            # session names, and a claim naming any other seat, or a request
+            # carrying no session at all, is refused HERE: before the series
+            # lock, before the publication and before the lease renewal below,
+            # each of which acts for whatever steam_id reaches it. The client
+            # pings as the id whose token it holds, so its own claims pass;
+            # while it holds no session (a lapsed or failed mint) this ping
+            # publishes nothing and renews nothing, and its lease expires by
+            # default after LEASE_TTL_INGAME.
+            _im_own_seat = await _session_seat(request, db)
+            if _im_own_seat != steam_id:
+                print("[PRESENCE] in_match claim refused, not the requester's "
+                      "own seat (the request's session names "
+                      + ("no seat" if _im_own_seat is None else "another seat")
+                      + f"): {steam_id} -> {in_match}")
+                raise _NotOwnSeat()
             # THE SERIES LOCK COMES BEFORE THE MEMBERSHIP READ (round-7c
             # HIGH). This is the only caller of _in_match_touch, and the 2v2
             # deferred-fallback sweep settles a series on the strength of that
@@ -15643,11 +15717,12 @@ async def presence_ping(request: Request,
             # verify raises there and no series row is locked; on the
             # soft-fail branch -- enforcement off, a caller below
             # STEAM_AUTH_MIN_VERSION whose account is not armed, or a failed
-            # session lookup -- the check logs one line and returns, and this
-            # ping takes the lock, reads membership and publishes exactly as
-            # a member's ping did before this lock existed. The lock changes
+            # session lookup -- the check logs one line and returns, and the
+            # seat binding above has already refused every claim for a seat
+            # the request's own session does not name, so what reaches this
+            # lock is a claim for the requester's own seat. The lock changes
             # WHERE a publication lands relative to a sweep pass, not WHO may
-            # publish.
+            # publish. The seat binding is what decides who may.
             _im_series = (await db.execute(text(
                 "SELECT status FROM team_series WHERE id = :gid FOR SHARE"
             ), {"gid": _gid})).first()
@@ -15711,7 +15786,9 @@ async def presence_ping(request: Request,
             # RENEW this caller's own lease only — never the group's. One
             # member must not be able to hold three other people's exclusion
             # open, so a client that lies about being in a battle can only
-            # keep ITSELF queue-locked. _lease_renew cannot create or
+            # keep ITSELF queue-locked: _im_pid is the seat the request's own
+            # session names, because the seat binding above refused every
+            # other claim before it got here. _lease_renew cannot create or
             # resurrect, so a ping arriving after the lease already lapsed
             # (or after an explicit escape) does not re-block the player.
             try:

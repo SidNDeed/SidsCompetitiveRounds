@@ -39,6 +39,7 @@ files do not have.
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import pathlib
 import time
@@ -72,6 +73,7 @@ DROP TABLE IF EXISTS team_matches;
 DROP TABLE IF EXISTS team_series;
 DROP TABLE IF EXISTS ovt_series;
 DROP TABLE IF EXISTS ffa_lobbies;
+DROP TABLE IF EXISTS steam_sessions;
 DROP TABLE IF EXISTS players;
 
 CREATE TABLE players (
@@ -131,7 +133,29 @@ CREATE TABLE ffa_lobbies (
     id UUID PRIMARY KEY,
     member_ids UUID[]
 );
+
+-- The session table presence_ping reads twice before its series lock: the
+-- session check, and the seat binding that confines an in-match claim to the
+-- seat the request's own session names (residual 26). The columns are exactly
+-- the ones those reads touch.
+CREATE TABLE steam_sessions (
+    token_hash TEXT PRIMARY KEY,
+    steam_id VARCHAR(20) NOT NULL,
+    verified BOOLEAN NOT NULL DEFAULT false,
+    issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ
+);
 """
+
+
+def _token(steam_id):
+    """The session token the harness gives one seat. Test-only and unique per
+    seat; only its sha256 is stored, as the mint stores it."""
+    return "sept16dc-session-" + steam_id
+
+
+def _token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _raw_dsn():
@@ -256,6 +280,13 @@ async def _fresh_series(t2_wins: int = 1):
             await s.execute(
                 text("INSERT INTO players (id, steam_id) VALUES (:i, :s)"),
                 {"i": ids[key], "s": steam})
+            # Each seat holds one session of its own, unverified and current:
+            # the ordinary client, which pings as the id whose token it holds.
+            await s.execute(
+                text("INSERT INTO steam_sessions"
+                     " (token_hash, steam_id, verified, expires_at)"
+                     " VALUES (:th, :s, false, NOW() + INTERVAL '1 day')"),
+                {"th": _token_hash(_token(steam)), "s": steam})
         await s.execute(
             text("""INSERT INTO team_series
                        (id, status, t1a_id, t1b_id, t2a_id, t2b_id,
@@ -1182,11 +1213,16 @@ SETTLE_STATEMENT = "SET status = 'dc_incomplete'"
 
 
 class _PingRequest:
-    """The two attributes presence_ping reads off its request, and no more."""
+    """The two attributes presence_ping reads off its request, and no more.
 
-    def __init__(self):
+    `token` is the X-Session-Token the request carries, or None for none. The
+    ordinary scenario passes the pinging seat's own token, as the client does:
+    the route's seat binding refuses an in-match claim for any seat the
+    request's session does not name (residual 26)."""
+
+    def __init__(self, token=None):
         self.state = types.SimpleNamespace()
-        self.headers = {}
+        self.headers = {} if token is None else {"X-Session-Token": token}
 
 
 @contextlib.contextmanager
@@ -1194,7 +1230,10 @@ def _presence_harness():
     """Let the REAL presence_ping run against this file's schema.
 
     * the Steam-session check is made to pass: authentication is not what
-      these scenarios measure, and the real check needs a sessions table;
+      these scenarios measure. The seat binding after it is NOT replaced: each
+      ping below carries its own seat's session token, which the harness
+      schema holds, so the binding runs for real and passes as it does for
+      the client;
     * the lease renewal is RECORDED instead of executed: the harness has no
       lease table, and the record is how a scenario proves the ping got as far
       as a verified membership decision rather than failing early and
@@ -1225,11 +1264,15 @@ def _presence_harness():
         main._lease_renew = old_renew
 
 
-async def _ping(Session, steam_id, sid):
-    """One in-match presence ping through the real route."""
+async def _ping(Session, steam_id, sid, token="own"):
+    """One in-match presence ping through the real route.
+
+    By default the request carries the claimed seat's own session token, as
+    the client's does; `token` names another token, or None for none."""
     async with Session() as s:
         return await main.presence_ping(
-            request=_PingRequest(), steam_id=steam_id, in_match=str(sid), db=s)
+            request=_PingRequest(_token(steam_id) if token == "own" else token),
+            steam_id=steam_id, in_match=str(sid), db=s)
 
 
 def test_a_ping_queued_between_the_veto_and_the_write_publishes_nothing_the_settlement_missed():
@@ -1513,8 +1556,9 @@ def test_a_pings_evidence_is_in_the_map_before_its_series_lock_is_released():
                 async def held_ping():
                     async with Session() as s:
                         return await main.presence_ping(
-                            request=_PingRequest(), steam_id=SID_T1B,
-                            in_match=key, db=_HoldAfterCommit(s, gate, reached))
+                            request=_PingRequest(_token(SID_T1B)),
+                            steam_id=SID_T1B, in_match=key,
+                            db=_HoldAfterCommit(s, gate, reached))
 
                 ping = asyncio.create_task(held_ping())
                 try:
@@ -1541,6 +1585,155 @@ def test_a_pings_evidence_is_in_the_map_before_its_series_lock_is_released():
         finally:
             await engine.dispose()
     _drive(body)
+
+
+# ── An in-match claim acts only for the requester's own seat (residual 26) ─
+
+
+SOFT_FAIL_LINE = "[STEAM-AUTH] soft-fail path="
+SEAT_REFUSED_LINE = "[PRESENCE] in_match claim refused, not the requester's own seat"
+
+
+@contextlib.contextmanager
+def _seat_harness(monkeypatch):
+    """The REAL session check on its soft-fail branch, the renewal recorded.
+
+    Nothing about authentication is replaced here, unlike _presence_harness:
+    the session check reads this schema's session table and, with both of its
+    switches removed from this process's environment for the scenario, takes
+    the soft-fail branch -- logs one line and returns -- which is the branch
+    residual 26 names. The lease renewal is recorded, as there, because the
+    harness has no lease table and the record is the evidence of what the
+    route renewed and for whom.
+    """
+    monkeypatch.delenv("STEAM_AUTH_ENFORCE", raising=False)
+    monkeypatch.delenv("STEAM_WEB_API_KEY", raising=False)
+    renewals = []
+    old_renew = main._lease_renew
+
+    async def _renew(db, pid, mode, gid, ttl, **kwargs):
+        renewals.append((str(pid), mode, str(gid)))
+
+    main._lease_renew = _renew
+    try:
+        yield renewals
+    finally:
+        main._lease_renew = old_renew
+
+
+async def _set_session(Session, steam_id, verified=None, expired=False):
+    """Change one seat's harness session in place."""
+    async with Session() as s:
+        if verified is not None:
+            await s.execute(
+                text("UPDATE steam_sessions SET verified = :v WHERE steam_id = :s"),
+                {"v": verified, "s": steam_id})
+        if expired:
+            await s.execute(
+                text("UPDATE steam_sessions"
+                     "   SET expires_at = NOW() - INTERVAL '1 hour'"
+                     " WHERE steam_id = :s"), {"s": steam_id})
+        await s.commit()
+
+
+# Every request shape that does NOT carry the claimed seat's own session. Each
+# claims SID_T1A, a roster member of the series; where a session rides along
+# it is SID_T1B's, another member of the same series. (id, token, verified)
+NOT_OWN_SEAT = (
+    ("another-seat-unverified", "t1b", False),
+    ("another-seat-verified", "t1b", True),
+    ("no-session", None, False),
+    ("token-no-session-carries", "unknown", False),
+)
+
+
+@pytest.mark.parametrize("carrier,verified", [s[1:] for s in NOT_OWN_SEAT],
+                         ids=[s[0] for s in NOT_OWN_SEAT])
+def test_a_soft_fail_ping_claiming_another_seat_publishes_and_renews_nothing(
+        monkeypatch, capsys, carrier, verified):
+    """R8-L8, residual 26: a claim for a seat the request does not hold is refused.
+
+    On the session check's soft-fail branch the check returns without binding
+    the claimed steam_id to anything, so before this round a request could name
+    another roster member, publish destruction-veto evidence for that member's
+    series and renew that member's lease. The route now compares the claim with
+    the seat the request's own session names and refuses any other before the
+    series lock. Four shapes, one outcome: nothing is published for the series,
+    no lease is renewed for anyone, the series is untouched, and the route says
+    why. The soft-fail line proves the scenario stood on the branch the residual
+    names rather than on an armed check that would have refused anyway.
+
+    ITS NEGATIVE CONTROL is the next test: the same route and harness, a claim
+    for the seat the request's session names, published and renewed. Without
+    it, this test would also pass on a route that never publishes at all.
+    """
+    token = {"t1b": _token(SID_T1B), "unknown": "sept16dc-session-unknown",
+             None: None}[carrier]
+
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        key = str(sid)
+        try:
+            with _harness_globals(), _seat_harness(monkeypatch) as renewals:
+                if verified:
+                    await _set_session(Session, SID_T1B, verified=True)
+                await asyncio.wait_for(
+                    _ping(Session, SID_T1A, sid, token=token), 15)
+                assert key not in main._in_match_seen, (
+                    "a claim for another seat published in-match evidence")
+                assert renewals == [], (
+                    "a claim for another seat renewed a lease", renewals)
+                assert (await _row(Session, sid))["status"] == "active"
+        finally:
+            await engine.dispose()
+    _drive(body)
+    out = capsys.readouterr().out
+    assert SOFT_FAIL_LINE in out, (
+        "the scenario never reached the session check's soft-fail branch")
+    assert SEAT_REFUSED_LINE in out, "the route never said it refused the claim"
+
+
+# The request shapes that DO carry the claimed seat's own session, on the same
+# soft-fail branch: verification and expiry are the session check's business,
+# not the seat binding's. (id, expired)
+OWN_SEAT = (
+    ("own-unverified", False),
+    ("own-expired", True),
+)
+
+
+@pytest.mark.parametrize("expired", [s[1] for s in OWN_SEAT],
+                         ids=[s[0] for s in OWN_SEAT])
+def test_a_soft_fail_ping_for_the_requesters_own_seat_publishes_and_renews(
+        monkeypatch, capsys, expired):
+    """The negative control of the test above (#391), and the honest caller.
+
+    The same real route on the same soft-fail branch, the claim naming the seat
+    whose session the request carries: the evidence is published and that
+    seat's own lease is renewed, exactly as before the binding existed. A fix
+    that refused every soft-fail claim would close residual 26 by breaking the
+    honest client, and this is where that would show.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        key = str(sid)
+        try:
+            with _harness_globals(), _seat_harness(monkeypatch) as renewals:
+                if expired:
+                    await _set_session(Session, SID_T1B, expired=True)
+                await asyncio.wait_for(_ping(Session, SID_T1B, sid), 15)
+                assert key in main._in_match_seen, (
+                    "a claim for the requester's own seat published nothing")
+                assert renewals == [(str(ids["t1b"]), "team", key)], renewals
+        finally:
+            await engine.dispose()
+    _drive(body)
+    out = capsys.readouterr().out
+    assert SOFT_FAIL_LINE in out, (
+        "the scenario never reached the session check's soft-fail branch")
+    assert SEAT_REFUSED_LINE not in out, out
 
 
 # ── A revived series does not get settled again ──────────────────────────

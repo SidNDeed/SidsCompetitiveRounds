@@ -2333,6 +2333,209 @@ def test_the_publisher_census_rejects_a_second_door_into_the_map():
     assert "_in_match_touch is referenced as a value" in joined, findings
 
 
+# ── An in-match claim acts only for the requester's own seat (residual 26) ─
+#
+# The publisher lock above decides WHERE a publication lands against a sweep
+# pass; this decides WHOSE claim may publish at all. _check_steam_session
+# raises only where enforcement is armed for the caller, and elsewhere
+# returns having bound the claimed steam_id to nothing, so every publisher
+# compares the claim with the seat the request's own session names --
+# _session_seat -- and refuses any other before it locks, publishes or
+# renews. Derived like the publisher census: every def that calls
+# _in_match_touch is judged, so a second publisher must bind as well.
+
+SEAT_BINDING = "_session_seat"
+SEAT_REFUSAL = "_NotOwnSeat"
+
+
+def _lock_reads_of(fn):
+    """Every `execute(text("SELECT ... FROM team_series ... <lock>"))` in fn."""
+    out = []
+    for c in ast.walk(fn):
+        sql = _sql_of_execute(c) or ""
+        if ("FROM team_series" in sql
+                and any(m in sql for m in PUBLISHER_LOCK_MODES)):
+            out.append(c)
+    return out
+
+
+def seat_binding_findings(tree):
+    """Why some in-match claim can act before it is bound to the requester's
+    own seat; [] when none can.
+
+    For every publisher: exactly one call of _session_seat, its answer kept in
+    one name; exactly one `if <that name> != steam_id:` whose body raises
+    _NotOwnSeat; that refusal after the session check and BEFORE the series
+    lock, the publication and every lease renewal in the def; inside a try
+    whose handler takes Exception, so a refused claim is dropped and the ping
+    is still answered; and _NotOwnSeat a module-level Exception subclass, so
+    that handler does take it.
+    """
+    out = []
+    kinds = (ast.FunctionDef, ast.AsyncFunctionDef)
+    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    refusal = classes.get(SEAT_REFUSAL)
+    if refusal is None or not any(isinstance(b, ast.Name)
+                                  and b.id == "Exception"
+                                  for b in refusal.bases):
+        out.append("%s is not a module-level subclass of Exception"
+                   % SEAT_REFUSAL)
+    pubs = [fn for fn in tree.body if isinstance(fn, kinds)
+            and fn.name != "_in_match_touch"
+            and _calls_named(fn, "_in_match_touch")]
+    if not pubs:
+        return out + ["nothing publishes in-match evidence"]
+    for fn in pubs:
+        binds = _calls_named(fn, SEAT_BINDING)
+        if len(binds) != 1:
+            out.append("%s: %d call(s) of %s, not one"
+                       % (fn.name, len(binds), SEAT_BINDING))
+            continue
+        kept = [a.targets[0].id for a in ast.walk(fn)
+                if isinstance(a, ast.Assign) and len(a.targets) == 1
+                and isinstance(a.targets[0], ast.Name)
+                and any(c is binds[0] for c in ast.walk(a.value))]
+        if len(kept) != 1:
+            out.append("%s: the seat the session names is not kept in one "
+                       "name" % fn.name)
+            continue
+        refusals = []
+        for n in ast.walk(fn):
+            if not (isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+                    and len(n.test.ops) == 1
+                    and isinstance(n.test.ops[0], ast.NotEq)):
+                continue
+            sides = {getattr(n.test.left, "id", None),
+                     getattr(n.test.comparators[0], "id", None)}
+            raises = [r for stmt in n.body for r in ast.walk(stmt)
+                      if isinstance(r, ast.Raise) and r.exc is not None
+                      and SEAT_REFUSAL in {getattr(r.exc, "id", None),
+                                           getattr(getattr(r.exc, "func",
+                                                           None), "id", None)}]
+            if sides == {kept[0], "steam_id"} and raises:
+                refusals.append(n)
+        if len(refusals) != 1:
+            out.append("%s: %d refusal(s) of a claim for a seat the request's "
+                       "session does not name, not one"
+                       % (fn.name, len(refusals)))
+            continue
+        at = refusals[0].lineno
+        checks = _calls_named(fn, "_check_steam_session")
+        if not checks or min(c.lineno for c in checks) > binds[0].lineno:
+            out.append("%s: the seat binding does not follow the session "
+                       "check" % fn.name)
+        for what, nodes in (("the series lock", _lock_reads_of(fn)),
+                            ("the publication",
+                             _calls_named(fn, "_in_match_touch")),
+                            ("a lease renewal", _calls_named(fn, "_lease_renew"))):
+            if nodes and min(c.lineno for c in nodes) <= at:
+                out.append("%s: %s comes before the seat binding"
+                           % (fn.name, what))
+        guarded = [t for t in ast.walk(fn) if isinstance(t, ast.Try)
+                   and any(h.type is None
+                           or getattr(h.type, "id", None) == "Exception"
+                           for h in t.handlers)
+                   and any(refusals[0] is d for s in t.body
+                           for d in ast.walk(s))]
+        if not guarded:
+            out.append("%s: the refusal is not inside a try whose handler "
+                       "takes Exception, so a refused claim would fail the "
+                       "ping instead of dropping the claim" % fn.name)
+    return out
+
+
+def test_an_in_match_claim_is_bound_to_the_requesters_own_seat_before_it_acts():
+    """Residual 26 (R8-L8), as a property of the source.
+
+    On the session check's soft-fail branch nothing tied the claimed steam_id
+    to what the request carries, so a claim naming another roster member
+    published that member's evidence and renewed that member's lease. The
+    orderings file drives the real route on that branch; this pins where the
+    binding sits, so it cannot drift after the lock or the renewal unseen.
+    """
+    assert seat_binding_findings(TREE) == []
+
+
+_BINDING_DECOY_HEAD = """
+class _NotOwnSeat(Exception):
+    pass
+
+
+async def presence_ping(request, steam_id, in_match, db):
+    try:
+        _gid = UUID(in_match)
+        await _check_steam_session(request, steam_id, db)
+"""
+_BINDING_DECOY_ACTS = """        _im_series = (await db.execute(text(
+            "SELECT status FROM team_series WHERE id = :gid FOR SHARE"
+        ), {"gid": _gid})).first()
+        _in_match_touch(in_match)
+        await _lease_renew(db, steam_id, "team", _gid, 900)
+"""
+_BINDING_DECOY_BINDS = """        _im_own_seat = await _session_seat(request, db)
+        if _im_own_seat != steam_id:
+            raise _NotOwnSeat()
+"""
+_BINDING_DECOY_TAIL = """    except Exception:
+        pass
+"""
+# The superseded route (no binding), and the binding placed after the acts it
+# must precede. The same check must name both.
+_UNBOUND_CLAIM_DECOY = (_BINDING_DECOY_HEAD + _BINDING_DECOY_ACTS
+                        + _BINDING_DECOY_TAIL)
+_LATE_BINDING_DECOY = (_BINDING_DECOY_HEAD + _BINDING_DECOY_ACTS
+                       + _BINDING_DECOY_BINDS + _BINDING_DECOY_TAIL)
+# ...and its inert twin: the same pieces, the binding first.
+_BOUND_CLAIM_TWIN = (_BINDING_DECOY_HEAD + _BINDING_DECOY_BINDS
+                     + _BINDING_DECOY_ACTS + _BINDING_DECOY_TAIL)
+
+
+def test_the_seat_binding_check_rejects_a_missing_and_a_late_binding():
+    unbound = seat_binding_findings(ast.parse(_UNBOUND_CLAIM_DECOY))
+    assert unbound == ["presence_ping: 0 call(s) of _session_seat, not one"], (
+        unbound)
+    late = seat_binding_findings(ast.parse(_LATE_BINDING_DECOY))
+    assert late == [
+        "presence_ping: the series lock comes before the seat binding",
+        "presence_ping: the publication comes before the seat binding",
+        "presence_ping: a lease renewal comes before the seat binding"], late
+    assert seat_binding_findings(ast.parse(_BOUND_CLAIM_TWIN)) == []
+
+
+# Every def that renews a queue lease, and on what. IN-GAME renews on an
+# in-match claim and is a publisher, so seat_binding_findings judges it.
+# LOBBY SEAT renews an open-lobby seat from a poll, for the id the request
+# names, under the session check's own policy (soft-fail where enforcement is
+# not armed for the caller). That class is filed in the round-9 notes and
+# not changed here; a renewer added later is unclassified and reddens this.
+LEASE_RENEWERS = {
+    "presence_ping": "IN-GAME",
+    "team_queue_poll": "LOBBY SEAT",
+    "ovt_queue_poll": "LOBBY SEAT",
+    "ffa_queue_poll": "LOBBY SEAT",
+    "_lobby_state_impl": "LOBBY SEAT",
+}
+
+
+def lease_renewers(tree=None):
+    """Every def other than _lease_renew itself that names it."""
+    return sorted(fn.name for fn in (tree or TREE).body
+                  if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and fn.name != "_lease_renew"
+                  and any(isinstance(n, ast.Name) and n.id == "_lease_renew"
+                          for n in ast.walk(fn)))
+
+
+def test_every_lease_renewer_is_classified():
+    assert lease_renewers() == sorted(LEASE_RENEWERS), lease_renewers()
+    publishers = {fn.name for fn in TREE.body
+                  if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and fn.name != "_in_match_touch"
+                  and _calls_named(fn, "_in_match_touch")}
+    in_game = {k for k, v in LEASE_RENEWERS.items() if v == "IN-GAME"}
+    assert in_game and in_game <= publishers, (in_game, publishers)
+
+
 # ── No orderings scenario writes evidence inside a held sweep ────────────
 #
 # The round-8 cold lens (finding 1) found two orderings scenarios that put
@@ -3019,6 +3222,10 @@ SUPERSEDED_CLAIMS = (
     # lens, finding 5): on the soft-fail branch the check returns and the
     # ping locks, reads and publishes.
     "a caller whose session does not verify never locks a series row",
+    # ...and the two sentences residual 26 overturned (round 9, R8-L8): on the
+    # soft-fail branch the ping acted for whatever seat it named.
+    "this ping takes the lock, reads membership and publishes exactly as a member's ping did",
+    "then costs only self-exclusion",
 )
 
 # ...and the sentence that replaced each one, which must be present exactly
@@ -3103,6 +3310,11 @@ CORRECTED_CLAIMS = (
     ("test_sept16_dc_fallback_shape.py",
      "the 214 s term could refuse no row a working flow produces, which "
      "test_the_sweep_does_not_consult_the_room_clock sets out"),
+    ("main.py", "The seat binding is what decides who may."),
+    ("main.py",
+     "a claim naming any other seat, or a request carrying no session at "
+     "all, is refused HERE"),
+    ("main.py", "so WHOSE lease that is, is the caller's decision."),
 )
 
 
