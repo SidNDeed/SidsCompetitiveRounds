@@ -8,11 +8,13 @@ the ops ``bug-log:N`` verb — reads ``bug_reports`` and therefore works on thes
 rows with no change at all. That reuse is the whole point of storing them here
 rather than in a table of their own.
 
-NO CLIENT CALLS IT IN THIS RELEASE. The client half (the Data & Privacy
-setting, the ``OnLeftRoom`` trigger, the client-side path scrub) is owned by
-another session's lifecycle work and is not in this batch. This module is
-therefore INERT on arrival: deployable, authenticated, rate-limited, tested,
-and with no caller.
+THE CLIENT HALF IS THE v1.41.0 BETA CLIENT LANE'S plugin/AutoLogUpload.cs. It
+posts here through ``ApiClient.SubmitAutoLogBody`` once a room the player
+played in is left, only while the opt-in Data & Privacy setting (default off)
+and data consent are both on (commit b8e5368; the lane's round 2 finding 4,
+commit 7f2c67b, made a consent revoke abort an upload already in flight).
+Until a release carries that client, this route has no caller in a released
+build: deployable, authenticated, rate-limited, tested, and inert.
 
   Inert is a known way to ship nothing while every log line looks perfect
   (#438, #443). So this route emits a POSITIVE signal rather than relying on
