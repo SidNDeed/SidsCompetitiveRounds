@@ -8819,14 +8819,32 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
 
     The channel is marked swept (_lb_swept) only when the history was read
     and every delete tried here went through; anything less leaves the sweep
-    owed, and publish_boards runs it again next tick (findings 12 and 15)."""
+    owed, and publish_boards runs it again next tick (findings 12 and 15).
+
+    A message of ours titled as a catalogue board that is NOT in `boards` is
+    retired: LEADERBOARD_BOARDS no longer names that board, and the channel
+    converges to exactly the boards it does name (finding 13). Before, such
+    a title matched nothing here, so a board dropped from the list -- FFA
+    after 1v1,2v2,ffa became 1v1,2v2, or every board once the list was
+    emptied -- stayed in the channel for good."""
     by_title = {b["title"]: b["key"] for b in boards}
-    keepers, dupes, complete = {}, 0, True
+    retire = {b["title"]: b["key"] for b in BOARDS if b["title"] not in by_title}
+    keepers, dupes, retired, complete = {}, 0, 0, True
     try:
         async for msg in ch.history(limit=50):
             if msg.author != bot.user or not msg.embeds:
                 continue
-            key = by_title.get(msg.embeds[0].title or "")
+            title = msg.embeds[0].title or ""
+            if title in retire:
+                try:
+                    await msg.delete()
+                    retired += 1
+                except Exception as e:
+                    complete = False
+                    print(f"[LB] couldn't retire {retire[title]} board mid={msg.id} "
+                          f"(not in LEADERBOARD_BOARDS): {e}")
+                continue
+            key = by_title.get(title)
             if key is None:
                 continue
             if key not in keepers:
@@ -8845,6 +8863,8 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
     ids.update(keepers)
     if dupes:
         print(f"[LB] deleted {dupes} duplicate stale board message(s)")
+    if retired:
+        print(f"[LB] retired {retired} board message(s) not in LEADERBOARD_BOARDS")
     if complete:
         _lb_swept.add(ch.id)
     else:
@@ -8946,6 +8966,11 @@ async def publish_boards(guild):
     if not ch: return
     boards = _enabled_boards()
     if not boards:
+        # The channel still converges to the (empty) list: the sweep retires
+        # every board of ours an earlier list left there, and it is owed and
+        # retried like any other sweep (_lb_swept; finding 13).
+        if ch.id not in _lb_swept:
+            await _adopt_board_messages(ch, boards, {})
         print("[LB] LEADERBOARD_BOARDS is empty — nothing to publish")
         return
     # Render everything BEFORE touching the channel: the repost path deletes

@@ -893,6 +893,74 @@ def test_a_restart_whose_rescan_fails_sweeps_the_old_set_on_a_later_tick(ns):
     assert CID in ns["_lb_swept"]
 
 
+def test_a_board_dropped_from_the_list_is_retired_on_restart(ns):
+    """Round 3 finding 13. LEADERBOARD_BOARDS goes from 1v1,2v2,ffa to
+    1v1,2v2 and the bot restarts. The FFA board's title matched nothing in the
+    sweep, so it was never adopted and never deleted: the channel kept a board
+    the list no longer names, for good. The restart's sweep now retires it --
+    only it, and only ours -- and the two named boards are adopted and edited
+    in place.
+
+    MUTATION: an empty retire map, or one that also holds the named boards.
+    Must fail."""
+    ch = ns["_ch"]
+    theirs = _run(ch.send(embeds=[_Embed(title=T_FFA, description="not ours")], view=None))
+    theirs.author = "someone-else"
+    note = _run(ch.send(embeds=[_Embed(title="Weekly recap", description="ours, no board")], view=None))
+    _tick(ns)
+    old = dict(ns["_lb_message_ids"][CID])
+    ns["LEADERBOARD_BOARDS_RAW"] = "1v1,2v2"        # the list changes; the bot restarts
+    ns["_lb_message_ids"].clear()
+    ns["_lb_swept"].clear()
+    ns["_log"].clear()
+    _tick(ns)
+    assert ch.deleted == [old["ffa"]], (ch.deleted, old)
+    assert ch.titles() == [T_FFA, "Weekly recap", T_1V1, T_2V2], ch.titles()
+    assert theirs in ch.messages and note in ch.messages
+    assert ns["_lb_message_ids"][CID] == {"1v1": old["1v1"], "2v2": old["2v2"]}
+    assert any("retired 1 board message(s) not in LEADERBOARD_BOARDS" in ln for ln in ns["_log"]), ns["_log"]
+    assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 2
+    assert CID in ns["_lb_swept"]
+
+
+def test_an_emptied_list_retires_every_board_and_retries_a_refused_one(ns):
+    """Round 3 finding 13, the empty list. With LEADERBOARD_BOARDS emptied,
+    publish_boards returned before it touched the channel, so every board
+    stayed. The sweep now runs there too and retires every board of ours; it
+    is owed until it completes, so a refused delete is retried on the next
+    tick, and a completed sweep is not run again.
+
+    MUTATION: no sweep on the empty list, or a refused retire marked
+    complete. Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    old = dict(ns["_lb_message_ids"][CID])
+    ns["LEADERBOARD_BOARDS_RAW"] = ""               # emptied; the bot restarts
+    ns["_lb_message_ids"].clear()
+    ns["_lb_swept"].clear()
+    ch.delete_fails = {old["2v2"]}
+    ns["_log"].clear()
+    _tick(ns)
+    assert sorted(ch.deleted) == sorted([old["1v1"], old["ffa"]]), (ch.deleted, old)
+    assert any("couldn't retire 2v2 board mid=%d" % old["2v2"] in ln for ln in ns["_log"]), ns["_log"]
+    assert any("LEADERBOARD_BOARDS is empty" in ln for ln in ns["_log"])
+    assert CID not in ns["_lb_swept"]
+    ch.delete_fails = set()
+    ns["_log"].clear()
+    _tick(ns)                                       # retried: the refused one goes too
+    assert ch.titles() == [], ch.titles()
+    assert CID in ns["_lb_swept"]
+    calls = []
+    real = ns["_adopt_board_messages"]
+
+    async def counting(*a, **kw):
+        calls.append(1)
+        return await real(*a, **kw)
+    ns["_adopt_board_messages"] = counting
+    _tick(ns)
+    assert calls == [], "a completed sweep ran again"
+
+
 def test_history_failure_edits_in_place_rather_than_deleting(ns):
     _tick(ns)
     ns["_ch"].history_raises = True
