@@ -594,6 +594,54 @@ def test_a_failing_board_costs_only_itself():
     assert any("ffa: render failed (timeout)" in ln for ln in n4["_log"])
 
 
+def test_an_empty_board_is_published_as_empty_not_left_stale(ns):
+    """Round 3 finding 14. A 200 with entries=[] is an answer -- every FFA
+    player aged past the activity window, say. It was taken as no data, so the
+    board kept showing the last list for good. It now renders as an honest
+    empty board, edited in place. A payload with no entries list at all is
+    still no data and leaves the board as it is.
+
+    MUTATION: take an empty list as no data again. Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    ffa = ch.messages[-1]
+    ns["_api"].payloads["/ffa/leaderboard"] = {"entries": [], "total_players": 0}
+    ns["_api"].payloads["/ffa/leaderboard?limit=1&min_games=1&include_inactive=true"] = {
+        "entries": _rows_ffa(1), "total_players": 25}
+    ns["_log"].clear()
+    _tick(ns)
+    assert not any("ffa: no data this tick" in ln for ln in ns["_log"]), ns["_log"]
+    assert any("ffa: edited board mid=%d" % ffa.id in ln for ln in ns["_log"]), ns["_log"]
+    assert ffa.embeds[0].title == T_FFA
+    assert "(no players)" in ffa.embeds[0].description
+    assert "Ffa0" not in "".join(e.description for e in ffa.embeds)
+    foot = ffa.embeds[-1].footer
+    assert foot.startswith("Page 1/1 ") and "0 rated FFA players" in foot, foot
+    assert "25 inactive hidden (90 days)" in foot, foot
+    assert [b.disabled for b in ffa.view.children] == [True, True]
+    # No entries list at all is not an answer: the board is left as it is.
+    ns["_api"].payloads["/ffa/leaderboard"] = {"total_players": 0}
+    edits = len(ffa.edits)
+    ns["_log"].clear()
+    _tick(ns)
+    assert any("ffa: no data this tick" in ln for ln in ns["_log"]), ns["_log"]
+    assert len(ffa.edits) == edits
+
+
+def test_a_board_nobody_has_played_yet_is_still_posted():
+    """Round 3 finding 14, the other half: a board for a mode nobody has
+    played yet answers entries=[], and was never posted at all. It is posted
+    in its place in the set, as an empty board.
+
+    MUTATION: take an empty list as no data again. Must fail."""
+    n2 = _fresh(broken={"/team/leaderboard": {"entries": [], "total_players": 0}})
+    _tick(n2)
+    ch = n2["_ch"]
+    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
+    assert "(no players)" in ch.messages[1].embeds[0].description
+    assert "0 rated 2v2 players" in ch.messages[1].embeds[-1].footer
+
+
 def test_burial_reposts_the_whole_set_once_and_then_settles(ns):
     _tick(ns)
     ch = ns["_ch"]

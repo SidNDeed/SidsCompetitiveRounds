@@ -8784,8 +8784,13 @@ async def _render_board(board: dict):
     render — publish_boards contains that per board, so one board's bad tick
     can neither skip the others nor kill the loop (#129)."""
     data = await api_get(board["path"])
-    if not data or not data.get("entries"):
-        # api_get already logged the status on non-200; this covers empty payloads.
+    if not data or data.get("entries") is None:
+        # api_get already logged the status on non-200; this covers a payload
+        # with no entries list at all. An EMPTY list is an answer, not an
+        # outage (finding 14): every player aged past the activity window, or
+        # a mode nobody has played yet. It renders as an honest empty board --
+        # "(no players)" and 0 in the footer. Taken as no data, it left the
+        # last list up for good, or never posted a newly enabled board.
         return None
     entries = data["entries"]
     total_players = data.get("total_players", 0)
