@@ -9423,6 +9423,145 @@ def test_r7_l9_serverl7_the_refusal_cost_and_the_rows_settlers_are_stated_as_the
                          "R7-SERVER-L7 inert twin"))
 
 
+# ROUND 13 -- OWED TO THIS LANE BY THE SERVER LANE'S ROUND-9 REVIEW (OI-2,
+# OI-4).  The server lane's round-9 notes, R9.2, list the client rows its
+# contract expects; two of them this lane had not answered.  OI-2: the
+# three-value passage's false row said that two of the five exits answering
+# false settle the series without naming which two.  OI-4: the deferral
+# paragraph named the sweep and a later real-totals report as what closes a
+# deferred row, while three more server paths -- its revival and resume
+# funnels and its room-issue clear -- end a deferral by clearing the row's
+# marker.  Each sentence below is read from SendTeamSeriesDcReport's own
+# text with its comment wrapping removed, so a reflow cannot turn the check
+# (#342), and counted within that method, never file-wide (#330, #279).
+_R13_OI2_NAMED = (
+    "of the five exits that answer false, two settle the series (the "
+    "lead-forfeit completion and the dc_incomplete settle) and the other three "
+    "(the settled-row exit and the two room fences) write nothing and say so "
+    'with "ignored": true')
+# the round-12 wording of the same row, which named neither set
+_R13_OI2_UNNAMED = "two settle the series and the other three write nothing"
+_R13_OI4_ENDS = (
+    "three more paths end a deferral: the server's revival and resume funnels "
+    "and its room-issue clear, each of which clears the row's deferred marker")
+_R13_OI4_NOT_SETTLED = (
+    "A deferral that ends that way ends without this report settling anything, "
+    'so "the deferral ended" is not "the series settled" either')
+# the false row as round 12 wrote it and as this round writes it, line by
+# line, and the paragraph this round adds: the pre-fix shape is the control
+# (#391)
+_R13_OI2_ROW_ROUND12 = (
+    'of the five exits that answer false,',
+    'two settle the series and the other',
+    'three write nothing and say so with an',
+    '"ignored" key in the same body')
+_R13_OI2_ROW_NOW = (
+    'of the five exits that answer false,',
+    'two settle the series (the',
+    'lead-forfeit completion and the',
+    'dc_incomplete settle) and the other',
+    'three (the settled-row exit and the',
+    'two room fences) write nothing and',
+    'say so with "ignored": true in the',
+    'same body')
+_R13_OI4_LINES = (
+    '',
+    'AND A DEFERRAL CAN END WITHOUT BEING SETTLED -- the round-13',
+    "addition, owed to this lane by the server lane's round-9 review",
+    '(OI-4). Besides the sweep and a later real-totals report, three',
+    "more paths end a deferral: the server's revival and resume",
+    'funnels and its room-issue clear, each of which clears the',
+    "row's deferred marker. A deferral that ends that way ends",
+    'without this report settling anything, so "the deferral ended"',
+    'is not "the series settled" either, and nothing in this process',
+    'observes which path ended it.')
+_R13_OI_GUTTER = " " * 20 + "//" + " " * 22
+
+
+def _r13_oi_rows(rows):
+    """The false row's continuation lines as the source writes them."""
+    return LF.join(_R13_OI_GUTTER + r for r in rows)
+
+
+def _r13_oi4_paragraph():
+    """The paragraph this round adds, as the source writes it."""
+    return LF.join(" " * 20 + "//" + (" " + x if x else "")
+                   for x in _R13_OI4_LINES)
+
+
+def _r13_oi_claim(s):
+    """Whether SendTeamSeriesDcReport's text names the false row's exits on
+    both sides and every path that ends a deferral, each once, and not the
+    round-12 row."""
+    body = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
+    if not body:
+        return False
+    flat = _flat_comment(body)
+    return (flat.count(_R13_OI2_NAMED) == 1
+            and _R13_OI2_UNNAMED not in flat
+            and flat.count(_R13_OI4_ENDS) == 1
+            and flat.count(_R13_OI4_NOT_SETTLED) == 1)
+
+
+def test_r13_oi2_oi4_the_false_row_names_its_exits_and_every_path_that_ends_a_deferral():
+    """OI-2 and OI-4, owed to this lane by the server lane's round-9 review
+    (its R8-L9 and residual 33), answered this round as additions.
+
+    The three-value passage's false row names the two exits that settle the
+    series and the three that write nothing, as the contract's definition
+    beside it names the three; the deferral paragraph names the three
+    server paths that end a deferral without this report settling
+    anything, besides the sweep and a later real-totals report.  The
+    round-12 row, the row with its settling exits unnamed, the paragraph
+    as round 12 left it and the paragraph naming one path fewer each fail
+    the check; rewording a neighbouring clause does not."""
+    api = _src("ApiClient.cs")
+    assert _r13_oi_claim(api), "the false row or the deferral paragraph is not as required"
+    now = _r13_oi_rows(_R13_OI2_ROW_NOW)
+    para = _r13_oi4_paragraph()
+    assert api.count(now) == 1, "the false row is not written as this round wrote it"
+    assert api.count(para) == 1, "the paragraph is not written as this round wrote it"
+
+    _assert_discriminating(
+        _r13_oi_claim, api,
+        _mutate(api, now, _r13_oi_rows(_R13_OI2_ROW_ROUND12),
+                "R13-OI2a the false row as round 12 wrote it"),
+        "R13-OI2a the false row names the exits on both sides")
+    _assert_discriminating(
+        _r13_oi_claim, api,
+        _mutate(api, "two settle the series (the" + LF + _R13_OI_GUTTER
+                + "lead-forfeit completion and the" + LF + _R13_OI_GUTTER
+                + "dc_incomplete settle) and the other",
+                "two settle the series and the other",
+                "R13-OI2b the settling exits unnamed"),
+        "R13-OI2b the false row names the two exits that settle")
+    _assert_discriminating(
+        _r13_oi_claim, api,
+        _mutate(api, LF + para, "", "R13-OI4a the paragraph as round 12 left it"),
+        "R13-OI4a the paths that end a deferral are named")
+    _assert_discriminating(
+        _r13_oi_claim, api,
+        _mutate(api, "three" + LF + " " * 20 + "// more paths end a deferral: the "
+                "server's revival and resume" + LF + " " * 20 + "// funnels and "
+                "its room-issue clear,",
+                "two" + LF + " " * 20 + "// more paths end a deferral: the "
+                "server's revival and resume" + LF + " " * 20 + "// funnels,",
+                "R13-OI4b the room-issue clear left out"),
+        "R13-OI4b every path that ends a deferral is named")
+
+    # INERT TWINS: rewording a neighbouring clause keeps the claim
+    assert _r13_oi_claim(_mutate(api, "claim that this call settled anything:",
+                                 "claim that the call settled anything:",
+                                 "R13-OI2 inert twin"))
+    assert _r13_oi_claim(_mutate(api, "// observes which path ended it.",
+                                 "// sees which path ended it.",
+                                 "R13-OI4 inert twin"))
+    print("R13-OI2 FALSE ROW: the two exits that settle and the three that "
+          "write nothing named once each in SendTeamSeriesDcReport; R13-OI4 "
+          "DEFERRAL: the revival and resume funnels and the room-issue clear "
+          "named once as paths that end a deferral without settling")
+
+
 # ── L11: W8 states the disposition the reviewed route produces ───────────────
 
 

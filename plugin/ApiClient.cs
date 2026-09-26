@@ -14516,9 +14516,13 @@ namespace CompetitiveRounds
                     //   present and false  this call parked NOTHING. It is not a
                     //                      claim that this call settled anything:
                     //                      of the five exits that answer false,
-                    //                      two settle the series and the other
-                    //                      three write nothing and say so with an
-                    //                      "ignored" key in the same body
+                    //                      two settle the series (the
+                    //                      lead-forfeit completion and the
+                    //                      dc_incomplete settle) and the other
+                    //                      three (the settled-row exit and the
+                    //                      two room fences) write nothing and
+                    //                      say so with "ignored": true in the
+                    //                      same body
                     //   absent from a 200  the box that answered PREDATES the
                     //                      field. That is the whole of what the
                     //                      absence proves. What that box did with
@@ -14569,6 +14573,16 @@ namespace CompetitiveRounds
                     // in this process observes any of that. The line below therefore
                     // reports the deferral it was told about and states the window; it
                     // does not claim the row will close, or by which writer.
+                    //
+                    // AND A DEFERRAL CAN END WITHOUT BEING SETTLED -- the round-13
+                    // addition, owed to this lane by the server lane's round-9 review
+                    // (OI-4). Besides the sweep and a later real-totals report, three
+                    // more paths end a deferral: the server's revival and resume
+                    // funnels and its room-issue clear, each of which clears the
+                    // row's deferred marker. A deferral that ends that way ends
+                    // without this report settling anything, so "the deferral ended"
+                    // is not "the series settled" either, and nothing in this process
+                    // observes which path ended it.
                     if (ok)
                     {
                         bool present = !string.IsNullOrEmpty(resp)
