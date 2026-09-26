@@ -8465,6 +8465,11 @@ def _pc_not_linked(ctx, target):
 # bytes: the text still goes out, the picture does not.
 _PC_FACE_MAX_BYTES = 4 * 1024 * 1024
 _PC_LEASE_RESERVE_S = 3.0
+# The composite byte route's refusals that mean "a healthy box, come back
+# shortly": a portrait released mid-render, the composite gate full, the cold
+# composite at the api's 30 s ceiling. The retry predicate is membership in
+# this one constant; every other answer is final.
+_PC_COMPOSITE_RETRYABLE = ("portrait_pending", "composite_busy", "composite_timeout")
 # The lease-ENDING requests (the release, the ack) are admitted by the api
 # itself (main._pc_release_slot, a slot per reserved-pool connection, review
 # r12): a client-side gate here (review r11) returned its permit on a timeout
@@ -8490,22 +8495,46 @@ def _pc_locale_of(ctx):
     return primary or "en"
 
 
-async def _pc_api_bytes(path, params=None, timeout=10.0):
-    """(status, bytes|None) for an internal byte route: an exact Content-Length
-    is required, the body is refused over _PC_FACE_MAX_BYTES or when shorter
-    or longer than declared."""
+async def _pc_api_bytes(path, params=None, timeout=10.0, max_bytes=_PC_FACE_MAX_BYTES):
+    """(status, bytes|None, meta) for an internal byte route: an exact
+    Content-Length is required, the body is refused over `max_bytes` (the
+    face cap unless the caller names another) or when shorter or longer than
+    declared. `meta` is the response headers, names lower-cased, plus `error`
+    (at most 64 characters) and `retry_after` (0-30 s) when a non-200 carried
+    a small JSON body - read off its `detail` first, as _pc_detail reads a
+    JSON refusal, with the Retry-After header standing in for a missing
+    retry_after; {} when the api did not answer at all. The bytes slot is
+    None for every non-200: an error body is never handed back as a
+    picture."""
     try:
         async with http_session.get(f"{API_BASE_URL}/api/v1{path}", params=params,
                                     timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            meta = {str(k).lower(): v for k, v in r.headers.items()}
             if r.status != 200:
                 print(f"API GET {path.split('?')[0]} -> HTTP {r.status}")
-                return r.status, None
+                # A refusal names its reason in a small JSON body: read it,
+                # bounded, so "come back in two seconds" is not mistaken for
+                # "no such route". Anything unparseable carries neither field.
+                parsed = {}
+                try:
+                    size = int(meta.get("content-length", "0"))
+                    if str(meta.get("content-type", "")).startswith("application/json") and 0 < size <= 4096:
+                        d = _pc_detail(json.loads(await r.content.readexactly(size)))
+                        if isinstance(d.get("error"), str):
+                            parsed["error"] = d["error"][:64]
+                        wait = d.get("retry_after", meta.get("retry-after"))
+                        if wait is not None:
+                            parsed["retry_after"] = max(0, min(30, int(wait)))
+                except Exception:
+                    parsed = {}
+                meta.update(parsed)
+                return r.status, None, meta
             cl = r.headers.get("Content-Length")
             if cl is None:
-                return r.status, None
+                return r.status, None, meta
             declared = int(cl)
-            if declared <= 0 or declared > _PC_FACE_MAX_BYTES:
-                return r.status, None
+            if declared <= 0 or declared > max_bytes:
+                return r.status, None, meta
             # `read(n)` answers UP TO n bytes. A body that arrives in more
             # than one buffer — which is every face over a few kilobytes —
             # returns its first chunk, and the exact-length check then throws
@@ -8515,20 +8544,20 @@ async def _pc_api_bytes(path, params=None, timeout=10.0):
             try:
                 data = await r.content.readexactly(declared)
             except asyncio.IncompleteReadError:
-                return r.status, None
+                return r.status, None, meta
             if await r.content.read(1):
-                return r.status, None
-            return r.status, data
+                return r.status, None, meta
+            return r.status, data, meta
     except Exception as e:
         print(f"API bytes error: {e}")
-        return 0, None
+        return 0, None, {}
 
 
 async def _pc_back_bytes():
     """The canonical back from the api, cached for an hour."""
     now = time.monotonic()
     if _pc_back_bytes_cache["bytes"] is None or now - _pc_back_bytes_cache["at"] > 3600:
-        st, data = await _pc_api_bytes("/internal/pc/face/back")
+        st, data, _ = await _pc_api_bytes("/internal/pc/face/back")
         if st == 200 and data:
             _pc_back_bytes_cache["bytes"], _pc_back_bytes_cache["at"] = data, now
     return _pc_back_bytes_cache["bytes"]
@@ -8587,7 +8616,7 @@ async def _pc_best_face(body, locale):
     lease = await _pc_lease(best[0]["subject_player_id"], print_id=best[0]["print_id"])
     if not lease[0]:
         return None, lease
-    st, face = await _pc_api_bytes(f"/internal/pc/face/print/{best[0]['print_id']}/{locale}",
+    st, face, _ = await _pc_api_bytes(f"/internal/pc/face/print/{best[0]['print_id']}/{locale}",
                                    params={"size": "card"})
     if st != 200:
         await _pc_lease_release(lease[0])
@@ -8796,7 +8825,7 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
     lease = await _pc_lease(ref)
     if not lease[0]:
         await ctx.send("❌ That card isn't available right now — try again in a moment."); return
-    st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{ref}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
+    st, face, _ = await _pc_api_bytes(f"/internal/pc/face/preview/{ref}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
     if st != 200:
         face = None
     if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=True):
@@ -8909,7 +8938,7 @@ async def poll_pc_events():
                 # §8). The line posts without a face rather than attach the
                 # plate for good — an attachment cannot be swapped later.
                 if lease[0] and p.get("print_id") and first.get("face_ready", True):
-                    st, face = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
+                    st, face, _ = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
                                                    params={"size": "card"})
                     if st != 200:
                         face = None
