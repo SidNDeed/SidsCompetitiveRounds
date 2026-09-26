@@ -27482,6 +27482,103 @@ async def pc_trade_accept(
     return await _pc_trade_guarded(db, _pc_trade_accept_tx(request, db, steam_id, sig, nonce, trade_id, digest))
 
 
+# ---- decline and cancel (3.6) ----
+
+async def _pc_trade_close(db: AsyncSession, tid: str, state: str, actor: str, nonce: str):
+    """D3's write, after L2 and L3: the proposal closes from `proposed` only."""
+    return (await db.execute(text("""
+        UPDATE pc_trades SET status = CAST(:state AS text), closed_at = now(),
+                             closed_by = CAST(:actor AS uuid), close_nonce = CAST(:nonce AS text)
+         WHERE id = CAST(:t AS uuid) AND status = 'proposed'
+        RETURNING id
+    """), {"state": state, "actor": actor, "nonce": nonce, "t": tid})).scalar_one_or_none()
+
+
+def _pc_trade_close_replay(t, actor: str, nonce: str):
+    """D2: a closed proposal. The actor's own close under this nonce answers
+    the stored projection; anything else is 409 with the state. No write."""
+    if t["status"] == "proposed":
+        return False
+    if str(t["closed_by"]) == actor and t["close_nonce"] == nonce:
+        return True
+    raise _pc_trade_refusal(t["status"], permanent=True, state=t["status"])
+
+
+async def _pc_trade_close_tx(request, db: AsyncSession, action: str, steam_id: str, sig: str,
+                             nonce: str, trade_id: str, digest: str):
+    await _pc_trade_timeouts(db)                                                   # DT
+    await _pc_trade_word_gate(db, need_ready=False)                                # D0 (no kill switch)
+    tid = _pc_trade_uuid(trade_id)
+    if (tid is None or not _PC_TRADE_STEAM_RE.match(steam_id or "")
+            or not _PC_TRADE_NONCE_RE.match(nonce or "") or not _PC_TRADE_DIGEST_RE.match(digest or "")):
+        raise _pc_trade_refusal("bad_request", 422, permanent=True)
+    player = await _pc_verified_actor(request, steam_id, sig,
+                                      _pc.canon_trade(steam_id, nonce, action, tid, digest), db)
+    actor = str(player.id)
+    t = (await db.execute(text(_PC_TRADE_STATE_SQL), {"t": tid})).mappings().first()   # D1
+    if t is None or actor not in (str(t["pair_lo"]), str(t["pair_hi"])):
+        raise _pc_trade_refusal("not_found", 404, permanent=True)
+    if (str(t["proposer"]) == actor) != (action == "cancel"):
+        raise _pc_trade_refusal("wrong_party", permanent=True)
+    if t["digest"] != digest:
+        raise _pc_trade_refusal("bad_terms", permanent=True)
+    if _pc_trade_close_replay(t, actor, nonce):                                    # D2
+        view = await _pc_trade_projection(db, request, tid, actor)
+        return {**view, "replayed": True}
+    state = "cancelled" if action == "cancel" else "declined"
+    await db.execute(text(_PC_TRADE_STATE_SQL + " FOR NO KEY UPDATE OF t"), {"t": tid})   # D3: L2
+    await _pc_trade_lock_players(db, [str(t["pair_lo"]), str(t["pair_hi"])])      # D3: L3 (F41)
+    closed = await _pc_trade_close(db, tid, state, actor, nonce)
+    if closed is None:
+        await db.rollback()
+        await _pc_trade_timeouts(db)
+        fresh = (await db.execute(text(_PC_TRADE_STATE_SQL), {"t": tid})).mappings().first()
+        if fresh is None:
+            raise _pc_trade_refusal("not_found", 404, permanent=True)
+        if _pc_trade_close_replay(fresh, actor, nonce):
+            view = await _pc_trade_projection(db, request, tid, actor)
+            return {**view, "replayed": True}
+        raise _pc_trade_refusal("busy", retry_after=1)
+    await db.commit()                                                              # D4
+    view = await _pc_trade_projection(db, request, tid, actor)
+    print(f"[PC-TRADE] {state} trade={tid} by={steam_id}")
+    return {**view, "replayed": False}
+
+
+@app.post("/api/v1/pc/trades/decline", tags=["Player Cards"])
+async def pc_trade_decline(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    sig: str = Query(..., max_length=128),
+    nonce: str = Query(..., max_length=64),
+    trade_id: str = Query(..., max_length=64),
+    digest: str = Query(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Decline a trade proposed to `steam_id` (3.6): HMAC over
+    pctrade:{steam}:{nonce}:decline:{trade_id}:{digest}, strict session.
+    Works while trading is switched off; moves nothing."""
+    return await _pc_trade_guarded(db, _pc_trade_close_tx(
+        request, db, "decline", steam_id, sig, nonce, trade_id, digest))
+
+
+@app.post("/api/v1/pc/trades/cancel", tags=["Player Cards"])
+async def pc_trade_cancel(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    sig: str = Query(..., max_length=128),
+    nonce: str = Query(..., max_length=64),
+    trade_id: str = Query(..., max_length=64),
+    digest: str = Query(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a trade `steam_id` proposed (3.6): HMAC over
+    pctrade:{steam}:{nonce}:cancel:{trade_id}:{digest}, strict session.
+    Works while trading is switched off; moves nothing."""
+    return await _pc_trade_guarded(db, _pc_trade_close_tx(
+        request, db, "cancel", steam_id, sig, nonce, trade_id, digest))
+
+
 # ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
 # The bot is a singleton on the primary; these answer only to the shared
 # internal key. Discord identity resolves through players.discord_id (the
