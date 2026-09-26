@@ -367,7 +367,7 @@
           ],
           "main",
           "admin_resolve_team_series",
-          "79113c6f2ed22f63540e71683046ab482a73bc5f"
+          "55ff53692cf5f3e81d516508378e541bd241d4de"
         ],
         [
           "/api/v1/admin/unban",
@@ -511,7 +511,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "5594b8babf1c09e446d41b5b86548a4d62a67606"
+          "8e5125e9d570e91f5fba6109b5c02f6d0bf70f20"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -610,7 +610,7 @@
           ],
           "main",
           "submit_match",
-          "3f6f7e48490cdf55d3ef0259bc47d072d4b5e76f"
+          "e456222029b411053b4238fb7565f575e25b734c"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -835,7 +835,7 @@
           ],
           "main",
           "set_active_color",
-          "a417fd310ad27198d9b0ddf7a819c48efe4b0aaa"
+          "3cc9942030f14f765777d51889315e4fce155f30"
         ],
         [
           "/api/v1/players/{steam_id}/active-cursor-color",
@@ -844,7 +844,7 @@
           ],
           "main",
           "set_active_cursor_color",
-          "e7bb06a45c274d6e1186c7ef660902e335fbef8d"
+          "70e420bc0e3a58ca13348fa823559a00f7ce25d2"
         ],
         [
           "/api/v1/players/{steam_id}/active-player-color",
@@ -853,7 +853,7 @@
           ],
           "main",
           "set_active_player_color",
-          "1c552337a972fc572ef195110ee9a1f0a576452e"
+          "9ce7288220cc5778ee8311df0220a2250d1ab61b"
         ],
         [
           "/api/v1/players/{steam_id}/active-player-effect",
@@ -862,7 +862,7 @@
           ],
           "main",
           "set_active_player_effect",
-          "1131aa8898c901cd5e08476567fe6b873e8107c7"
+          "7e685fa8d0afb33adaca0a7a7b19ab76a4d84358"
         ],
         [
           "/api/v1/players/{steam_id}/active-title",
@@ -871,7 +871,7 @@
           ],
           "main",
           "set_active_title",
-          "c5ac1d2fb53a30976b1995ee80df38fd51074fff"
+          "4a4effad3ef9b4a2b0e49396c92b86d61ab0dbbe"
         ],
         [
           "/api/v1/players/{steam_id}/active-trail",
@@ -880,7 +880,7 @@
           ],
           "main",
           "set_active_trail",
-          "12c8929abc94d1ec88d3fd6f6dda5ed82bdee121"
+          "75be577a8152fe5a515af1739a374a9469fe79b9"
         ],
         [
           "/api/v1/players/{steam_id}/appear-offline",
@@ -1177,7 +1177,7 @@
           ],
           "main",
           "submit_team_match",
-          "c7707011c832dbc9a6e14229296fca2025e226f0"
+          "eabe65ca2808eeeb80b0796482b85379df499d82"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "51ca43bb9b0617f141a2cacf3f21e49789c097c6"
+          "aee5710d42d53b4357ea77bf760d7b76268d22fe"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "d00f0abc506cbdd869dea4214c9c5aee863811c5"
+          "309364734dea1f9190d99d4f8777efbe024e2262"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2533,7 +2533,7 @@
           ],
           "main",
           "list_shop_items",
-          "145b484e1262c54eefe53b7f7b26aeea48c3e086"
+          "e4d5580f092040d6101390429cc8e7768b2d1c05"
         ],
         [
           "/api/v1/shop/newest",
@@ -3326,7 +3326,7 @@
           ],
           "title_ladders",
           "get_title_ladders",
-          "c42099dd8468c57fdaeb652cdc713c8d6d4e19b3"
+          "0d875f46addf7d60fbca917af1827fd112462ab1"
         ]
       ]
     }
