@@ -239,8 +239,9 @@ def test_c12c_a_409_on_any_face_lease_still_drops_the_image(monkeypatch, tmp_pat
         rig = app_rig(env, stub=stub)
         await run_pack(rig, own)
         one_post_without_image(rig)
-        assert len(rig.acquires()) == 4
-        assert len(rig.releases()) == 3, "every lease taken is released"
+        assert [c.status for c in rig.acquires() if (c.payload or {}).get("subject_ref") == busy] == [409]
+        taken = [c for c in rig.acquires() if c.status == 200]
+        assert taken and len(rig.releases()) == len(taken), "every lease taken is released"
     e2e(monkeypatch, tmp_path, body)
 
 
@@ -457,7 +458,9 @@ async def k_inserted_page(env, base=2000.0, tag="k"):
 def assert_k_inserted_outcome(rig, subs, state):
     """14d's baseline: no attachment, the list A-J rendered from the re-read,
     and the log line naming the manifest comparison."""
-    first, again = json_calls(rig, "binder")[0], json_calls(rig, "binder")[1]
+    calls = json_calls(rig, "binder")
+    assert len(calls) == 2, f"expected the read and the re-read, got {len(calls)} binder JSON reads"
+    first, again = calls
     names = [p["subject_name"] for p in body_of(first)["prints"]]
     assert names == [s.name for s in subs[:10]], names
     man = manifest(byte_call(rig), "binder")
@@ -581,8 +584,8 @@ def test_the_first_failing_clause_names_the_outcome(monkeypatch, tmp_path):
         for name, fn in RUNS_12N:
             try:
                 await fn(env)
-            except AssertionError as ex:
-                failed[name] = " ".join(str(ex).split())[:240]
+            except Exception as ex:
+                failed[name] = (type(ex).__name__ + ": " + " ".join(str(ex).split()))[:240]
         for name in sorted(failed):
             print(f"ROW12N run {name} FAILED: {failed[name]}")
         assert not failed, f"ROW12N failed runs: {','.join(sorted(failed))}"
@@ -1396,6 +1399,27 @@ def test_composite_leases_name_a_subject_and_never_a_print(monkeypatch, tmp_path
 
 
 def test_c22_a_discarded_print_in_the_pack_still_draws(monkeypatch, tmp_path):
+    """Row 13's fact through the bot's own step 1: the strip the bot fetches
+    draws the discarded print as a stamped face. Read at the byte call, which
+    precedes every acquire, so it holds whatever an acquire sends."""
+    async def body(env):
+        own, subs, pack = await pack_of(env)
+        prints = await env.pack_prints(pack)
+        await env.discard(own, prints[1]["print_id"])
+        rig = app_rig(env)
+        await run_pack(rig, own)
+        call = byte_call(rig)
+        assert call.status == 200, call.status
+        assert H.image_of(call.reply.body).size == (1947, 549)
+        man = manifest(call)
+        assert (man[1][3], man[1][5]) == ("face", "discarded"), man
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_c22_the_discarded_prints_subject_is_leased_and_the_image_attached(monkeypatch, tmp_path):
+    """Stated over the UNMUTATED tree (build notes, FINDING 7): the outcome row
+    22's property exists for - a subject-keyed lease admits the discarded
+    print's subject, so the picture posts."""
     async def body(env):
         own, subs, pack = await pack_of(env)
         prints = await env.pack_prints(pack)
@@ -1403,8 +1427,6 @@ def test_c22_a_discarded_print_in_the_pack_still_draws(monkeypatch, tmp_path):
         rig = app_rig(env)
         await run_pack(rig, own)
         one_post_with_image(rig)
-        man = manifest(byte_call(rig))
-        assert (man[1][3], man[1][5]) == ("face", "discarded"), man
         assert subs[1].id in acquired_subjects(rig)
     e2e(monkeypatch, tmp_path, body)
 

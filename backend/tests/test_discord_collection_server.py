@@ -2228,18 +2228,24 @@ def test_the_composite_statement_is_assembled_and_runs(monkeypatch, tmp_path):
         sent = []
         hook = _record_texts(env.database.engine, sent)
         try:
-            forms = {}
-            r = await env.strip(pack, owner.discord)
-            assert r.status_code == 200, (r.status_code, r.text[:200])
-            forms["strip"] = sent[-1]
-            r = await env.packs_json(owner.discord, pack)
-            assert r.status_code == 200, (r.status_code, r.text[:200])
-            forms["pack read"] = sent[-1]
-            r = await env.binder_json(owner.discord, owner.discord)
-            assert r.status_code == 200, (r.status_code, r.text[:200])
-            forms["binder"] = sent[-1]
+            forms, answers = {}, {}
+            for name, call in (("strip", lambda: env.strip(pack, owner.discord)),
+                               ("pack read", lambda: env.packs_json(owner.discord, pack)),
+                               ("binder", lambda: env.binder_json(owner.discord, owner.discord))):
+                before = len(sent)
+                r = await call()
+                answers[name] = (r.status_code, len(sent) - before)
+                if r.status_code == 200 and len(sent) > before:
+                    forms[name] = sent[-1]
         finally:
             event.remove(env.database.engine.sync_engine, "before_execute", hook)
+        try:
+            env.main._pc_composite_row_sql("WHERE false")
+            built = "builds"
+        except Exception as ex:
+            built = f"{type(ex).__name__}: {ex}"
+        print(f"ROW26C (status, composite statements sent) per route: {answers}; the builder: {built}")
+        assert all(st == 200 and n >= 1 for st, n in answers.values()), answers
         assert forms["binder"][0].startswith("WITH live AS MATERIALIZED"), forms["binder"][0][:60]
         for name, (sql, binds) in forms.items():
             assert "{17}" in sql, name
