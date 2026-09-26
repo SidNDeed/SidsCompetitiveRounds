@@ -3856,7 +3856,18 @@ def test_r12cl1_every_file_msbuild_reads_for_the_project_is_held_by_the_gate(tmp
     Analyzer items and an SDK reference each REFUSE the compile set, where
     the first-pass gate gave no reason; NuGet's own shape, a .user or
     extension file carrying only a property, and a task output adding
-    another item type are accepted."""
+    another item type are accepted.
+
+    ROUND 13 (R12R-L1): the gate reads each file as the parser reads it.  An
+    output into the Compile or Analyzer items spelled with a character
+    reference, as a child element with surrounding space, as an
+    ItemDefinitionGroup default, through an expansion, an `%XX` escape or an
+    entity the parser expands; a default-items switch inside a task's
+    properties spelled with a character reference or an escape; and a .user
+    file that is not XML each REFUSE the compile set, where the round-12
+    reading of the same text -- every pattern over the raw text -- gave no
+    reason either; the same constructions decoding to another item type or
+    property are accepted."""
     projects = sorted(p for p in PLUGIN.iterdir()
                       if p.is_file() and p.suffix.lower() == ".csproj")
     files, listing = _r12_msbuild_files(PLUGIN, projects)
@@ -3966,8 +3977,59 @@ def test_r12cl1_every_file_msbuild_reads_for_the_project_is_held_by_the_gate(tmp
         ("a .user file whose task output adds another item type", user,
          plain_body(output % ("zz", "ZzItems")), False),
     )
-    refused = accepted = 0
-    for label, rel, body, want in cases:
+    # ROUND 13 (R12R-L1): each spelling below reads as its literal form once
+    # parsed or decoded; the round-12 reading of the raw text gave no reason.
+    ref = ('  <ItemGroup><ProjectReference Include="..' + bs + "ZzGen" + bs
+           + 'ZzGen.csproj"%s</ItemGroup>' + LF)
+    task = ('  <Target Name="ZzTarget" BeforeTargets="CoreCompile"><MSBuild '
+            'Projects="$(MSBuildProjectFullPath)" Targets="ZzInner" '
+            'Properties="%s" /></Target>' + LF)
+    r13_cases = (
+        ("a .user file adding a Compile item through a task output whose item "
+         "type is spelled with a character reference", user,
+         plain_body(output % (elsewhere, "Com&#112;ile")), True),
+        ("an extension props file under obj/ taking a project reference's "
+         "output as an Analyzer spelled with a character reference", ext_p,
+         plain_body(ref % ' OutputItemType="&#x41;nalyzer" />'), True),
+        ("a .user file naming a project reference's output type Compile in a "
+         "child element with surrounding space", user,
+         plain_body(ref % "><OutputItemType> Compile </OutputItemType>"
+                    "</ProjectReference>"), True),
+        ("an extension targets file under obj/ giving every project reference "
+         "the output type Analyzer by default", ext_t, plain_body(
+             "  <ItemDefinitionGroup><ProjectReference><OutputItemType>Analyzer"
+             "</OutputItemType></ProjectReference></ItemDefinitionGroup>" + LF),
+         True),
+        ("a .user file naming a task output's item type with an expansion "
+         "inside it", user,
+         plain_body(output % (elsewhere, "Comp$(ZzEmpty)ile")), True),
+        ("a .user file naming a task output's item type with an MSBuild "
+         "escape", user, plain_body(output % (elsewhere, "Com%70ile")), True),
+        ("a .user file naming a task output's item type through an entity the "
+         "parser expands", user,
+         '<!DOCTYPE Project [<!ENTITY zz "Compile">]>' + LF
+         + plain_body(output % (elsewhere, "&zz;")), True),
+        ("an extension targets file under obj/ switching the default items "
+         "off inside a task's properties with a character reference", ext_t,
+         plain_body(task % "EnableDefault&#67;ompileItems=false"), True),
+        ("a .user file switching the default items off inside a task's "
+         "properties with an MSBuild escape", user,
+         plain_body(task % "EnableDefault%43ompileItems=false"), True),
+        ("a .user file that is not XML", user, "<Project>" + LF, True),
+        ("a .user file whose task output's item type decodes to another item "
+         "type", user, plain_body(output % ("zz", "ZzI&#116;ems")), False),
+        ("an extension props file under obj/ naming a project reference's "
+         "output type in a child element that decodes to another item type",
+         ext_p, plain_body(ref % "><OutputItemType>Zz&#x49;tems"
+                                 "</OutputItemType></ProjectReference>"),
+         False),
+        ("an extension targets file under obj/ whose task properties decode "
+         "to another property", ext_t,
+         plain_body(task % "ZzDebug&#80;rofile=false"), False),
+    )
+    refused = accepted = r13_refused = 0
+    for label, rel, body, want, r13 in ([c + (False,) for c in cases]
+                                        + [c + (True,) for c in r13_cases]):
         f = scratch / rel
         before = f.read_bytes() if f.exists() else None
         f.write_bytes(body.encode("utf-8"))
@@ -3977,6 +4039,10 @@ def test_r12cl1_every_file_msbuild_reads_for_the_project_is_held_by_the_gate(tmp
             if want:
                 assert got, "not refused: " + label
                 assert first == [], ("the first-pass gate read it", label, first)
+                if r13:
+                    assert _r12_authority_text_reasons_round12(body) == [], (
+                        "the round-12 reading saw it", label)
+                    r13_refused += 1
                 try:
                     _r12_compile_sources(scratch)
                     raise AssertionError("the compile set was read past: " + label)
@@ -3985,7 +4051,9 @@ def test_r12cl1_every_file_msbuild_reads_for_the_project_is_held_by_the_gate(tmp
                                                                         str(exc))
                 refused += 1
                 print("R12CL1 CASE %s : REFUSED -- %s; the first-pass gate gave "
-                      "no reason" % (label, got[0]))
+                      "no reason%s" % (label, got[0], "; the round-12 reading of "
+                                       "its raw text gave none either" if r13
+                                       else ""))
             else:
                 assert got == [], (label, got)
                 assert sorted(_r12_compile_sources(scratch)) == ["ApiClient.cs"], label
@@ -3996,9 +4064,11 @@ def test_r12cl1_every_file_msbuild_reads_for_the_project_is_held_by_the_gate(tmp
                 f.unlink()
             else:
                 f.write_bytes(before)
-    assert (refused, accepted) == (20, 4), (refused, accepted)
+    assert (refused, accepted) == (30, 7), (refused, accepted)
+    assert r13_refused == 10, r13_refused
     print("R12CL1 GATE: %d case(s) refused where the first-pass gate gave no "
-          "reason; %d accepted" % (refused, accepted))
+          "reason, %d of them where the round-12 reading gave none either; %d "
+          "accepted" % (refused, r13_refused, accepted))
 
 
 def test_r12cl2_a_using_alias_string_in_any_msbuild_spelling_refuses_the_binding(
@@ -4402,12 +4472,22 @@ _R12_AUTHORITY_FORMS = (
         r"\bDefault(?:LanguageSourceExtension|(?:Item)?ExcludesInProjectFolder)\b",
         re.I)),
     ("an Analyzer item", re.compile(r"<\s*Analyzer\b", re.I)),
-    ("an output into the Compile or Analyzer items", re.compile(
-        r"\b(?:ItemName|OutputItemType)\s*=\s*([\"'])\s*"
-        r"(?:(?:Compile|Analyzer)\s*\1|[$@%]\()", re.I)),
+    # an output into the Compile or Analyzer items is read from the parsed
+    # file by `_r13_output_item_types`, not by a pattern (R12R-L1)
     ("an SDK reference", re.compile(
         r"<\s*Sdk\b|\bSdk\s*=\s*([\"'])(?!Microsoft\.NET\.Sdk\1)", re.I)),
 )
+# THE ROUND-12 PATTERN for an output into the Compile or Analyzer items, over
+# the raw text -- the same pattern, its literal split differently.  Kept ONLY
+# so `test_r12cl1_...` can show the spellings it did not see; the gate reads
+# the parsed item type instead (R12R-L1).
+_R12_OUTPUT_FORM_ROUND12 = ("an output into the Compile or Analyzer items",
+                            re.compile(r"\b(?:ItemName|OutputItemType)\s*=\s*"
+                                       r"([\"'])\s*(?:(?:Compile|Analyzer)\s*\1"
+                                       r"|[$@%]\()", re.I))
+# the item types an output may not name, because they decide what the
+# project compiles (R12R-L1)
+_R13_AUTHORITY_ITEM_TYPES = ("compile", "analyzer")
 # the two forms NuGet's own generated files carry, held to NuGet's shape
 _R12_NUGET_SHAPED = ("a Compile item", "an Import")
 _R12_PACKAGE_FILE = re.compile(r"\$\(NuGetPackageRoot\)(?!.*\.\.)[A-Za-z0-9_.+\-\\/]+")
@@ -4489,10 +4569,89 @@ def _r12_nuget_shape_problems(role, path):
     return out
 
 
+# ROUND 13 (R12R-L1, R12R-L2) -- THE ITEM TYPE AN OUTPUT NAMES, READ AS
+# MSBUILD READS IT, ON ANY ELEMENT.  MSBuild names an output's item type in
+# two places: a task's `<Output ItemName="..." />`, and an item's
+# OutputItemType metadata -- a ProjectReference with OutputItemType adds what
+# the referenced project returns to the items of that type, and an
+# ItemDefinitionGroup can give every such reference that metadata by default.
+# Either can be an attribute or a child element, and either is parsed, so a
+# character reference in it is decoded.  `_r13_output_item_types` reads, from
+# any element, every attribute named ItemName or OutputItemType and the text
+# of an element so named, in any letter case and without its namespace;
+# `_r13_item_type_is` compares a value with its surrounding space dropped, in
+# any letter case, after every `%XX` escape is decoded -- so the comparison
+# does not depend on whether MSBuild decodes one there -- and a value carrying
+# an expansion (`$(`, `@(`, `%(`), before or after that decoding, is taken to
+# name the type, as this reading does not evaluate it.
+_R13_OUTPUT_TYPE_NAMES = ("itemname", "outputitemtype")
+
+
+def _r13_output_item_types(el):
+    """Every item type the element `el` names for an output: its ItemName and
+    OutputItemType attributes, and its own text when it is an element so
+    named (R12R-L1, R12R-L2)."""
+    out = [v for k, v in el.attrib.items()
+           if _r12_local(k).lower() in _R13_OUTPUT_TYPE_NAMES]
+    if _r12_local(el.tag).lower() in _R13_OUTPUT_TYPE_NAMES:
+        out.append("".join(el.itertext()))
+    return out
+
+
+def _r13_item_type_is(value, wanted):
+    """Whether the item type `value` is one of `wanted` (lower case) as this
+    reading compares it, or carries an expansion it does not evaluate."""
+    decoded = _r12_msbuild_unescape(value)
+    if any(x in v for v in (value, decoded) for x in _R12_MSBUILD_EXPANSION):
+        return True
+    return decoded.strip().lower() in wanted
+
+
+# ROUND 13 (R12R-L1) -- THE GATE READS EACH FILE AS THE PARSER READS IT.  Round
+# 12 ran every form's pattern over each file's raw text, so a form spelled
+# with an XML character reference -- `ItemName="Com&#112;ile"`, which the
+# parser, and so MSBuild, reads as Compile -- or with MSBuild's own `%XX`
+# escape matched no pattern.  Each form is now also searched in two views of
+# the parsed file: every element, attribute and text rendered as the parser
+# reads it (references and entities decoded, comments gone, namespaces
+# dropped), and that rendering with every `%XX` decoded.  A file that cannot
+# be read as XML is a reason.  An output's item type is read from the parsed
+# file by `_r13_output_item_types`, on any element, and is a reason when
+# `_r13_item_type_is` finds it names the Compile or Analyzer items or carries
+# an expansion.
+def _r13_msbuild_views(role, path):
+    """((the file as parsed, the same with every %XX decoded), root, []) for
+    the MSBuild file at `path`; ((), None, [reason]) when it cannot be read
+    as XML (R12R-L1)."""
+    try:
+        root = ET.fromstring(path.read_bytes())
+    except (OSError, ET.ParseError) as exc:
+        return (), None, ["%s could not be read as XML (%s)"
+                          % (role, type(exc).__name__)]
+    said = []
+    for el in root.iter():
+        said.append("<" + _r12_local(el.tag) + "".join(
+            ' %s="%s"' % (_r12_local(k), v) for k, v in el.attrib.items()) + ">")
+        said.append(el.text or "")
+        said.append(el.tail or "")
+    said = LF.join(said)
+    return (said, _r12_msbuild_unescape(said)), root, []
+
+
+def _r12_authority_text_reasons_round12(text):
+    """THE ROUND-12 READING of one file, the same in behaviour: every form's
+    pattern over the raw text, the output pattern among them.  Kept ONLY so
+    `test_r12cl1_...` can show the spellings it did not see; nothing else
+    calls it."""
+    return [label for label, rx in _R12_AUTHORITY_FORMS + (_R12_OUTPUT_FORM_ROUND12,)
+            if rx.search(text)]
+
+
 def _r12_compile_authority_problems(plugin_dir):
     """[reason] -- why the SDK default compile glob is NOT the authority for
     what the project in `plugin_dir` compiles; [] when it is (R11-L1; R12CL1
-    for the files MSBuild reads besides the project file)."""
+    for the files MSBuild reads besides the project file; R12R-L1 for each
+    file read as the parser reads it, not only as its raw text)."""
     plugin_dir = pathlib.Path(plugin_dir)
     projects = sorted(p for p in plugin_dir.iterdir()
                       if p.is_file() and p.suffix.lower() == ".csproj")
@@ -4510,11 +4669,18 @@ def _r12_compile_authority_problems(plugin_dir):
             continue
         if kind == "project" and not _R12_SDK_PROJECT.search(text):
             out.append("the project file is not SDK-style")
+        views, root, unread = _r13_msbuild_views(role, p)
+        out.extend(unread)
         for label, rx in _R12_AUTHORITY_FORMS:
             if kind == "nuget" and label in _R12_NUGET_SHAPED:
                 continue
-            if rx.search(text):
+            if any(rx.search(v) for v in (text,) + views):
                 out.append("%s carries %s" % (role, label))
+        if root is not None and any(
+                _r13_item_type_is(v, _R13_AUTHORITY_ITEM_TYPES)
+                for el in root.iter() for v in _r13_output_item_types(el)):
+            out.append("%s carries an output into the Compile or Analyzer items"
+                       % role)
         if kind == "nuget":
             out.extend(_r12_nuget_shape_problems(role, p))
     here = plugin_dir.resolve()
