@@ -106,9 +106,9 @@ C_STALE_WALKS = (
     [x for w in ("W3.1", "W3.2", "W3.3", "W3.4", "W4.1", "W4.2", "W4.4", "W5.2", "W5.3", "W5.4",
                  "W6.1", "W6.5", "W6.7") for x in walk(w, "ii")]
     + walk("W6.6") + walk("W6.6s", None) + walk("W6.7a", None) + walk("W6.15", None)
-    + walk("W6.10", None)
+    + walk("W6.10", None) + walk("W6.9") + walk("W6.9p", None)
 )
-assert len(C_STALE_WALKS) == 20, len(C_STALE_WALKS)
+assert len(C_STALE_WALKS) == 24, len(C_STALE_WALKS)
 
 # ── the rows (V10 section 5: V4's 23, then V5-V9's 14) ─────────────────
 # Each: id, file, function signature text, anchor, mutation, twin,
@@ -250,11 +250,11 @@ ROWS = [
     ("C-KEYED", NR, "static bool KeyedReadsAllowed(", "return !gate || game >= 1;",
      "return game >= 1;", "return !gate || 1 <= game;",
      units("KEYED-3") + walk("W7.8", None),
-     ("walk-D12 W7.8", "EXPECTED g4 CS{A4,B4,C-,D4} expected 4")),
+     ("walk-D12 W7.8", "EXPECTED g4 CS none, expected 4 on C")),
     ("C-RESETG", NR, "static int CounterAfterRoomChange(", "return (gate || lastName != name) ? 0 : counter;",
      "return 0;", "return (gate || lastName != name) ? 0 : counter + 0;",
      units("RESETG-2") + walk("W7.8", None),
-     ("walk-D12 W7.8", "EXPECTED g5 CS{A5,B5,C1,D5} expected 5")),
+     ("walk-D12 W7.8", "EXPECTED g5 CS{C1} expected 5")),
     ("C-SAMEGAME", NR, "static bool EpochEvidence(",
      "return sameEpoch && ahead && (!gate || (pickGame == phaseGame && pickCycle == phaseCycle));",
      "return sameEpoch && ahead && (!gate || pickCycle == phaseCycle);",
