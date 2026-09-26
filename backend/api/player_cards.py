@@ -20,6 +20,10 @@ only move rows and money and the tests exercise the rule itself:
     nothing about the score line as an input (the 2-0 sweep roll was removed
     in v4.13).
   * the canonical strings every signed request carries.
+  * ``PC_TRADE`` -- every trading tunable (caps, cooldowns, windows,
+    the traded discard value) -- and ``trade_items`` / ``trade_digest``,
+    the canonical item list of a trade and its SHA-256, which the
+    client mirrors byte for byte.
 
 No pity, no floors, no streaks. A print's rolled fields are fixed at the pull
 and no api path writes them again: the ``pc_prints_immutable`` trigger refuses
@@ -31,6 +35,7 @@ band conversion of the rank-2 prints minted while Legendary was rank 1 alone.
 
 import hashlib
 import hmac
+import uuid as _uuid
 
 RARITIES = ("common", "uncommon", "rare", "epic", "legendary")   # ascending
 
@@ -65,6 +70,29 @@ PC_ECONOMY = {
     # many times before the open is rejected as pool_changed (before any debit).
     "reroll_attempts": 3,
     "snapshot_keep": 14,
+}
+
+# Card trading (migration 353): cards for cards between two players and
+# nothing else. The server enforces every value; the client only displays
+# them, read from the bounds of the full trades read, and hardcodes none.
+PC_TRADE = {
+    "enabled": True,                    # the kill switch for propose and accept (3.13)
+    "prints_per_side_max": 3,           # Q2
+    "ttl_hours": 48,                    # Q3
+    "open_sent_max": 5,                 # open proposals one player has sent
+    "open_received_max": 10,            # open proposals one player can be sent
+    "proposals_per_day": 20,            # proposals one player may create per UTC day
+    "executed_per_day": 5,              # executed trades per player per UTC day, either role; reversed ones count (Q1)
+    "executed_per_pair_day": 2,         # executed trades per pair per UTC day (Q1)
+    "decline_cooldown_hours": 24,       # a declined proposer to that receiver (Q5)
+    "reversal_window_minutes": 60,      # the admin window AND the re-trade freeze on a moved print
+    "reversal_cooldown_hours": 72,      # both parties of a reversed trade (Q5)
+    "min_ranked_series": 3,             # Q6
+    "min_mod_age_days": 7,              # Q6
+    "traded_discard_shards": 0,         # shards for discarding a print ever received by trade, any rarity (Q7, ruled)
+    "recent_days": 7,                   # closed trades the full read returns
+    "retention_closed_days": 30,
+    "retention_executed_days": 180,
 }
 
 PACK_PAY = ("gold", "shards")
@@ -187,3 +215,36 @@ def canon_portrait(steam_id: str, nonce: str, upload_sha256: str, descriptor: st
 
 def canon_read(steam_id: str, what: str, target: str) -> str:
     return f"pcread:{steam_id}:{what}:{target}"
+
+
+# -- card trading: the canonical item list, its digest, the signed term --
+
+def trade_items(steam_id: str, give, to: str, get) -> str:
+    """The canonical item list of a trade in which `steam_id` gives the prints
+    `give` and `to` gives the prints `get`:
+
+        items = "pctl1|" + block(X) + "|" + block(Y)
+        block = steam_id + ":" + ",".join(print ids this party gives, ascending)
+
+    X and Y are the two parties in ascending steam id text order (both are
+    17-digit SteamID64 strings, so text order is numeric order), and every id
+    is its lowercase 8-4-4-4-12 text. The client builds the same string with
+    Guid.ToString("D"). Raises ValueError on an id that is not a UUID."""
+    def block(party, ids):
+        return str(party) + ":" + ",".join(sorted(str(_uuid.UUID(str(v))) for v in ids))
+    first, second = sorted(((str(steam_id), give), (str(to), get)), key=lambda side: side[0])
+    return "pctl1|" + block(*first) + "|" + block(*second)
+
+
+def trade_digest(items: str) -> str:
+    """Lowercase hex SHA-256 of the ASCII bytes of the canonical item list."""
+    return hashlib.sha256(items.encode("ascii")).hexdigest()
+
+
+def canon_trade(steam_id: str, nonce: str, action: str, target: str, digest: str) -> str:
+    """The signed term of every trade action: `target` is the counterparty's
+    steam id for a propose (no trade id exists yet) and the trade id for an
+    accept, a decline or a cancel. Every field but the nonce has a fixed
+    format with no colon, and the nonce's grammar excludes it too, so the
+    string is injective."""
+    return f"pctrade:{steam_id}:{nonce}:{action}:{target}:{digest}"

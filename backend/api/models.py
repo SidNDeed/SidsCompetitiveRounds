@@ -25,6 +25,17 @@ class Base(DeclarativeBase):
 # it through the ORM (an undeclared column is a silent no-op, learning #346);
 # stamp it in SQL or not at all. (Kept outside the class body so the route
 # manifest's Player fingerprint does not move for a comment.)
+# Player also owns pc_trades_open BOOLEAN and pc_trades_generation INTEGER in
+# SQL (migration 353, card trading), NOT declared below on purpose: every
+# reader and writer is raw SQL that asks the trading schema probe first, so
+# an api deployed ahead of the migration answers as the build before it. A
+# mapped column would join every select(Player) and every ORM insert of a
+# player, and on a box the migration has not reached each of them would
+# fail (the verified-actor read of every Player Cards route among them).
+# The SQL defaults (true, 0) cover every row the ORM creates. Never assign
+# either through the ORM (an undeclared column is a silent no-op, learning
+# #346). (Outside the class body, as the note above, so the route
+# manifest's Player fingerprint does not move for a comment.)
 class Player(Base):
     __tablename__ = "players"
 
