@@ -8,12 +8,13 @@ that team was already a game up AND the abandoned game saw real play (two
 points). The second half used to be the report's query-string snapshot, so two
 honest survivors holding different snapshots of one game got different
 settlements depending on which report took the series lock first. It is now
-team_series_games (migrations 348 and 351), written by the team live-points
-POST: one row per game, named by the series, its recorded games plus one and
-the sitting's room, holding which seat posted which pair. The DC report asks
-whether any history in which the game did not reach two points could have
-produced that record. No time is read (main.py, the comment above
-_team_game_identity).
+team_series_games (migrations 348, 351 and 352), written by the team
+live-points POST: one row per game, named by the series, its recorded games
+plus one and the sitting's room, holding which seat posted which pair, and
+which of those posts named their game. A crossing needs a pair of two points
+from a seat of each team (hotfix round 2); the DC report then asks whether any
+history in which the game did not reach two points could have produced that
+record. No time is read (main.py, the comment above _team_game_identity).
 
 STRUCTURAL (always runs, no database): the condition that opens the
 lead-forfeit branch asks the per-game record and compares no snapshot.
@@ -102,6 +103,8 @@ MIGRATION_348 = os.path.join(SQL_DIR, "348_team_series_games.sql")
 # Applied after 348 when present. A tree from before it has no such file, so
 # the file also runs, unchanged, against that older tree.
 MIGRATION_351 = os.path.join(SQL_DIR, "351_team_series_games_identity.sql")
+# Applied after 351 when present: which seat named which game.
+MIGRATION_352 = os.path.join(SQL_DIR, "352_team_series_games_attested_seats.sql")
 
 SECRET = "teamdc-test-secret"
 ROOM = "teamdc_room"
@@ -241,12 +244,15 @@ def _dc_sig(reporter, series_id, dc_player):
 class _Lab:
     """One throwaway schema holding the tables the two endpoints touch.
     `with_identity=False` stops after migration 348 (the API-before-351
-    deploy order)."""
+    deploy order), `with_attested_seats=False` after 351 (the API-before-352
+    one)."""
 
-    def __init__(self, with_games_table=True, with_identity=True):
+    def __init__(self, with_games_table=True, with_identity=True,
+                 with_attested_seats=True):
         self.schema = "teamdc_" + uuid.uuid4().hex[:12]
         self.with_games_table = with_games_table
         self.with_identity = with_identity
+        self.with_attested_seats = with_attested_seats
         self.engine = None
         self.sm = None
         self._n = 0
@@ -276,6 +282,8 @@ class _Lab:
                 await conn.execute(_read(MIGRATION_348))
                 if self.with_identity and os.path.exists(MIGRATION_351):
                     await conn.execute(_read(MIGRATION_351))
+                    if self.with_attested_seats and os.path.exists(MIGRATION_352):
+                        await conn.execute(_read(MIGRATION_352))
         finally:
             await conn.close()
         return self
@@ -398,12 +406,29 @@ class _Lab:
                 row["invalidation_reason"], forfeits)
 
     async def game_row(self, ser, ordinal, room=ROOM):
+        """The record of game `ordinal` in sitting `room`, every column (they
+        differ before and after migration 352), or None."""
         rows = await self.sql(
-            "SELECT game_ordinal, sitting_room, pair_seats, attested_max_sum"
+            "SELECT *"
             "  FROM team_series_games"
             " WHERE series_id = :sid AND game_ordinal = :o AND sitting_room = :r",
             {"sid": ser["sid"], "o": ordinal, "r": room})
         return rows[0] if rows else None
+
+    async def crossed(self, ser):
+        """The record rule's verdict for the game in progress, asked the way
+        the DC report asks it: under the series row lock, from the row that
+        lock pins. Nothing is written."""
+        from sqlalchemy import text
+        async with self.sm() as db:
+            row = (await db.execute(text(
+                "SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id,"
+                "       t1_series_wins, t2_series_wins, photon_room_id"
+                "  FROM team_series WHERE id = :sid FOR NO KEY UPDATE"),
+                {"sid": ser["sid"]})).mappings().first()
+            verdict = await main._team_game_crossed_two(db, ser["sid"], row, None)
+            await db.rollback()
+            return verdict
 
 
 @pytest.fixture
@@ -451,9 +476,10 @@ def test_the_settlement_is_the_same_whichever_survivor_reports_first(wired, play
     low-first on the other. Before the fix, order decided: high-first completed
     the series with ratings, low-first sent it to dc_incomplete.
 
-    The played game shows 1-1 from TWO seats. A 1-1 from one seat alone could
+    The played game shows 1-1 from a seat of EACH team. One team's seats
+    alone prove nothing (hotfix round 2), and a 1-1 from one seat alone could
     be the previous game's irregular seat (a relaunched or late-starting
-    client) and proves nothing; two seats cannot both be."""
+    client); two seats cannot both be."""
     async def go():
         async with _Lab() as lab:
             outcomes = {}
@@ -462,7 +488,7 @@ def test_the_settlement_is_the_same_whichever_survivor_reports_first(wired, play
                 await lab.post(ser, 0, 1, 0)
                 if played:
                     await lab.post(ser, 0, 1, 1)
-                    await lab.post(ser, 1, 1, 1)
+                    await lab.post(ser, 2, 1, 1)
                 first, second = (HIGH, LOW) if order == "high-first" else (LOW, HIGH)
                 a, b = await _two_reports(lab, ser, first, second)
                 assert b.get("ignored") is True, b    # the second finds it settled
@@ -556,18 +582,18 @@ def test_a_relock_opens_the_game_again(wired):
     clears the room and stamps relocked_at, and the next sitting is issued its
     own room. The dead sitting's posts that land after that are filed under
     the new sitting's first game, where nothing bounds what they carry, so
-    even two seats' 1-1 there settles nothing. The control series, identical
-    but never relocked, completes."""
+    even a 1-1 from a seat of each team there settles nothing. The control
+    series, identical but never relocked, completes."""
     async def go():
         async with _Lab() as lab:
             relocked = await lab.series()
             await lab.post(relocked, 0, 1, 1)                  # the dead sitting
             await lab.relock(relocked, ROOM_NEXT)
             await lab.post(relocked, 0, 1, 1)                  # its re-sends, landing late
-            await lab.post(relocked, 1, 1, 1)
+            await lab.post(relocked, 2, 1, 1)
             control = await lab.series()
             await lab.post(control, 0, 1, 1)
-            await lab.post(control, 1, 1, 1)
+            await lab.post(control, 2, 1, 1)
             await _two_reports(lab, relocked, HIGH, HIGH, room=ROOM_NEXT)
             await _two_reports(lab, control, LOW, LOW)
             return (await lab.settlement(relocked), await lab.settlement(control),
@@ -577,31 +603,31 @@ def test_a_relock_opens_the_game_again(wired):
     assert relocked[0] == "dc_incomplete", relocked
     assert control[:2] == ("completed", 1), control
     assert dead_row["pair_seats"] == _bit(1, 1, 0), dead_row
-    assert next_row["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 1), next_row
+    assert next_row["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 2), next_row
 
 
 @needs_pg
 def test_a_post_below_two_never_clears_a_crossing(wired):
     """Bits are only OR-ed: later posts below two points (a relaunched seat's
     lower view, a seat still at 0-0) add their own bits, clear none, and the
-    record still proves the crossing."""
+    record still proves the crossing, asked the way the DC report asks it."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
             await lab.post(ser, 0, 1, 1)
-            await lab.post(ser, 1, 1, 1)
+            await lab.post(ser, 2, 1, 1)
             before = await lab.game_row(ser, 2)
             await lab.post(ser, 3, 1, 0)
-            await lab.post(ser, 2, 0, 0)
+            await lab.post(ser, 1, 0, 0)
             after = await lab.game_row(ser, 2)
-            return before, after
+            return before, after, await lab.crossed(ser)
 
-    before, after = _run(go())
-    assert before["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 1), before
+    before, after, crossed = _run(go())
+    assert before["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 2), before
     assert after["pair_seats"] == (before["pair_seats"] | _bit(1, 0, 3)
-                                   | _bit(0, 0, 2)), after
-    assert after["attested_max_sum"] == 0, after
-    assert not main._team_game_unplayed_fits("second", after["pair_seats"], 0)
+                                   | _bit(0, 0, 1)), after
+    assert after["attested_seats"] == 0, after
+    assert crossed is True
 
 
 @needs_pg
@@ -866,14 +892,14 @@ def test_the_game_after_a_relocked_sittings_first_reads_its_own_record(wired, no
 def test_an_attested_post_settles_the_first_game_of_a_relocked_sitting(wired, attested):
     """The first game of a relocked sitting takes no legacy proof: the dead
     sitting's posts can land in its record carrying anything. A post naming
-    its game and sitting is filed only when it is exactly that game, so its
-    two points prove the game crossed. The same posts without the names
-    settle nothing."""
+    its game and sitting is filed only when it is exactly that game, so a 1-1
+    named so by a seat of each team proves the game crossed. The same posts
+    without the names settle nothing."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
             await lab.relock(ser, ROOM_NEXT)
-            for seat in (0, 1):
+            for seat in (0, 2):
                 if attested:
                     await lab.post(ser, seat, 1, 1, game=2, room=ROOM_NEXT)
                 else:
@@ -883,8 +909,8 @@ def test_an_attested_post_settles_the_first_game_of_a_relocked_sitting(wired, at
             return row, await lab.settlement(ser)
 
     row, settled = _run(go())
-    assert row["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 1), row
-    assert row["attested_max_sum"] == (2 if attested else 0), row
+    assert row["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 2), row
+    assert row["attested_seats"] == (row["pair_seats"] if attested else 0), row
     assert settled[:2] == (("completed", 1) if attested else ("dc_incomplete", None)), settled
 
 
@@ -894,7 +920,8 @@ def test_an_attested_post_for_another_game_or_sitting_is_not_filed(wired):
     names: game 1's post processed during game 2, and a post naming another
     room, are accepted and leave no trace in any record. A room carrying a
     suffix after the stored one (the report-room grammar team_series_report_dc
-    also accepts) is the same sitting."""
+    also accepts) is the same sitting: with a seat of the other team naming
+    the same game, the record proves the crossing."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()                           # game 2, in ROOM
@@ -903,6 +930,7 @@ def test_an_attested_post_for_another_game_or_sitting_is_not_filed(wired):
             untouched = (await lab.game_row(ser, 1), await lab.game_row(ser, 2),
                          await lab.game_row(ser, 2, ROOM_NEXT))
             await lab.post(ser, 1, 1, 1, game=2, room=ROOM + "_1")
+            await lab.post(ser, 2, 1, 1, game=2, room=ROOM)
             filed = await lab.game_row(ser, 2)
             await _two_reports(lab, ser, LOW, LOW)
             return prev_game, other_room, untouched, filed, await lab.settlement(ser)
@@ -910,7 +938,8 @@ def test_an_attested_post_for_another_game_or_sitting_is_not_filed(wired):
     prev_game, other_room, untouched, filed, settled = _run(go())
     assert prev_game["status"] == "ok" and other_room["status"] == "ok"
     assert untouched == (None, None, None), untouched
-    assert filed["pair_seats"] == _bit(1, 1, 1) and filed["attested_max_sum"] == 2, filed
+    both = _bit(1, 1, 1) | _bit(1, 1, 2)
+    assert filed["pair_seats"] == both and filed["attested_seats"] == both, filed
     assert settled[:2] == ("completed", 1), settled
 
 
@@ -996,12 +1025,12 @@ def test_migration_351_runs_twice_over_a_348_table(wired):
 def test_before_migration_351_nothing_fails_and_nothing_auto_completes(wired):
     """The deploy-order claim in 351's header: this API against a database
     with 348 but not 351 records nothing and reads nothing, fails no request,
-    and the DC report settles as dc_incomplete even on a game two seats
-    posted 1-1 in."""
+    and the DC report settles as dc_incomplete even on a game a seat of each
+    team posted 1-1 in, which settles the series once every migration is in."""
     async def go():
         async with _Lab(with_identity=False) as lab:
             ser = await lab.series()
-            posted = [await lab.post(ser, seat, 1, 1) for seat in (0, 1)]
+            posted = [await lab.post(ser, seat, 1, 1) for seat in (0, 2)]
             await _two_reports(lab, ser, LOW, LOW)
             rows = (await lab.sql("SELECT count(*) AS n FROM team_series_games"))[0]["n"]
             return posted, rows, await lab.settlement(ser)

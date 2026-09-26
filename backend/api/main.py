@@ -31381,11 +31381,12 @@ async def update_team_live_points(
     game is played in. A post that sends them signs
     'team-live-points-game:{series_id}:{reporter_steam_id}:{t1}:{t2}:{game_number}:{photon_room_id}'
     instead. It is then filed only under exactly that game of the stored
-    sitting, and its two points prove that game crossed on their own. A client
-    sending them must take game_number from the same event that resets its
-    pair, so the two can never describe different games. No client sends them
-    yet; a post without them is accepted as before and counts through the
-    record rule described above _record_team_game_points.
+    sitting. The names give the pair its game and nothing more: no single
+    post proves a crossing, attested or not, and the record rule described
+    above _record_team_game_points needs a pair of two points from a seat of
+    each team. A client sending them must take game_number from the same event
+    that resets its pair, so the two can never describe different games. No
+    client sends them yet; a post without them is accepted as before.
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
@@ -31482,9 +31483,10 @@ async def update_team_live_points(
 # report's query string: one survivor's snapshot, outside the DC signature,
 # so two honest survivors holding different snapshots of one game got
 # different settlements depending on whose report took the series lock first.
-# It is now read from team_series_games (migrations 348 and 351), written by
-# the live-points POST above while the game is played. The DC report reads it
-# after it has locked the series row; the snapshot it carries is only logged.
+# It is now read from team_series_games (migrations 348, 351 and 352),
+# written by the live-points POST above while the game is played. The DC
+# report reads it after it has locked the series row; the snapshot it carries
+# is only logged.
 #
 # WHICH GAME. A game is named by _team_game_identity: the series, the games
 # recorded on it plus one, and the sitting's room (team_series.photon_room_id),
@@ -31499,14 +31501,23 @@ async def update_team_live_points(
 # during game N and is processed after game N's report is filed under game
 # N+1, and it can be byte-identical to a post from game N+1. So a post may also
 # carry game_number and photon_room_id, signed with its pair. Such an ATTESTED
-# post is filed only under exactly the game and sitting it names, and one
-# carrying two points proves that game crossed.
+# post is filed only under exactly the game and sitting it names. The names
+# give its pair an identity and nothing more.
 #
-# LEGACY EVIDENCE. A legacy post is never classified by itself. Each accepted
-# post sets one bit, which seat posted which pair (each side capped at 2, as
-# the client caps it), and the DC report asks whether any history in which the
-# game did NOT reach two points could have produced the record. If none can,
-# the game crossed; if one can, it counts as not played. What a record can
+# BOTH TEAMS. Each accepted post sets one bit: which seat posted which pair
+# (each side capped at 2, as the client caps it). An attested post sets the
+# same bit in a second mask. A crossing is proven only by a pair of two
+# points or more posted by a seat of EACH team (seats 0,1 = team 1, 2,3 =
+# team 2) for the same game. Evidence from one team settles nothing, however
+# many of its seats posted it and whether or not they named the game; such a
+# record settles as dc_incomplete. The attested mask is read first; the
+# legacy rule below is asked only when the whole record already holds a pair
+# of two points from each team.
+#
+# LEGACY EVIDENCE. A legacy post is never classified by itself. The DC report
+# asks whether any history in which the game did NOT reach two points could
+# have produced the record. If none can, the game crossed; if one can, it
+# counts as not played. What a record can
 # hold rests on the client and on three assumptions about delivery, all of
 # them order and none of them time:
 #   * the pair is the game's cumulative points per team (GameStateWatcher's
@@ -31522,21 +31533,25 @@ async def update_team_live_points(
 # So the record of game g can hold g's own views, pairs with a 2 that game
 # g-1 passed through or went on to, and anything from ONE seat, g-1's
 # irregular one; the record of g-1 is what tells whether a pair with a 2 could
-# have been g-1's. Two seats posting 1-1 prove the game crossed. A first-round
-# sweep (2-0 from two seats) proves it when g-1's record shows g-1 never passed
-# 2-0. A pair g-1 could have left behind proves nothing, however late it
-# landed. The first game of a relocked sitting has no legacy proof at all,
-# because nothing bounds what its dead sitting's posts carried; an attested
-# post still proves it. Where the record admits both histories -- the same
+# have been g-1's. A 1-1 from a seat of each team proves the game crossed. A
+# first-round sweep (2-0 from a seat of each team) proves it when g-1's record
+# shows g-1 never passed 2-0. A pair g-1 could have left behind proves
+# nothing, however late it landed. The first game of a relocked sitting has
+# no legacy proof at all, because nothing bounds what its dead sitting's posts
+# carried; attested posts from both teams still prove it. Where the record
+# admits both histories -- the same
 # team sweeping the first round of two games running is the common case --
 # the answer is the conservative one, and only the attested fields remove it.
 #
-# What this does NOT change: a live-points post is signed with the shared mod
-# secret and names its seat in a query parameter, so a modified client can
-# still post points nobody played, exactly as it could write the old
+# What this does NOT change: a live-points post is accepted on the shared mod
+# secret and the series membership of the seat it names in a query parameter,
+# and neither check reads what was played, exactly as neither did for the old
 # query-string snapshot. This record removes the disagreement between honest
 # seats and the dependence on when a post arrived. It does not authenticate
-# the points.
+# the points. The two-team rule requires two accepted posts naming seats of
+# different teams; neither check binds a post to the session of the player
+# whose seat it names, so the rule counts seats named by accepted posts, not
+# distinct players.
 
 
 def _team_game_identity(t1_series_wins, t2_series_wins, photon_room_id):
@@ -31555,7 +31570,29 @@ def _team_game_same_sitting(claimed: str, stored: str) -> bool:
 
 
 # A pair (t1, t2), each side capped at 2, is pair index 3 * t1 + t2, and seat
-# k (0..3 = t1a, t1b, t2a, t2b) posting pair p is bit 4 * p + k of pair_seats.
+# k (0..3 = t1a, t1b, t2a, t2b) posting pair p is bit 4 * p + k of pair_seats
+# (and of attested_seats, for the posts that named their game).
+def _team_game_two_points_bits(team_seats) -> int:
+    """Every bit of a seat in `team_seats` posting a pair of two points or
+    more (t1 + t2 >= 2, each side capped at 2)."""
+    return sum(1 << (4 * (3 * t1 + t2) + seat)
+               for t1 in range(3) for t2 in range(3) if t1 + t2 >= 2
+               for seat in team_seats)
+
+
+# Team 1's (t1a, t1b) and team 2's (t2a, t2b) bits of a pair of two points or
+# more.
+_TEAM_GAME_TWO_POINTS = (_team_game_two_points_bits((0, 1)),
+                         _team_game_two_points_bits((2, 3)))
+
+
+def _team_game_both_teams_reached_two(seats: int) -> bool:
+    """Whether the bits in `seats` hold a pair of two points or more from a
+    seat of EACH team: what a crossing needs. One team's bits, from however
+    many of its seats, never prove one."""
+    return all(seats & team for team in _TEAM_GAME_TWO_POINTS)
+
+
 def _team_game_pair_mask(*pairs) -> int:
     """The pairs as a 9-bit mask of pair indexes."""
     mask = 0
@@ -31657,24 +31694,24 @@ def _team_game_unplayed_fits(shape: str, cur_seats: int, prev_seats: int = 0) ->
 
 _TEAM_GAME_POINTS_UPSERT_SQL = (
     "INSERT INTO team_series_games"
-    "  (series_id, game_ordinal, sitting_room, pair_seats, attested_max_sum)"
+    "  (series_id, game_ordinal, sitting_room, pair_seats, attested_seats)"
     " VALUES (:sid, CAST(:ord AS integer), CAST(:room AS text),"
-    "         CAST(:bits AS bigint), CAST(:att AS integer))"
+    "         CAST(:bits AS bigint), CAST(:att AS bigint))"
     " ON CONFLICT (series_id, game_ordinal, sitting_room) DO UPDATE"
     "    SET pair_seats = team_series_games.pair_seats | EXCLUDED.pair_seats,"
-    "        attested_max_sum = GREATEST(team_series_games.attested_max_sum,"
-    "                                    EXCLUDED.attested_max_sum),"
+    "        attested_seats = team_series_games.attested_seats | EXCLUDED.attested_seats,"
     "        last_posted_at = NOW()")
 
-# One row: the current game's bits and attested sum, the previous game's bits
-# (all in the current sitting), the lowest game on record in this sitting, and
-# whether the series has had another sitting (a relock stamp, read as a
-# boolean, or a record in another room). Rows written before migration 351
-# carry sitting_room '' and are never read.
+# One row: the current game's bits, from every post and from the posts that
+# named it, the previous game's bits (all in the current sitting), the lowest
+# game on record in this sitting, and whether the series has had another
+# sitting (a relock stamp, read as a boolean, or a record in another room).
+# Rows written before migration 351 carry sitting_room '' and are never read;
+# rows written before migration 352 hold attested_seats 0.
 _TEAM_GAME_CROSSED_SQL = (
     "SELECT COALESCE(BIT_OR(g.pair_seats)"
     "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_seats,"
-    "       COALESCE(MAX(g.attested_max_sum)"
+    "       COALESCE(BIT_OR(g.attested_seats)"
     "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_attested,"
     "       COALESCE(BIT_OR(g.pair_seats)"
     "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer) - 1), 0) AS prev_seats,"
@@ -31696,17 +31733,17 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
     0..3 = t1a, t1b, t2a, t2b.
 
     `attested` is (game_number, room) when the post named its game. It is then
-    filed only when that is exactly `game` in the stored sitting, and its pair
-    sum also raises attested_max_sum; a post naming any other game or sitting
-    is not filed at all.
+    filed only when that is exactly `game` in the stored sitting, and its bit
+    is also set in attested_seats; a post naming any other game or sitting is
+    not filed at all.
 
-    Only ever raises: bits are OR-ed and the sum is kept by GREATEST, so no
-    later post clears anything. Returns whether a row was written. Never
-    raises. The isolation is a SAVEPOINT, not a bare try/except, because under
-    asyncpg a caught statement error still aborts the whole transaction (#235)
-    and would take the points write with it. Before migrations 348 and 351 are
-    applied this records nothing, and the DC report then treats every game as
-    not played: the conservative settlement."""
+    Only ever raises: both masks are only OR-ed, so no later post clears
+    anything. Returns whether a row was written. Never raises. The isolation
+    is a SAVEPOINT, not a bare try/except, because under asyncpg a caught
+    statement error still aborts the whole transaction (#235) and would take
+    the points write with it. Before migrations 348, 351 and 352 are applied
+    this records nothing, and the DC report then treats every game as not
+    played: the conservative settlement."""
     ordinal, room = game
     if not room:
         return False
@@ -31718,12 +31755,12 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
                   f"Not filed.")
             return False
     t1, t2 = min(int(t1_points or 0), 2), min(int(t2_points or 0), 2)
+    bit = 1 << (4 * (3 * t1 + t2) + int(seat))
     try:
         async with db.begin_nested():
             await db.execute(text(_TEAM_GAME_POINTS_UPSERT_SQL), {
                 "sid": series_id, "ord": ordinal, "room": room,
-                "bits": 1 << (4 * (3 * t1 + t2) + int(seat)),
-                "att": (t1 + t2) if attested is not None else 0})
+                "bits": bit, "att": bit if attested is not None else 0})
         return True
     except Exception as ex:
         print(f"[TEAM-GAME-POINTS] series={series_id} not recorded: {type(ex).__name__}")
@@ -31732,22 +31769,23 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
 
 async def _team_game_crossed_two(db, series_id, series_row, reported_points=None) -> bool:
     """Whether the game in progress on this series saw real play, by the
-    server's own record: an attested post of two points or more for exactly
-    this game and sitting, or a legacy record that no history without two
-    points could have produced (_team_game_unplayed_fits). The caller holds
-    the series row lock and passes the row it read under that lock, so the
-    game is named by the same helper, from the same locked state, that the
-    posts were filed by.
+    server's own record: a pair of two points or more from a seat of each
+    team (_team_game_both_teams_reached_two), either among the posts that
+    named exactly this game and sitting, or in a legacy record that no
+    history without two points could have produced (_team_game_unplayed_fits).
+    The caller holds the series row lock and passes the row it read under that
+    lock, so the game is named by the same helper, from the same locked state,
+    that the posts were filed by.
 
     `reported_points` is the DC report's own snapshot. It is LOGGED when it
     disagrees with the record and never read by the answer: that disagreement
     is exactly what this record takes out of the settlement.
 
     False when no room is stored, when the record cannot be read (before
-    migration 348 or 351, or any statement error inside the savepoint), and
-    whenever a history without a crossing fits the record. Every one of those
-    settles as dc_incomplete, the outcome an admin can still change. Never
-    raises."""
+    migration 348, 351 or 352, or any statement error inside the savepoint),
+    when only one team's posts show two points, and whenever a history without
+    a crossing fits the record. Every one of those settles as dc_incomplete,
+    the outcome an admin can still change. Never raises."""
     ordinal, room = _team_game_identity(series_row["t1_series_wins"],
                                         series_row["t2_series_wins"],
                                         series_row["photon_room_id"])
@@ -31765,11 +31803,13 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
         return False
     original = not rec["relocked"] and not rec["other_room"]
     shape = _team_game_shape(original, ordinal, rec["first_ordinal"])
-    if int(rec["cur_attested"] or 0) >= 2:
-        crossed, basis = True, "an attested post"
+    cur = int(rec["cur_seats"] or 0)
+    if _team_game_both_teams_reached_two(int(rec["cur_attested"] or 0)):
+        crossed, basis = True, "attested posts from both teams"
     else:
-        crossed = not _team_game_unplayed_fits(shape, int(rec["cur_seats"] or 0),
-                                               int(rec["prev_seats"] or 0))
+        crossed = (_team_game_both_teams_reached_two(cur)
+                   and not _team_game_unplayed_fits(shape, cur,
+                                                    int(rec["prev_seats"] or 0)))
         basis = "the record (%s)" % shape
     if reported_points is not None and (int(reported_points) >= 2) != crossed:
         print(f"[TEAM-DC] series={series_id} game {ordinal}: {basis} says "
@@ -41409,7 +41449,7 @@ async def team_series_report_dc(
 # team_series_report_dc completes a series to the team that stayed only when
 # that team was already a game up AND the abandoned game saw real play. This
 # build decides the second half from the server's own per-game record,
-# team_series_games (migrations 348 and 351): update_team_live_points raises
+# team_series_games (migrations 348, 351 and 352): update_team_live_points raises
 # it during play through _record_team_game_points, and the DC report reads it
 # through _team_game_crossed_two instead of the point snapshot in its own
 # query string. The batch adds no route and no key to any GET answer both
@@ -41417,8 +41457,9 @@ async def team_series_report_dc(
 # word is what tells the new build from the old one. The release train
 # asserts it on both roles and reads any value but the expected one as the
 # old build; nothing else reads it (#306). It is a statement about the code
-# only: whether migrations 348 and 351 have been applied is proven by their
-# own checks, and until both are, every DC report settles as dc_incomplete.
+# only: whether migrations 348, 351 and 352 have been applied is proven by
+# their own checks, and until all three are, every DC report settles as
+# dc_incomplete.
 #
 # DERIVED, never written down (#342): 1 when update_team_live_points'
 # compiled code loads _record_team_game_points AND team_series_report_dc's
