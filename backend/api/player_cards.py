@@ -103,7 +103,9 @@ PACK_PAY = ("gold", "shards")
 # set, 2026-09-13) AND whose id is a public individual SteamID64 (v4.13).
 # Every card carries a picture, and deleting all data is the one way such a
 # player's card leaves the binders.
-SETTINGS_KEYS = ("collection_public", "announce")
+# trades_open (migration 353) is the trader-side consent of card trading;
+# like the other two it moves no picture and takes no card out of a binder.
+SETTINGS_KEYS = ("collection_public", "announce", "trades_open")
 
 
 def rarity_for_rank(pool_rank: int) -> str:

@@ -26591,16 +26591,36 @@ _PC_SETTINGS_SQL = {
          WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
         RETURNING pc_settings_revision
     """,
+    # Card trading's switch (migration 353, V8 2.1). Every write of off bumps
+    # the consent generation in the same statement (F4): a proposal stamps
+    # both parties' generations and the accept refuses one whose party has
+    # moved on, so off-then-on before the janitor's pass still ends every
+    # proposal made before the off. No write of on bumps it.
+    "trades_open": """
+        UPDATE players SET pc_trades_open = (CAST(:value AS integer) = 1),
+                           pc_trades_generation = pc_trades_generation
+                               + CASE WHEN CAST(:value AS integer) = 1 THEN 0 ELSE 1 END,
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
 }
 
 
 async def _pc_settings_of(db: AsyncSession, pid: str) -> dict:
+    # Card trading (migration 353): trades_open rides only while the schema
+    # probe finds the schema. On a box the migration has not reached, a bare
+    # column reference here would fail the answer of a settings write that
+    # has already committed (F3); the probe runs in a savepoint and never
+    # raises.
+    trading = await _pc_trade_schema(db) == "found"
     row = (await db.execute(text("""
         SELECT pc_collection_public, pc_announce, pc_settings_revision, pc_shards,
-               pc_game_portrait_descriptor, pc_game_portrait_hash, pc_game_portrait_locked_until
+               pc_game_portrait_descriptor, pc_game_portrait_hash, pc_game_portrait_locked_until""" + (
+        ", pc_trades_open" if trading else "") + """
           FROM players WHERE id = CAST(:pid AS uuid)
     """), {"pid": pid})).mappings().one()
-    return {
+    settings = {
         "collection_public": bool(row["pc_collection_public"]),
         "announce": bool(row["pc_announce"]),
         "revision": int(row["pc_settings_revision"]),
@@ -26612,6 +26632,9 @@ async def _pc_settings_of(db: AsyncSession, pid: str) -> dict:
         "portrait_hash": row["pc_game_portrait_hash"],
         "portrait_locked_until": _pc_iso(row["pc_game_portrait_locked_until"]),
     }
+    if trading:
+        settings["trades_open"] = bool(row["pc_trades_open"])
+    return settings
 
 
 @app.post("/api/v1/pc/settings", tags=["Player Cards"])
@@ -26625,16 +26648,20 @@ async def pc_set_setting(
     value: int = Query(..., ge=0, le=1),
     db: AsyncSession = Depends(get_db),
 ):
-    """One Player Cards setting (collection_public | announce), HMAC over
-    pcset:{steam}:{nonce}:{revision}:{key}:{value}, strict session.
+    """One Player Cards setting (collection_public | announce | trades_open),
+    HMAC over pcset:{steam}:{nonce}:{revision}:{key}:{value}, strict session.
     Compare-and-set on pc_settings_revision: a stale revision is refused
     (409 stale_revision with the current settings) and never applied.
-    Neither setting touches the subject's picture, so no writer here takes
+    No setting touches the subject's picture, so no writer here takes
     the identity lock or waits out a delivery lease (2026-09-13: the opt-out
     and the picture choice are gone, and no setting takes a card out of the
     binders that hold it)."""
     if key not in _pc.SETTINGS_KEYS:
         raise HTTPException(status_code=422, detail="unknown setting")
+    # Card trading's switch exists only once its schema does (migration
+    # 353): refused before any write while the probe does not find it (F3).
+    if key == "trades_open" and await _pc_trade_schema(db) != "found":
+        raise HTTPException(status_code=503, detail={"error": "trading_unavailable"})
     canon = _pc.canon_settings(steam_id, nonce, int(revision), key, int(value))
     player = await _pc_verified_actor(request, steam_id, sig, canon, db)
     pid = str(player.id)
@@ -26684,7 +26711,9 @@ async def pc_me(
         SELECT 1 FROM pc_daily_claims WHERE player_id = CAST(:pid AS uuid) AND claimed_on = (now() AT TIME ZONE 'UTC')::date
     """), {"pid": pid})).first() is not None
     return {
-        "settings": {k: settings[k] for k in ("collection_public", "announce", "revision")},
+        # trades_open only while the trading schema is found (migration 353)
+        "settings": {k: settings[k] for k in ("collection_public", "announce", "trades_open", "revision")
+                     if k in settings},
         "shards": settings["shards"],
         "portrait_descriptor": settings["portrait_descriptor"],
         "portrait_hash": settings["portrait_hash"],
