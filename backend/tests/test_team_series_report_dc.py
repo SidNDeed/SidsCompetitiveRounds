@@ -2144,3 +2144,692 @@ def test_the_clients_named_canonical_is_the_one_the_server_checks(monkeypatch):
                    "TeamGameNumber.QueryPair(", "TeamGameNumber.AttestedCanonical("):
         assert body.count(helper) == 1, helper
     assert "team-live-points" not in body, "a canonical built outside TeamGameNumber"
+
+
+# -- F25: the physical game's token (beta review round 4, F25; round 5) ---------
+#
+# The reviewer's scenario: team 1 leads 1-0; physical game 2 crosses two points
+# for both teams and team 2 wins it, but its report is still on its way (the
+# reporter's client queued it); physical game 3 starts while the server still
+# counts one recorded game, so game 3's seats name game 2 again; a team-2
+# player leaves at 0-0. Before round 5, with the queued result landing after
+# the DC reports, they read game 2's crossing as game 3's and completed the
+# series for team 1. A post that names its game now also carries the physical
+# game's token when its client holds one (the room's host publishes one per
+# game), and so does the DC report; a lead-forfeit is read only from posts
+# that carried the report's token (main._team_game_token_seats). Each test
+# below has its control: a mutation of exactly the rule it relies on, and an
+# inert twin.
+
+T2 = "a2" * 8          # physical game 2's token
+T3 = "a3" * 8          # physical game 3's token
+TX = "a1" * 8          # a token kept past its own physical game
+ZERO = dict(t1_total=0, t2_total=0)
+INCOMPLETE = ("dc_incomplete", None, 1, "dc_manual_pending", 0)
+COMPLETED = ("completed", 1, None, None, 1)
+_GAME_TWO_BITS = sum(_bit(1, 0, k) | _bit(1, 1, k) for k in range(4))
+
+_ORD_FILTER = "FILTER (WHERE g.game_ordinal = CAST(:ord AS integer))"
+_CONFLICT_SET = "OR COALESCE(EXCLUDED.game_token <> team_series_games.game_token, FALSE)"
+_ELSEWHERE = "AND t.game_token = CAST(:tok AS text)"
+
+
+def _mutate_sql(monkeypatch, name, anchor, replacement, count=1):
+    sql = getattr(main, name)
+    assert sql.count(anchor) == count, (name, anchor, sql.count(anchor))
+    monkeypatch.setattr(main, name, sql.replace(anchor, replacement))
+
+
+def _apply_f25_mutant(monkeypatch, mutant):
+    """The F25 controls, joined by '+':
+      token-layer-off           every bit of a record reads as posted with
+                                the report's token (_token_layer_off);
+      whole-sitting-read        the game in progress is read from every
+                                record of its sitting (the ordinal filter
+                                taken out of the five aggregates), the read
+                                the per-game record replaced;
+      no-conflict-flag          a post carrying another token no longer
+                                marks the record as holding two games;
+      a-tokenless-post-poisons  a post carrying no token does;
+      token-elsewhere-unread    the report's token is never found on
+                                another record of the series;
+      pass-through              nothing changes (the inert twin)."""
+    for part in mutant.split("+"):
+        if part == "token-layer-off":
+            _token_layer_off(monkeypatch)
+        elif part == "whole-sitting-read":
+            _mutate_sql(monkeypatch, "_TEAM_GAME_CROSSED_SQL", _ORD_FILTER,
+                        "FILTER (WHERE TRUE)", count=5)
+        elif part == "no-conflict-flag":
+            _mutate_sql(monkeypatch, "_TEAM_GAME_POINTS_UPSERT_SQL", _CONFLICT_SET, "OR FALSE")
+        elif part == "a-tokenless-post-poisons":
+            _mutate_sql(monkeypatch, "_TEAM_GAME_POINTS_UPSERT_SQL", _CONFLICT_SET,
+                        _CONFLICT_SET.replace("FALSE)", "TRUE)"))
+        elif part == "token-elsewhere-unread":
+            _mutate_sql(monkeypatch, "_TEAM_GAME_CROSSED_SQL", _ELSEWHERE, "AND FALSE")
+        else:
+            assert part == "pass-through", part
+
+
+async def _f25(lab, order, game_three=None):
+    """The reviewer's scenario. Team 1 leads 1-0. Physical game 2: every seat
+    posts 1-0 and then 1-1, naming game 2 and carrying game 2's token; team 2
+    wins it and its report is still on its way. Physical game 3 starts while
+    the server counts one recorded game, so its seats name game 2 as well and
+    carry game 3's token: with `game_three` (a pair) every seat posts it
+    before the disconnect, without it none has posted. Seat 2 (team 2)
+    leaves, and seats 0 and 1 report it naming game 3's token. `order` is
+    when game 2's queued result lands: "result-first", before the DC reports,
+    or "result-later", after them (the settlement is decided by then). Returns
+    the settlement and game 2's record."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=T2)
+    if game_three is not None:
+        await _post_all(lab, ser, game_three, game=2, room=ROOM, token=T3)
+    if order == "result-first":
+        await lab.win_game(ser, winner=2)
+    snap = dict(t1_total=game_three[0], t2_total=game_three[1]) if game_three else ZERO
+    await _two_reports(lab, ser, snap, snap, token=T3)
+    return await lab.settlement(ser), await lab.game_row(ser, 2)
+
+
+_F25_ORDERS = ["result-first", "result-later"]
+
+
+@needs_pg
+@pytest.mark.parametrize("game_three", [None, (0, 0), (1, 0)],
+                         ids=["game-3-no-post", "game-3-posted-0-0", "game-3-posted-1-0"])
+@pytest.mark.parametrize("order", _F25_ORDERS)
+def test_the_reviewers_scenario_settles_nothing_from_game_two(wired, order, game_three):
+    """F25, both ways: game 2's queued result landing before the DC reports and
+    after them. Neither settles and no series is completed. With the result
+    first the reports read game 3's own record, which holds nothing: game 3's
+    posts named game 2 and were filed in its record. With it later they read
+    game 2's record, whose token is not the reports'. Game 2's record keeps
+    game 2's token and only game 2's posts in its token bits; game 3's posts,
+    filed there too, mark it as holding two physical games."""
+    async def go():
+        async with _Lab() as lab:
+            return await _f25(lab, order, game_three)
+
+    settled, record = _run(go())
+    assert settled == INCOMPLETE, settled
+    assert wired == [], wired
+    assert (record["game_token"], record["token_seats"], record["token_conflict"]) == (
+        T2, _GAME_TWO_BITS, game_three is not None), record
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["token-layer-off", "whole-sitting-read",
+                                    "whole-sitting-read+token-layer-off", "pass-through"])
+def test_the_reviewers_scenario_test_can_fail(wired, monkeypatch, mutant):
+    """Controls for the test above (#391), game 3 without a post. With the
+    token rule off, the result-later order reads game 2's crossing as game
+    3's and completes the series for team 1: the defect as reported. The
+    result-first order is decided by the game's number before any token is
+    read (the reports read game 3's empty record), so the token rule off
+    leaves it incomplete; it completes only when the record is also read
+    without its game (every record of the sitting). That read alone, with the
+    token rule on, completes neither order: the token rule holds both by
+    itself. The inert twin changes nothing."""
+    _apply_f25_mutant(monkeypatch, mutant)
+
+    async def go():
+        results = {}
+        for order in _F25_ORDERS:
+            async with _Lab() as lab:
+                results[order] = (await _f25(lab, order))[0]
+        return results
+
+    later = COMPLETED if "token-layer-off" in mutant else INCOMPLETE
+    first = COMPLETED if mutant == "whole-sitting-read+token-layer-off" else INCOMPLETE
+    assert _run(go()) == {"result-first": first, "result-later": later}
+
+
+_PAIRLESS = ["result-first", "result-later", "same-game"]
+
+
+async def _f25_pairless(lab, situation):
+    """Old clients in game 2: every seat posts 1-0 and 1-1 without the pair (so
+    without a token), each filed under game 2 as the game in progress when it
+    is processed. `situation`:
+      result-first, result-later  the reviewer's scenario: game 3 has no post
+                                  when seat 2 leaves, and seats 0 and 1
+                                  report it naming game 3's token, game 2's
+                                  queued result landing before the reports or
+                                  after them;
+      same-game                   seat 2 leaves in game 2 itself and seats 0
+                                  and 1, old clients too, report it with no
+                                  token: a crossing that did happen."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (1, 1))
+    if situation == "result-first":
+        await lab.win_game(ser, winner=2)
+    if situation == "same-game":
+        await _two_reports(lab, ser, HIGH, HIGH, token=None)
+    else:
+        await _two_reports(lab, ser, ZERO, ZERO, token=T3)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("situation", _PAIRLESS)
+def test_pairless_posts_withhold_the_settlement_and_move_nothing(wired, situation):
+    """F25's pairless case (O1, unchanged): posts without the pair name no game
+    and carry no token, so no crossing is read from them: not the reviewer's
+    scenario in either order, and not a crossing that did happen. Each goes to
+    an admin (dc_incomplete) and no series is completed, so no result, rating
+    or gold moves."""
+    async def go():
+        async with _Lab() as lab:
+            return await _f25_pairless(lab, situation)
+
+    assert _run(go()) == INCOMPLETE
+    assert wired == [], wired
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["legacy-counted-token-layer-off",
+                                    "whole-sitting-read+legacy-counted-token-layer-off",
+                                    "pass-through"])
+def test_the_pairless_test_can_fail(wired, monkeypatch, mutant):
+    """Control: with posts without the pair counted in every game and the
+    token rule off, game 2's pairless crossing completes the series in the
+    result-later order and in the same game; the result-first order reads
+    game 3's empty record, and completes only when the record is also read
+    without its game. The inert twin changes nothing."""
+    counted = "legacy-counted" in mutant
+    _wrap_the_evidence(monkeypatch, (lambda shape, cur, att: cur) if counted else None)
+    if "whole-sitting-read" in mutant:
+        _apply_f25_mutant(monkeypatch, "whole-sitting-read")
+
+    async def go():
+        results = {}
+        for situation in _PAIRLESS:
+            async with _Lab() as lab:
+                results[situation] = await _f25_pairless(lab, situation)
+        return results
+
+    whole = "whole-sitting-read" in mutant
+    assert _run(go()) == {"result-first": COMPLETED if whole else INCOMPLETE,
+                          "result-later": COMPLETED if counted else INCOMPLETE,
+                          "same-game": COMPLETED if counted else INCOMPLETE}
+
+
+_MIXED = ["all-new", "old-team-2", "host-never-published", "old-reporters"]
+
+
+async def _mixed(lab, case):
+    """Team 1 leads 1-0 and game 2 crosses: every seat posts 1-0 and 1-1
+    naming game 2. Then seat 2 leaves and seats 0 and 1 report it. `case`:
+      all-new               every post and both reports carry game 2's token;
+      old-team-2            team 2's seats run an old client: their posts
+                            carry no token (team 1's do);
+      host-never-published  no seat holds a token (an old host, or a publish
+                            that never reached the room): no post and no
+                            report carries one;
+      old-reporters         every post carries it, the reports carry none."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    tok = _tok(ser["sid"], 2, ROOM)
+    for pair in ((1, 0), (1, 1)):
+        for seat in range(4):
+            bare = case == "host-never-published" or (case == "old-team-2" and seat >= 2)
+            await lab.post(ser, seat, *pair, game=2, room=ROOM, token=None if bare else tok)
+    await _two_reports(lab, ser, LOW, LOW,
+                       token=None if case in ("host-never-published", "old-reporters") else tok)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("case", _MIXED)
+def test_a_side_without_the_token_leaves_the_game_ineligible(wired, case):
+    """F25's mixed-client case. The same crossing settles only when every side
+    the rule reads carries the game's token: a two-point post of each team
+    and the report. A side without it is never presumed to match the side
+    that has it: the series goes to an admin (dc_incomplete)."""
+    async def go():
+        async with _Lab() as lab:
+            return await _mixed(lab, case)
+
+    assert _run(go()) == (COMPLETED if case == "all-new" else INCOMPLETE)
+    assert len(wired) == (1 if case == "all-new" else 0), wired
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["token-layer-off", "pass-through"])
+def test_the_mixed_client_test_can_fail(wired, monkeypatch, mutant):
+    """Control: with the token rule off, each mixed case completes the series
+    on a crossing one side never carried the game's token for; the inert twin
+    changes nothing."""
+    _apply_f25_mutant(monkeypatch, mutant)
+
+    async def go():
+        results = {}
+        for case in _MIXED[1:]:
+            async with _Lab() as lab:
+                results[case] = await _mixed(lab, case)
+        return results
+
+    want = COMPLETED if mutant == "token-layer-off" else INCOMPLETE
+    assert _run(go()) == {case: want for case in _MIXED[1:]}
+
+
+_REPORT_AT = ["in-the-window", "after-the-token"]
+
+
+async def _propagation(lab, report_at):
+    """F25's propagation window. Team 1 leads 1-0. In game 2 team 1's seats
+    post 1-0 and 1-1 carrying game 2's token; team 2's seats post the same
+    before their clients hold any token for the game (none carried). The
+    record rule is asked for game 2's token at that moment. With
+    "after-the-token" team 2's seats then post 1-1 again, now carrying it (a
+    client posts again when the token arrives), and the rule is asked again.
+    Seat 2 leaves; seats 0 and 1 report it naming game 2's token: inside the
+    window, or after the token arrived."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    tok = _tok(ser["sid"], 2, ROOM)
+    await _post_all(lab, ser, (1, 0), (1, 1), seats=(0, 1), game=2, room=ROOM, token=tok)
+    await _post_all(lab, ser, (1, 0), (1, 1), seats=(2, 3), game=2, room=ROOM, token=None)
+    window = await lab.crossed(ser, token=tok)
+    if report_at == "after-the-token":
+        await _post_all(lab, ser, (1, 1), seats=(2, 3), game=2, room=ROOM, token=tok)
+    now = await lab.crossed(ser, token=tok)
+    await _two_reports(lab, ser, LOW, LOW, token=tok)
+    return (window, now, await lab.settlement(ser)), await lab.game_row(ser, 2), tok
+
+
+@needs_pg
+@pytest.mark.parametrize("report_at", _REPORT_AT)
+def test_a_crossing_before_the_token_arrives_counts_once_it_does(wired, report_at):
+    """The window is ineligible while it lasts: a DC report inside it settles
+    as dc_incomplete. A post without the token poisons nothing: once team 2's
+    seats post the pair again carrying it, the same game is eligible and the
+    report completes the series. The record's token bits hold the posts that
+    carried the token and nothing else."""
+    async def go():
+        async with _Lab() as lab:
+            return await _propagation(lab, report_at)
+
+    verdicts, record, tok = _run(go())
+    team_one = _bit(1, 0, 0) | _bit(1, 1, 0) | _bit(1, 0, 1) | _bit(1, 1, 1)
+    if report_at == "in-the-window":
+        assert verdicts == (False, False, INCOMPLETE), verdicts
+        carried = team_one
+    else:
+        assert verdicts == (False, True, COMPLETED), verdicts
+        carried = team_one | _bit(1, 1, 2) | _bit(1, 1, 3)
+    assert (record["game_token"], record["token_seats"], record["token_conflict"]) == (
+        tok, carried, False), record
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["token-layer-off", "a-tokenless-post-poisons", "pass-through"])
+def test_the_propagation_test_can_fail(wired, monkeypatch, mutant):
+    """Controls: with the token rule off the window is already eligible and a
+    report inside it completes the series; with a post without the token
+    marking the record as two games, the game stays ineligible once the
+    token arrives and that report goes to an admin. The inert twin changes
+    nothing."""
+    _apply_f25_mutant(monkeypatch, mutant)
+
+    async def go():
+        results = {}
+        for report_at in _REPORT_AT:
+            async with _Lab() as lab:
+                results[report_at] = (await _propagation(lab, report_at))[0]
+        return results
+
+    want = {"token-layer-off": {"in-the-window": (True, True, COMPLETED),
+                                "after-the-token": (True, True, COMPLETED)},
+            "a-tokenless-post-poisons": {"in-the-window": (False, False, INCOMPLETE),
+                                         "after-the-token": (False, False, INCOMPLETE)},
+            "pass-through": {"in-the-window": (False, False, INCOMPLETE),
+                             "after-the-token": (False, True, COMPLETED)}}[mutant]
+    assert _run(go()) == want
+
+
+async def _lagging_reporter(lab):
+    """Game 2 crosses under its token (every seat 1-0 and 1-1 naming game 2,
+    carrying T2) and its report is still on its way. Game 3's seats post 1-0,
+    naming game 2 again and carrying game 3's token: filed in game 2's
+    record. Seat 2 leaves; seats 0 and 1 report it naming game 2's token (a
+    client that still holds it)."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=T2)
+    await _post_all(lab, ser, (1, 0), game=2, room=ROOM, token=T3)
+    await _two_reports(lab, ser, ZERO, ZERO, token=T2)
+    return await lab.settlement(ser), await lab.game_row(ser, 2)
+
+
+@needs_pg
+def test_a_record_holding_two_physical_games_proves_nothing(wired):
+    """The record keeps the first token filed under it; a post carrying another
+    sets none of its token bits and marks the record as holding two physical
+    games, and then no report reads a crossing from it, not even one naming
+    the record's own token."""
+    async def go():
+        async with _Lab() as lab:
+            return await _lagging_reporter(lab)
+
+    settled, record = _run(go())
+    assert settled == INCOMPLETE, settled
+    assert wired == [], wired
+    assert (record["game_token"], record["token_seats"], record["token_conflict"]) == (
+        T2, _GAME_TWO_BITS, True), record
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["no-conflict-flag", "pass-through"])
+def test_the_two_games_test_can_fail(wired, monkeypatch, mutant):
+    """Control: with a post carrying another token no longer marking the
+    record, the report naming game 2's token reads game 2's crossing and
+    completes the series; the inert twin changes nothing."""
+    _apply_f25_mutant(monkeypatch, mutant)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _lagging_reporter(lab)
+
+    settled, record = _run(go())
+    assert (settled, record["token_conflict"]) == (
+        (COMPLETED, False) if mutant == "no-conflict-flag" else (INCOMPLETE, True)), (
+        settled, record)
+
+
+async def _reused(lab, reuse):
+    """Team 1 wins game 1 after every seat posted 1-0 and 1-1 naming it and
+    carrying TX. Game 2 crosses the same way, carrying TX again with `reuse`
+    (a token kept past its own physical game), else game 2's own; seat 2
+    leaves and seats 0 and 1 report it naming the token game 2's posts
+    carried."""
+    ser = await lab.series(t1_wins=0, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=1, room=ROOM, token=TX)
+    await lab.win_game(ser, winner=1)
+    tok = TX if reuse else T2
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=tok)
+    await _two_reports(lab, ser, LOW, LOW, token=tok)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("reuse", [True, False], ids=["token-reused", "token-fresh"])
+def test_a_token_on_another_game_of_the_series_proves_nothing(wired, reuse):
+    """A token that is also on another game's record names no one physical
+    game: the report naming it settles nothing. The twin with game 2's own
+    token completes the series."""
+    async def go():
+        async with _Lab() as lab:
+            return await _reused(lab, reuse)
+
+    assert _run(go()) == (INCOMPLETE if reuse else COMPLETED)
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["token-elsewhere-unread", "pass-through"])
+def test_the_reused_token_test_can_fail(wired, monkeypatch, mutant):
+    """Control: with the report's token never found on another record, the
+    reused token completes the series; the inert twin changes nothing."""
+    _apply_f25_mutant(monkeypatch, mutant)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _reused(lab, True)
+
+    assert _run(go()) == (COMPLETED if mutant == "token-elsewhere-unread" else INCOMPLETE)
+
+
+@needs_pg
+def test_migration_354_runs_twice_over_a_352_table(wired):
+    """354 over a 352 table that already holds a row: the row keeps its bits
+    and reads no token, token_seats 0 and no conflict; a row written as the
+    API from before 354 writes one (naming only the older columns) gets the
+    same defaults; the three new columns are bounded; and a second run of 354
+    changes nothing -- nor does 352 run again and then 354."""
+    async def state(conn):
+        cols = [r["column_name"] for r in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'team_series_games'"
+            " ORDER BY ordinal_position")]
+        cons = [(r["conname"], r["def"]) for r in await conn.fetch(
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint"
+            " WHERE conrelid = 'team_series_games'::regclass ORDER BY conname")]
+        rows = [tuple(r) for r in await conn.fetch(
+            "SELECT game_ordinal, sitting_room, pair_seats, attested_seats, game_token,"
+            "       token_seats, token_conflict"
+            "  FROM team_series_games ORDER BY game_ordinal, sitting_room")]
+        return cols, cons, rows
+
+    async def go():
+        async with _Lab(with_game_token=False) as lab:
+            ser = await lab.series()
+            conn = await asyncpg.connect(PLAIN_DSN)
+            try:
+                await conn.execute('SET search_path TO "%s"' % lab.schema)
+                insert_old = ("INSERT INTO team_series_games (series_id, game_ordinal,"
+                              " sitting_room, pair_seats, attested_seats)"
+                              " VALUES ($1, $2, $3, $4, $4)")
+                await conn.execute(insert_old, ser["sid"], 2, ROOM, _bit(1, 1, 0))
+                await conn.execute(_read(MIGRATION_354))
+                await conn.execute(insert_old, ser["sid"], 3, ROOM, _bit(1, 1, 2))
+                first = await state(conn)
+                await conn.execute(_read(MIGRATION_354))
+                again = await state(conn)
+                await conn.execute(_read(MIGRATION_352))
+                await conn.execute(_read(MIGRATION_354))
+                after_352 = await state(conn)
+                refused = []
+                for bad in ("game_token = 'A2A2A2A2A2A2A2A2'", "game_token = 'a2'",
+                            "token_seats = 68719476736", "token_seats = -1",
+                            "token_seats = NULL", "token_conflict = NULL"):
+                    try:
+                        await conn.execute("UPDATE team_series_games SET %s"
+                                           " WHERE game_ordinal = 2" % bad)
+                    except (asyncpg.CheckViolationError, asyncpg.NotNullViolationError):
+                        refused.append(bad)
+                await conn.execute("UPDATE team_series_games SET game_token = $1"
+                                   " WHERE game_ordinal = 2", T2)
+                kept = await conn.fetchval("SELECT game_token FROM team_series_games"
+                                           " WHERE game_ordinal = 2")
+                return first, again, after_352, refused, kept
+            finally:
+                await conn.close()
+
+    first, again, after_352, refused, kept = _run(go())
+    cols, _cons, rows = first
+    assert cols[-3:] == ["game_token", "token_seats", "token_conflict"], cols
+    assert rows == [(2, ROOM, _bit(1, 1, 0), _bit(1, 1, 0), None, 0, False),
+                    (3, ROOM, _bit(1, 1, 2), _bit(1, 1, 2), None, 0, False)], rows
+    assert again == first and after_352 == first, (first, again, after_352)
+    assert len(refused) == 6, refused
+    assert kept == T2, kept
+
+
+@needs_pg
+@pytest.mark.parametrize("with_354", [False, True], ids=["before-354", "after-354"])
+def test_before_migration_354_nothing_fails_and_nothing_auto_completes(wired, with_354):
+    """The deploy-order claim in 354's header: this API against a database
+    with 352 but not 354 records nothing (its upsert names the new columns
+    and the savepoint takes the refusal) and reads nothing, fails no request,
+    and the DC report settles as dc_incomplete on a game a seat of each team
+    posted 1-1 in, naming it and carrying its token. The twin, the same posts
+    once 354 is applied, records the game and completes the series."""
+    async def go():
+        async with _Lab(with_game_token=with_354) as lab:
+            ser = await lab.series()
+            posted = [await lab.post(ser, seat, 1, 1, game=2, room=ROOM) for seat in (0, 2)]
+            await _two_reports(lab, ser, LOW, LOW)
+            rows = (await lab.sql("SELECT count(*) AS n FROM team_series_games"))[0]["n"]
+            return posted, rows, await lab.settlement(ser)
+
+    posted, rows, settled = _run(go())
+    assert [p["status"] for p in posted] == ["ok", "ok"], posted
+    assert rows == (1 if with_354 else 0), rows
+    assert settled == (COMPLETED if with_354 else INCOMPLETE), settled
+
+
+_DROPS = ["bad-signature", "not-hex", "no-signature", "no-pair"]
+
+
+async def _dropped_token_post(lab, case):
+    """One post from seat 0, 1-1, carrying a token the route cannot verify:
+    signed with a wrong MAC, not 16 lowercase hex digits (signed), sent
+    without token_sig, or on a post that names no game (signed over the
+    token canonical with no game)."""
+    ser = await lab.series()
+    kw = dict(game=2, room=ROOM, token=T2)
+    if case == "bad-signature":
+        kw["token_sig"] = "0" * 64
+    elif case == "not-hex":
+        kw["token"] = T2.upper()
+    elif case == "no-signature":
+        kw["token_sig"] = None
+    elif case == "no-pair":
+        kw = dict(token=T2)
+    answer = await lab.post(ser, 0, 1, 1, **kw)
+    return answer, await lab.game_row(ser, 2)
+
+
+@needs_pg
+@pytest.mark.parametrize("case", _DROPS)
+def test_a_post_token_the_route_cannot_verify_is_dropped_never_refused(wired, case):
+    """A token that does not verify costs the post nothing but the token: the
+    post is answered and filed (as attested when it names its game), and the
+    record holds no token and no token bits."""
+    async def go():
+        async with _Lab() as lab:
+            return await _dropped_token_post(lab, case)
+
+    answer, record = _run(go())
+    assert answer["status"] == "ok", answer
+    assert (record["pair_seats"], record["attested_seats"], record["game_token"],
+            record["token_seats"], record["token_conflict"]) == (
+        _bit(1, 1, 0), 0 if case == "no-pair" else _bit(1, 1, 0), None, 0, False), record
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["token-unverified", "pass-through"])
+def test_the_dropped_post_token_test_can_fail(wired, monkeypatch, mutant):
+    """Control: with the route taking any token it is sent, the badly signed
+    token is kept on the record; the inert twin changes nothing."""
+    if mutant == "token-unverified":
+        monkeypatch.setattr(main, "_team_game_post_token",
+                            lambda sid, rep, t1, t2, game, room, token, sig: token)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _dropped_token_post(lab, "bad-signature")
+
+    _answer, record = _run(go())
+    assert record["game_token"] == (T2 if mutant == "token-unverified" else None), record
+
+
+async def _dropped_token_report(lab, case):
+    """Team 1 leads 1-0 and game 2 crosses, every post carrying game 2's
+    token. Seat 2 leaves and seats 0 and 1 report it naming game 2's token,
+    signed ("signed"), signed with a wrong MAC, or without token_sig."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM)
+    kw = {}
+    if case == "bad-signature":
+        kw["token_sig"] = "0" * 64
+    elif case == "no-signature":
+        kw["token_sig"] = None
+    for seat in (0, 1):
+        await lab.report_dc(ser, reporter_seat=seat, dc_seat=2, **LOW, **kw)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("case", ["signed", "bad-signature", "no-signature"])
+def test_a_dc_token_the_route_cannot_verify_names_no_game(wired, case):
+    """A DC report whose token does not verify names no token, and its game is
+    not eligible: the series goes to an admin. The same report signed right
+    completes it."""
+    async def go():
+        async with _Lab() as lab:
+            return await _dropped_token_report(lab, case)
+
+    assert _run(go()) == (COMPLETED if case == "signed" else INCOMPLETE)
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["token-unverified", "pass-through"])
+def test_the_dropped_dc_token_test_can_fail(wired, monkeypatch, mutant):
+    """Control: with the DC route taking any token it is sent, the badly
+    signed report completes the series; the inert twin changes nothing."""
+    if mutant == "token-unverified":
+        monkeypatch.setattr(main, "_team_dc_game_token",
+                            lambda sid, rep, dc, token, sig: token)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _dropped_token_report(lab, "bad-signature")
+
+    assert _run(go()) == (COMPLETED if mutant == "token-unverified" else INCOMPLETE)
+
+
+def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch):
+    """Round 5, F25: the client signs 'team-live-points-token:...' and
+    'team-dc-token:...' exactly as the server's token checks build them.
+    plugin/TeamGameNumber.cs pins PinTokenExpected (PinSeries, PinReporter,
+    t1 2, t2 1, game 3, PinRoom, PinToken) and PinDcTokenExpected
+    (PinReporter, PinSeries, PinDcPlayer, PinToken); its sentinel checks that
+    TokenCanonical and DcTokenCanonical build them. A signature over each is
+    accepted by the server's own check for those inputs, and one over the
+    same string with two fields swapped, or over the token in upper case, is
+    not. The two query parameters the client appends are both endpoints'
+    own, in their order; PostTeamLivePoints and ReportTeamSeriesDc build them
+    from these helpers only, and their one caller each passes the token."""
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
+    src = _read(os.path.join(_PLUGIN_DIR, "TeamGameNumber.cs"))
+    series, reporter, room, token, dc_player, post_pin, dc_pin = (_cs_const(src, n) for n in (
+        "PinSeries", "PinReporter", "PinRoom", "PinToken", "PinDcPlayer", "PinTokenExpected",
+        "PinDcTokenExpected"))
+
+    def mac(message):
+        return hmac.new(SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+    assert main._team_game_post_token(series, reporter, 2, 1, 3, room, token, mac(post_pin)) == token
+    swapped = post_pin.replace(":2:1:3:", ":1:2:3:")
+    assert swapped != post_pin
+    assert main._team_game_post_token(series, reporter, 2, 1, 3, room, token, mac(swapped)) is None
+    upper = token.upper()
+    assert upper != token
+    assert main._team_game_post_token(series, reporter, 2, 1, 3, room, upper,
+                                      mac(post_pin.replace(token, upper))) is None
+    assert main._team_dc_game_token(series, reporter, dc_player, token, mac(dc_pin)) == token
+    other = "team-dc-token:%s:%s:%s:%s" % (dc_player, series, reporter, token)
+    assert other != dc_pin
+    assert main._team_dc_game_token(series, reporter, dc_player, token, mac(other)) is None
+    assert main._team_dc_game_token(series, reporter, dc_player, upper,
+                                    mac(dc_pin.replace(token, upper))) is None
+
+    query = re.search(r"internal static string QueryToken\(.*?\{(.*?)\n        \}", src, re.S)
+    assert query, "QueryToken"
+    names = re.findall(r'"&(\w+)="', query.group(1))
+    assert names == ["game_token", "token_sig"], names
+    for endpoint in (main.update_team_live_points, main.team_series_report_dc):
+        params = list(inspect.signature(endpoint).parameters)
+        assert [p for p in params if p in names] == names, (endpoint.__name__, params)
+
+    api = _read(os.path.join(_PLUGIN_DIR, "ApiClient.cs"))
+    for head, canonical, literal in (
+            ("public static void PostTeamLivePoints(", "TeamGameNumber.TokenCanonical(",
+             "team-live-points-token"),
+            ("public static void ReportTeamSeriesDc(", "TeamGameNumber.DcTokenCanonical(",
+             "team-dc-token")):
+        start = api.index(head)
+        body = api[start:api.index("\n        }\n", start)]
+        for helper in ("TeamGameNumber.TokenValid(", "TeamGameNumber.QueryToken(", canonical):
+            assert body.count(helper) == 1, (head, helper)
+        assert literal not in body, (head, "a canonical built outside TeamGameNumber")
+    watcher = _read(os.path.join(_PLUGIN_DIR, "GameStateWatcher.cs"))
+    start = watcher.index("private static void MaybeSendLivePoints(")
+    body = watcher[start:watcher.index("\n        }\n", start)]
+    assert body.count("TeamGameNumber.Live.TokenFor(") == 1, "MaybeSendLivePoints"
+    assert "teamGame, teamRoom, teamToken);" in body, "MaybeSendLivePoints"
+    plugin = _read(os.path.join(_PLUGIN_DIR, "Plugin.cs"))
+    assert plugin.count("ApiClient.ReportTeamSeriesDc(") == 1
+    assert "string dcToken = GameStateWatcher.TeamTokenForReport(seriesId);" in plugin
+    assert ("ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points, dcToken);"
+            in plugin)
