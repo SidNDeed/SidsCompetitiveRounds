@@ -14,12 +14,17 @@ Three things this file is here to stop:
     ``/shop/items`` appends and what the purchase path refuses, the rungs
     become invisible to their owners and buyable by anyone — #151, exactly.
 
-It also carries the per-MODE hook-coverage check. That one is INERT today and
-says so out loud: the four completion sites are not wired yet. The moment the
-first one is, it asserts all four and exactly one call inside each — never
-"one call per function" as a global rule, which is the check that passes while
-a whole mode goes unhooked. 1v2 is the fifth symbol and is asserted the other
-way round: it must exist and must NOT be hooked, because it reports unrated.
+It also carries the per-MODE hook-coverage check: all four completion sites
+carry the hook, exactly one awaited call inside each — never "one call per
+function" as a global rule, which is the check that passes while a whole mode
+goes unhooked — and each call passes the reference EXPECTED_REFERENCE names:
+the series id, or for FFA the lobby id, since one lobby is one sitting. 1v2
+is the fifth symbol and is asserted the other way round: it must exist and
+must NOT be hooked, because it reports unrated. Beside it, two whole-file
+checks: main.py names the hook exactly four times, one awaited call in each
+of the four functions -- so no fifth call, ffa_queue_leave's close above all,
+can sit outside the spans the per-mode check reads -- and no module but
+title_ladders.py carries SQL that writes the two ladder tables.
 """
 
 import ast
@@ -64,6 +69,20 @@ EXCLUDED_SITES = {
     "ovt": "submit_ovt_match",
 }
 HOOK = "record_completed_games"
+
+# The reference each site's call passes, as ast.unparse renders it (design V3
+# section 12.3). The credit key is (player_id, reference_id), so this IS the
+# unit of credit: the series at 1v1 and at both 2v2 paths -- the same string
+# at both, so the key collapses them -- and for FFA the LOBBY, because one
+# lobby is one sitting however many games it plays (main.py's ffa_lobbies
+# model). str(match_id) there would be a per-game key: a two-game rated lobby
+# would credit twice.
+EXPECTED_REFERENCE = {
+    "1v1": "str(series.id)",
+    "2v2": "str(series_uuid)",
+    "2v2-settled": "str(series_uuid)",
+    "ffa": "str(lobby_uuid)",
+}
 
 
 def _read(path):
@@ -542,7 +561,7 @@ def test_every_completion_symbol_exists():
 
 
 def test_hook_coverage_is_per_mode_once_anything_is_wired():
-    """INERT UNTIL THE HOOKS LAND, and it says so rather than passing quietly.
+    """Every rated completion path credits the ladder, exactly once.
 
     The check that must never be written is "exactly one call per function":
     it passes with 2v2's forfeit path unhooked, because that path is a
@@ -551,9 +570,12 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
     none, since an unrated mode crediting a rated-only ladder is the same
     class of defect pointing the other way."""
     src = _read(MAIN_PY)
-    if HOOK not in src:
-        pytest.skip(f"{HOOK} is not wired into main.py yet — hooks are blocked "
-                    f"behind another session's rewrite of the lease surface")
+    # This used to skip while the hooks were unwired. They are wired, so a
+    # main.py that no longer names the hook is a regression, not a state to
+    # wait out: it fails.
+    assert HOOK in src, (
+        f"main.py no longer names {HOOK} at all: every rated completion path "
+        f"has lost its ladder credit")
     lines = src.split("\n")
     counts = {}
     for mode, fn in COMPLETION_SITES.items():
@@ -578,6 +600,8 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
         f"reference_id is the dedupe key: without it the PRIMARY KEY on "
         f"title_ladder_credits cannot collapse the two 2v2 completion paths "
         f"and one series credits twice.")
+    mismatched = reference_mismatches(counts)
+    assert not mismatched, "\n".join(mismatched)
 
     wrongly_hooked = [f"{mode}:{fn}" for mode, fn in EXCLUDED_SITES.items()
                       if hook_calls_in("\n".join(_function_span(lines, fn)))]
@@ -587,6 +611,199 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
         f"rated-only contract in title_ladders' docstring. If 1v2 is now "
         f"meant to count, that is a design decision: move it into "
         f"COMPLETION_SITES and say so in the module docstring.")
+
+
+def _top_level_owner(top):
+    """The name a whole-file finding is reported under: the top-level
+    function it sits in (nested defs count toward it), else "<module>"."""
+    if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return top.name
+    return "<module>"
+
+
+def hook_references(source):
+    """Every place `source` names the hook, as (owner, line, kind).
+
+    kind is "awaited call" for an attribute `x.record_completed_games` that
+    is the callee of an awaited call, and otherwise says what the reference
+    is -- "attribute" (an unawaited call, or an alias `f = x.<hook>`),
+    "name", "import", or "string" (a constant equal to the name, as a
+    getattr would use). A comment cannot produce an entry: this walks the
+    parse tree. A name assembled at run time (`getattr(m, "record_" + s)`)
+    is beyond any static reading and is not claimed."""
+    tree = ast.parse(source)
+    refs = []
+    for top in tree.body:
+        owner = _top_level_owner(top)
+        awaited = {id(n.value.func) for n in ast.walk(top)
+                   if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)}
+        for n in ast.walk(top):
+            if isinstance(n, ast.Attribute) and n.attr == HOOK:
+                kind = "awaited call" if id(n) in awaited else "attribute"
+            elif isinstance(n, ast.Name) and n.id == HOOK:
+                kind = "name"
+            elif isinstance(n, ast.alias) and HOOK in (n.name.split(".")[-1], n.asname):
+                kind = "import"
+            elif isinstance(n, ast.Constant) and n.value == HOOK:
+                kind = "string"
+            else:
+                continue
+            refs.append((owner, getattr(n, "lineno", 0), kind))
+    return refs
+
+
+def test_main_py_holds_exactly_the_four_hook_calls():
+    """Whole file, not per span: main.py names the hook exactly four times,
+    each the awaited callee inside one of the four COMPLETION_SITES
+    functions, one per function -- no fifth call anywhere, and no alias,
+    import or getattr string that could make one.
+
+    The per-mode coverage test reads only the four spans and the excluded
+    one, so a call planted anywhere else passes it. ffa_queue_leave is the
+    case in point (design V3 section 12.4): when the departures reach all but
+    one member it writes the lobby 'completed', and it stays unhooked -- the
+    sitting's credit, if it earned one, was written by submit_ffa_match under
+    the lobby key, by the first accepted rated game that rated each player,
+    and deduped across the later ones. It is named here so that the claim
+    does not rest on COMPLETION_SITES staying as it is."""
+    source = _read(MAIN_PY)
+    refs = hook_references(source)
+    found = sorted((owner, kind) for owner, _line, kind in refs)
+    expected = sorted((fn, "awaited call") for fn in COMPLETION_SITES.values())
+    assert len(set(COMPLETION_SITES.values())) == 4, COMPLETION_SITES
+    assert found == expected, (
+        "main.py must name %s exactly four times, one awaited call in each of "
+        "%s; it names it at:\n  %s" % (
+            HOOK, sorted(COMPLETION_SITES.values()),
+            "\n  ".join("%s line %d: %s" % r for r in sorted(refs))))
+    tops = {_top_level_owner(n) for n in ast.parse(source).body}
+    assert "ffa_queue_leave" in tops, (
+        "ffa_queue_leave is not a top-level function of main.py any more: the "
+        "unhooked-close assertion below would be asserting nothing")
+    in_leave = [r for r in refs if r[0] == "ffa_queue_leave"]
+    assert not in_leave, (
+        "ffa_queue_leave credits the ladder at %r. Its close is not a "
+        "completion: the sitting was credited by the rated games that played "
+        "it, under the lobby key (design V3 section 12.4)." % in_leave)
+
+
+LADDER_TABLES = ("title_ladder_credits", "title_ladder_progress")
+_SQL_WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|TRUNCATE|MERGE|COPY|ALTER|DROP)\b",
+                        re.IGNORECASE)
+
+
+def ladder_table_writes(source):
+    """(owner, line) for every string constant in `source` that names one of
+    the two ladder tables beside an SQL write verb. Docstrings are skipped:
+    they describe the tables, they do not write them."""
+    tree = ast.parse(source)
+    docstrings = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if (n.body and isinstance(n.body[0], ast.Expr)
+                    and isinstance(n.body[0].value, ast.Constant)):
+                docstrings.add(id(n.body[0].value))
+    out = []
+    for top in tree.body:
+        for n in ast.walk(top):
+            if (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                    and id(n) not in docstrings
+                    and any(t in n.value for t in LADDER_TABLES)
+                    and _SQL_WRITE.search(n.value)):
+                out.append((_top_level_owner(top), n.lineno))
+    return out
+
+
+def test_the_ladder_tables_have_no_writer_but_the_hook():
+    """Design V3 section 12.4's closing claim, made checkable: a close (or
+    anything else) cannot reach ladder state around the hook, because
+    title_ladder_credits and title_ladder_progress are written only inside
+    title_ladders.record_completed_games. Every other backend/api module
+    carries no SQL that writes them, and inside title_ladders.py every such
+    statement is in that one function."""
+    elsewhere = []
+    for name in sorted(os.listdir(API_DIR)):
+        if name.endswith(".py") and name != os.path.basename(MODULE_PY):
+            elsewhere += ["%s:%s line %d" % ((name,) + w)
+                          for w in ladder_table_writes(_read(os.path.join(API_DIR, name)))]
+    assert not elsewhere, (
+        "SQL writing a ladder table outside title_ladders.py: %r" % elsewhere)
+    in_module = ladder_table_writes(_read(MODULE_PY))
+    owners = sorted({owner for owner, _line in in_module})
+    assert owners == [HOOK], (
+        "inside title_ladders.py the ladder tables must be written by %s "
+        "alone; SQL writing them sits in %r" % (HOOK, in_module))
+
+
+# A fake main.py shaped like the real one, for the whole-file checks' controls.
+FAKE_MAIN = """
+import title_ladders
+
+async def submit_match(db):
+    await title_ladders.record_completed_games(db, [1], mode="1v1", reference_id="a")
+
+async def submit_team_match(db):
+    await title_ladders.record_completed_games(db, [1], mode="2v2", reference_id="b")
+
+async def _complete_team_series_with_ratings(db):
+    await title_ladders.record_completed_games(db, [1], mode="2v2-settled", reference_id="b")
+
+async def submit_ffa_match(db):
+    await title_ladders.record_completed_games(db, [1], mode="ffa", reference_id="c")
+
+async def ffa_queue_leave(db):
+    await db.commit()
+"""
+
+
+def test_the_whole_file_scan_sees_the_four_and_each_kind_of_fifth():
+    """Control: the fake file reads as the four awaited calls; a fifth in
+    ffa_queue_leave, a module-level alias, an import and a getattr string
+    are each reported as what they are."""
+    four = sorted((o, k) for o, _l, k in hook_references(FAKE_MAIN))
+    assert four == sorted((fn, "awaited call") for fn in COMPLETION_SITES.values()), four
+    planted = {
+        "fifth call": ("    await db.commit()\n",
+                       "    await title_ladders.record_completed_games(db, [1], mode='ffa', reference_id='c')\n"
+                       "    await db.commit()\n",
+                       ("ffa_queue_leave", "awaited call")),
+        "alias": ("import title_ladders\n",
+                  "import title_ladders\n_credit = title_ladders.record_completed_games\n",
+                  ("<module>", "attribute")),
+        "import": ("import title_ladders\n",
+                   "import title_ladders\nfrom title_ladders import record_completed_games as rcg\n",
+                   ("<module>", "import")),
+        "getattr": ("    await db.commit()\n",
+                    "    getattr(title_ladders, 'record_completed_games')\n    await db.commit()\n",
+                    ("ffa_queue_leave", "string")),
+    }
+    for label, (old, new, extra) in planted.items():
+        src = FAKE_MAIN.replace(old, new, 1)
+        assert src != FAKE_MAIN, label
+        got = sorted((o, k) for o, _l, k in hook_references(src))
+        assert got == sorted(four + [extra]), (label, got)
+
+
+def test_the_table_writer_scan_sees_a_write_and_skips_prose():
+    """Control: an UPDATE of title_ladder_progress planted in a fake
+    ffa_queue_leave is reported under that function; the same words in a
+    docstring, or a plain SELECT, are not."""
+    write = FAKE_MAIN.replace(
+        "    await db.commit()\n",
+        "    await db.execute(text('UPDATE title_ladder_progress SET games = games + 1'))\n"
+        "    await db.commit()\n", 1)
+    prose = FAKE_MAIN.replace(
+        "async def ffa_queue_leave(db):\n",
+        "async def ffa_queue_leave(db):\n"
+        "    'Never UPDATE title_ladder_progress here.'\n", 1)
+    read = FAKE_MAIN.replace(
+        "    await db.commit()\n",
+        "    await db.execute(text('SELECT games FROM title_ladder_progress'))\n"
+        "    await db.commit()\n", 1)
+    assert write != FAKE_MAIN and prose != FAKE_MAIN and read != FAKE_MAIN
+    assert [o for o, _l in ladder_table_writes(write)] == ["ffa_queue_leave"]
+    assert ladder_table_writes(prose) == []
+    assert ladder_table_writes(read) == []
 
 
 # ── Line endings ───────────────────────────────────────────────────
@@ -846,14 +1063,16 @@ def test_one_reference_id_credits_once_however_many_times_it_arrives(monkeypatch
 def hook_calls_in(source):
     """Every CALL to the ladder hook in `source`, as structure rather than text.
 
-    One dict per call: whether it is awaited, and whether it carries the two
-    keyword arguments that make it dedupable. A comment or a string literal
+    One dict per call: whether it is awaited, whether it carries the two
+    keyword arguments that make it dedupable, and "reference" -- the
+    expression it passes as reference_id (_reference_of: a bare name is
+    followed to its one non-constant assignment in `source`, and anything
+    unresolvable is None, so it fails closed). A comment or a string literal
     cannot produce an entry, because this walks the parse tree.
 
-    Module-level precisely so it can be tested. The coverage test that uses it
-    skips until the hook is wired, and a scanner whose first real run is the
-    day it has to be right is not a check (#313) -- so the tests below drive it
-    against synthetic sources now.
+    Module-level precisely so it can be tested. It was written, and driven
+    against the synthetic sources below, before the hook was wired: a scanner
+    whose first real run is the day it has to be right is not a check (#313).
     """
     src = textwrap.dedent(source)
     try:
@@ -877,8 +1096,70 @@ def hook_calls_in(source):
         kwargs = {k.arg for k in node.keywords}
         found.append({"awaited": id(node) in awaited,
                       "has_mode": "mode" in kwargs,
-                      "has_reference_id": "reference_id" in kwargs})
+                      "has_reference_id": "reference_id" in kwargs,
+                      "reference": _reference_of(node, tree)})
     return found
+
+
+def _reference_of(call, tree):
+    """What `call` passes as reference_id, unparsed; None when that cannot be
+    known.
+
+    A literal expression is its own answer. A bare Name is followed to the
+    single assignment to it in `tree` whose value is not a constant -- the
+    1v1 site writes `_lref = "?"` (a constant: the except clause's
+    placeholder) and then `_lref = str(series.id)` inside the try. The answer
+    is None, failing closed, when the keyword is missing or passed more than
+    once, when the name has no non-constant assignment or more than one, or
+    when anything binds or rebinds it other than a plain `name = value`
+    statement (a loop, `with` or comprehension target, an unpacking or
+    chained assignment, a walrus, an augmented or annotated assignment, a
+    parameter, an import, an except clause, a def or class, a match capture,
+    a global or nonlocal declaration): each of those can make the value
+    something this reading does not see."""
+    kws = [k for k in call.keywords if k.arg == "reference_id"]
+    if len(kws) != 1:
+        return None
+    value = kws[0].value
+    if not isinstance(value, ast.Name):
+        return ast.unparse(value)
+    name = value.id
+    plain = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Assign) and len(n.targets) == 1
+             and isinstance(n.targets[0], ast.Name) and n.targets[0].id == name]
+    stores = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)]
+    other = [n for n in ast.walk(tree)
+             if (isinstance(n, ast.arg) and n.arg == name)
+             or (isinstance(n, (ast.ExceptHandler, ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef, ast.MatchAs, ast.MatchStar)) and n.name == name)
+             or (isinstance(n, ast.MatchMapping) and n.rest == name)
+             or (isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names)
+             or (isinstance(n, ast.alias)
+                 and (n.asname or n.name.split(".")[0]) == name)]
+    if len(stores) != len(plain) or other:
+        return None
+    sources = [ast.unparse(n.value) for n in plain if not isinstance(n.value, ast.Constant)]
+    return sources[0] if len(sources) == 1 else None
+
+
+def reference_mismatches(counts):
+    """One line per call whose reference is not the one EXPECTED_REFERENCE
+    names for its mode. `counts` maps "mode:function" to hook_calls_in's
+    list -- the coverage test's own dict -- and the synthetic tests below
+    drive the same helper."""
+    out = []
+    for site, calls in sorted(counts.items()):
+        mode = site.split(":", 1)[0]
+        want = EXPECTED_REFERENCE.get(mode)
+        for call in calls:
+            if want is None or call["reference"] != want:
+                out.append(
+                    "%s passes reference_id %r; the credit key needs %r%s" % (
+                        site, call["reference"], want,
+                        " -- the FFA unit is the SITTING: one lobby, however "
+                        "many games it plays, is one credit" if mode == "ffa" else ""))
+    return out
 
 
 # A stand-in for a wired completion site. One statement per line, and a second
@@ -897,15 +1178,16 @@ def test_the_coverage_scanner_sees_a_correct_call():
     """Control: without this, every test below passes on an empty result."""
     calls = hook_calls_in(WIRED_SITE)
     assert calls == [{"awaited": True, "has_mode": True,
-                      "has_reference_id": True}], calls
+                      "has_reference_id": True,
+                      "reference": "str(series.id)"}], calls
 
 
 def test_the_coverage_scanner_ignores_a_commented_out_call():
     """The defect the token count had: a commented call read as coverage.
 
-    This is not hypothetical for this item -- the hooks are deliberately
-    unwired and the likeliest first draft of the wiring is a commented
-    placeholder left behind at the site.
+    This was not hypothetical for this item: while the hooks were unwired,
+    the likeliest first draft of the wiring was a commented placeholder left
+    behind at a site.
     """
     src = WIRED_SITE.replace("        events = await", "        # events = await")
     assert hook_calls_in(src) == [], "a commented-out call counted as wired"
@@ -943,6 +1225,80 @@ def test_the_coverage_scanner_reads_an_indented_span():
     assert len(hook_calls_in(body)) == 1, (
         "the scanner could not read a span lifted out of a function; the "
         "coverage test feeds it exactly that")
+
+
+# The 1v1 site's shape: a constant placeholder for the except clause, the
+# real reference assigned inside the try, and the call passing the name.
+LREF_SITE = """
+async def submit_series(db, series, p1, p2):
+    if series.is_ranked:
+        _lref = "?"
+        try:
+            _lref = str(series.id)
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, [p1.id, p2.id], mode="1v1", reference_id=_lref)
+        except Exception as _lex:
+            print(_lref, _lex)
+"""
+
+# The FFA site's shape, with the reference left to fill in.
+FFA_SITE = """
+async def submit_ffa(db, report, id_by_steam, unrated, rated, lobby_uuid, match_id):
+    if rated:
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, [id_by_steam[p.steam_id] for p in report.players
+                         if p.steam_id not in unrated],
+                    mode="ffa", reference_id=REFERENCE)
+        except Exception as _lex:
+            print(_lex)
+"""
+
+
+def test_the_scanner_follows_a_name_to_its_one_real_assignment():
+    """`_lref = "?"` is a constant and is skipped; `_lref = str(series.id)`
+    is the one real assignment, so the call's reference is str(series.id)."""
+    calls = hook_calls_in(LREF_SITE)
+    assert [c["reference"] for c in calls] == ["str(series.id)"], calls
+    assert reference_mismatches({"1v1:submit_series": calls}) == []
+
+
+def test_the_scanner_refuses_a_name_assigned_twice():
+    """Two non-constant assignments: which one reaches the call is not
+    something a static reading can know, so the reference is None and the
+    site is reported rather than guessed."""
+    src = LREF_SITE.replace(
+        "            _lref = str(series.id)\n",
+        "            _lref = str(series.id)\n            _lref = str(series.other)\n")
+    assert src != LREF_SITE
+    calls = hook_calls_in(src)
+    assert [c["reference"] for c in calls] == [None], calls
+    assert len(reference_mismatches({"1v1:submit_series": calls})) == 1
+
+
+def test_the_scanner_refuses_a_name_bound_any_other_way():
+    """A loop target, and an unassigned name: both resolve to None."""
+    looped = LREF_SITE.replace(
+        "            _lref = str(series.id)\n",
+        "            for _lref in (str(series.id),):\n                pass\n")
+    unassigned = LREF_SITE.replace("            _lref = str(series.id)\n", "")
+    assert looped != LREF_SITE and unassigned != LREF_SITE
+    assert [c["reference"] for c in hook_calls_in(looped)] == [None]
+    assert [c["reference"] for c in hook_calls_in(unassigned)] == [None]
+
+
+def test_the_reference_check_reports_a_per_game_ffa_key():
+    """#391, both directions: an FFA-shaped site passing str(match_id) -- a
+    per-game key, the round-2 finding -- is reported, naming ffa and the
+    sitting; the same site passing str(lobby_uuid) passes."""
+    per_game = hook_calls_in(FFA_SITE.replace("REFERENCE", "str(match_id)"))
+    sitting = hook_calls_in(FFA_SITE.replace("REFERENCE", "str(lobby_uuid)"))
+    bad = reference_mismatches({"ffa:submit_ffa_match": per_game})
+    assert len(bad) == 1 and "ffa:submit_ffa_match" in bad[0], bad
+    assert "'str(match_id)'" in bad[0] and "SITTING" in bad[0], bad
+    assert reference_mismatches({"ffa:submit_ffa_match": sitting}) == []
 
 
 
@@ -1239,8 +1595,9 @@ def test_the_migration_applies_against_a_real_server():
     assert rungs == len(tl.ALL_SKUS) == 48, (rungs, len(tl.ALL_SKUS))
     assert items == 48, items
     assert on_sale == 0, (
-        "%d entry rung(s) came out of a clean apply on sale for 1000 gold, for "
-        "a ladder whose progression hook is not wired" % on_sale)
+        "%d entry rung(s) came out of a clean apply on sale for 1000 gold. 331 "
+        "lands them unlisted; opening them for sale is a decision of its own, "
+        "not a side effect of the migration" % on_sale)
     assert hidden == len(tl.GRANTED_ONLY_SKUS) == 40, (hidden, len(tl.GRANTED_ONLY_SKUS))
 
 
