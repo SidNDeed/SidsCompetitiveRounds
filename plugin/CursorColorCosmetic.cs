@@ -47,16 +47,37 @@ namespace CompetitiveRounds
             try { var v = PlayerPrefs.GetString(SHAPE_PREF, "default"); return Array.IndexOf(Shapes, v) >= 0 ? v : "default"; }
             catch { return "default"; }
         }
-        public static string CurrentShapeLabel()
+        public static string CurrentShapeLabel() => ShapeLabel(CurrentShape);
+
+        /// <summary>The English label of one shape id (item 13: the settings
+        /// page renders the recommended shape's label without selecting it).
+        /// An unknown id reads as the default shape, the same fallback
+        /// LoadShape applies to a stored value. English only: the page
+        /// translates through its own literal table, because a Tr of this
+        /// return value is invisible to the extractor.</summary>
+        public static string ShapeLabel(string id)
         {
-            int i = Array.IndexOf(Shapes, CurrentShape);
+            int i = Array.IndexOf(Shapes, id);
             return i >= 0 ? ShapeLabels[i] : "ROUNDS default";
         }
-        /// <summary>Advance to the next cursor shape (Settings cycler) and re-apply.</summary>
+
+        /// <summary>Advance to the next cursor shape and re-apply, through
+        /// SetShape.</summary>
         public static void CycleShape()
         {
             int i = Array.IndexOf(Shapes, CurrentShape);
-            _shape = Shapes[(Mathf.Max(0, i) + 1) % Shapes.Length];
+            SetShape(Shapes[(Mathf.Max(0, i) + 1) % Shapes.Length]);
+        }
+
+        /// <summary>The value-taking writer (item 13). An id outside Shapes is
+        /// refused before the pref is touched. The pref write and its Save are
+        /// one try, and the cursor is re-applied even when the id is the one
+        /// already stored, so a press always repairs a cursor something else
+        /// reset.</summary>
+        public static void SetShape(string id)
+        {
+            if (id == null || Array.IndexOf(Shapes, id) < 0) return;
+            _shape = id;
             try { PlayerPrefs.SetString(SHAPE_PREF, _shape); PlayerPrefs.Save(); } catch { }
             ApplyFromStats();
         }

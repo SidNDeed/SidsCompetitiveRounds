@@ -959,6 +959,7 @@ namespace CompetitiveRounds
              * the fallback atlas must learn the TRANSLATED glyphs. Unknown
              * strings pass through untouched (I18n.Tr is identity for en). */
             s=I18n.Tr(s);
+            if(PaintHook!=null){try{if(PaintHook(t,s,false))return;}catch{}}
             /* Make sure any non-ASCII glyph in this string exists in the runtime fallback atlas before TMP lays it out, else it renders as a box (Sid: "several players have boxes for their names"). No-ops for pure-ASCII text. */try{UnicodeFallback.EnsureCharacters(s);}catch{}pTmpText?.SetValue(t,_BoldWrap(s??""));}
         /* Codex v1.36 client find 15: USER-AUTHORED values (display names,
          * item names) must never pass through I18n.Tr — a player literally
@@ -966,7 +967,18 @@ namespace CompetitiveRounds
          * registration and bold wrap as SetText, no catalogue lookup. Any
          * site whose whole payload is a raw user string uses this. */
         public static void SetTextRaw(object t,string s){if(t==null)return;
+            if(PaintHook!=null){try{if(PaintHook(t,s,true))return;}catch{}}
             try{UnicodeFallback.EnsureCharacters(s);}catch{}pTmpText?.SetValue(t,_BoldWrap(s??""));}
+        /* Item 13: the settings page's paint hook (NativeUI.SettingsPaintHook).
+         * SetText and SetTextRaw offer every write to it first; it claims
+         * only the settings rows' own text objects (and a capture sentinel)
+         * and returns false for everything else, so every other text in the
+         * mod is written exactly as before. SetTextNoHook is the plain write
+         * the hook's own painting uses, so a row's label and control can
+         * never re-enter it. */
+        internal static Func<object,string,bool,bool> PaintHook;
+        internal static void SetTextNoHook(object t,string s){if(t==null)return;try{UnicodeFallback.EnsureCharacters(s);}catch{}pTmpText?.SetValue(t,_BoldWrap(s??""));}
+        internal static string GetTmpText(object t){if(t==null)return null;try{return pTmpText?.GetValue(t) as string;}catch{return null;}}
         public static void SetColor(object t,Color c){if(t!=null)pTmpColor?.SetValue(t,c);}
         public static void SetBold(object t,bool b){if(t==null)return;try{var tp=pTmpFontStyle?.PropertyType;if(tp!=null)pTmpFontStyle.SetValue(t,Enum.ToObject(tp,b?1:0));}catch{}}
         public static void SetWordWrap(object t,bool on){if(t==null||tTMP==null)return;try{var p=tTMP.GetProperty("enableWordWrapping",BindingFlags.Public|BindingFlags.Instance);p?.SetValue(t,on);}catch{}}
@@ -1325,7 +1337,7 @@ namespace CompetitiveRounds
         }
     }
 
-    public static class NativeUI
+    public static partial class NativeUI
     {
         private static readonly Color C_BG=new Color(0.06f,0.07f,0.09f,0.96f),C_PANEL=new Color(0.10f,0.11f,0.14f,0.92f);
         private static readonly Color C_WHITE=Color.white,C_SUB=new Color(0.8f,0.85f,1f),C_LABEL=new Color(0.7f,0.7f,0.75f);
@@ -1999,6 +2011,9 @@ namespace CompetitiveRounds
             // ClickHandler blocked, so it expires instead — #276/#430.)
             if(utilKind!=UtilKind.None&&(utilPopupGO==null||!utilPopupGO.activeSelf)){Plugin.Log.LogWarning("[UTIL-POPUP] flag set with no visible popup - closing");CloseUtilityPopup();}
             if(UtilityPopupOpen&&Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;bool took=false;try{took=MailUI.ConsumeEscape();}catch{}if(!took){try{took=CompetitiveUI.ConsumePromptEscape();}catch{}}if(!took)CloseUtilityPopup();return;}
+            // Item 13: an open prompt (the settings page's dropdown picker first) owns Escape before the page
+            // does - topmost surface first, one per press (CompetitiveUI.ConsumePromptEscape).
+            if(Input.GetKeyDown(KeyCode.Escape)){bool tookPrompt=false;try{tookPrompt=CompetitiveUI.ConsumePromptEscape();}catch{}if(tookPrompt){EscConsumedFrame=Time.frameCount;return;}}
             if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;/* Sept 6 item a: a PINNED profile card is the topmost surface — Escape unpins it and the page stays. */if(ProfileCard.ConsumeEscape())return;Close();return;}
             try{ProfileCard.Tick();}catch(Exception ex){VanillaFixSupport.DiagLimited("ProfileCard","tick failed: "+ex.Message,5);}/* Sept 6 item a: name-hover dwell, open, follow, pin */
             // r8 find 1: a bet-row refresh deferred by the mid-click guard
@@ -2031,6 +2046,9 @@ namespace CompetitiveRounds
             // Info tab: cross-ref link clicks are a raw Input poll (edge
             // trigger, so it must live on this per-frame path — #120).
             if (currentTab == TAB_INFO) TickInfoLinkClicks();
+            // Item 13: the settings page's keyboard / hover poll and its self-test
+            // (NativeUI.Settings.cs); both return at once off the settings tab.
+            if (currentTab == TAB_SETTINGS) { SettingsSelfTestTick(); TickSettingsInput(); }
             // Codex r1 f16: timed alerts expire LOCALLY — when the soonest
             // expiry passes, drop it and repaint so the banner clears within
             // seconds. Throttled; no server calls.
@@ -6270,6 +6288,8 @@ namespace CompetitiveRounds
                         if (bodyScroll >= 0f) { pendingInfoScroll = Mathf.Clamp01(bodyScroll); pendingInfoScrollFrame = Time.frameCount + 3; pendingInfoScrollKey = key; }
                     }
                 }
+                // Item 13: "5:<sub-tab>[:<key>|:expand]" and "5:selftest" (NativeUI.Settings.cs owns the grammar).
+                if (idx == TAB_SETTINGS && !string.IsNullOrEmpty(infoArticleKey)) DevSettingsDirective(infoArticleKey);
                 // the shop list, or (2026-09-13) the Settings column: the Player Cards rows live below its fold
                 var scrollGO = idx == 4 ? shopScrollGO : (idx == TAB_SETTINGS ? settingsScrollGO : null);
                 if (scrollGO != null && shopScroll >= 0f && UIFactory.tScrollRect != null)
@@ -13291,73 +13311,6 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static GameObject _perfSectionBody;
         private static bool deleteArmed = false;
 
-        // Helper: makes a left-aligned fixed-width button. Wraps in an HLG with a flex
-        // spacer so the button keeps its sizeDelta when the outer panel uses VLG
-        // (which otherwise stretches children to full width).
-        internal static GameObject SettingsButton(Transform parent, string name, string label,
-            Color textColor, Color bgColor, Vector2 size, UnityEngine.Events.UnityAction onClick)
-        {
-            var row = new GameObject(name + "_row");
-            row.transform.SetParent(parent, false);
-            row.AddComponent<RectTransform>();
-            UIFactory.AddHLG(row, spacing: 6, forceExpandH: true);
-            UIFactory.AddLE(row, prefH: size.y + 2, flexH: 0);
-            var btn = UIFactory.CreateButton(name, row.transform, label, 14f, textColor, bgColor, onClick, sizeDelta: size);
-            UIFactory.AddLE(btn, prefW: size.x, prefH: size.y, flexW: 0, flexH: 0);
-            var spacer = new GameObject("S");
-            spacer.transform.SetParent(row.transform, false);
-            spacer.AddComponent<RectTransform>();
-            UIFactory.AddLE(spacer, flexW: 1);
-            return btn;
-        }
-
-        // Bug 87 + July 26 item 3: one SETTING = one tight [button + caption
-        // BELOW it] group. Descriptions used to sit ABOVE their button with the
-        // same 4px sibling spacing as everything else, plus dead space at the
-        // bottom of their fixed-height boxes — so a caption visually attached
-        // to the PREVIOUS toggle. Grouping makes the association unambiguous;
-        // the section box's wider spacing (10) separates whole settings.
-        /// <param name="descWrap">Let the caption WRAP and take the height its
-        /// own text needs, instead of being clipped at <paramref name="descH"/>
-        /// (Codex r1 MEDIUM, the automatic-log consent caption). CreateText
-        /// pins prefH AND minH from sizeDelta.y and defaults overflow to
-        /// Truncate, so a caption longer than one line at 700 px silently loses
-        /// everything past the first — which is how a disclosure came to hide
-        /// the sentences that make it a disclosure, and would do it again in
-        /// any locale that runs 30% longer. With this on, descH is the FLOOR and
-        /// TMP's measured height is the actual one; the Settings tab is a
-        /// ScrollView, so growing is free. Off by default: every other caption
-        /// in this file is a deliberate one-liner.</param>
-        private static GameObject SettingsToggle(Transform parent, string name, Vector2 size,
-            UnityEngine.Events.UnityAction onClick, string desc = null, float descH = 18f,
-            bool descWrap = false)
-        {
-            var group = new GameObject(name + "_grp");
-            group.transform.SetParent(parent, false);
-            group.AddComponent<RectTransform>();
-            UIFactory.AddVLG(group, spacing: 1);
-            UIFactory.AddLE(group, flexH: 0);
-            var btn = SettingsButton(group.transform, name, "", C_WHITE, C_BTN, size, onClick);
-            if (!string.IsNullOrEmpty(desc))
-            {
-                var d = UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM,
-                    sizeDelta: new Vector2(700, descH));
-                if (descWrap)
-                {
-                    UIFactory.SetWordWrap(d, true);
-                    // Overflow (0) so every laid-out line PAINTS — Truncate is
-                    // the file-wide default and it is exactly what clipped this
-                    // caption. The auto-height below is what makes the box the
-                    // right size for those lines, so nothing bleeds onto the
-                    // next setting; the two go together and neither is enough
-                    // on its own.
-                    UIFactory.SetOverflowMode(d, 0);
-                    UIFactory.SetTextAutoHeight(d, descH);
-                }
-            }
-            return btn;
-        }
-
         /// <summary>Bug 180 (Stan): "How stats are tracked" explainer body.
         /// PROPERTY, not const — the literal must sit inside I18n.Tr at a
         /// call site for the extractor (#295a), and property access happens
@@ -13999,101 +13952,126 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         private static GameObject BuildSettingsTab(Transform parent)
         {
-            // Outer fills the tab area; scroll view eats all extra height so the
-            // contents auto-size and any added rows just extend the scrollable
-            // region instead of squeezing every existing button smaller. The
-            // user reported having to resize text/buttons to fit the perf
-            // toggles — the scroll wrap fixes that for any future additions.
+            // Item 13 (v1.41.0, the settings page reorganisation, design
+            // revision 7): seven sub-tabs of rows beside a help pane. The page
+            // chrome, the typed row constructors, the paint hook and the pane
+            // live in NativeUI.Settings.cs; every ROW is still built here, so
+            // the keyset instrument reads the whole page from this one method,
+            // and every row is still painted by RefreshSettings below. A row's
+            // caption is no longer drawn under its button: it is the row's
+            // help body, shown in the pane beside the list, which wraps and
+            // scrolls, so no caption can be clipped by a fixed box again.
+            SettingsBeginBuild();
             var outer = new GameObject("SettingsOuter");
             outer.transform.SetParent(parent, false);
             outer.AddComponent<RectTransform>();
-            UIFactory.AddVLG(outer, spacing: 0);
+            UIFactory.AddVLG(outer, spacing: 4);
             UIFactory.AddLE(outer, flexH: 1);
             // Aug 23: Settings became a two-member group (Settings | Info), so
             // it needs a sub-tab anchor like every other grouped tab.
             MakeSubTabAnchor(5, outer.transform, true);
-            var scroll = UIFactory.CreateScrollView("SettingsScroll", outer.transform, spacing: 0);
-            UIFactory.AddLE(scroll.scrollGO, flexH: 1);
-            settingsScrollGO = scroll.scrollGO;
+            var listContent = BuildSettingsChrome(outer);
 
+            // The root every sub-tab body hangs under; the seven bodies are in
+            // bar order (SettingsModel.SubTabBodies) and exactly one is active.
             var panel = new GameObject("Settings");
-            panel.transform.SetParent(scroll.content.transform, false);
-            panel.AddComponent<RectTransform>();
-            UIFactory.AddVLG(panel, spacing: 10, padL: 20, padR: 20, padT: 10, padB: 10);
-            // flexH:0 so the panel sizes to its content height (the scroll viewport
-            // handles overflow). flexH:1 here would collapse children with no prefH
-            // (learning #63).
-            UIFactory.AddLE(panel, flexH: 0);
+            panel.transform.SetParent(listContent, false);
+            SettingsPanelInit(panel);
+            var subIngame = new GameObject("SubIngame");
+            subIngame.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subIngame, 0);
+            var subChatMail = new GameObject("SubChatMail");
+            subChatMail.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subChatMail, 1);
+            var subSound = new GameObject("SubSound");
+            subSound.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subSound, 2);
+            var subVisuals = new GameObject("SubVisuals");
+            subVisuals.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subVisuals, 3);
+            var subPerf = new GameObject("SubPerf");
+            subPerf.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subPerf, 4);
+            var subLangMenus = new GameObject("SubLangMenus");
+            subLangMenus.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subLangMenus, 5);
+            var subPrivacy = new GameObject("SubPrivacy");
+            subPrivacy.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subPrivacy, 6);
 
-            UIFactory.CreateText("SH", panel.transform, "Settings", 22f, C_GOLD,
-                UIFactory.AlignTopCenter, sizeDelta: new Vector2(600, 30));
-
-            // -- Data & Privacy --
-            // July 26 item 3 (ties to bug 87): the old layout was one giant
-            // "Display" box with 15 controls and desc-above-button captions.
-            // Now: Data & Privacy / Interface / Visuals & Effects sections,
-            // each setting a SettingsToggle group (caption BELOW its button).
-            var consentBox = UIFactory.CreatePanel("SCB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(consentBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(consentBox, flexH: 0);
-            UIFactory.CreateText("SCL", consentBox.transform,
-                "Data & Privacy", 17f, new Color(0.7f, 0.85f, 1f),
-                sizeDelta: new Vector2(700, 24));
-            txtConsentStatus = UIFactory.CreateText("SCS", consentBox.transform, "",
-                15f, C_LABEL, sizeDelta: new Vector2(700, 22));
-            consentToggleBtn = SettingsToggle(consentBox.transform, "SCT", new Vector2(220, 28),
+            // -- In game --
+            pingToggleBtn = SettingsSwitch(subIngame.transform, "SPing", I18n.Tr("Shows your current server region and your ping to it."),
+                () => Plugin.ShowRegionPing != null && Plugin.ShowRegionPing.Value,
                 () =>
                 {
-                    Plugin.Log.LogInfo("[SETTINGS] Consent toggle clicked");
-                    if (Plugin.DataConsentGranted)
-                    {
-                        Plugin.DataConsent.Value = "denied";
-                    }
-                    else
-                    {
-                        Plugin.DataConsent.Value = "granted";
-                    }
-                    ApiClient.OnConsentChanged();
+                    Plugin.Log.LogInfo("[SETTINGS] Ping/region toggled");
+                    Plugin.ShowRegionPing.Value = !Plugin.ShowRegionPing.Value;
                     dirty = true;
-                },
-                "Allow the mod to report your match results and stats to the community server.");
-            consentToggleTxt = UIFactory.GetButtonText(consentToggleBtn);
-            /* Appear-offline (v1.33): server-synced privacy toggle — hides the
-             * player from the Home tab's online / recently-online lists.
-             * Optimistic flip on the cached stats; FetchPlayerStats in the
-             * SetAppearOffline callback reconciles with the server truth. */
-            appearOfflineBtn = SettingsToggle(consentBox.transform, "SAppOff", new Vector2(340, 28),
+                });
+            pingToggleTxt = UIFactory.GetButtonText(pingToggleBtn);
+            // Release B section 4 (bug 332): lag notices, default off. Sits under the
+            // ping/region row because both describe the same corner label.
+            lagNoticesToggleBtn = SettingsSwitch(subIngame.transform, "SLagNotice", I18n.Tr("Corner notices when your frames drop, your ping is high or the opponent's updates arrive late. 1v1 only."),
+                () => Plugin.LagNoticesEnabled != null && Plugin.LagNoticesEnabled.Value,
                 () =>
                 {
-                    var st = ApiClient.CachedPlayerStats;
-                    var id = MatchTracker.LocalSteamId;
-                    if (st == null || string.IsNullOrEmpty(id) || id == "unknown") return;
-                    Plugin.Log.LogInfo("[SETTINGS] appear-offline toggled");
-                    st.appear_offline = !st.appear_offline;
+                    Plugin.Log.LogInfo("[SETTINGS] Lag notices toggled");
+                    if (Plugin.LagNoticesEnabled != null) Plugin.LagNoticesEnabled.Value = !Plugin.LagNoticesEnabled.Value;
                     dirty = true;
-                    ApiClient.SetAppearOffline(id, st.appear_offline, (ok, resp) =>
-                    {
-                        if (!ok) CompetitiveUI.ShowNotification("Couldn't change Appear offline - try again", Color.yellow, 3f);
-                        dirty = true;
-                    });
-                },
-                "Hides you from the Home tab's online and recently-online lists.");
-            appearOfflineTxt = UIFactory.GetButtonText(appearOfflineBtn);
+                });
+            lagNoticesToggleTxt = UIFactory.GetButtonText(lagNoticesToggleBtn);
+            inputOverlayToggleBtn = SettingsSwitch(subIngame.transform, "SInpOv", I18n.Tr("Input overlay (bottom-left): shows W, A, S, D, Space and both mouse buttons. Lights up red when pressed. Useful for streams or spotting missed inputs."),
+                () => Plugin.ShowInputOverlay != null && Plugin.ShowInputOverlay.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Input overlay toggled");
+                    Plugin.ShowInputOverlay.Value = !Plugin.ShowInputOverlay.Value;
+                    dirty = true;
+                });
+            inputOverlayToggleTxt = UIFactory.GetButtonText(inputOverlayToggleBtn);
+            blockDbgToggleBtn = SettingsSwitch(subIngame.transform, "SBlkDbg", I18n.Tr("Block debug overlay (corner): blocks you started vs blocks that actually absorbed a hit, plus why each one missed (too early / too slow / unblockable)."),
+                () => Plugin.ShowBlockDebug != null && Plugin.ShowBlockDebug.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Block debug overlay toggled");
+                    Plugin.ShowBlockDebug.Value = !Plugin.ShowBlockDebug.Value;
+                    dirty = true;
+                });
+            blockDbgToggleTxt = UIFactory.GetButtonText(blockDbgToggleBtn);
+            // v1.41.0 item 10: the HP-readout precision lever. The setting itself
+            // (TabStatsOverlay.HealthPrecisionSetting) bound, normalised and
+            // formatted before any row reached it (#438/#443). It changes how a
+            // number is drawn and nothing else: the wire format is produced by
+            // WireNum, which ignores StatRow.fmt entirely (#47). Item 13: the
+            // three levels are chosen directly through the named writer.
+            healthPrecToggleBtn = SettingsSegmented(subIngame.transform, "SHpPrec", I18n.Tr("Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. "
+                + "Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops "
+                + "reading as a whole number too. Local display only - nothing stored or sent changes."),
+                new[] { TabStatsOverlay.HealthPrecisionSetting.ROUNDED, TabStatsOverlay.HealthPrecisionSetting.ONE_DP, TabStatsOverlay.HealthPrecisionSetting.TWO_DP },
+                () => TabStatsOverlay.HealthPrecisionSetting.Level,
+                id =>
+                {
+                    TabStatsOverlay.HealthPrecisionSetting.Set(id);
+                    Plugin.Log.LogInfo($"[SETTINGS] HP decimals -> {TabStatsOverlay.HealthPrecisionSetting.Level}");
+                    dirty = true;
+                });
+            healthPrecToggleTxt = UIFactory.GetButtonText(healthPrecToggleBtn);
             /* Room rules (Sept 10): the Same Cards preference for queue-matched
              * rooms (ranked 1v1, and the 2v2 / 1v2 auto-queue rooms, which have
-             * no host) — a room gets the rule only when EVERY player in it has
+             * no host) - a room gets the rule only when EVERY player in it has
              * this on, read when the room is issued, so a change while queued
              * applies to the next room. Optimistic flip on the cached stats (a
              * flat bool, free JsonUtility parse #73); the callback's stats
              * re-fetch reconciles with the server truth, like Appear offline. */
-            prefSameCardsBtn = SettingsToggle(consentBox.transform, "SPrefSC", new Vector2(340, 28),
+            prefSameCardsBtn = SettingsSwitch(subIngame.transform, "SPrefSC", I18n.Tr("Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in the room has this on. Applies from your next game."),
+                () => ApiClient.CachedPlayerStats != null && ApiClient.CachedPlayerStats.pref_same_cards,
                 () =>
                 {
                     var st = ApiClient.CachedPlayerStats;
                     var id = MatchTracker.LocalSteamId;
                     if (st == null || string.IsNullOrEmpty(id) || id == "unknown") return;
-                    // c1 M5: single-flight — a click while the previous write
-                    // is unacked is dropped (25 s staleness — past PostRequest's
+                    // c1 M5: single-flight - a click while the previous write
+                    // is unacked is dropped (25 s staleness - past PostRequest's
                     // 20 s transport timeout, so the latch cannot lapse while a
                     // write is still in flight and let a second click overtake
                     // it, c2 M1; a lost callback still cannot wedge the toggle),
@@ -14117,16 +14095,417 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         }
                         dirty = true;
                     });
-                },
-                "Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in the room has this on. Applies from your next game.", 36f);
+                });
             prefSameCardsTxt = UIFactory.GetButtonText(prefSameCardsBtn);
-            PlayerCardsUI.BuildSettingsRows(consentBox.transform);   // Sept 10 (Player Cards): the three consent toggles, design v4 section 12
-            /* Sept 6 (Sid, in-game mail): "Who can mail me" + the blocked-sender
-             * list, side by side so both mail preferences live in one place. */
-            MailUI.BuildSettingsRow(consentBox.transform);
-            /* July 22 item 8: opt-IN "show my Discord on the leaderboard" —
+            // -- Leave all queues (bug report #124) --
+            // Deliberately HERE, in Settings, and not on the queue tabs: the
+            // player who needs it is the one whose queue tab is misbehaving,
+            // and the FFA tab in particular auto-joins on open. Settings is
+            // reachable from every state, including inside a match.
+            var escRow = SettingsAction(subIngame.transform, "SEBtn", I18n.Tr("Removes you from every queue and lobby in every mode \u2014 1v1, 2v2, 1v2 and FFA.\n" +
+                "Use this if the game thinks you're still in a match you've already left, or if joining " +
+                "a queue keeps telling you you're busy. It won't affect a game you're actually playing, " +
+                "and it never touches your stats, gold or rating."),
+                () =>
+                {
+                    // No ClickGuard.Claim() here - CreateButton already guards
+                    // this control, and a second claim on the same key in the
+                    // same frame is always rejected (learning #158).
+                    ApiClient.EscapeAllQueues(null);
+                    dirty = true;
+                },
+                new Color(0.42f, 0.32f, 0.12f, 0.9f));
+            escBtnTxt = UIFactory.GetButtonText(escRow);
+
+            // -- Chat & mail --
+            ingameChatToggleBtn = SettingsSegmented(subChatMail.transform, "SIgChat", I18n.Tr("Shows community chat in the corner while you play. Press T to type a reply, or M in game to cycle normal / pinned / muted."),
+                new[] { "Normal", "Pinned", "Muted" },
+                () => CompetitiveUI.CurrentChatOverlayMode().ToString(),
+                id =>
+                {
+                    // The SAME state the M hotkey cycles (Normal -> Pinned ->
+                    // Muted), written through its named writer, so the row and
+                    // the key can never disagree and the row reaches Pinned.
+                    CompetitiveUI.SetChatOverlayMode(SettingsAsChatMode(id));
+                    dirty = true;
+                });
+            ingameChatToggleTxt = UIFactory.GetButtonText(ingameChatToggleBtn);
+            // The fade time is a slider over Plugin.CHAT_TTL_CYCLE's stops; the
+            // named writer snaps to the nearest stop and logs it.
+            chatTtlBtn = SettingsSlider(subChatMail.transform, "SChatTtl", I18n.Tr("How long a chat message stays fully visible before it fades. Ignored while the overlay is pinned."),
+                Plugin.CHAT_TTL_CYCLE,
+                () => Plugin.ChatOverlaySecondsIndex(),
+                v => { Plugin.SetChatOverlaySeconds(v); });
+            chatTtlTxt = UIFactory.GetButtonText(chatTtlBtn);
+            // Chat pop-up notifications (moved from its own box, July 26 item 3).
+            notifToggleBtn = SettingsSwitch(subChatMail.transform, "SNT", I18n.Tr("On-screen pop-ups for incoming chat and XP/level notifications. The chat log on the Home tab updates either way."),
+                () => Plugin.ShowNotifications != null && Plugin.ShowNotifications.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Notifications toggled");
+                    Plugin.ShowNotifications.Value = !Plugin.ShowNotifications.Value;
+                    dirty = true;
+                });
+            notifToggleTxt = UIFactory.GetButtonText(notifToggleBtn);
+            /* Sept 6 (in-game mail): "Who can mail me", the Discord relay and
+             * the blocked-sender list, so every mail preference lives in one
+             * place. */
+            MailUI.BuildSettingsRow(subChatMail.transform);
+
+            // -- Sound --
+            muteBgToggleBtn = SettingsSwitch(subSound.transform, "SMuteBg", I18n.Tr("Mutes game audio while the window is unfocused during online play. The menu stays audible; sound returns the moment you tab back in."),
+                () => Plugin.MuteAudioInBackground != null && Plugin.MuteAudioInBackground.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Background mute toggled");
+                    Plugin.MuteAudioInBackground.Value = !Plugin.MuteAudioInBackground.Value;
+                    dirty = true;
+                });
+            muteBgToggleTxt = UIFactory.GetButtonText(muteBgToggleBtn);
+            menuMusicToggleBtn = SettingsSegmented(subSound.transform, "SMenuMus", I18n.Tr("Main menu music: Default = ROUNDS' own theme, My playlist = your selected custom music, None = silence. Matches always use your picks."),
+                new[] { "vanilla", "custom", "silent" },
+                () => CurrentMenuMusicMode(),
+                id =>
+                {
+                    // Sept 2 feedback: three states, now chosen directly rather
+                    // than cycled. The value identities stay out of every
+                    // harvested call span (#295a inverse: a translated identity
+                    // breaks the compare); the named writer normalises, stores
+                    // and hands the engine the change.
+                    Plugin.Log.LogInfo("[SETTINGS] Menu music mode set");
+                    SetMenuMusicMode(id);
+                    dirty = true;
+                });
+            menuMusicToggleTxt = UIFactory.GetButtonText(menuMusicToggleBtn);
+            musicCreditToggleBtn = SettingsSwitch(subSound.transform, "SMusCredit", I18n.Tr("Shows a small bottom-left credit line naming the track and artist whenever a custom song starts."),
+                () => Plugin.MusicCreditToast != null && Plugin.MusicCreditToast.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Music credit toast toggled");
+                    if (Plugin.MusicCreditToast != null) Plugin.MusicCreditToast.Value = !Plugin.MusicCreditToast.Value;
+                    dirty = true;
+                });
+            musicCreditToggleTxt = UIFactory.GetButtonText(musicCreditToggleBtn);
+
+            // -- Visuals --
+            trailToggleBtn = SettingsSwitch(subVisuals.transform, "STrail", I18n.Tr("Shows cosmetic trails on you and other modded players."),
+                () => Plugin.ShowTrails != null && Plugin.ShowTrails.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Trails toggled");
+                    Plugin.ShowTrails.Value = !Plugin.ShowTrails.Value;
+                    // Live effect mid-match: ON -> re-attach for everyone, OFF -> detach.
+                    if (Plugin.ShowTrails.Value)
+                    {
+                        if (GameStateWatcher.IsInMatch) TrailCosmetic.OnMatchStart();
+                    }
+                    else
+                    {
+                        TrailCosmetic.OnMatchEnd();
+                    }
+                    dirty = true;
+                });
+            trailToggleTxt = UIFactory.GetButtonText(trailToggleBtn);
+            playerColorToggleBtn = SettingsSwitch(subVisuals.transform, "SPColor", I18n.Tr("Custom player body colors: shows shop-bought Body Colors on you and other modded players. Off = everyone falls back to default orange/blue."),
+                () => Plugin.ShowPlayerColors != null && Plugin.ShowPlayerColors.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Custom player colors toggled");
+                    Plugin.ShowPlayerColors.Value = !Plugin.ShowPlayerColors.Value;
+                    try { PlayerColorCosmetic.OnShowPlayerColorsToggled(); } catch { }
+                    try { PlayerEffectCosmetic.OnShowPlayerColorsToggled(); } catch { }
+                    dirty = true;
+                });
+            playerColorToggleTxt = UIFactory.GetButtonText(playerColorToggleBtn);
+            animCosToggleBtn = SettingsSwitch(subVisuals.transform, "SAnimCos", I18n.Tr("Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = everything freezes on a static frame."),
+                () => Plugin.AnimatedCosmetics != null && Plugin.AnimatedCosmetics.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Animated cosmetics toggled");
+                    Plugin.AnimatedCosmetics.Value = !Plugin.AnimatedCosmetics.Value;
+                    try { PlayerEffectCosmetic.OnAnimatedCosmeticsToggled(); } catch { }
+                    try { MapSkinEffects.OnAnimatedCosmeticsToggled(); } catch { }
+                    dirty = true;
+                });
+            animCosToggleTxt = UIFactory.GetButtonText(animCosToggleBtn);
+            // Bloom strength (Sid: "cosmetics are illuminated and the effect is
+            // quite large for some people"): three levels, chosen directly.
+            bloomToggleBtn = SettingsSegmented(subVisuals.transform, "SBloom", I18n.Tr("Glow (bloom): the soft halo around bright cosmetics, map art and effects. Reduced = smaller, dimmer halo. Off = no halo. Local only \u2014 nothing is hidden, the cosmetic itself still renders the same. A few items have their glow painted into the artwork, and that part stays."),
+                new[] { "Full", "Reduced", "Off" },
+                () => MapPhysicalColorPatch.BloomStrengthSetting.Level,
+                id =>
+                {
+                    MapPhysicalColorPatch.BloomStrengthSetting.Set(id);
+                    Plugin.Log.LogInfo($"[SETTINGS] Bloom strength -> {MapPhysicalColorPatch.BloomStrengthSetting.Level}");
+                    dirty = true;
+                });
+            bloomToggleTxt = UIFactory.GetButtonText(bloomToggleBtn);
+            screenShakeToggleBtn = SettingsSegmented(subVisuals.transform, "SShake", I18n.Tr("Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. "
+                + "Off = a perfectly steady camera. Local only."),
+                new[] { "Full", "Reduced", "Off" },
+                () => ScreenshakerDisablePatch.Level,
+                id =>
+                {
+                    ScreenshakerDisablePatch.Set(id);
+                    Plugin.Log.LogInfo($"[SETTINGS] Screen shake -> {ScreenshakerDisablePatch.Level}");
+                    dirty = true;
+                });
+            screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
+            chromAbToggleBtn = SettingsSwitch(subVisuals.transform, "SChromAb", I18n.Tr("Chromatic aberration: the RGB color-fringing that pulses on shots/hits/deaths. Off = crisp edges, tiny FPS gain. Visual only, local only."),
+                () => Plugin.ChromaticAberrationEnabled != null && Plugin.ChromaticAberrationEnabled.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Chromatic aberration toggled");
+                    Plugin.ChromaticAberrationEnabled.Value = !Plugin.ChromaticAberrationEnabled.Value;
+                    try { MapPhysicalColorPatch.ChromaticAberrationSetting.Apply(); } catch { }
+                    dirty = true;
+                });
+            chromAbToggleTxt = UIFactory.GetButtonText(chromAbToggleBtn);
+            mapLightingToggleBtn = SettingsSwitch(subVisuals.transform, "SLight", I18n.Tr("Map lighting: the light and shade the map is drawn with. Off = flat, evenly-lit maps for extra FPS."),
+                () => Plugin.MapLightingEnabled != null && Plugin.MapLightingEnabled.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Map lighting toggled");
+                    Plugin.MapLightingEnabled.Value = !Plugin.MapLightingEnabled.Value;
+                    // Re-tint the live skin too, not just the backdrop: which side carries
+                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
+                    // leaves the wall/art surfaces holding the WRONG correction until the
+                    // next map load - uncorrected after enable, doubly corrected after
+                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
+                    try
+                    {
+                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
+                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
+                        var liveSku = MapColorState.CurrentSku;
+                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
+                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
+                    }
+                    catch { }
+                    dirty = true;
+                });
+            mapLightingToggleTxt = UIFactory.GetButtonText(mapLightingToggleBtn);
+            mapShadowsToggleBtn = SettingsSwitch(subVisuals.transform, "SShad", I18n.Tr("Soft shadow beams cast by map lighting. Off = no shadows (lighting stays on) for extra FPS."),
+                () => Plugin.MapShadowsEnabled != null && Plugin.MapShadowsEnabled.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Map shadows toggled");
+                    Plugin.MapShadowsEnabled.Value = !Plugin.MapShadowsEnabled.Value;
+                    // Re-tint the live skin too, not just the backdrop: which side carries
+                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
+                    // leaves the wall/art surfaces holding the WRONG correction until the
+                    // next map load - uncorrected after enable, doubly corrected after
+                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
+                    try
+                    {
+                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
+                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
+                        var liveSku = MapColorState.CurrentSku;
+                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
+                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
+                    }
+                    catch { }
+                    dirty = true;
+                });
+            mapShadowsToggleTxt = UIFactory.GetButtonText(mapShadowsToggleBtn);
+            // Cursor shape (local-only). Combines with the equipped cursor color.
+            cursorShapeBtn = SettingsDropdown(subVisuals.transform, "SCursor", I18n.Tr("Changes the menu cursor's shape. Works alongside an equipped cursor color."),
+                () => CursorColorCosmetic.Shapes,
+                () => CursorColorCosmetic.CurrentShape,
+                id => { CursorColorCosmetic.SetShape(id); dirty = true; });
+            cursorShapeTxt = UIFactory.GetButtonText(cursorShapeBtn);
+
+            // -- Performance --
+            fpsToggleBtn = SettingsSwitch(subPerf.transform, "SFPS", I18n.Tr("Frames per second, top-left corner. Handy for checking whether a setting actually helped."),
+                () => Plugin.ShowFps != null && Plugin.ShowFps.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] FPS toggled");
+                    Plugin.ShowFps.Value = !Plugin.ShowFps.Value;
+                    dirty = true;
+                });
+            fpsToggleTxt = UIFactory.GetButtonText(fpsToggleBtn);
+            fpsCapToggleBtn = SettingsSwitch(subPerf.transform, "SFPSCap", I18n.Tr("Caps the game at 120 FPS while the window is not focused. Saves GPU/CPU when alt-tabbed; lifts instantly when you come back."),
+                () => Plugin.CapFpsUnfocused != null && Plugin.CapFpsUnfocused.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Unfocused FPS cap toggled");
+                    Plugin.CapFpsUnfocused.Value = !Plugin.CapFpsUnfocused.Value;
+                    dirty = true;
+                });
+            fpsCapToggleTxt = UIFactory.GetButtonText(fpsCapToggleBtn);
+            deepIdleToggleBtn = SettingsSwitch(subPerf.transform, "SDeepIdle", I18n.Tr("After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus."),
+                () => Plugin.DeepIdleUnfocused != null && Plugin.DeepIdleUnfocused.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Deep idle toggled");
+                    Plugin.DeepIdleUnfocused.Value = !Plugin.DeepIdleUnfocused.Value;
+                    dirty = true;
+                });
+            deepIdleToggleTxt = UIFactory.GetButtonText(deepIdleToggleBtn);
+            // Performance patches (v1.26.8): a disclosure over the eight patch
+            // rows. Each row maps 1:1 to a BepInEx config flag in Plugin.PerfXYZ.
+            // Same logic as PerfGate.Check: master must be on AND the per-patch
+            // flag must be on for the patch to fire.
+            var perfHdrRow = SettingsDisclosure(subPerf.transform, "SPerfH", null,
+                () => _perfSectionOpen,
+                () =>
+                {
+                    _perfSectionOpen = !_perfSectionOpen;
+                    if (_perfSectionBody != null) _perfSectionBody.SetActive(_perfSectionOpen);
+                    dirty = true;
+                });
+            _perfSectionHeaderTxt = UIFactory.GetButtonText(perfHdrRow);
+            _perfSectionBody = new GameObject("SPerfRows");
+            _perfSectionBody.transform.SetParent(subPerf.transform, false);
+            _perfSectionBody.AddComponent<RectTransform>();
+            UIFactory.AddVLG(_perfSectionBody, spacing: 4);
+            UIFactory.AddLE(_perfSectionBody, flexH: 0);
+            _perfSectionBody.SetActive(_perfSectionOpen);
+            // Item 9 (double failure fix): call sites wrap their literal in
+            // I18n.Tr(...) so it HARVESTS (Tr sites are harvest points). The
+            // row's name is "SPerf_" + id, the one name form the keyset
+            // instrument recognises for this emitter.
+            GameObject AddPerfRow(string id, string desc, Func<bool> get, UnityEngine.Events.UnityAction toggle)
+            {
+                var row = SettingsSwitch(_perfSectionBody.transform, "SPerf_" + id, desc, get, toggle);
+                return row;
+            }
+            perfMasterBtn = AddPerfRow("Master", I18n.Tr("Performance master switch \u2014 flips ALL the patches below at once."),
+                () => Plugin.PerfOptimizations != null && Plugin.PerfOptimizations.Value,
+                () => { if (Plugin.PerfOptimizations != null) { Plugin.PerfOptimizations.Value = !Plugin.PerfOptimizations.Value; dirty = true; } });
+            perfMasterTxt = UIFactory.GetButtonText(perfMasterBtn);
+            perfStunBtn = AddPerfRow("Stun", I18n.Tr("StunPlayer null-guard \u2014 stops NRE spam when a player is destroyed mid-stun."),
+                () => Plugin.PerfStunPlayerNullGuard != null && Plugin.PerfStunPlayerNullGuard.Value,
+                () => { if (Plugin.PerfStunPlayerNullGuard != null) { Plugin.PerfStunPlayerNullGuard.Value = !Plugin.PerfStunPlayerNullGuard.Value; dirty = true; } });
+            perfStunTxt = UIFactory.GetButtonText(perfStunBtn);
+            perfBulletsBtn = AddPerfRow("OOB", I18n.Tr("Despawn off-screen bullets \u2014 host clears bullets that exit the camera viewport."),
+                () => Plugin.PerfDespawnOffscreenBullets != null && Plugin.PerfDespawnOffscreenBullets.Value,
+                () => { if (Plugin.PerfDespawnOffscreenBullets != null) { Plugin.PerfDespawnOffscreenBullets.Value = !Plugin.PerfDespawnOffscreenBullets.Value; dirty = true; } });
+            perfBulletsTxt = UIFactory.GetButtonText(perfBulletsBtn);
+            perfHitSndBtn = AddPerfRow("HitSnd", I18n.Tr("Swallow RayHitBulletSound NREs from destroyed parents."),
+                () => Plugin.PerfSwallowHitSoundNREs != null && Plugin.PerfSwallowHitSoundNREs.Value,
+                () => { if (Plugin.PerfSwallowHitSoundNREs != null) { Plugin.PerfSwallowHitSoundNREs.Value = !Plugin.PerfSwallowHitSoundNREs.Value; dirty = true; } });
+            perfHitSndTxt = UIFactory.GetButtonText(perfHitSndBtn);
+            // ("ColorGh" + "Tag" rows removed v1.28.2 - their patches were
+            // old-game ports whose targets no longer exist; see PerfPatches.cs)
+            perfEdgeBnBtn = AddPerfRow("EdgeBn", I18n.Tr("Swallow ScreenEdgeBounce NREs from destroyed bullets."),
+                () => Plugin.PerfSwallowEdgeBounceNREs != null && Plugin.PerfSwallowEdgeBounceNREs.Value,
+                () => { if (Plugin.PerfSwallowEdgeBounceNREs != null) { Plugin.PerfSwallowEdgeBounceNREs.Value = !Plugin.PerfSwallowEdgeBounceNREs.Value; dirty = true; } });
+            perfEdgeBnTxt = UIFactory.GetButtonText(perfEdgeBnBtn);
+            perfMenuBtn = AddPerfRow("Menu", I18n.Tr("Skip MenuControllerHandler.Update during an active match."),
+                () => Plugin.PerfSkipMenuUpdateInMatch != null && Plugin.PerfSkipMenuUpdateInMatch.Value,
+                () => { if (Plugin.PerfSkipMenuUpdateInMatch != null) { Plugin.PerfSkipMenuUpdateInMatch.Value = !Plugin.PerfSkipMenuUpdateInMatch.Value; dirty = true; } });
+            perfMenuTxt = UIFactory.GetButtonText(perfMenuBtn);
+            perfBulletCapBtn = AddPerfRow("BulletCap", I18n.Tr("Cap bullet-hit particles at 2/frame \u2014 biggest user-visible win on heavy firefights."),
+                () => Plugin.PerfBulletHitParticleCap != null && Plugin.PerfBulletHitParticleCap.Value,
+                () => { if (Plugin.PerfBulletHitParticleCap != null) { Plugin.PerfBulletHitParticleCap.Value = !Plugin.PerfBulletHitParticleCap.Value; dirty = true; } });
+            perfBulletCapTxt = UIFactory.GetButtonText(perfBulletCapBtn);
+            perfPoolBtn = AddPerfRow("PoolInit", I18n.Tr("Clamp ObjectPool init-spawn to 4 in-match \u2014 reduces frame stutter from new pool allocation."),
+                () => Plugin.PerfClampObjectPoolInit != null && Plugin.PerfClampObjectPoolInit.Value,
+                () => { if (Plugin.PerfClampObjectPoolInit != null) { Plugin.PerfClampObjectPoolInit.Value = !Plugin.PerfClampObjectPoolInit.Value; dirty = true; } });
+            perfPoolTxt = UIFactory.GetButtonText(perfPoolBtn);
+            // "CardPickPart" row removed v1.28.3 - pausing the pick-phase skin
+            // particles made the picker's body invisible (bug #29).
+
+            // -- Language & menus --
+            // Sid, Aug 3: the language row is where a player who cannot read the
+            // current language looks first, and the sub-tab bar's trilingual
+            // pointer opens it. A PICKER, not a click-to-cycle: cycling made a
+            // player pass THROUGH languages they cannot read to reach theirs.
+            // The language names stay in their own language and bypass the
+            // catalogue, and the picker starts on the CURRENT locale so "Use"
+            // without a click keeps it.
+            langToggleBtn = SettingsDropdown(subLangMenus.transform, "SLang", I18n.Tr("Mod display language. Machine-translated drafts until community moderators review them \u2014 card text in matches follows ROUNDS' own language setting."),
+                () => new[] { "en", "es", "ru", "uk", "sv" },
+                () => Plugin.ModLanguage.Value == I18n.LOCALE_UNSET ? "en" : Plugin.ModLanguage.Value,
+                id => { SetModLanguage(id); },
+                () => new[] { "English", "Espa\u00f1ol (Spanish)", "\u0420\u0443\u0441\u0441\u043a\u0438\u0439 (Russian)", "\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430 (Ukrainian)", "Svenska (Swedish)" },
+                "Mod language");
+            langToggleTxt = UIFactory.GetButtonText(langToggleBtn);
+            // Item 9: the date format, the same picker. Writes Plugin.UiDateFormat;
+            // DateFmt.* honors it at every routed render site.
+            dateFmtBtn = SettingsDropdown(subLangMenus.transform, "SDateFmt", I18n.Tr("How dates are written across the mod's menus (history rows, leaderboards, tournaments)."),
+                () => new[] { "MDY", "DMY", "YMD" },
+                () => Plugin.UiDateFormat != null ? Plugin.UiDateFormat.Value : "MDY",
+                id => { SetUiDateFormat(id); },
+                null, I18n.Tr("Date format"));
+            dateFmtTxt = UIFactory.GetButtonText(dateFmtBtn);
+            /* Bug #159: heavier menu text, on by request. Sept 8 (bug #351):
+             * the weight lives on each label's material and ResetWeightMaterial
+             * re-points every label the mod has created, so the page rebuild in
+             * the named writer is kept only because this page re-lays-out on
+             * that path - the same PUBLIC path the language switch uses. */
+            heavyFontBtn = SettingsSwitch(subLangMenus.transform, "SHeavyFont", I18n.Tr("Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface."),
+                () => Plugin.UiHeavyFont == null || Plugin.UiHeavyFont.Value,
+                () => { SetUiHeavyFont(!(Plugin.UiHeavyFont == null || Plugin.UiHeavyFont.Value)); });
+            heavyFontTxt = UIFactory.GetButtonText(heavyFontBtn);
+            // Item d: every board hides players not seen for 90 days; this lists
+            // them greyed with an "(inactive)" tag. Zeroing the 1v1/FFA/1v2 tab
+            // refresh timers makes the next look at a board refetch with the new
+            // flag; the 2v2 board has no timer, so it is refetched here directly.
+            inactiveBoardsToggleBtn = SettingsSwitch(subLangMenus.transform, "SInactiveLb", I18n.Tr("Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive)."),
+                () => Plugin.ShowInactiveOnBoards != null && Plugin.ShowInactiveOnBoards.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Show inactive players on boards toggled");
+                    if (Plugin.ShowInactiveOnBoards != null) Plugin.ShowInactiveOnBoards.Value = !Plugin.ShowInactiveOnBoards.Value;
+                    lbTabRefreshAt = 0f; ffaLbRefreshAt = 0f; ovtTabRefreshAt = 0f;
+                    ApiClient.FetchTeamLeaderboard(200, ApiClient.CachedTeamLeaderboardSort ?? "rating");
+                    dirty = true;
+                });
+            inactiveBoardsToggleTxt = UIFactory.GetButtonText(inactiveBoardsToggleBtn);
+            // Info (Aug 23, Sid): the pointer to the explainer library on its
+            // own sub-tab. The "How stats are tracked" content is the wiki's
+            // stats-tracked article, which still reads StatsTrackingInfoBody.
+            var infoOpenRow = SettingsAction(subLangMenus.transform, "SInfoOpen", I18n.Tr("Guides to every mechanic: blocking, poison, netcode, modes, ratings, rewards, tournaments, anti-cheat, and what the mod does (and deliberately doesn't) change."),
+                () => { SwitchTab(TAB_INFO); },
+                new Color(0.20f, 0.34f, 0.55f, 0.92f));
+            infoOpenTxt = UIFactory.GetButtonText(infoOpenRow);
+            // Translator portal handoff (section 2.5): browser-based because the
+            // IME gap means some translators cannot type their script in-game.
+            var portalRow = SettingsAction(subLangMenus.transform, "SPortal", I18n.Tr("Help translate the mod - opens the web portal in your browser. An admin has to give you translator access before you can submit."),
+                () => { ApiClient.OpenTranslatePortal(); },
+                C_BTN);
+            portalTxt = UIFactory.GetButtonText(portalRow);
+
+            // -- Privacy --
+            // The consent row is a switch: the named writer stores the state it
+            // is given and applies it (ConsentSetting.Set), the same effect the
+            // old toggle had.
+            consentToggleBtn = SettingsSwitch(subPrivacy.transform, "SCT", I18n.Tr("Allow the mod to report your match results and stats to the community server."),
+                () => Plugin.DataConsent != null && Plugin.DataConsent.Value == "granted",
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Consent toggle clicked");
+                    ConsentSetting.Set(!Plugin.DataConsentGranted);
+                    dirty = true;
+                });
+            consentToggleTxt = UIFactory.GetButtonText(consentToggleBtn);
+            /* Appear-offline (v1.33): server-synced privacy toggle - hides the
+             * player from the Home tab's online / recently-online lists.
+             * Optimistic flip on the cached stats; FetchPlayerStats in the
+             * SetAppearOffline callback reconciles with the server truth. */
+            appearOfflineBtn = SettingsSwitch(subPrivacy.transform, "SAppOff", I18n.Tr("Hides you from the Home tab's online and recently-online lists."),
+                () => ApiClient.CachedPlayerStats != null && ApiClient.CachedPlayerStats.appear_offline,
+                () =>
+                {
+                    var st = ApiClient.CachedPlayerStats;
+                    var id = MatchTracker.LocalSteamId;
+                    if (st == null || string.IsNullOrEmpty(id) || id == "unknown") return;
+                    Plugin.Log.LogInfo("[SETTINGS] appear-offline toggled");
+                    st.appear_offline = !st.appear_offline;
+                    dirty = true;
+                    ApiClient.SetAppearOffline(id, st.appear_offline, (ok, resp) =>
+                    {
+                        if (!ok) CompetitiveUI.ShowNotification("Couldn't change Appear offline - try again", Color.yellow, 3f);
+                        dirty = true;
+                    });
+                });
+            appearOfflineTxt = UIFactory.GetButtonText(appearOfflineBtn);
+            /* July 22 item 8: opt-IN "show my Discord on the leaderboard" -
              * server-synced like appear-offline, default OFF. */
-            showDiscordBtn = SettingsToggle(consentBox.transform, "SShowDc", new Vector2(340, 28),
+            showDiscordBtn = SettingsSwitch(subPrivacy.transform, "SShowDc", I18n.Tr("Shows your Discord name on the leaderboard (opt-in; link Discord on the Home tab first)."),
+                () => ApiClient.CachedPlayerStats != null && ApiClient.CachedPlayerStats.show_discord,
                 () =>
                 {
                     var st = ApiClient.CachedPlayerStats;
@@ -14145,14 +14524,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         if (!ok) CompetitiveUI.ShowNotification("Couldn't change Show Discord on leaderboard - try again", Color.yellow, 3f);
                         dirty = true;
                     });
-                },
-                "Shows your Discord name on the leaderboard (opt-in; link Discord on the Home tab first).");
+                });
             showDiscordTxt = UIFactory.GetButtonText(showDiscordBtn);
-
-            // Spectator opt-out (design §6.7). Server-authoritative: the
+            // Spectator opt-out (design section 6.7). Server-authoritative: the
             // toggle blocks NEW grants immediately and the heartbeat recheck
             // removes CURRENT spectators within ~15s.
-            allowSpectatorsBtn = SettingsToggle(consentBox.transform, "SAllowSpec", new Vector2(340, 28),
+            allowSpectatorsBtn = SettingsSwitch(subPrivacy.transform, "SAllowSpec", I18n.Tr("Allow other players to spectate your ranked games. Turning this off also removes current spectators."),
+                () => ApiClient.CachedPlayerStats != null && ApiClient.CachedPlayerStats.allow_spectators,
                 () =>
                 {
                     var st = ApiClient.CachedPlayerStats;
@@ -14174,10 +14552,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         }
                         dirty = true;
                     });
-                },
-                "Allow other players to spectate your ranked games. Turning this off also removes current spectators.");
+                });
             allowSpectatorsTxt = UIFactory.GetButtonText(allowSpectatorsBtn);
-
             /* v1.41.0 item (a): automatic log upload. A LOCAL config toggle
              * (no server round-trip, so there is no optimistic flip to roll
              * back), opt-IN, default off.
@@ -14185,13 +14561,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
              * THE CAPTION NAMES EVERY FIELD THE POST CARRIES (Codex r1, two
              * MEDIUMs). The body ApiClient.BuildAutoLogBody assembles is
              * steam_id, display_name, mod_version, game_version, mode,
-             * room_name, opponent_steam_id, series_id and log_text — so the
+             * room_name, opponent_steam_id, series_id and log_text - so the
              * caption lists the identity and match fields as well as the log,
              * because a consent that names only the obvious half is not
              * consent for the other half. If a field is ever added to that
              * body, it is added here in the same edit or it is not sent.
              * `opponent_steam_id` is SINGULAR and optional, so the caption
-             * says so — the earlier draft promised "the other players' Steam
+             * says so - the earlier draft promised "the other players' Steam
              * IDs", plural, which no body this sender builds has ever carried
              * (Codex client r2 LOW).
              *
@@ -14218,7 +14594,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
              * been persisted there. The caption said "turning it off stops an
              * upload that is already running" next to "Nothing is sent while
              * this is off", and the pair reads as a promise that withdrawing
-             * permission mid-transfer keeps the data off the server — which no
+             * permission mid-transfer keeps the data off the server - which no
              * abort can give (r3 lens LOW). It now promises the two separable
              * things: nothing NEW is dispatched, the upload in progress is cut
              * off, and a part that already arrived stays where it arrived. The
@@ -14231,627 +14607,46 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
              * draft's closing sentences never reached a player. descWrap: true
              * is the fix, and it is what makes a longer locale safe too.
              *
-             * A comment must not sit between the arguments — the i18n
+             * A comment must not sit between the arguments - the i18n
              * extractor splits this call's arguments on top-level commas, and
              * a comma inside such a comment shifts the caption out of position
              * 4, which drops the key from every locale (#357). */
-            autoLogToggleBtn = SettingsToggle(consentBox.transform, "SAutoLog", new Vector2(340, 28),
+            /* Item 13: the caption above is now this row's help body in the
+             * settings pane (SetDetBody), which wraps and scrolls, so the
+             * clipping the descWrap note describes cannot recur there; the
+             * caption's text is the same key, byte for byte. */
+            autoLogToggleBtn = SettingsSwitch(subPrivacy.transform, "SAutoLog", I18n.Tr("After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, your opponent's Steam ID when the game had one, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Users folder, however the slashes are written, and this PC's own profile folder; and this PC's Windows account name where it stands on its own in a line, when it is three characters or longer. The Steam login ticket the game writes into its log is replaced by its length and a short fingerprint. Nothing else is removed - the same name inside a path we did not recognise, or in an e-mail address, stays. At most one upload every five minutes. Nothing new is sent while this is off, and turning it off cuts off an upload already in progress - though any part of it that had already reached the server stays there."),
+                () => Plugin.AutoLogUploadEnabled != null && Plugin.AutoLogUploadEnabled.Value,
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] automatic log upload toggled");
                     if (Plugin.AutoLogUploadEnabled != null)
                         Plugin.AutoLogUploadEnabled.Value = !Plugin.AutoLogUploadEnabled.Value;
                     dirty = true;
-                },
-                "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, your opponent's Steam ID when the game had one, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Users folder, however the slashes are written, and this PC's own profile folder; and this PC's Windows account name where it stands on its own in a line, when it is three characters or longer. The Steam login ticket the game writes into its log is replaced by its length and a short fingerprint. Nothing else is removed - the same name inside a path we did not recognise, or in an e-mail address, stays. At most one upload every five minutes. Nothing new is sent while this is off, and turning it off cuts off an upload already in progress - though any part of it that had already reached the server stays there.",
-                descH: 100f,
-                descWrap: true);
-            autoLogToggleTxt = UIFactory.GetButtonText(autoLogToggleBtn);
-
-            // -- Language & Translation --
-            // Sid, Aug 3: pulled out of "Visuals & Effects" (where it sat
-            // between chromatic aberration and map lighting) and placed
-            // directly under Data & Privacy, so a player who cannot read the
-            // current language finds it near the TOP of the tab instead of
-            // hunting through graphics options in a script they don't know.
-            var langBox = UIFactory.CreatePanel("SLangB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(langBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(langBox, flexH: 0);
-            UIFactory.CreateText("SLangL", langBox.transform,
-                // Deliberately trilingual and NOT translated: this is the
-                // label a lost player scans for, so it must be readable in
-                // every locale we ship.
-                "Language / Idioma / Язык / Мова / Språk", 17f, new Color(0.7f, 0.85f, 1f),
-                sizeDelta: new Vector2(700, 24));
-
-            // -- Info (Aug 23, Sid: the old "Stats" sub-cat, renamed and grown
-            // into a full explainer library on its own sub-tab). This box is
-            // the pointer only. The "How stats are tracked" popup button that
-            // briefly lived here was removed on Sid's direction (Aug 23 round
-            // 2) - the same content is the wiki's 'How stats are tracked'
-            // article (InfoLibrary key stats-tracked, which still reads
-            // NativeUI.StatsTrackingInfoBody, so that property stays).
-            var statsHelpBox = UIFactory.CreatePanel("SStatsB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(statsHelpBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(statsHelpBox, flexH: 0);
-            UIFactory.CreateText("SStatsL", statsHelpBox.transform,
-                "Info", 17f, new Color(0.7f, 0.85f, 1f),
-                sizeDelta: new Vector2(700, 24));
-            UIFactory.CreateText("SStatsD", statsHelpBox.transform,
-                "Guides to every mechanic: blocking, poison, netcode, modes, ratings, rewards, tournaments, anti-cheat, and what the mod does (and deliberately doesn't) change.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 34));
-            var infoBtnRow = new GameObject("SInfoRow");
-            infoBtnRow.transform.SetParent(statsHelpBox.transform, false);
-            infoBtnRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(infoBtnRow, spacing: 8, forceExpandH: true);
-            UIFactory.AddLE(infoBtnRow, prefH: 30, flexH: 0);
-            UIFactory.CreateButton("SInfoOpen", infoBtnRow.transform,
-                "Open the Info library", 15f, C_WHITE, new Color(0.20f, 0.34f, 0.55f, 0.92f),
-                () => SwitchTab(TAB_INFO),
-                sizeDelta: new Vector2(300, 28));
-            var infoRowSp = new GameObject("S");
-            infoRowSp.transform.SetParent(infoBtnRow.transform, false);
-            infoRowSp.AddComponent<RectTransform>();
-            UIFactory.AddLE(infoRowSp, flexW: 1);
-
-            // -- Interface --
-            var intBox = UIFactory.CreatePanel("SIntB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(intBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(intBox, flexH: 0);
-            UIFactory.CreateText("SIntL", intBox.transform,
-                "Interface", 17f, new Color(0.7f, 0.85f, 1f),
-                sizeDelta: new Vector2(700, 24));
-            fpsToggleBtn = SettingsToggle(intBox.transform, "SFPS", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] FPS toggled");
-                    Plugin.ShowFps.Value = !Plugin.ShowFps.Value;
-                    dirty = true;
-                },
-                "Frames per second, top-left corner. Handy for checking whether a setting actually helped.");
-            fpsToggleTxt = UIFactory.GetButtonText(fpsToggleBtn);
-            fpsCapToggleBtn = SettingsToggle(intBox.transform, "SFPSCap", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Unfocused FPS cap toggled");
-                    Plugin.CapFpsUnfocused.Value = !Plugin.CapFpsUnfocused.Value;
-                    dirty = true;
-                },
-                "Caps the game at 120 FPS while the window is not focused. Saves GPU/CPU when alt-tabbed; lifts instantly when you come back.");
-            fpsCapToggleTxt = UIFactory.GetButtonText(fpsCapToggleBtn);
-            deepIdleToggleBtn = SettingsToggle(intBox.transform, "SDeepIdle", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Deep idle toggled");
-                    Plugin.DeepIdleUnfocused.Value = !Plugin.DeepIdleUnfocused.Value;
-                    dirty = true;
-                },
-                "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.");
-            deepIdleToggleTxt = UIFactory.GetButtonText(deepIdleToggleBtn);
-            muteBgToggleBtn = SettingsToggle(intBox.transform, "SMuteBg", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Background mute toggled");
-                    Plugin.MuteAudioInBackground.Value = !Plugin.MuteAudioInBackground.Value;
-                    dirty = true;
-                },
-                "Mutes game audio while the window is unfocused during online play. The menu stays audible; sound returns the moment you tab back in.");
-            muteBgToggleTxt = UIFactory.GetButtonText(muteBgToggleBtn);
-            menuMusicToggleBtn = SettingsToggle(intBox.transform, "SMenuMus", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Menu music mode cycled");
-                    // Sept 2 feedback: 3-state cycler (the cursorShapeBtn /
-                    // date-format pattern) over MenuMusicMode — vanilla ->
-                    // custom -> silent -> vanilla. Branched on the VALUE,
-                    // never the label. An unknown hand-edited value PAINTS as
-                    // Default, so it cycles as vanilla too (-> custom) —
-                    // paint and cycle can never disagree.
-                    // Cycle logic hoisted OUT of this harvested call span —
-                    // the extractor's argument-position walker otherwise
-                    // harvests the mode VALUE literals as translatable keys,
-                    // and a translated identity breaks the compare (#295a
-                    // inverse: identity strings must never enter the catalog).
-                    CycleMenuMusicMode();
-                    // The engine owns the transition — this only changed an input.
-                    try { MusicEngine.Reconcile("settings-menu-music"); } catch { }
-                    dirty = true;
-                },
-                "Main menu music: Default = ROUNDS' own theme, My playlist = your selected custom music, None = silence. Matches always use your picks.");
-            menuMusicToggleTxt = UIFactory.GetButtonText(menuMusicToggleBtn);
-            musicCreditToggleBtn = SettingsToggle(intBox.transform, "SMusCredit", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Music credit toast toggled");
-                    if (Plugin.MusicCreditToast != null) Plugin.MusicCreditToast.Value = !Plugin.MusicCreditToast.Value;
-                    dirty = true;
-                },
-                "Shows a small bottom-left credit line naming the track and artist whenever a custom song starts.");
-            musicCreditToggleTxt = UIFactory.GetButtonText(musicCreditToggleBtn);
-            pingToggleBtn = SettingsToggle(intBox.transform, "SPing", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Ping/region toggled");
-                    Plugin.ShowRegionPing.Value = !Plugin.ShowRegionPing.Value;
-                    dirty = true;
-                },
-                "Shows your current server region and your ping to it.");
-            pingToggleTxt = UIFactory.GetButtonText(pingToggleBtn);
-            // Item d: every board hides players not seen for 90 days; this lists
-            // them greyed with an "(inactive)" tag. Zeroing the 1v1/FFA/1v2 tab
-            // refresh timers makes the next look at a board refetch with the new
-            // flag; the 2v2 board has no timer, so it is refetched here directly.
-            inactiveBoardsToggleBtn = SettingsToggle(intBox.transform, "SInactiveLb", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Show inactive players on boards toggled");
-                    if (Plugin.ShowInactiveOnBoards != null) Plugin.ShowInactiveOnBoards.Value = !Plugin.ShowInactiveOnBoards.Value;
-                    lbTabRefreshAt = 0f; ffaLbRefreshAt = 0f; ovtTabRefreshAt = 0f;
-                    ApiClient.FetchTeamLeaderboard(200, ApiClient.CachedTeamLeaderboardSort ?? "rating");
-                    dirty = true;
-                },
-                "Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).");
-            inactiveBoardsToggleTxt = UIFactory.GetButtonText(inactiveBoardsToggleBtn);
-            // Release B §4 (bug 332): lag notices, default off. Sits under the
-            // ping/region row because both describe the same corner label.
-            lagNoticesToggleBtn = SettingsToggle(intBox.transform, "SLagNotice", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Lag notices toggled");
-                    if (Plugin.LagNoticesEnabled != null) Plugin.LagNoticesEnabled.Value = !Plugin.LagNoticesEnabled.Value;
-                    dirty = true;
-                },
-                "Corner notices when your frames drop, your ping is high or the opponent's updates arrive late. 1v1 only.");
-            lagNoticesToggleTxt = UIFactory.GetButtonText(lagNoticesToggleBtn);
-            ingameChatToggleBtn = SettingsToggle(intBox.transform, "SIgChat", new Vector2(260, 28),
-                () =>
-                {
-                    // Cycles the SAME state the M hotkey does (Normal ->
-                    // Pinned -> Muted) rather than a private bool, so the
-                    // button and the key can never disagree and the button can
-                    // reach Pinned at all.
-                    CompetitiveUI.CycleChatOverlayMode();
-                    dirty = true;
-                },
-                "Shows community chat in the corner while you play. Press T to type a reply, or M in game to cycle normal / pinned / muted.");
-            ingameChatToggleTxt = UIFactory.GetButtonText(ingameChatToggleBtn);
-            chatTtlBtn = SettingsToggle(intBox.transform, "SChatTtl", new Vector2(260, 28),
-                () => { Plugin.CycleChatOverlaySeconds(); dirty = true; },
-                "How long a chat message stays fully visible before it fades. Ignored while the overlay is pinned.");
-            chatTtlTxt = UIFactory.GetButtonText(chatTtlBtn);
-            // Chat pop-up notifications (moved from its own box, July 26 item 3).
-            notifToggleBtn = SettingsToggle(intBox.transform, "SNT", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Notifications toggled");
-                    Plugin.ShowNotifications.Value = !Plugin.ShowNotifications.Value;
-                    dirty = true;
-                },
-                "On-screen pop-ups for incoming chat and XP/level notifications. The chat log on the Home tab updates either way.", 34f);
-            notifToggleTxt = UIFactory.GetButtonText(notifToggleBtn);
-            inputOverlayToggleBtn = SettingsToggle(intBox.transform, "SInpOv", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Input overlay toggled");
-                    Plugin.ShowInputOverlay.Value = !Plugin.ShowInputOverlay.Value;
-                    dirty = true;
-                },
-                "Input overlay (bottom-left): shows W, A, S, D, Space and both mouse buttons. Lights up red when pressed. Useful for streams or spotting missed inputs.", 34f);
-            inputOverlayToggleTxt = UIFactory.GetButtonText(inputOverlayToggleBtn);
-            blockDbgToggleBtn = SettingsToggle(intBox.transform, "SBlkDbg", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Block debug overlay toggled");
-                    Plugin.ShowBlockDebug.Value = !Plugin.ShowBlockDebug.Value;
-                    dirty = true;
-                },
-                "Block debug overlay (corner): blocks you started vs blocks that actually absorbed a hit, plus why each one missed (too early / too slow / unblockable).", 34f);
-            blockDbgToggleTxt = UIFactory.GetButtonText(blockDbgToggleBtn);
-            // Cursor shape cycler (local-only). Combines with the equipped cursor color.
-            cursorShapeBtn = SettingsToggle(intBox.transform, "SCursor", new Vector2(260, 28),
-                () => { CursorColorCosmetic.CycleShape(); dirty = true; },
-                "Changes the menu cursor's shape. Works alongside an equipped cursor color.");
-            cursorShapeTxt = UIFactory.GetButtonText(cursorShapeBtn);
-
-            // -- Visuals & Effects --
-            var dispBox = UIFactory.CreatePanel("SDispB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(dispBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(dispBox, flexH: 0);
-            UIFactory.CreateText("SDispL", dispBox.transform,
-                "Visuals & Effects", 17f, new Color(0.7f, 0.85f, 1f),
-                sizeDelta: new Vector2(700, 24));
-            trailToggleBtn = SettingsToggle(dispBox.transform, "STrail", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Trails toggled");
-                    Plugin.ShowTrails.Value = !Plugin.ShowTrails.Value;
-                    // Live effect mid-match: ON -> re-attach for everyone, OFF -> detach.
-                    if (Plugin.ShowTrails.Value)
-                    {
-                        if (GameStateWatcher.IsInMatch) TrailCosmetic.OnMatchStart();
-                    }
-                    else
-                    {
-                        TrailCosmetic.OnMatchEnd();
-                    }
-                    dirty = true;
-                },
-                "Shows cosmetic trails on you and other modded players.");
-            trailToggleTxt = UIFactory.GetButtonText(trailToggleBtn);
-            playerColorToggleBtn = SettingsToggle(dispBox.transform, "SPColor", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Custom player colors toggled");
-                    Plugin.ShowPlayerColors.Value = !Plugin.ShowPlayerColors.Value;
-                    try { PlayerColorCosmetic.OnShowPlayerColorsToggled(); } catch { }
-                    try { PlayerEffectCosmetic.OnShowPlayerColorsToggled(); } catch { }
-                    dirty = true;
-                },
-                "Custom player body colors: shows shop-bought Body Colors on you and other modded players. Off = everyone falls back to default orange/blue.", 34f);
-            playerColorToggleTxt = UIFactory.GetButtonText(playerColorToggleBtn);
-            animCosToggleBtn = SettingsToggle(dispBox.transform, "SAnimCos", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Animated cosmetics toggled");
-                    Plugin.AnimatedCosmetics.Value = !Plugin.AnimatedCosmetics.Value;
-                    try { PlayerEffectCosmetic.OnAnimatedCosmeticsToggled(); } catch { }
-                    try { MapSkinEffects.OnAnimatedCosmeticsToggled(); } catch { }
-                    dirty = true;
-                },
-                "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = everything freezes on a static frame.", 34f);
-            animCosToggleTxt = UIFactory.GetButtonText(animCosToggleBtn);
-            // Bloom strength (Sid: "cosmetics are illuminated and the effect is quite large
-            // for some people"). 3-state cycler — same SettingsToggle row the cursor-shape
-            // and date-format cyclers already use; the label carries the current level.
-            bloomToggleBtn = SettingsToggle(dispBox.transform, "SBloom", new Vector2(260, 28),
-                () =>
-                {
-                    MapPhysicalColorPatch.BloomStrengthSetting.Cycle();
-                    Plugin.Log.LogInfo($"[SETTINGS] Bloom strength -> {MapPhysicalColorPatch.BloomStrengthSetting.Level}");
-                    dirty = true;
-                },
-                "Glow (bloom): the soft halo around bright cosmetics, map art and effects. Reduced = smaller, dimmer halo. Off = no halo. Local only — nothing is hidden, the cosmetic itself still renders the same. A few items have their glow painted into the artwork, and that part stays.", 46f);
-            bloomToggleTxt = UIFactory.GetButtonText(bloomToggleBtn);
-            screenShakeToggleBtn = SettingsToggle(dispBox.transform, "SShake", new Vector2(260, 28),
-                () =>
-                {
-                    ScreenshakerDisablePatch.Cycle();
-                    Plugin.Log.LogInfo($"[SETTINGS] Screen shake -> {ScreenshakerDisablePatch.Level}");
-                    dirty = true;
-                },
-                "Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. "
-                + "Off = a perfectly steady camera. Local only.");
-            screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
-            // v1.41.0 item 10: the HP-readout precision lever. The setting
-            // itself (TabStatsOverlay.HealthPrecisionSetting) was complete
-            // before this row existed -- it bound, normalised, cycled and
-            // formatted -- and had no caller anywhere, so no stock player
-            // could reach it. A finished feature with no entry point is
-            // indistinguishable in the logs from one that works (#438/#443).
-            // It lives in the Display box because it changes how a number is
-            // drawn and nothing else: the wire format is produced by WireNum,
-            // which ignores StatRow.fmt entirely (#47).
-            healthPrecToggleBtn = SettingsToggle(dispBox.transform, "SHpPrec", new Vector2(260, 28),
-                () =>
-                {
-                    TabStatsOverlay.HealthPrecisionSetting.Cycle();
-                    Plugin.Log.LogInfo($"[SETTINGS] HP decimals -> {TabStatsOverlay.HealthPrecisionSetting.Level}");
-                    dirty = true;
-                },
-                "Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. "
-                + "Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops "
-                + "reading as a whole number too. Local display only - nothing stored or sent changes.", 46f);
-            healthPrecToggleTxt = UIFactory.GetButtonText(healthPrecToggleBtn);
-            langToggleBtn = SettingsToggle(langBox.transform, "SLang", new Vector2(260, 28),
-                () =>
-                {
-                    // Sid, Aug 3: a PICKER, not a click-to-cycle. Cycling made
-                    // a player pass THROUGH languages they can't read to reach
-                    // the one they want, and the rebuild dropped them on the
-                    // Home tab — disoriented, in a foreign language, with no
-                    // obvious way back. Now: choose explicitly, and land back
-                    // on this Settings tab.
-                    CompetitiveUI.OpenArtistPicker("Mod language",
-                        new string[] { "English", "Español (Spanish)", "Русский (Russian)", "Українська (Ukrainian)", "Svenska (Swedish)" },
-                        new string[] { "en", "es", "ru", "uk", "sv" },
-                        picked =>
-                        {
-                            if (string.IsNullOrEmpty(picked)) return;
-                            Plugin.ModLanguage.Value = picked;
-                            I18n.SetLocale(picked);
-                            Plugin.Log.LogInfo($"[SETTINGS] Language -> {picked}");
-                            // Hot-switch goes through the PUBLIC page path
-                            // (localization-design §2.3: Close -> destroy page
-                            // -> pageBuilt=false -> Open; never just flip
-                            // pageBuilt — Tick's early-return would strand
-                            // Escape). Remember the tab across the rebuild so
-                            // the player stays where they were.
-                            int backTo = currentTab;
-                            Close();
-                            if (pageGO != null) UnityEngine.Object.Destroy(pageGO);
-                            pageBuilt = false;
-                            Open();
-                            SwitchTab(backTo);
-                        },
-                        actionLabel: "Use", showClear: false, itemNoun: "",
-                        // Start on the CURRENT locale so "Use" without clicking
-                        // keeps your language instead of resetting to English.
-                        selectedId: (Plugin.ModLanguage.Value == I18n.LOCALE_UNSET
-                                     ? "en" : Plugin.ModLanguage.Value));
-                },
-                "Mod display language. Machine-translated drafts until community moderators review them — card text in matches follows ROUNDS' own language setting.", 34f);
-            langToggleTxt = UIFactory.GetButtonText(langToggleBtn);
-            // Item 9: date-format picker — same OpenArtistPicker pattern as
-            // the language row. Writes Plugin.UiDateFormat; DateFmt.* honors
-            // it at every routed render site.
-            dateFmtBtn = SettingsToggle(langBox.transform, "SDateFmt", new Vector2(260, 28),
-                () =>
-                {
-                    CompetitiveUI.OpenArtistPicker(I18n.Tr("Date format"),
-                        new string[] { I18n.Tr("Month/Day/Year (US)"), I18n.Tr("Day/Month/Year"), I18n.Tr("Year/Month/Day") },
-                        new string[] { "MDY", "DMY", "YMD" },
-                        picked =>
-                        {
-                            if (string.IsNullOrEmpty(picked)) return;
-                            try { if (Plugin.UiDateFormat != null) Plugin.UiDateFormat.Value = picked; } catch { }
-                            dirty = true;
-                        },
-                        actionLabel: I18n.Tr("Use"), showClear: false, itemNoun: "",
-                        selectedId: Plugin.UiDateFormat != null ? Plugin.UiDateFormat.Value : "MDY");
-                },
-                "How dates are written across the mod's menus (history rows, leaderboards, tournaments).", 18f);
-            dateFmtTxt = UIFactory.GetButtonText(dateFmtBtn);
-            /* Bug #159: heavier menu text, on by request.
-             * Sept 8 (bug #351): the weight still lives on each label's
-             * material, but ResetWeightMaterial no longer DESTROYS the shared
-             * clone — it re-points every label the mod has ever created
-             * (UIFactory.RepointWeightLabels). Destroying it stranded every
-             * label this handler does not rebuild — the chat overlay above
-             * all — on a destroyed Material: the panel paints and the text
-             * does not, until the game restarts. So the page rebuild below is
-             * no longer what makes the weight change take effect; it is kept
-             * because this tab page also re-lays-out on this path, and it is
-             * the same PUBLIC path the language switch uses. */
-            heavyFontBtn = SettingsToggle(langBox.transform, "SHeavyFont", new Vector2(260, 28),
-                () =>
-                {
-                    try { Plugin.UiHeavyFont.Value = !Plugin.UiHeavyFont.Value; } catch { }
-                    UIFactory.ResetWeightMaterial();
-                    // Same PUBLIC page path the language switch uses (§2.3):
-                    // Close -> destroy -> pageBuilt=false -> Open, never a bare
-                    // pageBuilt flip (Tick's early-return would strand Escape).
-                    int backTo = currentTab;
-                    Close();
-                    if (pageGO != null) UnityEngine.Object.Destroy(pageGO);
-                    pageBuilt = false;
-                    Open();
-                    SwitchTab(backTo);
-                },
-                "Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface.", 18f);
-            heavyFontTxt = UIFactory.GetButtonText(heavyFontBtn);
-            // Translator portal handoff (§2.5): browser-based because the IME
-            // gap means some translators cannot type their script in-game.
-            var portalBtn = SettingsToggle(langBox.transform, "SPortal", new Vector2(260, 28),
-                () => ApiClient.OpenTranslatePortal(),
-                "Help translate the mod - opens the web portal in your browser. An admin has to give you translator access before you can submit.", 34f);
-            UIFactory.SetText(UIFactory.GetButtonText(portalBtn), "Translate SCR (web portal)");
-            // Item 5 companion: point players at the chat language channels.
-            UIFactory.CreateText("SLangChatNote", langBox.transform,
-                "Chat has language channels - use the dropdown on the Home tab, or tap Alt while typing, to switch.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 18));
-            chromAbToggleBtn = SettingsToggle(dispBox.transform, "SChromAb", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Chromatic aberration toggled");
-                    Plugin.ChromaticAberrationEnabled.Value = !Plugin.ChromaticAberrationEnabled.Value;
-                    try { MapPhysicalColorPatch.ChromaticAberrationSetting.Apply(); } catch { }
-                    dirty = true;
-                },
-                "Chromatic aberration: the RGB color-fringing that pulses on shots/hits/deaths. Off = crisp edges, tiny FPS gain. Visual only, local only.", 34f);
-            chromAbToggleTxt = UIFactory.GetButtonText(chromAbToggleBtn);
-            mapLightingToggleBtn = SettingsToggle(dispBox.transform, "SLight", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Map lighting toggled");
-                    Plugin.MapLightingEnabled.Value = !Plugin.MapLightingEnabled.Value;
-                    // Re-tint the live skin too, not just the backdrop: which side carries
-                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
-                    // leaves the wall/art surfaces holding the WRONG correction until the
-                    // next map load — uncorrected after enable, doubly corrected after
-                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
-                    try
-                    {
-                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
-                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
-                        var liveSku = MapColorState.CurrentSku;
-                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
-                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
-                    }
-                    catch { }
-                    dirty = true;
-                },
-                "Map lighting: the light and shade the map is drawn with. Off = flat, evenly-lit maps for extra FPS.");
-            mapLightingToggleTxt = UIFactory.GetButtonText(mapLightingToggleBtn);
-            mapShadowsToggleBtn = SettingsToggle(dispBox.transform, "SShad", new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Map shadows toggled");
-                    Plugin.MapShadowsEnabled.Value = !Plugin.MapShadowsEnabled.Value;
-                    // Re-tint the live skin too, not just the backdrop: which side carries
-                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
-                    // leaves the wall/art surfaces holding the WRONG correction until the
-                    // next map load — uncorrected after enable, doubly corrected after
-                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
-                    try
-                    {
-                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
-                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
-                        var liveSku = MapColorState.CurrentSku;
-                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
-                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
-                    }
-                    catch { }
-                    dirty = true;
-                },
-                "Soft shadow beams cast by map lighting. Off = no shadows (lighting stays on) for extra FPS.");
-            mapShadowsToggleTxt = UIFactory.GetButtonText(mapShadowsToggleBtn);
-
-            // ── Performance toggles (v1.26.8) ──
-            // Collapsible — header is the click-to-expand line. Each row maps
-            // 1:1 to a BepInEx config flag in Plugin.PerfXYZ. Same logic as
-            // PerfGate.Check: master must be on AND the per-patch flag must
-            // be on for the patch to fire.
-            var perfBox = UIFactory.CreatePanel("SPerfB", dispBox.transform, C_PANEL);
-            UIFactory.AddVLG(perfBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
-            UIFactory.AddLE(perfBox, flexH: 0);
-            var perfHdrBtn = SettingsButton(perfBox.transform, "SPerfH", "",
-                new Color(1f, 0.85f, 0.4f), C_BTN, new Vector2(700, 28),
-                () =>
-                {
-                    _perfSectionOpen = !_perfSectionOpen;
-                    if (_perfSectionBody != null) _perfSectionBody.SetActive(_perfSectionOpen);
-                    dirty = true;
                 });
-            _perfSectionHeaderTxt = UIFactory.GetButtonText(perfHdrBtn);
-            _perfSectionBody = new GameObject("SPerfBody");
-            _perfSectionBody.transform.SetParent(perfBox.transform, false);
-            _perfSectionBody.AddComponent<RectTransform>();
-            UIFactory.AddVLG(_perfSectionBody, spacing: 3, padL: 4, padR: 4, padT: 4, padB: 4);
-            UIFactory.AddLE(_perfSectionBody, flexH: 0);
-            _perfSectionBody.SetActive(_perfSectionOpen);
-
-            // Each row: a short label + a small toggle button on the right.
-            // Item 9 (double failure fix): call sites wrap their literal in
-            // I18n.Tr(...) so it HARVESTS (Tr sites are harvest points), and
-            // the helper Tr's again before the color-tag wrap — identity for
-            // already-translated text, a real lookup if a future caller
-            // passes a bare literal. The composed "<color>"+label result is
-            // deliberately never a key.
-            void AddPerfRow(string id, string label, UnityEngine.Events.UnityAction onClick, out GameObject btnOut, out object txtOut)
-            {
-                UIFactory.CreateText("SPerfL_" + id, _perfSectionBody.transform,
-                    "<color=#AAAAAA>" + I18n.Tr(label) + "</color>",
-                    12f, C_DIM, sizeDelta: new Vector2(700, 18));
-                btnOut = SettingsButton(_perfSectionBody.transform, "SPerf_" + id, "",
-                    C_WHITE, C_BTN, new Vector2(280, 22), onClick);
-                txtOut = UIFactory.GetButtonText(btnOut);
-            }
-
-            AddPerfRow("Master", I18n.Tr("Performance master switch — flips ALL the patches below at once."),
-                () => { if (Plugin.PerfOptimizations != null) { Plugin.PerfOptimizations.Value = !Plugin.PerfOptimizations.Value; dirty = true; } },
-                out perfMasterBtn, out perfMasterTxt);
-            AddPerfRow("Stun", I18n.Tr("StunPlayer null-guard — stops NRE spam when a player is destroyed mid-stun."),
-                () => { if (Plugin.PerfStunPlayerNullGuard != null) { Plugin.PerfStunPlayerNullGuard.Value = !Plugin.PerfStunPlayerNullGuard.Value; dirty = true; } },
-                out perfStunBtn, out perfStunTxt);
-            AddPerfRow("OOB", I18n.Tr("Despawn off-screen bullets — host clears bullets that exit the camera viewport."),
-                () => { if (Plugin.PerfDespawnOffscreenBullets != null) { Plugin.PerfDespawnOffscreenBullets.Value = !Plugin.PerfDespawnOffscreenBullets.Value; dirty = true; } },
-                out perfBulletsBtn, out perfBulletsTxt);
-            AddPerfRow("HitSnd", I18n.Tr("Swallow RayHitBulletSound NREs from destroyed parents."),
-                () => { if (Plugin.PerfSwallowHitSoundNREs != null) { Plugin.PerfSwallowHitSoundNREs.Value = !Plugin.PerfSwallowHitSoundNREs.Value; dirty = true; } },
-                out perfHitSndBtn, out perfHitSndTxt);
-            // ("ColorGh" + "Tag" rows removed v1.28.2 — their patches were
-            // old-game ports whose targets no longer exist; see PerfPatches.cs)
-            AddPerfRow("EdgeBn", I18n.Tr("Swallow ScreenEdgeBounce NREs from destroyed bullets."),
-                () => { if (Plugin.PerfSwallowEdgeBounceNREs != null) { Plugin.PerfSwallowEdgeBounceNREs.Value = !Plugin.PerfSwallowEdgeBounceNREs.Value; dirty = true; } },
-                out perfEdgeBnBtn, out perfEdgeBnTxt);
-            AddPerfRow("Menu", I18n.Tr("Skip MenuControllerHandler.Update during an active match."),
-                () => { if (Plugin.PerfSkipMenuUpdateInMatch != null) { Plugin.PerfSkipMenuUpdateInMatch.Value = !Plugin.PerfSkipMenuUpdateInMatch.Value; dirty = true; } },
-                out perfMenuBtn, out perfMenuTxt);
-            AddPerfRow("BulletCap", I18n.Tr("Cap bullet-hit particles at 2/frame — biggest user-visible win on heavy firefights."),
-                () => { if (Plugin.PerfBulletHitParticleCap != null) { Plugin.PerfBulletHitParticleCap.Value = !Plugin.PerfBulletHitParticleCap.Value; dirty = true; } },
-                out perfBulletCapBtn, out perfBulletCapTxt);
-            AddPerfRow("PoolInit", I18n.Tr("Clamp ObjectPool init-spawn to 4 in-match — reduces frame stutter from new pool allocation."),
-                () => { if (Plugin.PerfClampObjectPoolInit != null) { Plugin.PerfClampObjectPoolInit.Value = !Plugin.PerfClampObjectPoolInit.Value; dirty = true; } },
-                out perfPoolBtn, out perfPoolTxt);
-            // "CardPickPart" row removed v1.28.3 — pausing the pick-phase skin
-            // particles made the picker's body invisible (bug #29).
-
-            // (Chat notifications toggle moved into the Interface box above —
-            // July 26 item 3 reorg.)
-
-            // ("Report a bug" box removed v1.41.0 — the entry point is the Bug
-            // icon in the page title row, beside Mail. Its blurb named the
-            // description, the severity, the optional logs and the Preview
-            // button; DrawBugReportModal shows all four as labelled controls of
-            // its own, so nothing moved into the modal with it.)
-
-            // (No filler spacer — when the panel lives inside a ScrollView the
-            // content sizes to fit its children, so a flex spacer would collapse
-            // anyway and just left the bottom panels jammed against the next
-            // item. Delete is still at the bottom because it's added last.)
-
-            // -- Leave all queues (bug report #124) --
-            // Deliberately HERE, in Settings, and not on the queue tabs: the
-            // player who needs it is the one whose queue tab is misbehaving,
-            // and the FFA tab in particular auto-joins on open. Settings is
-            // reachable from every state, including inside a match.
-            var escBox = UIFactory.CreatePanel("SEB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(escBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(escBox, flexH: 0);
-            UIFactory.CreateText("SEL", escBox.transform,
-                "Leave All Queues", 17f, new Color(1f, 0.85f, 0.5f),
-                sizeDelta: new Vector2(700, 24));
-            UIFactory.CreateText("SED", escBox.transform,
-                "Removes you from every queue and lobby in every mode — 1v1, 2v2, 1v2 and FFA.\n" +
-                "Use this if the game thinks you're still in a match you've already left, or if joining " +
-                "a queue keeps telling you you're busy. It won't affect a game you're actually playing, " +
-                "and it never touches your stats, gold or rating.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 56));
-            var escRow = new GameObject("SER");
-            escRow.transform.SetParent(escBox.transform, false);
-            escRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(escRow, spacing: 8, forceExpandH: true);
-            UIFactory.AddLE(escRow, prefH: 30, flexH: 0);
-            UIFactory.CreateButton("SEBtn", escRow.transform,
-                "Leave All Queues", 14f, C_WHITE, new Color(0.42f, 0.32f, 0.12f, 0.9f),
-                () =>
-                {
-                    // No ClickGuard.Claim() here — CreateButton already guards
-                    // this control, and a second claim on the same key in the
-                    // same frame is always rejected (learning #158).
-                    ApiClient.EscapeAllQueues(null);
-                    dirty = true;
-                },
-                sizeDelta: new Vector2(200, 28));
-
-            // -- Delete my data (last, so it's hard to click accidentally) --
-            var delBox = UIFactory.CreatePanel("SDB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(delBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(delBox, flexH: 0);
-            UIFactory.CreateText("SDL", delBox.transform,
-                "Delete My Data", 17f, new Color(1f, 0.6f, 0.6f),
-                sizeDelta: new Vector2(700, 24));
-            var sdd = UIFactory.CreateText("SDD", delBox.transform,
-                "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' " +
-                "Elo and histories aren't affected. You will no longer appear on leaderboards.\n" +
-                "<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches " +
-                "from this account will show as [Deleted User] and won't count toward stats.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 34));
-            UIFactory.SetWordWrap(sdd, true); UIFactory.SetTextAutoHeight(sdd, 34f);   // 2026-09-13: its own height, no hole above SDD2
-            // 2026-09-13: deleting all data is the one thing that removes a
-            // player's cards from every binder; its own key so SDD's
-            // translations stay valid.
-            var sdd2 = UIFactory.CreateText("SDD2", delBox.transform,
-                "Also removes your Player Cards: your binder is emptied, and every card of you is removed from every other player's binder.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 17));
-            UIFactory.SetWordWrap(sdd2, true); UIFactory.SetTextAutoHeight(sdd2, 17f);   // folds when translated
-            var delRow = new GameObject("SDR");
-            delRow.transform.SetParent(delBox.transform, false);
-            delRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(delRow, spacing: 8, forceExpandH: true);
-            UIFactory.AddLE(delRow, prefH: 30, flexH: 0);
-            deleteBtn = UIFactory.CreateButton("SDBtn", delRow.transform,
-                "Delete My Data...", 14f, C_WHITE, new Color(0.45f, 0.18f, 0.18f, 0.9f),
+            autoLogToggleTxt = UIFactory.GetButtonText(autoLogToggleBtn);
+            PlayerCardsUI.BuildSettingsRows(subPrivacy.transform);   // Sept 10 (Player Cards): the three consent rows, design v4 section 12
+            // -- Delete my data (last on the last sub-tab, so it is hard to click
+            // accidentally). One row, three buttons, one help button and one
+            // combined help pane (design section 6.1).
+            UIFactory.CreateText("SDL", subPrivacy.transform, "Delete My Data", 15f, new Color(1f, 0.6f, 0.6f),
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
+            var sdrRow = UIFactory.CreatePanel("SDR", subPrivacy.transform, SettingsZebra(subPrivacy.transform));
+            SettingsRowLayout(sdrRow);
+            SettingsDecorateRow(sdrRow, "SDR");
+            var sdrCell = new GameObject("SDR_c");
+            sdrCell.transform.SetParent(sdrRow.transform, false);
+            SettingsCellLayout(sdrCell);
+            deleteBtn = SettingsDestructive(sdrCell.transform, "SDBtn", "", C_WHITE, new Color(0.45f, 0.18f, 0.18f, 0.9f),
+                new Vector2(200, 26),
                 () =>
                 {
                     if (!ClickGuard.Claim()) return;
                     deleteArmed = true;
                     dirty = true;
-                },
-                sizeDelta: new Vector2(200, 28));
-            UIFactory.AddLE(deleteBtn, prefW: 200, prefH: 28, flexW: 0, flexH: 0);
-            confirmDeleteBtn = UIFactory.CreateButton("SDCBtn", delRow.transform,
-                "Confirm — really delete", 14f, C_WHITE, new Color(0.7f, 0.15f, 0.15f, 0.95f),
+                });
+            confirmDeleteBtn = SettingsDestructive(sdrCell.transform, "SDCBtn", "", C_WHITE, new Color(0.7f, 0.15f, 0.15f, 0.95f),
+                new Vector2(220, 26),
                 () =>
                 {
                     if (!ClickGuard.Claim()) return;
@@ -14875,39 +14670,65 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         }
                         dirty = true;
                     });
-                },
-                sizeDelta: new Vector2(220, 28));
-            UIFactory.AddLE(confirmDeleteBtn, prefW: 220, prefH: 28, flexW: 0, flexH: 0);
+                });
             confirmDeleteBtn.SetActive(false);
-            cancelDelBtn = UIFactory.CreateButton("SDXBtn", delRow.transform,
-                "Cancel", 14f, C_LABEL, C_BTN,
+            cancelDelBtn = SettingsDestructive(sdrCell.transform, "SDXBtn", "", C_LABEL, C_BTN,
+                new Vector2(90, 26),
                 () =>
                 {
                     if (!ClickGuard.Claim()) return;
                     deleteArmed = false;
                     dirty = true;
-                },
-                sizeDelta: new Vector2(90, 28));
-            UIFactory.AddLE(cancelDelBtn, prefW: 90, prefH: 28, flexW: 0, flexH: 0);
+                });
             cancelDelBtn.SetActive(false);
-            var delSpacer = new GameObject("SDSp");
-            delSpacer.transform.SetParent(delRow.transform, false);
-            delSpacer.AddComponent<RectTransform>();
-            UIFactory.AddLE(delSpacer, flexW: 1);
-            txtDeleteStatus = UIFactory.CreateText("SDS", delBox.transform, "",
-                14f, C_LABEL, sizeDelta: new Vector2(700, 22));
 
+            // Every rebuild route (language, heavy font, catalogue, host
+            // recovery) lands back on the remembered sub-tab.
+            ApplyRememberedSubTab();
             return outer;
         }
 
-        /// <summary>N20: THE one normalization for MenuMusicMode reads — trim
+        /// <summary>Item 13: the pane's texts that are not rows - the consent
+        /// status, the chat-language note, the delete explainers and the
+        /// delete result - built into the help pane's extras slot, where each
+        /// shows beside the row it explains (NativeUI.Settings.cs,
+        /// SettingsShowExtras). Same keys as when they sat in the list.</summary>
+        private static void BuildSettingsPaneTexts(Transform extras)
+        {
+            txtConsentStatus = UIFactory.CreateText("SCS", extras, "",
+                15f, C_LABEL, sizeDelta: new Vector2(748, 22));
+            UIFactory.SetWordWrap(txtConsentStatus, true); UIFactory.SetTextAutoHeight(txtConsentStatus, 22f);
+            // Item 5 companion: point players at the chat language channels.
+            var note = UIFactory.CreateText("SLangChatNote", extras,
+                "Chat has language channels - use the dropdown on the Home tab, or tap Alt while typing, to switch.",
+                13f, C_DIM, sizeDelta: new Vector2(748, 18));
+            UIFactory.SetWordWrap(note, true); UIFactory.SetTextAutoHeight(note, 18f);
+            var sdd = UIFactory.CreateText("SDD", extras,
+                "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' " +
+                "Elo and histories aren't affected. You will no longer appear on leaderboards.\n" +
+                "<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches " +
+                "from this account will show as [Deleted User] and won't count toward stats.",
+                13f, C_DIM, sizeDelta: new Vector2(748, 34));
+            UIFactory.SetWordWrap(sdd, true); UIFactory.SetTextAutoHeight(sdd, 34f);
+            // 2026-09-13: deleting all data is the one thing that removes a
+            // player's cards from every binder; its own key so SDD's
+            // translations stay valid.
+            var sdd2 = UIFactory.CreateText("SDD2", extras,
+                "Also removes your Player Cards: your binder is emptied, and every card of you is removed from every other player's binder.",
+                13f, C_DIM, sizeDelta: new Vector2(748, 17));
+            UIFactory.SetWordWrap(sdd2, true); UIFactory.SetTextAutoHeight(sdd2, 17f);
+            txtDeleteStatus = UIFactory.CreateText("SDS", extras, "",
+                14f, C_LABEL, sizeDelta: new Vector2(748, 22));
+            UIFactory.SetWordWrap(txtDeleteStatus, true); UIFactory.SetTextAutoHeight(txtDeleteStatus, 22f);
+        }
+
+        /// <summary>N20: THE one normalization for MenuMusicMode reads - trim
         /// + case-fold to the canonical lowercase value, unknown -> "vanilla"
-        /// — matching the engine's own MenuModeSetting (MusicEngine.cs, which
+        /// - matching the engine's own MenuModeSetting (MusicEngine.cs, which
         /// already trims and compares OrdinalIgnoreCase). Without this, a
         /// hand-edited "Silent"/whitespace-padded value silenced the menu
-        /// (engine) while Settings painted Default and the first click cycled
-        /// vanilla->custom instead of silent->vanilla. Identity strings, never
-        /// translated (#295a inverse) — both callers keep them outside every
+        /// (engine) while Settings painted Default. Identity strings, never
+        /// translated (#295a inverse) - every caller keeps them outside every
         /// harvested call span.</summary>
         private static string NormalizeMenuMusicMode(string raw)
         {
@@ -14918,30 +14739,92 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return "vanilla";
         }
 
-        /// <summary>Cycle MenuMusicMode vanilla -> custom -> silent -> vanilla.
-        /// Lives OUTSIDE the SettingsToggle call span so the i18n extractor's
-        /// argument-position walker cannot harvest the mode VALUE literals as
-        /// translatable keys — a translated identity would break the compares.
-        /// Branched on the NORMALIZED value (N20 — the paint site and the
-        /// engine read through the same normalization), never the label; an
-        /// unknown hand-edited value cycles as vanilla (-> custom), matching
-        /// how it paints (Default). Writes are canonical lowercase, so one
-        /// click also heals a hand-edited spelling on disk.</summary>
+        /// <summary>Cycle MenuMusicMode vanilla -> custom -> silent -> vanilla,
+        /// branched on the NORMALIZED value (N20), through the named writer.
+        /// Item 13 retains it beside its successor SetMenuMusicMode, which the
+        /// settings row now calls with the value the player chose.</summary>
         private static void CycleMenuMusicMode()
         {
             if (Plugin.MenuMusicMode == null) return;
             string cur = NormalizeMenuMusicMode(Plugin.MenuMusicMode.Value);
-            Plugin.MenuMusicMode.Value =
-                cur == "custom" ? "silent"
-                : cur == "silent" ? "vanilla"
-                : "custom";
+            SetMenuMusicMode(cur == "custom" ? "silent" : cur == "silent" ? "vanilla" : "custom");
+        }
+
+        /// <summary>Item 13 (design section 2.1): the menu-music row's named
+        /// writer. Writes are canonical lowercase, so a choice also heals a
+        /// hand-edited spelling on disk; the engine owns the transition, this
+        /// only changes an input.</summary>
+        internal static void SetMenuMusicMode(string id)
+        {
+            if (Plugin.MenuMusicMode == null) return;
+            Plugin.MenuMusicMode.Value = NormalizeMenuMusicMode(id);
+            try { MusicEngine.Reconcile("settings-menu-music"); } catch { }
+            dirty = true;
+        }
+
+        internal static string CurrentMenuMusicMode()
+        {
+            return NormalizeMenuMusicMode(Plugin.MenuMusicMode != null ? Plugin.MenuMusicMode.Value : null);
+        }
+
+        // Item 13 (design section 2.1): the value-taking named writers the
+        // per-tab reset calls with each row's recommended value
+        // (SettingsDescriptorWriters.InvokeReset). A row's own switch keeps its
+        // handler; each writer produces the same effect for a given value.
+        internal static void SetShowRegionPing(bool on) { if (Plugin.ShowRegionPing == null) return; Plugin.ShowRegionPing.Value = on; dirty = true; }
+        internal static void SetShowInputOverlay(bool on) { if (Plugin.ShowInputOverlay == null) return; Plugin.ShowInputOverlay.Value = on; dirty = true; }
+        internal static void SetShowBlockDebug(bool on) { if (Plugin.ShowBlockDebug == null) return; Plugin.ShowBlockDebug.Value = on; dirty = true; }
+        internal static void SetShowNotifications(bool on) { if (Plugin.ShowNotifications == null) return; Plugin.ShowNotifications.Value = on; dirty = true; }
+        internal static void SetMuteAudioInBackground(bool on) { if (Plugin.MuteAudioInBackground == null) return; Plugin.MuteAudioInBackground.Value = on; dirty = true; }
+        internal static void SetMusicCreditToast(bool on) { if (Plugin.MusicCreditToast == null) return; Plugin.MusicCreditToast.Value = on; dirty = true; }
+        internal static void SetShowFps(bool on) { if (Plugin.ShowFps == null) return; Plugin.ShowFps.Value = on; dirty = true; }
+        internal static void SetCapFpsUnfocused(bool on) { if (Plugin.CapFpsUnfocused == null) return; Plugin.CapFpsUnfocused.Value = on; dirty = true; }
+        internal static void SetDeepIdleUnfocused(bool on) { if (Plugin.DeepIdleUnfocused == null) return; Plugin.DeepIdleUnfocused.Value = on; dirty = true; }
+
+        /// <summary>The language row's writer. Hot-switch goes through the
+        /// PUBLIC page path (localization-design section 2.3), never a bare
+        /// pageBuilt flip, and lands back on this tab and sub-tab.</summary>
+        internal static void SetModLanguage(string id)
+        {
+            if (string.IsNullOrEmpty(id) || Plugin.ModLanguage == null) return;
+            Plugin.ModLanguage.Value = id;
+            I18n.SetLocale(id);
+            Plugin.Log.LogInfo($"[SETTINGS] Language -> {id}");
+            SettingsRebuildPage();
+        }
+
+        internal static void SetUiDateFormat(string id)
+        {
+            if (id != "MDY" && id != "DMY" && id != "YMD") return;
+            try { if (Plugin.UiDateFormat != null) Plugin.UiDateFormat.Value = id; } catch { }
+            dirty = true;
+        }
+
+        /// <summary>Bug #159's writer: stores the weight, re-points every label
+        /// (UIFactory.ResetWeightMaterial) and rebuilds the page by the public
+        /// path; inside a per-tab reset the rebuild waits for the last write.</summary>
+        internal static void SetUiHeavyFont(bool on)
+        {
+            try { if (Plugin.UiHeavyFont != null) Plugin.UiHeavyFont.Value = on; } catch { }
+            UIFactory.ResetWeightMaterial();
+            if (settingsResetDepth > 0) settingsRebuildOwed = true;
+            else SettingsRebuildPage();
+        }
+
+        internal static void SetShowInactiveOnBoards(bool on)
+        {
+            if (Plugin.ShowInactiveOnBoards == null) return;
+            Plugin.ShowInactiveOnBoards.Value = on;
+            lbTabRefreshAt = 0f; ffaLbRefreshAt = 0f; ovtTabRefreshAt = 0f;
+            ApiClient.FetchTeamLeaderboard(200, ApiClient.CachedTeamLeaderboardSort ?? "rating");
+            dirty = true;
         }
 
         private static void RefreshSettings()
         {
             if (txtConsentStatus != null)
             {
-                // Item 11: Tr at assignment — variable-assigned literals are
+                // Item 11: Tr at assignment - variable-assigned literals are
                 // invisible to the extractor's call-site harvest otherwise.
                 string status;
                 if (Plugin.DataConsentGranted)
@@ -14952,81 +14835,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     status = I18n.Tr("Status: <color=#DDDD66>Unset</color> - the consent prompt will appear on next launch.");
                 UIFactory.SetTextRaw(txtConsentStatus, status);
             }
-            if (consentToggleTxt != null)
-                UIFactory.SetText(consentToggleTxt, Plugin.DataConsentGranted ? "Revoke consent" : "Allow data reporting");
-
-            if (deleteBtn != null) deleteBtn.SetActive(!deleteArmed);
-            if (confirmDeleteBtn != null) confirmDeleteBtn.SetActive(deleteArmed);
-            if (cancelDelBtn != null) cancelDelBtn.SetActive(deleteArmed);
-
-            if (notifToggleTxt != null)
-                UIFactory.SetText(notifToggleTxt,
-                    Plugin.ShowNotifications.Value
-                        ? "Chat notifications: <color=#88FF88>ON</color>"
-                        : "Chat notifications: <color=#FF9966>OFF</color>");
-            if (fpsToggleTxt != null && Plugin.ShowFps != null)
-                UIFactory.SetText(fpsToggleTxt,
-                    Plugin.ShowFps.Value
-                        ? "FPS counter: <color=#88FF88>ON</color>"
-                        : "FPS counter: <color=#FF9966>OFF</color>");
-            if (fpsCapToggleTxt != null && Plugin.CapFpsUnfocused != null)
-                UIFactory.SetText(fpsCapToggleTxt,
-                    Plugin.CapFpsUnfocused.Value
-                        ? "Unfocused 120 FPS cap: <color=#88FF88>ON</color>"
-                        : "Unfocused 120 FPS cap: <color=#FF9966>OFF</color>");
-            if (deepIdleToggleTxt != null && Plugin.DeepIdleUnfocused != null)
-                UIFactory.SetText(deepIdleToggleTxt,
-                    Plugin.DeepIdleUnfocused.Value
-                        ? "Unfocused deep idle (60s): <color=#88FF88>ON</color>"
-                        : "Unfocused deep idle (60s): <color=#FF9966>OFF</color>");
-            if (muteBgToggleTxt != null && Plugin.MuteAudioInBackground != null)
-                UIFactory.SetText(muteBgToggleTxt,
-                    Plugin.MuteAudioInBackground.Value
-                        ? "Mute audio when tabbed out: <color=#88FF88>ON</color>"
-                        : "Mute audio when tabbed out: <color=#FF9966>OFF</color>");
-            if (menuMusicToggleTxt != null && Plugin.MenuMusicMode != null)
-            {
-                // Sept 2: 3-state paint, branched on the config VALUE (a
-                // display string is not a state — the chatTtl rule). An
-                // unknown hand-edited value renders as Default, matching the
-                // engine's fallback for it. N20: read through the SAME
-                // normalization as the cycle site and the engine, so a
-                // hand-edited "Silent"/padded value can never silence the
-                // menu while this paints Default.
-                // Mode compares hoisted OUT of the SetText span: the extractor
-                // harvests every literal in the TEXT argument position, and the
-                // identity values must never become catalogue keys (a translated
-                // "custom" breaks the compare). The three LABELS stay inside the
-                // call so they remain harvestable.
-                string mmv = NormalizeMenuMusicMode(Plugin.MenuMusicMode.Value);
-                int mmSel = mmv == "custom" ? 1 : mmv == "silent" ? 2 : 0;
-                UIFactory.SetText(menuMusicToggleTxt,
-                    mmSel == 1
-                        ? "Menu music: <color=#88FF88>My playlist</color>"
-                        : mmSel == 2
-                            ? "Menu music: <color=#FF9966>None</color>"
-                            : "Menu music: <color=#88CCFF>Default</color>");
-            }
-            if (musicCreditToggleTxt != null && Plugin.MusicCreditToast != null)
-                UIFactory.SetText(musicCreditToggleTxt,
-                    Plugin.MusicCreditToast.Value
-                        ? "Music credit toast: <color=#88FF88>ON</color>"
-                        : "Music credit toast: <color=#FF9966>OFF</color>");
+            // Item 13: every row is painted by its own paint function, a
+            // function of the value, so the settings pane can render a row's
+            // recommended value through the same literals the live row paints.
+            if (consentToggleTxt != null) PaintConsent(consentToggleTxt, Plugin.DataConsentGranted);
+            PaintDeleteRow();
+            if (notifToggleTxt != null && Plugin.ShowNotifications != null) PaintNotifications(notifToggleTxt, Plugin.ShowNotifications.Value);
+            if (fpsToggleTxt != null && Plugin.ShowFps != null) PaintShowFps(fpsToggleTxt, Plugin.ShowFps.Value);
+            if (fpsCapToggleTxt != null && Plugin.CapFpsUnfocused != null) PaintCapFps(fpsCapToggleTxt, Plugin.CapFpsUnfocused.Value);
+            if (deepIdleToggleTxt != null && Plugin.DeepIdleUnfocused != null) PaintDeepIdle(deepIdleToggleTxt, Plugin.DeepIdleUnfocused.Value);
+            if (muteBgToggleTxt != null && Plugin.MuteAudioInBackground != null) PaintMuteBg(muteBgToggleTxt, Plugin.MuteAudioInBackground.Value);
+            if (menuMusicToggleTxt != null && Plugin.MenuMusicMode != null) PaintMenuMusic(menuMusicToggleTxt, Plugin.MenuMusicMode.Value);
+            if (musicCreditToggleTxt != null && Plugin.MusicCreditToast != null) PaintMusicCredit(musicCreditToggleTxt, Plugin.MusicCreditToast.Value);
             if (appearOfflineTxt != null)
             {
                 var stAo = ApiClient.CachedPlayerStats;
-                UIFactory.SetText(appearOfflineTxt,
-                    stAo != null && stAo.appear_offline
-                        ? "Appear offline (Home lists): <color=#88FF88>ON</color>"
-                        : "Appear offline (Home lists): <color=#FF9966>OFF</color>");
+                PaintAppearOffline(appearOfflineTxt, stAo != null && stAo.appear_offline);
             }
             if (prefSameCardsTxt != null)
             {
                 var stSc = ApiClient.CachedPlayerStats;
-                UIFactory.SetText(prefSameCardsTxt,
-                    stSc != null && stSc.pref_same_cards
-                        ? "Same cards in queue games: <color=#88FF88>ON</color>"
-                        : "Same cards in queue games: <color=#FF9966>OFF</color>");
+                PaintPrefSameCards(prefSameCardsTxt, stSc != null && stSc.pref_same_cards);
             }
             MailUI.RefreshSettingsRow();   // Sept 6 mail: preference label + blocked list
             PlayerCardsUI.RefreshSettingsRows();
@@ -15034,180 +14863,43 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 var stSd = ApiClient.CachedPlayerStats;
                 bool linked = stSd != null && (!string.IsNullOrEmpty(stSd.discord_username) || !string.IsNullOrEmpty(stSd.discord_id));
-                UIFactory.SetText(showDiscordTxt,
-                    !linked
-                        ? "Show Discord on leaderboard: <color=#888>link Discord first</color>"
-                        : (stSd.show_discord
-                            ? "Show Discord on leaderboard: <color=#88FF88>ON</color>"
-                            : "Show Discord on leaderboard: <color=#FF9966>OFF</color>"));
+                PaintShowDiscord(showDiscordTxt, linked, linked && stSd.show_discord);
             }
             if (allowSpectatorsTxt != null)
             {
                 var stAs = ApiClient.CachedPlayerStats;
-                UIFactory.SetText(allowSpectatorsTxt,
-                    stAs == null
-                        ? I18n.Tr("Allow spectators: <color=#888>...</color>")
-                        : (stAs.allow_spectators
-                            ? I18n.Tr("Allow spectators: <color=#88FF88>ON</color>")
-                            : I18n.Tr("Allow spectators: <color=#FF9966>OFF</color>")));
+                PaintAllowSpectators(allowSpectatorsTxt, stAs == null ? (bool?)null : stAs.allow_spectators);
             }
-            if (autoLogToggleTxt != null && Plugin.AutoLogUploadEnabled != null)
-                UIFactory.SetText(autoLogToggleTxt,
-                    Plugin.AutoLogUploadEnabled.Value
-                        ? "Send logs automatically: <color=#88FF88>ON</color>"
-                        : "Send logs automatically: <color=#FF9966>OFF</color>");
-            if (pingToggleTxt != null && Plugin.ShowRegionPing != null)
-                UIFactory.SetText(pingToggleTxt,
-                    Plugin.ShowRegionPing.Value
-                        ? "Ping / region display: <color=#88FF88>ON</color>"
-                        : "Ping / region display: <color=#FF9966>OFF</color>");
-            // Item d. Whole-literal keys like the rows above: SetText is the L10n
-            // chokepoint and translates the composed string itself.
-            if (inactiveBoardsToggleTxt != null && Plugin.ShowInactiveOnBoards != null)
-                UIFactory.SetText(inactiveBoardsToggleTxt,
-                    Plugin.ShowInactiveOnBoards.Value
-                        ? "Show inactive players (90d+): <color=#88FF88>ON</color>"
-                        : "Show inactive players (90d+): <color=#FF9966>OFF</color>");
-            if (lagNoticesToggleTxt != null && Plugin.LagNoticesEnabled != null)
-                UIFactory.SetText(lagNoticesToggleTxt,
-                    Plugin.LagNoticesEnabled.Value
-                        ? "Lag notices: <color=#88FF88>ON</color>"
-                        : "Lag notices: <color=#FF9966>OFF</color>");
-            if (ingameChatToggleTxt != null && Plugin.ShowIngameChat != null)
-            {
-                // The ON and OFF literals are kept VERBATIM — rewording OFF to
-                // "MUTED" would retire its four shipped translations (#289).
-                // Only PINNED is a new key.
-                var chatMode = CompetitiveUI.CurrentChatOverlayMode();
-                UIFactory.SetText(ingameChatToggleTxt,
-                    chatMode == CompetitiveUI.ChatOverlayMode.Muted
-                        ? "In-game chat overlay: <color=#FF9966>OFF</color>"
-                        : chatMode == CompetitiveUI.ChatOverlayMode.Pinned
-                            ? "In-game chat overlay: <color=#88CCFF>PINNED</color>"
-                            : "In-game chat overlay: <color=#88FF88>ON</color>");
-            }
-            if (chatTtlTxt != null)
-            {
-                // The cycle now spans 0, and 0 does not mean "fades instantly"
-                // — it means the overlay never appears at all. "Chat fade
-                // after: 0s" would describe a fade that never happens, so the
-                // whole sentence changes rather than just the number.
-                // Branched on the VALUE, never on the label string: the label
-                // is display text and a display string is not a state.
-                float ttl = Plugin.ChatOverlaySeconds != null ? Plugin.ChatOverlaySeconds.Value : 25f;
-                UIFactory.SetTextRaw(chatTtlTxt, ttl <= 0f
-                    ? I18n.Tr("Chat fade after: <color=#FF9966>Off (chat hidden in game)</color>")
-                    : I18n.TrF("Chat fade after: <color=#88CCFF>{0}</color>", Plugin.ChatOverlaySecondsLabel()));
-            }
-            if (cursorShapeTxt != null)
-                UIFactory.SetTextRaw(cursorShapeTxt,
-                    I18n.TrF("Cursor: <color=#88CCFF>{0}</color>", I18n.Tr(CursorColorCosmetic.CurrentShapeLabel())));
-            if (trailToggleTxt != null && Plugin.ShowTrails != null)
-                UIFactory.SetText(trailToggleTxt,
-                    Plugin.ShowTrails.Value
-                        ? "Cosmetic trails: <color=#88FF88>ON</color>"
-                        : "Cosmetic trails: <color=#FF9966>OFF</color>");
-            if (blockDbgToggleTxt != null && Plugin.ShowBlockDebug != null)
-                UIFactory.SetText(blockDbgToggleTxt,
-                    Plugin.ShowBlockDebug.Value
-                        ? "Block debug overlay: <color=#88FF88>ON</color>"
-                        : "Block debug overlay: <color=#FF9966>OFF</color>");
-            if (playerColorToggleTxt != null && Plugin.ShowPlayerColors != null)
-                UIFactory.SetText(playerColorToggleTxt,
-                    Plugin.ShowPlayerColors.Value
-                        ? "Custom player body colors: <color=#88FF88>ON</color>"
-                        : "Custom player body colors: <color=#FF9966>OFF</color>");
-            if (inputOverlayToggleTxt != null && Plugin.ShowInputOverlay != null)
-                UIFactory.SetText(inputOverlayToggleTxt,
-                    Plugin.ShowInputOverlay.Value
-                        ? "Input overlay: <color=#88FF88>ON</color>"
-                        : "Input overlay: <color=#FF9966>OFF</color>");
-            // v1.32 items 7+8 labels.
-            if (screenShakeToggleTxt != null && Plugin.ScreenShakeStrength != null)
-            {
-                // Item 9: display map for the level word — the internal state
-                // string ("Full"/"Reduced"/"Off") itself is never translated.
-                string _sl = ScreenshakerDisablePatch.Level;
-                string _sc = _sl == "Full" ? "#88FF88" : _sl == "Reduced" ? "#FFDD88" : "#FF9966";
-                UIFactory.SetTextRaw(screenShakeToggleTxt,
-                    I18n.TrF("Screen shake: <color={0}>{1}</color>", _sc, I18n.Tr(_sl.ToUpperInvariant())));
-            }
-            if (mapLightingToggleTxt != null && Plugin.MapLightingEnabled != null)
-                UIFactory.SetText(mapLightingToggleTxt,
-                    Plugin.MapLightingEnabled.Value
-                        ? "Map lighting: <color=#88FF88>ON</color>"
-                        : "Map lighting: <color=#FF9966>OFF</color>");
-            if (mapShadowsToggleTxt != null && Plugin.MapShadowsEnabled != null)
-                UIFactory.SetText(mapShadowsToggleTxt,
-                    Plugin.MapShadowsEnabled.Value
-                        ? "Map shadows: <color=#88FF88>ON</color>"
-                        : "Map shadows: <color=#FF9966>OFF</color>");
-            if (animCosToggleTxt != null && Plugin.AnimatedCosmetics != null)
-                UIFactory.SetText(animCosToggleTxt,
-                    Plugin.AnimatedCosmetics.Value
-                        ? "Animated cosmetics: <color=#88FF88>ON</color>"
-                        : "Animated cosmetics: <color=#FF9966>OFF</color>");
-            if (bloomToggleTxt != null && Plugin.BloomStrength != null)
-            {
-                string _bl = MapPhysicalColorPatch.BloomStrengthSetting.Level;
-                string _bc = _bl == "Full" ? "#88FF88" : _bl == "Reduced" ? "#DDDD66" : "#FF9966";
-                // Item 9 (F-class): Tr the hole value too, or English leaks
-                // through the translated template.
-                UIFactory.SetTextRaw(bloomToggleTxt, I18n.TrF("Glow (bloom): <color={0}>{1}</color>", _bc, I18n.Tr(_bl.ToUpperInvariant())));
-            }
-            if (healthPrecToggleTxt != null)
-            {
-                // Each level is its OWN literal inside I18n.Tr, rather than
-                // Tr(level.ToUpperInvariant()) the way the bloom row above
-                // does it. A Tr whose argument is computed is invisible to
-                // tools/i18n_extract.py, so the string never enters
-                // i18n_source.json or I18nSourceKeys.g.cs and ships English in
-                // every locale unless someone remembers to hand-register it
-                // (#295a). Three literals cost three lines and cannot be
-                // forgotten.
-                string _hp = TabStatsOverlay.HealthPrecisionSetting.Level;
-                UIFactory.SetTextRaw(healthPrecToggleTxt,
-                    _hp == TabStatsOverlay.HealthPrecisionSetting.TWO_DP
-                        ? I18n.Tr("HP decimals: <color=#88FF88>2 DECIMALS</color>")
-                        : _hp == TabStatsOverlay.HealthPrecisionSetting.ONE_DP
-                            ? I18n.Tr("HP decimals: <color=#DDDD66>1 DECIMAL</color>")
-                            : I18n.Tr("HP decimals: <color=#FF9966>ROUNDED</color>"));
-            }
-            if (chromAbToggleTxt != null && Plugin.ChromaticAberrationEnabled != null)
-                UIFactory.SetText(chromAbToggleTxt,
-                    Plugin.ChromaticAberrationEnabled.Value
-                        ? "Chromatic aberration: <color=#88FF88>ON</color>"
-                        : "Chromatic aberration: <color=#FF9966>OFF</color>");
-            if (langToggleTxt != null && Plugin.ModLanguage != null)
-            {
-                // Language names stay in their OWN language (never translated
-                // away — a player stuck in the wrong locale must still find
-                // theirs). The label itself bypasses the catalogue.
-                string lv = Plugin.ModLanguage.Value;
-                string lname = lv == "es" ? "Español" : lv == "ru" ? "Русский"
-                    : lv == "uk" ? "Українська" : lv == "sv" ? "Svenska" : "English";
-                UIFactory.SetTextRaw(langToggleTxt, I18n.TrF("Language: <color=#88CCFF>{0}</color>", lname));
-            }
-            // Item 9: date-format picker label.
+            if (autoLogToggleTxt != null && Plugin.AutoLogUploadEnabled != null) PaintAutoLog(autoLogToggleTxt, Plugin.AutoLogUploadEnabled.Value);
+            if (pingToggleTxt != null && Plugin.ShowRegionPing != null) PaintRegionPing(pingToggleTxt, Plugin.ShowRegionPing.Value);
+            if (inactiveBoardsToggleTxt != null && Plugin.ShowInactiveOnBoards != null) PaintInactiveBoards(inactiveBoardsToggleTxt, Plugin.ShowInactiveOnBoards.Value);
+            if (lagNoticesToggleTxt != null && Plugin.LagNoticesEnabled != null) PaintLagNotices(lagNoticesToggleTxt, Plugin.LagNoticesEnabled.Value);
+            if (ingameChatToggleTxt != null && Plugin.ShowIngameChat != null) PaintIngameChat(ingameChatToggleTxt, CompetitiveUI.CurrentChatOverlayMode());
+            if (chatTtlTxt != null) PaintChatTtl(chatTtlTxt, Plugin.ChatOverlaySeconds != null ? Plugin.ChatOverlaySeconds.Value : 25f);
+            if (cursorShapeTxt != null) PaintCursorShape(cursorShapeTxt, CursorColorCosmetic.CurrentShape);
+            if (trailToggleTxt != null && Plugin.ShowTrails != null) PaintTrails(trailToggleTxt, Plugin.ShowTrails.Value);
+            if (blockDbgToggleTxt != null && Plugin.ShowBlockDebug != null) PaintBlockDebug(blockDbgToggleTxt, Plugin.ShowBlockDebug.Value);
+            if (playerColorToggleTxt != null && Plugin.ShowPlayerColors != null) PaintPlayerColors(playerColorToggleTxt, Plugin.ShowPlayerColors.Value);
+            if (inputOverlayToggleTxt != null && Plugin.ShowInputOverlay != null) PaintInputOverlay(inputOverlayToggleTxt, Plugin.ShowInputOverlay.Value);
+            if (screenShakeToggleTxt != null && Plugin.ScreenShakeStrength != null) PaintScreenShake(screenShakeToggleTxt, ScreenshakerDisablePatch.Level);
+            if (mapLightingToggleTxt != null && Plugin.MapLightingEnabled != null) PaintMapLighting(mapLightingToggleTxt, Plugin.MapLightingEnabled.Value);
+            if (mapShadowsToggleTxt != null && Plugin.MapShadowsEnabled != null) PaintMapShadows(mapShadowsToggleTxt, Plugin.MapShadowsEnabled.Value);
+            if (animCosToggleTxt != null && Plugin.AnimatedCosmetics != null) PaintAnimCos(animCosToggleTxt, Plugin.AnimatedCosmetics.Value);
+            if (bloomToggleTxt != null && Plugin.BloomStrength != null) PaintBloom(bloomToggleTxt, MapPhysicalColorPatch.BloomStrengthSetting.Level);
+            if (healthPrecToggleTxt != null) PaintHealthPrecision(healthPrecToggleTxt, TabStatsOverlay.HealthPrecisionSetting.Level);
+            if (chromAbToggleTxt != null && Plugin.ChromaticAberrationEnabled != null) PaintChromAb(chromAbToggleTxt, Plugin.ChromaticAberrationEnabled.Value);
+            if (langToggleTxt != null && Plugin.ModLanguage != null) PaintLanguage(langToggleTxt, Plugin.ModLanguage.Value);
             if (dateFmtTxt != null)
             {
                 string df = "MDY"; try { df = Plugin.UiDateFormat?.Value ?? "MDY"; } catch { }
-                string dfLabel = df == "DMY" ? I18n.Tr("Day/Month/Year")
-                    : df == "YMD" ? I18n.Tr("Year/Month/Day") : I18n.Tr("Month/Day/Year (US)");
-                UIFactory.SetTextRaw(dateFmtTxt, I18n.TrF("Date format: <color=#88CCFF>{0}</color>", dfLabel));
+                PaintDateFormat(dateFmtTxt, df);
             }
-            // Bug #159: heavier menu text. Whole-string keys per state, in the
-            // same shape as every other toggle above — never label + Tr("ON"),
-            // which would be compose-after-Tr (learning #298c).
             if (heavyFontTxt != null)
             {
                 bool hf = true; try { hf = Plugin.UiHeavyFont?.Value ?? true; } catch { }
-                UIFactory.SetText(heavyFontTxt,
-                    hf ? "Thicker menu text: <color=#88FF88>ON</color>"
-                       : "Thicker menu text: <color=#FF9966>OFF</color>");
+                PaintHeavyFont(heavyFontTxt, hf);
             }
-
-            // ── Perf section labels (v1.26.8) ──
+            // Perf section labels (v1.26.8).
             if (_perfSectionHeaderTxt != null)
             {
                 int onCount = 0, total = 7;
@@ -15218,34 +14910,395 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (Plugin.PerfSkipMenuUpdateInMatch?.Value ?? false) onCount++;
                 if (Plugin.PerfBulletHitParticleCap?.Value ?? false) onCount++;
                 if (Plugin.PerfClampObjectPoolInit?.Value ?? false) onCount++;
-                bool masterOn = Plugin.PerfOptimizations?.Value ?? false;
-                string masterTag = masterOn
-                    ? I18n.TrF("<color=#88FF88>{0}/{1} active</color>", onCount, total)
-                    : I18n.Tr("<color=#FF9966>MASTER OFF</color>");
-                string arrow = _perfSectionOpen ? "v" : ">";
-                UIFactory.SetTextRaw(_perfSectionHeaderTxt,
-                    I18n.TrF("<b>{0} Performance patches</b>  {1}", arrow, masterTag));
+                PaintPerfHeader(_perfSectionHeaderTxt, _perfSectionOpen, onCount, total, Plugin.PerfOptimizations?.Value ?? false);
             }
-            // Item 9: labels arrive pre-Tr'd from the call sites below (Tr at
-            // the call is what makes them harvestable); the helper composes
-            // via TrF templates and writes Raw.
-            void SetPerfRow(object txt, BepInEx.Configuration.ConfigEntry<bool> e, string label)
+            PaintPerfRows();
+            PaintActionRows();
+            SettingsAfterRefresh();
+        }
+
+        // ---- Item 13: the rows' paint functions. Each takes the value it
+        // paints, so the pane can capture a row's string for a value that is
+        // not the live one (SettingsCapture). Whole-literal keys per state,
+        // exactly as before: SetText is the L10n chokepoint and translates
+        // the composed string itself; never label + Tr("ON") (#298c).
+
+        internal static void PaintConsent(object t, bool granted)
+        {
+            // The row's label is the section's own name and its value the
+            // state word, both translated before they are joined, so it writes
+            // raw (the one row that composes after Tr, by design).
+            UIFactory.SetTextRaw(t, I18n.Tr("Data & Privacy") + ": " + (granted
+                ? "<color=#88FF88>" + I18n.Tr("Granted") + "</color>"
+                : "<color=#FF9966>" + I18n.Tr("Not granted") + "</color>"));
+        }
+
+        private static void PaintNotifications(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Chat notifications: <color=#88FF88>ON</color>"
+                : "Chat notifications: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintShowFps(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "FPS counter: <color=#88FF88>ON</color>"
+                : "FPS counter: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintCapFps(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Unfocused 120 FPS cap: <color=#88FF88>ON</color>"
+                : "Unfocused 120 FPS cap: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintDeepIdle(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Unfocused deep idle (60s): <color=#88FF88>ON</color>"
+                : "Unfocused deep idle (60s): <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintMuteBg(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Mute audio when tabbed out: <color=#88FF88>ON</color>"
+                : "Mute audio when tabbed out: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintMenuMusic(object t, string mode)
+        {
+            // Sept 2: 3-state paint, branched on the config VALUE through the
+            // SAME normalization as the writer and the engine (N20). The mode
+            // compares stay OUT of the SetText span: the extractor harvests
+            // every literal in the text argument, and the identity values must
+            // never become catalogue keys. The three labels stay inside it.
+            string mmv = NormalizeMenuMusicMode(mode);
+            int mmSel = mmv == "custom" ? 1 : mmv == "silent" ? 2 : 0;
+            UIFactory.SetText(t,
+                mmSel == 1
+                    ? "Menu music: <color=#88FF88>My playlist</color>"
+                    : mmSel == 2
+                        ? "Menu music: <color=#FF9966>None</color>"
+                        : "Menu music: <color=#88CCFF>Default</color>");
+        }
+
+        private static void PaintMusicCredit(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Music credit toast: <color=#88FF88>ON</color>"
+                : "Music credit toast: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintAppearOffline(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Appear offline (Home lists): <color=#88FF88>ON</color>"
+                : "Appear offline (Home lists): <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintPrefSameCards(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Same cards in queue games: <color=#88FF88>ON</color>"
+                : "Same cards in queue games: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintShowDiscord(object t, bool linked, bool on)
+        {
+            UIFactory.SetText(t,
+                !linked
+                    ? "Show Discord on leaderboard: <color=#888>link Discord first</color>"
+                    : (on
+                        ? "Show Discord on leaderboard: <color=#88FF88>ON</color>"
+                        : "Show Discord on leaderboard: <color=#FF9966>OFF</color>"));
+        }
+
+        private static void PaintAllowSpectators(object t, bool? on)
+        {
+            UIFactory.SetText(t,
+                on == null
+                    ? I18n.Tr("Allow spectators: <color=#888>...</color>")
+                    : (on.Value
+                        ? I18n.Tr("Allow spectators: <color=#88FF88>ON</color>")
+                        : I18n.Tr("Allow spectators: <color=#FF9966>OFF</color>")));
+        }
+
+        private static void PaintAutoLog(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Send logs automatically: <color=#88FF88>ON</color>"
+                : "Send logs automatically: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintRegionPing(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Ping / region display: <color=#88FF88>ON</color>"
+                : "Ping / region display: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintInactiveBoards(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Show inactive players (90d+): <color=#88FF88>ON</color>"
+                : "Show inactive players (90d+): <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintLagNotices(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Lag notices: <color=#88FF88>ON</color>"
+                : "Lag notices: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintIngameChat(object t, CompetitiveUI.ChatOverlayMode chatMode)
+        {
+            // The ON and OFF literals are kept VERBATIM - rewording OFF to
+            // "MUTED" would retire its four shipped translations (#289).
+            UIFactory.SetText(t,
+                chatMode == CompetitiveUI.ChatOverlayMode.Muted
+                    ? "In-game chat overlay: <color=#FF9966>OFF</color>"
+                    : chatMode == CompetitiveUI.ChatOverlayMode.Pinned
+                        ? "In-game chat overlay: <color=#88CCFF>PINNED</color>"
+                        : "In-game chat overlay: <color=#88FF88>ON</color>");
+        }
+
+        private static void PaintChatTtl(object t, float ttl)
+        {
+            // 0 does not mean "fades instantly" - it means the overlay never
+            // appears at all, so the whole sentence changes rather than just
+            // the number. Branched on the VALUE, never on the label string.
+            UIFactory.SetTextRaw(t, ttl <= 0f
+                ? I18n.Tr("Chat fade after: <color=#FF9966>Off (chat hidden in game)</color>")
+                : I18n.TrF("Chat fade after: <color=#88CCFF>{0}</color>", Plugin.ChatOverlaySecondsLabel(ttl)));
+        }
+
+        /// <summary>A cursor shape's display word. Each word is its own
+        /// literal inside I18n.Tr, so the extractor harvests it (a Tr of a
+        /// computed string is invisible to tools/i18n_extract.py, #295a).</summary>
+        private static string ShapeLabelTr(string id)
+        {
+            string lab = CursorColorCosmetic.ShapeLabel(id);
+            switch (lab)
             {
-                if (txt == null) return;
-                if (e == null) { UIFactory.SetTextRaw(txt, I18n.TrF("{0}: <color=#888>(not bound)</color>", label)); return; }
-                UIFactory.SetTextRaw(txt,
-                    e.Value
-                        ? I18n.TrF("{0}: <color=#88FF88>ON</color>", label)
-                        : I18n.TrF("{0}: <color=#FF9966>OFF</color>", label));
+                case "Arrow": return I18n.Tr("Arrow");
+                case "Dot": return I18n.Tr("Dot");
+                case "Crosshair": return I18n.Tr("Crosshair");
+                case "Circle": return I18n.Tr("Circle");
+                case "ROUNDS default": return I18n.Tr("ROUNDS default");
             }
-            SetPerfRow(perfMasterTxt,    Plugin.PerfOptimizations,             I18n.Tr("Master"));
-            SetPerfRow(perfStunTxt,      Plugin.PerfStunPlayerNullGuard,       I18n.Tr("Stun null-guard"));
-            SetPerfRow(perfBulletsTxt,   Plugin.PerfDespawnOffscreenBullets,   I18n.Tr("OOB bullet despawn"));
-            SetPerfRow(perfHitSndTxt,    Plugin.PerfSwallowHitSoundNREs,       I18n.Tr("Hit-sound NRE swallow"));
-            SetPerfRow(perfEdgeBnTxt,    Plugin.PerfSwallowEdgeBounceNREs,     I18n.Tr("EdgeBounce NRE swallow"));
-            SetPerfRow(perfMenuTxt,      Plugin.PerfSkipMenuUpdateInMatch,     I18n.Tr("Menu update bail"));
-            SetPerfRow(perfBulletCapTxt, Plugin.PerfBulletHitParticleCap,      I18n.Tr("Bullet-hit particle cap (2/frame)"));
-            SetPerfRow(perfPoolTxt,      Plugin.PerfClampObjectPoolInit,       I18n.Tr("ObjectPool init clamp (in-match)"));
+            return I18n.Tr(lab);
+        }
+
+        private static void PaintCursorShape(object t, string id)
+        {
+            UIFactory.SetTextRaw(t, I18n.TrF("Cursor: <color=#88CCFF>{0}</color>", ShapeLabelTr(id)));
+        }
+
+        private static void PaintTrails(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Cosmetic trails: <color=#88FF88>ON</color>"
+                : "Cosmetic trails: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintBlockDebug(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Block debug overlay: <color=#88FF88>ON</color>"
+                : "Block debug overlay: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintPlayerColors(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Custom player body colors: <color=#88FF88>ON</color>"
+                : "Custom player body colors: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintInputOverlay(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Input overlay: <color=#88FF88>ON</color>"
+                : "Input overlay: <color=#FF9966>OFF</color>");
+        }
+
+        /// <summary>A three-level setting's display word ("Full" / "Reduced" /
+        /// "Off" are internal state strings, never translated themselves).
+        /// Each word is its own literal inside I18n.Tr so it harvests.</summary>
+        private static string LevelWordTr(string level)
+        {
+            if (level == "Full") return I18n.Tr("FULL");
+            if (level == "Reduced") return I18n.Tr("REDUCED");
+            return I18n.Tr("OFF");
+        }
+
+        private static void PaintScreenShake(object t, string level)
+        {
+            string _sl = level ?? "Full";
+            string _sc = _sl == "Full" ? "#88FF88" : _sl == "Reduced" ? "#FFDD88" : "#FF9966";
+            UIFactory.SetTextRaw(t, I18n.TrF("Screen shake: <color={0}>{1}</color>", _sc, LevelWordTr(_sl)));
+        }
+
+        private static void PaintMapLighting(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Map lighting: <color=#88FF88>ON</color>"
+                : "Map lighting: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintMapShadows(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Map shadows: <color=#88FF88>ON</color>"
+                : "Map shadows: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintAnimCos(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Animated cosmetics: <color=#88FF88>ON</color>"
+                : "Animated cosmetics: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintBloom(object t, string level)
+        {
+            // Item 9 (F-class): Tr the hole value too, or English leaks
+            // through the translated template.
+            string _bl = level ?? "Full";
+            string _bc = _bl == "Full" ? "#88FF88" : _bl == "Reduced" ? "#DDDD66" : "#FF9966";
+            UIFactory.SetTextRaw(t, I18n.TrF("Glow (bloom): <color={0}>{1}</color>", _bc, LevelWordTr(_bl)));
+        }
+
+        private static void PaintHealthPrecision(object t, string level)
+        {
+            // Each level is its OWN literal inside I18n.Tr, so it harvests
+            // (#295a); three literals cost three lines and cannot be forgotten.
+            UIFactory.SetTextRaw(t,
+                level == TabStatsOverlay.HealthPrecisionSetting.TWO_DP
+                    ? I18n.Tr("HP decimals: <color=#88FF88>2 DECIMALS</color>")
+                    : level == TabStatsOverlay.HealthPrecisionSetting.ONE_DP
+                        ? I18n.Tr("HP decimals: <color=#DDDD66>1 DECIMAL</color>")
+                        : I18n.Tr("HP decimals: <color=#FF9966>ROUNDED</color>"));
+        }
+
+        private static void PaintChromAb(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Chromatic aberration: <color=#88FF88>ON</color>"
+                : "Chromatic aberration: <color=#FF9966>OFF</color>");
+        }
+
+        /// <summary>A language's name in its OWN language (never translated
+        /// away - a player stuck in the wrong locale must still find theirs).
+        /// The descriptor table renders the language row's recommended value
+        /// with it (SettingsDescriptorWriters.RenderExpression).</summary>
+        internal static string LanguageName(string id)
+        {
+            return id == "es" ? "Espa\u00f1ol" : id == "ru" ? "\u0420\u0443\u0441\u0441\u043a\u0438\u0439"
+                : id == "uk" ? "\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430" : id == "sv" ? "Svenska" : "English";
+        }
+
+        private static void PaintLanguage(object t, string id)
+        {
+            UIFactory.SetTextRaw(t, I18n.TrF("Language: <color=#88CCFF>{0}</color>", LanguageName(id)));
+        }
+
+        private static void PaintDateFormat(object t, string df)
+        {
+            string dfLabel = df == "DMY" ? I18n.Tr("Day/Month/Year")
+                : df == "YMD" ? I18n.Tr("Year/Month/Day") : I18n.Tr("Month/Day/Year (US)");
+            UIFactory.SetTextRaw(t, I18n.TrF("Date format: <color=#88CCFF>{0}</color>", dfLabel));
+        }
+
+        private static void PaintHeavyFont(object t, bool hf)
+        {
+            UIFactory.SetText(t,
+                hf ? "Thicker menu text: <color=#88FF88>ON</color>"
+                   : "Thicker menu text: <color=#FF9966>OFF</color>");
+        }
+
+        private static void PaintPerfHeader(object t, bool open, int onCount, int total, bool masterOn)
+        {
+            string masterTag = masterOn
+                ? I18n.TrF("<color=#88FF88>{0}/{1} active</color>", onCount, total)
+                : I18n.Tr("<color=#FF9966>MASTER OFF</color>");
+            string arrow = open ? "v" : ">";
+            UIFactory.SetTextRaw(t, I18n.TrF("<b>{0} Performance patches</b>  {1}", arrow, masterTag));
+        }
+
+        /// <summary>A performance row's paint. Its label arrives translated
+        /// (PerfRowLabel); the composition goes through TrF templates and is
+        /// written raw. Null is an unbound config entry.</summary>
+        private static void PaintPerfRow(object t, bool? on, string label)
+        {
+            if (t == null) return;
+            if (on == null) { UIFactory.SetTextRaw(t, I18n.TrF("{0}: <color=#888>(not bound)</color>", label)); return; }
+            UIFactory.SetTextRaw(t,
+                on.Value
+                    ? I18n.TrF("{0}: <color=#88FF88>ON</color>", label)
+                    : I18n.TrF("{0}: <color=#FF9966>OFF</color>", label));
+        }
+
+        private static string PerfRowLabel(string id)
+        {
+            switch (id)
+            {
+                case "Master": return I18n.Tr("Master");
+                case "Stun": return I18n.Tr("Stun null-guard");
+                case "OOB": return I18n.Tr("OOB bullet despawn");
+                case "HitSnd": return I18n.Tr("Hit-sound NRE swallow");
+                case "EdgeBn": return I18n.Tr("EdgeBounce NRE swallow");
+                case "Menu": return I18n.Tr("Menu update bail");
+                case "BulletCap": return I18n.Tr("Bullet-hit particle cap (2/frame)");
+                case "PoolInit": return I18n.Tr("ObjectPool init clamp (in-match)");
+            }
+            return id;
+        }
+
+        private static void PaintPerfRows()
+        {
+            PaintPerfRow(perfMasterTxt, Plugin.PerfOptimizations?.Value, PerfRowLabel("Master"));
+            PaintPerfRow(perfStunTxt, Plugin.PerfStunPlayerNullGuard?.Value, PerfRowLabel("Stun"));
+            PaintPerfRow(perfBulletsTxt, Plugin.PerfDespawnOffscreenBullets?.Value, PerfRowLabel("OOB"));
+            PaintPerfRow(perfHitSndTxt, Plugin.PerfSwallowHitSoundNREs?.Value, PerfRowLabel("HitSnd"));
+            PaintPerfRow(perfEdgeBnTxt, Plugin.PerfSwallowEdgeBounceNREs?.Value, PerfRowLabel("EdgeBn"));
+            PaintPerfRow(perfMenuTxt, Plugin.PerfSkipMenuUpdateInMatch?.Value, PerfRowLabel("Menu"));
+            PaintPerfRow(perfBulletCapTxt, Plugin.PerfBulletHitParticleCap?.Value, PerfRowLabel("BulletCap"));
+            PaintPerfRow(perfPoolTxt, Plugin.PerfClampObjectPoolInit?.Value, PerfRowLabel("PoolInit"));
+        }
+
+        /// <summary>The three action rows keep the button labels they had,
+        /// now painted into their row's label column.</summary>
+        private static void PaintActionRows()
+        {
+            if (escBtnTxt != null) UIFactory.SetText(escBtnTxt, "Leave All Queues");
+            if (infoOpenTxt != null) UIFactory.SetText(infoOpenTxt, "Open the Info library");
+            if (portalTxt != null) UIFactory.SetText(portalTxt, "Translate SCR (web portal)");
+        }
+
+        /// <summary>The delete row: which of its three buttons shows, and each
+        /// button's face (the same labels as before, now painted each pass).</summary>
+        private static void PaintDeleteRow()
+        {
+            if (deleteBtn != null)
+            {
+                deleteBtn.SetActive(!deleteArmed);
+                UIFactory.SetText(UIFactory.GetButtonText(deleteBtn), "Delete My Data...");
+            }
+            if (confirmDeleteBtn != null)
+            {
+                confirmDeleteBtn.SetActive(deleteArmed);
+                UIFactory.SetText(UIFactory.GetButtonText(confirmDeleteBtn), "Confirm \u2014 really delete");
+            }
+            if (cancelDelBtn != null)
+            {
+                cancelDelBtn.SetActive(deleteArmed);
+                UIFactory.SetText(UIFactory.GetButtonText(cancelDelBtn), "Cancel");
+            }
         }
 
         private sealed class MergedSeriesRow

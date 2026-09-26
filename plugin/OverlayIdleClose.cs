@@ -73,6 +73,11 @@ namespace CompetitiveRounds
             bool prompt;
             try { prompt = NativeUI.HasOpenPrompt; } catch { prompt = false; }
             if (prompt) { lastPresenceRt = now; return; }
+            // Item 13: the settings self-test (lever "5:selftest") is an
+            // operator session; closing the page under it stalls the run.
+            bool selfTest;
+            try { selfTest = NativeUI.SettingsSelfTestRunning; } catch { selfTest = false; }
+            if (selfTest) { lastPresenceRt = now; return; }
 
             float idle = now - lastPresenceRt;
             if (InLiveOnlineRoom)

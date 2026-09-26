@@ -255,6 +255,66 @@ def test_the_ladder_shop_guarantees_each_have_a_case(harness_run, name):
         "the case printed no measurement: " + line)
 
 
+def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
+    """Item 13: the settings page's split and reset-scope rules
+    (plugin/SettingsModel.cs). Its cases live in the harness-only
+    SettingsModelSelfTest.cs."""
+    suites = _suites(harness_run)
+    assert "settingsmodel" in suites, "the SettingsModel suite did not report"
+    run, fail, verdict = suites["settingsmodel"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[settingsmodel\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The count on the commit that added the suite, not a floor far below
+    # it (#342). Raise it when cases are added.
+    assert run >= 25, "the SettingsModel suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # T2a, the design's four cases
+    "T2a the ordinary case",
+    "T2a parentheses in the value",
+    "T2a a colon in the value half stays in the value (control)",
+    "T2a a disclosure never splits",
+    # A6, the legs the generated table decides
+    "A6 every row has a reason",
+    "A6 every row that stores no value has a when-to-press line",
+    "A6 no row's help target is its own actuating control",
+    # T5-g's selection half: one exact set per sub-tab, never a total
+    "T5-g ingame writes exactly its 5",
+    "T5-g chatmail writes exactly its 3",
+    "T5-g sound writes exactly its 3",
+    "T5-g visuals writes exactly its 9",
+    "T5-g perf writes exactly its 11",
+    "T5-g langmenus writes exactly its 2",
+    "T5-g privacy writes exactly its 0",
+])
+def test_the_settings_model_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "settingsmodel")
+    assert line.startswith("[settingsmodel] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+def test_the_split_keeps_a_colon_that_belongs_to_the_value(harness_run):
+    """T2a's control, asserted on the printed MEASUREMENT: the value half
+    of "Label: <color=#88FF88>10:30</color>" keeps its own colon. A split at
+    the last colon prints label=[Label: <color=#88FF88>10] instead."""
+    line = _named_case(harness_run,
+                       "T2a a colon in the value half stays in the value (control)",
+                       "settingsmodel")
+    assert "label=[Label] value=[<color=#88FF88>10:30</color>]" in line, line
+
+
+def test_the_privacy_tab_reset_writes_nothing(harness_run):
+    """No row whose home is Privacy & account is ever bulk-written, by rule
+    (design section 6.4): consent, reporting and what leaves this PC are the
+    player's own decisions. Asserted on the printed written set."""
+    line = _named_case(harness_run, "T5-g privacy writes exactly its 0", "settingsmodel")
+    assert "written=0 {}" in line, line
+
+
 def test_the_binder_order_is_total_under_every_mode_the_button_offers(harness_run):
     """The tail that makes the order total is reached from every branch, so a
     mode added later cannot quietly forget it.
@@ -612,3 +672,10 @@ def test_the_harness_compiles_only_the_rule_files():
     plugin_proj = (REPO / "plugin" / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
     assert "TitleLadderRulesSelfTest" not in plugin_proj
     assert not (REPO / "plugin" / "TitleLadderRulesSelfTest.cs").exists()
+    # Item 13: the settings model's cases and the I18n stand-in are the
+    # harness's own files; the plugin compiles the model and never these.
+    assert any(p.endswith("plugin/SettingsModel.cs") for p in included)
+    for harness_only in ("SettingsModelSelfTest.cs", "I18nStub.cs"):
+        assert harness_only in included
+        assert harness_only.split(".")[0] not in plugin_proj
+        assert not (REPO / "plugin" / harness_only).exists()

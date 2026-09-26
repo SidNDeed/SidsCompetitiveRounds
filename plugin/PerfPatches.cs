@@ -22,6 +22,56 @@ using UnityEngine;
 
 namespace CompetitiveRounds
 {
+    /// <summary>Item 13: the named writer every performance row of the
+    /// settings page routes through, so a per-tab reset and a click write the
+    /// same entry the same way. Ids are the row ids the page builds its
+    /// SPerf_ controls from. Each entry is written by name, never through an
+    /// alias, so a reader of this file sees exactly which key each id owns.
+    /// </summary>
+    internal static class PerfPatches
+    {
+        internal static readonly string[] Ids =
+            { "Master", "Stun", "OOB", "HitSnd", "EdgeBn", "Menu", "BulletCap", "PoolInit" };
+
+        /// <summary>The current value of one patch flag; null when the entry
+        /// is not bound (very early startup).</summary>
+        internal static bool? IsOn(string id)
+        {
+            switch (id)
+            {
+                case "Master": return Plugin.PerfOptimizations?.Value;
+                case "Stun": return Plugin.PerfStunPlayerNullGuard?.Value;
+                case "OOB": return Plugin.PerfDespawnOffscreenBullets?.Value;
+                case "HitSnd": return Plugin.PerfSwallowHitSoundNREs?.Value;
+                case "EdgeBn": return Plugin.PerfSwallowEdgeBounceNREs?.Value;
+                case "Menu": return Plugin.PerfSkipMenuUpdateInMatch?.Value;
+                case "BulletCap": return Plugin.PerfBulletHitParticleCap?.Value;
+                case "PoolInit": return Plugin.PerfClampObjectPoolInit?.Value;
+            }
+            return null;
+        }
+
+        /// <summary>Write one patch flag. An unbound entry or an unknown id
+        /// writes nothing. The patches read their flag per call (PerfGate), so
+        /// there is no apply step; the page repaints on its dirty flag.</summary>
+        internal static void SetPatch(string id, bool value)
+        {
+            switch (id)
+            {
+                case "Master": if (Plugin.PerfOptimizations != null) Plugin.PerfOptimizations.Value = value; break;
+                case "Stun": if (Plugin.PerfStunPlayerNullGuard != null) Plugin.PerfStunPlayerNullGuard.Value = value; break;
+                case "OOB": if (Plugin.PerfDespawnOffscreenBullets != null) Plugin.PerfDespawnOffscreenBullets.Value = value; break;
+                case "HitSnd": if (Plugin.PerfSwallowHitSoundNREs != null) Plugin.PerfSwallowHitSoundNREs.Value = value; break;
+                case "EdgeBn": if (Plugin.PerfSwallowEdgeBounceNREs != null) Plugin.PerfSwallowEdgeBounceNREs.Value = value; break;
+                case "Menu": if (Plugin.PerfSkipMenuUpdateInMatch != null) Plugin.PerfSkipMenuUpdateInMatch.Value = value; break;
+                case "BulletCap": if (Plugin.PerfBulletHitParticleCap != null) Plugin.PerfBulletHitParticleCap.Value = value; break;
+                case "PoolInit": if (Plugin.PerfClampObjectPoolInit != null) Plugin.PerfClampObjectPoolInit.Value = value; break;
+                default: return;
+            }
+            NativeUI.MarkDirty();
+        }
+    }
+
     internal static class PerfGate
     {
         // Each patch in this file gates through here. Both the master switch
@@ -591,13 +641,28 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Cycles Full -> Reduced -> Off -> Full. No apply step needed —
-        /// the patch reads the level per impulse.</summary>
+        /// <summary>Cycles Full -> Reduced -> Off -> Full through Set. Kept for
+        /// any caller that still steps the setting; the settings page writes a
+        /// chosen level through Set directly.</summary>
         internal static void Cycle()
         {
             if (Plugin.ScreenShakeStrength == null) return;
+            Set(Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full");
+        }
+
+        /// <summary>The value-taking writer (item 13). The level is
+        /// canonicalised to Full / Reduced / Off, so a caller cannot store a
+        /// display word; null or unknown writes Full, which is also how an
+        /// unknown stored value reads. No apply step: the patch reads the level
+        /// per impulse.</summary>
+        internal static void Set(string level)
+        {
+            if (Plugin.ScreenShakeStrength == null) return;
+            string v = (level ?? "").Trim();
             Plugin.ScreenShakeStrength.Value =
-                Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full";
+                string.Equals(v, "Off", StringComparison.OrdinalIgnoreCase) ? "Off"
+                : string.Equals(v, "Reduced", StringComparison.OrdinalIgnoreCase) ? "Reduced"
+                : "Full";
         }
 
         private static bool Scale(ref Vector2 feelDirection)

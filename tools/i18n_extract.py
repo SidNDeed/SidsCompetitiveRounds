@@ -121,6 +121,12 @@ FILES = [
     # (#368). Listed here because the list is FIXED and a new file's strings
     # are silently unharvestable until it is named (#357).
     "TitleLaddersUI.cs",
+    # Settings page reorganisation (v1.41.0 item 13): the sub-tab bar, the
+    # help pane, the reset footer and the per-row paint functions live in
+    # a partial of NativeUI; the per-key help text is generated from the
+    # committed descriptor table into SettingsDescriptors.g.cs.  Both are
+    # new files, so both are named here (#357).
+    "NativeUI.Settings.cs", "SettingsDescriptors.g.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
@@ -305,7 +311,16 @@ def lf(s: str) -> str:
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
 
+# A C# \uXXXX escape is decoded to the character it names, so a source
+# that spells a non-ASCII character as an escape harvests the SAME key the
+# compiled string looks up at runtime (item 13 keeps every added source
+# line ASCII).  Only an escape preceded by an EVEN run of backslashes is a
+# real escape; an escaped backslash followed by u is literal text.
+_U_ESC = re.compile(r"(?<!\\)((?:\\\\)*)\\u([0-9A-Fa-f]{4})")
+
+
 def unescape(s: str) -> str:
+    s = _U_ESC.sub(lambda m: m.group(1) + chr(int(m.group(2), 16)), s)
     return (s.replace('\\"', '"').replace("\\n", "\n")
              .replace("\\r", "\r").replace("\\\\", "\\"))
 

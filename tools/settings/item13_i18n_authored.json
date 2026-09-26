@@ -1,0 +1,565 @@
+{
+  "measured_from": {
+    "lane": "46f54d4689bba538f13f5ab81e5a98463bc22e09",
+    "manifest": {
+      "lane": "46f54d4689bba538f13f5ab81e5a98463bc22e09",
+      "pin": "cc924982d612470830a90f7ffd05ef615fa96401"
+    },
+    "pin": "cc924982d612470830a90f7ffd05ef615fa96401"
+  },
+  "note": "The EXACT authored set, frozen. T6 compares the generator's enumeration against this file, so an addition, an omission or a reword reddens. Regenerate it deliberately, with --freeze-i18n --force, and the diff is the change to the translation workload.",
+  "schema": "item13-i18n-authored/1",
+  "terms": [
+    {
+      "class": "reason",
+      "key": "SAllowSpec",
+      "text": "turning it off also removes spectators already watching"
+    },
+    {
+      "class": "reason",
+      "key": "SAnimCos",
+      "text": "turn it off on a weak GPU; nothing is hidden"
+    },
+    {
+      "class": "reason",
+      "key": "SAppOff",
+      "text": "it only hides you from Home lists; it does not hide matches"
+    },
+    {
+      "class": "reason",
+      "key": "SAutoLog",
+      "text": "sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report"
+    },
+    {
+      "class": "reason",
+      "key": "SBlkDbg",
+      "text": "a debugging overlay, not a HUD"
+    },
+    {
+      "class": "reason",
+      "key": "SBloom",
+      "text": "painted-in glow stays whatever you pick"
+    },
+    {
+      "class": "reason",
+      "key": "SBugBtn",
+      "text": "the form attaches the current log, which a later report cannot"
+    },
+    {
+      "class": "help_body",
+      "key": "SBugBtn",
+      "text": "Opens the report form. It attaches the log the game is writing right now, which is why a report filed while the problem is on screen carries more than one written afterwards."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SBugBtn",
+      "text": "while the problem is still on screen"
+    },
+    {
+      "class": "reason",
+      "key": "SCT",
+      "text": "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off"
+    },
+    {
+      "class": "reason",
+      "key": "SChatTtl",
+      "text": "the shipped default; 0 is a mode rather than a short timer, because chat then never appears in game"
+    },
+    {
+      "class": "reason",
+      "key": "SChromAb",
+      "text": "off is crisper and slightly faster"
+    },
+    {
+      "class": "reason",
+      "key": "SCursor",
+      "text": "it combines with an equipped cursor colour"
+    },
+    {
+      "class": "reason",
+      "key": "SDBtn",
+      "text": "it deletes your rating, history and collection, and there is no undo"
+    },
+    {
+      "class": "help_body",
+      "key": "SDBtn",
+      "text": "Arms the deletion. This press deletes nothing: the row swaps to a confirm button and a cancel button, and only the confirm performs it."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SDBtn",
+      "text": "only to leave for good"
+    },
+    {
+      "class": "reason",
+      "key": "SDCBtn",
+      "text": "this is the press that performs the deletion"
+    },
+    {
+      "class": "when_to_press",
+      "key": "SDCBtn",
+      "text": "only after reading the armed warning"
+    },
+    {
+      "class": "reason",
+      "key": "SDXBtn",
+      "text": "cancelling costs nothing and re-arms cleanly"
+    },
+    {
+      "class": "help_body",
+      "key": "SDXBtn",
+      "text": "Puts the delete row back to its normal state. Nothing has been deleted at this point, so cancelling costs nothing and the row can be armed again."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SDXBtn",
+      "text": "whenever you armed it by accident"
+    },
+    {
+      "class": "reason",
+      "key": "SDateFmt",
+      "text": "the shipped default; menus only, never match data, so switch to the order you read fastest"
+    },
+    {
+      "class": "reason",
+      "key": "SDeepIdle",
+      "text": "never active in a room or on match-found"
+    },
+    {
+      "class": "reason",
+      "key": "SEBtn",
+      "text": "it leaves every queue at once and costs nothing if you are not in one"
+    },
+    {
+      "class": "help_body",
+      "key": "SEBtn",
+      "text": "Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SEBtn",
+      "text": "when the game thinks you are still queued"
+    },
+    {
+      "class": "reason",
+      "key": "SFPS",
+      "text": "it is the instrument you judge the rest of this tab with"
+    },
+    {
+      "class": "reason",
+      "key": "SFPSCap",
+      "text": "it costs nothing while you are playing"
+    },
+    {
+      "class": "reason",
+      "key": "SHeavyFont",
+      "text": "the SDF face drops thin glyphs when light"
+    },
+    {
+      "class": "reason",
+      "key": "SHpPrec",
+      "text": "local display only; decimals help only when a card leaves max health on a fraction"
+    },
+    {
+      "class": "reason",
+      "key": "SIgChat",
+      "text": "M cycles the same state in game; Muted also tells the room you cannot read chat"
+    },
+    {
+      "class": "reason",
+      "key": "SInactiveLb",
+      "text": "keeps boards to players you can actually meet"
+    },
+    {
+      "class": "reason",
+      "key": "SInfoOpen",
+      "text": "the Info library answers most rules questions"
+    },
+    {
+      "class": "help_body",
+      "key": "SInfoOpen",
+      "text": "Opens the in-game library: how a pick lands, what each ranked state means, the leave rules, and the card and damage notes players have contributed."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SInfoOpen",
+      "text": "before asking in Discord"
+    },
+    {
+      "class": "reason",
+      "key": "SInpOv",
+      "text": "for streams and for spotting missed inputs"
+    },
+    {
+      "class": "reason",
+      "key": "SLagNotice",
+      "text": "worth it while investigating one match; it is noisy, so turn it back off afterwards"
+    },
+    {
+      "class": "reason",
+      "key": "SLang",
+      "text": "drafts are machine-translated until reviewed, and English is always complete"
+    },
+    {
+      "class": "reason",
+      "key": "SLight",
+      "text": "off is flat but faster"
+    },
+    {
+      "class": "reason",
+      "key": "SMailBlocked",
+      "text": "it is the only place a block can be lifted"
+    },
+    {
+      "class": "help_body",
+      "key": "SMailBlocked",
+      "text": "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SMailBlocked",
+      "text": "when you want to unblock someone"
+    },
+    {
+      "class": "reason",
+      "key": "SMailFrom",
+      "text": "blocked senders never reach you anyway"
+    },
+    {
+      "class": "help_body",
+      "key": "SMailFrom",
+      "text": "Chooses who may start a new mail thread with you: everyone, only players you have played, or nobody. Threads you already have are unaffected, and blocked senders never reach you."
+    },
+    {
+      "class": "reason",
+      "key": "SMailRelay",
+      "text": "once Discord is linked, mail reaches you when the game is closed and you can reply from there"
+    },
+    {
+      "class": "help_body",
+      "key": "SMailRelay",
+      "text": "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox."
+    },
+    {
+      "class": "reason",
+      "key": "SMenuMus",
+      "text": "matches always use your picks regardless"
+    },
+    {
+      "class": "reason",
+      "key": "SMusCredit",
+      "text": "one line, bottom-left, and only on custom tracks"
+    },
+    {
+      "class": "reason",
+      "key": "SMuteBg",
+      "text": "the menu stays audible either way"
+    },
+    {
+      "class": "reason",
+      "key": "SNT",
+      "text": "the Home chat log updates either way; this is the pop-up"
+    },
+    {
+      "class": "reason",
+      "key": "SPColor",
+      "text": "off falls everyone back to orange/blue"
+    },
+    {
+      "class": "reason",
+      "key": "SPcAnn",
+      "text": "only rare pulls, and only in one channel"
+    },
+    {
+      "class": "reason",
+      "key": "SPcPre",
+      "text": "follows the character you actually play"
+    },
+    {
+      "class": "reason",
+      "key": "SPcPub",
+      "text": "lets trades find your binder"
+    },
+    {
+      "class": "reason",
+      "key": "SPerfH",
+      "text": "it is the only place the individual patches can be seen"
+    },
+    {
+      "class": "help_body",
+      "key": "SPerfH",
+      "text": "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SPerfH",
+      "text": "when the count beside it is not 7/7"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_BulletCap",
+      "text": "largest visible win in heavy firefights"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_EdgeBn",
+      "text": "swallows the one null reference a destroyed bullet raises at a screen edge"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_HitSnd",
+      "text": "swallows the one null reference the hit sound raises when its parent is gone"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_Master",
+      "text": "master gate; off disables all seven"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_Menu",
+      "text": "menu code cannot matter mid-match"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_OOB",
+      "text": "host-only, and it despawns real bullets"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_PoolInit",
+      "text": "removes allocation stutter"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_Stun",
+      "text": "stops null-reference spam and changes nothing visible"
+    },
+    {
+      "class": "reason",
+      "key": "SPing",
+      "text": "tells you which region you are on"
+    },
+    {
+      "class": "reason",
+      "key": "SPortal",
+      "text": "it opens a browser; nothing in game changes"
+    },
+    {
+      "class": "when_to_press",
+      "key": "SPortal",
+      "text": "when you want the web leaderboard"
+    },
+    {
+      "class": "reason",
+      "key": "SPrefSC",
+      "text": "applies only when everyone in the room agrees"
+    },
+    {
+      "class": "reason",
+      "key": "SShad",
+      "text": "off keeps lighting and drops the beams"
+    },
+    {
+      "class": "reason",
+      "key": "SShake",
+      "text": "Reduced keeps the hit feedback without the camera motion"
+    },
+    {
+      "class": "reason",
+      "key": "SShowDc",
+      "text": "opt-in, and it needs a linked Discord to do anything"
+    },
+    {
+      "class": "reason",
+      "key": "STrail",
+      "text": "cosmetic only"
+    },
+    {
+      "class": "option_word",
+      "key": "SBloom",
+      "text": "FULL"
+    },
+    {
+      "class": "option_word",
+      "key": "SBloom",
+      "text": "REDUCED"
+    },
+    {
+      "class": "state_word",
+      "key": "SCT",
+      "text": "Granted"
+    },
+    {
+      "class": "state_word",
+      "key": "SCT",
+      "text": "Not granted"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "ROUNDS default"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Arrow"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Dot"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Crosshair"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Circle"
+    },
+    {
+      "class": "state_word",
+      "key": "SDBtn",
+      "text": "Armed"
+    },
+    {
+      "class": "state_word",
+      "key": "SDBtn",
+      "text": "Not armed"
+    },
+    {
+      "class": "state_word",
+      "key": "SMailBlocked",
+      "text": "Expanded"
+    },
+    {
+      "class": "state_word",
+      "key": "SMailBlocked",
+      "text": "Collapsed"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "a picture choice has no right answer"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row to apply the detected id"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "consent is the player's own decision, never bulk-written"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "sending your logs automatically is your own decision, never bulk-written"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "there is no region detection to reset TO, and a deliberate regional choice should not revert to the shipped US default"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this row only opens and closes a list; it stores no value"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this row performs an action and stores no value, so there is nothing for a reset to write"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this row stores no value, and nothing bulk may ever arm or confirm a deletion"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Currently: {0}"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Recommended: {0}"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "When to press this: {0}"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Reset this tab to recommended"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Reset this tab to recommended?"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Read more"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Skipped: server settings"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Detected: {0}"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "ingame",
+      "text": "In game"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "chatmail",
+      "text": "Chat & mail"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "sound",
+      "text": "Sound"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "visuals",
+      "text": "Visuals"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "perf",
+      "text": "Performance"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "langmenus",
+      "text": "Language & menus"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "privacy",
+      "text": "Privacy & account"
+    }
+  ],
+  "total": 110
+}

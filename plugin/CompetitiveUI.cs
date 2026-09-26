@@ -331,6 +331,20 @@ namespace CompetitiveRounds
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
+        /// <summary>Item 13: the raw-keystroke gate, named ONCE. It is what
+        /// ClickHandler.ModalBlockInput is written from, and it is the first
+        /// thing the settings page's keyboard poll reads, live, so a modal
+        /// that opens this frame already owns the keys (ModalBlockInput is
+        /// written from OnGUI and is one frame stale in Update).</summary>
+        internal static bool KeyboardInputOwnedByModal => AnyModalOwnsInput || quickChatOpen || danceWheelOpen;
+
+        /// <summary>Item 13: the T-chat box is a typing surface but not a
+        /// modal (it can be open over the F5 page, and it must not block
+        /// clicks), so it is not in the gate above; the settings keyboard poll
+        /// reads this beside it so a space typed into chat never presses a
+        /// settings row.</summary>
+        internal static bool ChatTypingOwnsKeyboard => chatInputOpen;
+
         // Item 12 r2: the IMGUI surfaces that sit ABOVE every uGUI popup and own
         // their own clicks. The backdrop-less modals are topmost by definition
         // (the same fact ClickHandler.BypassSuspended states below), and the
@@ -486,7 +500,7 @@ namespace CompetitiveRounds
             // consent) — a backdrop stops EventSystem clicks but not a
             // ClickHandler polling Input.GetMouseButtonDown itself (#141/#200).
             // Adding them to anyModal instead would double-blocker them.
-            ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen || danceWheelOpen;
+            ClickHandler.ModalBlockInput = KeyboardInputOwnedByModal;
             // Sept 7 item 1 (contract 7 / 1-1a): a backdropless modal is topmost
             // by definition, so while one is up every popup's bypass handlers
             // are inert as well. Single writer, beside ModalBlockInput's.
@@ -4257,12 +4271,28 @@ namespace CompetitiveRounds
                 case ChatOverlayMode.Pinned: next = ChatOverlayMode.Muted;  break;
                 default:                     next = ChatOverlayMode.Normal; break;
             }
+            SetChatOverlayMode(next);
+        }
+
+        /// <summary>Item 13: the value-taking writer behind the M hotkey's
+        /// cycle, the settings page's segmented row and its per-tab reset.
+        /// Persists both entries, republishes the room marker IN THIS CALL
+        /// STACK (the 2 s reconciler in Tick is a safety net, never the
+        /// publisher), repaints, and announces the state entered. The state
+        /// already stored returns before anything is written, published or
+        /// announced (the M cycle never asks for it; a segmented click on the
+        /// lit option and a reset of a tab already at Normal do). A value
+        /// outside the three members is refused, and so is a pair with either
+        /// entry unbound: a half-written pair paints a state nobody chose.</summary>
+        internal static void SetChatOverlayMode(ChatOverlayMode next)
+        {
+            if (next != ChatOverlayMode.Normal && next != ChatOverlayMode.Pinned && next != ChatOverlayMode.Muted) return;
+            if (Plugin.ShowIngameChat == null || Plugin.ChatOverlayPinned == null) return;
+            if (next == CurrentChatOverlayMode()) return;
             try
             {
-                if (Plugin.ShowIngameChat != null)
-                    Plugin.ShowIngameChat.Value = next != ChatOverlayMode.Muted;
-                if (Plugin.ChatOverlayPinned != null)
-                    Plugin.ChatOverlayPinned.Value = next == ChatOverlayMode.Pinned;
+                Plugin.ShowIngameChat.Value = next != ChatOverlayMode.Muted;
+                Plugin.ChatOverlayPinned.Value = next == ChatOverlayMode.Pinned;
             }
             catch { }
             try { PublishChatMuteState(); } catch { }
@@ -4584,6 +4614,9 @@ namespace CompetitiveRounds
         /// is nulled with the flag, so a cancelled prompt cannot fire later.</summary>
         public static void CancelPrompts()
         {
+            // Item 13: the artist picker (the settings page's dropdowns) is a
+            // prompt of this set too, and its callback is nulled with its flag.
+            artistPickerOpen = false; artistPickerOnPick = null;
             confirmOpen = false; confirmOnYes = null;
             playerSearchOpen = false; playerSearchOnPick = null;
         }
@@ -4592,6 +4625,11 @@ namespace CompetitiveRounds
         /// Runs in Update, before the IMGUI draw would see the same press.</summary>
         public static bool ConsumePromptEscape()
         {
+            // Item 13: FIRST, because the picker is backdrop-less IMGUI and so
+            // topmost by definition. Tick runs before OnGUI, so the picker's
+            // own Escape branch never sees a press consumed here; without this
+            // clause the page closed under an open dropdown.
+            if (artistPickerOpen) { artistPickerOpen = false; artistPickerOnPick = null; return true; }
             if (confirmOpen) { confirmOpen = false; confirmOnYes = null; return true; }
             if (playerSearchOpen) { playerSearchOpen = false; playerSearchOnPick = null; return true; }
             return false;
@@ -4659,6 +4697,7 @@ namespace CompetitiveRounds
         private static Action<string> artistPickerOnPick = null;
         private static string artistPickerAction = "Assign";
         private static bool artistPickerShowClear = true;
+        private static bool artistPickerShowIds = true;
         private static Vector2 artistPickerScroll = Vector2.zero;
         private static GUIStyle pickerRowStyle;
 
@@ -4668,9 +4707,13 @@ namespace CompetitiveRounds
         /// <param name="selectedId">Pre-selects the current value, so pressing
         /// the action button without clicking a row keeps what you already had
         /// instead of silently choosing the first row.</param>
+        /// <param name="showIds">Item 13: false hides the grey id beside each
+        /// row (the settings page's dropdowns, whose ids are storage values such
+        /// as MDY, not something a player picks by).</param>
         public static void OpenArtistPicker(string title, string[] names, string[] ids, Action<string> onPick,
                                             string actionLabel = "Assign", bool showClear = true,
-                                            string itemNoun = "artist", string selectedId = null)
+                                            string itemNoun = "artist", string selectedId = null,
+                                            bool showIds = true)
         {
             if (names == null || ids == null || names.Length == 0 || names.Length != ids.Length) return;
             artistPickerTitle = title ?? "Pick an artist";
@@ -4684,6 +4727,7 @@ namespace CompetitiveRounds
             artistPickerOnPick = onPick;
             artistPickerAction = string.IsNullOrEmpty(actionLabel) ? "Assign" : actionLabel;
             artistPickerShowClear = showClear;
+            artistPickerShowIds = showIds;
             artistPickerScroll = Vector2.zero;
             artistPickerOpen = true;
         }
@@ -4721,7 +4765,9 @@ namespace CompetitiveRounds
                 if (sel)
                     GUI.DrawTexture(new Rect(0, i * rowH, w - 45, rowH - 2), Texture2D.whiteTexture,
                         ScaleMode.StretchToFill, true, 0, new Color(0.25f, 0.45f, 0.25f, 0.85f), 0, 0);
-                string line = $"{(sel ? "> " : "")}{artistPickerNames[i]}   <color=#888><size=11>{artistPickerIds[i]}</size></color>";
+                string line = artistPickerShowIds
+                    ? $"{(sel ? "> " : "")}{artistPickerNames[i]}   <color=#888><size=11>{artistPickerIds[i]}</size></color>"
+                    : $"{(sel ? "> " : "")}{artistPickerNames[i]}";
                 if (GUI.Button(new Rect(0, i * rowH, w - 45, rowH - 2), line, pickerRowStyle))
                     artistPickerIdx = i;
             }

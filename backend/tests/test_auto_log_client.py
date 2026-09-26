@@ -42,6 +42,7 @@ AUTO_LOG = PLUGIN / "AutoLogUpload.cs"
 API_CLIENT = PLUGIN / "ApiClient.cs"
 COMPETITIVE_UI = PLUGIN / "CompetitiveUI.cs"
 NATIVE_UI = PLUGIN / "NativeUI.cs"
+NATIVE_UI_SETTINGS = PLUGIN / "NativeUI.Settings.cs"
 LOG_SCRUB = PLUGIN / "LogScrub.cs"
 CATALOGUES = PLUGIN / "I18nCatalogues.cs"
 
@@ -161,8 +162,10 @@ def test_the_log_tail_skips_a_partial_utf8_sequence():
 # ── the consent names what the POST carries ──────────────────────────────
 
 def _settings_toggle_call(name: str):
-    """(source-with-literals, masked) slices of the `SettingsToggle` call whose
-    element name is `name`.
+    """(source-with-literals, masked) slices of the settings row constructor
+    call whose element name is `name` -- since item 13 (the settings page
+    reorganisation) a `SettingsSwitch` on the Privacy & account sub-tab, whose
+    description argument is the caption.
 
     Two views of the SAME offsets: literals survive the first (that is how the
     element name is found and the caption read back), and are blanked in the
@@ -172,9 +175,9 @@ def _settings_toggle_call(name: str):
     src = NATIVE_UI.read_text(encoding="utf-8")
     with_literals = strip_comments_only(src)
     masked = mask_code(src)
-    anchor = with_literals.find('SettingsToggle(consentBox.transform, "%s"' % name)
+    anchor = with_literals.find('SettingsSwitch(subPrivacy.transform, "%s"' % name)
     if anchor == -1:
-        raise CsParseError("no SettingsToggle call for %r" % name)
+        raise CsParseError("no SettingsSwitch call for %r" % name)
     depth, i = 0, masked.index("(", anchor)
     while i < len(masked):
         if masked[i] == "(":
@@ -185,7 +188,7 @@ def _settings_toggle_call(name: str):
                 break
         i += 1
     else:
-        raise CsParseError("unterminated SettingsToggle call for %r" % name)
+        raise CsParseError("unterminated SettingsSwitch call for %r" % name)
     return with_literals[anchor:i], masked[anchor:i]
 
 
@@ -452,15 +455,22 @@ def test_the_bare_name_pass_does_not_eat_identifiers():
 
 def test_the_caption_is_allowed_to_wrap():
     """A fixed-height label with TMP's Truncate default drops everything past
-    the first line. Control: delete `descWrap: true` from the call -> red."""
-    _, call = _settings_toggle_call("SAutoLog")
-    assert "descWrap: true" in call, "the consent caption is still clipped at one line"
+    the first line. Since item 13 the caption is not a label on the row at
+    all: it is the row's description, which the settings pane shows as the
+    help body (SettingsBodyFor -> SetDetBody), a word-wrapped, auto-height
+    text inside a scroll view. Control: delete the body's SetWordWrap call ->
+    red."""
+    call, _ = _settings_toggle_call("SAutoLog")
+    assert call.startswith('SettingsSwitch(subPrivacy.transform, "SAutoLog", I18n.Tr("'), (
+        "the caption is no longer the row's description argument: " + call[:120])
 
-    # ...and the option does what its name says.
-    toggle = mask_code(cs_block(NATIVE_UI, "SettingsToggle(Transform parent, string name, Vector2 size,"))
-    for needle in ("if (descWrap)", "SetWordWrap(d, true)", "SetTextAutoHeight(d, descH)",
-                   "SetOverflowMode(d, 0)"):
-        assert needle in toggle, "SettingsToggle's descWrap does not %r" % needle
+    chrome = mask_code(cs_block(NATIVE_UI_SETTINGS,
+                                "private static Transform BuildSettingsChrome(GameObject outer)"))
+    for needle in ("SetWordWrap(setDetBodyTxt, true)", "SetOverflowMode(setDetBodyTxt, 0)",
+                   "SetTextAutoHeight(setDetBodyTxt, 0f)"):
+        assert needle in chrome, "the settings pane's help body does not %r" % needle
+    body = code_of(NATIVE_UI_SETTINGS, "private static string SettingsBodyFor(SettingsRowRec rec)")
+    assert "rec.Desc" in body, "the help body no longer carries the row's description"
 
 
 # ── the caption ships in every locale ────────────────────────────────────

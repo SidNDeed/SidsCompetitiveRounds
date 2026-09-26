@@ -560,6 +560,9 @@
   "Apple Stem",
   "Approved Update Queue...",
   "Are you good at this game?",
+  "Armed",
+  "Arms the deletion. This press deletes nothing: the row swaps to a confirm button and a cancel button, and only the confirm performs it.",
+  "Arrow",
   "Artist",
   "Artist Studio",
   "Ascendant",
@@ -763,6 +766,7 @@
   "Charcoal walls rimmed with corona amber on a true black sky.",
   "Charred timber — warm dark brown verging on black.",
   "Chat  <color=#888>(press T to chat)</color>",
+  "Chat & mail",
   "Chat Lockdown...",
   "Chat Mutes...",
   "Chat [{0}]  —  Enter to send, Esc keeps your draft, Alt switches channel",
@@ -782,10 +786,12 @@
   "Chat overlay: PINNED - messages stay on screen",
   "Choose a metric",
   "Choose cards (left) to compare {0}.",
+  "Chooses who may start a new mail thread with you: everyone, only players you have played, or nobody. Threads you already have are unaffected, and blocked senders never reach you.",
   "Chromatic aberration: <color=#88FF88>ON</color>",
   "Chromatic aberration: <color=#FF9966>OFF</color>",
   "Chromatic aberration: the RGB color-fringing that pulses on shots/hits/deaths. Off = crisp edges, tiny FPS gain. Visual only, local only.",
   "Chrome",
+  "Circle",
   "Claim today's free pack",
   "Claimed - the next one unlocks in {0}",
   "Claimed for today",
@@ -809,6 +815,7 @@
   "Clutch",
   "Cobalt",
   "Cold violet and cyan motes swirl in a dark halo.",
+  "Collapsed",
   "Collection",
   "Collector",
   "Colorize your name in cyan.",
@@ -899,6 +906,7 @@
   "Create Private...",
   "Crimson",
   "Crimson Streak",
+  "Crosshair",
   "Crown",
   "Cub",
   "Current Game: {0}",
@@ -906,6 +914,7 @@
   "Current Series: {0}",
   "Current tier",
   "Current tier: {0} - {1}",
+  "Currently: {0}",
   "Cursor",
   "Cursor: <color=#88CCFF>{0}</color>",
   "Curved crimson horns for your inner demon.",
@@ -979,6 +988,7 @@
   "Detail: heavy is the head. Equip in the Character editor.",
   "Details",
   "Details (optional)",
+  "Detected: {0}",
   "Devil Horns",
   "Diagram of Spirit's research, 'On Damage Types and Buff Activation'.",
   "Different players who have picked this card",
@@ -1001,6 +1011,7 @@
   "Dog",
   "Dog God",
   "Done.",
+  "Dot",
   "Double KO - nobody scored this round.",
   "Double Nova",
   "Downloading full album...",
@@ -1085,6 +1096,9 @@
   "Everyone starts at 1500. Higher tiers multiply series gold; each band splits into sub-tiers V to I.",
   "Everyone starts somewhere.",
   "Everything you leave behind turns gold.",
+  "Expanded",
+  "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once.",
+  "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.",
   "Expert",
   "Export Tier List",
   "Export already in progress...",
@@ -1128,6 +1142,7 @@
   "FPS",
   "FPS counter: <color=#88FF88>ON</color>",
   "FPS counter: <color=#FF9966>OFF</color>",
+  "FULL",
   "Faced by",
   "Fade Gradient",
   "Failed",
@@ -1250,6 +1265,7 @@
   "Grant Translator...",
   "Grant a translation role - find the player",
   "Grant data consent first (Settings)",
+  "Granted",
   "Graphs {0}/{1}",
   "Great White",
   "Green Cursor",
@@ -1336,6 +1352,7 @@
   "Immortal",
   "Immovable Object",
   "In a game — no results yet",
+  "In game",
   "In use",
   "In-combat particle aura around your character. Only visible to modded players.",
   "In-game chat overlay: <color=#88CCFF>PINNED</color>",
@@ -1351,7 +1368,6 @@
   "Input overlay: <color=#FF9966>OFF</color>",
   "Inside the 0.35 s window?",
   "Instinct",
-  "Interface",
   "Intermediate",
   "Into the Deep End",
   "Iron",
@@ -1403,6 +1419,7 @@
   "Lag notices: <color=#88FF88>ON</color>",
   "Lag notices: <color=#FF9966>OFF</color>",
   "Lagoon",
+  "Language & menus",
   "Language / Idioma / Язык / Мова / Språk",
   "Language: <color=#88CCFF>{0}</color>",
   "Last game for me",
@@ -1423,6 +1440,7 @@
   "Leave your 2v2 lobby first.",
   "Leave your current game first.",
   "Leave your custom 1v2 lobby first.",
+  "Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued.",
   "Leaving queue...",
   "Left 1v1 queue - you joined a game",
   "Left all queues",
@@ -1483,6 +1501,7 @@
   "Lumberjack",
   "Lv {0}",
   "M - cycle the chat overlay mode",
+  "M cycles the same state in game; Muted also tells the room you cannot read chat",
   "MATCH FOUND!",
   "MATCH FOUND!  vs {0} ({1:F0})",
   "MATCH POINT - {0} are half a point from the win!",
@@ -1658,11 +1677,13 @@
   "Noobie",
   "Northern Lights",
   "Not allowed.",
+  "Not armed",
   "Not enough gold",
   "Not enough gold for a pack",
   "Not enough players to continue the FFA - returning to menu.",
   "Not enough shards for a pack",
   "Not found - it may have been deleted.",
+  "Not granted",
   "Not great. Not terrible.",
   "Not in queue.",
   "Not on sale yet",
@@ -1712,6 +1733,7 @@
   "Opening draws:",
   "Opening the upload folder - drop a 512x512 transparent PNG (or a GIF) in there.",
   "Opening your pack...",
+  "Opens the in-game library: how a pick lands, what each ranked state means, the leave rules, and the card and damage notes players have contributed.",
   "Opp:",
   "Opponent Block Rate",
   "Opponent Blocks",
@@ -1783,6 +1805,7 @@
   "Per-letter warm grey → ember red gradient. Cooling coals.",
   "Per-letter white → dark charcoal gradient. Fades out as it goes.",
   "Perfect balance. One light, one dark.",
+  "Performance",
   "Performance master switch — flips ALL the patches below at once.",
   "Phoenix",
   "Phoenix Flame",
@@ -1855,6 +1878,7 @@
   "Prismatic",
   "Prismatic Wake",
   "Pristine Perfection",
+  "Privacy & account",
   "Private 1v2 lobby",
   "Private 2v2 lobby",
   "Private FFA lobby",
@@ -1869,6 +1893,7 @@
   "Purple Cursor",
   "Purple Name",
   "Purple-black shadow trail. Feels wrong in the best way.",
+  "Puts the delete row back to its normal state. Nothing has been deleted at this point, so cancelling costs nothing and the row can be armed again.",
   "Putting on {0}...",
   "Q (hold) - quick-chat wheel, release to send",
   "QF A",
@@ -1897,6 +1922,7 @@
   "RD: {0:F0}    Peak: {1:F0}",
   "RECORD",
   "RECORD\u0004pc.stat.record",
+  "REDUCED",
   "REFRESHVALID IN PLAY: SILENCE SEQUENCES",
   "REVIEW",
   "RLFP Ping",
@@ -1905,6 +1931,7 @@
   "RLFP ping failed: {0}",
   "RMB",
   "ROUNDS OST",
+  "ROUNDS default",
   "ROUNDS ships with real bugs - some cosmetic, some that decide rounds. The catalogue: symptom, real cause, and whether the mod repairs it. Repair details: (see <color=#7FD4FF>Bug fixes the mod ships</color>).\n\n<color=#FFD94D><b>INPUT AND LOBBY BUGS</b></color>\n\n<color=#7FD4FF>Escape key permanently dead, or inputs frozen as a match is found</color> - the game toggles input across all players with no null checks; one half-spawned player crashes the loop. <color=#7FE87F>Fixed by the mod, always on.</color>\n\n<color=#7FD4FF>'No space to ready up' - you cannot spawn into a lobby</color> - the game tries to spawn your character before you are actually in a room, crashes, and never recovers. <color=#7FE87F>Fixed by the mod, always on</color>; 30 seconds stuck returns you to the menu.\n\n<color=#7FD4FF>Typing confirms a card pick, Enter opens the room-code box, Space readies you up mid-sentence</color> - three places read the raw keyboard without checking for an open text box. <color=#7FE87F>Fixed for the mod's own chat</color>; the vanilla chat box keeps its quirks.\n\n<color=#FFD94D><b>COMBAT BUGS</b></color>\n\n<color=#7FD4FF>After a rematch, your block goes on cooldown but absorbs nothing - or Shield Charge stops firing while basic block works</color> - the between-games teardown can destroy card objects half-way, stranding dead hooks on your block. <color=#7FE87F>Fixed by the mod everywhere</color> (see <color=#7FD4FF>Blocking</color>).\n\n<color=#7FD4FF>Poison health bars disagree between screens, and blocking poison is a coin flip</color> - every machine ticks its own copy of the poison against its own copy of your shield; health is never re-synced. <color=#7FE87F>Replaced by the mod's victim-authoritative poison</color> when the victim runs the mod (see <color=#7FD4FF>Poison & damage over time</color>).\n\n<color=#7FD4FF>A poison tick kills someone during the round-won animation, awarding a phantom round</color> - damage-over-time keeps landing after the round is decided. <color=#7FE87F>Fixed on every modded client, in any room</color> - full protection just needs the room's (usually modded) host seat patched too.\n\n<color=#7FD4FF>A leftover bullet from the previous point hits you just after everyone respawns</color> - nothing in vanilla despawns mid-air bullets at the point boundary. <color=#7FE87F>Fixed: modded clients clear their own leftover bullets.</color>\n\n<color=#7FD4FF>Shots visibly connect but do no damage on your screen, or a point-blank drill bullet turns invisible</color> - the bullet's special components can register in the wrong order on the receiving machine. <color=#7FE87F>Fixed by the mod in any room.</color>\n\n<color=#7FD4FF>Grow one-shots you out of nowhere</color> - broken math more than a bug: Grow's damage compounds per frame on the shooter's machine, so low frame rates and hitches multiply it massively. <color=#7FE87F>Normalized by the mod in competitive play</color> (see <color=#7FD4FF>Grow</color>).\n\n<color=#7FD4FF>After one game with Demonic Pact, hold-to-fire guns like Spray stop auto-firing all session</color> - the no-auto-fire flag is copied one way and never reset between games. <color=#7FE87F>Fixed by the mod in any game.</color>\n\n<color=#7FD4FF>Radiance visibly sweeps through a crowd and hits one person</color> - the wave only ever checks the single closest target and stops after one hit. <color=#FF6666>Fixed in FFA only</color> - there it hits everyone it sweeps; other modes keep vanilla.\n\n<color=#7FD4FF>Chase's card text lists a Health bonus</color> - dead data the game never applies; the card has never granted it. <color=#7FE87F>The mod fixes the label.</color>\n\n<color=#7FD4FF>Being offered a card you already own</color> - not a bug; the second copy levels up the first.\n\n<color=#FFD94D><b>MODE AND VISUAL BUGS</b></color>\n\n<color=#7FD4FF>In 2v2 or 1v2, a card picker stands on an empty stage, or the wrong body is shown picking</color> - vanilla only ever presents one picker per round, using a team number as a player number. <color=#7FE87F>Fixed in 2v2 and 1v2 mod rooms.</color>\n\n<color=#7FD4FF>Phoenix revives someone into thin air - invisible, unhittable, stuck</color> - the revive finds the player by list position, wrong once the list has changed (an FFA leaver), and the death flag is never set. <color=#7FE87F>Fixed by the mod everywhere.</color>\n\n<color=#7FD4FF>Another player's name shows as the literal placeholder PlayerName</color> - a failed Steam name lookup is never retried. <color=#7FE87F>Fixed: the mod retries the lookup (up to 15 tries over half a minute) and repaints the name when it lands.</color>\n\n<color=#7FD4FF>A saw's spinning loop plays forever, or audio goes muffled for the session</color> - looping sounds outlive their owner and starve the sound engine of voices. <color=#7FE87F>Fixed: leaked loops are swept after every round.</color>\n\n<color=#7FD4FF>Harmless error spam in the log during map transitions</color> - the map-move animation holds references to pieces replaced mid-move. <color=#8A8A93>Not fixed - benign noise. (Anything that must touch the map mid-move, like the mod's own map skins, defers around that window instead.)</color>\n\n<color=#FFD94D><b>WHERE THE FIXES RUN</b></color>\n\nCrash guards and dead-state repairs run everywhere - they repair states vanilla never intended, without changing any rule. Rule changes are gated: mode logic needs its own mod-issued room, Grow normalization needs every fighter modded and consenting, and poison authority follows the poisoned player - an unmodded victim keeps vanilla poison. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> - and the only things they can ever see of the mod are nametag styling and quick-chat phrases you deliberately send through the game's own chat (see <color=#7FD4FF>Vanilla stays vanilla</color>).",
   "Rabbit",
   "Rabbit God",
@@ -1966,6 +1993,7 @@
   "Reach 1700 rating in ranked (1v1 or 2v2)",
   "Reach 1980 rating in ranked (1v1 or 2v2)",
   "Reach 2330 rating in ranked (1v1 or 2v2)",
+  "Read more",
   "Reading a card",
   "Ready Up",
   "Ready-up failed — retrying search",
@@ -1975,6 +2003,7 @@
   "Recent Async Tournaments",
   "Recent Ranked Series",
   "Recent Sync Tournaments",
+  "Recommended: {0}",
   "Reconnect suppressed (broadcast identity)",
   "Reconnect to Match",
   "Record removal failed: {0}",
@@ -1983,6 +2012,7 @@
   "Red Cursor",
   "Red Name",
   "Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.",
+  "Reduced keeps the hit feedback without the camera motion",
   "Refresh",
   "Refresh?",
   "Refreshing too fast - give it a sec",
@@ -2017,6 +2047,8 @@
   "Request failed - try again.",
   "Requeue",
   "Reset the window",
+  "Reset this tab to recommended",
+  "Reset this tab to recommended?",
   "Restore the vanilla random map color rotation.",
   "Resuming series at {0}-{1}",
   "Retry",
@@ -2028,7 +2060,6 @@
   "Revoke",
   "Revoke Artist...",
   "Revoke Translator...",
-  "Revoke consent",
   "Revoke which alert?",
   "Revoke which translation role?",
   "Rich forest-green body color.",
@@ -2204,6 +2235,7 @@
   "Sinister Smile",
   "Size",
   "Skip MenuControllerHandler.Update during an active match.",
+  "Skipped: server settings",
   "Sky",
   "Sky Lord",
   "Slate",
@@ -2236,6 +2268,7 @@
   "Solo {0}W/{1}L",
   "Sorry!",
   "Sort:",
+  "Sound",
   "Sovereign",
   "Soviet",
   "Spam",
@@ -2575,7 +2608,7 @@
   "Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on this page comes straight from the game's code.\n\n<color=#FFD94D><b>THE SHIELD EDGE BOUNCE</b></color>\n\nThe arena has a hard kill boundary just off-screen. While you are past it, the game checks you every 0.1 seconds:\n\n- <color=#FF6666>Not blocking:</color> you take a 51-damage lethal hit and an impulse back toward the arena. At 100 HP, two unshielded edge hits kill you.\n- <color=#7FE87F>Blocking:</color> no damage at all, and the return impulse is twice as strong. Your old velocity is zeroed first, so the bounce is clean and predictable no matter how fast you were flying out.\n\nThe block window is 0.3 seconds and the edge check ticks every 0.1 seconds, so the press can slightly TRAIL your exit and still count. Getting launched off-screen is survivable on demand: block as you cross the edge and you come back harder, for free. In a knockback war this is the difference between a lost point and a return volley.\n\n<color=#FFD94D><b>WALL JUMPS AND JUMP REFRESH</b></color>\n\n- Touching a wall in the air while holding movement INTO it counts as a wall grab. Unless you jumped within the last 0.15 seconds, <color=#7FE87F>a wall touch refreshes ALL of your jumps</color>.\n- Pressing jump within 0.1 seconds of a wall touch performs a wall jump: up and away from the wall instead of straight up.\n- Ground jumps add extra horizontal push proportional to how fast you were already moving sideways; wall jumps skip that bonus.\n- Holding jump keeps adding upward force for a short moment after takeoff - tap for a short hop, hold for full height.\n- While hanging close to a wall, your time-in-air counts more slowly for game systems that care about air time.\n\n<color=#FFD94D><b>THE FLYING BOUNCE</b></color>\n\nA hit big enough to set you 'flying' changes how walls treat you: while flying, hitting map geometry reflects your velocity off the surface, stuns you for 0.2 seconds, and deals a 5-damage self-hit. The reflected launch comes out after a quarter-second hold.\n\nThat self-hit is an ordinary blockable hit: <color=#7FE87F>blocking at the moment of wall impact negates the 5 damage</color>.\n\n<color=#FFD94D><b>MYTHS THE CODE SAYS NO TO</b></color>\n\n- <color=#8A8A93>Wall sliding is real, but not where you'd think: pressing into a wall damps your speed a little and keeps resetting the gravity ramp, so you do fall slower - while the stat actually named 'wall grab drag' does nothing at all.</color>\n- <color=#8A8A93>Cards that advertise a self-push on block do nothing on a normal block press - the game's own block window suppresses the push before it can apply. Do not draft them for movement.</color>\n\n<color=#FFD94D><b>SHIELD CHARGE IS THE REAL BLOCK MOVEMENT</b></color>\n\nShield Charge launches you along your AIM direction on any block press, and the launch works during your own block window. Hitting a player cancels the launch, damages and knocks them back, and grants a bonus block. It also combos with the wall rules above: charge into a wall, get your jumps refreshed, wall-jump out.",
   "View channel",
   "Viewing: {0}  <color=#888>(press T to chat)</color>",
-  "Visuals & Effects",
+  "Visuals",
   "Vivid orange neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
   "Void",
   "Void Ripple",
@@ -2607,6 +2640,7 @@
   "What other players can and cannot see of your mod. The short version is a guarantee: <color=#7FE87F>the only things a non-modded opponent can ever see of the mod are your nametag styling and the quick-chat phrases you choose to send.</color> Quick chat is chat, not a cosmetic - it goes out through the game's own chat bubble, exactly like a typed message. Everything else either needs the mod on the viewer's side or never leaves your machine.\n\n<color=#FFD94D><b>WHAT A NON-MODDED OPPONENT SEES</b></color>\n\n<color=#7FD4FF>Nametag styling - visible, with two exceptions below.</color> Formatting (bold, italic, underline, strikethrough, float), solid and neon colors, sizes, caps and spacing transforms, rainbow and the gradients all render on a completely unmodded client. The mechanism: the mod writes the style into your Photon nickname as rich text, and vanilla's own name labels already render rich text - players were putting raw style tags in their Steam names long before this mod existed. That's why this one class is allowed to cross.\n\nTwo nametag styles are the exception and render mod-side only:\n\n- <color=#7FD4FF>Glows</color> - applied locally on modded screens. A vanilla opponent sees your name without the glow (any other styling you stacked still shows), and no leftover artifact.\n- <color=#7FD4FF>Typefaces</color> - a local font swap. A vanilla opponent sees your name in the default font.\n\nEverything else shows a non-modded player nothing:\n\n- <color=#7FD4FF>Face cosmetics</color> - the item ID travels over vanilla's own face channel, but a vanilla client doesn't know the ID and renders an EMPTY slot instead. No crash, no fallback item - that slot is bare on their screen, and any vanilla face parts you wear still show normally.\n- <color=#7FD4FF>Trails</color> - nothing.\n- <color=#7FD4FF>Body colors</color> - they see the default team orange/blue.\n- <color=#7FD4FF>Auras</color> - nothing.\n- <color=#7FD4FF>Titles, chat styling, Hide Gold</color> - these only exist on mod surfaces (the F5 overlay, T-chat, Discord). Vanilla has no place to show them.\n\n<color=#FFD94D><b>WHAT A MODDED OPPONENT SEES</b></color>\n\nThe whole catalog: your face cosmetics render fully (the art ships inside the mod), plus your trail, body color, aura, nametag glow and typeface, and your title on the boards and in chat.\n\nThree caveats:\n\n- Modded viewers can individually opt out of trails, body colors, and animated cosmetics in Settings - your cosmetic renders only for viewers who left those on.\n- A body color also becomes your team identity on modded screens: point announcements, the round-counter dots, and the FFA score strip use it. A viewer with that setting off sees plain vanilla teams.\n- Titles never appear over your head in-match, for anyone. They render on the F5 boards, in T-chat, and on Discord only.\n\n<color=#FFD94D><b>WHAT NEVER LEAVES YOUR MACHINE</b></color>\n\n- <color=#7FD4FF>Map skins</color> - never networked at all. Nobody sees your map skin, modded or not: every player sees their own equipped skin, or vanilla. Equipping one changes exactly one screen - yours.\n- <color=#7FD4FF>Cursor color and shape</color> - your own cursor, on your own screen.\n\n<color=#7FE87F>Your cosmetics never produce a broken visual, an empty rectangle, or a crash on a non-modded screen.</color> <color=#8A8A93>One early glow implementation did leak a visible rectangle to vanilla clients - it was removed for exactly that reason, and glows have rendered mod-side only ever since.</color>",
   "What unmodded players see",
   "When a game counts",
+  "When to press this: {0}",
   "Where their gold came from",
   "Which channel for {0}?",
   "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.",
@@ -2670,6 +2704,7 @@
   "Wise beyond your years.",
   "Wisps of grey smoke drift off your body.",
   "Wisps of living shadow crown your head. ANIMATED.",
+  "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox.",
   "Won",
   "World Turtle",
   "Worn by those who climbed the mountain.",
@@ -2728,7 +2763,9 @@
   "Your view starts at the next round - that is the first moment the score, cards and health can be shown correctly.",
   "Your {0} lobby closed.",
   "Your {0} lobby seat expired — join or create a new one.",
+  "a debugging overlay, not a HUD",
   "a person makes the call",
+  "a picture choice has no right answer",
   "a pot scaled by lobby size, battles and opponent tier, split by placement",
   "a year ago",
   "absorbs everything",
@@ -2736,12 +2773,16 @@
   "also locks when any game is decided",
   "always earns x1.5 pay",
   "an empty slot - no crash, no fallback",
+  "applies only when everyone in the room agrees",
+  "applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row to apply the detected id",
   "art submitted in-game",
   "artist sets price + stock",
   "as DUO (w/ {0}) vs {1}",
   "as SOLO vs {0} + {1}",
   "assigned by the server",
   "base game",
+  "before asking in Discord",
+  "blocked senders never reach you anyway",
   "blocking: 0 damage + 2x return impulse",
   "both",
   "both Ranked",
@@ -2751,6 +2792,7 @@
   "bundled into the mod",
   "by hit %, block %, ranked DPS, keys/sec and build-type mix",
   "can't be altered in transit",
+  "cancelling costs nothing and re-arms cleanly",
   "card cap {0}",
   "casual",
   "casual FFA and 1v2 = recorded, not rated",
@@ -2763,6 +2805,8 @@
   "common",
   "competitive clock: 120 FPS",
   "confirmed - admin tools: ban, reversal",
+  "consent is the player's own decision, never bulk-written",
+  "cosmetic only",
   "cursor color",
   "custom 2v2 lobby",
   "date ->",
@@ -2774,6 +2818,7 @@
   "dmg/s",
   "does not trigger",
   "draft restored",
+  "drafts are machine-translated until reviewed, and English is always complete",
   "duo",
   "duo: the whole right half",
   "earn gold by playing",
@@ -2791,29 +2836,49 @@
   "finished series: result stands",
   "first team to 2 games",
   "first to {0}",
+  "follows the character you actually play",
+  "for streams and for spotting missed inputs",
   "fps",
   "free daily pack",
   "game 1 starts",
   "game in last 45 min: wait",
   "game server relay",
+  "host-only, and it despawns real bullets",
   "impossibly fast series",
   "invalidated outright, gold and XP reversed",
   "is elected reporter",
+  "it combines with an equipped cursor colour",
+  "it costs nothing while you are playing",
+  "it deletes your rating, history and collection, and there is no undo",
+  "it is the instrument you judge the rest of this tab with",
+  "it is the only place a block can be lifted",
+  "it is the only place the individual patches can be seen",
+  "it leaves every queue at once and costs nothing if you are not in one",
+  "it only hides you from Home lists; it does not hide matches",
+  "it opens a browser; nothing in game changes",
   "jump within 0.1s: up and away",
   "just now",
+  "keeps boards to players you can actually meet",
   "kill boundary",
+  "largest visible win in heavy firefights",
   "legendary",
+  "lets trades find your binder",
   "level",
+  "local display only; decimals help only when a card leaves max health on a fraction",
   "local fight simulation",
   "lost {0} of {1}",
   "macro-pace input windows",
+  "master gate; off disables all seven",
   "match data unavailable",
   "match goes live",
+  "matches always use your picks regardless",
+  "menu code cannot matter mid-match",
   "mod",
   "mod-issued",
   "mod-issued: queue / 2v2 / tournament / ranked FFA = ranked",
   "music album",
   "nametag",
+  "never active in a room or on match-found",
   "no - casual",
   "no - stop",
   "no build recorded for these games",
@@ -2836,7 +2901,12 @@
   "nothing",
   "nothing - vanilla has no surface for them",
   "now: <b>{0}</b>",
+  "off falls everyone back to orange/blue",
+  "off is crisper and slightly faster",
+  "off is flat but faster",
+  "off keeps lighting and drops the beams",
   "on the boards and in chat",
+  "once Discord is linked, mail reaches you when the game is closed and you can reply from there",
   "one +24h extension",
   "one 0.3s block window",
   "one 2v2 rating outcome",
@@ -2844,17 +2914,23 @@
   "one color at a time",
   "one font at a time",
   "one glow at a time - modded players only",
+  "one line, bottom-left, and only on custom tracks",
   "one present: absent player forfeits",
   "one size at a time",
   "one typeface at a time - modded players only",
   "online, data on, fighter",
+  "only after reading the armed warning",
   "only if it is 1-1",
+  "only rare pulls, and only in one channel",
+  "only to leave for good",
   "opp n/a",
   "opponent",
   "opponent has run",
+  "opt-in, and it needs a linked Discord to do anything",
   "optional extra opening pick",
   "otherwise: score / check-in / no-show tiebreak",
   "own bullets judge hits",
+  "painted-in glow stays whatever you pick",
   "player color",
   "player effect",
   "point + release E to dance",
@@ -2865,6 +2941,7 @@
   "private",
   "pts",
   "ranked 1v1 series vs anyone in the selection, minimum 5 series",
+  "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off",
   "ranked or casual",
   "rare",
   "rating updates ->",
@@ -2873,6 +2950,7 @@
   "recordable setting?",
   "recorded once",
   "regular (converged)",
+  "removes allocation stutter",
   "replica age est. n/a",
   "replica age est. {0} ms one-way (peer-reported input)",
   "report version {0} - some panels may be missing",
@@ -2881,6 +2959,8 @@
   "room code",
   "room type?",
   "same-card",
+  "sending your logs automatically is your own decision, never bulk-written",
+  "sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report",
   "series created",
   "series ends",
   "short-match farming pattern",
@@ -2889,18 +2969,36 @@
   "showing {0} of {1}",
   "solo: the outer-left point",
   "stackable",
+  "stops null-reference spam and changes nothing visible",
   "sudden death",
+  "swallows the one null reference a destroyed bullet raises at a screen edge",
+  "swallows the one null reference the hit sound raises when its parent is gone",
+  "tells you which region you are on",
+  "the Home chat log updates either way; this is the pop-up",
+  "the Info library answers most rules questions",
+  "the SDF face drops thin glyphs when light",
   "the base award scales with your opponent's tier; podium and sweep bonuses can add more",
   "the full art",
   "the host",
+  "the menu stays audible either way",
   "the mod?",
   "the one automatic penalty",
+  "the shipped default; 0 is a mode rather than a short timer, because chat then never appears in game",
+  "the shipped default; menus only, never match data, so switch to the order you read fastest",
   "the styled name - minus glow and typeface",
+  "there is no region detection to reset TO, and a deliberate regional choice should not revert to the shipped US default",
+  "this is the press that performs the deletion",
+  "this row only opens and closes a list; it stores no value",
+  "this row performs an action and stores no value, so there is nothing for a reset to write",
+  "this row stores no value, and nothing bulk may ever arm or confirm a deletion",
+  "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
   "title",
   "touch wall while holding into it",
   "tracks the whole game",
   "trail",
   "triggers",
+  "turn it off on a weak GPU; nothing is hidden",
+  "turning it off also removes spectators already watching",
   "two players, one side",
   "two teams of two",
   "uncommon",
@@ -2918,8 +3016,14 @@
   "waiting {0}s",
   "wall touch refreshes all jumps unless you jumped within the last 0.15s",
   "watching",
+  "when the count beside it is not 7/7",
+  "when the game thinks you are still queued",
+  "when you want the web leaderboard",
+  "when you want to unblock someone",
+  "whenever you armed it by accident",
   "window over - cooldown keeps counting from the press",
   "with exact evidence",
+  "worth it while investigating one match; it is noisy, so turn it back off afterwards",
   "yes",
   "yesterday",
   "you",
@@ -3785,7 +3889,7 @@
   },
   "<b>{0} Performance patches</b>  {1}": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPerfHeader",
    "kind": "TrF"
   },
   "<b>{0}</b>  <color=#888>(empty)</color>": {
@@ -3969,8 +4073,8 @@
    "kind": "Tr"
   },
   "<color=#777><i>hover the panel and scroll for more</i></color>": {
-   "surface": "NativeUI",
-   "location": "BuildCompareTab, BuildLeaderboardTab",
+   "surface": "NativeUI, NativeUI.Settings",
+   "location": "BuildCompareTab, BuildLeaderboardTab, BuildSettingsChrome",
    "kind": "CreateText"
   },
   "<color=#777>rounds on the left - each step is one point scored</color>": {
@@ -4400,7 +4504,7 @@
   },
   "<color=#88FF88>{0}/{1} active</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPerfHeader",
    "kind": "TrF"
   },
   "<color=#8A8A93>Research and write-up by Spirit - 'On Damage Types and Buff Activation', University of Rounds. Reproduced for this library with light reformatting; the testing, the findings and the voice are all his.</color>\n\nVia thorough testing in the sandbox game mode with an additional controller player, I have catalogued which types of damage trigger which cards and buffs. The main cards in question are Scavenger, Refresh, Brawler, and Taste of Blood. Lifesteal as a character stat bestowed by numerous cards has also been considered. My results split damage into three main categories: opponent damage, self-damage, and Conditional damage. Damage to your opponent via nearly any means will trigger all cards and buffs, with the exception of specific types of Conditional damage. For various reasons, some Conditional damage, typically from block cards, will not consistently trigger Refresh but will still trigger all other buffs. Finally, any form of self-damage will always activate Scavenger, but nothing else. There are, of course, numerous oddities and exceptions.": {
@@ -4695,7 +4799,7 @@
   },
   "<color=#FF9966>MASTER OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPerfHeader",
    "kind": "Tr"
   },
   "<color=#FF9966>PLACEMENT CHANGE REJECTED</color>": {
@@ -5556,12 +5660,12 @@
   "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, your opponent's Steam ID when the game had one, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Users folder, however the slashes are written, and this PC's own profile folder; and this PC's Windows account name where it stands on its own in a line, when it is three characters or longer. The Steam login ticket the game writes into its log is replaced by its length and a short fingerprint. Nothing else is removed - the same name inside a path we did not recognise, or in an e-mail address, stays. At most one upload every five minutes. Nothing new is sent while this is off, and turning it off cuts off an upload already in progress - though any part of it that had already reached the server stays there.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Aged metallic bronze with a warm gleam.": {
    "surface": "shop catalog",
@@ -5634,34 +5738,34 @@
    "kind": "TrF"
   },
   "Allow data reporting": {
-   "surface": "CompetitiveUI, NativeUI",
-   "location": "DrawConsentModal, RefreshSettings",
-   "kind": "SetText, Tr"
+   "surface": "CompetitiveUI",
+   "location": "DrawConsentModal",
+   "kind": "Tr"
   },
   "Allow other players to spectate your ranked games. Turning this off also removes current spectators.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Allow spectators: <color=#888>...</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAllowSpectators",
    "kind": "SetText, Tr"
   },
   "Allow spectators: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAllowSpectators",
    "kind": "SetText, Tr"
   },
   "Allow spectators: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAllowSpectators",
    "kind": "SetText, Tr"
   },
   "Allow the mod to report your match results and stats to the community server.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Alpha Cat": {
    "surface": "shop catalog",
@@ -5676,11 +5780,11 @@
   "Also DM new mail to your linked Discord. You can reply from there.": {
    "surface": "MailUI",
    "location": "BuildSettingsRow",
-   "kind": "CreateText"
+   "kind": "Tr"
   },
   "Also removes your Player Cards: your binder is emptied, and every card of you is removed from every other player's binder.": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
+   "location": "BuildSettingsPaneTexts",
    "kind": "CreateText"
   },
   "Amber": {
@@ -5710,32 +5814,32 @@
   },
   "Animated cosmetics: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAnimCos",
    "kind": "SetText"
   },
   "Animated cosmetics: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAnimCos",
    "kind": "SetText"
   },
   "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = everything freezes on a static frame.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Announce my pulls: <color=#888>...</color>": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshSettingsRows",
+   "location": "PaintAnnounce",
    "kind": "SetText"
   },
   "Announce my pulls: <color=#88FF88>ON</color>": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshSettingsRows",
+   "location": "PaintAnnounce",
    "kind": "SetText"
   },
   "Announce my pulls: <color=#FF9966>OFF</color>": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshSettingsRows",
+   "location": "PaintAnnounce",
    "kind": "SetText"
   },
   "Announcement": {
@@ -5745,7 +5849,7 @@
   },
   "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and histories aren't affected. You will no longer appear on leaderboards.\n<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches from this account will show as [Deleted User] and won't count toward stats.": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
+   "location": "BuildSettingsPaneTexts",
    "kind": "CreateText"
   },
   "Another Round": {
@@ -5770,12 +5874,12 @@
   },
   "Appear offline (Home lists): <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAppearOffline",
    "kind": "SetText"
   },
   "Appear offline (Home lists): <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAppearOffline",
    "kind": "SetText"
   },
   "Apple Stem": {
@@ -5792,6 +5896,21 @@
    "surface": "QuickChat",
    "location": "Phrases",
    "kind": "table"
+  },
+  "Armed": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsPaintDeleteState, SettingsRenderDestructivePane",
+   "kind": "Tr"
+  },
+  "Arms the deletion. This press deletes nothing: the row swaps to a confirm button and a cancel button, and only the confirm performs it.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
+   "kind": "Tr"
+  },
+  "Arrow": {
+   "surface": "NativeUI",
+   "location": "ShapeLabelTr",
+   "kind": "Tr"
   },
   "Artist": {
    "surface": "NativeUI",
@@ -6211,16 +6330,16 @@
   "Block debug overlay (corner): blocks you started vs blocks that actually absorbed a hit, plus why each one missed (too early / too slow / unblockable).": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Block debug overlay: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintBlockDebug",
    "kind": "SetText"
   },
   "Block debug overlay: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintBlockDebug",
    "kind": "SetText"
   },
   "Block rate - {0}": {
@@ -6470,7 +6589,7 @@
   },
   "Bullet-hit particle cap (2/frame)": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PerfRowLabel",
    "kind": "Tr"
   },
   "Bullets": {
@@ -6581,7 +6700,7 @@
   "Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. Off = a perfectly steady camera. Local only.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.": {
    "surface": "ApiClient",
@@ -6589,9 +6708,9 @@
    "kind": "ShowNotification"
   },
   "Cancel": {
-   "surface": "CompetitiveUI, MailUI, NativeUI",
-   "location": "BuildRankedRow, BuildSettingsTab, DrawAdminPrompt +8",
-   "kind": "CreateButton, Tr"
+   "surface": "CompetitiveUI, MailUI, NativeUI +1",
+   "location": "BuildRankedRow, BuildSettingsChrome, DrawAdminPrompt +9",
+   "kind": "CreateButton, SetText, Tr"
   },
   "Cannot spectate: {0}": {
    "surface": "ApiClient",
@@ -6606,7 +6725,7 @@
   "Caps the game at 120 FPS while the window is not focused. Saves GPU/CPU when alt-tabbed; lifts instantly when you come back.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Card": {
    "surface": "NativeUI",
@@ -6776,7 +6895,7 @@
   "Changes the menu cursor's shape. Works alongside an equipped cursor color.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.": {
    "surface": "NativeUI",
@@ -6785,7 +6904,7 @@
   },
   "Character preset": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshPictureRows",
+   "location": "PaintPreset",
    "kind": "Tr"
   },
   "Charcoal": {
@@ -6808,6 +6927,11 @@
    "location": "BuildHomeTab",
    "kind": "CreateText"
   },
+  "Chat & mail": {
+   "surface": "SettingsDescriptors.g",
+   "location": "SubTabLabelTr",
+   "kind": "Tr"
+  },
   "Chat Lockdown...": {
    "surface": "NativeUI",
    "location": "BuildAdminTab",
@@ -6825,12 +6949,12 @@
   },
   "Chat fade after: <color=#88CCFF>{0}</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintChatTtl",
    "kind": "TrF"
   },
   "Chat fade after: <color=#FF9966>Off (chat hidden in game)</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintChatTtl",
    "kind": "Tr"
   },
   "Chat has been locked by moderators - messages are paused.": {
@@ -6845,7 +6969,7 @@
   },
   "Chat has language channels - use the dropdown on the Home tab, or tap Alt while typing, to switch.": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
+   "location": "BuildSettingsPaneTexts",
    "kind": "CreateText"
   },
   "Chat is currently LOCKED.": {
@@ -6870,27 +6994,27 @@
   },
   "Chat notifications: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintNotifications",
    "kind": "SetText"
   },
   "Chat notifications: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintNotifications",
    "kind": "SetText"
   },
   "Chat overlay: MUTED - hidden, and the room is told": {
    "surface": "CompetitiveUI",
-   "location": "CycleChatOverlayMode",
+   "location": "SetChatOverlayMode",
    "kind": "ShowNotification"
   },
   "Chat overlay: NORMAL - messages fade out": {
    "surface": "CompetitiveUI",
-   "location": "CycleChatOverlayMode",
+   "location": "SetChatOverlayMode",
    "kind": "ShowNotification"
   },
   "Chat overlay: PINNED - messages stay on screen": {
    "surface": "CompetitiveUI",
-   "location": "CycleChatOverlayMode",
+   "location": "SetChatOverlayMode",
    "kind": "ShowNotification"
   },
   "Choose a metric": {
@@ -6903,25 +7027,35 @@
    "location": "BuildCompareCardMetric",
    "kind": "TrF"
   },
+  "Chooses who may start a new mail thread with you: everyone, only players you have played, or nobody. Threads you already have are unaffected, and blocked senders never reach you.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
+   "kind": "Tr"
+  },
   "Chromatic aberration: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintChromAb",
    "kind": "SetText"
   },
   "Chromatic aberration: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintChromAb",
    "kind": "SetText"
   },
   "Chromatic aberration: the RGB color-fringing that pulses on shots/hits/deaths. Off = crisp edges, tiny FPS gain. Visual only, local only.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Chrome": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Circle": {
+   "surface": "NativeUI",
+   "location": "ShapeLabelTr",
+   "kind": "Tr"
   },
   "Claim today's free pack": {
    "surface": "PlayerCardsUI",
@@ -7038,6 +7172,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Collapsed": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsRenderPane",
+   "kind": "Tr"
+  },
   "Collection": {
    "surface": "NativeUI",
    "location": "(file scope)",
@@ -7139,14 +7278,14 @@
    "kind": "Tr"
   },
   "Confirm": {
-   "surface": "CompetitiveUI",
-   "location": "DrawConfirm",
-   "kind": "Tr"
+   "surface": "CompetitiveUI, NativeUI.Settings",
+   "location": "BuildSettingsChrome, DrawConfirm",
+   "kind": "CreateButton, Tr"
   },
   "Confirm — really delete": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateButton"
+   "location": "PaintDeleteRow",
+   "kind": "SetText"
   },
   "Connecting to the game...": {
    "surface": "SpectatorHud",
@@ -7231,7 +7370,7 @@
   "Corner notices when your frames drop, your ping is high or the opponent's updates arrive late. 1v1 only.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Cosmetic Reviews...": {
    "surface": "NativeUI",
@@ -7240,12 +7379,12 @@
   },
   "Cosmetic trails: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintTrails",
    "kind": "SetText"
   },
   "Cosmetic trails: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintTrails",
    "kind": "SetText"
   },
   "Cosmetics": {
@@ -7488,6 +7627,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Crosshair": {
+   "surface": "NativeUI",
+   "location": "ShapeLabelTr",
+   "kind": "Tr"
+  },
   "Crown": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -7523,6 +7667,11 @@
    "location": "PaintEntry, RefreshPopup",
    "kind": "TrF"
   },
+  "Currently: {0}": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsRenderDestructivePane, SettingsRenderPane",
+   "kind": "TrF"
+  },
   "Cursor": {
    "surface": "NativeUI",
    "location": "(file scope)",
@@ -7530,7 +7679,7 @@
   },
   "Cursor: <color=#88CCFF>{0}</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintCursorShape",
    "kind": "TrF"
   },
   "Curved crimson horns for your inner demon.": {
@@ -7545,18 +7694,18 @@
   },
   "Custom player body colors: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPlayerColors",
    "kind": "SetText"
   },
   "Custom player body colors: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPlayerColors",
    "kind": "SetText"
   },
   "Custom player body colors: shows shop-bought Body Colors on you and other modded players. Off = everyone falls back to default orange/blue.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Cyan Cursor": {
    "surface": "shop catalog",
@@ -7660,8 +7809,8 @@
   },
   "Data & Privacy": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateText"
+   "location": "PaintConsent",
+   "kind": "Tr"
   },
   "Data sharing is disabled in your settings": {
    "surface": "SessionReportView",
@@ -7685,7 +7834,7 @@
   },
   "Date format: <color=#88CCFF>{0}</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintDateFormat",
    "kind": "TrF"
   },
   "Date obtained": {
@@ -7695,7 +7844,7 @@
   },
   "Day/Month/Year": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab, RefreshSettings",
+   "location": "PaintDateFormat",
    "kind": "Tr"
   },
   "Deadlines & forfeits": {
@@ -7726,7 +7875,7 @@
   "Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Decline": {
    "surface": "NativeUI",
@@ -7814,14 +7963,14 @@
    "kind": "CreateButton"
   },
   "Delete My Data": {
-   "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateText"
+   "surface": "NativeUI, NativeUI.Settings",
+   "location": "BuildSettingsTab, SettingsRenderDestructivePane",
+   "kind": "CreateText, Tr"
   },
   "Delete My Data...": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateButton"
+   "location": "PaintDeleteRow",
+   "kind": "SetText"
   },
   "Delete a chat message - type to search": {
    "surface": "NativeUI",
@@ -7888,6 +8037,11 @@
    "location": "DrawReportModal",
    "kind": "Tr"
   },
+  "Detected: {0}": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsRenderPane",
+   "kind": "TrF"
+  },
   "Devil Horns": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -7950,22 +8104,22 @@
   },
   "Discord relay: <color=#88FF88>On</color>": {
    "surface": "MailUI",
-   "location": "RefreshSettingsRow",
+   "location": "PaintMailRelay",
    "kind": "Tr"
   },
   "Discord relay: <color=#AAAAAA>checking...</color>": {
    "surface": "MailUI",
-   "location": "RefreshSettingsRow",
+   "location": "PaintMailRelay",
    "kind": "Tr"
   },
   "Discord relay: <color=#AAAAAA>link Discord first</color>": {
    "surface": "MailUI",
-   "location": "RefreshSettingsRow",
+   "location": "PaintMailRelay",
    "kind": "Tr"
   },
   "Discord relay: <color=#FF9966>Off</color>": {
    "surface": "MailUI",
-   "location": "RefreshSettingsRow",
+   "location": "PaintMailRelay",
    "kind": "Tr"
   },
   "Dismiss (1 min)": {
@@ -7997,6 +8151,11 @@
    "surface": "NativeUI",
    "location": "ShowArtistResult",
    "kind": "ShowNotification"
+  },
+  "Dot": {
+   "surface": "NativeUI",
+   "location": "ShapeLabelTr",
+   "kind": "Tr"
   },
   "Double KO - nobody scored this round.": {
    "surface": "FfaMode",
@@ -8240,7 +8399,7 @@
   },
   "EdgeBounce NRE swallow": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PerfRowLabel",
    "kind": "Tr"
   },
   "Edition": {
@@ -8417,6 +8576,21 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Expanded": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsRenderPane",
+   "kind": "Tr"
+  },
+  "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
+   "kind": "Tr"
+  },
+  "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
+   "kind": "Tr"
   },
   "Expert": {
    "surface": "shop catalog",
@@ -8625,13 +8799,18 @@
   },
   "FPS counter: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintShowFps",
    "kind": "SetText"
   },
   "FPS counter: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintShowFps",
    "kind": "SetText"
+  },
+  "FULL": {
+   "surface": "NativeUI",
+   "location": "LevelWordTr",
+   "kind": "Tr"
   },
   "Faced by": {
    "surface": "NativeUI",
@@ -8846,7 +9025,7 @@
   "Frames per second, top-left corner. Handy for checking whether a setting actually helped.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Free daily pack": {
    "surface": "PlayerCardsUI",
@@ -9105,13 +9284,13 @@
   },
   "Glow (bloom): <color={0}>{1}</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintBloom",
    "kind": "TrF"
   },
   "Glow (bloom): the soft halo around bright cosmetics, map art and effects. Reduced = smaller, dimmer halo. Off = no halo. Local only — nothing is hidden, the cosmetic itself still renders the same. A few items have their glow painted into the artwork, and that part stays.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Glow Yellow": {
    "surface": "shop catalog",
@@ -9243,6 +9422,11 @@
    "location": "ReasonText",
    "kind": "Tr"
   },
+  "Granted": {
+   "surface": "NativeUI",
+   "location": "PaintConsent",
+   "kind": "Tr"
+  },
   "Graphs {0}/{1}": {
    "surface": "PostSessionReport",
    "location": "BuildGraphPages",
@@ -9291,7 +9475,7 @@
   "Guides to every mechanic: blocking, poison, netcode, modes, ratings, rewards, tournaments, anti-cheat, and what the mod does (and deliberately doesn't) change.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "CreateText"
+   "kind": "Tr"
   },
   "H2H {0}-{1} · Ranked series {2}": {
    "surface": "H2HSummary",
@@ -9320,17 +9504,17 @@
   },
   "HP decimals: <color=#88FF88>2 DECIMALS</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintHealthPrecision",
    "kind": "Tr"
   },
   "HP decimals: <color=#DDDD66>1 DECIMAL</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintHealthPrecision",
    "kind": "Tr"
   },
   "HP decimals: <color=#FF9966>ROUNDED</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintHealthPrecision",
    "kind": "Tr"
   },
   "HUMAN REVIEW": {
@@ -9421,7 +9605,7 @@
   "Help translate the mod - opens the web portal in your browser. An admin has to give you translator access before you can submit.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Hide Gold": {
    "surface": "NativeUI, shop catalog",
@@ -9436,7 +9620,7 @@
   "Hides you from the Home tab's online and recently-online lists.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Higher placement takes a bigger share of the pot; the pot itself scales with lobby size, battles played and opponent tier.": {
    "surface": "InfoViz",
@@ -9500,7 +9684,7 @@
   },
   "Hit-sound NRE swallow": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PerfRowLabel",
    "kind": "Tr"
   },
   "Hold on!": {
@@ -9561,7 +9745,7 @@
   "How dates are written across the mod's menus (history rows, leaderboards, tournaments).": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "How games are tracked": {
    "surface": "InfoLibrary",
@@ -9571,7 +9755,7 @@
   "How long a chat message stays fully visible before it fades. Ignored while the overlay is pinned.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "How long for {0}?": {
    "surface": "NativeUI",
@@ -9673,6 +9857,11 @@
    "location": "RefreshSession",
    "kind": "SetText"
   },
+  "In game": {
+   "surface": "SettingsDescriptors.g",
+   "location": "SubTabLabelTr",
+   "kind": "Tr"
+  },
   "In use": {
    "surface": "TitleLaddersUI",
    "location": "PaintTierRow",
@@ -9685,17 +9874,17 @@
   },
   "In-game chat overlay: <color=#88CCFF>PINNED</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintIngameChat",
    "kind": "SetText"
   },
   "In-game chat overlay: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintIngameChat",
    "kind": "SetText"
   },
   "In-game chat overlay: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintIngameChat",
    "kind": "SetText"
   },
   "Inbox": {
@@ -9720,22 +9909,22 @@
   },
   "Info": {
    "surface": "NativeUI",
-   "location": "(file scope), BuildFfaTab, BuildOneVTwoTab +2",
-   "kind": "CreateButton, CreateText, Tr"
+   "location": "(file scope), BuildFfaTab, BuildOneVTwoTab +1",
+   "kind": "CreateButton, Tr"
   },
   "Input overlay (bottom-left): shows W, A, S, D, Space and both mouse buttons. Lights up red when pressed. Useful for streams or spotting missed inputs.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Input overlay: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintInputOverlay",
    "kind": "SetText"
   },
   "Input overlay: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintInputOverlay",
    "kind": "SetText"
   },
   "Inside the 0.35 s window?": {
@@ -9747,11 +9936,6 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
-  },
-  "Interface": {
-   "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateText"
   },
   "Intermediate": {
    "surface": "InfoViz",
@@ -9995,12 +10179,12 @@
   },
   "Lag notices: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintLagNotices",
    "kind": "SetText"
   },
   "Lag notices: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintLagNotices",
    "kind": "SetText"
   },
   "Lagoon": {
@@ -10008,14 +10192,19 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Language & menus": {
+   "surface": "SettingsDescriptors.g",
+   "location": "SubTabLabelTr",
+   "kind": "Tr"
+  },
   "Language / Idioma / Язык / Мова / Språk": {
-   "surface": "NativeUI",
-   "location": "MaybeShowLanguagePrompt",
-   "kind": "CreateText"
+   "surface": "NativeUI, NativeUI.Settings",
+   "location": "BuildSettingsChrome, MaybeShowLanguagePrompt",
+   "kind": "CreateButton, CreateText"
   },
   "Language: <color=#88CCFF>{0}</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintLanguage",
    "kind": "TrF"
   },
   "Last game for me": {
@@ -10065,8 +10254,8 @@
   },
   "Leave All Queues": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateButton, CreateText"
+   "location": "PaintActionRows",
+   "kind": "SetText"
   },
   "Leave Lobby": {
    "surface": "NativeUI",
@@ -10106,6 +10295,11 @@
   "Leave your custom 1v2 lobby first.": {
    "surface": "ApiClient",
    "location": "OvtJoinQueue",
+   "kind": "Tr"
+  },
+  "Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
    "kind": "Tr"
   },
   "Leaving queue...": {
@@ -10161,7 +10355,7 @@
   "Lets others see which cards you hold, in the mod and in Discord.": {
    "surface": "PlayerCardsUI",
    "location": "BuildSettingsRows",
-   "kind": "SettingsRow"
+   "kind": "Tr"
   },
   "Level 1": {
    "surface": "NativeUI",
@@ -10225,13 +10419,13 @@
   },
   "Link your Discord first: Home tab -> Get Link Code, then !link YOUR_CODE in Discord.": {
    "surface": "MailUI",
-   "location": "ToggleMailRelay",
+   "location": "SetMailRelay",
    "kind": "Tr"
   },
   "Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Little Pink Buddy": {
    "surface": "shop catalog",
@@ -10408,6 +10602,11 @@
    "location": "BuildKeyboard",
    "kind": "Tr"
   },
+  "M cycles the same state in game; Muted also tells the room you cannot read chat": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "MATCH FOUND!": {
    "surface": "NativeUI",
    "location": "BuildRankedRow",
@@ -10481,7 +10680,7 @@
   "Main menu music: Default = ROUNDS' own theme, My playlist = your selected custom music, None = silence. Matches always use your picks.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Manage your cosmetics and earn 30% on each paid purchase - gifts and your own buys pay nothing. Size or placement changes return to admin review; unsuitable art may be rejected or adjusted.": {
    "surface": "NativeUI",
@@ -10500,27 +10699,27 @@
   },
   "Map lighting: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMapLighting",
    "kind": "SetText"
   },
   "Map lighting: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMapLighting",
    "kind": "SetText"
   },
   "Map lighting: the light and shade the map is drawn with. Off = flat, evenly-lit maps for extra FPS.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Map shadows: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMapShadows",
    "kind": "SetText"
   },
   "Map shadows: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMapShadows",
    "kind": "SetText"
   },
   "Map skins": {
@@ -10545,7 +10744,7 @@
   },
   "Master": {
    "surface": "ApiClient, InfoViz, NativeUI",
-   "location": "AchievementDefs, BuildRankLadder, RefreshSettings",
+   "location": "AchievementDefs, BuildRankLadder, PerfRowLabel",
    "kind": "Tr, table"
   },
   "Match canceled (disconnect)": {
@@ -10615,22 +10814,22 @@
   },
   "Menu music: <color=#88CCFF>Default</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMenuMusic",
    "kind": "SetText"
   },
   "Menu music: <color=#88FF88>My playlist</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMenuMusic",
    "kind": "SetText"
   },
   "Menu music: <color=#FF9966>None</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMenuMusic",
    "kind": "SetText"
   },
   "Menu update bail": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PerfRowLabel",
    "kind": "Tr"
   },
   "Message (shown to every player)": {
@@ -10666,7 +10865,7 @@
   "Mod display language. Machine-translated drafts until community moderators review them — card text in matches follows ROUNDS' own language setting.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Mode closed": {
    "surface": "ApiClient",
@@ -10725,7 +10924,7 @@
   },
   "Month/Day/Year (US)": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab, RefreshSettings",
+   "location": "PaintDateFormat",
    "kind": "Tr"
   },
   "Moon Rabbit": {
@@ -10850,12 +11049,12 @@
   },
   "Music credit toast: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMusicCredit",
    "kind": "SetText"
   },
   "Music credit toast: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMusicCredit",
    "kind": "SetText"
   },
   "Music download failed - press Retry": {
@@ -10910,12 +11109,12 @@
   },
   "Mute audio when tabbed out: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMuteBg",
    "kind": "SetText"
   },
   "Mute audio when tabbed out: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintMuteBg",
    "kind": "SetText"
   },
   "Mute from message": {
@@ -10931,7 +11130,7 @@
   "Mutes game audio while the window is unfocused during online play. The menu stays audible; sound returns the moment you tab back in.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "My Stats": {
    "surface": "NativeUI",
@@ -10940,17 +11139,17 @@
   },
   "My collection is public: <color=#888>...</color>": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshSettingsRows",
+   "location": "PaintCollectionPublic",
    "kind": "SetText"
   },
   "My collection is public: <color=#88FF88>ON</color>": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshSettingsRows",
+   "location": "PaintCollectionPublic",
    "kind": "SetText"
   },
   "My collection is public: <color=#FF9966>OFF</color>": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshSettingsRows",
+   "location": "PaintCollectionPublic",
    "kind": "SetText"
   },
   "NETWORK": {
@@ -11283,6 +11482,11 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "Not armed": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsPaintDeleteState, SettingsRenderDestructivePane",
+   "kind": "Tr"
+  },
   "Not enough gold": {
    "surface": "TitleLaddersUI",
    "location": "ReasonText",
@@ -11306,6 +11510,11 @@
   "Not found - it may have been deleted.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "Not granted": {
+   "surface": "NativeUI",
+   "location": "PaintConsent",
    "kind": "Tr"
   },
   "Not great. Not terrible.": {
@@ -11370,8 +11579,8 @@
   },
   "OFF": {
    "surface": "NativeUI",
-   "location": "FillMusicTrackRow, PaintMusicAlbumToggle",
-   "kind": "SetText"
+   "location": "FillMusicTrackRow, LevelWordTr, PaintMusicAlbumToggle",
+   "kind": "SetText, Tr"
   },
   "ONE CONDITIONAL HIT": {
    "surface": "InfoViz",
@@ -11385,7 +11594,7 @@
   },
   "OOB bullet despawn": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PerfRowLabel",
    "kind": "Tr"
   },
   "OPEN": {
@@ -11405,7 +11614,7 @@
   },
   "ObjectPool init clamp (in-match)": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PerfRowLabel",
    "kind": "Tr"
   },
   "Obsidian": {
@@ -11441,7 +11650,7 @@
   "On-screen pop-ups for incoming chat and XP/level notifications. The chat log on the Home tab updates either way.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "One copy, full flight, bars on a log scale. The mod pins every eligible Grow bullet to the same 120 FPS growth clock: about x3.1.": {
    "surface": "InfoViz",
@@ -11520,8 +11729,8 @@
   },
   "Open the Info library": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateButton"
+   "location": "PaintActionRows",
+   "kind": "SetText"
   },
   "Open today's free pack": {
    "surface": "PlayerCardsUI",
@@ -11551,6 +11760,11 @@
   "Opening your pack...": {
    "surface": "PlayerCardsUI",
    "location": "Refresh",
+   "kind": "Tr"
+  },
+  "Opens the in-game library: how a pick lands, what each ranked state means, the leave rules, and the card and damage notes players have contributed.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
    "kind": "Tr"
   },
   "Opp:": {
@@ -11645,7 +11859,7 @@
   },
   "Other players can pull, collect and trade a card of you showing your name, rank title, rating and ranked record - the same things the leaderboard shows. Its picture is your Steam profile picture until this PC has sent your in-game character - the same body, face, colour and effect you play with, drawn here and sent once. Deleting your data (below) removes every card of you from every binder.": {
    "surface": "PlayerCardsUI",
-   "location": "BuildSettingsRows",
+   "location": "BuildSettingsPaneExtras",
    "kind": "CreateText"
   },
   "Overall Series: {0}": {
@@ -11908,6 +12122,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Performance": {
+   "surface": "SettingsDescriptors.g",
+   "location": "SubTabLabelTr",
+   "kind": "Tr"
+  },
   "Performance master switch — flips ALL the patches below at once.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -11970,12 +12189,12 @@
   },
   "Ping / region display: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintRegionPing",
    "kind": "SetText"
   },
   "Ping / region display: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintRegionPing",
    "kind": "SetText"
   },
   "Pink Cursor": {
@@ -12268,6 +12487,11 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Privacy & account": {
+   "surface": "SettingsDescriptors.g",
+   "location": "SubTabLabelTr",
+   "kind": "Tr"
+  },
   "Private 1v2 lobby": {
    "surface": "NativeUI",
    "location": "JoinHostLobbyRow",
@@ -12338,6 +12562,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Puts the delete row back to its normal state. Nothing has been deleted at this point, so cancelling costs nothing and the row can be armed again.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
+   "kind": "Tr"
+  },
   "Putting on {0}...": {
    "surface": "TitleLaddersUI",
    "location": "OnWearClicked",
@@ -12381,7 +12610,7 @@
   "Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in the room has this on. Applies from your next game.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Quick Reload main": {
    "surface": "shop catalog",
@@ -12478,6 +12707,11 @@
    "location": "Tr",
    "kind": "TrC:pc.stat.record"
   },
+  "REDUCED": {
+   "surface": "NativeUI",
+   "location": "LevelWordTr",
+   "kind": "Tr"
+  },
   "REFRESHVALID IN PLAY: SILENCE SEQUENCES": {
    "surface": "InfoViz",
    "location": "BuildRefreshSequences",
@@ -12516,6 +12750,11 @@
   "ROUNDS OST": {
    "surface": "NativeUI",
    "location": "RefreshMusicTab",
+   "kind": "Tr"
+  },
+  "ROUNDS default": {
+   "surface": "NativeUI",
+   "location": "ShapeLabelTr",
    "kind": "Tr"
   },
   "ROUNDS ships with real bugs - some cosmetic, some that decide rounds. The catalogue: symptom, real cause, and whether the mod repairs it. Repair details: (see <color=#7FD4FF>Bug fixes the mod ships</color>).\n\n<color=#FFD94D><b>INPUT AND LOBBY BUGS</b></color>\n\n<color=#7FD4FF>Escape key permanently dead, or inputs frozen as a match is found</color> - the game toggles input across all players with no null checks; one half-spawned player crashes the loop. <color=#7FE87F>Fixed by the mod, always on.</color>\n\n<color=#7FD4FF>'No space to ready up' - you cannot spawn into a lobby</color> - the game tries to spawn your character before you are actually in a room, crashes, and never recovers. <color=#7FE87F>Fixed by the mod, always on</color>; 30 seconds stuck returns you to the menu.\n\n<color=#7FD4FF>Typing confirms a card pick, Enter opens the room-code box, Space readies you up mid-sentence</color> - three places read the raw keyboard without checking for an open text box. <color=#7FE87F>Fixed for the mod's own chat</color>; the vanilla chat box keeps its quirks.\n\n<color=#FFD94D><b>COMBAT BUGS</b></color>\n\n<color=#7FD4FF>After a rematch, your block goes on cooldown but absorbs nothing - or Shield Charge stops firing while basic block works</color> - the between-games teardown can destroy card objects half-way, stranding dead hooks on your block. <color=#7FE87F>Fixed by the mod everywhere</color> (see <color=#7FD4FF>Blocking</color>).\n\n<color=#7FD4FF>Poison health bars disagree between screens, and blocking poison is a coin flip</color> - every machine ticks its own copy of the poison against its own copy of your shield; health is never re-synced. <color=#7FE87F>Replaced by the mod's victim-authoritative poison</color> when the victim runs the mod (see <color=#7FD4FF>Poison & damage over time</color>).\n\n<color=#7FD4FF>A poison tick kills someone during the round-won animation, awarding a phantom round</color> - damage-over-time keeps landing after the round is decided. <color=#7FE87F>Fixed on every modded client, in any room</color> - full protection just needs the room's (usually modded) host seat patched too.\n\n<color=#7FD4FF>A leftover bullet from the previous point hits you just after everyone respawns</color> - nothing in vanilla despawns mid-air bullets at the point boundary. <color=#7FE87F>Fixed: modded clients clear their own leftover bullets.</color>\n\n<color=#7FD4FF>Shots visibly connect but do no damage on your screen, or a point-blank drill bullet turns invisible</color> - the bullet's special components can register in the wrong order on the receiving machine. <color=#7FE87F>Fixed by the mod in any room.</color>\n\n<color=#7FD4FF>Grow one-shots you out of nowhere</color> - broken math more than a bug: Grow's damage compounds per frame on the shooter's machine, so low frame rates and hitches multiply it massively. <color=#7FE87F>Normalized by the mod in competitive play</color> (see <color=#7FD4FF>Grow</color>).\n\n<color=#7FD4FF>After one game with Demonic Pact, hold-to-fire guns like Spray stop auto-firing all session</color> - the no-auto-fire flag is copied one way and never reset between games. <color=#7FE87F>Fixed by the mod in any game.</color>\n\n<color=#7FD4FF>Radiance visibly sweeps through a crowd and hits one person</color> - the wave only ever checks the single closest target and stops after one hit. <color=#FF6666>Fixed in FFA only</color> - there it hits everyone it sweeps; other modes keep vanilla.\n\n<color=#7FD4FF>Chase's card text lists a Health bonus</color> - dead data the game never applies; the card has never granted it. <color=#7FE87F>The mod fixes the label.</color>\n\n<color=#7FD4FF>Being offered a card you already own</color> - not a bug; the second copy levels up the first.\n\n<color=#FFD94D><b>MODE AND VISUAL BUGS</b></color>\n\n<color=#7FD4FF>In 2v2 or 1v2, a card picker stands on an empty stage, or the wrong body is shown picking</color> - vanilla only ever presents one picker per round, using a team number as a player number. <color=#7FE87F>Fixed in 2v2 and 1v2 mod rooms.</color>\n\n<color=#7FD4FF>Phoenix revives someone into thin air - invisible, unhittable, stuck</color> - the revive finds the player by list position, wrong once the list has changed (an FFA leaver), and the death flag is never set. <color=#7FE87F>Fixed by the mod everywhere.</color>\n\n<color=#7FD4FF>Another player's name shows as the literal placeholder PlayerName</color> - a failed Steam name lookup is never retried. <color=#7FE87F>Fixed: the mod retries the lookup (up to 15 tries over half a minute) and repaints the name when it lands.</color>\n\n<color=#7FD4FF>A saw's spinning loop plays forever, or audio goes muffled for the session</color> - looping sounds outlive their owner and starve the sound engine of voices. <color=#7FE87F>Fixed: leaked loops are swept after every round.</color>\n\n<color=#7FD4FF>Harmless error spam in the log during map transitions</color> - the map-move animation holds references to pieces replaced mid-move. <color=#8A8A93>Not fixed - benign noise. (Anything that must touch the map mid-move, like the mod's own map skins, defers around that window instead.)</color>\n\n<color=#FFD94D><b>WHERE THE FIXES RUN</b></color>\n\nCrash guards and dead-state repairs run everywhere - they repair states vanilla never intended, without changing any rule. Rule changes are gated: mode logic needs its own mod-issued room, Grow normalization needs every fighter modded and consenting, and poison authority follows the poisoned player - an unmodded victim keeps vanilla poison. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> - and the only things they can ever see of the mod are nametag styling and quick-chat phrases you deliberately send through the game's own chat (see <color=#7FD4FF>Vanilla stays vanilla</color>).": {
@@ -12726,7 +12965,7 @@
   "Rare pulls may be posted to the Discord gambler chat with your name.": {
    "surface": "PlayerCardsUI",
    "location": "BuildSettingsRows",
-   "kind": "SettingsRow"
+   "kind": "Tr"
   },
   "Rarest Hand": {
    "surface": "NativeUI",
@@ -12823,6 +13062,11 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Read more": {
+   "surface": "NativeUI.Settings",
+   "location": "BuildSettingsChrome",
+   "kind": "CreateButton"
+  },
   "Reading a card": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -12868,6 +13112,11 @@
    "location": "ShowRecentTournamentsPopup",
    "kind": "Tr"
   },
+  "Recommended: {0}": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsRenderPane",
+   "kind": "TrF"
+  },
   "Reconnect suppressed (broadcast identity)": {
    "surface": "NativeUI",
    "location": "BuildTournamentsTab",
@@ -12906,6 +13155,11 @@
   "Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.": {
    "surface": "InfoViz",
    "location": "BuildRefreshGate",
+   "kind": "Tr"
+  },
+  "Reduced keeps the hit feedback without the camera motion": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "Refresh": {
@@ -12991,7 +13245,7 @@
   "Removes you from every queue and lobby in every mode — 1v1, 2v2, 1v2 and FFA.\nUse this if the game thinks you're still in a match you've already left, or if joining a queue keeps telling you you're busy. It won't affect a game you're actually playing, and it never touches your stats, gold or rating.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "CreateText"
+   "kind": "Tr"
   },
   "Render your name at 130% size.": {
    "surface": "shop catalog",
@@ -13078,6 +13332,16 @@
    "location": "BuildRefreshFlow, TextFallback",
    "kind": "Tr"
   },
+  "Reset this tab to recommended": {
+   "surface": "NativeUI.Settings",
+   "location": "BuildSettingsChrome",
+   "kind": "CreateButton"
+  },
+  "Reset this tab to recommended?": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsRenderResetPrompt",
+   "kind": "Tr"
+  },
   "Restore the vanilla random map color rotation.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -13132,11 +13396,6 @@
    "surface": "NativeUI",
    "location": "BuildAdminTab",
    "kind": "CreateButton"
-  },
-  "Revoke consent": {
-   "surface": "NativeUI",
-   "location": "RefreshSettings",
-   "kind": "SetText"
   },
   "Revoke which alert?": {
    "surface": "NativeUI",
@@ -13375,12 +13634,12 @@
   },
   "Same cards in queue games: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPrefSameCards",
    "kind": "SetText"
   },
   "Same cards in queue games: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPrefSameCards",
    "kind": "SetText"
   },
   "Same cards: OFF": {
@@ -13440,7 +13699,7 @@
   },
   "Screen shake: <color={0}>{1}</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintScreenShake",
    "kind": "TrF"
   },
   "Search Random": {
@@ -13565,12 +13824,12 @@
   },
   "Send logs automatically: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAutoLog",
    "kind": "SetText"
   },
   "Send logs automatically: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintAutoLog",
    "kind": "SetText"
   },
   "Send ping": {
@@ -13750,8 +14009,8 @@
   },
   "Settings": {
    "surface": "NativeUI",
-   "location": "(file scope), BuildSettingsTab",
-   "kind": "CreateText, Tr"
+   "location": "(file scope)",
+   "kind": "Tr"
   },
   "Severity:": {
    "surface": "CompetitiveUI",
@@ -13845,17 +14104,17 @@
   },
   "Show Discord on leaderboard: <color=#888>link Discord first</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintShowDiscord",
    "kind": "SetText"
   },
   "Show Discord on leaderboard: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintShowDiscord",
    "kind": "SetText"
   },
   "Show Discord on leaderboard: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintShowDiscord",
    "kind": "SetText"
   },
   "Show Gold": {
@@ -13865,12 +14124,12 @@
   },
   "Show inactive players (90d+): <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintInactiveBoards",
    "kind": "SetText"
   },
   "Show inactive players (90d+): <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintInactiveBoards",
    "kind": "SetText"
   },
   "Showing {0} of {1}": {
@@ -13891,27 +14150,27 @@
   "Shows a small bottom-left credit line naming the track and artist whenever a custom song starts.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Shows community chat in the corner while you play. Press T to type a reply, or M in game to cycle normal / pinned / muted.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Shows cosmetic trails on you and other modded players.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Shows your Discord name on the leaderboard (opt-in; link Discord on the Home tab first).": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Shows your current server region and your ping to it.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Sid Slayer": {
    "surface": "ApiClient, shop catalog",
@@ -14012,6 +14271,11 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "Tr"
+  },
+  "Skipped: server settings": {
+   "surface": "NativeUI.Settings",
+   "location": "BuildSettingsChrome",
+   "kind": "CreateText"
   },
   "Sky": {
    "surface": "shop catalog",
@@ -14116,7 +14380,7 @@
   "Soft shadow beams cast by map lighting. Off = no shadows (lighting stays on) for extra FPS.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Sold": {
    "surface": "NativeUI",
@@ -14172,6 +14436,11 @@
    "surface": "NativeUI, PlayerCardsUI",
    "location": "BuildAchievementsTab, RefreshBinder",
    "kind": "CreateText, Tr"
+  },
+  "Sound": {
+   "surface": "SettingsDescriptors.g",
+   "location": "SubTabLabelTr",
+   "kind": "Tr"
   },
   "Sovereign": {
    "surface": "shop catalog",
@@ -14375,7 +14644,7 @@
   },
   "Still checking your Discord link - try again in a moment.": {
    "surface": "MailUI",
-   "location": "ToggleMailRelay",
+   "location": "SetMailRelay",
    "kind": "Tr"
   },
   "Still joining - one moment...": {
@@ -14470,7 +14739,7 @@
   },
   "Stun null-guard": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PerfRowLabel",
    "kind": "Tr"
   },
   "StunPlayer null-guard — stops NRE spam when a player is destroyed mid-stun.": {
@@ -15111,16 +15380,16 @@
   "Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
-   "kind": "SettingsToggle"
+   "kind": "Tr"
   },
   "Thicker menu text: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintHeavyFont",
    "kind": "SetText"
   },
   "Thicker menu text: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintHeavyFont",
    "kind": "SetText"
   },
   "This account cannot send mail.": {
@@ -15455,7 +15724,7 @@
   },
   "Translate SCR (web portal)": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab",
+   "location": "PaintActionRows",
    "kind": "SetText"
   },
   "Translation role revoked.": {
@@ -15640,22 +15909,22 @@
   },
   "Unfocused 120 FPS cap: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintCapFps",
    "kind": "SetText"
   },
   "Unfocused 120 FPS cap: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintCapFps",
    "kind": "SetText"
   },
   "Unfocused deep idle (60s): <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintDeepIdle",
    "kind": "SetText"
   },
   "Unfocused deep idle (60s): <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintDeepIdle",
    "kind": "SetText"
   },
   "Unique Players": {
@@ -15819,8 +16088,8 @@
    "kind": "AppendSystemChatLine"
   },
   "Use": {
-   "surface": "NativeUI",
-   "location": "BuildSettingsTab, OpenChatTypingPicker, OpenChatViewPicker",
+   "surface": "NativeUI, NativeUI.Settings",
+   "location": "OpenChatTypingPicker, OpenChatViewPicker, SettingsOpenDropdown",
    "kind": "Tr"
   },
   "Use vanilla music": {
@@ -15868,10 +16137,10 @@
    "location": "RefreshChatLog",
    "kind": "TrF"
   },
-  "Visuals & Effects": {
-   "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateText"
+  "Visuals": {
+   "surface": "SettingsDescriptors.g",
+   "location": "SubTabLabelTr",
+   "kind": "Tr"
   },
   "Vivid orange neon name with a soft glow halo. Visible to everyone; modded players also see the glow.": {
    "surface": "shop catalog",
@@ -16028,6 +16297,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "When to press this: {0}": {
+   "surface": "NativeUI.Settings",
+   "location": "SettingsRenderDestructivePane, SettingsRenderPane",
+   "kind": "TrF"
+  },
   "Where their gold came from": {
    "surface": "NativeUI",
    "location": "BuildCompareGenericPie",
@@ -16041,7 +16315,7 @@
   "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.": {
    "surface": "PlayerCardsUI",
    "location": "BuildSettingsRows",
-   "kind": "SettingsRow"
+   "kind": "Tr"
   },
   "Which language for {0}?": {
    "surface": "NativeUI",
@@ -16055,23 +16329,23 @@
   },
   "Who can mail me: <color=#88FF88>Everyone</color>": {
    "surface": "MailUI",
-   "location": "RefreshSettingsRow",
+   "location": "PaintMailFrom",
    "kind": "Tr"
   },
   "Who can mail me: <color=#FF9966>Nobody</color>": {
    "surface": "MailUI",
-   "location": "RefreshSettingsRow",
+   "location": "PaintMailFrom",
    "kind": "Tr"
   },
   "Who can mail me: <color=#FFD94D>People I have played</color>": {
    "surface": "MailUI",
-   "location": "RefreshSettingsRow",
+   "location": "PaintMailFrom",
    "kind": "Tr"
   },
   "Who may send you in-game mail. Blocked senders never reach you.": {
    "surface": "MailUI",
    "location": "BuildSettingsRow",
-   "kind": "CreateText"
+   "kind": "Tr"
   },
   "Who picks these cards the most": {
    "surface": "NativeUI",
@@ -16343,6 +16617,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "HelpBodyTr",
+   "kind": "Tr"
+  },
   "Won": {
    "surface": "NativeUI",
    "location": "BuildCompareBarChart",
@@ -16420,7 +16699,7 @@
   },
   "Year/Month/Day": {
    "surface": "NativeUI",
-   "location": "BuildSettingsTab, RefreshSettings",
+   "location": "PaintDateFormat",
    "kind": "Tr"
   },
   "Yellow Cursor": {
@@ -16633,9 +16912,19 @@
    "location": "HandleSeatExpired",
    "kind": "TrF"
   },
+  "a debugging overlay, not a HUD": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "a person makes the call": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
+   "kind": "Tr"
+  },
+  "a picture choice has no right answer": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
    "kind": "Tr"
   },
   "a pot scaled by lobby size, battles and opponent tier, split by placement": {
@@ -16673,6 +16962,16 @@
    "location": "BuildVisibilitySeats",
    "kind": "Tr"
   },
+  "applies only when everyone in the room agrees": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row to apply the detected id": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
+   "kind": "Tr"
+  },
   "art submitted in-game": {
    "surface": "InfoViz",
    "location": "BuildCosmeticsFlow",
@@ -16701,6 +17000,16 @@
   "base game": {
    "surface": "InfoViz",
    "location": "BuildKeyboard",
+   "kind": "Tr"
+  },
+  "before asking in Discord": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
+   "kind": "Tr"
+  },
+  "blocked senders never reach you anyway": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "blocking: 0 damage + 2x return impulse": {
@@ -16746,6 +17055,11 @@
   "can't be altered in transit": {
    "surface": "InfoViz",
    "location": "BuildReportPipeline",
+   "kind": "Tr"
+  },
+  "cancelling costs nothing and re-arms cleanly": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "card cap {0}": {
@@ -16808,6 +17122,16 @@
    "location": "BuildAnticheatPipeline",
    "kind": "Tr"
   },
+  "consent is the player's own decision, never bulk-written": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
+   "kind": "Tr"
+  },
+  "cosmetic only": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "cursor color": {
    "surface": "NativeUI",
    "location": "TrKindWord",
@@ -16861,6 +17185,11 @@
   "draft restored": {
    "surface": "CompetitiveUI",
    "location": "DrawChatInput",
+   "kind": "Tr"
+  },
+  "drafts are machine-translated until reviewed, and English is always complete": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "duo": {
@@ -16948,6 +17277,16 @@
    "location": "FfaSettingsSummaryBits",
    "kind": "TrF"
   },
+  "follows the character you actually play": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "for streams and for spotting missed inputs": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "fps": {
    "surface": "SessionReportModel",
    "location": "Build",
@@ -16973,6 +17312,11 @@
    "location": "BuildNetcodeMap",
    "kind": "Tr"
   },
+  "host-only, and it despawns real bullets": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "impossibly fast series": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
@@ -16988,6 +17332,51 @@
    "location": "BuildReportPipeline",
    "kind": "Tr"
   },
+  "it combines with an equipped cursor colour": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it costs nothing while you are playing": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it deletes your rating, history and collection, and there is no undo": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it is the instrument you judge the rest of this tab with": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it is the only place a block can be lifted": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it is the only place the individual patches can be seen": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it leaves every queue at once and costs nothing if you are not in one": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it only hides you from Home lists; it does not hide matches": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "it opens a browser; nothing in game changes": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "jump within 0.1s: up and away": {
    "surface": "InfoViz",
    "location": "BuildMovementWindow",
@@ -16998,9 +17387,19 @@
    "location": "Ago",
    "kind": "Tr"
   },
+  "keeps boards to players you can actually meet": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "kill boundary": {
    "surface": "InfoViz",
    "location": "BuildMovementWindow",
+   "kind": "Tr"
+  },
+  "largest visible win in heavy firefights": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "legendary": {
@@ -17008,9 +17407,19 @@
    "location": "TrRarity",
    "kind": "Tr"
   },
+  "lets trades find your binder": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "level": {
    "surface": "InfoViz",
    "location": "BuildXpCurve",
+   "kind": "Tr"
+  },
+  "local display only; decimals help only when a card leaves max health on a fraction": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "local fight simulation": {
@@ -17028,6 +17437,11 @@
    "location": "BuildAnticheatPipeline",
    "kind": "Tr"
   },
+  "master gate; off disables all seven": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "match data unavailable": {
    "surface": "PostSessionReport",
    "location": "Compose2v2, ComposeFfa, ComposeGameRows1v1",
@@ -17036,6 +17450,16 @@
   "match goes live": {
    "surface": "InfoViz",
    "location": "BuildForfeitClock",
+   "kind": "Tr"
+  },
+  "matches always use your picks regardless": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "menu code cannot matter mid-match": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "mod": {
@@ -17061,6 +17485,11 @@
   "nametag": {
    "surface": "NativeUI",
    "location": "TrKindWord",
+   "kind": "Tr"
+  },
+  "never active in a room or on match-found": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "no - casual": {
@@ -17173,9 +17602,34 @@
    "location": "RefreshTournaments",
    "kind": "TrF"
   },
+  "off falls everyone back to orange/blue": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "off is crisper and slightly faster": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "off is flat but faster": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "off keeps lighting and drops the beams": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "on the boards and in chat": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
+   "kind": "Tr"
+  },
+  "once Discord is linked, mail reaches you when the game is closed and you can reply from there": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "one +24h extension": {
@@ -17213,6 +17667,11 @@
    "location": "ApplyShopRow",
    "kind": "Tr"
   },
+  "one line, bottom-left, and only on custom tracks": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "one present: absent player forfeits": {
    "surface": "InfoViz",
    "location": "BuildForfeitClock",
@@ -17233,9 +17692,24 @@
    "location": "BuildWhenCounts",
    "kind": "Tr"
   },
+  "only after reading the armed warning": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
+   "kind": "Tr"
+  },
   "only if it is 1-1": {
    "surface": "InfoViz",
    "location": "BuildSeriesFormat",
+   "kind": "Tr"
+  },
+  "only rare pulls, and only in one channel": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "only to leave for good": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
    "kind": "Tr"
   },
   "opp n/a": {
@@ -17253,6 +17727,11 @@
    "location": "BuildWhenCounts",
    "kind": "Tr"
   },
+  "opt-in, and it needs a linked Discord to do anything": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "optional extra opening pick": {
    "surface": "InfoViz",
    "location": "BuildOvtFormat",
@@ -17266,6 +17745,11 @@
   "own bullets judge hits": {
    "surface": "InfoViz",
    "location": "BuildNetcodeMap",
+   "kind": "Tr"
+  },
+  "painted-in glow stays whatever you pick": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "player color": {
@@ -17318,6 +17802,11 @@
    "location": "BuildCompareNemesisPanel",
    "kind": "Tr"
   },
+  "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "ranked or casual": {
    "surface": "InfoViz",
    "location": "BuildReportPipeline",
@@ -17356,6 +17845,11 @@
   "regular (converged)": {
    "surface": "InfoViz",
    "location": "BuildGlickoRd",
+   "kind": "Tr"
+  },
+  "removes allocation stutter": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "replica age est. n/a": {
@@ -17398,6 +17892,16 @@
    "location": "FfaSettingsSummaryBits",
    "kind": "Tr"
   },
+  "sending your logs automatically is your own decision, never bulk-written": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
+   "kind": "Tr"
+  },
+  "sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "series created": {
    "surface": "InfoViz",
    "location": "BuildBetWindow",
@@ -17438,9 +17942,44 @@
    "location": "ApplyShopRow",
    "kind": "Tr"
   },
+  "stops null-reference spam and changes nothing visible": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "sudden death": {
    "surface": "NativeUI",
    "location": "FfaSettingsSummaryBits",
+   "kind": "Tr"
+  },
+  "swallows the one null reference a destroyed bullet raises at a screen edge": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "swallows the one null reference the hit sound raises when its parent is gone": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "tells you which region you are on": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "the Home chat log updates either way; this is the pop-up": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "the Info library answers most rules questions": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "the SDF face drops thin glyphs when light": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "the base award scales with your opponent's tier; podium and sweep bonuses can add more": {
@@ -17458,6 +17997,11 @@
    "location": "RefreshFfaTab",
    "kind": "Tr"
   },
+  "the menu stays audible either way": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "the mod?": {
    "surface": "InfoViz",
    "location": "BuildWhenCounts",
@@ -17468,9 +18012,49 @@
    "location": "BuildAnticheatPipeline",
    "kind": "Tr"
   },
+  "the shipped default; 0 is a mode rather than a short timer, because chat then never appears in game": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "the shipped default; menus only, never match data, so switch to the order you read fastest": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "the styled name - minus glow and typeface": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
+   "kind": "Tr"
+  },
+  "there is no region detection to reset TO, and a deliberate regional choice should not revert to the shipped US default": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
+   "kind": "Tr"
+  },
+  "this is the press that performs the deletion": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "this row only opens and closes a list; it stores no value": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
+   "kind": "Tr"
+  },
+  "this row performs an action and stores no value, so there is nothing for a reset to write": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
+   "kind": "Tr"
+  },
+  "this row stores no value, and nothing bulk may ever arm or confirm a deletion": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
+   "kind": "Tr"
+  },
+  "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ExclusionReasonTr",
    "kind": "Tr"
   },
   "title": {
@@ -17496,6 +18080,16 @@
   "triggers": {
    "surface": "InfoViz",
    "location": "BuildDamageMatrix",
+   "kind": "Tr"
+  },
+  "turn it off on a weak GPU; nothing is hidden": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "turning it off also removes spectators already watching": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "two players, one side": {
@@ -17583,6 +18177,31 @@
    "location": "RenderOvtLiveGames",
    "kind": "Tr"
   },
+  "when the count beside it is not 7/7": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
+   "kind": "Tr"
+  },
+  "when the game thinks you are still queued": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
+   "kind": "Tr"
+  },
+  "when you want the web leaderboard": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
+   "kind": "Tr"
+  },
+  "when you want to unblock someone": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
+   "kind": "Tr"
+  },
+  "whenever you armed it by accident": {
+   "surface": "SettingsDescriptors.g",
+   "location": "WhenToPressTr",
+   "kind": "Tr"
+  },
   "window over - cooldown keeps counting from the press": {
    "surface": "InfoViz",
    "location": "BuildBlockWindow",
@@ -17591,6 +18210,11 @@
   "with exact evidence": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
+   "kind": "Tr"
+  },
+  "worth it while investigating one match; it is noisy, so turn it back off afterwards": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "yes": {
@@ -17940,12 +18564,12 @@
   },
   "{0}: <color=#888>(not bound)</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPerfRow",
    "kind": "TrF"
   },
   "{0}: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
-   "location": "RefreshSettings",
+   "location": "PaintPerfRow",
    "kind": "TrF"
   },
   "{0}: rating {1}": {

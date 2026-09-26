@@ -131,13 +131,28 @@ namespace CompetitiveRounds
                 }
             }
 
-            /// <summary>Rounded -> 1 decimal -> 2 decimals -> Rounded. No
-            /// invalidation call: the board re-renders every cell at its next
-            /// 8 Hz snapshot (RefreshSnapshot), and the broadcaster's derived
-            /// strings rebuild on that same generation bump.</summary>
+            /// <summary>Rounded -> 1 decimal -> 2 decimals -> Rounded, through
+            /// Set. Kept for any caller that still steps the setting; the
+            /// settings page writes a chosen level through Set directly.</summary>
             internal static void Cycle()
             {
                 string next = Level == ROUNDED ? ONE_DP : Level == ONE_DP ? TWO_DP : ROUNDED;
+                Set(next);
+            }
+
+            /// <summary>The value-taking writer (item 13). The level is
+            /// canonicalised against the three ids, so a caller cannot store a
+            /// display word; null or unknown writes Rounded, which is also how
+            /// an unknown stored value reads. No invalidation call: the board
+            /// re-renders every cell at its next 8 Hz snapshot
+            /// (RefreshSnapshot), and the broadcaster's derived strings rebuild
+            /// on that same generation bump.</summary>
+            internal static void Set(string level)
+            {
+                string v = (level ?? "").Trim();
+                string next = string.Equals(v, ONE_DP, StringComparison.OrdinalIgnoreCase) ? ONE_DP
+                    : string.Equals(v, TWO_DP, StringComparison.OrdinalIgnoreCase) ? TWO_DP
+                    : ROUNDED;
                 try { var e = Entry(); if (e != null) e.Value = next; } catch { }
             }
 

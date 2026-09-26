@@ -47,6 +47,15 @@
                         partial class), so the shipped DLL carries no ladder
                         fixture.
 
+      SettingsModel.cs      the settings page's split and reset-scope rules
+                        (item 13): where a painted row string is cut into its
+                        label and its value, and exactly which rows each
+                        sub-tab's reset writes. The generated descriptor table
+                        it reads (SettingsDescriptors.g.cs) comes with it, and
+                        I18nStub.cs stands in for the plugin's I18n, which
+                        needs Unity. The cases live in the harness-only
+                        SettingsModelSelfTest.cs.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -75,6 +84,10 @@
     <Compile Include="../../plugin/BinderSortRules.cs" />
     <Compile Include="../../plugin/TitleLadderRules.cs" />
     <Compile Include="TitleLadderRulesSelfTest.cs" />
+    <Compile Include="../../plugin/SettingsModel.cs" />
+    <Compile Include="../../plugin/SettingsDescriptors.g.cs" />
+    <Compile Include="I18nStub.cs" />
+    <Compile Include="SettingsModelSelfTest.cs" />
   </ItemGroup>
 
 </Project>

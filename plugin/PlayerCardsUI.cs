@@ -2428,28 +2428,44 @@ namespace CompetitiveRounds
         internal static void BuildSettingsRows(Transform parent)
         {
             UIFactory.CreateText("SPcHdr", parent, "Player Cards", 15f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
-            var info = UIFactory.CreateText("SPcInfo", parent,
+            btnPublic = NativeUI.SettingsSwitch(parent, "SPcPub",
+                I18n.Tr("Lets others see which cards you hold, in the mod and in Discord."),
+                () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.collection_public,
+                () => ToggleSetting("collection_public"));
+            btnPublicTxt = UIFactory.GetButtonText(btnPublic);
+            btnAnnounce = NativeUI.SettingsSwitch(parent, "SPcAnn",
+                I18n.Tr("Rare pulls may be posted to the Discord gambler chat with your name."),
+                () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.announce,
+                () => ToggleSetting("announce"));
+            btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
+            btnPreset = NativeUI.SettingsDropdown(parent, "SPcPre",
+                I18n.Tr("Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show."),
+                PresetOptionIds, () => PortraitRender.CurrentPreset().ToString(System.Globalization.CultureInfo.InvariantCulture),
+                id => { SetPreset(ParsePresetId(id)); });
+            btnPresetTxt = UIFactory.GetButtonText(btnPreset);
+        }
+
+        /// <summary>Item 13: the Player Cards texts that are not rows -- the
+        /// block's explainer, the preset preview and the renderer's note --
+        /// built into the settings pane (NativeUI's SetDetail), where they
+        /// show beside the rows they explain. <paramref name="infoParent"/>
+        /// takes the explainer, <paramref name="previewParent"/> the preview
+        /// row and the note (the pane's SDetPrev slot).</summary>
+        internal static GameObject BuildSettingsPaneExtras(Transform infoParent, Transform previewParent)
+        {
+            var info = UIFactory.CreateText("SPcInfo", infoParent,
                 "Other players can pull, collect and trade a card of you showing your name, rank title, rating and ranked record - the same things the leaderboard shows. Its picture is your Steam profile picture until this PC has sent your in-game character - the same body, face, colour and effect you play with, drawn here and sent once. Deleting your data (below) removes every card of you from every binder.",
                 13f, C_DIM, sizeDelta: new Vector2(700, 36));
             // wrap + auto height, the Info body's shape: CreateText defaults to a
             // single Truncate line, and this caption is longer than the column
             UIFactory.SetWordWrap(info, true); UIFactory.SetTextAutoHeight(info, 36f);
-            btnPublic = SettingsRow(parent, "SPcPub", () => ToggleSetting("collection_public"),
-                "Lets others see which cards you hold, in the mod and in Discord.", 18f);
-            btnPublicTxt = UIFactory.GetButtonText(btnPublic);
-            btnAnnounce = SettingsRow(parent, "SPcAnn", () => ToggleSetting("announce"),
-                "Rare pulls may be posted to the Discord gambler chat with your name.", 18f);
-            btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
-            btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
-                "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.", 18f);
-            btnPresetTxt = UIFactory.GetButtonText(btnPreset);
-            // The preview in its own left-aligned row: dropped straight into
-            // the settings column it was stretched to the column's width and
-            // its picture centred in that ("too far to the right", Sid,
+            UIFactory.SetMinH(((Component)info).gameObject, 0f);
+            // The preview in its own left-aligned row, so its picture is not
+            // centred in a stretched cell ("too far to the right", Sid,
             // 2026-09-13). It shows as soon as a render exists, which the
-            // Settings tab now asks for itself (MaybeTick -> OnTabVisit).
+            // Settings tab asks for itself (MaybeTick -> OnTabVisit).
             presetPreviewRow = new GameObject("SPcPrevRow");
-            presetPreviewRow.transform.SetParent(parent, false);
+            presetPreviewRow.transform.SetParent(previewParent, false);
             presetPreviewRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(presetPreviewRow, spacing: 8, forceExpandW: false, forceExpandH: false);
             UIFactory.AddLE(presetPreviewRow, prefH: 118, minH: 118, flexH: 0);
@@ -2459,13 +2475,34 @@ namespace CompetitiveRounds
             presetPreviewRow.SetActive(false);
             // The renderer's last word (rendered / uploading / picture current /
             // why it refused), the diagnostic the picture row used to carry.
-            txtPicNote = UIFactory.CreateText("SPcPicN", parent, "", 12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 16));
+            txtPicNote = UIFactory.CreateText("SPcPicN", previewParent, "", 12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 16));
+            return ((Component)info).gameObject;
         }
 
-        private static string PresetLabel()
+        /// <summary>The preset slots a player can pick: Follow (-1) and every
+        /// AUTHORABLE slot (bug #370: PresetSlotCount, not the array length).</summary>
+        private static string[] PresetOptionIds()
         {
-            int v = PortraitRender.CurrentPreset();
-            // v is the slot INDEX; players count slots from one.
+            int slots = PortraitRender.PresetSlotCount();
+            var ids = new string[slots + 1];
+            for (int i = -1; i < slots; i++)
+                ids[i + 1] = i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return ids;
+        }
+
+        private static int ParsePresetId(string id)
+        {
+            int v;
+            return int.TryParse(id, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : -1;
+        }
+
+        private static string PresetLabel() => PresetLabel(PortraitRender.CurrentPreset());
+
+        /// <summary>Item 13: the label of a GIVEN slot index, so the settings
+        /// pane can render the recommended value (Follow, -1) without it being
+        /// the live one. v is the slot INDEX; players count slots from one.</summary>
+        internal static string PresetLabel(int v)
+        {
             return v < 0 ? I18n.Tr("Follow my character") : I18n.TrF("Preset {0}", v + 1);
         }
 
@@ -2484,28 +2521,56 @@ namespace CompetitiveRounds
                 if (cfg == null) return;
                 // -1 → 0 → … → slots-1 → -1, over slots+1 states.
                 int slots = PortraitRender.PresetSlotCount();
-                cfg.Value = ((Mathf.Clamp(cfg.Value, -1, slots - 1) + 2) % (slots + 1)) - 1;
-                PortraitRender.RequestRefresh("preset");
-                NativeUI.MarkDirty();
+                SetPreset(((Mathf.Clamp(cfg.Value, -1, slots - 1) + 2) % (slots + 1)) - 1);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset cycle threw: {ex.Message}"); }
         }
 
-        private static GameObject SettingsRow(Transform parent, string name, UnityEngine.Events.UnityAction onClick, string desc, float descH)
+        /// <summary>Item 13: the value-taking writer of the preset row (the
+        /// settings page's dropdown). The slot is clamped to Follow (-1)
+        /// through the last AUTHORABLE slot (bug #370), so an out-of-range id
+        /// cannot select an unfillable slot. Local only; the renderer is asked
+        /// for a new picture, debounced on its side.</summary>
+        internal static void SetPreset(int v)
         {
-            // One setting = one [button + caption below] group (Bug 87), the
-            // same shape as NativeUI's SettingsToggle.
-            var group = new GameObject(name + "_grp");
-            group.transform.SetParent(parent, false);
-            group.AddComponent<RectTransform>();
-            UIFactory.AddVLG(group, spacing: 1);
-            UIFactory.AddLE(group, flexH: 0);
-            var btn = NativeUI.SettingsButton(group.transform, name, "", C_WHITE, C_BTN, new Vector2(340, 28), onClick);
-            var d = UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM, sizeDelta: new Vector2(700, descH));
-            // wrap + auto height (2026-09-13): a caption longer than the column, or
-            // a translation of one, folds instead of running off the edge
-            UIFactory.SetWordWrap(d, true); UIFactory.SetTextAutoHeight(d, descH);
-            return btn;
+            try
+            {
+                var cfg = Plugin.PortraitPreset;
+                if (cfg == null) return;
+                int slots = PortraitRender.PresetSlotCount();
+                int next = Mathf.Clamp(v, -1, slots - 1);
+                if (next == cfg.Value) return;                 // already stored: no refresh request
+                cfg.Value = next;
+                PortraitRender.RequestRefresh("preset");
+                NativeUI.MarkDirty();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset set threw: {ex.Message}"); }
+        }
+
+        /// <summary>Item 13: the two server rows' paint as a function of the
+        /// value (null = /pc/me has not answered yet), so the settings pane can
+        /// render the recommended value through the same literals.</summary>
+        internal static void PaintCollectionPublic(object t, bool? on)
+        {
+            UIFactory.SetText(t, on == null
+                ? "My collection is public: <color=#888>...</color>"
+                : on.Value
+                    ? "My collection is public: <color=#88FF88>ON</color>"
+                    : "My collection is public: <color=#FF9966>OFF</color>");
+        }
+
+        internal static void PaintAnnounce(object t, bool? on)
+        {
+            UIFactory.SetText(t, on == null
+                ? "Announce my pulls: <color=#888>...</color>"
+                : on.Value
+                    ? "Announce my pulls: <color=#88FF88>ON</color>"
+                    : "Announce my pulls: <color=#FF9966>OFF</color>");
+        }
+
+        internal static void PaintPreset(object t, int v)
+        {
+            UIFactory.SetTextRaw(t, I18n.Tr("Character preset") + ": <color=#CCCCCC>" + PresetLabel(v) + "</color>");
         }
 
         internal static void RefreshSettingsRows()
@@ -2514,20 +2579,8 @@ namespace CompetitiveRounds
             var id = LocalId();
             var me = ApiClient.CachedPcMe;
             if (me == null && id != null) ApiClient.FetchPcMe(id);   // throttled inside (10 s)
-            if (me == null)
-            {
-                UIFactory.SetText(btnPublicTxt, "My collection is public: <color=#888>...</color>");
-                UIFactory.SetText(btnAnnounceTxt, "Announce my pulls: <color=#888>...</color>");
-            }
-            else
-            {
-                UIFactory.SetText(btnPublicTxt, me.collection_public
-                    ? "My collection is public: <color=#88FF88>ON</color>"
-                    : "My collection is public: <color=#FF9966>OFF</color>");
-                UIFactory.SetText(btnAnnounceTxt, me.announce
-                    ? "Announce my pulls: <color=#88FF88>ON</color>"
-                    : "Announce my pulls: <color=#FF9966>OFF</color>");
-            }
+            PaintCollectionPublic(btnPublicTxt, me == null ? (bool?)null : me.collection_public);
+            PaintAnnounce(btnAnnounceTxt, me == null ? (bool?)null : me.announce);
             RefreshPictureRows();
         }
 
@@ -2537,7 +2590,7 @@ namespace CompetitiveRounds
         private static void RefreshPictureRows()
         {
             if (btnPresetTxt == null) return;
-            UIFactory.SetTextRaw(btnPresetTxt, I18n.Tr("Character preset") + ": <color=#CCCCCC>" + PresetLabel() + "</color>");
+            PaintPreset(btnPresetTxt, PortraitRender.CurrentPreset());
             string note = PortraitRender.LastResult;
             UIFactory.SetTextRaw(txtPicNote, string.IsNullOrEmpty(note) ? "" : "(" + note + ")");
             if (presetPreviewRow == null || presetPreview == null) return;
@@ -2565,9 +2618,21 @@ namespace CompetitiveRounds
 
         private static void ToggleSetting(string key)
         {
+            var me = ApiClient.CachedPcMe;
+            if (me == null) { var lid = LocalId(); if (lid != null) ApiClient.FetchPcMe(lid, true); return; }
+            SetSetting(key, !SettingValue(me, key));
+        }
+
+        /// <summary>Item 13: the value-taking writer of the two server rows
+        /// (the settings page's switches). A value equal to the cached one
+        /// sends nothing. Everything else is the toggle's contract unchanged:
+        /// single flight, optimistic, rolled back on failure.</summary>
+        internal static void SetSetting(string key, bool value)
+        {
             var id = LocalId(); var me = ApiClient.CachedPcMe;
             if (id == null) return;
             if (me == null) { ApiClient.FetchPcMe(id, true); return; }
+            if (SettingValue(me, key) == value) { NativeUI.MarkDirty(); return; }
             if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
             // Single-flight with a 25 s latch (past the 20 s transport timeout,
             // the same rule as the same-cards preference): the value that
@@ -2576,7 +2641,7 @@ namespace CompetitiveRounds
             if (setInFlight && Now - setAt < 25f) return;
             setInFlight = true; setAt = Now;
             bool before = SettingValue(me, key);
-            bool after = !before;
+            bool after = value;
             int revision = me.revision;
             ApplySetting(me, key, after);
             NativeUI.MarkDirty();
