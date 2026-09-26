@@ -166,6 +166,7 @@ namespace CompetitiveRounds
         /// painted or focused.</summary>
         private static void SettingsBeginBuild()
         {
+            settingsBuildGen++;
             UIFactory.PaintHook = SettingsPaintHook;
             settingsRegistry.Clear();
             settingsByKey.Clear();
@@ -1637,9 +1638,21 @@ namespace CompetitiveRounds
             catch (Exception e) { Plugin.Log.LogWarning("[SETTINGS] lever failed: " + e.Message); }
         }
 
+        /// <summary>Paint readiness (round-2 M2). settingsBuildGen counts page
+        /// builds (SettingsBeginBuild); settingsPaintedGen is the build the
+        /// last COMPLETE RefreshSettings pass painted (SettingsAfterRefresh is
+        /// its last step, so a pass that throws part-way never counts).
+        /// Between a rebuild and the new page's first paint pass every row's
+        /// text is still empty - and a language pack that lands after a
+        /// locale switch rebuilds the page on its own clock (I18n.ApplyPack ->
+        /// RequestCatalogueRebuild), so the self-test measures only a page
+        /// whose two numbers match.</summary>
+        private static int settingsBuildGen, settingsPaintedGen = -1;
+
         /// <summary>The last step of every RefreshSettings pass.</summary>
         private static void SettingsAfterRefresh()
         {
+            settingsPaintedGen = settingsBuildGen;
             SettingsPaintDeleteState(deleteArmed);
             SettingsUpdateHint();
             SettingsRenderPane();
@@ -1666,10 +1679,25 @@ namespace CompetitiveRounds
         /// empty for the control run. Each named mutation breaks exactly one
         /// assertion's subject at run time, so that assertion must red while
         /// the others stay green. Only the control run sweeps the four other
-        /// locales for A2a (design residual 3).</summary>
+        /// locales for A2a (design residual 3) - and the two A2a sweep
+        /// fixtures (round-2 M2), which are inputs rather than mutations:
+        /// "a2a-blank" empties 12 of the Swedish pass's In-game cells at
+        /// measurement time, the count the round-1 sweep hid, and
+        /// "a2a-rebuild" rebuilds the page in the Tick just before that
+        /// measurement, the race a late language pack creates.</summary>
         private static string stMutation = "";
         private static readonly string[] SettingsSelfTestMutations =
-            { "a1-shift", "a2a-zero", "a2a-narrow", "a2b-short", "a5-tall", "a7-noremember", "a8-nohint", "s15-long" };
+            { "a1-shift", "a2a-zero", "a2a-narrow", "a2b-short", "a5-tall", "a7-noremember", "a8-nohint", "s15-long",
+              "a2a-blank", "a2a-rebuild" };
+        private static bool SettingsSweepRuns => stMutation.Length == 0 || stMutation == "a2a-blank" || stMutation == "a2a-rebuild";
+
+        /// <summary>A2a's denominator (round-2 M2): the cells the base pass
+        /// measured on each sub-tab, by id ("SIgChat/label", "SIgChat/opt1").
+        /// Every locale pass must measure the same set, so a cell that drops
+        /// out of the loop is named rather than silently uncounted.</summary>
+        private static readonly List<string>[] stBaseCells = new List<string>[SETTINGS_TABS];
+        private static int stReadyRetry;
+        private static bool stRebuildFixtureDone;
         private static readonly string[] SettingsSweepLocales = { "es", "ru", "uk", "sv" };
         private static int stSweepIdx, stPrefBefore;
         private static string stOrigLocale;
@@ -1721,6 +1749,8 @@ namespace CompetitiveRounds
             }
             stMutation = mutation;
             stSegMax.Clear(); stSegWidest.Clear(); stSegLocales.Clear();
+            for (int i = 0; i < SETTINGS_TABS; i++) stBaseCells[i] = null;
+            stReadyRetry = 0; stRebuildFixtureDone = false;
             stPhase = 0; stTab = 0; stPass = 0; stFail = 0; stRetry = 0; stWaitUntil = 0f; stSweepIdx = 0;
             stSavedTab = settingsSubTab;
             stSavedPerfOpen = _perfSectionOpen;
@@ -1800,6 +1830,7 @@ namespace CompetitiveRounds
                     case 0: SelfTestStatic(); stPhase = 1; stTab = 0; break;
                     case 1: SelfTestOpenTab(); stPhase = 2; stWaitUntil = Time.unscaledTime + 0.6f; break;
                     case 2:
+                        if (!SelfTestPaintReady("A2a " + SettingsModel.SubTabHomes[stTab])) break;
                         SelfTestCheckTab();
                         stTab++;
                         stPhase = stTab < SETTINGS_TABS ? 1 : 3;
@@ -2062,34 +2093,53 @@ namespace CompetitiveRounds
                     if (painted != baseText) stSweepDiffer++;
                 }
             }
-            int a2 = 0, a2n = 0;
-            foreach (var r in rows)
+            // Every one-line cell of every active row (design S10 A2a, round-2
+            // M2): the label, a switch's state word, each segment word, a
+            // dropdown face, a slider readout, an action or disclosure glyph,
+            // and each delete-row button face, shown or hidden (a hidden face
+            // must still fit when it shows). A cell that is not built, is
+            // empty or cannot be measured FAILS and stays in the denominator;
+            // no cell leaves the count.
+            var cells = SelfTestA2aCells(rows);
+            bool blank = stMutation == "a2a-blank" && loc == "sv" && home == "ingame";
+            int a2 = 0, a2n = 0, blanked = 0;
+            var measured = new List<string>();
+            foreach (var c in cells)
             {
-                var cells = new List<KeyValuePair<object, float>>();
-                if (r.Kind == SettingsKind.Destructive && r.Members != null)
-                {
-                    foreach (var m in r.Members)
-                        if (m.Button != null && m.Button.activeInHierarchy) cells.Add(new KeyValuePair<object, float>(m.ButtonTxt, m.ButtonSize.x - 8f));
-                }
-                else cells.Add(new KeyValuePair<object, float>(r.Label, stMutation == "a2a-narrow" && r.Key == "SPerf_PoolInit" ? 40f : 340f));
-                if (r.Kind == SettingsKind.Switch) cells.Add(new KeyValuePair<object, float>(r.Word, 240f));
-                if (r.Kind == SettingsKind.Segmented && r.OptTxts != null) foreach (var o in r.OptTxts) cells.Add(new KeyValuePair<object, float>(o, 142f));
-                if (r.Kind == SettingsKind.Dropdown) cells.Add(new KeyValuePair<object, float>(r.FaceTxt, 312f));
-                if (r.Kind == SettingsKind.Slider) cells.Add(new KeyValuePair<object, float>(r.Readout, 222f));
-                foreach (var kv in cells)
-                {
-                    if (kv.Key == null) continue;
-                    string text = UIFactory.GetTmpText(kv.Key);
-                    if (string.IsNullOrEmpty(SettingsModel.StripTags(text))) continue;
-                    a2n++;
-                    float w = stMutation == "a2a-zero" ? 0f : UIFactory.MeasureTextWidth(kv.Key, text);
-                    if (w <= 0f) StBad(tag + " " + r.Key + ": measurement unavailable");
-                    else if (w > kv.Value + 0.5f) StBad(tag + " " + r.Key + ": '" + SettingsModel.StripTags(text) + "' measures "
-                        + w.ToString("0", CultureInfo.InvariantCulture) + " px in a " + kv.Value.ToString("0", CultureInfo.InvariantCulture) + " px cell");
-                    else a2++;
-                }
+                if (blank && blanked < 12 && c.Obj != null) { UIFactory.SetTextNoHook(c.Obj, ""); blanked++; }
+                a2n++;
+                measured.Add(c.Id);
+                if (c.Obj == null) { StBad(tag + " " + c.Id + ": cell not built"); continue; }
+                string text = UIFactory.GetTmpText(c.Obj);
+                if (string.IsNullOrEmpty(SettingsModel.StripTags(text))) { StBad(tag + " " + c.Id + ": measurement unavailable (empty text)"); continue; }
+                float w = stMutation == "a2a-zero" ? 0f : UIFactory.MeasureTextWidth(c.Obj, text);
+                if (w <= 0f) StBad(tag + " " + c.Id + ": measurement unavailable");
+                else if (w > c.Width + 0.5f) StBad(tag + " " + c.Id + ": '" + SettingsModel.StripTags(text) + "' measures "
+                    + w.ToString("0", CultureInfo.InvariantCulture) + " px in a " + c.Width.ToString("0", CultureInfo.InvariantCulture) + " px cell");
+                else a2++;
             }
-            if (a2 == a2n) StOk(tag + " " + home + ": " + a2 + " one-line cells fit");
+            if (blanked > 0) { StNote(tag + " fixture a2a-blank emptied " + blanked + " of " + home + "'s cells before measuring"); dirty = true; }
+            // The denominator is the base pass's own cell set: each locale pass
+            // must measure every cell the base pass measured on this sub-tab.
+            int tabIdx = SettingsModel.SubTabIndex(home);
+            bool covered = true;
+            string baseNote = "";
+            if (loc == null)
+            {
+                if (tabIdx >= 0) stBaseCells[tabIdx] = measured;
+                StNote(tag + " " + home + " cells: " + string.Join(", ", measured.ToArray()));
+            }
+            else if (tabIdx >= 0 && stBaseCells[tabIdx] != null)
+            {
+                var seen = new HashSet<string>(measured);
+                foreach (var id in stBaseCells[tabIdx])
+                    if (!seen.Contains(id)) { covered = false; StBad(tag + " " + id + ": not measured in this pass (the base pass measured it)"); }
+                if (a2n != stBaseCells[tabIdx].Count) covered = false;
+                baseNote = " (base pass " + stBaseCells[tabIdx].Count + ")";
+            }
+            else if (tabIdx >= 0) { covered = false; baseNote = " (no base pass to compare)"; }
+            string sum = tag + " " + home + ": " + a2 + " of " + a2n + " one-line cells fit" + baseNote;
+            if (a2 == a2n && covered) StOk(sum); else StBad(sum);
 
             // Section 15: each segmented row's widest option word in this
             // pass. The s15-long mutation lengthens one SBloom word for this
@@ -2130,27 +2180,102 @@ namespace CompetitiveRounds
                 if (loc == null) stBaseSubLabels[i] = painted;
                 else if (stBaseSubLabels[i] != null && painted != stBaseSubLabels[i]) stSweepSubDiffer++;
             }
+            // Round-2 M2, same class as the rows: a face that was never built
+            // is named and failed, never left out of the count.
+            var names = new List<string>();
             var cells = new List<KeyValuePair<GameObject, float>>();
-            for (int i = 0; i < SETTINGS_TABS; i++)
-                if (settingsSubBtns[i] != null) cells.Add(new KeyValuePair<GameObject, float>(settingsSubBtns[i], 160f));
-            if (setDetMoreBtn != null) cells.Add(new KeyValuePair<GameObject, float>(setDetMoreBtn, 132f));
-            if (setResetBtn != null) cells.Add(new KeyValuePair<GameObject, float>(setResetBtn, 292f));
-            if (setResetConfirmBtn != null) cells.Add(new KeyValuePair<GameObject, float>(setResetConfirmBtn, 102f));
-            if (setResetCancelBtn != null) cells.Add(new KeyValuePair<GameObject, float>(setResetCancelBtn, 92f));
-            int ok = 0, n = 0;
-            foreach (var kv in cells)
+            for (int i = 0; i < SETTINGS_TABS; i++) { names.Add("sub-tab " + SettingsModel.SubTabHomes[i]); cells.Add(new KeyValuePair<GameObject, float>(settingsSubBtns[i], 160f)); }
+            names.Add("details more"); cells.Add(new KeyValuePair<GameObject, float>(setDetMoreBtn, 132f));
+            names.Add("reset"); cells.Add(new KeyValuePair<GameObject, float>(setResetBtn, 292f));
+            names.Add("reset confirm"); cells.Add(new KeyValuePair<GameObject, float>(setResetConfirmBtn, 102f));
+            names.Add("reset cancel"); cells.Add(new KeyValuePair<GameObject, float>(setResetCancelBtn, 92f));
+            int ok = 0;
+            for (int k = 0; k < cells.Count; k++)
             {
+                var kv = cells[k];
+                if (kv.Key == null) { StBad(tag + " " + names[k] + ": not built"); continue; }
                 var t = UIFactory.GetButtonText(kv.Key);
                 string text = UIFactory.GetTmpText(t);
                 if (t == null || string.IsNullOrEmpty(SettingsModel.StripTags(text))) { StBad(tag + " " + kv.Key.name + ": empty face"); continue; }
-                n++;
                 float w = stMutation == "a2a-zero" ? 0f : UIFactory.MeasureTextWidth(t, text);
                 if (w <= 0f) StBad(tag + " " + kv.Key.name + ": measurement unavailable");
                 else if (w > kv.Value + 0.5f) StBad(tag + " " + kv.Key.name + ": '" + SettingsModel.StripTags(text) + "' measures "
                     + w.ToString("0", CultureInfo.InvariantCulture) + " px in a " + kv.Value.ToString("0", CultureInfo.InvariantCulture) + " px face");
                 else ok++;
             }
-            if (ok == cells.Count) StOk(tag + ": " + ok + " button faces fit");
+            string sum = tag + ": " + ok + " of " + cells.Count + " button faces fit";
+            if (ok == cells.Count) StOk(sum); else StBad(sum);
+        }
+
+        /// <summary>One A2a cell: its id ("SIgChat/opt1"), its text object
+        /// (null when the row never built it) and the width it must fit.</summary>
+        private struct SettingsA2aCell
+        {
+            internal string Id;
+            internal object Obj;
+            internal float Width;
+            internal SettingsA2aCell(string id, object obj, float width) { Id = id; Obj = obj; Width = width; }
+        }
+
+        /// <summary>A2a's cell list for a sub-tab's active rows (round-2 M2):
+        /// every one-line cell each row's kind builds, whether or not its text
+        /// object exists, so a cell the row failed to build is failed by id.</summary>
+        private static List<SettingsA2aCell> SelfTestA2aCells(List<SettingsRowRec> rows)
+        {
+            var cells = new List<SettingsA2aCell>();
+            foreach (var r in rows)
+            {
+                float labelW = stMutation == "a2a-narrow" && r.Key == "SPerf_PoolInit" ? 40f : 340f;
+                cells.Add(new SettingsA2aCell(r.Key + "/label", r.Label, labelW));
+                switch (r.Kind)
+                {
+                    case SettingsKind.Switch:
+                        cells.Add(new SettingsA2aCell(r.Key + "/word", r.Word, 240f));
+                        break;
+                    case SettingsKind.Segmented:
+                        int n = r.Ids != null ? r.Ids.Length : 0;
+                        for (int i = 0; i < n; i++)
+                            cells.Add(new SettingsA2aCell(r.Key + "/opt" + i, r.OptTxts != null && i < r.OptTxts.Length ? r.OptTxts[i] : null, 142f));
+                        if (n == 0) cells.Add(new SettingsA2aCell(r.Key + "/opt", null, 142f));
+                        break;
+                    case SettingsKind.Dropdown:
+                        cells.Add(new SettingsA2aCell(r.Key + "/face", r.FaceTxt, 312f));
+                        break;
+                    case SettingsKind.Slider:
+                        cells.Add(new SettingsA2aCell(r.Key + "/readout", r.Readout, 222f));
+                        break;
+                    case SettingsKind.Action:
+                    case SettingsKind.Disclosure:
+                        cells.Add(new SettingsA2aCell(r.Key + "/glyph", r.GlyphTxt, 36f));
+                        break;
+                    case SettingsKind.Destructive:
+                        if (r.Members == null || r.Members.Count == 0) cells.Add(new SettingsA2aCell(r.Key + "/buttons", null, 0f));
+                        else foreach (var m in r.Members) cells.Add(new SettingsA2aCell(m.Key + "/button", m.ButtonTxt, m.ButtonSize.x - 8f));
+                        break;
+                }
+            }
+            return cells;
+        }
+
+        /// <summary>Round-2 M2: the self-test measures only a page its own
+        /// paint pass has painted (settingsPaintedGen == settingsBuildGen).
+        /// The wait is bounded - 20 x 0.25 s - and a page that never completes
+        /// a pass fails; it is then measured anyway, so its empty cells fail
+        /// by id. Returns false while waiting (the caller retries the phase).</summary>
+        private static bool SelfTestPaintReady(string tag)
+        {
+            if (settingsPaintedGen == settingsBuildGen)
+            {
+                if (stReadyRetry > 0)
+                    StNote(tag + ": waited " + (stReadyRetry * 0.25f).ToString("0.00", CultureInfo.InvariantCulture)
+                        + " s for the page's paint pass after build " + settingsBuildGen);
+                stReadyRetry = 0;
+                return true;
+            }
+            if (stReadyRetry++ < 20) { stWaitUntil = Time.unscaledTime + 0.25f; return false; }
+            StBad(tag + ": the page never completed a paint pass after build " + settingsBuildGen + " (last painted " + settingsPaintedGen + ")");
+            stReadyRetry = 0;
+            return true;
         }
 
         private static void SelfTestA2b(string home, List<SettingsRowRec> rows)
@@ -2243,7 +2368,7 @@ namespace CompetitiveRounds
             else StBad("A7 after the rebuild: sub-tab " + settingsSubTab + ", active bodies [" + SelfTestActiveBodies() + "], expected exactly body 3");
             if (empty.Count == 0) StOk("A7 all " + SettingsDescriptors.All.Length + " labels painted after the rebuild");
             else StBad("A7 unpainted after the rebuild: " + string.Join(",", empty.ToArray()));
-            if (stMutation.Length == 0)
+            if (SettingsSweepRuns)
             {
                 stOrigLocale = I18n.Locale;
                 stPrefBefore = SettingsGameLanguagePref();
@@ -2346,6 +2471,21 @@ namespace CompetitiveRounds
 
         private static void SelfTestSweepCheckTab()
         {
+            string sweepLoc = SettingsSweepLocales[stSweepIdx];
+            // Fixture "a2a-rebuild" (round-2 M2): ask for a catalogue rebuild
+            // and stay in this phase, so the next Tick rebuilds the page and
+            // the one after reaches this measurement before the new page's
+            // first paint pass - the race a language pack landing after the
+            // locale switch creates, made deterministic.
+            if (stMutation == "a2a-rebuild" && sweepLoc == "sv" && stTab == 0 && !stRebuildFixtureDone)
+            {
+                stRebuildFixtureDone = true;
+                RequestCatalogueRebuild();
+                StNote("A2a[" + sweepLoc + "] fixture a2a-rebuild: the page rebuilds just before the "
+                    + SettingsModel.SubTabHomes[stTab] + " measurement (build " + settingsBuildGen + ")");
+                return;
+            }
+            if (!SelfTestPaintReady("A2a[" + sweepLoc + "] " + SettingsModel.SubTabHomes[stTab])) return;
             SettingsForceLayout();
             SelfTestA2a(SettingsModel.SubTabHomes[stTab], SettingsFocusList(stTab), SettingsSweepLocales[stSweepIdx]);
             if (stTab == 0) SelfTestA2aChrome(SettingsSweepLocales[stSweepIdx]);
