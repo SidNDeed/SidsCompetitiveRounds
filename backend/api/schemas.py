@@ -856,6 +856,19 @@ class HealthResponse(BaseModel):
     # it raises instead of silently leaving the key out. Absent on any build
     # before that batch, which is how the train reads the old build.
     ffa_game_number: int
+    # ovt_solo_split: whether this build refuses a 1v2 report that moves another
+    # player into the solo seat once the series holds a recorded game
+    # (main._OVT_SOLO_SPLIT; 1 = submit_ovt_match's compiled constants carry the
+    # refusal's 403 detail AND the trailing literal of its log line). DERIVED
+    # from those two strings when main is imported, never written down, so a
+    # build that lost or edited either one reads 0 (#342). The release train's
+    # build discriminator for the bug 391 batch, which adds no route and no key
+    # to a GET answer both builds serve; equal on both boxes by construction,
+    # and read by nothing else (#306). Declared without a default, so building
+    # the answer without it raises instead of silently leaving the key out.
+    # Absent on any build before that batch, which is how the train reads the
+    # old build.
+    ovt_solo_split: int
     # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
     # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
     # by migration 333). `ready` once the map is non-empty, `empty` when the

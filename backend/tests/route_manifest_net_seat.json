@@ -646,7 +646,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "19c985f411d1f7a7d1d542bf5fd6bdc782b16336"
+          "fe6745d17d2e937ea1a6d6f0288c8727fa82cc1a"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -3314,6 +3314,21 @@
           "52d7f9cd49c8d4e2e6ae1ddbbd76345b7b23539b"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "title_ladders router (backend/api/title_ladders.py): one GET, /api/v1/players/{steam_id}/title-ladders. It reads players (one row by steam_id, of which only id and active_title_id are used; the row is never serialized), player_items joined to shop_items (sku), shop_items (sku, id) and title_ladder_progress (line, games, tier), and answers a fixed projection built from those values and the in-module LADDERS catalogue. It reads no matches table and no Match ORM row, so no W1 seat column can reach its output. Static classification: handler-implementation drift (a Match read, or serializing the Player row) would need re-review. Enumerated only under the pinned fastapi==0.115.0 (0.141 wraps included routers as _IncludedRouter, invisible to app.routes) - the test asserts the pin.",
+      "routes": [
+        [
+          "/api/v1/players/{steam_id}/title-ladders",
+          [
+            "GET"
+          ],
+          "title_ladders",
+          "get_title_ladders",
+          "c42099dd8468c57fdaeb652cdc713c8d6d4e19b3"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -3350,7 +3365,7 @@
       [
         "main",
         "lifespan",
-        "c7e6822c6e4087702ff232ebc7edbd9c57f8a264"
+        "a09fe0698cd192322e4e2cfa1adbe244825f780d"
       ]
     ]
   },
@@ -3370,6 +3385,7 @@
     "GET /api/v1/tournaments/my-active-matches -> tournaments.my_active_matches",
     "GET /api/v1/tournaments/players/{steam_id}/tournaments -> tournaments.player_tournaments",
     "GET /api/v1/tournaments/players/{steam_id}/penalty -> tournaments.player_penalty",
+    "GET /api/v1/players/{steam_id}/title-ladders -> title_ladders.get_title_ladders",
     "GET /api/v1/health -> main.health_check",
     "GET /api/v1/mod-version -> main.get_mod_version",
     "GET /api/v1/internal/janitor-selftest -> main.get_janitor_selftest",

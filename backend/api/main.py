@@ -2803,6 +2803,35 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             _walk(child, [], (), ())
         return found, dyn
 
+    def _collect_orm_locks(fn_node):
+        """Every `.with_for_update(...)` in one function, with its wait mode.
+
+        The SQL half of this walk sees only `text(<literal>)`, so an ORM lock
+        is invisible to it — and a census built from the SQL half alone
+        reports a lock-taking path count that is wrong in the one direction
+        that matters, too LOW (bug 391 r2 finding 4). This is a separate,
+        deliberately blunt pass: the method name is enough to identify a
+        locking read, and the keywords decide whether it can WAIT.
+
+        `skip_locked=True` or `nowait=True` means the statement DECLINES; no
+        such keyword means it can wait with no bound. A non-constant keyword
+        value is counted as WAIT: a mode this walk cannot prove is a mode it
+        must not certify as declining (#342).
+        """
+        out = []
+        for node in _ast.walk(fn_node):
+            if not (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr == "with_for_update"):
+                continue
+            declines = False
+            for kw in node.keywords:
+                if kw.arg in ("skip_locked", "nowait"):
+                    if isinstance(kw.value, _ast.Constant) and kw.value.value:
+                        declines = True
+            out.append((node.lineno, "DECLINES" if declines else "WAITS"))
+        return out
+
     def _callees(mod, fn_node):
         """Edges from one function. Function-local imports are resolved per
         function AND every plausible resolution of a name is followed —
@@ -2839,9 +2868,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
     statements: dict = {}    # (module, line, sql) -> entry
     dynamic: dict = {}       # (module, line) -> entry
+    orm_locks: dict = {}     # (module, line) -> entry
     root_counts: dict = {}
     lit_cache: dict = {}
     edge_cache: dict = {}
+    orm_cache: dict = {}
 
     for root_mod, root_fn in roots:
         if root_fn not in funcs.get(root_mod, {}):
@@ -2862,6 +2893,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             if (mod, fn) not in lit_cache:
                 lit_cache[(mod, fn)] = _collect_literals(mod, funcs[mod][fn])
                 edge_cache[(mod, fn)] = _callees(mod, funcs[mod][fn])
+                orm_cache[(mod, fn)] = _collect_orm_locks(funcs[mod][fn])
+            for line, mode in orm_cache[(mod, fn)]:
+                orm_locks.setdefault((mod, line), {
+                    "module": mod, "func": fn, "line": line, "mode": mode})
             found, dyn = lit_cache[(mod, fn)]
             for line, sql in found:
                 key = (mod, line, sql)
@@ -2882,8 +2917,64 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                              key=lambda s: (s["module"], s["line"], s["sql"])),
         "dynamic": sorted(dynamic.values(),
                           key=lambda s: (s["module"], s["line"])),
+        "orm_locks": sorted(orm_locks.values(),
+                            key=lambda s: (s["module"], s["line"])),
         "root_counts": root_counts,
     }
+
+
+# Every SQL row-locking clause PostgreSQL has. Listed in longest-first order so
+# `FOR NO KEY UPDATE` is never matched as `FOR UPDATE` and miscounted.
+_ROW_LOCK_CLAUSES = ("FOR NO KEY UPDATE", "FOR KEY SHARE", "FOR UPDATE",
+                     "FOR SHARE")
+
+
+def _janitor_lock_census() -> dict:
+    """Every lock-taking path the janitor roots reach, and whether it can WAIT.
+
+    #432: a flag names a LINE, the defect is a CLASS. The class here is "a
+    janitor statement that can wait with no bound", because a janitor arm that
+    waits holds every arm behind it in the same tick and raises nothing while
+    it does (#276 / #430).
+
+    The first version of this census was authored by hand from the SQL half of
+    `_janitor_sql_inventory()` and therefore could not see an ORM lock at all,
+    so it reported a WAIT count that was wrong in the one direction that
+    matters — too low — while certifying itself exhaustive (bug 391 r2
+    finding 4). Both halves are derived from the SAME live call graph here:
+    SQL literals classified by their lock clause, ORM `.with_for_update(...)`
+    calls classified by their keywords. A statement DECLINES only when it says
+    so (`SKIP LOCKED` / `NOWAIT`); everything else is counted as a waiter,
+    which is the safe direction for a count whose job is to be an upper bound
+    on surprise.
+    """
+    inv = _janitor_sql_inventory()
+    declines, waits = [], []
+    for st in inv["statements"]:
+        up = " ".join(st["sql"].split()).upper()
+        clause = next((c for c in _ROW_LOCK_CLAUSES if c in up), None)
+        if clause is None:
+            continue
+        row = {"module": st["module"], "line": st["line"], "func": st["func"],
+               "kind": "sql", "clause": clause,
+               "sql": " ".join(st["sql"].split())[:110]}
+        (declines if ("SKIP LOCKED" in up or "NOWAIT" in up)
+         else waits).append(row)
+    for lk in inv["orm_locks"]:
+        row = {"module": lk["module"], "line": lk["line"], "func": lk["func"],
+               "kind": "orm", "clause": "with_for_update", "sql": ""}
+        (declines if lk["mode"] == "DECLINES" else waits).append(row)
+    key = (lambda r: (r["module"], r["line"]))
+    # Two different numbers, because one source line can expand into several
+    # statements (the walker expands a constant loop into one statement per
+    # row). "statements" is what EXPLAIN plans; "sites" is what a reader
+    # greps. Reporting only one of them is how two counts from the same
+    # expression get reconciled instead of explained (#342 / #431).
+    return {"declines": sorted(declines, key=key),
+            "waits": sorted(waits, key=key),
+            "decline_sites": sorted({key(r) for r in declines}),
+            "wait_sites": sorted({key(r) for r in waits}),
+            "orm_total": len(inv["orm_locks"])}
 
 
 def _janitor_print(msg: str) -> None:
@@ -3700,6 +3791,431 @@ async def team_queue_cleanup_loop():
             print(f"[TEAM-QUEUE-CLEANUP] Error: {e}")
 
 
+# ── 1v2 abandoned-series horizon (bug 391) ───────────────────────────────
+# Sid ruled on 2026-09-20 that a ranked series idle for 14 days is closed
+# rather than left live. A 1v2 sitting is UNRANKED (`is_ranked` defaults FALSE
+# and nothing flips it — backend/sql/120_1v2_schema.sql), so there is no rating
+# to move and the settlement is a VOID: `invalidated_at` +
+# `invalidation_reason`, never `completed_at` and never `winner_side`. Nothing
+# is credited to whoever happened to be ahead on games.
+#
+# Sid's ruling for a RANKED series idle this long is the OPPOSITE settlement —
+# the leader takes the rating — so a ranked row must never reach this void.
+# Every 1v2 insert on this tree hardcodes `is_ranked` FALSE, but
+# 120_1v2_schema.sql reserves the column ("FALSE at launch (unscored)"), so the
+# candidate read FILTERS on it instead of trusting that: the day the flag
+# becomes a variable, this arm declines those rows and NAMES them in the log
+# rather than silently applying the unranked rule to a ranked sitting.
+#
+# What the void does NOT do: it does not make the sitting continuable again.
+# `ovt_series_continuation`'s prior-series lookup accepts 'canceled', so the
+# void moves the row INTO its scope; the refusal two statements later is the
+# 60-minute window (_CONTINUATION_WINDOW_MINUTES), anchored on
+# COALESCE(completed_at, created_at). That anchor is the whole of the claim,
+# and it is only `created_at` — 14 days old by construction — while the row
+# carries NO completion stamp. `completed_at` is schema-nullable and
+# independent of `status`, so an `active` row carrying a RECENT one would be
+# voided into the lookup's scope with a recent anchor and then accepted as a
+# continuable prior. The settlement write stays two invalidation columns wide
+# (nothing here clears a stamp), so the refusal is in the PREDICATE instead:
+# both halves require `completed_at IS NULL`, and a past-horizon `active` row
+# that carries one is declined, counted and named in the log rather than
+# voided (bug 391 r2 finding 2). The acceptance of canceled priors is there
+# for a lock canceled MINUTES after creation (assembly_timeout), not for this
+# arm's rows.
+OVT_ABANDONED_HORIZON_DAYS = 14
+# One tick settles at most this many rows; the next tick continues. A full
+# batch SAYS SO in the log, because a silent truncation makes "nothing left"
+# and "two hundred done, four thousand waiting" the same line (#304 / #441).
+OVT_HORIZON_SWEEP_LIMIT = 200
+# The whole arm's wall-clock budget inside one 60-second tick. This arm is NOT
+# the loop's only lock-taking path and the budget does not rest on it being
+# one: `_janitor_lock_census()` enumerates every lock-taking statement the
+# janitor roots reach, in both the SQL and the ORM family, and counts how many
+# of them can WAIT — the stranded-bet payout arms in this same loop are
+# waiters too. What the budget rests on is the consequence: a lock wait raises
+# nothing, no lock_timeout or statement_timeout is configured on this engine,
+# and the arms BEHIND this one in the same tick (the FFA janitor, the lease
+# expiry) run only if this one returns — so an unbounded wait stops them with
+# no log line at all. This arm's own row lock declines rather than waits
+# (SKIP LOCKED below); the budget bounds everything else — a table-level wait
+# behind a migration's DDL, a batch that runs long — so the arm's failure
+# direction is "gives up and says so", never "holds the loop" (#276 / #430).
+OVT_HORIZON_TICK_BUDGET_S = 20
+
+
+async def _ovt_horizon_candidates(db, days: int, limit: int):
+    """1v2 series rows that have been `active` with no activity for `days` days.
+
+    A row carrying a `completed_at` is DECLINED whatever its age. The stamp is
+    schema-nullable and independent of `status`, and it is the anchor the
+    continuation's 60-minute window reads — voiding such a row moves it into
+    the prior-series lookup's scope carrying an anchor this arm has not
+    checked and which MAY be recent, which is exactly what the 14-day-old
+    `created_at` could otherwise be relied on not to be. This arm's write is
+    two invalidation columns wide and clears nothing, so the row is left
+    `active` and `_ovt_horizon_stamped_backlog` names it in the log instead
+    (bug 391 r2 finding 2).
+
+    Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
+    (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
+    ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
+    (PIN main.py:42577 ":started, NOW(),") and `created_at` defaults to NOW()
+    by schema. `ovt_matches.started_at`
+    is the one client-supplied stamp on that row and is deliberately NOT read
+    here: a client-attested value may only move the server toward the
+    conservative outcome, and a future-dated one would hold its own series open
+    forever (#283).
+
+    Queue polls are not activity either. `ovt_queue.last_polled` is a client
+    saying it is still there; a client that never stops polling would pin a row
+    `active` with no bound, which is exactly the blocking-by-default shape this
+    sweep exists to remove (#276 / #430).
+
+    RANKED rows are excluded here rather than declined later. Sid's 14-day
+    ruling for a ranked series is that the leader takes the rating — a
+    different write from this one — and an unbuilt settlement must not be
+    approximated by the one that happens to exist. The tick counts what this
+    filter leaves behind and names it in the log, so the omission is loud.
+
+    This is a candidate READ, not the decision. Every row it returns is
+    re-checked under its own row lock before anything is written (#208), so a
+    report that lands between this SELECT and the write settles the row itself
+    and the sweep declines it.
+    """
+    rows = await db.execute(text("""
+        SELECT s.id AS id,
+               GREATEST(s.created_at,
+                        COALESCE((SELECT MAX(GREATEST(m.ended_at, m.created_at))
+                                    FROM ovt_matches m
+                                   WHERE m.series_id = s.id),
+                                 s.created_at)) AS last_activity_at
+          FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NULL
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+         ORDER BY s.created_at
+         LIMIT CAST(:lim AS int)
+    """), {"days": int(days), "lim": int(limit)})
+    return rows.mappings().all()
+
+
+async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
+    """Void ONE past-horizon 1v2 series under its own row lock. True if written.
+
+    The caller owns the transaction boundary: this function locks, re-checks
+    and writes; the caller commits on True and rolls back on False.
+
+    There is no arm here that DECLINES a past-horizon row on grounds it cannot
+    evaluate. It consults neither the presence map nor the service-account
+    fence, because the alternative to voiding is a row that stays `active`
+    indefinitely, and a blocking-by-default state needs a positive cleanup that
+    always runs (#276 / #430). The write is delta-free — no gold, no XP, no
+    rating, no `winner_side` — so there is no credit for that fence to protect
+    and nothing a wrong call could pay out.
+
+    What 14 days of idleness does NOT prove is that no writer remains. It is a
+    bound on OBSERVED activity, not a guarantee about the future: a returning
+    trio can still report a game against this row and, on the live path, the
+    report advances the tally and can complete the series. The bound the code
+    actually holds is the ordering one — this settlement and that report
+    serialise on the same series row lock: the report sink's lock waits
+    (PIN main.py:42389 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    this one declines. Whichever commits second observes the first, and a
+    report arriving after the void is recorded and paid on the settled-without
+    -play arm of `submit_ovt_match` rather than lost.
+
+    `invalidated_at` is not an inert marker, though, and the delta-free claim
+    rests on a SECOND property rather than on the column being unread: the
+    Player Cards reconciler voids every still-unopened earned pack whose series
+    carries a non-NULL `invalidated_at` (`_PC_VOID_SWEEP_SQL["ovt"]`) and the
+    open route refuses on the same column (`_PC_SERIES_STANDING_SQL["ovt"]`).
+    The rows this arm writes can carry no such pack, because BOTH ovt grant
+    paths are completion-gated — the inline grant sits in the statement group
+    that writes `status='completed'`, and `_PC_RECONCILE_SQL["ovt"]` scans
+    `status = 'completed' AND invalidated_at IS NULL`. If pack granting ever
+    moves to per-game or mid-series, that property is gone and this write
+    starts voiding real packs; `test_the_ovt_earned_pack_paths_are_completion_gated`
+    is the pin that reds when it does.
+    """
+    locked = (await db.execute(text(
+        # FOR NO KEY UPDATE, not FOR UPDATE (#202 / #207): `ovt_matches.series_id`
+        # is an FK to this row, so every report's INSERT takes FOR KEY SHARE on
+        # it, and KEY SHARE conflicts with exactly one mode — FOR UPDATE. NO KEY
+        # UPDATE is the weakest mode that still self-conflicts, so two sweeps
+        # serialize, and so does a sweep against the report sink's own lock on
+        # this row — and SKIP LOCKED means that meeting is a DECLINE, not a
+        # wait. What NO KEY UPDATE keeps out of the way entirely is the FK
+        # check: a report's INSERT INTO ovt_matches never waits on the janitor.
+        #
+        # SKIP LOCKED, like every sibling sweep in this loop (`FOR UPDATE OF q
+        # SKIP LOCKED` in the ovt husk arm, the same in the 1v1 and team arms,
+        # `FOR NO KEY UPDATE OF p2 SKIP LOCKED` in the pair writer). A janitor
+        # arm that WAITS on a row lock waits with no bound — no lock_timeout is
+        # configured on this engine — and it raises nothing while it does, so
+        # the arms behind it in the same tick simply never run (#276 / #430).
+        # The row is 14 days old; losing it for one 60-second tick costs
+        # nothing, and the next tick re-reads it.
+        "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+        " FOR NO KEY UPDATE SKIP LOCKED"
+    ), {"sid": str(series_id)})).mappings().first()
+    # #208: the predicate is re-checked INSIDE the transaction, against the row
+    # version this lock saw — never against the candidate list, which was read
+    # before any lock was held. Each refusal says which one it is: one boolean
+    # must not stand for both "somebody else holds it" and "it is no longer
+    # ours to settle" (#430).
+    if locked is None:
+        print(f"[OVT-HORIZON] Candidate held by another writer or gone; "
+              f"left for the next tick: series {series_id}")
+        return False
+    if locked["status"] != "active":
+        print(f"[OVT-HORIZON] Candidate already settled under the lock: "
+              f"series {series_id} status={locked['status']}")
+        return False
+    still_idle = (await db.execute(text("""
+        SELECT 1 FROM ovt_series s
+         WHERE s.id = CAST(:sid AS uuid)
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NULL
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+    """), {"sid": str(series_id), "days": int(days)})).first()
+    if still_idle is None:
+        print(f"[OVT-HORIZON] Candidate no longer past the horizon under the "
+              f"lock: series {series_id}")
+        return False
+    # 'canceled', one L. Every other ovt path uses that spelling and the
+    # continuation's prior-series lookup filters on it
+    # (PIN main.py:42292 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # janitor's original 'cancelled' made its own rows invisible to that lookup
+    # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
+    # spelling would reopen that hole, so the VOID is carried by
+    # `invalidation_reason`, not by a new status word.
+    upd = await db.execute(text("""
+        UPDATE ovt_series
+           SET status = 'canceled',
+               invalidated_at = NOW(),
+               invalidation_reason = 'abandoned_horizon_void'
+         WHERE id = CAST(:sid AS uuid)
+           AND status = 'active'
+        RETURNING id
+    """), {"sid": str(series_id)})
+    if upd.first() is None:
+        print(f"[OVT-HORIZON] Candidate changed between the lock and the "
+              f"write; not settled: series {series_id}")
+        return False
+    return True
+
+
+async def _ovt_horizon_ranked_backlog(db, days: int) -> int:
+    """How many RANKED 1v2 series are past the horizon and still `active`.
+
+    Zero on this tree — every 1v2 insert hardcodes `is_ranked` FALSE — and
+    that is the point: the day it stops being zero, the arm says so instead of
+    leaving the rows to a settlement nobody wrote (#342, a check that cannot
+    fail is worse than no check; the count is the one that CAN).
+
+    IDLE means the same thing here as it does in the settlement half. Creation
+    age alone is not idleness: a series created twenty days ago whose trio
+    played this morning is live, and counting it would emit a warning about an
+    unbuilt settlement for a sitting that needs none (bug 391 r2 finding 7).
+    The recency term is the same `NOT EXISTS` over server-clock match columns
+    the candidate read uses, so the two halves cannot drift into disagreeing
+    about which rows the arm is leaving behind.
+    """
+    n = (await db.execute(text("""
+        SELECT COUNT(*) FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.is_ranked = TRUE
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+    """), {"days": int(days)})).scalar()
+    return int(n or 0)
+
+
+async def _ovt_horizon_stamped_backlog(db, days: int) -> int:
+    """Past-horizon idle `active` rows this arm declines for a completion stamp.
+
+    The predicate refuses `completed_at IS NOT NULL` because voiding such a row
+    would hand the continuation's 60-minute window an anchor this arm has not
+    checked, which MAY be recent (see `_ovt_horizon_candidates`). A decline
+    nobody can see is the other half of the defect that produced it, so the set
+    is COUNTED and named: zero on this tree — the only ovt writer of
+    `completed_at` sets `status='completed'` too — and loud when that changes.
+    Same unranked scope and same idleness terms as the candidate read, so the
+    number is "rows this arm would otherwise have settled".
+    """
+    n = (await db.execute(text("""
+        SELECT COUNT(*) FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NOT NULL
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+    """), {"days": int(days)})).scalar()
+    return int(n or 0)
+
+
+# Printed once per api process, by the arm itself, the first time it runs: a
+# deploy needs a POSITIVE signal that THIS arm shipped, and the janitor
+# self-test's "all janitor queries plan clean" prints on any build, including
+# one with no horizon arm at all (#438 / #443, and #306 — a probe whose only
+# purpose is to be probed).
+_ovt_horizon_armed_logged = False
+# The last ranked backlog this process reported, so a standing non-zero count
+# is named when it CHANGES rather than every 60 seconds forever.
+_ovt_horizon_ranked_last_seen = -1
+# The same, for rows declined because they carry a completion stamp.
+_ovt_horizon_stamped_last_seen = -1
+# Single-flight: the id of the tick task currently in flight, or None. A tick
+# whose budget expires is CANCELLED and not awaited, so the cancellation can
+# outlive the tick that started it; without this, every 60 seconds would start
+# another one behind the same stuck connection and the pool would drain with
+# no line in the log saying why (bug 391 r2 finding 3).
+_ovt_horizon_tick_inflight = None
+
+
+async def _ovt_horizon_sweep_tick(session_factory) -> int:
+    """One tick of the 1v2 horizon arm. Returns the number of rows settled.
+
+    This is the arm's whole body: `queue_cleanup_loop` calls it through
+    `_ovt_horizon_sweep_tick_bounded` and nothing else, so "the arm exists" and
+    "the arm runs" stay the same claim (#286).
+    """
+    global _ovt_horizon_armed_logged, _ovt_horizon_ranked_last_seen
+    global _ovt_horizon_stamped_last_seen
+    if not _ovt_horizon_armed_logged:
+        _ovt_horizon_armed_logged = True
+        print(f"[OVT-HORIZON] armed: horizon={OVT_ABANDONED_HORIZON_DAYS}d "
+              f"cap={OVT_HORIZON_SWEEP_LIMIT} "
+              f"budget={OVT_HORIZON_TICK_BUDGET_S}s reason="
+              f"abandoned_horizon_void")
+    settled = 0
+    async with session_factory() as db:
+        cands = await _ovt_horizon_candidates(
+            db, OVT_ABANDONED_HORIZON_DAYS, OVT_HORIZON_SWEEP_LIMIT)
+        for hc in cands:
+            # Settled or declined, the row's own line is printed by the
+            # settler — which is the only place that knows WHICH refusal it
+            # was. Here we print the one outcome it cannot name: the write.
+            if await _ovt_settle_horizon_row(
+                    db, hc["id"], OVT_ABANDONED_HORIZON_DAYS):
+                await db.commit()
+                settled += 1
+                print(f"[OVT-HORIZON] Abandoned series voided: series "
+                      f"{hc['id']} last_activity={hc['last_activity_at']} "
+                      f"reason=abandoned_horizon_void")
+            else:
+                await db.rollback()
+        if len(cands) >= OVT_HORIZON_SWEEP_LIMIT:
+            print(f"[OVT-HORIZON] batch full at {OVT_HORIZON_SWEEP_LIMIT} "
+                  f"candidates; more may remain, next tick continues")
+        ranked = await _ovt_horizon_ranked_backlog(
+            db, OVT_ABANDONED_HORIZON_DAYS)
+        stamped = await _ovt_horizon_stamped_backlog(
+            db, OVT_ABANDONED_HORIZON_DAYS)
+        await db.rollback()
+        if ranked != _ovt_horizon_ranked_last_seen:
+            _ovt_horizon_ranked_last_seen = ranked
+            if ranked:
+                print(f"[OVT-HORIZON] {ranked} RANKED 1v2 series past the "
+                      f"horizon left ACTIVE: the ranked settlement (the leader "
+                      f"takes the rating) is not built, and this arm voids "
+                      f"unranked sittings only")
+        if stamped != _ovt_horizon_stamped_last_seen:
+            _ovt_horizon_stamped_last_seen = stamped
+            if stamped:
+                print(f"[OVT-HORIZON] {stamped} idle 1v2 series past the "
+                      f"horizon left ACTIVE: they carry a completed_at while "
+                      f"still 'active', so voiding one could hand the "
+                      f"continuation window an anchor that is not 14 days old")
+    return settled
+
+
+async def _ovt_horizon_sweep_tick_bounded(session_factory) -> int:
+    """Run one tick, and give the loop back inside OVT_HORIZON_TICK_BUDGET_S.
+
+    The budget is not decoration. The arms behind this one in the same tick —
+    the FFA janitor, the lease expiry — run only if this one returns, a wait
+    on a table lock raises nothing while it holds, and no lock_timeout or
+    statement_timeout is configured on this engine (`database.py`). On expiry
+    the tick task is CANCELLED and not awaited: waiting for a wedged
+    connection to finish unwinding would reintroduce the same unbounded wait
+    one level up. The orphan holds at most its own pooled connection, the
+    janitor keeps ticking, and the next tick re-reads the same rows — the
+    sweep is idempotent by construction.
+
+    "At most its own pooled connection" is only true ONCE. `task.cancel()`
+    requests cancellation; it does not complete it, and a task wedged inside a
+    server-side wait unwinds when that wait ends, not when the request is
+    made. Left alone, every 60-second tick would start another sweep behind
+    the same stuck one and each would take another pooled connection — the
+    accumulation that eventually starves every other database user, with no
+    line saying why (bug 391 r2 finding 3). SINGLE FLIGHT: at most one sweep
+    per process is in flight, the next tick DECLINES on its own line, and the
+    slot is released by the task's own done callback — which runs on
+    completion, on cancellation and on error alike, so the failure direction
+    is "the slot always comes back" rather than "one stall silences the arm
+    forever" (#276 / #430).
+    """
+    global _ovt_horizon_tick_inflight
+    if _ovt_horizon_tick_inflight is not None:
+        print(f"[OVT-HORIZON] tick declined: the previous tick is still in "
+              f"flight (cancelled at {OVT_HORIZON_TICK_BUDGET_S}s and not yet "
+              f"unwound); one sweep per process, next tick retries")
+        return 0
+    task = asyncio.create_task(_ovt_horizon_sweep_tick(session_factory))
+    _ovt_horizon_tick_inflight = task
+
+    def _release(_t, _task=task):
+        global _ovt_horizon_tick_inflight
+        if _ovt_horizon_tick_inflight is _task:
+            _ovt_horizon_tick_inflight = None
+
+    task.add_done_callback(_release)
+    done, _pending = await asyncio.wait({task},
+                                        timeout=OVT_HORIZON_TICK_BUDGET_S)
+    if task not in done:
+        task.cancel()
+        # Nothing awaits this task again, so its result would be reported as
+        # "never retrieved" on GC. Swallow it there instead.
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        print(f"[OVT-HORIZON] tick abandoned after "
+              f"{OVT_HORIZON_TICK_BUDGET_S}s (row lock declines, so this is a "
+              f"table-level wait or a long batch); the rest of this janitor "
+              f"tick runs, next tick retries")
+        return 0
+    # The task finished inside the budget. Release the slot HERE rather than
+    # relying on the done callback having been scheduled and run already: a
+    # done callback is dispatched by the loop, not at completion, so leaving
+    # the release to it alone would make "may the next tick start?" depend on
+    # loop scheduling. Both releases are the same idempotent assignment.
+    _release(task)
+    try:
+        return task.result()
+    except Exception as e:
+        print(f"[QUEUE-CLEANUP] ovt horizon sweep error: {e}")
+        return 0
+
+
 async def queue_cleanup_loop():
     """Delete stale queue entries every 60 seconds.
     Logs enough detail to diagnose matchmaking reports like lopi+NotNic where
@@ -3934,6 +4450,26 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] ovt sweep error: {e}")
+        # ── 1v2 abandoned-series horizon backstop (bug 391) ──────────────
+        # Its OWN session and try/except (#228), and deliberately NOT inside
+        # the ovt block above. That block calls _assert_no_service_subject(),
+        # which RAISES on a candidate whose trio includes the broadcast
+        # account, and the raise aborts the rest of that tick's ovt work; this
+        # backstop exists for exactly the rows the classified arms never
+        # settle, so it must not share their failure.
+        #
+        # The classified arms settle what they can NAME: a zero-game lock dead
+        # for 30 minutes, and a mid-series row with games and nothing reported
+        # for 24 hours — the latter fenced off any trio containing a service
+        # account. This arm names nothing. It closes a row that has been
+        # `active` for the whole 14-day horizon with no game and no report,
+        # whatever the reason, so that "the classified arms declined it" can no
+        # longer mean "it is live forever".
+        #
+        # The arm's body, its own session, its own try/except and its own time
+        # budget all live in _ovt_horizon_sweep_tick_bounded — one call here,
+        # so the loop cannot drift from what the tests drive.
+        await _ovt_horizon_sweep_tick_bounded(async_session)
         try:
             async with async_session() as db:
                 # ── FFA janitor (same nobody-is-polling contract as the ovt
@@ -4644,6 +5180,23 @@ app.add_middleware(
 # Tournament endpoints (router module).
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
+
+# Animal title ladders (v1.41.0 item 12): the READ route only,
+# GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
+# progress bars from. Pure read, no writes, safe on the replica.
+#
+# The module's per-series completion hook is NOT called from here. Wiring it
+# into the four completion paths is a separate change on a separate tree, and
+# until it lands this route answers games=0 for every account — which the
+# client renders as NOT STARTED per line rather than as a countdown.
+#
+# Deliberately not naming that hook's symbol in this comment:
+# test_title_ladders.py decides whether to run its per-mode coverage assertion
+# by testing whether the symbol appears in this file at all, so a mention here
+# would switch that test on and fail it against four paths this change was
+# told not to touch. The gate is a substring test; a comment is not a call.
+import title_ladders
+app.include_router(title_ladders.router)
 
 
 # ── Version gate ───────────────────────────────────────────────
@@ -5792,7 +6345,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
-                              ffa_game_number=_FFA_GAME_NUMBER,
+                              ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
@@ -5804,7 +6357,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
-                              ffa_game_number=_FFA_GAME_NUMBER,
+                              ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
 
 
@@ -24065,10 +24618,10 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 # the catalogue, rather than matched on the `title_ladder_` sku prefix: a
 # prefix is a naming convention that a later sku can join by accident and that
 # a rename silently empties, which is the shape of a check that cannot fail
-# (#306/#342). Importing the module does NOT wire the ladder — the router is
-# still unmounted and the progression hook is still uncalled; see that
-# module's docstring, which records this import as the one production
-# reference that exists.
+# (#306/#342). This import wires nothing by itself. The ladder's read route is
+# mounted separately, by the one include_router line beside the tournaments
+# router; the progression hook is still uncalled; that module's docstring
+# records both production references.
 import title_ladders as _title_ladders
 
 _GRANTED_ONLY_TITLE_SKUS = _title_ladders.GRANTED_ONLY_SKUS
@@ -40927,6 +41480,108 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
     return m, labels
 
 
+# The 1v2 series statuses that mean "settled WITHOUT play" — a janitor void, an
+# assembly timeout, an abandoned sitting, an administrative cancel. A game
+# reported against one of these is still a game that was played, and no
+# series-completion bonus was ever paid on that series, so the report sink pays
+# its per-game award there (bug 391 r2 finding 1). 'completed' is deliberately
+# absent: that series was resolved BY play and already paid its own bonus.
+# Both spellings are listed because migration 145 had to normalise 'cancelled'
+# rows that an older janitor wrote and the reader set still accepts both.
+_OVT_SETTLED_WITHOUT_PLAY = ("canceled", "cancelled")
+
+# A 1v2 sitting is a best-of-three, and that is what bounds how many games ONE
+# series can ever be paid for. On the live arm the bound is implicit in the
+# tally: the moment a side reaches OVT_SERIES_WINS_REQUIRED the series is set
+# 'completed', and every later report lands on the arm that pays nothing.
+#
+# The settled-without-play arm deliberately does NOT advance the tally — a
+# settled series' score is final — so it cannot inherit that bound and must
+# carry the same one explicitly. Without it the live path would be bounded and
+# this one would not, and an unbounded arm is not a difference two paths into
+# the same XP and gold may have. Found by re-reading the comments this round's
+# own fix wrote (#351); the bar is the integrity one — this arm moves money.
+#
+# ONE constant, read by both halves, rather than two numbers that happen to
+# agree today: two literals that must match are a check that cannot fail
+# (#342).
+OVT_SERIES_WINS_REQUIRED = 2
+OVT_SERIES_MAX_GAMES = OVT_SERIES_WINS_REQUIRED * 2 - 1
+
+
+async def _ovt_award_seats(award, *, solo_id, duo_a_id, duo_b_id,
+                           winner_side: int, extra_pick: bool,
+                           solo_r: float, duo_avg_r: float, podium) -> tuple:
+    """Pay ONE 1v2 game to all three seats; returns (results, labels) by pid.
+
+    Module level rather than a closure so the two rules it carries can be
+    tested without standing up a route: (1) seats are paid in canonical
+    `str(pid)` order — NOT slot order — because the players-row tuple locks
+    must follow one global order across concurrent completions (#197); and
+    (2) each seat's difficulty multiplier reads the OPPOSING side's rating and
+    podium standing, so a mirrored argument is a real defect rather than a
+    cosmetic one.
+
+    `award` is the caller's own per-player write, so this helper holds no
+    transaction and no money logic of its own.
+    """
+    solo_won_game = winner_side == 1
+    duo_pod = (str(duo_a_id) in podium) or (str(duo_b_id) in podium)
+    solo_pod = str(solo_id) in podium
+    results: dict = {}
+    labels: dict = {}
+    for pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):
+        is_solo = (pid == solo_id)
+        won = solo_won_game if is_solo else (not solo_won_game)
+        mult, lbl = _ovt_difficulty_mult(
+            is_solo, extra_pick,
+            duo_avg_r if is_solo else solo_r,
+            duo_pod if is_solo else solo_pod)
+        labels[pid] = lbl
+        results[pid] = await award(pid, won, mult)
+    return results, labels
+
+
+# ── One order for the duo pair (bug 391 r3) ────────────────────────────────
+# The ovt_matches replay key is ORDERED —
+# UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id) — while the report sink
+# accepts the two duo seats in either order (it checks the three players as a
+# SET against the series). With no single order for the pair, the same game
+# reported again with its duo reversed missed the key, inserted a second match
+# row and was paid a second time. The order is the players' Steam ids compared
+# ordinally: the order the client has built every 1v2 report in since the
+# report first shipped (it sorts the duo with StringComparer.Ordinal before it
+# signs), so a report built by the client comes through unchanged.
+def _ovt_canonical_duo(report):
+    """The report with its duo pair in canonical order — the SAME object when
+    it already is.
+
+    The sink applies this after the HMAC check (the signature covers the order
+    the client sent) and before any comparison or write, so everything after
+    it reads one order. Every seat-keyed field travels with its own player:
+    the two PlayerMatchData records (steam id, name, cards, end stats), the
+    two fps averages and the two damage timelines. A copy, never an in-place
+    edit, so the caller's object keeps the order it arrived in.
+    """
+    if report.duo_a.steam_id <= report.duo_b.steam_id:
+        return report
+    return report.model_copy(update={
+        "duo_a": report.duo_b, "duo_b": report.duo_a,
+        "duo_a_fps": report.duo_b_fps, "duo_b_fps": report.duo_a_fps,
+        "duo_a_damage_timeline": report.duo_b_damage_timeline,
+        "duo_b_damage_timeline": report.duo_a_damage_timeline,
+    })
+
+
+# Advisory-lock class for "one report of a given 1v2 game room at a time"
+# (bug 391 r3). The two-key form is a key space of its own, so it never meets
+# the single-key Steam-id locks elsewhere in this module. Keyed by
+# hashtext(room): the only reports that wait on each other are reports of the
+# same room — and, rarely, two rooms whose hashes collide, which costs a short
+# wait and nothing else.
+OVT_REPORT_ROOM_LOCK_CLASS = 391120
+
+
 # 1v2 podium (factor iv). Runs the SAME query shape as GET
 # /ovt/leaderboard?role=combined — same UNION ALL over ovt_matches, same
 # invalidated_at/deleted_at filters, same `games DESC, win-rate DESC` ordering,
@@ -41780,6 +42435,10 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_ovt_hmac(report):
         raise HTTPException(403, "Invalid 1v2 match signature")
+    # bug 391 r3: ONE order for the duo pair before any comparison and any
+    # write (see _ovt_canonical_duo). After the HMAC check on purpose: the
+    # signature covers the order the client sent.
+    report = _ovt_canonical_duo(report)
     try:
         series_uuid = UUID(report.series_id)
     except (ValueError, TypeError):
@@ -41871,13 +42530,83 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     if {solo_id, duo_a_id, duo_b_id} != {series["solo_id"], series["duo_a_id"], series["duo_b_id"]}:
         raise HTTPException(403, "Reported players do not match the series")
 
+    # The id this report's match row gets if it is recorded. The answer to a
+    # game already on record carries it too, exactly as it always has.
+    match_id = uuid.uuid4()
+
+    async def _already_recorded():
+        """The ONE answer a second report of a game on record gets — from the
+        replay check just below and from a key conflict at the INSERT — so the
+        two can never say different things: 200, "Already recorded", the
+        series as it stands and the score from the reporter's side. Nothing
+        this report did is kept."""
+        await db.rollback()
+        # Already recorded (replay). Return the current series state idempotently.
+        s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
+        if s2 is None:
+            raise HTTPException(404, "Series not found")
+        # Reporter-first score (learning #121) — a duo-member reporter must not
+        # see the solo-first order and read a won series as a loss.
+        rep_side_r = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+        score_r = (f"{s2['solo_series_wins']}-{s2['duo_series_wins']}" if rep_side_r == 1
+                   else f"{s2['duo_series_wins']}-{s2['solo_series_wins']}")
+        return OvtMatchResponse(
+            match_id=match_id, series_id=series_uuid, series_status=s2["status"],
+            series_score=score_r, winner_side=report.winner_side, message="Already recorded")
+
+    # ── One game, one record, whichever seat each player arrives in (bug 391 r3)
+    # The report room IS the game: it is per-game suffixed ("<room>_<token>_r<n>",
+    # held to the series room above). The set comparison above accepts every
+    # assignment of these three players to the solo seat and the two duo seats,
+    # so "is this game already on record?" must not depend on the assignment
+    # either. It is asked here, before any write, as a SET: a row for this room
+    # naming exactly these three players, in any seats, means the game is on
+    # record, and this report gets the answer a key conflict gets.
+    #
+    # Under a lock on the ROOM. The series row lock above makes reports of one
+    # series take turns, but one room's reports can also arrive under two
+    # series ids (a continuation series keeps the sitting's room), and two such
+    # reports would each find nothing committed and both record. The room lock
+    # makes this check and the INSERT below one step for every report of the
+    # room. It is taken after the series row lock, and a report holding it
+    # never waits on another series' row, so it adds no lock cycle.
+    #
+    # The ordered UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id) stays the
+    # database's own backstop: the duo pair reaches the INSERT in canonical
+    # order, so the key conflicts on either order of the pair, and a report
+    # that gets to the INSERT anyway is answered by _already_recorded too.
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:room AS text)))"
+    ), {"cls": OVT_REPORT_ROOM_LOCK_CLASS, "room": (report.photon_room_id or "")[:64]})
+    _on_record = (await db.execute(text("""
+        SELECT id, solo_id FROM ovt_matches
+         WHERE photon_room_id = :room
+           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])
+           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])
+         LIMIT 1
+    """), {"room": (report.photon_room_id or "")[:64],
+           "trio": [solo_id, duo_a_id, duo_b_id]})).mappings().first()
+    if _on_record is not None:
+        if str(_on_record["solo_id"]) != str(solo_id):
+            # Not a repeat of the recorded report: the room is on record with
+            # another of these three players in the solo seat. Answered the
+            # same way, and named here, because a second account of one game
+            # is worth being able to find.
+            print(f"[OVT-REPORT] series {series_uuid}: this room is already recorded "
+                  f"as match {_on_record['id']} with a different solo seat; the report "
+                  f"is answered as already recorded and nothing is written")
+        return await _already_recorded()
+
     # Slot-identity realign (July 22 forensics): the series row's solo/duo_a/duo_b
     # is a queue-time preference; the report's is the in-game truth (team sizes).
     # When they disagree, the per-slot accumulators (solo_xp_earned, ...) and a
     # future ranked replay would credit the wrong player. On the FIRST match of
     # a series, rewrite the series row's slot ids to the report's ordering —
-    # under the row lock, before any accumulator applies. Mid-series drift
-    # (should be impossible: sides are fixed per sitting) is logged only.
+    # under the row lock, before any accumulator applies. From then on the
+    # series' solo-versus-duo split is fixed: see the refusal below (bug 391 r4).
+    # The report's duo pair is in canonical order by here (bug 391 r3), so a
+    # game-1 realignment writes that order into the series row, and a later
+    # report of the sitting with the same sides meets it.
     # The slot ids the series ROW carries from here on (c3 B): the report's
     # after a game-1 realignment, the stored ones otherwise.
     slot_solo, slot_da, slot_db = series["solo_id"], series["duo_a_id"], series["duo_b_id"]
@@ -41893,12 +42622,40 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
             print(f"[OVT] series {series_uuid} slots realigned to report ordering "
                   f"(solo={report.solo.steam_id})")
             slot_solo, slot_da, slot_db = solo_id, duo_a_id, duo_b_id
+        elif solo_id != series["solo_id"]:
+            # ONE solo-versus-duo split per series (bug 391 r4). The series has
+            # a recorded game, and that game fixed who plays alone; this report
+            # puts another of the same three players in the solo seat. Nothing
+            # on the server moves a series' seats after its first game (the
+            # realignment above is the only UPDATE of these three columns, and
+            # a continuation series copies them), so the series has no place
+            # for a game under another split. Recorded, it would be counted and
+            # paid under a split the series never had (the tally and the awards
+            # read the report's seats, the pack recipients the stored ones), so
+            # it is refused HERE: before the INSERT and before any award, as the
+            # set check above refuses a report naming other players. A room
+            # already on record for these three players never gets this far:
+            # the replay check above answers it as that game.
+            print(f"[OVT-REPORT] series {series_uuid}: report refused, nothing written: "
+                  f"it names solo {solo_id} with duo {duo_a_id}, {duo_b_id}; the series "
+                  f"holds solo {series['solo_id']} with duo {series['duo_a_id']}, "
+                  f"{series['duo_b_id']} and has {prior_games} recorded game(s); a "
+                  f"series keeps one solo-versus-duo split for every game")
+            await db.rollback()
+            raise HTTPException(403, "Reported solo seat does not match the series")
         else:
+            # The series' own split, its duo pair stored in the other order.
+            # With the canonical form above, a series row holds its pair in
+            # ordinal order from its first game on, so this is only a row whose
+            # first game was recorded before that and did not leave it in that
+            # order (every client since v1.31.0 sends it). The game is recorded
+            # and paid by player id; the stored order is left as it is, so
+            # this game's two duo-seat ledger columns follow the report.
             print(f"[OVT] WARNING: series {series_uuid} slot ordering differs from "
                   f"report mid-series (game {prior_games + 1}) — leaving as-is")
 
-    # Insert the match (dedup on the room+players unique constraint → replay no-op).
-    match_id = uuid.uuid4()
+    # Insert the match. A game already on record was answered above; the
+    # room+players UNIQUE — duo pair in canonical order — is the backstop.
     try:
         await db.execute(text("""
             INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id, duo_b_id,
@@ -41947,19 +42704,9 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                "hmac": (report.hmac_signature or "")[:128] or None, "rep": id_by_steam.get(report.reported_by_steam_id),
                "started": report.started_at})
     except IntegrityError:
-        await db.rollback()
-        # Already recorded (replay). Return the current series state idempotently.
-        s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
-        if s2 is None:
-            raise HTTPException(404, "Series not found")
-        # Reporter-first score (learning #121) — a duo-member reporter must not
-        # see the solo-first order and read a won series as a loss.
-        rep_side_r = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
-        score_r = (f"{s2['solo_series_wins']}-{s2['duo_series_wins']}" if rep_side_r == 1
-                   else f"{s2['duo_series_wins']}-{s2['solo_series_wins']}")
-        return OvtMatchResponse(
-            match_id=match_id, series_id=series_uuid, series_status=s2["status"],
-            series_score=score_r, winner_side=report.winner_side, message="Already recorded")
+        # The key conflicted: this game is already on record (the backstop
+        # behind the replay check above).
+        return await _already_recorded()
 
     # Per-game card picks (both duo members + solo).
     for pmd, pid in ((report.solo, solo_id), (report.duo_a, duo_a_id), (report.duo_b, duo_b_id)):
@@ -41971,21 +42718,6 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                 "INSERT INTO ovt_match_cards (match_id, player_id, card_name, pick_order) "
                 "VALUES (:m, :p, :c, :o)"
             ), {"m": match_id, "p": pid, "c": _canon_card_name(str(nm))[:64], "o": i})
-
-    # Advance the series win tally only if still active (re-check under the lock).
-    if series["status"] != "active":
-        await db.commit()  # keeps the match/card rows we already inserted
-        rep_side2 = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
-        score2 = (f"{series['solo_series_wins']}-{series['duo_series_wins']}" if rep_side2 == 1
-                  else f"{series['duo_series_wins']}-{series['solo_series_wins']}")
-        return OvtMatchResponse(
-            match_id=match_id, series_id=series_uuid, series_status=series["status"],
-            series_score=score2, winner_side=report.winner_side, message="Series already resolved")
-
-    solo_wins = series["solo_series_wins"] + (1 if report.winner_side == 1 else 0)
-    duo_wins = series["duo_series_wins"] + (1 if report.winner_side == 2 else 0)
-    series_done = solo_wins >= 2 or duo_wins >= 2
-    winner_side = 1 if solo_wins > duo_wins else 2
 
     # ── Per-match XP + gold. Review CONFIRMED: use an ATOMIC increment
     # (total_xp = total_xp + delta) with RETURNING, not a Python-computed
@@ -42023,25 +42755,161 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                                    reason="level_reward", reference_id=str(match_id)))
         return xp, gold_delta + level_gold
 
-    solo_won_game = report.winner_side == 1
-    # Award in canonical str(pid) order, not solo/duo slot order — players-row
-    # tuple locks must follow one global order across concurrent completions
-    # (learning #197 / review find).
-    _award_results = {}
-    _bonus_labels: dict = {}
-    _duo_pod = (str(duo_a_id) in _ovt_pod) or (str(duo_b_id) in _ovt_pod)
-    _solo_pod = str(solo_id) in _ovt_pod
-    # solo_extra_pick is already in scope — the series SELECT is `SELECT *`.
-    _extra_pick = bool(series["solo_extra_pick"])
-    for _pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):
-        _is_solo = (_pid == solo_id)
-        _won = solo_won_game if _is_solo else (not solo_won_game)
-        _m, _lbl = _ovt_difficulty_mult(
-            _is_solo, _extra_pick,
-            _duo_avg_r if _is_solo else _solo_r,
-            _duo_pod if _is_solo else _solo_pod)
-        _bonus_labels[_pid] = _lbl
-        _award_results[_pid] = await _award(_pid, _won, _m)
+    async def _award_the_game():
+        """Pay THIS game to all three seats. One call; two callers below.
+
+        The seat loop itself is `_ovt_award_seats` (module level, so the
+        canonical-order and multiplier rules are testable without a route):
+        award in canonical str(pid) order, not solo/duo slot order, because
+        players-row tuple locks must follow one global order across concurrent
+        completions (learning #197 / review find). `solo_extra_pick` is in
+        scope — the series SELECT is `SELECT *`.
+        """
+        return await _ovt_award_seats(
+            _award, solo_id=solo_id, duo_a_id=duo_a_id, duo_b_id=duo_b_id,
+            winner_side=report.winner_side,
+            extra_pick=bool(series["solo_extra_pick"]),
+            solo_r=_solo_r, duo_avg_r=_duo_avg_r, podium=_ovt_pod)
+
+    # ── The series is no longer `active` (re-check under the lock) ──────────
+    #
+    # SERIALISATION, not refusal (bug 391 r2 finding 1). The series row lock
+    # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
+    # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
+    # — its locking read is
+    # PIN main.py:3964 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # and the clause is the line under it. So the two can
+    # never both decide this row: either the janitor meets this report's lock
+    # and DECLINES the row for that tick, or it commits its void first and
+    # this read blocks until it does, then sees the committed 'canceled' under
+    # READ COMMITTED. Whichever commits second observes the first, and this
+    # branch is the one determinate path out of that meeting. Do not add SKIP
+    # LOCKED or NOWAIT here: a declining report would answer on the row
+    # version it did not wait to see.
+    #
+    # What the determinate path OWES the seats: the game was played and its
+    # row is being committed, so its per-game award is paid here too. Before
+    # this, the award lived below this return and all three seats silently
+    # missed a game they earned whenever the janitor won the race. A skip that
+    # nobody can see is exactly what #276/#430 call the blocking-by-default
+    # outcome, and an award is not something the server may lose quietly.
+    #
+    # FAILURE DIRECTION. Paying is scoped to a series settled WITHOUT play —
+    # a void/cancel, where no series-completion bonus was ever paid and
+    # nothing else will ever pay this game. A game is recorded, and so paid,
+    # at most once whichever seats its players arrive in: the replay check
+    # above answers a second report of a room already on record for these
+    # three players — in ANY seats — before any write and under the room
+    # lock, and the duo pair reaches the INSERT in canonical order, so the
+    # ordered room+players UNIQUE also conflicts on either order of the pair
+    # and a report that gets that far returns above, before any award. (The
+    # key alone did not hold this: it is ordered, and the sink accepts the
+    # three players in any seats — bug 391 r3.)
+    # AT MOST once, not exactly once — a match row committed by the second arm
+    # below carries no award at all, deliberately, and says so. Sibling arms,
+    # swept (#432): the live path and this one are the only two that pay, and
+    # both sit after the same check and the same UNIQUE. Any OTHER resolved
+    # status — by play today, an unknown word tomorrow — falls to the second
+    # arm and is NOT paid: money is the integrity bar, so the unhandled case
+    # fails toward not paying. That arm is no longer silent: it prints the
+    # match id, the status and the reason, so a skip is on the record and can
+    # be settled by hand.
+    #
+    # BOUNDED, the same way the live arm is. "At most once per match row" is
+    # not by itself a bound on what one SERIES can pay: the live arm stops
+    # because the tally resolves the series and every later report is refused,
+    # and this arm deliberately never advances the tally. So it reads the
+    # series' recorded game count and pays only within OVT_SERIES_MAX_GAMES —
+    # the best-of-three a 1v2 sitting is, from the one constant the live arm's
+    # own comparison reads. Past that the game is still recorded and the award
+    # is refused, on its own named reason in the log rather than in silence.
+    if series["status"] != "active":
+        # How many games this series has on record, INCLUDING the row inserted
+        # above — same transaction, under the same series row lock, so this is
+        # the count as it will be committed and not a stale read. It is READ
+        # rather than derived from the tally, because the tally is exactly what
+        # this arm does not advance.
+        _games_recorded = (await db.execute(text(
+            "SELECT COUNT(*) FROM ovt_matches WHERE series_id = :sid"
+        ), {"sid": series_uuid})).scalar() or 0
+        _within_series_bound = _games_recorded <= OVT_SERIES_MAX_GAMES
+        if (series["status"] in _OVT_SETTLED_WITHOUT_PLAY
+                and _within_series_bound):
+            _res_a, _lbl_a = await _award_the_game()
+            _sx, _sg = _res_a[solo_id]
+            _ax, _ag = _res_a[duo_a_id]
+            _bx, _bg = _res_a[duo_b_id]
+            # The per-slot ledger follows the payment so the series row does
+            # not report zero for xp that reached the players. The WIN TALLY
+            # is deliberately NOT advanced: a settled series' score is final,
+            # and this arm must not resurrect it.
+            await db.execute(text("""
+                UPDATE ovt_series SET
+                    solo_xp_earned = solo_xp_earned + :sx,
+                    duo_a_xp_earned = duo_a_xp_earned + :ax,
+                    duo_b_xp_earned = duo_b_xp_earned + :bx,
+                    solo_gold_earned = solo_gold_earned + :sg,
+                    duo_a_gold_earned = duo_a_gold_earned + :ag,
+                    duo_b_gold_earned = duo_b_gold_earned + :bg
+                 WHERE id = :sid
+            """), {"sx": _sx, "ax": _ax, "bx": _bx, "sg": _sg, "ag": _ag,
+                   "bg": _bg, "sid": series_uuid})
+            await db.commit()
+            print(f"[OVT-REPORT] match {match_id} series {series_uuid} landed on a "
+                  f"series settled without play (status={series['status']} "
+                  f"reason={series['invalidation_reason']}); the game and its "
+                  f"per-game award are recorded, the series tally stays "
+                  f"{series['solo_series_wins']}-{series['duo_series_wins']}")
+            _rp = id_by_steam.get(report.reported_by_steam_id)
+            _rx, _rg = _res_a.get(_rp, (0, 0))
+            rep_side_a = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+            score_a = (f"{series['solo_series_wins']}-{series['duo_series_wins']}"
+                       if rep_side_a == 1
+                       else f"{series['duo_series_wins']}-{series['solo_series_wins']}")
+            return OvtMatchResponse(
+                match_id=match_id, series_id=series_uuid, series_status=series["status"],
+                series_score=score_a, winner_side=report.winner_side,
+                xp_gained=_rx, gold_gained=_rg,
+                xp_bonuses=list(_lbl_a.get(_rp, [])),
+                message="Series already resolved")
+        await db.commit()  # keeps the match/card rows we already inserted
+        # 'completed' today; any status word outside the settled-without-play
+        # set lands here, which is why this line names the status instead of
+        # asserting how the series was resolved (#302). TWO reasons reach this
+        # arm now and they are different facts, so the line says WHICH: a
+        # status this path does not pay, or a settled series already carrying
+        # every game a best-of-three can have. Naming only the status would
+        # make the bound the silent skip that finding 1 exists to remove.
+        _why_unpaid = (
+            f"status={series['status']} is not a settled-without-play status"
+            if _within_series_bound else
+            f"the series already carries {_games_recorded} recorded games, "
+            f"past the {OVT_SERIES_MAX_GAMES} a best-of-"
+            f"{OVT_SERIES_MAX_GAMES} sitting can have")
+        print(f"[OVT-REPORT] match {match_id} series {series_uuid} recorded against a "
+              f"series resolved as status={series['status']} ({_why_unpaid}), which this path does "
+              f"not pay; the game and its card rows are kept and no per-game "
+              f"award is granted")
+        rep_side2 = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+        score2 = (f"{series['solo_series_wins']}-{series['duo_series_wins']}" if rep_side2 == 1
+                  else f"{series['duo_series_wins']}-{series['solo_series_wins']}")
+        return OvtMatchResponse(
+            match_id=match_id, series_id=series_uuid, series_status=series["status"],
+            series_score=score2, winner_side=report.winner_side, message="Series already resolved")
+
+    solo_wins = series["solo_series_wins"] + (1 if report.winner_side == 1 else 0)
+    duo_wins = series["duo_series_wins"] + (1 if report.winner_side == 2 else 0)
+    # The SAME constant the settled-without-play arm bounds itself by. These
+    # two are the only paths that pay a 1v2 game, and the live one's bound on
+    # "how many games may one series pay" is this comparison: once it holds,
+    # the series is 'completed' and every later report is refused an award.
+    # Two literals that must agree are a check that cannot fail (#342), so
+    # there is one constant and both halves read it.
+    series_done = (solo_wins >= OVT_SERIES_WINS_REQUIRED
+                   or duo_wins >= OVT_SERIES_WINS_REQUIRED)
+    winner_side = 1 if solo_wins > duo_wins else 2
+
+    _award_results, _bonus_labels = await _award_the_game()
     sx, sg = _award_results[solo_id]
     ax, ag = _award_results[duo_a_id]
     bx, bg = _award_results[duo_b_id]
@@ -42139,6 +43007,39 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         series_score=score, winner_side=report.winner_side,
         xp_gained=_rep_xp, gold_gained=_rep_gold,
         xp_bonuses=_rep_labels)
+
+
+# -- The 1v2 solo-seat build marker (/health `ovt_solo_split`) -------------
+# A 1v2 series keeps one solo-versus-duo split for every game. Once a series
+# holds a recorded game, submit_ovt_match refuses a report that puts another
+# of its three players in the solo seat: it answers 403 "Reported solo seat
+# does not match the series" before anything is written, and logs the refusal
+# with both splits. The batch adds no route and no key to any GET answer both
+# builds serve -- the refusal rides only the report answer, which needs a
+# signed report -- so this word is what tells the new build from the old one.
+# The release train asserts it on both roles and reads any value but the
+# expected one as the old build; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): 1 when submit_ovt_match's compiled
+# string constants carry both the refusal's HTTPException detail and the
+# trailing literal segment of its log line, else 0. Both are read from the
+# endpoint's code object, not from its source text, so a comment beside
+# either cannot move the value, and an edit to either string reads 0.
+def _ovt_const_literal(code, text: str) -> str:
+    """`text` when it is one of `code`'s compiled constants, else ''."""
+    return text if text in code.co_consts else ""
+
+
+def _ovt_solo_split_marker(detail: str, log_segment: str) -> int:
+    """1 when both literals were found among the endpoint's constants, else 0."""
+    return int(bool(detail) and bool(log_segment))
+
+
+_OVT_SOLO_SPLIT = _ovt_solo_split_marker(
+    _ovt_const_literal(submit_ovt_match.__code__,
+                       "Reported solo seat does not match the series"),
+    _ovt_const_literal(submit_ovt_match.__code__,
+                       " recorded game(s); a series keeps one solo-versus-duo split for every game"))
 
 
 @app.get("/api/v1/ovt/series/active", tags=["1v2 Matches"])
@@ -49556,6 +50457,9 @@ def _ffa_game_number_marker(insert_sql: str, lookup_sql: str) -> int:
 
 _FFA_GAME_NUMBER = _ffa_game_number_marker(
     _ffa_match_insert_literal(submit_ffa_match.__code__), _FFA_PRIOR_GAME_SQL)
+# Its sibling _OVT_SOLO_SPLIT (the /health `ovt_solo_split` word) is derived
+# the same way, from two of submit_ovt_match's compiled string constants, and
+# is defined right after that endpoint.
 
 
 _FFA_LB_SORTS = {
