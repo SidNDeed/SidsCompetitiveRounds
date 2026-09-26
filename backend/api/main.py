@@ -29031,6 +29031,166 @@ async def internal_pc_pack_strip(
     return resp
 
 
+_PC_BINDER_PAGE_SIZE = 10
+_PC_BINDER_PAGE_CAP = 50
+
+
+def _pc_binder_page_sql() -> str:
+    """The binder page statement - ONE statement, both binder routes.
+
+    `live` is the owner's live prints through _pc_composite_row_sql,
+    MATERIALIZED because it is read twice; `meta` is the collection-wide
+    total with one count per player_cards.RARITIES member (bound :r0 ...
+    in the tuple's order) and n_other for any other value, so the rarity
+    counts always sum to the total; `page` is one page of `live`; and
+    `meta LEFT JOIN page` makes the metadata row exist on an empty page as on
+    a full one. The order is the six-term key ending in print_id (unique, so
+    the page is a total order and a tie cannot flip between reads), stated
+    in `page` AND restated at depth zero, because a LEFT JOIN does not
+    promise to keep a CTE's row order and the JSON half and the image half
+    are two executions of this text. Assembled by concatenation, never
+    str.format (the wrap carries a literal brace); the SQL carries no comment
+    (text() would read a colon inside one as a bind)."""
+    live = _pc_composite_row_sql("WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL")
+    per_rarity = "".join(", count(*) FILTER (WHERE rarity = CAST(:r" + str(i) + " AS text)) AS n_r" + str(i)
+                         for i in range(len(_pc.RARITIES)))
+    return ("WITH live AS MATERIALIZED ( " + live + " ), "
+            + "meta AS ( SELECT count(*) AS live_total" + per_rarity
+            + ", count(*) FILTER (WHERE rarity <> ALL(CAST(:rall AS text[]))) AS n_other FROM live ), "
+            + "page AS ( SELECT * FROM live "
+            + "ORDER BY CASE rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END, signed DESC, foil DESC, pool_rank, minted_at, print_id "
+            + "LIMIT CAST(:limit AS integer) OFFSET CAST(:offset AS integer) ) "
+            + "SELECT m.*, p.* FROM meta m LEFT JOIN page p ON true "
+            + "ORDER BY CASE p.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END, p.signed DESC, p.foil DESC, p.pool_rank, p.minted_at, p.print_id")
+
+
+async def _pc_binder_page(db: AsyncSession, owner_ref: str, page: int):
+    """(meta, rows) of one binder page, from _pc_binder_page_sql: `meta` holds
+    the collection-wide `count`, `by_rarity` (the RARITIES keys plus `other`,
+    always present) and `pages` (at most _PC_BINDER_PAGE_CAP); `rows` are the
+    page's rows in the statement's order - none past the last page. The
+    rarity counts must sum to the count (a 500 and a log line otherwise), and
+    a non-zero `other` is logged: an unknown rarity is a fact about the data
+    that should reach a log rather than be absorbed."""
+    binds = {"owner": owner_ref, "rall": list(_pc.RARITIES), "limit": _PC_BINDER_PAGE_SIZE,
+             "offset": (int(page) - 1) * _PC_BINDER_PAGE_SIZE}
+    binds.update({"r" + str(i): rarity for i, rarity in enumerate(_pc.RARITIES)})
+    result = (await db.execute(text(_pc_binder_page_sql()), binds)).mappings().all()
+    head = result[0]
+    count = int(head["live_total"])
+    by_rarity = {rarity: int(head["n_r" + str(i)]) for i, rarity in enumerate(_pc.RARITIES)}
+    by_rarity["other"] = int(head["n_other"])
+    if sum(by_rarity.values()) != count:
+        print(f"[PC-BINDER] rarity_sum owner={owner_ref} count={count} sum={sum(by_rarity.values())}")
+        raise HTTPException(status_code=500, detail={"error": "binder_count_mismatch"})
+    if by_rarity["other"]:
+        print(f"[PC-BINDER] unknown_rarity owner={owner_ref} count={by_rarity['other']}")
+    pages = min(_PC_BINDER_PAGE_CAP, max(1, math.ceil(count / _PC_BINDER_PAGE_SIZE)))
+    rows = [r for r in result if r["print_id"] is not None]
+    return {"count": count, "by_rarity": by_rarity, "pages": pages}, rows
+
+
+@app.get("/api/v1/internal/pc/binder", tags=["Internal"])
+async def internal_pc_binder(
+    discord_id: str = Query(..., max_length=32),
+    viewer_discord_id: str | None = Query(None, max_length=32),
+    page: int = Query(1, ge=1, le=50),
+    locale: str | None = Query(None, max_length=16),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /binder [@member]: one page of the owner's live prints, ten
+    at a time in the binder order, each with its tile decision, and the
+    collection-wide count, rarity totals and page count from the SAME
+    statement. Consent as /internal/pc/collection: someone else's binder only
+    while it is public (403 private), the shard balance to its owner only.
+    `owner_ref` and `settings_rev` identify the answer for the bot's pre-send
+    re-read."""
+    _require_internal_key(x_internal_key)
+    owner = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[owner.id])
+    is_owner = viewer_discord_id is not None and str(viewer_discord_id) == str(owner.discord_id)
+    if not is_owner and not bool(getattr(owner, "pc_collection_public", True)):
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    pid = str(owner.id)
+    _pc_reveal_pace(pid, "json")
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, _pc_served_locales()))
+    meta, rows = await _pc_binder_page(db, pid, page)
+    prints = []
+    for r in rows:
+        d = _pc_print_dict(r, ctx)
+        tile, reason = _pc_composite_tile(r)
+        d.update({"gone": False, "tile": tile, "reason": reason, "subject_id_ok": bool(r["subject_id_ok"])})
+        prints.append(d)
+    answer = {"owner_name": _pcp.public_render_name(owner.display_name) or _pc_neutral_name(),
+              "owner_ref": pid, "settings_rev": int(getattr(owner, "pc_settings_revision", 0) or 0),
+              "count": meta["count"], "by_rarity": meta["by_rarity"], "page": int(page),
+              "pages": meta["pages"], "prints": prints}
+    if is_owner:
+        # The shard balance is the owner's alone, as on /internal/pc/collection.
+        answer["shards"] = int(getattr(owner, "pc_shards", 0) or 0)
+    return answer
+
+
+@app.get("/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png", tags=["Internal"])
+async def internal_pc_binder_page(
+    owner_ref: str, page: str, locale: str,
+    viewer_discord_id: str | None = Query(None, max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The /binder picture: one binder page as a 5 x 2 grid in the binder
+    order, each print's face at tile size or the card back
+    (_pc_composite_tile). Consent is re-derived here, because this route
+    resolves the owner by players.id and not by Discord id: `owner_ref`
+    canonical and a live players row, else 404; the viewer is the owner only
+    when both Discord ids are present and equal; someone else's binder only
+    while it is public (403 private). A page outside 1-50, or past the last
+    print, is 404. The manifest (X-Grid-Slots), the digest (X-Grid-Rev), the
+    owner (X-Grid-Owner) and the consent revision (X-Grid-Consent-Rev) come
+    from the row read that keyed the picture."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(owner_ref) or not (_re.fullmatch("[0-9]{1,2}", page) and 1 <= int(page) <= _PC_BINDER_PAGE_CAP):
+        raise HTTPException(status_code=404, detail="Not found")
+    owner = (await db.execute(select(Player).where(
+        Player.id == uuid.UUID(owner_ref), Player.deleted_at.is_(None)))).scalar_one_or_none()
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    await _assert_no_service_subject(db, affected_player_ids=[owner.id])
+    is_owner = (viewer_discord_id is not None
+                and owner.discord_id is not None
+                and str(viewer_discord_id) == str(owner.discord_id))
+    if not (is_owner or bool(getattr(owner, "pc_collection_public", True))):
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    pid = str(owner.id)
+    _pc_reveal_pace(pid, "composite")
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, _pc_served_locales()))
+    _meta, rows = await _pc_binder_page(db, pid, int(page))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Not found")
+    tokens, manifest, cells = [], [], []
+    for pos, r in enumerate(rows, start=1):
+        d = _pc_print_dict(r, ctx)
+        tile, reason = _pc_composite_tile(r)
+        word = d["face_rev"] if tile == "face" else reason
+        tokens.append(_pcstrip.grid_slot_token(pos, d["print_id"], tile, word))
+        manifest.append(_pcstrip.grid_manifest_entry(pos, d["print_id"], d["subject_player_id"], tile, word))
+        cells.append((tile, r, False))
+    digest = _pcstrip.composite_digest(ctx["locale"], ctx["renderer_fp"], _pcstrip.STRIP_COLS,
+                                       _pcstrip.STRIP_GRID_ROWS, tokens)
+    key = _pcp.composite_binder_key(pid, int(page), digest, ctx["locale"])
+    if key is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    data = await _pc_composite_bytes(db, key, cells, ctx, _pcstrip.STRIP_COLS, _pcstrip.STRIP_GRID_ROWS)
+    resp = _pc_png_response(data, "private, max-age=60")
+    resp.headers["X-Grid-Rev"] = digest
+    resp.headers["X-Grid-Slots"] = ",".join(manifest)
+    resp.headers["X-Grid-Owner"] = pid
+    resp.headers["X-Grid-Consent-Rev"] = str(int(getattr(owner, "pc_settings_revision", 0) or 0))
+    return resp
+
+
 # ── Player Cards: earned packs (WP-D) ────────────────────────────────────────
 # One deterministic roll per (mode, series) — player_cards.earned_pack_kind,
 # HMAC(secret, "mode:series") — at the mode's odds, whatever the score line
