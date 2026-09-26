@@ -33,8 +33,9 @@ TREE = ast.parse(TEXT)
 
 WANT_FUNC = {"rank_emoji", "get_rank_name", "_escape_md", "_lb_line", "_split_lb_descriptions",
              "_build_board_embeds", "_board_medal", "_lb_line_2v2", "_lb_line_ffa", "_lb_line_ovt",
-             "_enabled_boards", "_render_board", "_own_embed_messages", "_adopt_board_messages",
-             "_boards_are_anchored", "_repost_board_set", "publish_boards", "publish_lb_loop"}
+             "_enabled_boards", "_render_board", "_delete_board_message", "_own_embed_messages",
+             "_adopt_board_messages", "_boards_are_anchored", "_repost_board_set", "publish_boards",
+             "publish_lb_loop"}
 WANT_CLASS = {"LeaderboardPaginator"}
 WANT_ASSIGN = {"RANK_ROLES", "LB_PAGE_SIZE", "LB_TOTAL_FETCH", "BOARDS",
                "_lb_message_ids", "_lb_unknown_board_keys", "_lb_swept"}
@@ -90,8 +91,13 @@ class _View:
                     self.children.append(btn)
 
 
+class _NotFound(Exception):
+    """discord.NotFound: Discord answered 404 for the message. Round 4: the
+    one failure that proves a board message gone (finding 21)."""
+
+
 FAKE_DISCORD = types.SimpleNamespace(
-    Embed=_Embed, Interaction=object,
+    Embed=_Embed, Interaction=object, NotFound=_NotFound,
     ButtonStyle=types.SimpleNamespace(secondary="secondary"),
     Color=types.SimpleNamespace(gold=lambda: "gold", blurple=lambda: "blurple",
                                 orange=lambda: "orange", teal=lambda: "teal"),
@@ -107,6 +113,8 @@ class _Msg:
         self.edits = []
 
     async def edit(self, **kw):
+        if self not in self.ch.messages:
+            raise _NotFound(f"404 Unknown Message {self.id}")
         self.edits.append(kw)
         self.embeds = kw.get("embeds", self.embeds)
         self.view = kw.get("view", self.view)
@@ -114,6 +122,8 @@ class _Msg:
     async def delete(self):
         if self.id in self.ch.delete_fails:
             raise RuntimeError("403 Missing Permissions")
+        if self not in self.ch.messages:
+            raise _NotFound(f"404 Unknown Message {self.id}")
         self.ch.deleted.append(self.id)
         self.ch.messages = [m for m in self.ch.messages if m.id != self.id]
 
@@ -157,7 +167,7 @@ class _Channel:
         for m in self.messages:
             if m.id == mid:
                 return m
-        raise RuntimeError(f"Unknown Message {mid}")
+        raise _NotFound(f"404 Unknown Message {mid}")
 
     def history(self, limit=100):
         if self.history_raises:
@@ -727,13 +737,11 @@ def test_out_of_order_set_is_re_anchored_in_board_order(ns):
 def test_buried_set_is_not_reposted_while_a_board_is_missing(ns):
     """The repost may only run while holding a replacement for every board.
 
-    That used to be a data-loss rule: the repost deleted the whole set before
-    sending anything, so reposting one board short meant deleting a message
-    with nothing to put back. It is now an ORDERING rule -- the repost posts
-    each replacement before deleting what it replaces, so a missing board
-    would leave its old message stranded ABOVE the newly posted ones rather
-    than dropped. Still wrong, no longer destructive. The gate earns its keep
-    either way, which is why it stays."""
+    Since round 4 (finding 21) the repost deletes each board's old message
+    before it posts the replacement, and _repost_board_set skips a board it
+    holds no render for before touching anything of it. So a repost one
+    board short would not lose that board; it would strand it above the
+    moved set, out of order. The gate keeps the set whole, and stays."""
     _tick(ns)
     ch = ns["_ch"]
     ch.post_from_someone_else()
@@ -847,64 +855,53 @@ def test_no_new_bot_setting_becomes_unreachable_from_env():
         "only value production will ever see (#438)." % sorted(gap))
 
 
-def test_a_failed_repost_send_never_takes_a_board_off_the_channel(ns):
-    """A send that fails mid-repost leaves that board's old message standing.
-
-    This is the failure the delete-first shape could not survive. It deleted
-    the whole set first, so any send failure after that point left the channel
-    holding part of the set or none of it until the next tick -- ten minutes
-    of empty leaderboard channel, which is the exact appearance of deadness
-    that bottom-anchoring exists to prevent (#140).
-
-    The caller's guarantee that every board RENDERED is not the same as every
-    send succeeding, and no amount of pre-rendering can make it so. Posting
-    each replacement before deleting what it replaces is what closes the gap.
-    """
+def test_a_failed_repost_send_leaves_the_board_absent_for_one_tick_never_twice(ns):
+    """Round 4, finding 21, and what its order costs. The repost used to post
+    each replacement before deleting what it replaced, so no send failure
+    could take a board off the channel (#140) -- and a delete failure left two
+    live copies of it. A replacement is now posted only once its old message
+    is proven gone, so a send that fails right after that delete leaves the
+    board absent for one tick, never on the channel twice. The next tick's
+    complete walk finds no copy of it, posts it, and puts the set back in
+    order: the gap is one tick long, not a new steady state."""
     _tick(ns)
     ch = ns["_ch"]
     ch.post_from_someone_else()                    # bury the set -> next tick reposts
     ch.send_fails_for_titles = {T_2V2}             # 2v2's replacement will not go out
     ns["_log"].clear()
     _tick(ns)
-
-    # The assertion the old shape failed: every board is still on the channel,
-    # exactly once. 2v2's is stale and out of order -- present beats correct.
-    titles = [t for t in ch.titles() if t is not None]
-    assert sorted(titles) == sorted([T_1V1, T_2V2, T_FFA]), titles
-    assert any("repost failed" in ln and "old message kept" in ln for ln in ns["_log"])
-
-    # And it re-anchors once the send goes through again, so the degraded
-    # ordering is one tick long and not a new steady state.
+    titles = _board_titles(ch)
+    assert sorted(titles) == sorted([T_1V1, T_FFA]), titles
+    assert any("2v2: repost failed" in ln and "absent until the next tick" in ln
+               for ln in ns["_log"]), ns["_log"]
+    assert "2v2" not in ns["_lb_message_ids"][CID]
     ch.send_fails_for_titles = set()
     ns["_log"].clear()
     _tick(ns)
+    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
     assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
 
 
-def test_the_missing_board_detector_can_fail(ns):
-    """Negative control (#391) for the test above.
-
-    Its invariant is only worth having if it can go red. Take a board's
-    message away without putting one back -- precisely what a failed send did
-    under the delete-first shape -- and the same assertion must fail.
-    """
+def test_the_second_copy_detector_can_fail(ns):
+    """Negative control (#391) for the never-twice assertions in this file:
+    a second live copy of a board -- what a replacement posted before its old
+    message was proven gone used to leave -- must fail them."""
     _tick(ns)
     ch = ns["_ch"]
-    _run(ch.messages[1].delete())                  # 2v2 gone, nothing put back
-    titles = [t for t in ch.titles() if t is not None]
-    assert T_2V2 not in titles
+    _run(ch.send(embeds=[_Embed(title=T_2V2, description="a second copy")], view=None))
+    titles = _board_titles(ch)
+    assert titles.count(T_2V2) == 2
     assert sorted(titles) != sorted([T_1V1, T_2V2, T_FFA])
 
 
-def test_a_failed_repost_delete_leaves_a_duplicate_not_a_hole(ns):
-    """The other failure direction, which is the price of the fix.
+def test_a_failed_repost_delete_keeps_the_board_and_edits_it_in_place(ns):
+    """Round 4, finding 21. The repost used to post the replacement and then
+    try the delete, so a delete that failed left the board on the channel
+    twice. Nothing replaces a board now until its old message is proven gone:
+    when the delete fails, the old message stays this board's message, is
+    edited where it is, and is the only copy.
 
-    If the replacement goes out but the old message will not delete, the
-    channel carries that board twice. That is the deliberate trade: a stale
-    duplicate above the set is recoverable by the re-adopt sweep, an absent
-    board is not recoverable until the next tick. We track the NEW id either
-    way, so the next tick edits the right message.
-    """
+    MUTATION: the old order (post, then delete). Must fail."""
     _tick(ns)
     ch = ns["_ch"]
     old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
@@ -912,42 +909,44 @@ def test_a_failed_repost_delete_leaves_a_duplicate_not_a_hole(ns):
     ch.delete_fails = {old_2v2}
     ns["_log"].clear()
     _tick(ns)
-
-    titles = [t for t in ch.titles() if t is not None]
-    assert titles.count(T_2V2) == 2, titles
-    assert ns["_lb_message_ids"][CID]["2v2"] != old_2v2
-    assert any("not deleted" in ln for ln in ns["_log"])
-
-
-def test_a_failed_repost_delete_is_swept_on_a_later_tick(ns):
-    """Round 3 finding 12. The replacement is posted and anchored and the old
-    message will not delete; the log promised that the next tick's re-adopt
-    sweeps it, but the sweep ran only while a board id was missing, so the
-    duplicate stayed for good. The channel now owes a sweep until one
-    completes: retried while the delete keeps failing, done once it goes
-    through, and not run again after that.
-
-    MUTATION: drop the owed-sweep trigger, or leave the channel marked swept
-    after the failed delete. Must fail."""
-    _tick(ns)
-    ch = ns["_ch"]
-    old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
-    ch.post_from_someone_else()
-    ch.delete_fails = {old_2v2}
-    _tick(ns)                                   # re-anchor; the old 2v2 will not go
-    assert [t for t in ch.titles() if t is not None].count(T_2V2) == 2, ch.titles()
-    ns["_log"].clear()
-    _tick(ns)                                   # still refused: swept again, still owed
-    assert any("couldn't delete duplicate 2v2 board mid=%d" % old_2v2 in ln
+    titles = _board_titles(ch)
+    assert titles.count(T_2V2) == 1, titles
+    assert sorted(titles) == sorted([T_1V1, T_2V2, T_FFA]), titles
+    assert ns["_lb_message_ids"][CID]["2v2"] == old_2v2
+    assert len(next(m for m in ch.messages if m.id == old_2v2).edits) == 1
+    assert any("2v2: old message mid=%d not deleted" % old_2v2 in ln and "edited in place" in ln
                for ln in ns["_log"]), ns["_log"]
-    assert CID not in ns["_lb_swept"]
+
+
+def test_a_failed_repost_delete_is_retried_until_the_board_moves(ns):
+    """Round 3 finding 12, as round 4's order meets it. The old 2v2 message
+    will not delete, so the set cannot reach the bottom: every tick retries
+    the move, and while the delete keeps failing the board stays one copy,
+    edited in place. Once the delete goes through the set is at the bottom
+    in order, the next tick edits all three, and a channel with nothing owed
+    is not swept again.
+
+    MUTATION: the old order (post, then delete). Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
+    ch.post_from_someone_else()
+    ch.delete_fails = {old_2v2}
+    _tick(ns)                                   # 1v1 and FFA move; 2v2 stays, edited
+    assert _board_titles(ch).count(T_2V2) == 1, ch.titles()
+    ns["_log"].clear()
+    _tick(ns)                                   # still refused: the move is retried
+    assert any("2v2: old message mid=%d not deleted" % old_2v2 in ln for ln in ns["_log"]), ns["_log"]
+    assert _board_titles(ch).count(T_2V2) == 1, ch.titles()
     ch.delete_fails = set()
     ns["_log"].clear()
-    _tick(ns)                                   # goes through: the duplicate is gone
+    _tick(ns)                                   # goes through: the set is at the bottom
     assert old_2v2 in ch.deleted
     assert ch.titles() == [None, T_1V1, T_2V2, T_FFA], ch.titles()
-    assert CID in ns["_lb_swept"]
+    ns["_log"].clear()
+    _tick(ns)
     assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
+    assert CID in ns["_lb_swept"]
     # ...and a clean channel is not swept again on every tick.
     calls = []
     real = ns["_adopt_board_messages"]
@@ -960,16 +959,17 @@ def test_a_failed_repost_delete_is_swept_on_a_later_tick(ns):
     assert calls == [], "a channel with nothing owed was swept again"
 
 
-def test_a_restart_whose_rescan_fails_sweeps_the_old_set_on_a_later_tick(ns):
-    """Round 3 finding 15. After a restart the id map is empty and the rescan
-    is what finds the set already in the channel. When that history read
-    fails, a fresh set is posted and anchored -- and the sweep ran only while
-    an id was missing, so the old set stayed above it for good. A failed
-    rescan now leaves the sweep owed, and the next tick's sweep keeps the
-    newest copy of each board and removes the old set.
+def test_a_restart_whose_rescan_fails_posts_nothing_it_cannot_prove_absent(ns):
+    """Round 3 finding 15, as round 4's finding 21 meets it. After a restart
+    the id map is empty and the walk is what finds the set already in the
+    channel. When that history read fails, a fresh set used to be posted
+    beside the old one. Nothing is posted now without a complete walk: the
+    tick leaves the channel as it is, the sweep stays owed, and the next
+    tick's walk adopts the old set and edits it in place -- one set
+    throughout, nothing deleted.
 
-    MUTATION: mark the channel swept although the rescan failed, or drop the
-    owed-sweep trigger. Must fail."""
+    MUTATION: post a board with no message on record after a failed walk.
+    Must fail."""
     _tick(ns)
     ch = ns["_ch"]
     old = dict(ns["_lb_message_ids"][CID])
@@ -979,15 +979,16 @@ def test_a_restart_whose_rescan_fails_sweeps_the_old_set_on_a_later_tick(ns):
     ns["_log"].clear()
     _tick(ns)
     assert any("rescan failed" in ln for ln in ns["_log"]), ns["_log"]
-    assert len([t for t in ch.titles() if t is not None]) == 6, ch.titles()
-    fresh = dict(ns["_lb_message_ids"][CID])
-    assert set(fresh.values()).isdisjoint(old.values())
+    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
+    assert len(ch.sent) == 3 and ch.deleted == []
+    assert ns["_lb_message_ids"][CID] == {}
+    assert CID not in ns["_lb_swept"]
     ch.history_raises = False
     ns["_log"].clear()
     _tick(ns)
-    assert sorted(ch.deleted) == sorted(old.values()), (ch.deleted, old)
-    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
-    assert ns["_lb_message_ids"][CID] == fresh
+    assert ns["_lb_message_ids"][CID] == old
+    assert ch.deleted == [] and len(ch.sent) == 3
+    assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
     assert CID in ns["_lb_swept"]
 
 
@@ -1097,20 +1098,92 @@ def test_a_board_message_of_someone_elses_is_never_touched(ns):
     assert other in ns["_ch"].messages
 
 
-def test_a_transient_edit_failure_posts_fresh_and_re_anchors_next_tick(ns):
+@pytest.mark.parametrize("boards_raw", ["1v1", "1v1,2v2,ffa"])
+def test_a_transient_edit_failure_retries_the_edit_and_never_posts_a_second_copy(boards_raw):
+    """Round 4, finding 21, the round-3 report's scenario. A transient fetch
+    or edit failure (a 429 here) used to drop the board's id and post a fresh
+    board while the old message was still live. With LEADERBOARD_BOARDS=1v1
+    the fresh singleton sat at the bottom, the channel read as anchored, no
+    sweep ran again, and the old board stayed for good. A failure that does
+    not prove the message gone now leaves the board as it is, and the next
+    tick edits the same message; however many ticks follow, one copy.
+
+    MUTATION: the edit failure posting a fresh message again. Must fail."""
+    n2 = _fresh(boards_raw=boards_raw)
+    _tick(n2)
+    ch = n2["_ch"]
+    ids = dict(n2["_lb_message_ids"][CID])
+    first = ids["1v1"]
+    ch.fetch_fails_once.add(first)                       # e.g. a 429 on that one message
+    n2["_log"].clear()
+    _tick(n2)
+    assert any(f"1v1: edit of mid={first} failed" in ln and "retried next tick" in ln
+               for ln in n2["_log"]), n2["_log"]
+    assert not any("posted fresh board message" in ln for ln in n2["_log"]), n2["_log"]
+    assert n2["_lb_message_ids"][CID] == ids
+    n2["_log"].clear()
+    _tick(n2)
+    assert any(f"1v1: edited board mid={first}" in ln for ln in n2["_log"]), n2["_log"]
+    for _ in range(3):
+        _tick(n2)
+    assert _board_titles(ch).count(T_1V1) == 1, ch.titles()
+    assert ch.deleted == [] and n2["_lb_message_ids"][CID] == ids
+
+
+def test_a_board_deleted_by_hand_is_posted_again_once(ns):
+    """Round 4, finding 21: a 404 is proof. A moderator deletes the 2v2
+    board. On the move path the old message's delete answers 404, which is
+    as good as a delete; on the edit path (here the tail read fails, so the
+    set is edited in place) the edit answers 404 and the board is posted
+    fresh at once. Either way it ends as one copy, and the set in order."""
     _tick(ns)
     ch = ns["_ch"]
     old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
-    ch.fetch_fails_once.add(old_2v2)                     # e.g. a 429 on that one message
+    ch.messages = [m for m in ch.messages if m.id != old_2v2]      # deleted by hand
+    ch.history_raises = True                                        # the tail read fails
     ns["_log"].clear()
     _tick(ns)
-    assert any(f"2v2: edit of mid={old_2v2} failed" in ln for ln in ns["_log"])
-    assert any("2v2: posted fresh board message" in ln for ln in ns["_log"])
-    assert ns["_lb_message_ids"][CID]["2v2"] != old_2v2
+    assert any("2v2: board mid=%d is gone (404)" % old_2v2 in ln for ln in ns["_log"]), ns["_log"]
+    assert _board_titles(ch) == [T_1V1, T_FFA, T_2V2], ch.titles()
+    ch.history_raises = False
     ns["_log"].clear()
-    _tick(ns)                                            # self-heals: order restored, no duplicate
-    assert ch.titles() == [T_1V1, T_2V2, T_FFA]
-    assert sum(1 for ln in ns["_log"] if "not at the channel bottom" in ln) == 1
+    _tick(ns)
+    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
+    # The move path: deleted by hand again, with the tail read working.
+    gone = ns["_lb_message_ids"][CID]["2v2"]
+    ch.messages = [m for m in ch.messages if m.id != gone]
+    ns["_log"].clear()
+    _tick(ns)
+    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
+    assert gone not in ch.deleted                        # the 404 was the proof, not a delete
+
+
+def test_a_walk_that_fails_part_way_posts_nothing_it_did_not_reach(ns):
+    """Round 4, findings 15 and 21: a partial walk proves nothing absent. The
+    set sits under 120 messages of chat and the process restarts; the walk
+    reads 60 messages and fails. Nothing is posted and nothing deleted, the
+    sweep stays owed, and the next tick's complete walk finds the set and
+    moves it -- one set throughout.
+
+    MUTATION: post a board with no message on record after a failed walk.
+    Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    _bury(ch)
+    ns["_lb_message_ids"].clear()               # the process restarts
+    ns["_lb_swept"].clear()
+    ch.history_fails_after = 60
+    ns["_log"].clear()
+    _tick(ns)
+    assert any("rescan failed (history page failed)" in ln for ln in ns["_log"]), ns["_log"]
+    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
+    assert len(ch.sent) == 3 and ch.deleted == []
+    assert CID not in ns["_lb_swept"]
+    ch.history_fails_after = None
+    _tick(ns)
+    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
+    assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
+    assert CID in ns["_lb_swept"]
 
 
 # -- round 4: the sweep reads the whole channel (findings 12, 13, 15) ----------

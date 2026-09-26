@@ -8776,14 +8776,15 @@ _lb_message_ids: dict = {}
 
 # Channels whose board cleanup is COMPLETE for this process (v1.41.0 beta
 # round 3, findings 12 and 15). The adoption sweep below is the only thing
-# that removes a leftover board message -- a replaced board whose delete
-# failed, or the set a restart could not see because its history read
-# failed -- and it used to run only while a board id was missing, so once a
-# fresh set was anchored nothing ever swept again. A channel owes a sweep
-# from the start of every process, and again after any failed delete or
-# failed history read; publish_boards runs one on every tick that gets as
-# far as the channel while it is owed, until a sweep reads the history and
-# every delete it tries goes through.
+# that removes a leftover board message -- a copy an earlier process or an
+# earlier version left, or one of a board the list no longer names -- and it
+# used to run only while a board id was missing, so once a fresh set was
+# anchored nothing ever swept again. A channel owes a sweep from the start of
+# every process, and again after any failed delete or failed history read;
+# publish_boards runs one on every tick that gets as far as the channel while
+# it is owed, until a sweep reads the whole history and every delete it tries
+# goes through. (Since round 4, finding 21, no replacement is posted before
+# the old message is proven gone, so a failed replace leaves no leftover.)
 _lb_swept: set = set()
 
 
@@ -8820,6 +8821,25 @@ async def _render_board(board: dict):
     view = LeaderboardPaginator(board, entries, total_players, hidden_inactive)
     view._update_buttons()
     return embeds, view
+
+
+async def _delete_board_message(ch, msg=None, mid=None):
+    """Delete one board message of ours, given the message or its id, and
+    say whether it is PROVEN gone (v1.41.0 beta round 4, findings 21 and
+    22). Returns None when it is: the delete went through, or Discord
+    answered 404 (discord.NotFound) because it was already deleted.
+    Otherwise it returns the failure -- a 5xx, a rate limit, a lost
+    permission -- and the message may still be live, so the caller keeps
+    treating it as live: nothing replaces it, and a leftover stays owed."""
+    try:
+        if msg is None:
+            msg = await ch.fetch_message(mid)
+        await msg.delete()
+        return None
+    except discord.NotFound:
+        return None
+    except Exception as e:
+        return e
 
 
 async def _own_embed_messages(ch):
@@ -8862,30 +8882,36 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
     The channel is marked swept (_lb_swept) only when the history was read
     and every delete tried here went through; anything less leaves the sweep
     owed, and publish_boards runs it again next tick (findings 12 and 15).
+    A delete answered 404 went through: the message is gone either way.
 
     A message of ours titled as a catalogue board that is NOT in `boards` is
     retired: LEADERBOARD_BOARDS no longer names that board, and the channel
     converges to exactly the boards it does name (finding 13). Before, such
     a title matched nothing here, so a board dropped from the list -- FFA
     after 1v1,2v2,ffa became 1v1,2v2, or every board once the list was
-    emptied -- stayed in the channel for good."""
+    emptied -- stayed in the channel for good.
+
+    Returns True when the walk reached the channel's first message. Only
+    then may the caller post a board that has no message on record: a
+    partial walk cannot show that no copy of it is already in the channel
+    (round 4, finding 21)."""
     by_title = {b["title"]: b["key"] for b in boards}
     retire = {b["title"]: b["key"] for b in BOARDS if b["title"] not in by_title}
     ours, walk_error = await _own_embed_messages(ch)
     keepers, dupes, retired, complete = {}, 0, 0, walk_error is None
     if walk_error is not None:
-        print(f"[LB] rescan failed ({walk_error}) -- boards not found here are posted fresh; "
-              "the sweep runs again next tick")
+        print(f"[LB] rescan failed ({walk_error}) -- no board it did not reach is posted "
+              "this tick; the sweep runs again next tick")
     for msg in ours:
         title = msg.embeds[0].title or ""
         if title in retire:
-            try:
-                await msg.delete()
+            err = await _delete_board_message(ch, msg=msg)
+            if err is None:
                 retired += 1
-            except Exception as e:
+            else:
                 complete = False
                 print(f"[LB] couldn't retire {retire[title]} board mid={msg.id} "
-                      f"(not in LEADERBOARD_BOARDS): {e}")
+                      f"(not in LEADERBOARD_BOARDS): {err}")
             continue
         key = by_title.get(title)
         if key is None:
@@ -8893,12 +8919,12 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
         if key not in keepers:
             keepers[key] = msg.id
             continue
-        try:
-            await msg.delete()
+        err = await _delete_board_message(ch, msg=msg)
+        if err is None:
             dupes += 1
-        except Exception as e:
+        else:
             complete = False
-            print(f"[LB] couldn't delete duplicate {key} board mid={msg.id}: {e}")
+            print(f"[LB] couldn't delete duplicate {key} board mid={msg.id}: {err}")
     ids.update(keepers)
     if dupes:
         print(f"[LB] deleted {dupes} duplicate stale board message(s)")
@@ -8908,6 +8934,7 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
         _lb_swept.add(ch.id)
     else:
         _lb_swept.discard(ch.id)
+    return walk_error is None
 
 
 async def _boards_are_anchored(ch, boards: list, ids: dict) -> bool:
@@ -8932,27 +8959,31 @@ async def _boards_are_anchored(ch, boards: list, ids: dict) -> bool:
     return tail == want
 
 
-async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict):
+async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict, walked):
     """Move the whole board set to the channel bottom in BOARDS order, one
-    board at a time, POSTING EACH REPLACEMENT BEFORE DELETING THE MESSAGE IT
-    REPLACES. Sends append at the bottom in order while the deletes remove
-    from above, so the channel ends in the same state a delete-all-then-repost
-    reaches -- but no board is ever absent, not even briefly.
+    board at a time: DELETE THE OLD MESSAGE, AND ONLY ONCE IT IS PROVEN GONE
+    POST ITS REPLACEMENT (v1.41.0 beta round 4, finding 21). Sends append at
+    the bottom in order, so the channel ends with the set at the bottom, in
+    order.
 
-    The delete-first shape this replaces was sound only for as long as every
-    send that followed it succeeded. The caller renders the whole set up front
-    and still refuses to repost unless EVERY board rendered, so the
-    replacement CONTENT was always in hand; what no amount of pre-rendering
-    can hold is a SUCCESSFUL SEND. A 5xx, a timeout, a lost Manage-Messages,
-    or the task being cancelled between the two loops left the channel holding
-    part of the set or none of it until a later tick -- ten minutes of empty
-    leaderboard channel, which is precisely the appearance of deadness that
-    bottom-anchoring exists to prevent (#140).
+    The order used to be the reverse -- post each replacement, then delete
+    what it replaced -- so that a failed send could never take a board off
+    the channel (#140). Its price was the other failure: a delete that failed
+    left two live copies of the board, and finding 21 requires that a board
+    is never replaced before its old message is proven gone. So now:
 
-    Both failure directions are now non-destructive. A failed send leaves the
-    old message in place: stale and out of order, but present, and the next
-    tick re-anchors. A failed delete leaves a duplicate above the new set for
-    the next tick's re-adopt sweep to resolve. Neither can empty the channel.
+    - The old message's delete fails with anything but a 404: nothing is
+      posted for that board. The old message stays this board's message and
+      is edited where it is, and the move is retried next tick, because the
+      set is still not at the bottom. No second copy comes from here.
+    - The old message is proven gone (deleted, or a 404) and the send then
+      fails: that board is absent until the next tick, whose complete walk
+      finds no copy of it and posts it. That is the price of the order: one
+      tick, and only when a delete goes through and the very next send fails.
+    - A board with no message on record is posted only when this tick's walk
+      reached the channel's first message (`walked` is True): only such a
+      walk shows that no copy of it is already in the channel.
+
     Deletes still only ever touch ids this process posted or adopted, and the
     whole path still runs at most once per tick.
     """
@@ -8969,24 +9000,30 @@ async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict):
             continue
         embeds, view = r
         old = ids.get(b["key"])
+        if old is not None:
+            err = await _delete_board_message(ch, mid=old)
+            if err is not None:
+                print(f"[LB] {b['key']}: old message mid={old} not deleted ({err}) -- kept and "
+                      "edited in place; the move is retried next tick")
+                try:
+                    msg = await ch.fetch_message(old)
+                    await msg.edit(embeds=embeds, view=view)
+                    print(f"[LB] {b['key']}: edited board mid={old}")
+                except Exception as e:
+                    print(f"[LB] {b['key']}: edit of mid={old} failed ({e}) -- board left as it is")
+                continue
+            ids.pop(b["key"], None)
+        elif walked is not True:
+            print(f"[LB] {b['key']}: no message on record and no complete walk this tick -- "
+                  "not posted until a walk shows no copy of it is in the channel")
+            continue
         try:
             sent = await ch.send(embeds=embeds, view=view)
         except Exception as e:
-            print(f"[LB] {b['key']}: repost failed ({e}) -- old message kept, re-anchoring next tick")
+            print(f"[LB] {b['key']}: repost failed ({e}) -- absent until the next tick posts it")
             continue
         ids[b["key"]] = sent.id
         print(f"[LB] {b['key']}: reposted at bottom as mid={sent.id}")
-        if old is None:
-            continue
-        try:
-            msg = await ch.fetch_message(old)
-            await msg.delete()
-        except Exception as e:
-            # Owed: publish_boards sweeps this channel again until the
-            # duplicate is gone (finding 12). Before, nothing swept once the
-            # new set was anchored, whatever this line promised.
-            _lb_swept.discard(ch.id)
-            print(f"[LB] {b['key']}: old message mid={old} not deleted ({e}) -- next tick's re-adopt sweeps it")
 
 
 async def publish_boards(guild):
@@ -9013,7 +9050,8 @@ async def publish_boards(guild):
         print("[LB] LEADERBOARD_BOARDS is empty — nothing to publish")
         return
     # Render everything BEFORE touching the channel: the repost path deletes
-    # messages, and it may only do that while holding a replacement for each.
+    # each board's old message before it posts the replacement (round 4,
+    # finding 21), so it may only run while holding a replacement for each.
     rendered = {}
     for b in boards:
         try:
@@ -9028,23 +9066,25 @@ async def publish_boards(guild):
         print("[LB] no board rendered this tick — nothing published")
         return
     ids = _lb_message_ids.setdefault(ch.id, {})
-    adopted = False
+    # Whether this tick's walk reached the channel's first message; None when
+    # no walk ran. A board with no message on record is posted only after a
+    # complete one (round 4, finding 21).
+    walked = None
     # Also while the channel owes a sweep: from the start of every process,
     # and again after a delete or a history read failed, until one sweep
     # completes (_lb_swept; findings 12 and 15).
     if any(b["key"] not in ids for b in boards) or ch.id not in _lb_swept:
-        await _adopt_board_messages(ch, boards, ids)
-        adopted = True
+        walked = await _adopt_board_messages(ch, boards, ids)
     if not await _boards_are_anchored(ch, boards, ids):
         if len(rendered) == len(boards):
             # Rescan before reposting as well: an id we hold may no longer be
-            # the newest message for its board (another process, a failed edit
-            # that posted a fresh one), and reposting without re-adopting would
-            # leave that older board message in the channel above the new set —
-            # the stale-duplicate case the sweep exists for.
-            if not adopted:
-                await _adopt_board_messages(ch, boards, ids)
-            await _repost_board_set(ch, boards, rendered, ids)
+            # the newest message for its board (another process posted one),
+            # and reposting without re-adopting would leave that older board
+            # message in the channel above the new set -- the stale-duplicate
+            # case the sweep exists for.
+            if walked is None:
+                walked = await _adopt_board_messages(ch, boards, ids)
+            await _repost_board_set(ch, boards, rendered, ids, walked)
             return
         print("[LB] set is buried but a board did not render — editing in place, "
               "re-anchoring on a tick where every board renders")
@@ -9060,9 +9100,24 @@ async def publish_boards(guild):
                 await msg.edit(embeds=embeds, view=view)
                 print(f"[LB] {b['key']}: edited board mid={mid}")
                 continue
+            except discord.NotFound:
+                # Proven gone (deleted by hand, say): no copy of this board
+                # is live, so a fresh post leaves exactly one (finding 21).
+                print(f"[LB] {b['key']}: board mid={mid} is gone (404) -- posting a fresh message")
+                ids.pop(b["key"], None)
             except Exception as e:
-                print(f"[LB] {b['key']}: edit of mid={mid} failed ({e}) — posting a fresh message")
-                ids.pop(b["key"], None)   # deleted/unreachable — rediscover
+                # Not proven gone. The message may still be live, and a fresh
+                # post would be a second copy that nothing removes once the
+                # set reads as anchored -- the round-3 report's finding 21,
+                # with LEADERBOARD_BOARDS=1v1. The board is left as it is and
+                # the same message is edited next tick.
+                print(f"[LB] {b['key']}: edit of mid={mid} failed ({e}) -- board left as it is; "
+                      "the edit is retried next tick")
+                continue
+        elif walked is not True:
+            print(f"[LB] {b['key']}: no message on record and no complete walk this tick -- "
+                  "not posted until a walk shows no copy of it is in the channel")
+            continue
         try:
             sent = await ch.send(embeds=embeds, view=view)
             ids[b["key"]] = sent.id
