@@ -2912,6 +2912,24 @@
           "aedbe4650988d00a2ead5fb2fc18cdea91bb0b42"
         ],
         [
+          "/api/v1/internal/pc/binder",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_binder",
+          "unpinned"
+        ],
+        [
+          "/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_binder_page",
+          "unpinned"
+        ],
+        [
           "/api/v1/internal/pc/card",
           [
             "GET"
@@ -3153,6 +3171,24 @@
           "main",
           "internal_pc_lease_check",
           "0ede5287caaf32446fc9cda4816605533cdfa157"
+        ],
+        [
+          "/api/v1/internal/pc/packs",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_packs",
+          "unpinned"
+        ],
+        [
+          "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_pack_strip",
+          "unpinned"
         ],
         [
           "/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png",
@@ -3521,6 +3557,10 @@
     "GET /api/v1/internal/pc/face/print/{print_id}/{locale} -> main.internal_pc_face_print",
     "GET /api/v1/internal/pc/face/preview/{player_ref}/{locale} -> main.internal_pc_face_preview",
     "GET /api/v1/internal/pc/face/back -> main.internal_pc_face_back",
+    "GET /api/v1/internal/pc/packs -> main.internal_pc_packs",
+    "GET /api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png -> main.internal_pc_pack_strip",
+    "GET /api/v1/internal/pc/binder -> main.internal_pc_binder",
+    "GET /api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png -> main.internal_pc_binder_page",
     "POST /api/v1/shop/purchase -> main.purchase_item",
     "POST /api/v1/music/rate -> main.music_rate",
     "GET /api/v1/music/ratings -> main.music_ratings_public",
