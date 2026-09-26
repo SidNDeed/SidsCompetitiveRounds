@@ -28753,6 +28753,191 @@ async def internal_pc_face_back(x_internal_key: str | None = Header(None, alias=
     return _pc_png_response(_pc_back_cache["bytes"], "private, max-age=86400")
 
 
+# -- Player Cards: the Discord reveal (/pack, /binder) ------------------------
+# Four read-only internal routes for the bot: an opened pack's history and one
+# pack's five slots as one strip image; a binder page as JSON and as one 5 x 2
+# grid image. An image route answers its manifest (X-Strip-Slots /
+# X-Grid-Slots) from the row read that keyed the image, on a cache hit as on a
+# cold render, so the bot can bind the picture to the list it types. Nothing
+# here writes a row, schedules a pre-render or primes a Steam picture. The bot
+# calls its own box's api, so the primary answers these routes; they deploy to
+# both boxes all the same.
+
+# Pacing lives in the handlers - the internal prefix is exempt from the IP
+# limiter - keyed on the resolved players.id: a Discord id resets on a rebind,
+# and every bot request shares one address.
+_PC_REVEAL_WINDOW_S = 60
+_PC_COMPOSITE_PER_PLAYER = 6
+_PC_COMPOSITE_GLOBAL = 30
+_PC_REVEAL_JSON_PER_PLAYER = 20
+_pc_reveal_clock = time.monotonic
+_pc_reveal_windows: dict = {}
+
+
+def _pc_reveal_pace(player_ref: str, kind: str) -> None:
+    """Admit one reveal request, or refuse it with 429 too_many.
+
+    A sliding window of _PC_REVEAL_WINDOW_S seconds. `json` (the two JSON
+    routes) allows _PC_REVEAL_JSON_PER_PLAYER per player; `composite` (the two
+    image routes) allows _PC_COMPOSITE_PER_PLAYER per player and
+    _PC_COMPOSITE_GLOBAL for the whole process. An admitted request is counted
+    in every window it was checked against; a refused one is counted in none,
+    so refusals do not lengthen the wait. `retry_after` is the whole seconds
+    until the oldest counted request leaves the fullest window."""
+    now = _pc_reveal_clock()
+    if kind == "composite":
+        checks = ((("composite", player_ref), _PC_COMPOSITE_PER_PLAYER),
+                  (("composite", None), _PC_COMPOSITE_GLOBAL))
+    else:
+        checks = ((("json", player_ref), _PC_REVEAL_JSON_PER_PLAYER),)
+    wait = 0.0
+    for key, allowance in checks:
+        window = _pc_reveal_windows.get(key)
+        while window and now - window[0] >= _PC_REVEAL_WINDOW_S:
+            window.popleft()
+        if window is not None and len(window) >= allowance:
+            wait = max(wait, _PC_REVEAL_WINDOW_S - (now - window[0]))
+    if wait > 0:
+        retry = max(1, math.ceil(wait))
+        raise HTTPException(status_code=429, detail={"error": "too_many", "retry_after": retry},
+                            headers={"Retry-After": str(retry)})
+    for key, _allowance in checks:
+        _pc_reveal_windows.setdefault(key, collections_mod.deque()).append(now)
+    if len(_pc_reveal_windows) > 4096:
+        # Bounded state: a window whose newest entry has aged out holds nothing.
+        for key in [k for k, w in _pc_reveal_windows.items() if not w or now - w[-1] >= _PC_REVEAL_WINDOW_S]:
+            del _pc_reveal_windows[key]
+
+
+@app.get("/api/v1/internal/pc/packs", tags=["Internal"])
+async def internal_pc_packs(
+    discord_id: str = Query(..., max_length=32),
+    pack_id: str | None = Query(None, max_length=36),
+    before: str | None = Query(None, max_length=36),
+    limit: int = Query(5, ge=1, le=10),
+    locale: str | None = Query(None, max_length=16),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /pack: the linked player's opened packs, newest first, as
+    summary rows - pack_id, status, source, kind, opened_at and the slot
+    rarities from the stored roster (null when the roster cannot be read) -
+    keyset-paged on (opened_at, id) like /pc/packs, `limit` at a time. No
+    summary row reads a print. With `pack_id` (the pack the bot is about to
+    reveal, and its pre-send re-read) the answer is that one pack, its
+    `prints` from _pc_roster_prints, and 404 unless it is this player's opened
+    pack. `actor_ref` is the resolved players.id, compared by the bot across
+    its reads. The renderer gate comes first, as on the strip route: this
+    answer keys every face it lists (face_rev), and a box that cannot key a
+    face answers the reason instead of a list without keys."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    actor = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[actor.id])
+    pid = str(actor.id)
+    cursor = (before or "").strip()
+    if pack_id is not None and not _pcp.print_id_ok(pack_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    if cursor:
+        try:
+            _ = uuid.UUID(cursor)
+        except Exception:
+            raise HTTPException(status_code=422, detail="bad cursor")
+    _pc_reveal_pace(pid, "json")
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    rows = (await db.execute(text("""
+        SELECT id, status, source, kind, opened_at, result,
+               (SELECT COUNT(*) FROM pc_packs t
+                 WHERE t.player_id = CAST(:pid AS uuid) AND t.status = 'done') AS total
+          FROM pc_packs
+         WHERE player_id = CAST(:pid AS uuid) AND status = 'done'
+           AND (CAST(:pack AS uuid) IS NULL OR id = CAST(:pack AS uuid))
+           AND (CAST(:before AS uuid) IS NULL
+                OR (opened_at, id) < (SELECT c.opened_at, c.id FROM pc_packs c
+                                       WHERE c.id = CAST(:before AS uuid)
+                                         AND c.player_id = CAST(:pid AS uuid)))
+         ORDER BY opened_at DESC, id DESC
+         LIMIT CAST(:lim AS integer)
+    """), {"pid": pid, "pack": pack_id, "before": cursor or None, "lim": int(limit) + 1})).mappings().all()
+    if pack_id is not None and not rows:
+        raise HTTPException(status_code=404, detail="Not found")
+    more = len(rows) > int(limit)
+    rows = rows[:int(limit)]
+    packs = []
+    for r in rows:
+        raw = r["result"]
+        if isinstance(raw, (str, bytes, bytearray)):
+            try:
+                raw = _json.loads(raw)
+            except ValueError:
+                raw = None
+        roster = _pc_roster_slots(raw)
+        packs.append({"pack_id": str(r["id"]), "status": r["status"], "source": r["source"],
+                      "kind": r["kind"], "opened_at": _pc_iso(r["opened_at"]),
+                      "rarities": [e["rarity"] for e in roster] if roster is not None else None})
+    if pack_id is not None:
+        ctx = await _pc_face_ctx(db, loc)
+        packs[0]["prints"], _live = await _pc_roster_prints(db, pack_id, ctx)
+    # rows and total from one statement's snapshot, as /pc/packs does; an
+    # empty page has no row to carry it.
+    total = rows[0]["total"] if rows else (await db.execute(text(
+        "SELECT COUNT(*) FROM pc_packs WHERE player_id = CAST(:pid AS uuid) AND status = 'done'"),
+        {"pid": pid})).scalar_one()
+    return {"packs": packs, "total": int(total or 0), "locale": loc,
+            "next_before": (packs[-1]["pack_id"] if more and packs else None), "actor_ref": pid}
+
+
+@app.get("/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png", tags=["Internal"])
+async def internal_pc_pack_strip(
+    pack_id: str, locale: str,
+    discord_id: str = Query(..., max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The /pack picture: one opened pack's five slots in one row, slot 1 on
+    the left, each the print's face at tile size or the card back (the
+    ordered rules of _pc_composite_tile; a roster slot with no live row is
+    the back). Answered only for the pack's own player: a pack id that is not
+    canonical, not this player's, or not opened is 404, never 403. The
+    manifest (X-Strip-Slots), the digest (X-Strip-Rev) and the actor
+    (X-Strip-Actor) come from the row read that keyed the picture."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(pack_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    actor = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[actor.id])
+    owned = (await db.execute(text("""
+        SELECT id FROM pc_packs
+         WHERE id = CAST(:pack AS uuid)
+           AND player_id = CAST(:pid AS uuid)
+           AND status = 'done'
+    """), {"pack": pack_id, "pid": str(actor.id)})).scalar_one_or_none()
+    if owned is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    _pc_reveal_pace(str(actor.id), "composite")
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, _pc_served_locales()))
+    entries, live = await _pc_roster_prints(db, pack_id, ctx)
+    tokens, manifest, cells = [], [], []
+    for e in entries:
+        state = "gone" if e["gone"] else ("discarded" if e["discarded"] else "live")
+        word = e["face_rev"] if e["tile"] == "face" else e["reason"]
+        tokens.append(_pcstrip.strip_slot_token(e["slot"], e["print_id"], e["tile"], word, state))
+        manifest.append(_pcstrip.strip_manifest_entry(e["slot"], e["print_id"], e["subject_player_id"],
+                                                      e["tile"], word, state))
+        cells.append((e["tile"], live.get(e["print_id"]), state == "discarded"))
+    digest = _pcstrip.composite_digest(ctx["locale"], ctx["renderer_fp"], _pcstrip.STRIP_COLS, 1, tokens)
+    key = _pcp.composite_strip_key(pack_id, digest, ctx["locale"])
+    if key is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    data = await _pc_composite_bytes(db, key, cells, ctx, _pcstrip.STRIP_COLS, 1)
+    resp = _pc_png_response(data, "private, max-age=60")
+    resp.headers["X-Strip-Rev"] = digest
+    resp.headers["X-Strip-Slots"] = ",".join(manifest)
+    resp.headers["X-Strip-Actor"] = str(actor.id)
+    return resp
+
+
 # ── Player Cards: earned packs (WP-D) ────────────────────────────────────────
 # One deterministic roll per (mode, series) — player_cards.earned_pack_kind,
 # HMAC(secret, "mode:series") — at the mode's odds, whatever the score line
