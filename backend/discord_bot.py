@@ -8563,26 +8563,30 @@ async def _pc_back_bytes():
     return _pc_back_bytes_cache["bytes"]
 
 
-async def _pc_lease(subject_ref, print_id=None, event_ids=None):
-    """(lease_id, deadline, transient) — deadline on the monotonic clock,
-    `until` minus the reserve — or (None, None, transient) when no lease could
+async def _pc_lease(subject_ref, print_id=None, event_ids=None, *, timeout=None):
+    """(lease_id, deadline, transient, status) - deadline on the monotonic clock,
+    `until` minus the reserve - or (None, None, transient, status) when no lease could
     be taken: the send then carries no picture.
 
     `transient` distinguishes "not right now" from "not ever". 409 means the
     subject's identity lock is held by a writer for a moment; 0 means the api
     did not answer at all; a 5xx is the api's own problem. A caller that can
     come back later should. 404 and 422 are answers about the subject or the
-    pair itself and do not improve with waiting."""
+    pair itself and do not improve with waiting. `status` is the acquire's
+    HTTP status (None when no request was made), for a caller that must tell
+    a 404 from a 422. `timeout`, when given, is that request's ceiling;
+    absent, the request is exactly the one every shipped caller makes."""
     if not subject_ref:
-        return None, None, False
+        return None, None, False, None
     payload = {"subject_ref": str(subject_ref)}
     if print_id:
         payload["print_id"] = str(print_id)
     if event_ids:
         payload["event_ids"] = [int(i) for i in event_ids]
-    st, body = await _pc_api("POST", "/internal/pc/lease", payload=payload)
+    st, body = await _pc_api("POST", "/internal/pc/lease", payload=payload,
+                             **({} if timeout is None else {"timeout": float(timeout)}))
     if st != 200 or not isinstance(body, dict) or not body.get("lease_id"):
-        return None, None, (st == 409 or st == 0 or st >= 500)
+        return None, None, (st == 409 or st == 0 or st >= 500), st
     try:
         until = datetime.fromisoformat(str(body.get("until")).replace("Z", "+00:00"))
         if until.tzinfo is None:
@@ -8590,7 +8594,7 @@ async def _pc_lease(subject_ref, print_id=None, event_ids=None):
         left = (until - datetime.now(timezone.utc)).total_seconds()
     except Exception:
         left = 30.0
-    return str(body["lease_id"]), time.monotonic() + (left - _PC_LEASE_RESERVE_S), False
+    return str(body["lease_id"]), time.monotonic() + (left - _PC_LEASE_RESERVE_S), False, st
 
 
 def _pc_lease_left(deadline):
@@ -8624,14 +8628,72 @@ async def _pc_best_face(body, locale):
     return face, lease
 
 
-async def _pc_lease_live(lease_id):
-    st, _ = await _pc_api("GET", f"/internal/pc/lease/{lease_id}", timeout=4.0)
+async def _pc_lease_live(lease_id, *, timeout=None):
+    st, _ = await _pc_api("GET", f"/internal/pc/lease/{lease_id}", timeout=4.0 if timeout is None else float(timeout))
     return st == 200
 
 
 async def _pc_lease_release(lease_id):
     if lease_id:
         await _pc_api("DELETE", f"/internal/pc/lease/{lease_id}", timeout=4.0)
+
+
+async def _pc_lease_release_all(lease_ids):
+    """Release every lease in `lease_ids`, at most four at a time: one reveal
+    holds up to ten, and the api admits a release on its reserved pool, where
+    ten at once would queue at that admission gate rather than at the pool."""
+    gate = asyncio.Semaphore(4)
+
+    async def _one(lease_id):
+        async with gate:
+            await _pc_lease_release(lease_id)
+
+    await asyncio.gather(*(_one(lease_id) for lease_id in lease_ids if lease_id))
+
+
+async def _pc_leases(subject_refs):
+    """(leased, undeliverable, past_deadline) - the leases a composite send
+    needs: one per DISTINCT subject, in ascending canonical order, each naming
+    the subject only (a lease naming a print re-checks that the print is live,
+    and would refuse every discarded print a pack still shows).
+
+    Every ref is attempted whatever an earlier one answered: a 200 adds that
+    ref to `leased`, which maps each ref to its (lease_id, deadline) - keyed
+    by the ref asked for, never by the lease id; a 404 adds it to
+    `undeliverable`; any other status - 409, 422, a 5xx, or 0 for a request
+    its timeout cut short - fails the call. The phase runs under ONE
+    monotonic deadline, 20 s from the first acquire: each acquire is handed
+    min(2.0, remaining), and once nothing remains every later ref goes to
+    `past_deadline` with no request (aiohttp arms no timer for a total that is
+    not above zero, so a request started then would run unbounded). A call
+    with every ref answered 200 returns (leased, set(), set()); any other
+    releases every lease it took and returns (None, undeliverable,
+    past_deadline). More than ten refs is refused outright, before any
+    request."""
+    refs = sorted({str(ref) for ref in subject_refs if ref})
+    if len(refs) > 10:
+        print(f"[PC-REVEAL] leases refused: {len(refs)} subjects, at most 10")
+        return None, set(), set()
+    leased, undeliverable, past_deadline, other = {}, set(), set(), []
+    started = time.monotonic()
+    for ref in refs:
+        remaining = 20.0 - (time.monotonic() - started)
+        if remaining <= 0:
+            past_deadline.add(ref)
+            continue
+        lease_id, deadline, _transient, status = await _pc_lease(ref, timeout=min(2.0, remaining))
+        if status == 200 and lease_id:
+            leased[ref] = (lease_id, deadline)
+        elif status == 404:
+            undeliverable.add(ref)
+        else:
+            other.append(status)
+    if not (other or undeliverable or past_deadline):
+        return leased, set(), set()
+    print(f"[PC-REVEAL] leases failed: taken={len(leased)} undeliverable={len(undeliverable)} "
+          f"past_deadline={len(past_deadline)} other={len(other)}")
+    await _pc_lease_release_all([lease_id for lease_id, _deadline in leased.values()])
+    return None, undeliverable, past_deadline
 
 
 async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
