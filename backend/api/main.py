@@ -35535,6 +35535,27 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     if waited >= 1.0:
         print(f"[PC-LEASE] deletion waited {waited:.1f}s for the lines in flight naming the player")
     await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
+    # Card trading (migration 353, V8 3.9): every trade naming the player as
+    # a party (its holds cascade) and every spent-nonce tombstone of theirs
+    # (F2), BEFORE the player's prints go -- an accept holding a trade row
+    # (L2) makes this delete wait for its commit, so the print purge below
+    # sees a print it moved here, and a trade row deleted first leaves an
+    # accept nothing to claim (F42). Under the exclusive identity key above,
+    # which every trade naming the player holds shared. The probe decides:
+    # found, the two deletes; a positively confirmed schema_missing (no
+    # trade row can exist), the deletion exactly as before trading;
+    # partial or unknown, 503 and nothing deleted -- neither word proves no
+    # trade row names the player (F29, F36).
+    trade_schema = await _pc_trade_schema(db)
+    if trade_schema == "found":
+        await db.execute(text(
+            "DELETE FROM pc_trades WHERE pair_lo = CAST(:pid AS uuid) OR pair_hi = CAST(:pid AS uuid)"),
+            {"pid": pid})
+        await db.execute(text("DELETE FROM pc_trade_spent_nonces WHERE proposer = CAST(:pid AS uuid)"),
+                         {"pid": pid})
+    elif trade_schema != "missing":
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="trading_unavailable")
     await db.execute(text("DELETE FROM pc_prints WHERE owner_player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_packs WHERE player_id = :pid"), {"pid": pid})
