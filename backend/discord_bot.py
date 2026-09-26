@@ -14381,6 +14381,10 @@ class LobbyBetSelect(discord.ui.Select):
 
 class LobbyBetModal(discord.ui.Modal):
     def __init__(self, mode: str, lobby_id: str, target_steams: str, target_label: str):
+        # target_label is the select option's label, built from the players'
+        # names. A modal title is plain text -- Discord renders no Markdown
+        # there -- so the title shows it as typed; the confirmation in
+        # on_submit is Markdown and escapes it (v1.41.0 beta round 5, F26).
         super().__init__(title=f"Bet on {str(target_label)[:38]}")
         self.mode = mode
         self.lobby_id = lobby_id
@@ -14418,8 +14422,9 @@ class LobbyBetModal(discord.ui.Modal):
             await _bet_reply(interaction, f"❌ {perr}")
             return
         label = _LOBBY_BET_MODE_LABEL.get(self.mode, self.mode.upper())
+        # The label is players' names: literal in this Markdown (round 5, F26).
         await _bet_reply(interaction,
-            f"✅ Bet placed: **{amount:,}g** on **{self.target_label}** "
+            f"✅ Bet placed: **{amount:,}g** on **{_escape_md(self.target_label)}** "
             f"in {label} lobby `{self.lobby_id[:8]}` — odds are set when the host starts.",)
 
 

@@ -20,9 +20,11 @@ of its AST and executed against fakes. Two layers:
    player's name. A new unescaped site fails; so does an ALLOW entry that no
    longer matches anything. _Census.carries says what counts as a name: it
    follows a name through locals, lists, parameters and return values, but
-   only from the keys and attributes NAME_KEY, NAME_ATTR and EXTRA_ATTR list.
-   A name the server sends under some other key is not seen -- the census's
-   bound, stated rather than hidden.
+   only from the keys and attributes NAME_KEY, NAME_ATTR and EXTRA_ATTR list,
+   and from the parameters EXTRA_ATTR names (round 5, F26: a call to a class
+   is not followed into its __init__, so LobbyBetModal's target_label
+   argument is seeded by its name). A name the server sends under some other
+   key is not seen -- the census's bound, stated rather than hidden.
 2. Renderers EXECUTED with hostile names: each shows the name as typed.
 """
 
@@ -31,8 +33,10 @@ import asyncio
 import collections
 import copy
 import datetime as _dt
+import json
 import os
 import re
+import types
 
 import pytest
 
@@ -48,7 +52,7 @@ NAME_KEY = re.compile(
     r"team_[ab]|winner_team|login|sender_login|author|discord_username|(next_|pending_)?match_label)$"
     r"|^(?!(card|rank|tag|role|file)_name$)[a-z0-9_]*_name$")
 NAME_ATTR = {"display_name", "global_name", "nick", "name"}
-EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name"}
+EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name", "target_label"}
 # The escapes. The four after escape_markdown are this file's own wrappers of
 # discord.utils.escape_markdown; a value through any of them is literal.
 SAFE = {"_escape_md", "escape_markdown", "_md_name", "_pc_name", "_game_embed_plain", "_board_name"}
@@ -87,8 +91,9 @@ class _Census:
     .get() of a name key; a name attribute; a local, a closure's outer local
     or a list assigned or appended from such a value through plain wrappers
     (x or "?", str(x), x.strip(), x[:n], a conditional, a tuple, a
-    comprehension); a parameter some call site passes such a value to; or the
-    result of a function that returns one. A value through an escape in SAFE
+    comprehension); a parameter some call site passes such a value to, or one
+    named in EXTRA_ATTR; or the result of a function that returns one. A call
+    to a class is not followed into its __init__. A value through an escape in SAFE
     carries nothing. Sites inside print() are logs and are not counted."""
 
     def __init__(self, text):
@@ -109,7 +114,12 @@ class _Census:
         self.by_name = {}
         for fn in self.funcs:
             self.by_name.setdefault(fn.name, []).append(fn)
-        self.seeds = {id(fn): set() for fn in self.funcs}
+        # A parameter named in EXTRA_ATTR carries a name from the start (round
+        # 5, F26): LobbyBetModal gets target_label as a constructor argument,
+        # and a call to a class is not followed into its __init__.
+        self.seeds = {id(fn): {a.arg for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs
+                               if a.arg in EXTRA_ATTR}
+                      for fn in self.funcs}
         self.sources = set()
         self.taint = {}
         self._fixpoint()
@@ -345,6 +355,7 @@ ALLOW = {
     ("_pair_label", "(a or '?')[:per]"): (1, _BUTTON + "; its Markdown uses escape at their own sites"),
     ("_pair_label", "(b or '?')[:per]"): (1, _BUTTON + "; its Markdown uses escape at their own sites"),
     ("__init__", "side[:38]"): (2, "a modal title: plain text, no Markdown"),
+    ("__init__", "str(target_label)[:38]"): (1, "a modal title: plain text, no Markdown"),
     ("__init__", "nm[:100]"): (1, "a select option label: plain text"),
     ("__init__", "sid[:100]"): (1, "a select option value, not shown"),
     ("_normalize_bettable_lobby", "_nm[:80]"): (1, "a select option label: plain text"),
@@ -551,3 +562,147 @@ def test_a_mail_confirmation_and_a_moderation_result_print_names_literally(name)
     text = ns["_modcase_render"](200, body, spec, "**Mod**")
     _shows_literally(text, name)
     _shows_literally(text, "**Mod**")
+
+
+# -- round 5, F26: the lobby bet's target label ---------------------------------
+#
+# LobbyBetModal's target_label is the select option's label, built from the
+# players' names (_normalize_bettable_lobby, _build_lobby_bet_targets). The
+# confirmation on_submit sends is Markdown; the modal title is plain text.
+
+_LOBBY_ESCAPED = "**{_escape_md(self.target_label)}**"
+_LOBBY_RAW = "**{self.target_label}**"
+_LOBBY_TITLE = ("__init__", "str(target_label)[:38]")
+_MASKED_LINK = re.compile(r"\[[^\]]*\]\(")
+
+
+class _Interaction:
+    """What LobbyBetModal.on_submit touches: the user's id, a response that
+    _bet_ack defers, and the followup _bet_reply then sends through. Every
+    message sent is kept, in order."""
+
+    def __init__(self):
+        self.user = types.SimpleNamespace(id=4242)
+        self.sent = []
+        sent, deferred = self.sent, []
+
+        class _Response:
+            async def defer(self, ephemeral=False, thinking=False):
+                deferred.append(True)
+
+            def is_done(self):
+                return bool(deferred)
+
+            async def send_message(self, msg, ephemeral=False):
+                sent.append(msg)
+
+        class _Followup:
+            async def send(self, msg, ephemeral=False):
+                sent.append(msg)
+
+        self.response = _Response()
+        self.followup = _Followup()
+
+
+def _lobby_bet_confirmation(label, text=None):
+    """(messages sent, API posts) when a bettor submits 1,250 gold on `label`
+    in a 2v2 lobby: LobbyBetModal.on_submit lifted out of `text` (the bot's
+    source by default) with every helper it calls -- _parse_bet_amount,
+    _bet_ack, _discord_bet_error, _bet_reply, _escape_md and
+    _LOBBY_BET_MODE_LABEL, all the bot's own -- run against a fake
+    interaction and an api_post that accepts the bet."""
+    tree = TREE if text is None else ast.parse(text)
+    helpers = {"_parse_bet_amount", "_bet_ack", "_discord_bet_error", "_bet_reply", "_escape_md"}
+    picked, seen = [], set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in helpers:
+            picked.append(copy.deepcopy(node))
+            seen.add(node.name)
+        elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "_LOBBY_BET_MODE_LABEL"
+                                                  for t in node.targets):
+            picked.append(copy.deepcopy(node))
+            seen.add("_LOBBY_BET_MODE_LABEL")
+        elif isinstance(node, ast.ClassDef) and node.name == "LobbyBetModal":
+            for item in node.body:
+                if isinstance(item, ast.AsyncFunctionDef) and item.name == "on_submit":
+                    picked.append(copy.deepcopy(item))
+                    seen.add("on_submit")
+    assert seen == helpers | {"_LOBBY_BET_MODE_LABEL", "on_submit"}, seen
+    posted = []
+
+    async def api_post(path, params=None, timeout=None):
+        posted.append((path, dict(params or {})))
+        return {"status": "ok"}
+
+    ns = {"re": re, "json": json, "api_post": api_post,
+          "discord": types.SimpleNamespace(Interaction=object)}
+    exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), ns)
+    modal = types.SimpleNamespace(mode="team", lobby_id="0123456789abcdef",
+                                  target_steams="90000000000000001,90000000000000002",
+                                  target_label=label, amount_input=types.SimpleNamespace(value="1,250"))
+    interaction = _Interaction()
+    asyncio.run(ns["on_submit"](modal, interaction))
+    return interaction.sent, posted
+
+
+def _markup(text):
+    """The Markdown a message still carries once every backslash-escaped
+    character is dropped: what Discord formats."""
+    return re.sub(r"\\.", "", text)
+
+
+@pytest.mark.parametrize("name", HOSTILE, ids=HOSTILE_IDS)
+def test_the_lobby_bet_confirmation_prints_the_target_label_literally(name):
+    """Round 5, F26: the bettor's confirmation names whom the bet backs.
+    Whatever that label holds -- a masked link, **bold**, a heading, a line
+    break -- it shows as typed, and the message keeps exactly its own
+    formatting: the amount and the label in bold, the lobby id as code, no
+    link, one line.
+
+    MUTATION: the confirmation's escape removed. Must fail (the next test
+    runs that mutation on the two cases the review names)."""
+    sent, posted = _lobby_bet_confirmation(name)
+    assert [(p, q["amount"]) for p, q in posted] == [("/discord-lobby-bets", 1250)], posted
+    assert len(sent) == 1, sent
+    msg = sent[0]
+    _shows_literally(msg, name)
+    assert " Bet placed: **1,250g** on **%s** in 2v2 lobby `01234567` " % _expect(name) in msg, msg
+    shown = _markup(msg)
+    assert shown.count("**") == 4 and shown.count("`") == 2, shown
+    assert not _MASKED_LINK.search(shown) and "\n" not in msg, shown
+
+
+@pytest.mark.parametrize("name", ["[watch](https://example.invalid)", "**Admin**"],
+                         ids=["masked-link", "bold"])
+@pytest.mark.parametrize("escaped", [True, False], ids=["as-shipped", "escape-removed"])
+def test_the_lobby_bet_confirmation_test_can_fail(name, escaped):
+    """Control (#391) for the test above, on the two cases the review names:
+    on_submit lifted from the bot's source with the confirmation's escape
+    removed prints the name as Markdown -- a link whose text hides its
+    target, or bold that swallows the message's own -- so both checks above
+    fail; as shipped (the inert twin) both pass."""
+    assert TEXT.count(_LOBBY_ESCAPED) == 1
+    text = TEXT if escaped else TEXT.replace(_LOBBY_ESCAPED, _LOBBY_RAW)
+    sent, _posted = _lobby_bet_confirmation(name, text)
+    shown = _markup(sent[0])
+    literal = _expect(name) in sent[0]
+    formatted = shown.count("**") != 4 or bool(_MASKED_LINK.search(shown))
+    assert (literal, formatted) == ((True, False) if escaped else (False, True)), sent
+
+
+def test_the_census_counts_the_lobby_target_label(monkeypatch):
+    """Round 5, F26: target_label is in the census's vocabulary. With the
+    confirmation's escape removed the census reports exactly that site; the
+    modal title is counted as well, and excused in ALLOW as plain text.
+    Without target_label in EXTRA_ATTR (round 4's vocabulary) the census sees
+    neither: the removed escape goes unreported and the title's ALLOW entry
+    matches nothing. The vocabulary entry is what makes the flow count."""
+    assert TEXT.count(_LOBBY_ESCAPED) == 1
+    raw = TEXT.replace(_LOBBY_ESCAPED, _LOBBY_RAW)
+    found = collections.Counter((f, e) for f, e, _k, _l in _Census(TEXT).sites())
+    assert (found[_LOBBY_TITLE], found[("on_submit", "self.target_label")]) == (1, 0), found
+    extra, stale = _unexpected(_Census(raw).sites())
+    assert (set(extra), stale) == ({("on_submit", "self.target_label")}, {}), (extra, stale)
+    monkeypatch.setitem(globals(), "EXTRA_ATTR", EXTRA_ATTR - {"target_label"})
+    extra, stale = _unexpected(_Census(raw).sites())
+    assert (extra, stale) == ({}, {_LOBBY_TITLE: 1}), (extra, stale)
