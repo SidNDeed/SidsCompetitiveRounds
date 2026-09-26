@@ -25327,6 +25327,110 @@ def _pc_pack_dup_at_pull(stored: dict, print_id: str):
     return None
 
 
+# The pack slots a Discord reveal strip draws, in paste order. The open writes
+# a pack's stored answer once, one roster entry per slot, and the strip is five
+# tiles wide: a roster that does not name exactly these is refused.
+_PC_ROSTER_SLOTS = (1, 2, 3, 4, 5)
+
+
+def _pc_composite_tile(row) -> tuple:
+    """(tile, reason) for one LIVE row of _pc_composite_row_sql: the ordered
+    decision, first match wins.
+
+    Rule 1: the subject's id is not a SteamID64 -> the card back, reason
+    no_steam_id, whatever else holds (migration 320 retired those prints, so
+    a discarded row arrives here with it; a face would need a delivery lease
+    the acquire refuses for that subject). Rule 4: the subject is banned ->
+    the back, reason subject_banned: the delivery layer withholds a banned
+    subject's face outright (internal_pc_lease_check), so the reveal does not
+    send the plated face either. Otherwise the face, which the compositor
+    stamps when the print is discarded. Rule 3, a roster slot with no live
+    row, has no row to decide from: _pc_roster_prints answers it."""
+    if not row["subject_id_ok"]:
+        return "back", "no_steam_id"
+    if row["subject_banned"]:
+        return "back", "subject_banned"
+    return "face", None
+
+
+def _pc_roster_slots(stored):
+    """The stored roster of a pack answer as one entry per slot, in slot
+    order, or None when it is absent, unparseable, or does not name each of
+    _PC_ROSTER_SLOTS exactly once with a canonical print id and subject id.
+    Each entry carries what a gone slot is answered from: print_id,
+    subject_player_id, slot, rarity, foil, signed."""
+    prints = stored.get("prints") if isinstance(stored, dict) else None
+    if not isinstance(prints, list):
+        return None
+    entries = []
+    for p in prints:
+        if not isinstance(p, dict):
+            return None
+        print_id, subject, slot, rarity = (p.get("print_id"), p.get("subject_player_id"),
+                                           p.get("slot"), p.get("rarity"))
+        if not (isinstance(print_id, str) and _pcp.print_id_ok(print_id)
+                and isinstance(subject, str) and _pcp.print_id_ok(subject)):
+            return None
+        if isinstance(slot, bool) or not isinstance(slot, int) or not isinstance(rarity, str):
+            return None
+        entries.append({"print_id": print_id, "subject_player_id": subject, "slot": slot,
+                        "rarity": rarity, "foil": bool(p.get("foil")), "signed": bool(p.get("signed"))})
+    entries.sort(key=lambda e: e["slot"])
+    if tuple(e["slot"] for e in entries) != _PC_ROSTER_SLOTS:
+        return None
+    if len({e["print_id"] for e in entries}) != len(entries):
+        return None
+    return entries
+
+
+async def _pc_roster_prints(db: AsyncSession, pack_id: str, ctx: dict):
+    """(entries, live) for one opened pack of the Discord reveal: `entries`
+    enumerates its STORED ROSTER in slot order, and `live` maps each print id
+    to the row it was decided from. Both halves of a reveal - the packs JSON
+    and the strip image - read the pack through this one helper.
+
+    A roster entry with a live row answers the ordinary print shape
+    (_pc_print_dict) plus `dup_at_pull` from the roster and the route-local
+    `gone`, `tile`, `reason` and `subject_id_ok`. An entry with no live row -
+    a subject's delete-my-data removes their prints wherever they are held
+    and leaves the holder's pack row - answers from the roster alone: drawn
+    as the back (reason print_gone) under the neutral label, and no players
+    row is read for it. A roster that is absent, unparseable or does not name
+    slots 1-5, or a live row the roster does not name, is a 500 with a log
+    line: the stored answer and the table then disagree in a way no deletion
+    explains."""
+    stored = await _pc_pack_result(db, pack_id)
+    rows = (await db.execute(text(_pc_composite_row_sql("WHERE pr.pack_id = CAST(:pack AS uuid)")),
+                             {"pack": pack_id})).mappings().all()
+    live = {str(r["print_id"]): r for r in rows}
+    roster = _pc_roster_slots(stored)
+    if roster is None:
+        print(f"[PC-REVEAL] roster_invalid pack={pack_id} live_rows={len(live)}")
+        raise HTTPException(status_code=500, detail={"error": "roster_invalid"})
+    unnamed = sorted(set(live) - {e["print_id"] for e in roster})
+    if unnamed:
+        print(f"[PC-REVEAL] roster_mismatch pack={pack_id} unnamed_rows={len(unnamed)}")
+        raise HTTPException(status_code=500, detail={"error": "roster_mismatch"})
+    entries = []
+    for e in roster:
+        row = live.get(e["print_id"])
+        if row is None:
+            entries.append({"print_id": e["print_id"], "subject_player_id": e["subject_player_id"],
+                            "slot": e["slot"], "rarity": e["rarity"], "foil": e["foil"],
+                            "signed": e["signed"], "gone": True, "tile": "back", "reason": "print_gone",
+                            "subject_name": _pc_neutral_name(ctx), "face_rev": None})
+            continue
+        d = _pc_print_dict(row, ctx)
+        dup = _pc_pack_dup_at_pull(stored, d["print_id"])
+        if dup is not None:
+            d["dup_at_pull"] = dup
+        tile, reason = _pc_composite_tile(row)
+        d.update({"gone": False, "tile": tile, "reason": reason,
+                  "subject_id_ok": bool(row["subject_id_ok"])})
+        entries.append(d)
+    return entries, live
+
+
 async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
     """One new pool snapshot from the live tables (the caller commits): the
     players _PC_POOL_MEMBER_SQL admits. pool_rank = leaderboard order among
