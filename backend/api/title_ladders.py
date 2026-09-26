@@ -530,6 +530,24 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
     return events
 
 
+# ── The build word main.py derives from the hook ───────────────────
+
+# The hook's own name, read off the function rather than typed a second time.
+_HOOK_NAME = record_completed_games.__name__
+
+
+def hooked_site_count(functions) -> int:
+    """How many of `functions` load the name record_completed_games in their
+    own compiled code -- the names each function's code object loads, which
+    a call of the hook does and a comment or a docstring naming it does not.
+    main.py binds its /health `ladder_hook` build word to this over the four
+    rated completion functions, and test_title_ladders.py holds main.py to
+    one awaited call of the hook in each of the four and no other reference.
+    The count lives here, beside the hook, so that main.py need not name the
+    hook anywhere else."""
+    return sum(1 for fn in functions if _HOOK_NAME in fn.__code__.co_names)
+
+
 # ── The read route ─────────────────────────────────────────────────
 
 @router.get("/api/v1/players/{steam_id}/title-ladders")

@@ -6316,6 +6316,9 @@ _FFA_HOLD_FENCES = 1
 # route carry it; a box on the build before round 2 answers without the key.
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
+# Its sibling _LADDER_HOOK (the /health `ladder_hook` word) is DERIVED from the
+# compiled code of the four rated completion functions, so it is defined after
+# the last of them in this file, submit_team_match.
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6331,6 +6334,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              ladder_hook=_LADDER_HOOK,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
@@ -6342,6 +6346,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              ladder_hook=_LADDER_HOOK,
                               pc_card_themes=_pc_card_themes_word())
 
 
@@ -53325,6 +53330,31 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         new_t2a_rating=new_ratings.get(str(p_t2a.id)),
         new_t2b_rating=new_ratings.get(str(p_t2b.id)),
     )
+
+
+# -- The title-ladder hook build marker (/health `ladder_hook`) --------------
+# v1.41.0 item 12's server half credits the worn title ladder from every rated
+# completion path, through title_ladders.record_completed_games: submit_match
+# (1v1), submit_team_match (2v2), _complete_team_series_with_ratings (2v2
+# settled by the admin route or a lead forfeit) and submit_ffa_match (FFA,
+# once per sitting). The batch adds no route and no key to any GET answer both
+# builds serve -- the title-ladder route answers on the build before it, from
+# the same tables -- so this word is what tells the new build from the old
+# one. The release train asserts it on both roles and reads any value but the
+# expected one as the old build; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): how many of those four functions' own
+# compiled code loads the hook's name -- 4 on this build, 0 on the build
+# before it, and between the two on a build that lost a site's call. It is
+# read from each function's code object (the names the function loads), not
+# from its source text, so a comment or a docstring naming the hook cannot
+# move the value. The count is title_ladders.hooked_site_count, kept beside
+# the hook so that this file names the hook at its four awaited calls and
+# nowhere else (test_title_ladders.py's whole-file test). health_check reads
+# the word at request time, so it is bound here, after the last of the four.
+_LADDER_HOOK_SITES = (submit_match, submit_team_match,
+                      _complete_team_series_with_ratings, submit_ffa_match)
+_LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
 
 
 @app.get("/api/v1/team/players/{steam_id}/team-stats", response_model=TeamStatsResponse, tags=["Team Matches"])
