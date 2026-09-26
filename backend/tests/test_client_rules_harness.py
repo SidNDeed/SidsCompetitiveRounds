@@ -422,6 +422,77 @@ def test_a_later_freeze_cannot_move_a_key_already_taken(harness_run):
         + control)
 
 
+def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "pctrade" in suites, "the PcTradeRules suite did not report"
+    run, fail, verdict = suites["pctrade"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[pctrade\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The count on the commit that added the suite: a floor far below it
+    # would be a gate that cannot fail (#342).
+    assert run >= 19, "the PcTradeRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # the digest: fixed vectors the server's own trade_items/trade_digest produced
+    "items match the server's trade_items",
+    "digest matches the server's trade_digest",
+    "the counterparty's view hashes the same",
+    "higher actor: items match the server",
+    "higher actor: digest matches the server",
+    "negative controls miss the server's digest",
+    "a malformed id yields no digest",
+    "canon_trade",
+    "canon_read",
+    # discovery and the lists
+    "discovery classifies the four answers and keeps state on the rest",
+    "discovery gates the tab, propose and reads",
+    "buckets",
+    "refetch after every refusal but busy/transport/limit; busy retried once",
+    "accept confirms only on the armed row inside six seconds",
+    "new ids against the last summary, never against zero",
+    "offered = give of sent open proposals only",
+    "time left from the server clock",
+])
+def test_the_pc_trade_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "pctrade")
+    assert line.startswith("[pctrade] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+def test_the_pc_trade_digest_vectors_are_the_servers():
+    """The two expected digests in PcTradeRules.cs are recomputed here from
+    the inputs the file names, by the same algorithm the server's
+    player_cards.trade_items / trade_digest implement, so a constant edited to
+    match a broken client cannot pass."""
+    import hashlib
+    import uuid
+    src = (REPO / "plugin" / "PcTradeRules.cs").read_text(encoding="utf-8")
+
+    def const(name):
+        m = re.search(r'internal const string ' + name + r' = "([^"]*)";', src)
+        assert m, "constant %s not found" % name
+        return m.group(1)
+
+    def items(steam, give, to, get):
+        def block(party, ids):
+            return party + ":" + ",".join(sorted(str(uuid.UUID(v)) for v in ids))
+        first, second = sorted(((steam, give), (to, get)), key=lambda side: side[0])
+        return "pctl1|" + block(*first) + "|" + block(*second)
+
+    s1, s2 = const("VecS1"), const("VecS2")
+    a, b, c, d = const("VecA"), const("VecB"), const("VecC"), const("VecD")
+    i1 = items(s1, [b, a], s2, [c])
+    i3 = items(s2, [d, c], s1, [b])
+    assert i1 == const("VecItems1")
+    assert i3 == const("VecItems3")
+    assert hashlib.sha256(i1.encode("ascii")).hexdigest() == const("VecDigest1")
+    assert hashlib.sha256(i3.encode("ascii")).hexdigest() == const("VecDigest3")
+
+
 def _named_case(proc, name, suite="topstrip"):
     """One case line, matched on its NAME.
 
@@ -603,7 +674,8 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "Main.cs" in included
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
-                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs"):
+                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
+                      "plugin/PcTradeRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial

@@ -47,6 +47,16 @@
                         partial class), so the shipped DLL carries no ladder
                         fixture.
 
+      PcTradeRules.cs   card trading's client half: the canonical item list
+                        and its SHA-256 digest (checked against fixed vectors
+                        the server's own player_cards.trade_items and
+                        trade_digest produced), the signed terms, what a
+                        summary read means for the Trades view, the three
+                        lists, the refetch and busy-retry rules, new-proposal
+                        detection and the In a trade set. A digest that is
+                        off by one byte makes every proposal answer bad_terms
+                        with no other symptom, so it is RUN, not described.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -75,6 +85,7 @@
     <Compile Include="../../plugin/BinderSortRules.cs" />
     <Compile Include="../../plugin/TitleLadderRules.cs" />
     <Compile Include="TitleLadderRulesSelfTest.cs" />
+    <Compile Include="../../plugin/PcTradeRules.cs" />
   </ItemGroup>
 
 </Project>
