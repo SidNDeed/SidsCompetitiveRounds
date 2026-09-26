@@ -6357,7 +6357,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
-                              pc_card_themes=_pc_card_themes_word())
+                              pc_card_themes=_pc_card_themes_word(),
+                              pc_trading=await _pc_trading_word(db))
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -6370,7 +6371,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
-                              pc_card_themes=_pc_card_themes_word())
+                              pc_card_themes=_pc_card_themes_word(),
+                              pc_trading=_pc_trading_word_cached())
 
 
 LATEST_MOD_VERSION = "1.40.3"
