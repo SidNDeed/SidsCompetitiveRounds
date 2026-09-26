@@ -850,9 +850,9 @@ def test_the_helper_closure_stays_affordable():
     indexed bindings, with the walk itself taking 0.1 s once the index is built
     (~5.3 s, once per process). The bounds below sat above those with room, so
     this fails on a walk that has gone wrong rather than on ordinary growth;
-    the worst-route bounds have since moved for measured growth in bindings
-    a route really runs, each move recorded with its measurement at its
-    assertion.
+    the worst-route bounds, and at the Discord collection landing the p90
+    bounds, have since moved for measured growth in bindings a route really
+    runs, each move recorded with its measurement at its assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -879,7 +879,37 @@ def test_the_helper_closure_stays_affordable():
     # alone: measured 20 / 55 / 198 with data-into-data expansion, against
     # 16 / 48 / 191 before it.
     assert code_median <= 24, f"median code closure {code_median} of {total}"
-    assert code_p90 <= 75, f"p90 code closure {code_p90} of {total}"
+    # Discord collection landing (2026-09-26): the p90 moved for measured
+    # growth. The same walk with the same route seeds over each tree:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   main 9a1dd9d                          365   21 / 69 / 326
+    #   lane 5868131                          369   21 / 73 / 326
+    #   LAND-1 74af3f6 (7541261 merged)       369   21 / 73 / 326
+    #   LAND-2 852f4be through 9f52e03        369   21 / 76 / 326
+    #
+    # Main alone passes and the lane alone passes; the landed tree is the sum
+    # of the two landings. The p90 is a rank statistic -- the value at sorted
+    # position int(0.9 * n) -- and it moved while the route AT that position
+    # did not: GET /api/v1/admin/quarantine/triage/{mode}/{group_id} measures
+    # 76 on every tree above. What moved is how many routes sit above 75: 37
+    # of 369 on the landed tree, exactly the count that puts position 332 on
+    # that route (main: 33 of 365; the lane: 35 of 369). Four of the 37 are
+    # the lane's new internal routes: the collection binder (117) and its page
+    # image (280), the pack list (123) and its strip image (280), the two
+    # images reaching the card-face rendering their tiles are composited from.
+    # Two crossed 75 on main's title-ladder hook: POST
+    # /api/v1/team/series/{series_id}/report-dc 72 -> 80 and POST
+    # /api/v1/admin/team/series/{series_id}/resolve 74 -> 82, each +8 in
+    # title_ladders (record_completed_games, the three lookups it runs and the
+    # four rung tables they read) -- the ladder credit their completion paths
+    # now give. Every one is a binding its route really runs, and the median
+    # has not moved, which is where a walk gone wrong shows first (the hub
+    # case in the docstring measured median 179).
+    #
+    # The bound moves to 80, 5% over the measurement -- the ~5-6% headroom the
+    # worst bounds keep over theirs; the median and worst bounds stay.
+    assert code_p90 <= 80, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -920,7 +950,25 @@ def test_the_helper_closure_stays_affordable():
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
     assert all_median <= 90, f"median closure {all_median} of {total}"
-    assert all_p90 <= 150, f"p90 closure {all_p90} of {total}"
+    # Discord collection landing (2026-09-26): the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 9a1dd9d                          365   72 / 140 / 457
+    #   lane 5868131                          369   73 / 150 / 457
+    #   LAND-1 74af3f6 (7541261 merged)       369   73 / 151 / 457
+    #   LAND-2 852f4be through 9f52e03        369   73 / 151 / 457
+    #
+    # The same rank effect as the code p90 above, and it crossed at the first
+    # landing: 37 of 369 routes sit above 150 on the landed tree (main: 33 of
+    # 365; the lane: 36 of 369), which puts position 332 on POST
+    # /api/v1/ovt/matches, 151 on every tree above. Four of the 37 are the
+    # lane's new internal routes (216, 410, 222, 409); the one that crossed on
+    # main is POST /api/v1/team/series/{series_id}/report-dc, 146 -> 153 on
+    # the lead-forfeit hotfix -- seven code bindings, _team_game_crossed_two
+    # with the four helpers and two constants beside it, the per-game
+    # evidence that route now settles from. The bound moves to 160, 6% over
+    # the measurement; the median and worst bounds stay.
+    assert all_p90 <= 160, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
