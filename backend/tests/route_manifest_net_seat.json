@@ -682,7 +682,7 @@
           ],
           "main",
           "pc_collection",
-          "c4e600e874bfd1c1e09183905df2f17e496bf118"
+          "b6e61f7208f2646a0dff39fdea585f8af46f2633"
         ],
         [
           "/api/v1/pc/daily",
@@ -700,7 +700,7 @@
           ],
           "main",
           "pc_me",
-          "a44ba251f5ca06715224a2fa486642eae0a16d4d"
+          "d3b5b4d71bfe290ca80eae4e59ffc2b72d753497"
         ],
         [
           "/api/v1/pc/packs/open",
@@ -745,7 +745,7 @@
           ],
           "main",
           "pc_discard_print",
-          "ee01098d50cd6484bfed9020ed492ab283af4815"
+          "aad1a549215266aed8a0ec1eb77507e6bd8b559b"
         ],
         [
           "/api/v1/pc/settings",
@@ -754,7 +754,7 @@
           ],
           "main",
           "pc_set_setting",
-          "50ed00767e13def5d1c7aa1abdfa89e92d43abf4"
+          "d856fb7d0abdf287aa1e214cddc8a26fb6d59b20"
         ],
         [
           "/api/v1/players/block",
@@ -943,7 +943,7 @@
           ],
           "main",
           "delete_player_data",
-          "19c44de3f7244e18bb495f525b484fc99f566a13"
+          "bc2b79579d6c1607a6bba992657d590c98f8f8c9"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "43d49b6792e30e7f28931288e387b2ec5f18917a"
+          "7b878531d62a7b7038975a04267555d7548089a4"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2894,6 +2894,24 @@
           "79b0b59b273dcac4022e19fefff3ebe7f4a92640"
         ],
         [
+          "/api/v1/admin/pc/trades",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_pc_trades",
+          "a07a629ac5baec871cb5905bfdd84a08a45e7acc"
+        ],
+        [
+          "/api/v1/admin/pc/trades/reverse",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_pc_trade_reverse",
+          "059fefe0c314ad0fd826e4c81843a85ce76f8950"
+        ],
+        [
           "/api/v1/internal/moderation-cases/{case_id}/act",
           [
             "POST"
@@ -3171,6 +3189,51 @@
           "main",
           "pc_portrait_upload",
           "8e9f9a4dfb45229426377c3bea0c495f784bee78"
+        ],
+        [
+          "/api/v1/pc/trades",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_trades",
+          "ba09daa618103f7e97e28abe5f856a38baa6522a"
+        ],
+        [
+          "/api/v1/pc/trades/accept",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_accept",
+          "3de55bfb16ee98da809961884156dbb8cdc55902"
+        ],
+        [
+          "/api/v1/pc/trades/cancel",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_cancel",
+          "59292f0f5683bb1ddd0e9cc50c063db45a29870f"
+        ],
+        [
+          "/api/v1/pc/trades/decline",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_decline",
+          "c38bf25b821fce2c0b76998405ce3332da7c9b94"
+        ],
+        [
+          "/api/v1/pc/trades/propose",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_propose",
+          "eba750d1c489c9545bc3f3cfb1f98c8b0d708e33"
         ]
       ]
     },
@@ -3365,7 +3428,7 @@
       [
         "main",
         "lifespan",
-        "e30665929993127aeccf6bc917a15eaa19585eb4"
+        "786ed528773374a18a616f3f4c63633892c35260"
       ]
     ]
   },
@@ -3507,6 +3570,13 @@
     "GET /api/v1/pc/card -> main.pc_card_face",
     "GET /api/v1/pc/pool -> main.pc_pool_summary",
     "POST /api/v1/admin/pc/snapshot -> main.admin_pc_snapshot",
+    "POST /api/v1/pc/trades/propose -> main.pc_trade_propose",
+    "POST /api/v1/pc/trades/accept -> main.pc_trade_accept",
+    "POST /api/v1/pc/trades/decline -> main.pc_trade_decline",
+    "POST /api/v1/pc/trades/cancel -> main.pc_trade_cancel",
+    "GET /api/v1/pc/trades -> main.pc_trades",
+    "POST /api/v1/admin/pc/trades/reverse -> main.admin_pc_trade_reverse",
+    "GET /api/v1/admin/pc/trades -> main.admin_pc_trades",
     "GET /api/v1/internal/pc/events/pending -> main.internal_pc_events_pending",
     "POST /api/v1/internal/pc/events/ack -> main.internal_pc_events_ack",
     "POST /api/v1/internal/pc/daily -> main.internal_pc_daily",
