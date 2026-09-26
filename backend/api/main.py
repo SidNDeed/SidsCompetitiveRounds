@@ -25132,6 +25132,35 @@ _PC_PRINT_FACE_SELECT = """
 """
 
 
+# The Discord reveal's row statement (the /pack strip and the /binder grid):
+# _PC_PRINT_FACE_SELECT WRAPPED, never edited, with the subject's SteamID64
+# rule as a COLUMN, so a slot whose subject has no SteamID64 is named (it draws
+# the card back) instead of silently missing from the answer. `s2` is the
+# subject's players row, joined outside the wrap; the rule is steamid64's, the
+# idiom _PC_FACE_SUBJECT_ID_SQL and _PC_LEASE_SUBJECT_ID_OK already use.
+_PC_COMPOSITE_SUBJECT_ID_SQL = _sid64.individual_id_sql("s2.steam_id")
+
+
+def _pc_composite_row_sql(where: str) -> str:
+    """The composite row statement, assembled by CONCATENATION ONLY. It is
+    never formatted: individual_id_sql emits a literal `{17}` (steamid64.py),
+    so str.format() over this text reads that as a positional field and
+    raises IndexError before any SQL is sent.
+
+    `where` carries the inner predicate and NOTHING ELSE. This builder states
+    no ordering and no page: the two pack routes send its output as it
+    stands (a strip's order is its stored roster's, not a statement's), and
+    the two binder routes wrap it as the `live` CTE of one statement whose
+    `page` CTE carries the ORDER BY and the LIMIT/OFFSET and whose final
+    SELECT restates the same six-term key at depth zero. There is no `order`
+    and no extra-columns parameter, and none is to be added: a page stated
+    inside the wrap would make the binder's collection-wide count count the
+    page."""
+    return ("SELECT q.*, " + _PC_COMPOSITE_SUBJECT_ID_SQL + " AS subject_id_ok "
+            + " FROM ( " + _PC_PRINT_FACE_SELECT + " " + where + " ) q "
+            + " JOIN players s2 ON s2.id = q.subject_player_id ")
+
+
 async def _pc_verified_actor(request, steam_id: str, sig: str, canon: str, db: AsyncSession):
     """The acting player for a mutation or a private read: mod HMAC over the
     canonical string (503 unconfigured, 403 invalid), a STRICT verified Steam
