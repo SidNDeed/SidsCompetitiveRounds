@@ -385,7 +385,7 @@
           ],
           "main",
           "list_bug_reports",
-          "0ddeb1525c5e7d222cd74c35e641b3d7ec52f3f8"
+          "1562edc2bea2015fb1bc013d715bbe26807077d4"
         ],
         [
           "/api/v1/bug-reports",
@@ -394,7 +394,7 @@
           ],
           "main",
           "submit_bug_report",
-          "a1c2e55f50f41b7012e9c9201f70340b6b73ba9c"
+          "c12b8e5d95d3e4423efbaf1d78950df1d8ea48a8"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -403,7 +403,7 @@
           ],
           "main",
           "recent_bug_report_events",
-          "c275547be4039736b86b6ea5070b17ec09b2cef7"
+          "2009472bb026c902a6a7b900719074a4d0b9b2c9"
         ],
         [
           "/api/v1/bug-reports/recent",
@@ -412,7 +412,7 @@
           ],
           "main",
           "recent_bug_reports",
-          "902b0c1ddeed8cdc5142a2bb27b22d4630a5b42c"
+          "0296386ae437a559bfdf498512721af4b3cd70b3"
         ],
         [
           "/api/v1/bug-reports/{report_id}",
@@ -421,7 +421,7 @@
           ],
           "main",
           "get_bug_report",
-          "a3d92ed7e223c2f9d425a44e303ae18f09e348e7"
+          "450bf926025212342f1e9ee6f557afe54167d834"
         ],
         [
           "/api/v1/bug-reports/{report_id}/comment",
@@ -430,7 +430,7 @@
           ],
           "main",
           "admin_comment_on_bug_report",
-          "7eef8b2ed9677ed3d3e3d0a9e9b82cf70f4bef47"
+          "043135c4ae4751f1d8407d44023f1a82a9c78601"
         ],
         [
           "/api/v1/bug-reports/{report_id}/log",
@@ -439,7 +439,7 @@
           ],
           "main",
           "download_bug_report_log",
-          "4279a582ec185b3f2bd8704c237ef58243b85c61"
+          "bf428d1c52959ad555e2c0e796842af270be449c"
         ],
         [
           "/api/v1/bug-reports/{report_id}/status",
@@ -448,7 +448,7 @@
           ],
           "main",
           "admin_change_bug_report_status",
-          "506350c584a7e9f61aea3bd6584298ddb70527d5"
+          "fec81a027e2240afb052d6cea38e5d39ed78373d"
         ],
         [
           "/api/v1/cards",
@@ -529,7 +529,7 @@
           ],
           "main",
           "user_comment_on_bug_report",
-          "29288cd8c05db8b10045e4a7132d3976902e3938"
+          "eb23007b1f1f37d764086fe44f2bfb90d4e35558"
         ],
         [
           "/api/v1/internal/bug-reports/events/ack",
@@ -556,7 +556,7 @@
           ],
           "main",
           "internal_comment_on_bug_report",
-          "944cffcf046f194117fe9c9843174b549cc1475e"
+          "275153da49682e51c61b074a14e18b5f6cb0c202"
         ],
         [
           "/api/v1/internal/linked-players",
@@ -646,7 +646,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "fe6745d17d2e937ea1a6d6f0288c8727fa82cc1a"
+          "fd26e7b3f97e6d478602cc9a0b0c76b3f0b75ad0"
         ],
         [
           "/api/v1/ovt/series/active",
