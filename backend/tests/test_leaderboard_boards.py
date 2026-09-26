@@ -135,6 +135,7 @@ class _Channel:
         self.id, self.bot_user = cid, bot_user
         self.messages, self.deleted, self.sent = [], [], []
         self.history_raises = False
+        self.history_reads = 0
         # A walk whose later page fails: this many messages are read, newest
         # first, and then the read raises (round 4).
         self.history_fails_after = None
@@ -172,6 +173,7 @@ class _Channel:
     def history(self, limit=100):
         if self.history_raises:
             raise RuntimeError("history boom")
+        self.history_reads += 1
         # limit=None is the whole channel, as discord.py pages it (round 4).
         msgs = list(self.messages) if limit is None else list(self.messages)[-limit:]
         snapshot = msgs[::-1]                              # newest first, as Discord answers
@@ -186,6 +188,12 @@ class _Channel:
 
     def titles(self):
         return [(m.embeds[0].title if m.embeds else None) for m in self.messages]
+
+    @property
+    def last_message_id(self):
+        """TextChannel.last_message_id, as the channel stands: the id of its
+        newest message (the tournament board's burial check reads it)."""
+        return self.messages[-1].id if self.messages else None
 
 
 class _Bot:
@@ -227,26 +235,26 @@ class _Interaction:
 
 # ── lifting ───────────────────────────────────────────────────────────────
 
-def _lift():
+def _lift(want_func=WANT_FUNC, want_assign=WANT_ASSIGN, want_class=WANT_CLASS):
     picked, seen = [], set()
     for node in TREE.body:
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                if isinstance(t, ast.Name) and t.id in WANT_ASSIGN:
+                if isinstance(t, ast.Name) and t.id in want_assign:
                     picked.append(node)
                     seen.add(t.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id in WANT_ASSIGN:
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id in want_assign:
             picked.append(node)
             seen.add(node.target.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in WANT_FUNC:
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in want_func:
             fn = copy.deepcopy(node)
             fn.decorator_list = []                     # @tasks.loop is the harness's
             picked.append(fn)
             seen.add(node.name)
-        elif isinstance(node, ast.ClassDef) and node.name in WANT_CLASS:
+        elif isinstance(node, ast.ClassDef) and node.name in want_class:
             picked.append(copy.deepcopy(node))
             seen.add(node.name)
-    want = WANT_FUNC | WANT_ASSIGN | WANT_CLASS
+    want = want_func | want_assign | want_class
     assert seen == want, want - seen
     return picked
 
@@ -1266,6 +1274,255 @@ def test_a_retired_board_buried_deep_is_still_retired(ns):
     assert old["ffa"] in ch.deleted, (ch.deleted, old)
     assert _board_titles(ch) == [T_1V1, T_2V2], _board_titles(ch)
     assert CID in ns["_lb_swept"]
+
+
+# -- round 4: the tournament board runs the same mechanism (finding 22) --------
+
+TB_FUNC = {"_delete_board_message", "_own_embed_messages", "_adopt_tournament_board",
+           "_publish_tournament_board", "publish_tournament_board"}
+TB_ASSIGN = {"_tournament_board_ids", "_tb_swept"}
+T_SYNC = chr(0x1F3C6) + " Sync Tournament"       # the titles _build_tournament_board_embed gives
+T_ASYNC = chr(0x1F300) + " Async Tournament"
+
+
+def _tb_fresh():
+    """A fresh bot process for the tournament board: its id map and its
+    owed-sweep set start empty, as at every start. The board's two embeds
+    come from a stub; what is under test is where the message goes."""
+    out = []
+    ch = _Channel(CID, "scr-bot")
+    ns = {"discord": FAKE_DISCORD, "bot": _Bot(ch), "SCR_TOURNAMENTS_CHANNEL": CID,
+          "_watch_cache": {"tournaments": [{"kind": "sync", "status": "voting"}]},
+          "http_session": None, "API_SECRET_KEY": "", "API_BASE_URL": "", "aiohttp": None,
+          "_build_tournament_board_embed": lambda t, kind: _Embed(
+              title=T_SYNC if kind == "sync" else T_ASYNC, description="status"),
+          "print": lambda *a, **k: out.append(" ".join(str(x) for x in a))}
+    exec(compile(ast.Module(body=_lift(TB_FUNC, TB_ASSIGN, set()), type_ignores=[]), SRC, "exec"), ns)
+    ns["_log"], ns["_ch"] = out, ch
+    return ns
+
+
+def _tb_tick(ns):
+    _run(ns["publish_tournament_board"]())       # the loop body, with its own guard (#129)
+
+
+def _tb_restart(ns):
+    """The process restarts: its memory is gone, the channel is not."""
+    ns["_tournament_board_ids"].clear()
+    ns["_tb_swept"].clear()
+
+
+def _tb_copies(ch):
+    return [m.id for m in ch.messages
+            if m.author == ch.bot_user and m.embeds and (m.embeds[0].title or "").endswith("Tournament")]
+
+
+def test_the_tournament_board_is_posted_once_and_then_edited_in_place():
+    """Round 4, finding 22, the steady state. The first tick walks the empty
+    channel and posts the board; later ticks edit that message, and once the
+    sweep has completed they do not walk the channel again."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    _tb_tick(ns)
+    mid = ns["_tournament_board_ids"][CID]
+    assert _tb_copies(ch) == [mid] and ch.messages[-1].embeds[0].title == T_SYNC
+    assert CID in ns["_tb_swept"] and ch.history_reads == 1
+    ns["_log"].clear()
+    _tb_tick(ns)
+    _tb_tick(ns)
+    assert sum(1 for ln in ns["_log"] if f"edited board mid={mid}" in ln) == 2, ns["_log"]
+    assert _tb_copies(ch) == [mid] and ch.deleted == [] and ch.history_reads == 1
+
+
+def test_a_buried_tournament_board_whose_delete_fails_stays_the_only_copy_until_it_moves():
+    """Round 4, finding 22, the round-3 report's first scenario. Chat buries
+    the board and its delete fails (a revoked Manage Messages, a 5xx). The
+    publisher used to swallow that, post a fresh board at the bottom and
+    remember only the fresh one: two copies, and the old one was never
+    looked at again. Now nothing is posted while the old message may be
+    live -- it is edited where it is -- and the move is retried every tick
+    until the delete goes through. One copy at every tick.
+
+    MUTATION: post the replacement first and delete after (the old order).
+    Must fail."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    _tb_tick(ns)
+    mid = ns["_tournament_board_ids"][CID]
+    ch.post_from_someone_else()
+    ch.delete_fails.add(mid)
+    for _ in range(3):
+        ns["_log"].clear()
+        _tb_tick(ns)
+        assert _tb_copies(ch) == [mid], ch.titles()
+        assert any(f"buried board mid={mid} not deleted" in ln for ln in ns["_log"]), ns["_log"]
+        assert any(f"edited board mid={mid}" in ln for ln in ns["_log"]), ns["_log"]
+    assert len(ch.sent) == 1
+    ch.delete_fails.clear()
+    _tb_tick(ns)
+    new = ns["_tournament_board_ids"][CID]
+    assert mid in ch.deleted and _tb_copies(ch) == [new] and ch.messages[-1].id == new
+
+
+def test_a_duplicate_tournament_board_whose_delete_fails_is_deleted_on_a_later_tick():
+    """Round 4, finding 22, the round-3 report's second scenario. A restart
+    finds two copies of the board, and the older copy's delete fails. The
+    rescan used to log that and forget it. Now the sweep stays owed and runs
+    again on every tick until the delete goes through; then the channel
+    holds one board, and steady ticks stop walking it.
+
+    MUTATION: a failed duplicate delete not leaving the sweep owed, and the
+    owed sweep not run while a board is on record. Each must fail."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    older = _run(ch.send(embeds=[_Embed(title=T_SYNC)])).id
+    ch.post_from_someone_else()
+    newer = _run(ch.send(embeds=[_Embed(title=T_SYNC)])).id
+    ch.delete_fails.add(older)
+    _tb_tick(ns)                                  # a fresh process: nothing on record, a sweep owed
+    assert ns["_tournament_board_ids"][CID] == newer
+    assert CID not in ns["_tb_swept"]
+    assert any(f"couldn't delete duplicate board mid={older}" in ln for ln in ns["_log"]), ns["_log"]
+    _tb_tick(ns)
+    assert older in [m.id for m in ch.messages]   # still refused, still owed
+    ch.delete_fails.clear()
+    _tb_tick(ns)
+    assert older in ch.deleted and _tb_copies(ch) == [newer]
+    assert CID in ns["_tb_swept"]
+    reads = ch.history_reads
+    _tb_tick(ns)
+    assert ch.history_reads == reads and _tb_copies(ch) == [newer]
+
+
+def test_a_tournament_board_buried_deeper_than_the_old_window_is_moved_not_duplicated():
+    """Round 4, finding 22 (finding 12's depth, in this publisher's own
+    copy). The board sits under 120 messages of chat and the bot restarts.
+    The rescan read the newest 50 messages, missed it and posted a second
+    board. The walk now reads the whole channel: the restart adopts the
+    board and moves it to the bottom -- one copy.
+
+    MUTATION: the walk back to the newest 50 messages. Must fail."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    _tb_tick(ns)
+    old = ns["_tournament_board_ids"][CID]
+    _bury(ch)
+    _tb_restart(ns)
+    _tb_tick(ns)
+    new = ns["_tournament_board_ids"][CID]
+    assert ch.deleted == [old] and _tb_copies(ch) == [new]
+    assert ch.messages[-1].id == new and len(ch.messages) == _DEEP + 1
+    assert CID in ns["_tb_swept"]
+
+
+def test_a_tournament_board_walk_that_fails_part_way_posts_nothing():
+    """Round 4, finding 22 with finding 21's rule: a partial walk proves no
+    copy absent. The board sits under 120 messages of chat and the bot
+    restarts; the walk reads 60 messages and fails. Nothing is posted, the
+    sweep stays owed, and the next tick's complete walk finds the board and
+    moves it -- one copy throughout.
+
+    MUTATION: post with no message on record after a failed walk. Must
+    fail."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    _tb_tick(ns)
+    old = ns["_tournament_board_ids"][CID]
+    _bury(ch)
+    _tb_restart(ns)
+    ch.history_fails_after = 60
+    ns["_log"].clear()
+    _tb_tick(ns)
+    assert any("rescan failed (history page failed)" in ln for ln in ns["_log"]), ns["_log"]
+    assert any("no board on record and no complete walk" in ln for ln in ns["_log"]), ns["_log"]
+    assert _tb_copies(ch) == [old] and len(ch.sent) == 1
+    assert CID not in ns["_tb_swept"]
+    ch.history_fails_after = None
+    _tb_tick(ns)
+    new = ns["_tournament_board_ids"][CID]
+    assert _tb_copies(ch) == [new] and ch.messages[-1].id == new
+    assert CID in ns["_tb_swept"]
+
+
+def test_a_transient_failure_leaves_the_tournament_board_and_retries_it():
+    """Round 4, finding 22 with finding 21's rule. A fetch that fails for any
+    reason but a 404 (a 429 here) proves nothing gone, so the board is left
+    as it is and the next tick edits the same message. One copy throughout,
+    and nothing deleted.
+
+    MUTATION: a failed fetch dropping the id and posting fresh. Must fail."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    _tb_tick(ns)
+    mid = ns["_tournament_board_ids"][CID]
+    ch.fetch_fails_once.add(mid)
+    ns["_log"].clear()
+    _tb_tick(ns)
+    assert any(f"fetch of mid={mid} failed" in ln and "retried next tick" in ln
+               for ln in ns["_log"]), ns["_log"]
+    _tb_tick(ns)
+    assert any(f"edited board mid={mid}" in ln for ln in ns["_log"]), ns["_log"]
+    assert _tb_copies(ch) == [mid] and ch.deleted == [] and len(ch.sent) == 1
+
+
+def test_a_tournament_board_deleted_by_hand_is_posted_again_once():
+    """Round 4, finding 22 with finding 21's rule: a 404 is proof. A
+    moderator deletes the board; the next tick's fetch answers 404 and the
+    board is posted fresh at once -- one copy, and no delete was needed.
+
+    MUTATION: a 404 on the fetch not counted as proof. Must fail."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    _tb_tick(ns)
+    gone = ns["_tournament_board_ids"][CID]
+    ch.messages = [m for m in ch.messages if m.id != gone]     # deleted by hand
+    ns["_log"].clear()
+    _tb_tick(ns)
+    assert any(f"board mid={gone} is gone (404)" in ln for ln in ns["_log"]), ns["_log"]
+    new = ns["_tournament_board_ids"][CID]
+    assert new != gone and _tb_copies(ch) == [new] and gone not in ch.deleted
+
+
+def test_a_failed_tournament_repost_leaves_the_board_absent_for_one_tick_never_twice():
+    """Round 4, finding 22 with finding 21's order. The board is buried; its
+    delete goes through and the replacement's send fails. The board is
+    absent until the next tick, whose complete walk finds no copy and posts
+    one: the one price of deleting first, and never two copies.
+
+    MUTATION: post the replacement first and delete after. Must fail."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    _tb_tick(ns)
+    old = ns["_tournament_board_ids"][CID]
+    ch.post_from_someone_else()
+    ch.send_fails_for_titles.add(T_SYNC)
+    ns["_log"].clear()
+    _tb_tick(ns)
+    assert old in ch.deleted and _tb_copies(ch) == []
+    assert any("repost failed" in ln for ln in ns["_log"]), ns["_log"]
+    assert CID not in ns["_tournament_board_ids"]
+    ch.send_fails_for_titles.clear()
+    _tb_tick(ns)
+    new = ns["_tournament_board_ids"][CID]
+    assert _tb_copies(ch) == [new] and ch.messages[-1].id == new
+
+
+def test_the_tournament_sweep_touches_only_our_board_copies():
+    """Round 4, finding 22: the walk now reads the whole channel, so what it
+    matches matters more than it did at 50 messages. A board copy is a
+    message of this bot's whose first embed's title ends with "Tournament":
+    another member's message titled the same, and an embed of ours titled
+    otherwise, are never deleted."""
+    ns = _tb_fresh()
+    ch = ns["_ch"]
+    theirs = ch.post_from_someone_else()
+    theirs.embeds = [_Embed(title=T_SYNC)]
+    other = _run(ch.send(embeds=[_Embed(title="Tournament FFA Complete - 5 players")])).id
+    _tb_tick(ns)
+    _tb_tick(ns)
+    assert ch.deleted == []
+    assert theirs in ch.messages and other in [m.id for m in ch.messages]
+    assert _tb_copies(ch) == [ns["_tournament_board_ids"][CID]]
 
 
 # ── paginators ────────────────────────────────────────────────────────────

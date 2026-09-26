@@ -12827,6 +12827,14 @@ async def on_interaction(interaction: discord.Interaction):
 # a restart, before poll_tournaments' first tick).
 
 _tournament_board_ids: dict = {}  # channel_id -> message_id
+# Channels whose tournament-board sweep has completed in this process: the
+# leaderboard's _lb_swept, kept for this channel and run the same way
+# (v1.41.0 beta round 4, finding 22). A channel owes a sweep from the start
+# of every process, and again after a failed delete of a duplicate or a
+# failed history read; _publish_tournament_board runs one on every tick
+# while it is owed, until a sweep reads the whole history and every delete
+# it tries goes through.
+_tb_swept: set = set()
 
 _BRACKET_SIDE_LABEL = {"W": "WB", "L": "LB", "GF": "Grand Final", "GF_RESET": "GF Reset", "TP": "3rd Place"}
 _BRACKET_SIDE_ORDER = {"W": 0, "L": 1, "GF": 2, "GF_RESET": 3, "TP": 4}
@@ -13040,6 +13048,51 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
     return em
 
 
+async def _adopt_tournament_board(ch):
+    """Find the tournament board already in the channel, and delete older
+    copies of it: the leaderboard's sweep (_adopt_board_messages), reused for
+    this channel's one board (v1.41.0 beta round 4, finding 22). It walks the
+    same whole history (_own_embed_messages), so a copy is found however deep
+    it is buried, and it deletes through the same helper
+    (_delete_board_message), so a delete answered 404 counts as done. A board
+    copy is a message of this bot's whose first embed's title ends with
+    "Tournament", as the rescan always matched; the newest is the keeper.
+
+    The channel is marked swept (_tb_swept) only when the walk reached the
+    channel's first message and every delete tried here went through;
+    anything less leaves the sweep owed, and the next tick runs it again.
+    The rescan used to read the newest 50 messages and forget a failed
+    delete: a duplicate it could not delete was not retried, and one deeper
+    than 50 messages was never found.
+
+    Returns (the keeper's id or None, whether the walk was complete). Only a
+    complete walk shows that no copy of the board is in the channel."""
+    ours, walk_error = await _own_embed_messages(ch)
+    complete = walk_error is None
+    if walk_error is not None:
+        print(f"[TBOARD] rescan failed ({walk_error}) -- the sweep runs again next tick")
+    keeper, dupes = None, 0
+    for msg in ours:
+        if not (msg.embeds[0].title or "").endswith("Tournament"):
+            continue
+        if keeper is None:
+            keeper = msg.id
+            continue
+        err = await _delete_board_message(ch, msg=msg)
+        if err is None:
+            dupes += 1
+        else:
+            complete = False
+            print(f"[TBOARD] couldn't delete duplicate board mid={msg.id}: {err}")
+    if dupes:
+        print(f"[TBOARD] deleted {dupes} duplicate board message(s)")
+    if complete:
+        _tb_swept.add(ch.id)
+    else:
+        _tb_swept.discard(ch.id)
+    return keeper, walk_error is None
+
+
 async def _publish_tournament_board():
     if not SCR_TOURNAMENTS_CHANNEL:
         return
@@ -13079,65 +13132,89 @@ async def _publish_tournament_board():
         _build_tournament_board_embed(pick("sync"), "sync"),
         _build_tournament_board_embed(pick("async"), "async"),
     ]
-    # Living-message management — the single-message shape the leaderboard
-    # channel used before v1.41.0 item 1: remembered id, edit in place, delete
-    # and repost when something was posted after it. publish_boards now runs a
-    # SET of messages instead (last_message_id can't order a set), so this is
-    # its own copy, not a caller of it.
+    # Living-message management: one message, its id remembered, edited in
+    # place, and moved to the channel bottom when something was posted after
+    # it (#140). publish_boards runs a SET of messages (last_message_id can't
+    # order a set), so this is its own copy of the pattern -- but since v1.41.0
+    # beta round 4 (finding 22) it runs the leaderboard's mechanism for its one
+    # message, not a third one: an owed sweep over the whole channel
+    # (_adopt_tournament_board, _tb_swept) retried every tick until it
+    # completes, and a move that deletes the old message first and posts the
+    # new one only once the old is proven gone (_delete_board_message, as in
+    # _repost_board_set; finding 21). A fetch, edit or delete that fails
+    # leaves the board as it is, and the next tick tries again. Before, all
+    # three delete sites swallowed a failure and nothing owed a retry: a
+    # buried board whose delete failed stayed beside its replacement, and a
+    # duplicate the rescan could not delete was forgotten; a rescan ran only
+    # after a failed fast-path edit, and read only the newest 50 messages.
     mid = _tournament_board_ids.get(ch.id)
-    if mid:
+    # Whether this tick's walk reached the channel's first message; None when
+    # no walk ran. With no message on record, the board is posted only after
+    # a complete walk; with one, only once that message answers 404.
+    walked = None
+    if mid is None or ch.id not in _tb_swept:
+        keeper, walked = await _adopt_tournament_board(ch)
+        if keeper is not None:
+            _tournament_board_ids[ch.id] = mid = keeper
+    if mid is not None:
         try:
             msg = await ch.fetch_message(mid)
-            if getattr(ch, "last_message_id", None) not in (None, mid):
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                sent = await ch.send(embeds=embeds)
-                _tournament_board_ids[ch.id] = sent.id
-                print(f"[TBOARD] board was buried — reposted at bottom as mid={sent.id}")
-                return
-            await msg.edit(embeds=embeds)
-            print(f"[TBOARD] edited board mid={mid}")
-            return
-        except Exception as e:
-            print(f"[TBOARD] fast-path edit of mid={mid} failed ({e}) — rescanning")
+        except discord.NotFound:
+            msg = None
+            print(f"[TBOARD] board mid={mid} is gone (404) -- posting a fresh message")
             _tournament_board_ids.pop(ch.id, None)
-    # Rescan: adopt the newest board message, delete older duplicates.
-    keeper = None
-    dupes = 0
-    async for msg in ch.history(limit=50):
-        if msg.author == bot.user and msg.embeds and (msg.embeds[0].title or "").endswith("Tournament"):
-            if keeper is None:
-                keeper = msg
-            else:
-                try:
-                    await msg.delete()
-                    dupes += 1
-                except Exception as e:
-                    print(f"[TBOARD] couldn't delete duplicate board mid={msg.id}: {e}")
-    if dupes:
-        print(f"[TBOARD] deleted {dupes} duplicate board message(s)")
-    if keeper is not None:
-        if getattr(ch, "last_message_id", None) not in (None, keeper.id):
-            try:
-                await keeper.delete()
-            except Exception:
-                pass
-            sent = await ch.send(embeds=embeds)
-            _tournament_board_ids[ch.id] = sent.id
-            print(f"[TBOARD] re-anchored board was buried — reposted at bottom as mid={sent.id}")
-            return
-        _tournament_board_ids[ch.id] = keeper.id
-        try:
-            await keeper.edit(embeds=embeds)
-            print(f"[TBOARD] re-anchored to board mid={keeper.id} and edited")
         except Exception as e:
-            print(f"[TBOARD] re-anchor edit of mid={keeper.id} failed: {e}")
+            print(f"[TBOARD] fetch of mid={mid} failed ({e}) -- board left as it is; "
+                  "the fetch is retried next tick")
+            return
+        if msg is not None and getattr(ch, "last_message_id", None) not in (None, mid):
+            # Buried: delete the old message first, and post the new one only
+            # once the old is proven gone.
+            err = await _delete_board_message(ch, msg=msg)
+            if err is not None:
+                print(f"[TBOARD] buried board mid={mid} not deleted ({err}) -- kept and "
+                      "edited in place; the move is retried next tick")
+                try:
+                    await msg.edit(embeds=embeds)
+                    print(f"[TBOARD] edited board mid={mid}")
+                except Exception as e:
+                    print(f"[TBOARD] edit of mid={mid} failed ({e}) -- board left as it is")
+                return
+            _tournament_board_ids.pop(ch.id, None)
+            try:
+                sent = await ch.send(embeds=embeds)
+            except Exception as e:
+                # Proven gone and not replaced: absent for one tick. The next
+                # tick has nothing on record, so it walks the channel, finds
+                # no copy and posts one.
+                print(f"[TBOARD] repost failed ({e}) -- absent until the next tick posts it")
+                return
+            _tournament_board_ids[ch.id] = sent.id
+            print(f"[TBOARD] board was buried -- reposted at bottom as mid={sent.id}")
+            return
+        if msg is not None:
+            try:
+                await msg.edit(embeds=embeds)
+                print(f"[TBOARD] edited board mid={mid}")
+                return
+            except discord.NotFound:
+                print(f"[TBOARD] board mid={mid} is gone (404) -- posting a fresh message")
+                _tournament_board_ids.pop(ch.id, None)
+            except Exception as e:
+                print(f"[TBOARD] edit of mid={mid} failed ({e}) -- board left as it is; "
+                      "the edit is retried next tick")
+                return
+    elif walked is not True:
+        print("[TBOARD] no board on record and no complete walk this tick -- not posted "
+              "until a walk shows no copy of it is in the channel")
         return
-    sent = await ch.send(embeds=embeds)
+    try:
+        sent = await ch.send(embeds=embeds)
+    except Exception as e:
+        print(f"[TBOARD] post failed ({e}) -- absent until the next tick posts it")
+        return
     _tournament_board_ids[ch.id] = sent.id
-    print(f"[TBOARD] posted fresh tournament board in {ch.id}")
+    print(f"[TBOARD] posted fresh tournament board mid={sent.id} in {ch.id}")
 
 
 @tasks.loop(seconds=120)
