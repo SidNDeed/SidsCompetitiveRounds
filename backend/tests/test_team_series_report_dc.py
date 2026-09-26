@@ -8,14 +8,19 @@ that team was already a game up AND the abandoned game saw real play (two
 points). The second half used to be the report's query-string snapshot, so two
 honest survivors holding different snapshots of one game got different
 settlements depending on which report took the series lock first. It is now
-team_series_games (migrations 348, 351 and 352), written by the team
+team_series_games (migrations 348, 351, 352 and 354), written by the team
 live-points POST: one row per game, named by the series, its recorded games
-plus one and the sitting's room, holding which seat posted which pair, and
-which of those posts named their game. A crossing needs a pair of two points
-from a seat of each team, and after the first game of the original sitting
-only the posts that named their game count: the production client can deliver
-a previous game's posts after that game's report, and they name no game
-(hotfix round 2). No time is read (main.py, the comment above
+plus one and the sitting's room, holding which seat posted which pair, which
+of those posts named their game, and which carried the physical game's token.
+A crossing needs a pair of two points from a seat of each team, and after the
+first game of the original sitting only the posts that named their game
+count: the production client can deliver a previous game's posts after that
+game's report, and they name no game (hotfix round 2). Of those, only the
+posts that carried the token of the physical game the DC report names are
+read, and only when no other token was filed under the game and the token is
+on no other game of the series: a game's report can land after the next
+physical game has started, and both games then name the same number (beta
+round 4 review, F25). No time is read (main.py, the comment above
 _team_game_identity).
 
 STRUCTURAL (always runs, no database): the condition that opens the
@@ -107,6 +112,8 @@ MIGRATION_348 = os.path.join(SQL_DIR, "348_team_series_games.sql")
 MIGRATION_351 = os.path.join(SQL_DIR, "351_team_series_games_identity.sql")
 # Applied after 351 when present: which seat named which game.
 MIGRATION_352 = os.path.join(SQL_DIR, "352_team_series_games_attested_seats.sql")
+# Applied after 352 when present: which physical game (beta round 5, F25).
+MIGRATION_354 = os.path.join(SQL_DIR, "354_team_series_games_game_token.sql")
 
 SECRET = "teamdc-test-secret"
 ROOM = "teamdc_room"
@@ -243,18 +250,61 @@ def _dc_sig(reporter, series_id, dc_player):
                     hashlib.sha256).hexdigest()
 
 
+# -- the physical game's token (beta round 5, F25) ------------------------------
+#
+# The room's host publishes a token for every physical game and every seat
+# carries that one value. In the lab a physical game is, by default, the game
+# number a post names in its sitting, and _tok is its token: every post naming
+# that game carries it, and a DC report carries the one of the game in
+# progress. A test models two physical games that share a game number (F25) by
+# giving each its own token explicitly, and an old client by token=None.
+
+_AUTO = object()
+
+
+def _sitting(room):
+    """The sitting a room names: the suffix grammar the server accepts
+    (_team_game_same_sitting) makes ROOM + "_1" the sitting of ROOM."""
+    for base in (ROOM_NEXT, ROOM):
+        if room == base or room.startswith(base + "_"):
+            return base
+    return room
+
+
+def _tok(sid, game, room):
+    """The lab's token for game `game` of the sitting of `room`."""
+    return hashlib.sha256(("%s:%s:%s" % (sid, game, _sitting(room))).encode()).hexdigest()[:16]
+
+
+def _token_sig(series_id, reporter, t1, t2, game, room, token):
+    msg = f"team-live-points-token:{series_id}:{reporter}:{t1}:{t2}:{game}:{room}:{token}"
+    return hmac.new(SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def _dc_token_sig(reporter, series_id, dc_player, token):
+    msg = f"team-dc-token:{reporter}:{series_id}:{dc_player}:{token}"
+    return hmac.new(SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def _takes(fn, name):
+    """Whether `fn` has a parameter `name`: a tree from before the token has
+    none, and is then called exactly as before."""
+    return name in inspect.signature(fn).parameters
+
+
 class _Lab:
     """One throwaway schema holding the tables the two endpoints touch.
     `with_identity=False` stops after migration 348 (the API-before-351
     deploy order), `with_attested_seats=False` after 351 (the API-before-352
-    one)."""
+    one), `with_game_token=False` after 352 (the API-before-354 one)."""
 
     def __init__(self, with_games_table=True, with_identity=True,
-                 with_attested_seats=True):
+                 with_attested_seats=True, with_game_token=True):
         self.schema = "teamdc_" + uuid.uuid4().hex[:12]
         self.with_games_table = with_games_table
         self.with_identity = with_identity
         self.with_attested_seats = with_attested_seats
+        self.with_game_token = with_game_token
         self.engine = None
         self.sm = None
         self._n = 0
@@ -286,6 +336,8 @@ class _Lab:
                     await conn.execute(_read(MIGRATION_351))
                     if self.with_attested_seats and os.path.exists(MIGRATION_352):
                         await conn.execute(_read(MIGRATION_352))
+                        if self.with_game_token and os.path.exists(MIGRATION_354):
+                            await conn.execute(_read(MIGRATION_354))
         finally:
             await conn.close()
         return self
@@ -373,16 +425,26 @@ class _Lab:
         await self.record_game(ser["sid"], ser["pids"], winner=winner,
                                secs_ago=secs_ago, n=n)
 
-    async def post(self, ser, seat, t1, t2, *, game=None, room=None):
+    async def post(self, ser, seat, t1, t2, *, game=None, room=None, token=_AUTO,
+                   token_sig=_AUTO):
         """One team live-points post from seat `seat` (0..3), through the real
         endpoint. With `game`/`room` it is an attested post; without them the
         call is exactly the legacy one, with no extra argument, which is also
         what lets the two review scenarios run against a tree from before the
-        fix."""
+        fix. An attested post carries the physical game's token: by default
+        the lab's (_tok), None for a client that sends none, or the one given;
+        `token_sig` replaces its signature."""
         reporter = ser["steams"][seat]
         extra = {}
         if game is not None or room is not None:
             extra = {"game_number": game, "photon_room_id": room}
+        if token is _AUTO:
+            token = _tok(ser["sid"], game, room) if game is not None and room else None
+        if token is not None and _takes(main.update_team_live_points, "game_token"):
+            extra["game_token"] = token
+            extra["token_sig"] = (
+                _token_sig(str(ser["sid"]), reporter, t1, t2, game, room, token)
+                if token_sig is _AUTO else token_sig)
         async with self.sm() as db:
             return await main.update_team_live_points(
                 series_id=str(ser["sid"]), request=None, t1_points=t1, t2_points=t2,
@@ -390,16 +452,35 @@ class _Lab:
                 sig=_live_sig(str(ser["sid"]), reporter, t1, t2, game, room),
                 db=db, **extra)
 
+    async def current_token(self, ser):
+        """The lab's token of the game in progress: the series' recorded
+        games plus one, in the stored sitting (None while no room is stored)."""
+        row = (await self.sql(
+            "SELECT t1_series_wins + t2_series_wins AS n, photon_room_id AS room"
+            "  FROM team_series WHERE id = :sid", {"sid": ser["sid"]}))[0]
+        return _tok(ser["sid"], row["n"] + 1, row["room"]) if row["room"] else None
+
     async def report_dc(self, ser, *, reporter_seat, dc_seat, t1_total, t2_total,
-                        room=ROOM):
+                        room=ROOM, token=_AUTO, token_sig=_AUTO):
+        """A DC report through the real endpoint. It names the token of the
+        physical game its reporter is in: by default the lab's token of the
+        game in progress, None for a client that sends none, or the one
+        given; `token_sig` replaces its signature."""
         reporter = ser["steams"][reporter_seat]
         dc = ser["steams"][dc_seat]
+        if token is _AUTO:
+            token = await self.current_token(ser)
+        extra = {}
+        if token is not None and _takes(main.team_series_report_dc, "game_token"):
+            extra = {"game_token": token,
+                     "token_sig": (_dc_token_sig(reporter, str(ser["sid"]), dc, token)
+                                   if token_sig is _AUTO else token_sig)}
         async with self.sm() as db:
             return await main.team_series_report_dc(
                 series_id=str(ser["sid"]), reporter_steam_id=reporter,
                 dc_player_steam_id=dc, t1_points_total=t1_total,
                 t2_points_total=t2_total, photon_room_id=room,
-                hmac_sig=_dc_sig(reporter, str(ser["sid"]), dc), db=db)
+                hmac_sig=_dc_sig(reporter, str(ser["sid"]), dc), db=db, **extra)
 
     async def settlement(self, ser):
         row = (await self.sql(
@@ -422,10 +503,11 @@ class _Lab:
             {"sid": ser["sid"], "o": ordinal, "r": room})
         return rows[0] if rows else None
 
-    async def crossed(self, ser):
+    async def crossed(self, ser, token=_AUTO):
         """The record rule's verdict for the game in progress, asked the way
         the DC report asks it: under the series row lock, from the row that
-        lock pins. Nothing is written."""
+        lock pins, for the token a report would name (by default the lab's
+        token of the game in progress). Nothing is written."""
         from sqlalchemy import text
         async with self.sm() as db:
             row = (await db.execute(text(
@@ -433,7 +515,11 @@ class _Lab:
                 "       t1_series_wins, t2_series_wins, photon_room_id"
                 "  FROM team_series WHERE id = :sid FOR NO KEY UPDATE"),
                 {"sid": ser["sid"]})).mappings().first()
-            verdict = await main._team_game_crossed_two(db, ser["sid"], row, None)
+            if token is _AUTO:
+                token = (_tok(ser["sid"], row["t1_series_wins"] + row["t2_series_wins"] + 1,
+                              row["photon_room_id"]) if row["photon_room_id"] else None)
+            extra = {"token": token} if _takes(main._team_game_crossed_two, "token") else {}
+            verdict = await main._team_game_crossed_two(db, ser["sid"], row, None, **extra)
             await db.rollback()
             return verdict
 
@@ -468,9 +554,9 @@ HIGH = dict(t1_total=1, t2_total=1)
 LOW = dict(t1_total=1, t2_total=0)
 
 
-async def _two_reports(lab, ser, first, second, room=ROOM):
-    a = await lab.report_dc(ser, reporter_seat=0, dc_seat=2, room=room, **first)
-    b = await lab.report_dc(ser, reporter_seat=1, dc_seat=2, room=room, **second)
+async def _two_reports(lab, ser, first, second, room=ROOM, token=_AUTO):
+    a = await lab.report_dc(ser, reporter_seat=0, dc_seat=2, room=room, token=token, **first)
+    b = await lab.report_dc(ser, reporter_seat=1, dc_seat=2, room=room, token=token, **second)
     return a, b
 
 
@@ -774,13 +860,13 @@ def test_every_survivor_reporting_settles_the_series_once(wired, played):
 # on the tree before this round (8af7fb3) and GREEN after, each with a
 # mutation control and an inert twin on the same path.
 
-async def _post_all(lab, ser, *pairs, seats=(0, 1, 2, 3), game=None, room=None):
+async def _post_all(lab, ser, *pairs, seats=(0, 1, 2, 3), game=None, room=None, token=_AUTO):
     """Every seat in `seats` posts each pair in turn: the four clients' own
     re-sends of one game's running score, naming `game` and `room` when
-    given."""
+    given, and carrying `token` (the lab's own for that game by default)."""
     for t1, t2 in pairs:
         for seat in seats:
-            await lab.post(ser, seat, t1, t2, game=game, room=room)
+            await lab.post(ser, seat, t1, t2, game=game, room=room, token=token)
 
 
 async def _early_crossing(lab):
@@ -807,10 +893,27 @@ async def _late_stale_posts(lab):
     return await lab.settlement(ser)
 
 
+_ALL_BITS = (1 << 36) - 1
+
+
+def _token_layer_off(monkeypatch):
+    """Every bit of a record reads as posted with the report's token: the
+    round-5 token rule (main._team_game_token_seats) removed. The controls
+    below that mutate one of the earlier rules switch it off as well. Each
+    scenario they run is kept out twice since round 5: its stale posts name
+    no game or another one, and they carry no token or another game's. With
+    the token rule in place a mutant of the earlier rule alone changes
+    nothing there, so a control that leaves it on could no longer watch its
+    test fail. The token rule has its own controls (beta round 5, below)."""
+    monkeypatch.setattr(main, "_team_game_token_seats",
+                        lambda rec, token: (_ALL_BITS, None))
+
+
 def _wrap_the_evidence(monkeypatch, mutant=None):
     """Replace main._team_game_evidence by a wrapper that records each call's
     shape and returns `mutant(shape, cur, attested)` when given, else the real
-    answer (the inert twin)."""
+    answer (the inert twin). With `mutant` the token rule is switched off too
+    (_token_layer_off)."""
     real = main._team_game_evidence
     calls = []
 
@@ -821,6 +924,8 @@ def _wrap_the_evidence(monkeypatch, mutant=None):
         return real(shape, cur_seats, attested_seats)
 
     monkeypatch.setattr(main, "_team_game_evidence", wrapped)
+    if mutant is not None:
+        _token_layer_off(monkeypatch)
     return calls
 
 
@@ -1615,10 +1720,11 @@ async def _one_team_two_seats(lab, *, game_one, other_team_seat=None):
     """Scenario (c): two seats of team 1 (0 and 1) each post 1-1, and nothing
     comes from team 2 unless `other_team_seat` posts the same pair.
     game_one=True: game 1 of a fresh series (shape "first"), legacy posts --
-    the one game legacy evidence is still read in. game_one=False: game 2 of
-    a series team 1 leads, every post naming game 2. Returns the record
-    rule's verdict for the game in progress, then the settlement after seat 2
-    leaves."""
+    the one game legacy evidence was read in until beta round 5; a legacy
+    post carries no physical-game token, so since then it proves nothing
+    there either. game_one=False: game 2 of a series team 1 leads, every post
+    naming game 2. Returns the record rule's verdict for the game in
+    progress, then the settlement after seat 2 leaves."""
     ser = await lab.series(t1_wins=0 if game_one else 1, t2_wins=0)
     named = {} if game_one else {"game": 2, "room": ROOM}
     seats = (0, 1) + ((other_team_seat,) if other_team_seat is not None else ())
@@ -1636,10 +1742,12 @@ def test_two_seats_of_one_team_prove_no_crossing(wired, game_one, other_team_sea
     """Scenario (c) and its twin. Two seats of the SAME team posting a pair of
     two points prove nothing: a seat count is not a team count, and one
     team's evidence alone is what ruling 2 refuses. A third post, from a seat
-    of the other team, proves it. In game 1 -- the one game legacy evidence
-    is read in -- the verdict is the record rule's own answer: the DC report
-    never asks about game 1, because no team is a game up yet, so it settles
-    dc_incomplete either way, on f67b22a and after. In game 2 the same rule
+    of the other team, proves it. In game 1 the verdict is the record rule's
+    own answer: the DC report never asks about game 1, because no team is a
+    game up yet, so it settles dc_incomplete either way, on f67b22a and
+    after. Game 1's legacy posts proved the crossing from a seat of each team
+    until beta round 5; they carry no physical-game token (F25), so since
+    then they prove nothing, whatever the teams. In game 2 the same rule
     settles the series."""
     async def go():
         async with _Lab() as lab:
@@ -1648,7 +1756,7 @@ def test_two_seats_of_one_team_prove_no_crossing(wired, game_one, other_team_sea
 
     verdict, settled = _run(go())
     played = other_team_seat is not None
-    assert verdict is played, (verdict, settled)
+    assert verdict is (played and not game_one), (verdict, settled)
     if played and not game_one:
         assert settled == ("completed", 1, None, None, 1), settled
     else:
@@ -1665,17 +1773,23 @@ def _two_seats_suffice(seats):
 
 
 @needs_pg
-@pytest.mark.parametrize("mutant", ["two-seats-suffice", "pass-through"])
+@pytest.mark.parametrize("mutant", ["two-seats-suffice", "two-seats-suffice-token-layer-off",
+                                    "pass-through"])
 def test_the_one_team_test_can_fail(wired, monkeypatch, mutant):
     """Control for scenario (c), on its own path: with the two-team rule put
-    back to a seat count, both one-team records read as crossed -- game 1's
-    verdict and game 2's settlement flip -- so the test above would fail. The
-    same mutant leaves scenario (b)'s lone attester unsettled (one seat is
-    not two), so (b) and (c) pin different rules. The inert twin wraps the
-    real rule and changes nothing."""
+    back to a seat count, the game-2 one-team record reads as crossed and
+    game 2's settlement flips, so the test above would fail. Game 1's legacy
+    record flips too once the round-5 token rule is also switched off
+    (_token_layer_off); with the token rule in place its posts carry no
+    token, so it stays unread under the seat count alone. The same mutant
+    leaves scenario (b)'s lone attester unsettled (one seat is not two), so
+    (b) and (c) pin different rules. The inert twin wraps the real rule and
+    changes nothing."""
     real = main._team_game_both_teams_reached_two
     monkeypatch.setattr(main, "_team_game_both_teams_reached_two",
-                        _two_seats_suffice if mutant == "two-seats-suffice" else real)
+                        real if mutant == "pass-through" else _two_seats_suffice)
+    if mutant == "two-seats-suffice-token-layer-off":
+        _token_layer_off(monkeypatch)
 
     async def go():
         async with _Lab() as lab:
@@ -1684,8 +1798,9 @@ def test_the_one_team_test_can_fail(wired, monkeypatch, mutant):
                     await _one_team_attests(lab))
 
     game_one, game_two, lone = _run(go())
-    flipped = mutant == "two-seats-suffice"
-    assert game_one == (flipped, ("dc_incomplete", None, 1, "dc_manual_pending", 0)), game_one
+    flipped = mutant != "pass-through"
+    assert game_one == (mutant == "two-seats-suffice-token-layer-off",
+                        ("dc_incomplete", None, 1, "dc_manual_pending", 0)), game_one
     assert game_two == (flipped, ("completed", 1, None, None, 1) if flipped
                         else ("dc_incomplete", None, 1, "dc_manual_pending", 0)), game_two
     assert lone == ("dc_incomplete", None, 1, "dc_manual_pending", 0), lone
@@ -1707,18 +1822,23 @@ def _wrap_the_filing(monkeypatch, mutant=False):
     """Replace main._record_team_game_points by a wrapper that records each
     call and, with `mutant`, files an attested post under the game in
     progress whatever game or sitting it names: the check that makes a
-    post's identity its own, removed. Without `mutant` it passes every call
-    through unchanged (the inert twin)."""
+    post's identity its own, removed (and the token rule switched off,
+    _token_layer_off). Without `mutant` it passes every call through
+    unchanged (the inert twin)."""
     real = main._record_team_game_points
     calls = []
 
-    async def wrapped(db, series_id, t1_points, t2_points, game, seat, attested=None):
+    async def wrapped(db, series_id, t1_points, t2_points, game, seat, attested=None,
+                      token=None):
         calls.append(attested)
         if mutant and attested is not None:
             attested = game
-        return await real(db, series_id, t1_points, t2_points, game, seat, attested)
+        return await real(db, series_id, t1_points, t2_points, game, seat, attested,
+                          token=token)
 
     monkeypatch.setattr(main, "_record_team_game_points", wrapped)
+    if mutant:
+        _token_layer_off(monkeypatch)
     return calls
 
 
