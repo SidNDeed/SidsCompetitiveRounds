@@ -12,9 +12,11 @@ team_series_games (migrations 348, 351 and 352), written by the team
 live-points POST: one row per game, named by the series, its recorded games
 plus one and the sitting's room, holding which seat posted which pair, and
 which of those posts named their game. A crossing needs a pair of two points
-from a seat of each team (hotfix round 2); the DC report then asks whether any
-history in which the game did not reach two points could have produced that
-record. No time is read (main.py, the comment above _team_game_identity).
+from a seat of each team, and after the first game of the original sitting
+only the posts that named their game count: the production client can deliver
+a previous game's posts after that game's report, and they name no game
+(hotfix round 2). No time is read (main.py, the comment above
+_team_game_identity).
 
 STRUCTURAL (always runs, no database): the condition that opens the
 lead-forfeit branch asks the per-game record and compares no snapshot.
@@ -42,7 +44,6 @@ import asyncio
 import hashlib
 import hmac
 import inspect
-import itertools
 import os
 import textwrap
 import urllib.parse as _urlparse
@@ -476,10 +477,10 @@ def test_the_settlement_is_the_same_whichever_survivor_reports_first(wired, play
     low-first on the other. Before the fix, order decided: high-first completed
     the series with ratings, low-first sent it to dc_incomplete.
 
-    The played game shows 1-1 from a seat of EACH team. One team's seats
-    alone prove nothing (hotfix round 2), and a 1-1 from one seat alone could
-    be the previous game's irregular seat (a relaunched or late-starting
-    client); two seats cannot both be."""
+    The played game shows 1-1 from a seat of EACH team, each post naming game
+    2: one team's seats alone prove nothing, and after the first game of a
+    sitting a post that names no game may be the previous game's (hotfix
+    round 2)."""
     async def go():
         async with _Lab() as lab:
             outcomes = {}
@@ -487,8 +488,8 @@ def test_the_settlement_is_the_same_whichever_survivor_reports_first(wired, play
                 ser = await lab.series()
                 await lab.post(ser, 0, 1, 0)
                 if played:
-                    await lab.post(ser, 0, 1, 1)
-                    await lab.post(ser, 2, 1, 1)
+                    await lab.post(ser, 0, 1, 1, game=2, room=ROOM)
+                    await lab.post(ser, 2, 1, 1, game=2, room=ROOM)
                 first, second = (HIGH, LOW) if order == "high-first" else (LOW, HIGH)
                 a, b = await _two_reports(lab, ser, first, second)
                 assert b.get("ignored") is True, b    # the second finds it settled
@@ -556,17 +557,18 @@ def test_a_previous_games_post_recorded_after_its_report_does_not_count(wired):
 @needs_pg
 def test_a_crossing_counts_by_its_pairs_not_by_its_distance_from_the_report(wired):
     """No window. The same stale post on two series, both just after game 1's
-    report. On the second, two seats also post game 2's genuine first-round
-    1-1 straight away, with no wait for any window: that series completes,
-    while the stale post alone settles nothing."""
+    report. On the second, a seat of each team also posts game 2's genuine
+    first-round 1-1 straight away, naming game 2, with no wait for any
+    window: that series completes, while the stale post alone settles
+    nothing."""
     async def go():
         async with _Lab() as lab:
             stale = await lab.series(game_recorded_secs_ago=0)
             await lab.post(stale, 1, 2, 1)
             fresh = await lab.series(game_recorded_secs_ago=0)
             await lab.post(fresh, 1, 2, 1)
-            await lab.post(fresh, 0, 1, 1)
-            await lab.post(fresh, 2, 1, 1)
+            await lab.post(fresh, 0, 1, 1, game=2, room=ROOM)
+            await lab.post(fresh, 2, 1, 1, game=2, room=ROOM)
             await _two_reports(lab, stale, LOW, LOW)
             await _two_reports(lab, fresh, LOW, LOW)
             return await lab.settlement(stale), await lab.settlement(fresh)
@@ -580,20 +582,24 @@ def test_a_crossing_counts_by_its_pairs_not_by_its_distance_from_the_report(wire
 def test_a_relock_opens_the_game_again(wired):
     """A resume replays the same game number in a new sitting: the relock
     clears the room and stamps relocked_at, and the next sitting is issued its
-    own room. The dead sitting's posts that land after that are filed under
-    the new sitting's first game, where nothing bounds what they carry, so
-    even a 1-1 from a seat of each team there settles nothing. The control
-    series, identical but never relocked, completes."""
+    own room. The dead sitting's game crossed, a seat of each team naming it,
+    and that record stays the dead sitting's. Its re-sends landing after the
+    relock settle nothing: those naming the dead sitting are filed nowhere,
+    and those naming no game are filed under the new sitting's first game,
+    where nothing bounds what they carry and only named posts count. The
+    control series, identical but never relocked, completes."""
     async def go():
         async with _Lab() as lab:
             relocked = await lab.series()
-            await lab.post(relocked, 0, 1, 1)                  # the dead sitting
+            for seat in (0, 2):                                # the dead sitting
+                await lab.post(relocked, seat, 1, 1, game=2, room=ROOM)
             await lab.relock(relocked, ROOM_NEXT)
-            await lab.post(relocked, 0, 1, 1)                  # its re-sends, landing late
-            await lab.post(relocked, 2, 1, 1)
+            for seat in (0, 2):                                # its re-sends, landing late
+                await lab.post(relocked, seat, 1, 1, game=2, room=ROOM)
+                await lab.post(relocked, seat, 1, 1)
             control = await lab.series()
-            await lab.post(control, 0, 1, 1)
-            await lab.post(control, 2, 1, 1)
+            for seat in (0, 2):
+                await lab.post(control, seat, 1, 1, game=2, room=ROOM)
             await _two_reports(lab, relocked, HIGH, HIGH, room=ROOM_NEXT)
             await _two_reports(lab, control, LOW, LOW)
             return (await lab.settlement(relocked), await lab.settlement(control),
@@ -602,31 +608,33 @@ def test_a_relock_opens_the_game_again(wired):
     relocked, control, dead_row, next_row = _run(go())
     assert relocked[0] == "dc_incomplete", relocked
     assert control[:2] == ("completed", 1), control
-    assert dead_row["pair_seats"] == _bit(1, 1, 0), dead_row
-    assert next_row["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 2), next_row
+    both = _bit(1, 1, 0) | _bit(1, 1, 2)
+    assert (dead_row["pair_seats"], dead_row["attested_seats"]) == (both, both), dead_row
+    assert (next_row["pair_seats"], next_row["attested_seats"]) == (both, 0), next_row
 
 
 @needs_pg
 def test_a_post_below_two_never_clears_a_crossing(wired):
     """Bits are only OR-ed: later posts below two points (a relaunched seat's
-    lower view, a seat still at 0-0) add their own bits, clear none, and the
-    record still proves the crossing, asked the way the DC report asks it."""
+    lower view, a seat still at 0-0, naming the game or not) add their own
+    bits, clear none, and the record still proves the crossing, asked the way
+    the DC report asks it."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
-            await lab.post(ser, 0, 1, 1)
-            await lab.post(ser, 2, 1, 1)
+            await lab.post(ser, 0, 1, 1, game=2, room=ROOM)
+            await lab.post(ser, 2, 1, 1, game=2, room=ROOM)
             before = await lab.game_row(ser, 2)
             await lab.post(ser, 3, 1, 0)
-            await lab.post(ser, 1, 0, 0)
+            await lab.post(ser, 1, 0, 0, game=2, room=ROOM)
             after = await lab.game_row(ser, 2)
             return before, after, await lab.crossed(ser)
 
     before, after, crossed = _run(go())
-    assert before["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 2), before
-    assert after["pair_seats"] == (before["pair_seats"] | _bit(1, 0, 3)
-                                   | _bit(0, 0, 1)), after
-    assert after["attested_seats"] == 0, after
+    both = _bit(1, 1, 0) | _bit(1, 1, 2)
+    assert (before["pair_seats"], before["attested_seats"]) == (both, both), before
+    assert after["pair_seats"] == both | _bit(1, 0, 3) | _bit(0, 0, 1), after
+    assert after["attested_seats"] == both | _bit(0, 0, 1), after
     assert crossed is True
 
 
@@ -689,20 +697,21 @@ def test_a_reporter_on_the_leaving_team_is_still_refused(wired):
 # on the tree before this round (8af7fb3) and GREEN after, each with a
 # mutation control and an inert twin on the same path.
 
-async def _post_all(lab, ser, *pairs, seats=(0, 1, 2, 3)):
+async def _post_all(lab, ser, *pairs, seats=(0, 1, 2, 3), game=None, room=None):
     """Every seat in `seats` posts each pair in turn: the four clients' own
-    re-sends of one game's running score."""
+    re-sends of one game's running score, naming `game` and `room` when
+    given."""
     for t1, t2 in pairs:
         for seat in seats:
-            await lab.post(ser, seat, t1, t2)
+            await lab.post(ser, seat, t1, t2, game=game, room=room)
 
 
 async def _early_crossing(lab):
     """Scenario (a): game 1 has just been reported, game 2's first round goes
-    1-0 then 1-1 straight away with all four seats posting, then seat 2
-    leaves."""
+    1-0 then 1-1 straight away with all four seats posting, each post naming
+    game 2, then seat 2 leaves."""
     ser = await lab.series(game_recorded_secs_ago=0)
-    await _post_all(lab, ser, (1, 0), (1, 1))
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM)
     await _two_reports(lab, ser, LOW, LOW)
     return await lab.settlement(ser)
 
@@ -721,20 +730,20 @@ async def _late_stale_posts(lab):
     return await lab.settlement(ser)
 
 
-def _wrap_the_rule(monkeypatch, mutant_answer=None):
-    """Replace main._team_game_unplayed_fits by a wrapper that records each
-    call and returns `mutant_answer(shape, cur, prev)` when given, else the
-    real rule's answer (the inert twin)."""
-    real = main._team_game_unplayed_fits
+def _wrap_the_evidence(monkeypatch, mutant=None):
+    """Replace main._team_game_evidence by a wrapper that records each call's
+    shape and returns `mutant(shape, cur, attested)` when given, else the real
+    answer (the inert twin)."""
+    real = main._team_game_evidence
     calls = []
 
-    def wrapped(shape, cur_seats, prev_seats=0):
+    def wrapped(shape, cur_seats, attested_seats):
         calls.append(shape)
-        if mutant_answer is not None:
-            return mutant_answer(shape, cur_seats, prev_seats)
-        return real(shape, cur_seats, prev_seats)
+        if mutant is not None:
+            return mutant(shape, cur_seats, attested_seats)
+        return real(shape, cur_seats, attested_seats)
 
-    monkeypatch.setattr(main, "_team_game_unplayed_fits", wrapped)
+    monkeypatch.setattr(main, "_team_game_evidence", wrapped)
     return calls
 
 
@@ -742,8 +751,8 @@ def _wrap_the_rule(monkeypatch, mutant_answer=None):
 def test_a_crossing_early_in_a_later_game_settles(wired):
     """Review finding 1, scenario (a): a genuine crossing moments after the
     previous game's report. The window discarded it as too close to the
-    game's opening; the record proves it, because a 1-1 exists only in its
-    own game's first round and more than one seat posted it."""
+    game's opening; the record proves it, from a seat of each team, each post
+    naming its game."""
     async def go():
         async with _Lab() as lab:
             return await _early_crossing(lab)
@@ -754,14 +763,14 @@ def test_a_crossing_early_in_a_later_game_settles(wired):
 
 
 @needs_pg
-@pytest.mark.parametrize("mutant", ["legacy-proof-disabled", "pass-through"])
+@pytest.mark.parametrize("mutant", ["evidence-disabled", "pass-through"])
 def test_the_early_crossing_test_can_fail(wired, monkeypatch, mutant):
-    """Control for the test above, on its own path: with the legacy proof
-    disabled (every record explained as unplayed) the same series settles as
-    dc_incomplete, so the test above would fail; the inert twin wraps the real
-    rule, is reached, and changes nothing."""
-    calls = _wrap_the_rule(monkeypatch, (lambda shape, cur, prev: True)
-                           if mutant == "legacy-proof-disabled" else None)
+    """Control for the test above, on its own path: with no post counted as
+    evidence the same series settles as dc_incomplete, so the test above
+    would fail; the inert twin wraps the real rule, is reached, and changes
+    nothing."""
+    calls = _wrap_the_evidence(monkeypatch, (lambda shape, cur, att: 0)
+                               if mutant == "evidence-disabled" else None)
 
     async def go():
         async with _Lab() as lab:
@@ -769,7 +778,7 @@ def test_the_early_crossing_test_can_fail(wired, monkeypatch, mutant):
 
     settled = _run(go())
     assert calls == ["second"], calls
-    if mutant == "legacy-proof-disabled":
+    if mutant == "evidence-disabled":
         assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
     else:
         assert settled == ("completed", 1, None, None, 1), settled
@@ -779,8 +788,8 @@ def test_the_early_crossing_test_can_fail(wired, monkeypatch, mutant):
 def test_a_previous_games_post_never_settles_the_next_game_at_any_delay(wired):
     """Review finding 1, scenario (b): a previous game's posts processed long
     after that game's report. The window counted them as game 2's crossing;
-    the record explains every one as a pair game 1 went through, whatever the
-    delay, and game 2 itself never reached two points."""
+    none of them names a game, so none counts in game 2, whatever the delay,
+    and game 2 itself never reached two points."""
     async def go():
         async with _Lab() as lab:
             return await _late_stale_posts(lab)
@@ -797,12 +806,13 @@ _TWO_OR_MORE = sum(0xF << (4 * (3 * a + b))
 @needs_pg
 @pytest.mark.parametrize("mutant", ["any-two-points-count", "pass-through"])
 def test_the_stale_post_test_can_fail(wired, monkeypatch, mutant):
-    """Control for the test above, on its own path: a rule that counts any
-    pair of two points in the game's record, wherever it came from, completes
-    the same series, so the test above would fail; the inert twin wraps the
-    real rule, is reached, and changes nothing."""
-    calls = _wrap_the_rule(monkeypatch, (lambda shape, cur, prev: not cur & _TWO_OR_MORE)
-                           if mutant == "any-two-points-count" else None)
+    """Control for the test above, on its own path: a rule that counts every
+    pair in the game's record, named or not, wherever it came from (the
+    two-team rule kept), completes the same series, so the test above would
+    fail; the inert twin wraps the real rule, is reached, and changes
+    nothing."""
+    calls = _wrap_the_evidence(monkeypatch, (lambda shape, cur, att: cur | att)
+                               if mutant == "any-two-points-count" else None)
 
     async def go():
         async with _Lab() as lab:
@@ -817,19 +827,19 @@ def test_the_stale_post_test_can_fail(wired, monkeypatch, mutant):
 
 
 @needs_pg
-@pytest.mark.parametrize("before, now, played", [
-    (((0, 1), (1, 1), (1, 2), (2, 2)), ((1, 0), (2, 0)), True),
-    (((1, 0), (2, 0), (2, 1), (2, 2)), ((1, 0), (2, 0)), False),
-    (((1, 0), (2, 0), (2, 1), (2, 2)), ((0, 1), (0, 2)), True),
+@pytest.mark.parametrize("before, now", [
+    (((0, 1), (1, 1), (1, 2), (2, 2)), ((1, 0), (2, 0))),
+    (((1, 0), (2, 0), (2, 1), (2, 2)), ((1, 0), (2, 0))),
+    (((1, 0), (2, 0), (2, 1), (2, 2)), ((0, 1), (0, 2))),
 ], ids=["split-before", "same-sweep-before", "other-team-sweeps"])
-def test_a_first_round_sweep_counts_when_the_previous_game_rules_it_out(
-        wired, before, now, played):
-    """A first-round sweep (2-0 from every seat) proves the game crossed
-    exactly when game 1's record shows game 1 never went through that pair;
-    otherwise every 2-0 could be game 1's re-send, landing late. The same
-    team sweeping round 1 of two games running is the case no rule on this
-    record can tell apart (test_the_ambiguous_case_is_identical_bit_for_bit),
-    and it settles the conservative way."""
+def test_after_game_one_legacy_first_round_sweeps_settle_nothing(wired, before, now):
+    """Round 1 read a first-round sweep (2-0 from every seat) in game 2 as
+    proof whenever game 1's record showed game 1 never went through that
+    pair. That rested on every seat's game-1 posts being processed before
+    game 1's report, which the production client does not guarantee: it
+    never withdraws a post once sent. After the first game of a sitting a
+    post that names no game proves nothing, whatever the record around it
+    shows, so each of these settles the conservative way."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series(t1_wins=0, t2_wins=0)
@@ -840,23 +850,26 @@ def test_a_first_round_sweep_counts_when_the_previous_game_rules_it_out(
             return await lab.settlement(ser)
 
     settled = _run(go())
-    assert settled[:2] == (("completed", 1) if played else ("dc_incomplete", None)), settled
+    assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
 
 
 @needs_pg
-@pytest.mark.parametrize("seats, played", [((0,), False), ((0, 2), True)],
-                         ids=["one-seat", "two-seats"])
-def test_a_first_round_one_one_counts_from_two_seats(wired, seats, played):
-    """A 1-1 exists only in its own game's first round, so a regular seat's
-    1-1 is this game's. One seat alone may be the previous game's irregular
-    seat (a relaunched or late-starting client whose view is not the true
-    score), and the rule excuses one such seat per game; two seats cannot
-    both be."""
+@pytest.mark.parametrize("named, played", [(False, False), (True, True)],
+                         ids=["legacy", "attested"])
+def test_after_game_one_a_one_one_counts_only_when_it_names_its_game(wired, named, played):
+    """Game 2's first round goes 1-1 and a seat of each team posts it. A 1-1
+    exists only in a first round, but the production client can deliver game
+    1's own first-round 1-1 after game 1's report (review finding 1), and a
+    post that names no game cannot say which game's it is: the legacy posts
+    settle nothing. The same posts naming game 2 settle the series."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
-            for seat in seats:
-                await lab.post(ser, seat, 1, 1)
+            for seat in (0, 2):
+                if named:
+                    await lab.post(ser, seat, 1, 1, game=2, room=ROOM)
+                else:
+                    await lab.post(ser, seat, 1, 1)
             await _two_reports(lab, ser, HIGH, HIGH)
             return await lab.settlement(ser)
 
@@ -865,13 +878,15 @@ def test_a_first_round_one_one_counts_from_two_seats(wired, seats, played):
 
 
 @needs_pg
-@pytest.mark.parametrize("now, played", [(((1, 0), (1, 1)), True), (((2, 1),), False)],
+@pytest.mark.parametrize("now, named, played", [(((1, 0), (1, 1)), True, True),
+                                                (((2, 1),), False, False)],
                          ids=["own-crossing", "leftover"])
-def test_the_game_after_a_relocked_sittings_first_reads_its_own_record(wired, now, played):
-    """The first game of a relocked sitting takes no legacy proof, but the
-    game after it does: its record is bounded again, by the game before it in
-    the same sitting. A 1-1 from every seat proves it; a pair the replayed
-    game 1 went on to (2-1) proves nothing."""
+def test_the_game_after_a_relocked_sittings_first_reads_its_own_record(
+        wired, now, named, played):
+    """The game after a relocked sitting's first is named by the new
+    sitting's room and its own number. Posts naming exactly that, a 1-1 from
+    every seat, prove it; a pair the replayed game 1 went on to (2-1),
+    naming no game, proves nothing."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series(t1_wins=0, t2_wins=0)
@@ -879,7 +894,8 @@ def test_the_game_after_a_relocked_sittings_first_reads_its_own_record(wired, no
             await lab.relock(ser, ROOM_NEXT)
             await _post_all(lab, ser, (1, 0), (1, 1), (2, 1), (2, 2))   # game 1 again
             await lab.win_game(ser, winner=1)
-            await _post_all(lab, ser, *now)
+            await _post_all(lab, ser, *now,
+                            **({"game": 2, "room": ROOM_NEXT} if named else {}))
             await _two_reports(lab, ser, LOW, LOW, room=ROOM_NEXT)
             return await lab.settlement(ser)
 
@@ -1026,11 +1042,13 @@ def test_before_migration_351_nothing_fails_and_nothing_auto_completes(wired):
     """The deploy-order claim in 351's header: this API against a database
     with 348 but not 351 records nothing and reads nothing, fails no request,
     and the DC report settles as dc_incomplete even on a game a seat of each
-    team posted 1-1 in, which settles the series once every migration is in."""
+    team posted 1-1 in, naming it, which settles the series once every
+    migration is in."""
     async def go():
         async with _Lab(with_identity=False) as lab:
             ser = await lab.series()
-            posted = [await lab.post(ser, seat, 1, 1) for seat in (0, 2)]
+            posted = [await lab.post(ser, seat, 1, 1, game=2, room=ROOM)
+                      for seat in (0, 2)]
             await _two_reports(lab, ser, LOW, LOW)
             rows = (await lab.sql("SELECT count(*) AS n FROM team_series_games"))[0]["n"]
             return posted, rows, await lab.settlement(ser)
@@ -1043,11 +1061,17 @@ def test_before_migration_351_nothing_fails_and_nothing_auto_completes(wired):
 
 # -- the rule against an independent model of what a record can hold ---------
 #
-# The live tests above pin individual histories. These enumerate them: every
-# history the delivery model in main.py admits (the comment above
-# _team_game_identity), written here in pairs and seats rather than masks.
+# The live tests above pin individual histories. These enumerate them, in
+# pairs and seats rather than masks, under the delivery assumption the
+# production client supports (main.py, the comment above
+# _team_game_identity): none. A post that names no game may be filed in any
+# later game's record, from any seat, carrying any pair. A post naming its
+# game is filed only under that game, and an honest seat names only its own
+# view of it: the true score, or a lower one (a relaunched client counts
+# from 0-0). One seat per game may post anything at all.
 
 _PAIRS = [(a, b) for a in range(3) for b in range(3)]
+_SHAPES = ("first", "second", "later", "after-relock", "unclean")
 
 
 def _seat_bits(seat, pairs):
@@ -1064,167 +1088,105 @@ def _all_seats(pairs, seats=(0, 1, 2, 3)):
     return m
 
 
-def _has_two(p):
-    return p[0] == 2 or p[1] == 2
-
-
 def _at_most(p, q):
     return p[0] <= q[0] and p[1] <= q[1]
 
 
-def _finished_games():
-    """Every pair sequence a finished game can have shown, one point at a
-    time from 0-0: each ends on a pair with a 2 (a round was won), capped at
-    2 a side as the client caps it."""
-    out = []
-
-    def walk(t1, t2, seen):
-        seen = seen + [(t1, t2)]
-        if _has_two((t1, t2)):
-            out.append(seen)
-        if (t1, t2) == (2, 2):
-            return
-        if t1 < 2:
-            walk(t1 + 1, t2, seen)
-        if t2 < 2:
-            walk(t1, t2 + 1, seen)
-
-    walk(0, 0, [])
-    return out
+def _verdict(shape, legacy, attested):
+    """main's rule on a record whose posts named no game (`legacy`) and named
+    this one (`attested`); pair_seats holds both, as the writer sets it."""
+    evidence = main._team_game_evidence(shape, legacy | attested, attested)
+    return main._team_game_both_teams_reached_two(evidence)
 
 
-def _model_records(shape, first_side, prev_game, irregular, kinds):
-    """The fullest records (this game's, the previous game's) a history can
-    leave in which this game never reached two points. `first_side` scored
-    its first point; `prev_game` is the previous game's pairs in order;
-    `irregular` = the irregular seats of the game two back, the previous game
-    and this one (None = none); `kinds` = whether the previous game's and this
-    game's irregular seats hold a LOWER or a CARRIED view."""
-    older_odd, prev_odd, this_odd = irregular
-    prev_kind, this_kind = kinds
-    this_game = [(0, 0), (1, 0)] if first_side == 1 else [(0, 0), (0, 1)]
+def _uncrossed_records(shape):
+    """The fullest records a game that never reached two points can leave,
+    for each side that scored its first point and each seat allowed to post
+    anything (or none). Outside "first", legacy bits from every seat at every
+    pair: nothing bounds a previous game's late posts. In "first" nothing was
+    posted before the game, so the legacy posts are the seats' views too."""
     anything = set(_PAIRS)
-    with_two = {p for p in _PAIRS if _has_two(p)}
-    cur = prev = 0
-    for seat in range(4):
-        # The seat's views of the previous game.
-        if shape == "first":
-            prev_views = set()
-        elif seat == prev_odd:
-            if prev_kind == "carried" and shape == "later" and seat != older_odd:
-                prev_views = with_two          # counting on from a finished game
-            elif prev_kind == "carried":
-                prev_views = anything
-            else:
-                prev_views = {p for p in _PAIRS if _at_most(p, prev_game[-1])}
-        else:
-            prev_views = set(prev_game)
-        # Its views of this game.
-        if seat == this_odd:
-            if this_kind == "lower":
-                views = {p for p in _PAIRS if _at_most(p, this_game[-1])}
-            elif shape == "first" or seat == prev_odd:
-                views = anything
-            else:
-                views = {p for p in _PAIRS if _at_most(prev_game[-1], p)}
-        else:
-            views = set(this_game)
-        # This game's record: its own views, and the previous game's posts
-        # landing late -- anything from that game's irregular seat, pairs with
-        # a 2 from the others (their first-round posts land in time).
-        late = prev_views if seat == prev_odd else prev_views & with_two
-        cur |= _seat_bits(seat, views | late)
-        # The previous game's record: its own views, and late posts of the
-        # game before it.
-        if shape in ("second", "later"):
-            older_late = set()
-            if shape == "later":
-                older_late = anything if seat == older_odd else with_two
-            prev |= _seat_bits(seat, prev_views | older_late)
-        elif shape == "after-relock":
-            prev |= _seat_bits(seat, anything)
-    return cur, prev
+    for first_side in (1, 2):
+        top = (1, 0) if first_side == 1 else (0, 1)
+        honest = {p for p in _PAIRS if _at_most(p, top)}
+        for odd in (None, 0, 1, 2, 3):
+            views = 0
+            for seat in range(4):
+                views |= _seat_bits(seat, anything if seat == odd else honest)
+            legacy = views if shape == "first" else _all_seats(anything)
+            yield first_side, odd, legacy, views
 
 
 def _model_counterexamples(stop_at_first=False):
-    """Histories without a crossing that main's rule would settle as played."""
-    seats = (None, 0, 1, 2, 3)
+    """Records of a game that never reached two points that main's rule
+    would settle as played."""
     found = []
-    for shape in ("first", "second", "later", "after-relock"):
-        games = _finished_games() if shape != "first" else [[(0, 0)]]
-        for first_side, prev_game, irregular, kinds in itertools.product(
-                (1, 2), games, itertools.product(seats, repeat=3),
-                itertools.product(("lower", "carried"), repeat=2)):
-            if shape != "later" and irregular[0] is not None:
-                continue
-            if shape == "first" and irregular[1] is not None:
-                continue
-            cur, prev = _model_records(shape, first_side, prev_game, irregular, kinds)
-            if not main._team_game_unplayed_fits(shape, cur, prev):
-                found.append((shape, first_side, prev_game, irregular, kinds))
+    for shape in _SHAPES:
+        for first_side, odd, legacy, attested in _uncrossed_records(shape):
+            if _verdict(shape, legacy, attested):
+                found.append((shape, first_side, odd))
                 if stop_at_first:
                     return found
     return found
 
 
-def test_the_record_rule_is_sound_against_the_delivery_model():
-    """Exhaustively: for every history the model admits in which the game in
-    progress never reached two points -- which side scored first, every way
-    the previous game can have gone, every choice of irregular seats and of
-    their views -- the rule finds an unplayed explanation. So it never
-    settles a game that did not cross, and a previous game's post never
-    settles the next game, whatever its delay inside the model."""
-    assert len(_finished_games()) == 14
+def test_the_record_rule_is_sound_without_a_delivery_bound():
+    """Exhaustively: whichever side scored first, whichever seat posts
+    anything, and -- after the first game of the original sitting -- every
+    legacy post any seat could have left in flight, a game that never reached
+    two points is never settled as played. The rule reads no delivery order
+    and no time."""
+    assert len(list(_uncrossed_records("second"))) == 10
     assert _model_counterexamples() == []
 
 
-@pytest.mark.parametrize("mutant", ["no-excused-seat", "no-carried-over-values",
+@pytest.mark.parametrize("mutant", ["one-seat-suffices", "legacy-in-every-game",
                                     "pass-through"])
 def test_the_soundness_check_can_fail(monkeypatch, mutant):
-    """Control for the test above: a rule that forgets the irregular seat, or
-    forgets that the previous game's pairs with a 2 can land in this game's
-    record, is caught; the inert twin sets the same values and finds
-    nothing."""
-    if mutant == "no-excused-seat":
-        monkeypatch.setattr(main, "_TEAM_GAME_EXCUSED", (0,))
-    elif mutant == "no-carried-over-values":
-        monkeypatch.setattr(main, "_TEAM_GAME_WITH_TWO", 0)
+    """Control for the test above: a rule that takes one seat's pair of two
+    points as proof, or reads a post naming no game in every game (round 1's
+    attribution by arrival, the two-team rule kept), is caught; the inert
+    twin sets the real functions and finds nothing."""
+    if mutant == "one-seat-suffices":
+        monkeypatch.setattr(main, "_team_game_both_teams_reached_two",
+                            lambda seats: bool(seats & _TWO_OR_MORE))
+    elif mutant == "legacy-in-every-game":
+        monkeypatch.setattr(main, "_team_game_evidence",
+                            lambda shape, cur, att: cur | att)
     else:
-        monkeypatch.setattr(main, "_TEAM_GAME_EXCUSED", main._TEAM_GAME_EXCUSED)
-        monkeypatch.setattr(main, "_TEAM_GAME_WITH_TWO", main._TEAM_GAME_WITH_TWO)
+        monkeypatch.setattr(main, "_team_game_both_teams_reached_two",
+                            main._team_game_both_teams_reached_two)
+        monkeypatch.setattr(main, "_team_game_evidence", main._team_game_evidence)
     found = _model_counterexamples(stop_at_first=mutant != "pass-through")
     assert bool(found) == (mutant != "pass-through"), found[:3]
 
 
-def test_a_split_first_round_is_proven_and_a_sweep_exactly_when_ruled_out():
-    """What a legacy record CAN prove, against every way the previous game can
-    have gone: a split first round (1-1 from two seats) always; a first-round
-    sweep (2-0 from every seat) exactly when the previous game never went
-    through 2-0."""
-    split = _all_seats([(1, 0), (1, 1)], seats=(0, 1))
-    sweep = _all_seats([(1, 0), (2, 0)])
-    for prev_game in _finished_games():
-        prev = _all_seats(prev_game)
-        for shape in ("second", "later", "after-relock"):
-            assert not main._team_game_unplayed_fits(shape, split, prev), (shape, prev_game)
-        for shape in ("second", "later"):
-            proven = not main._team_game_unplayed_fits(shape, sweep, prev)
-            assert proven == ((2, 0) not in prev_game), (shape, prev_game)
+def test_both_teams_named_posts_prove_a_crossing_in_every_shape():
+    """What a record CAN prove: a first-round 1-1 from a seat of each team,
+    naming its game, in every shape; the same posts naming no game only in
+    the first game of the original sitting; two seats of one team nowhere,
+    named or not."""
+    each_team = _all_seats([(1, 0), (1, 1)], seats=(0, 2))
+    one_team = _all_seats([(1, 0), (1, 1)], seats=(0, 1))
+    for shape in _SHAPES:
+        assert _verdict(shape, 0, each_team), shape
+        assert _verdict(shape, each_team, 0) == (shape == "first"), shape
+        assert not _verdict(shape, one_team, one_team), shape
 
 
 def test_the_ambiguous_case_is_identical_bit_for_bit():
-    """Where no rule reading this record can do better. Game 1 began with
-    team 1 sweeping round 1 and went on; game 2 begins the same way. Game 2's
-    record when it really swept round 1, and its record when it only reached
-    1-0 and every 2-0 in it is game 1's re-send landing late, are the same
-    bits, so the rule must give the conservative answer. Only the attested
-    fields remove this case."""
-    prev = _all_seats([(0, 0), (1, 0), (2, 0), (2, 1), (2, 2)])
+    """Why a post that names no game cannot count after game 1. Game 1 began
+    with team 1 sweeping round 1 and went on; game 2 begins the same way.
+    Game 2's legacy record when it really swept round 1, and its record when
+    it only reached 1-0 and every 2-0 in it is game 1's re-send landing late,
+    are the same bits, so the rule must give the conservative answer. The
+    same posts naming game 2 remove the case."""
     crossed = _all_seats([(0, 0), (1, 0), (2, 0)])
     stayed_below = _all_seats([(0, 0), (1, 0)]) | _all_seats([(2, 0)])
     assert crossed == stayed_below
-    assert main._team_game_unplayed_fits("second", crossed, prev)
-    assert main._team_game_unplayed_fits("later", crossed, prev)
+    for shape in ("second", "later"):
+        assert not _verdict(shape, crossed, 0), shape
+        assert _verdict(shape, 0, crossed), shape
 
 
 def test_the_shape_names_what_can_reach_a_record():

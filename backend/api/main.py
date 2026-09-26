@@ -31386,7 +31386,9 @@ async def update_team_live_points(
     above _record_team_game_points needs a pair of two points from a seat of
     each team. A client sending them must take game_number from the same event
     that resets its pair, so the two can never describe different games. No
-    client sends them yet; a post without them is accepted as before.
+    client sends them yet. A post without them is accepted and filed as
+    before, but after the first game of a series' original sitting only the
+    posts that named their game count toward a crossing.
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
@@ -31497,51 +31499,37 @@ async def update_team_live_points(
 # while no room is stored is filed nowhere. Nothing in this rule reads a time.
 #
 # What that name cannot tell is which game a POST describes. Nothing in a
-# legacy post (every client today) names its game: a post that left a client
-# during game N and is processed after game N's report is filed under game
-# N+1, and it can be byte-identical to a post from game N+1. So a post may also
-# carry game_number and photon_room_id, signed with its pair. Such an ATTESTED
-# post is filed only under exactly the game and sitting it names. The names
-# give its pair an identity and nothing more.
+# legacy post (every client today) names its game, and the production client
+# never withdraws one (plugin/ApiClient.cs at TAG v1.40.3, SendLivePoints and
+# SendLivePointsOnce): it dispatches a post at every change of its pair and
+# at every 20-second refresh, whatever is already in flight, and a newer pair
+# stops only the older one's RETRIES; a request already sent runs until it
+# completes or times out. So a post that left a client during game N can be
+# processed after game N's report carrying any pair game N passed through,
+# first-round pairs included, and it is filed under game N+1, where it can be
+# byte-identical to a post from game N+1. Nothing in the client bounds how
+# many such posts there are; only time does, and this rule reads no time. So
+# a post may also carry game_number and photon_room_id, signed with its pair.
+# Such an ATTESTED post is filed only under exactly the game and sitting it
+# names. The names give its pair an identity and nothing more.
+#
+# WHICH POSTS COUNT (_team_game_evidence). In the first game of the series'
+# original sitting no earlier post of the series exists, so every post filed
+# there is that game's own (or the next game's, landing before this game's
+# report, which exists only once this game is over) and all of them count.
+# In any later game a post that names no game may be the game before's, and
+# in the first game of a relocked sitting it may be the dead sitting's: there
+# only the posts that named the game count. A lead-forfeit is only ever asked
+# about a later game (the team that stayed must already be a game up), so
+# until a seat of each team sends the names, every lead-forfeit settles as
+# dc_incomplete, the outcome an admin can still change.
 #
 # BOTH TEAMS. Each accepted post sets one bit: which seat posted which pair
 # (each side capped at 2, as the client caps it). An attested post sets the
 # same bit in a second mask. A crossing is proven only by a pair of two
-# points or more posted by a seat of EACH team (seats 0,1 = team 1, 2,3 =
-# team 2) for the same game. Evidence from one team settles nothing, however
-# many of its seats posted it and whether or not they named the game; such a
-# record settles as dc_incomplete. The attested mask is read first; the
-# legacy rule below is asked only when the whole record already holds a pair
-# of two points from each team.
-#
-# LEGACY EVIDENCE. A legacy post is never classified by itself. The DC report
-# asks whether any history in which the game did NOT reach two points could
-# have produced the record. If none can, the game crossed; if one can, it
-# counts as not played. What a record can
-# hold rests on the client and on three assumptions about delivery, all of
-# them order and none of them time:
-#   * the pair is the game's cumulative points per team (GameStateWatcher's
-#     liveCum counters): it only rises within a game, and a pair with no 2 in
-#     it (1-0, 0-1, 1-1) exists only during the game's first round;
-#   * in each game at most one seat holds a view other than the true score,
-#     LOWER (it relaunched mid-game) or CARRIED (it missed the game start and
-#     kept counting on top of its previous game);
-#   * every other seat's first-round post is processed before its own game's
-#     report, and no post is processed after the report of the game after its
-#     own (the dead sitting of a relock counts as the game before the next
-#     sitting's first game).
-# So the record of game g can hold g's own views, pairs with a 2 that game
-# g-1 passed through or went on to, and anything from ONE seat, g-1's
-# irregular one; the record of g-1 is what tells whether a pair with a 2 could
-# have been g-1's. A 1-1 from a seat of each team proves the game crossed. A
-# first-round sweep (2-0 from a seat of each team) proves it when g-1's record
-# shows g-1 never passed 2-0. A pair g-1 could have left behind proves
-# nothing, however late it landed. The first game of a relocked sitting has
-# no legacy proof at all, because nothing bounds what its dead sitting's posts
-# carried; attested posts from both teams still prove it. Where the record
-# admits both histories -- the same
-# team sweeping the first round of two games running is the common case --
-# the answer is the conservative one, and only the attested fields remove it.
+# points or more among the counted posts, from a seat of EACH team (seats
+# 0,1 = team 1, 2,3 = team 2). One team's evidence proves nothing, however
+# many of its seats posted it, attested or not.
 #
 # What this does NOT change: a live-points post is accepted on the shared mod
 # secret and the series membership of the seat it names in a query parameter,
@@ -31593,63 +31581,21 @@ def _team_game_both_teams_reached_two(seats: int) -> bool:
     return all(seats & team for team in _TEAM_GAME_TWO_POINTS)
 
 
-def _team_game_pair_mask(*pairs) -> int:
-    """The pairs as a 9-bit mask of pair indexes."""
-    mask = 0
-    for t1, t2 in pairs:
-        mask |= 1 << (3 * t1 + t2)
-    return mask
-
-
-def _team_game_all_seats(pair_mask: int) -> int:
-    """Every seat's bit of every pair in a 9-bit pair mask."""
-    return sum(0xF << (4 * p) for p in range(9) if pair_mask >> p & 1)
-
-
-def _team_game_paths():
-    """The six monotone paths from 0-0 to 2-2, one point at a time, as pair
-    masks. Every finished game's pairs are the start of one of them, and a
-    longer path only admits more, so these six stand for every finished game."""
-    paths = []
-
-    def walk(t1, t2, mask):
-        mask |= 1 << (3 * t1 + t2)
-        if (t1, t2) == (2, 2):
-            paths.append(mask)
-            return
-        if t1 < 2:
-            walk(t1 + 1, t2, mask)
-        if t2 < 2:
-            walk(t1, t2 + 1, mask)
-
-    walk(0, 0, 0)
-    return tuple(paths)
-
-
-_TEAM_GAME_WITH_TWO = _team_game_pair_mask((0, 2), (1, 2), (2, 0), (2, 1), (2, 2))
-# What a game that never reached two points shows: 0-0, then the first point
-# to team 1 or to team 2.
-_TEAM_GAME_BELOW_TWO = (_team_game_pair_mask((0, 0), (1, 0)),
-                        _team_game_pair_mask((0, 0), (0, 1)))
-_TEAM_GAME_PATHS = _team_game_paths()
-# One seat's bits of every pair, and "no seat": the irregular seats excused.
-_TEAM_GAME_EXCUSED = (0,) + tuple(0x111111111 << seat for seat in range(4))
-
-
 def _team_game_shape(original: bool, ordinal: int, first_ordinal) -> str:
-    """What can have reached the record of game `ordinal` besides its own posts.
+    """What can have reached the record of game `ordinal` besides its own
+    posts. It decides which posts _team_game_evidence counts, and names the
+    record in the DC report's log.
 
     `original` = the series was never relocked and has no record in another
     room; `first_ordinal` = the lowest game on record in the current room.
-      "first"         game 1 of the original sitting: no game came before it.
-      "second"        game 2 of the original sitting: the previous record holds
-                      game 1's own posts only.
-      "later"         the previous record may also hold late posts of the game
+      "first"         game 1 of the original sitting: nothing, no game came
                       before it.
-      "after-relock"  the previous game was the first of a relocked sitting,
-                      whose record may hold anything; it is not read.
-      "unclean"       the first game of a relocked sitting: its own record may
-                      hold anything the dead sitting posted."""
+      "second"        game 2 of the original sitting: game 1's late posts.
+      "later"         a later game: the game before's late posts.
+      "after-relock"  the game after a relocked sitting's first: that first
+                      game's late posts.
+      "unclean"       the first game of a relocked sitting: anything posted in
+                      the dead sitting."""
     if original:
         return "first" if ordinal <= 1 else "second" if ordinal == 2 else "later"
     if first_ordinal is None or first_ordinal >= ordinal:
@@ -31657,39 +31603,15 @@ def _team_game_shape(original: bool, ordinal: int, first_ordinal) -> str:
     return "after-relock" if first_ordinal == ordinal - 1 else "later"
 
 
-def _team_game_unplayed_fits(shape: str, cur_seats: int, prev_seats: int = 0) -> bool:
-    """Whether a history in which the game in progress never reached two
-    points could have produced its record (`cur_seats`) and the previous
-    game's (`prev_seats`), under the rules in the comment above. True is the
-    conservative answer: the DC report then treats the game as not played.
-
-    The histories enumerated: which team scored the game's first point, the
-    previous game's path (_TEAM_GAME_PATHS), the previous game's irregular
-    seat (excused in both records: its views and its late posts may be
-    anything) and, from game 3, the irregular seat of the game before that
-    (excused in the previous record, where its late posts land). At most 300
-    mask checks."""
-    if shape == "unclean":
-        return True
-    for below_two in _TEAM_GAME_BELOW_TWO:
-        if shape == "first":
-            own = _team_game_all_seats(below_two)
-            if any(not cur_seats & ~(own | odd) for odd in _TEAM_GAME_EXCUSED):
-                return True
-            continue
-        for path in _TEAM_GAME_PATHS:
-            cur_ok = _team_game_all_seats(below_two | (path & _TEAM_GAME_WITH_TWO))
-            prev_ok = _team_game_all_seats(
-                path | (_TEAM_GAME_WITH_TWO if shape == "later" else 0))
-            for odd in _TEAM_GAME_EXCUSED:
-                if cur_seats & ~(cur_ok | odd):
-                    continue
-                if shape == "after-relock":
-                    return True
-                for older in (_TEAM_GAME_EXCUSED if shape == "later" else (0,)):
-                    if not prev_seats & ~(prev_ok | odd | older):
-                        return True
-    return False
+def _team_game_evidence(shape: str, cur_seats: int, attested_seats: int) -> int:
+    """The bits of the game's record that count toward a crossing: every
+    post's (`cur_seats`) in the first game of the original sitting, where no
+    earlier post of the series exists; in every other shape only the posts
+    that named exactly this game and sitting (`attested_seats`), because a
+    post that names no game may be a late post of the game before, or of a
+    dead sitting, and nothing but time bounds how many there are (the comment
+    above _team_game_identity)."""
+    return cur_seats if shape == "first" else attested_seats
 
 
 _TEAM_GAME_POINTS_UPSERT_SQL = (
@@ -31703,18 +31625,16 @@ _TEAM_GAME_POINTS_UPSERT_SQL = (
     "        last_posted_at = NOW()")
 
 # One row: the current game's bits, from every post and from the posts that
-# named it, the previous game's bits (all in the current sitting), the lowest
-# game on record in this sitting, and whether the series has had another
-# sitting (a relock stamp, read as a boolean, or a record in another room).
-# Rows written before migration 351 carry sitting_room '' and are never read;
-# rows written before migration 352 hold attested_seats 0.
+# named it (both in the current sitting), the lowest game on record in this
+# sitting, and whether the series has had another sitting (a relock stamp,
+# read as a boolean, or a record in another room). Rows written before
+# migration 351 carry sitting_room '' and are never read; rows written before
+# migration 352 hold attested_seats 0.
 _TEAM_GAME_CROSSED_SQL = (
     "SELECT COALESCE(BIT_OR(g.pair_seats)"
     "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_seats,"
     "       COALESCE(BIT_OR(g.attested_seats)"
     "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_attested,"
-    "       COALESCE(BIT_OR(g.pair_seats)"
-    "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer) - 1), 0) AS prev_seats,"
     "       MIN(g.game_ordinal) AS first_ordinal,"
     "       (SELECT ts.relocked_at IS NOT NULL FROM team_series ts"
     "         WHERE ts.id = :sid) AS relocked,"
@@ -31770,12 +31690,12 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
 async def _team_game_crossed_two(db, series_id, series_row, reported_points=None) -> bool:
     """Whether the game in progress on this series saw real play, by the
     server's own record: a pair of two points or more from a seat of each
-    team (_team_game_both_teams_reached_two), either among the posts that
-    named exactly this game and sitting, or in a legacy record that no
-    history without two points could have produced (_team_game_unplayed_fits).
-    The caller holds the series row lock and passes the row it read under that
-    lock, so the game is named by the same helper, from the same locked state,
-    that the posts were filed by.
+    team (_team_game_both_teams_reached_two) among the posts that count for
+    this game (_team_game_evidence) -- every post in the first game of the
+    original sitting, only the posts that named exactly this game and sitting
+    in any other. The caller holds the series row lock and passes the row it
+    read under that lock, so the game is named by the same helper, from the
+    same locked state, that the posts were filed by.
 
     `reported_points` is the DC report's own snapshot. It is LOGGED when it
     disagrees with the record and never read by the answer: that disagreement
@@ -31783,9 +31703,10 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
 
     False when no room is stored, when the record cannot be read (before
     migration 348, 351 or 352, or any statement error inside the savepoint),
-    when only one team's posts show two points, and whenever a history without
-    a crossing fits the record. Every one of those settles as dc_incomplete,
-    the outcome an admin can still change. Never raises."""
+    and when the counted posts do not show two points from both teams (in
+    any game but the first of the original sitting, only the posts that
+    named it are counted). Every one of those settles as dc_incomplete, the
+    outcome an admin can still change. Never raises."""
     ordinal, room = _team_game_identity(series_row["t1_series_wins"],
                                         series_row["t2_series_wins"],
                                         series_row["photon_room_id"])
@@ -31803,14 +31724,11 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
         return False
     original = not rec["relocked"] and not rec["other_room"]
     shape = _team_game_shape(original, ordinal, rec["first_ordinal"])
-    cur = int(rec["cur_seats"] or 0)
-    if _team_game_both_teams_reached_two(int(rec["cur_attested"] or 0)):
-        crossed, basis = True, "attested posts from both teams"
-    else:
-        crossed = (_team_game_both_teams_reached_two(cur)
-                   and not _team_game_unplayed_fits(shape, cur,
-                                                    int(rec["prev_seats"] or 0)))
-        basis = "the record (%s)" % shape
+    evidence = _team_game_evidence(shape, int(rec["cur_seats"] or 0),
+                                   int(rec["cur_attested"] or 0))
+    crossed = _team_game_both_teams_reached_two(evidence)
+    basis = "the record (%s, %s)" % (
+        shape, "every post" if shape == "first" else "posts naming the game")
     if reported_points is not None and (int(reported_points) >= 2) != crossed:
         print(f"[TEAM-DC] series={series_id} game {ordinal}: {basis} says "
               f"{'played' if crossed else 'not played'}; the report's snapshot "
