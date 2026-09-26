@@ -27579,6 +27579,95 @@ async def pc_trade_cancel(
         request, db, "cancel", steam_id, sig, nonce, trade_id, digest))
 
 
+# ---- reads (3.7): never write -- no void, no expiry, no touch ----
+
+def _pc_trade_bounds() -> dict:
+    """Every PC_TRADE value the client displays (it hardcodes none)."""
+    keys = ("prints_per_side_max", "ttl_hours", "open_sent_max", "open_received_max", "proposals_per_day",
+            "executed_per_day", "executed_per_pair_day", "decline_cooldown_hours", "reversal_window_minutes",
+            "reversal_cooldown_hours", "min_ranked_series", "min_mod_age_days", "traded_discard_shards",
+            "recent_days")
+    return {k: int(_pc.PC_TRADE[k]) for k in keys}
+
+
+async def _pc_trades_read_tx(request, db: AsyncSession, steam_id: str, sig: str, view: str):
+    await _pc_trade_timeouts(db)
+    await _pc_trade_word_gate(db, need_ready=False)
+    if view not in ("summary", "full"):
+        raise _pc_trade_refusal("bad_request", 422, permanent=True)
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_read(steam_id, "trades", view), db)
+    pid = str(player.id)
+    me = (await db.execute(text("""
+        SELECT pc_trades_open, pc_settings_revision, now() AS server_now FROM players WHERE id = CAST(:pid AS uuid)
+    """), {"pid": pid})).mappings().one()
+    open_rows = (await db.execute(text("""
+        SELECT id, proposer FROM pc_trades
+         WHERE (pair_lo = CAST(:pid AS uuid) OR pair_hi = CAST(:pid AS uuid))
+           AND status = 'proposed' AND expires_at > now()
+         ORDER BY created_at, id
+    """), {"pid": pid})).mappings().all()
+    answer = {
+        "enabled": bool(_pc.PC_TRADE["enabled"]),
+        "trades_open": bool(me["pc_trades_open"]),
+        "revision": int(me["pc_settings_revision"]),
+        "server_now": _pc_iso(me["server_now"]),
+        "received_open": [str(r["id"]) for r in open_rows if str(r["proposer"]) != pid],
+        "sent_open": [str(r["id"]) for r in open_rows if str(r["proposer"]) == pid],
+    }
+    if view == "summary":
+        return answer
+    today = (await db.execute(text("""
+        SELECT (SELECT count(*) FROM pc_trades
+                 WHERE status IN ('executed', 'reversed')
+                   AND (pair_lo = CAST(:pid AS uuid) OR pair_hi = CAST(:pid AS uuid))
+                   AND (executed_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS executed_today,
+               (SELECT count(*) FROM pc_trades
+                 WHERE proposer = CAST(:pid AS uuid)
+                   AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS proposals_today
+    """), {"pid": pid})).mappings().one()
+    offers = (await db.execute(text(_PC_TRADE_ROW_SQL + """
+     WHERE (t.pair_lo = CAST(:pid AS uuid) OR t.pair_hi = CAST(:pid AS uuid))
+       AND t.status = 'proposed' AND t.expires_at > now()
+     ORDER BY t.created_at, t.id
+    """), {"pid": pid})).mappings().all()
+    recent = (await db.execute(text(_PC_TRADE_ROW_SQL + """
+     WHERE (t.pair_lo = CAST(:pid AS uuid) OR t.pair_hi = CAST(:pid AS uuid))
+       AND ((t.status NOT IN ('proposed', 'executing')
+             AND t.closed_at > now() - make_interval(days => CAST(:days AS integer)))
+            OR (t.status = 'proposed' AND t.expires_at <= now()))
+     ORDER BY COALESCE(t.closed_at, t.expires_at) DESC, t.id
+     LIMIT 20
+    """), {"pid": pid, "days": int(_pc.PC_TRADE["recent_days"])})).mappings().all()
+    ctx = await _pc_face_ctx(db, _pc_locale(request))
+    named = [p for t in list(offers) + list(recent) for p in list(t["a_prints"]) + list(t["b_prints"])]
+    prints = await _pc_trade_prints_by_id(db, named, ctx)
+    return {
+        **answer,
+        "bounds": {**_pc_trade_bounds(), "executed_today": int(today["executed_today"]),
+                   "proposals_today": int(today["proposals_today"])},
+        "locale": ctx["locale"],
+        "offers": [_pc_trade_view(t, pid, prints, ctx) for t in offers],
+        "recent": [_pc_trade_view(t, pid, prints, ctx, slim=True) for t in recent],
+    }
+
+
+@app.get("/api/v1/pc/trades", tags=["Player Cards"])
+async def pc_trades(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    sig: str = Query(..., max_length=128),
+    view: str = Query("summary", max_length=16),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's trades (3.7), HMAC over pcread:{steam}:trades:{view},
+    strict session. summary: the switch, the caller's trading setting and
+    settings revision, the server clock and the ids of the open proposals
+    each way. full: those plus the bounds, the open offers with faces and
+    the trades closed in the last recent_days (at most 20). Answers 200
+    whatever the kill switch says, reporting it as `enabled`."""
+    return await _pc_trade_guarded(db, _pc_trades_read_tx(request, db, steam_id, sig, view))
+
+
 # ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
 # The bot is a singleton on the primary; these answer only to the shared
 # internal key. Discord identity resolves through players.discord_id (the
