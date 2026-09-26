@@ -2699,9 +2699,19 @@ def _r12_msbuild_alias_reason(value):
 
 
 def _r12_output_names_using(el):
-    """Whether the task output `el` adds items of the type Using -- the type
-    compared in any letter case -- or names its item type by an expansion
-    this reading does not evaluate."""
+    """Whether the element `el` adds items of the type Using through an output
+    -- a task output's ItemName or an item's OutputItemType, an attribute or
+    a child element -- the type compared as `_r13_item_type_is` compares it
+    (R12CL2; R12R-L2 on every element, not only one named Output)."""
+    return any(_r13_item_type_is(v, ("using",))
+               for v in _r13_output_item_types(el))
+
+
+def _r12_output_names_using_round12(el):
+    """THE ROUND-12 READING, the same in behaviour: the ItemName attribute
+    only, where the caller had already found an element named Output.  Kept
+    ONLY so `test_r12cl2_...` can show the forms it did not see; nothing else
+    calls it."""
     for k, v in el.attrib.items():
         if k.lower() == "itemname" and (
                 v.strip().lower() == "using"
@@ -2713,7 +2723,8 @@ def _r12_output_names_using(el):
 def _r12_msbuild_string_problems(project_dir):
     """[reason] -- every using alias that could name String, in any spelling
     MSBuild accepts, in every MSBuild file the gate lists for the project in
-    `project_dir` (R12CL2)."""
+    `project_dir` (R12CL2), and every output adding Using items, on any
+    element (R12R-L2)."""
     project_dir = pathlib.Path(project_dir)
     projects = sorted(p for p in project_dir.iterdir()
                       if p.is_file() and p.suffix.lower() == ".csproj")
@@ -2726,10 +2737,10 @@ def _r12_msbuild_string_problems(project_dir):
             out.append("%s could not be read as XML (%s)" % (role, type(exc).__name__))
             continue
         for el in root.iter():
-            if (_r12_local(el.tag).lower() == "output"
-                    and _r12_output_names_using(el)):
-                out.append("%s: a using item made by a task output this "
-                           "reading does not evaluate" % role)
+            if _r12_output_names_using(el):
+                out.append("%s: a using item made by an output -- a task "
+                           "output's ItemName or an item's OutputItemType -- "
+                           "this reading does not evaluate" % role)
                 continue
             if _r12_local(el.tag).lower() != "using":
                 continue
@@ -4086,7 +4097,18 @@ def test_r12cl2_a_using_alias_string_in_any_msbuild_spelling_refuses_the_binding
     and the uppercase call beside it; a different alias, a longer name, a
     Using item with no alias, an Alias on another item type, an escape
     spelling another name, a task output adding another item type and a
-    formatting character inside a string literal leave it established."""
+    formatting character inside a string literal leave it established.
+
+    ROUND 13 (R12R-L2): an output adding Using items is read on every
+    element.  A project reference's OutputItemType of Using -- an attribute
+    beside the alias String, a child element, an ItemDefinitionGroup default,
+    spelled with a character reference, in any letter case, or with an `%XX`
+    escape -- and a task output's ItemName spelled with an escape each REFUSE
+    the binding, where the round-12 reading, which looked for the item type
+    only on an element named Output and only in its ItemName, had nothing to
+    read in any of them; a project reference whose output type is Analyzer,
+    beside the same alias, or ZzItems in a child element leaves it
+    established."""
     ra = _src("RoomActors.cs")
     assert _r12_msbuild_string_problems(PLUGIN) == []
     tree = _r12_compile_sources()
@@ -4192,6 +4214,70 @@ def test_r12cl2_a_using_alias_string_in_any_msbuild_spelling_refuses_the_binding
         assert got, (label, why)
         print("R12CL2 TWIN %s : established" % label)
 
+    # ROUND 13 (R12R-L2): an output adding Using items, on any element.
+    def round12_saw(d):
+        """Whether the round-12 reading had anything to read in `d`: an
+        element named Output whose ItemName it read as Using, or an element
+        named Using."""
+        found, _listing = _r12_msbuild_files(d, sorted(d.glob("*.csproj")))
+        for _role, p, _kind in found:
+            for el in ET.fromstring(p.read_bytes()).iter():
+                name = _r12_local(el.tag).lower()
+                if name == "using" or (
+                        name == "output" and _r12_output_names_using_round12(el)):
+                    return True
+        return False
+
+    shadow = ".." + bs + "ZzShadow" + bs + "ZzShadow.csproj"
+    r13_forms = (
+        ("a project reference's output type Using beside the alias String",
+         "csproj", '<ProjectReference Include="%s" OutputItemType="Using" '
+         'Alias="String" />' % shadow, ""),
+        ("a project reference's output type Using in a child element", "user",
+         '<ProjectReference Include="%s"><OutputItemType>Using'
+         "</OutputItemType></ProjectReference>" % shadow, ""),
+        ("every project reference's output type Using by an "
+         "ItemDefinitionGroup default", "ext",
+         '<ProjectReference Include="%s" />' % shadow,
+         "  <ItemDefinitionGroup><ProjectReference><OutputItemType>Using"
+         "</OutputItemType></ProjectReference></ItemDefinitionGroup>" + LF),
+        ("a character reference in a project reference's output type",
+         "csproj", '<ProjectReference Include="%s" '
+         'OutputItemType="Usin&#103;" />' % shadow, ""),
+        ("a lower-case metadata name and an upper-case output type", "csproj",
+         '<ProjectReference Include="%s" outputitemtype="USING" />' % shadow,
+         ""),
+        ("an MSBuild escape in a project reference's output type", "csproj",
+         '<ProjectReference Include="%s" OutputItemType="Us%%69ng" />' % shadow,
+         ""),
+        ("an MSBuild escape in a task output's item type", "csproj",
+         '<ZzHolder Include="x" />', zz_output % "Us%69ng"),
+    )
+    r13_refused = 0
+    for i, (label, kind, item, extra) in enumerate(r13_forms):
+        d = project(tmp_path / ("r%02d" % i), kind, item, extra)
+        got, why = _r12_string_binding(ra, tree, d)
+        using = [w for w in why if "using item" in w]
+        assert not got and using, (label, why)
+        assert not round12_saw(d), ("the round-12 reading had it to read", label)
+        r13_refused += 1
+        print("R12CL2 FORM %s : REFUSED -- %s; the round-12 reading had nothing "
+              "to read in it" % (label, using[0]))
+    assert r13_refused == 7, r13_refused
+    r13_twins = (
+        ("a project reference's output type Analyzer beside the alias String",
+         '<ProjectReference Include="%s" OutputItemType="Analyzer" '
+         'Alias="String" />' % shadow),
+        ("a project reference's output type ZzItems in a child element",
+         '<ProjectReference Include="%s"><OutputItemType>ZzItems'
+         "</OutputItemType></ProjectReference>" % shadow),
+    )
+    for i, (label, item) in enumerate(r13_twins):
+        d = project(tmp_path / ("s%02d" % i), "csproj", item, "")
+        got, why = _r12_string_binding(ra, tree, d)
+        assert got, (label, why)
+        print("R12CL2 TWIN %s : established" % label)
+
     zw = chr(0x200B)
     cf_ident = _r12_block("    internal static class ZzHolder" + LF + "    {" + LF
                           + "        internal static int Str" + zw + "ing;" + LF
@@ -4214,9 +4300,11 @@ def test_r12cl2_a_using_alias_string_in_any_msbuild_spelling_refuses_the_binding
     print("R12CL2 SOURCE TWIN: the same character inside a string literal : "
           "established")
     print("R12CL2 BINDING: %d MSBuild spelling(s) refused, %d of them seen by "
-          "the first-pass pattern; a project file that is not XML refused; a "
-          "formatting character in code refused; %d twin(s) established"
-          % (refused, seen_first, len(twins) + 1))
+          "the first-pass pattern; %d output form(s) refused that the round-12 "
+          "reading had nothing to read in; a project file that is not XML "
+          "refused; a formatting character in code refused; %d twin(s) "
+          "established" % (refused, seen_first, r13_refused,
+                           len(twins) + len(r13_twins) + 1))
 
 
 def test_the_dc_fallback_watch_dies_with_the_room():
