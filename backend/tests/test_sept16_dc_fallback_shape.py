@@ -2972,27 +2972,43 @@ def test_every_value_the_settle_writes_is_read_from_the_locked_row():
         code, "_assert_no_service_subject(")
 
 
-# ── /mod-version advertises no capability ────────────────────────────────
+# -- /mod-version advertises no 2v2 series-status capability --------------
 
 
-def test_mod_version_advertises_no_capability():
-    """The advertisement is deleted, not merely unused.
+def test_mod_version_advertises_no_series_status_capability():
+    """The 2v2 series-status advertisement is deleted, not merely unused.
 
     An answer from /mod-version cannot speak for the box that answers a LATER
     request: the edge chooses an upstream per request and the two boxes are
     deployed independently (learning #422). Leaving the key in place while the
     client stopped reading it would leave the next reader a mechanism to
     revive.
+
+    Since the bug 392 landing the route advertises ONE capability of another
+    kind: the involuntary-cause field, derived from the leave-cause vocabulary
+    and pinned by that fix's own tests. It gates what a client may SEND, and
+    this pin does not judge it. What this pin holds is the rest of the answer:
+    the returned mapping is exactly the two version numbers plus that one
+    field, so any other key -- the series-status flag above all -- turns it
+    red.
     """
-    code = code_lines_of(node_named("get_mod_version"))
-    joined = "\n".join(code)
+    node = node_named("get_mod_version")
+    joined = "\n".join(code_lines_of(node))
     assert "series_status_readonly" not in joined, joined
-    # The two version numbers, and nothing else.
-    assert '"version": LATEST_MOD_VERSION' in joined
-    assert '"min_version": MIN_MOD_VERSION_EFFECTIVE}' in joined
-    doc = ast.get_docstring(node_named("get_mod_version"))
+    returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+    assert len(returns) == 1, [ast.unparse(r) for r in returns]
+    answer = returns[0].value
+    assert isinstance(answer, ast.Dict), ast.unparse(returns[0])
+    keys = sorted(ast.unparse(k) for k in answer.keys)
+    assert keys == sorted(["'version'", "'min_version'",
+                           "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD"]), keys
+    values = {ast.unparse(k): ast.unparse(v) for k, v in zip(answer.keys, answer.values)}
+    # The two version numbers are the two constants, not a literal.
+    assert values["'version'"] == "LATEST_MOD_VERSION", values
+    assert values["'min_version'"] == "MIN_MOD_VERSION_EFFECTIVE", values
+    doc = ast.get_docstring(node)
     # The docstring must say WHY, or the next pass re-adds it.
-    assert "NO CAPABILITY IS ADVERTISED HERE" in doc
+    assert "NO 2v2 SERIES-STATUS CAPABILITY IS ADVERTISED HERE" in doc
     assert "/status" in doc
 
 
