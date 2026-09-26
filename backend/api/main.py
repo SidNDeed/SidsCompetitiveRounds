@@ -27668,6 +27668,149 @@ async def pc_trades(
     return await _pc_trade_guarded(db, _pc_trades_read_tx(request, db, steam_id, sig, view))
 
 
+# ---- the admin reversal and list (3.10) ----
+
+async def _pc_trade_reverse_lock(db: AsyncSession, t) -> dict:
+    """3.10 step 3: L1 (both parties and every subject), L2 (the trade row),
+    L3 (both players rows) and L4 (the named prints), each ascending -- the
+    gate P11 and A10 read the reversal cooldown under, taken before the
+    claim writes it (F49)."""
+    named = list(t["a_prints"]) + list(t["b_prints"])
+    subjects = await _pc_trade_subjects(db, named)
+    if not await _pc_trade_try_identities(db, [t["lo_steam_id"], t["hi_steam_id"], *subjects]):
+        raise _pc_trade_refusal("busy", retry_after=3)
+    await db.execute(text(_PC_TRADE_STATE_SQL + " FOR NO KEY UPDATE OF t"), {"t": str(t["id"])})
+    await _pc_trade_lock_players(db, [str(t["pair_lo"]), str(t["pair_hi"])])
+    return await _pc_trade_lock_prints(db, named)
+
+
+async def _pc_trade_reverse_claim(db: AsyncSession, tid: str, admin_steam_id: str):
+    """3.10 step 4: both time checks and reversed_at read clock_timestamp(),
+    under L3 (F5, F49)."""
+    return (await db.execute(text("""
+        UPDATE pc_trades SET status = 'reversed', reversed_at = clock_timestamp(), reversed_by = CAST(:admin AS text)
+         WHERE id = CAST(:t AS uuid) AND status = 'executed'
+           AND executed_at > clock_timestamp() - make_interval(mins => CAST(:w AS integer))
+        RETURNING id
+    """), {"t": tid, "admin": admin_steam_id,
+           "w": int(_pc.PC_TRADE["reversal_window_minutes"])})).scalar_one_or_none()
+
+
+async def _pc_trade_reverse_refusal(db: AsyncSession, tid: str):
+    """Step 2's plain read, and the fresh read after a claim that returned no
+    row: 404, 409 with the state, or 409 window_closed. None when the trade
+    is executed and inside its window."""
+    row = (await db.execute(text("""
+        SELECT status, (executed_at <= clock_timestamp() - make_interval(mins => CAST(:w AS integer))) AS closed
+          FROM pc_trades WHERE id = CAST(:t AS uuid)
+    """), {"t": tid, "w": int(_pc.PC_TRADE["reversal_window_minutes"])})).mappings().first()
+    if row is None:
+        return _pc_trade_refusal("not_found", 404, permanent=True)
+    if row["status"] != "executed":
+        return _pc_trade_refusal(row["status"], permanent=True, state=row["status"])
+    if row["closed"]:
+        return _pc_trade_refusal("window_closed", permanent=True, state="executed")
+    return None
+
+
+async def _admin_pc_trade_reverse_tx(db: AsyncSession, admin_steam_id: str, sig: str, trade_id: str, reason: str):
+    await _pc_trade_timeouts(db)                                                   # step 0
+    await _pc_trade_word_gate(db, need_ready=False)
+    tid = _pc_trade_uuid(trade_id)
+    if tid is None:
+        raise _pc_trade_refusal("bad_request", 422, permanent=True)
+    await _require_admin(db, admin_steam_id, "pc_trade_reverse", tid, sig)        # step 1
+    refusal = await _pc_trade_reverse_refusal(db, tid)                             # step 2
+    if refusal is not None:
+        raise refusal
+    t = (await db.execute(text(_PC_TRADE_STATE_SQL), {"t": tid})).mappings().first()
+    if t is None:
+        raise _pc_trade_refusal("not_found", 404, permanent=True)
+    locked = await _pc_trade_reverse_lock(db, t)                                   # step 3
+    claimed = await _pc_trade_reverse_claim(db, tid, admin_steam_id)               # step 4
+    if claimed is None:
+        await db.rollback()
+        await _pc_trade_timeouts(db)
+        refusal = await _pc_trade_reverse_refusal(db, tid)
+        raise refusal if refusal is not None else _pc_trade_refusal("busy", retry_after=1)
+    lo, hi = str(t["pair_lo"]), str(t["pair_hi"])
+    for ids, holder in ((t["a_prints"], hi), (t["b_prints"], lo)):                 # step 5: moved on?
+        for print_id in ids:
+            row = locked.get(str(print_id))
+            if row is None or row["discarded_at"] is not None or str(row["owner_player_id"]) != holder:
+                raise _pc_trade_refusal("moved_on", permanent=True, state="executed")
+    moved_back = {}
+    for ids, source, target, key in ((t["a_prints"], hi, lo, "to_lo"), (t["b_prints"], lo, hi, "to_hi")):
+        moved = (await db.execute(text(_PC_TRADE_MOVE_SQL), {                      # step 6: the move back
+            "to": target, "ids": [str(p) for p in ids], "from": source})).all()
+        if len(moved) != len(ids):
+            raise _pc_trade_refusal("moved_on", permanent=True, state="executed")
+        moved_back[key] = sorted(str(r[0]) for r in moved)
+    details = {"trade_id": tid, "pair_lo_steam_id": t["lo_steam_id"], "pair_hi_steam_id": t["hi_steam_id"],
+               "moved_back": moved_back, "executed_at": _pc_iso(t["executed_at"]), "reason": reason}
+    db.add(AdminAction(admin_steam_id=admin_steam_id, action="pc_trade_reverse", target_steam_id=tid,
+                       details=details))                                           # step 7
+    await db.commit()
+    print(f"[PC-TRADE] reversed trade={tid} by admin={admin_steam_id}")
+    return {"status": "reversed", **details}
+
+
+@app.post("/api/v1/admin/pc/trades/reverse", tags=["Admin"])
+async def admin_pc_trade_reverse(
+    admin_steam_id: str = Query(..., max_length=32),
+    sig: str = Query(..., max_length=128),
+    trade_id: str = Query(..., max_length=64),
+    reason: str = Query("", max_length=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reverse an executed trade within reversal_window_minutes (3.10):
+    admin HMAC over the admin canonical, action 'pc_trade_reverse', target
+    the trade id. Every print goes back to its giver or nothing moves (409
+    moved_on); the AdminAction row commits with the reversal."""
+    return await _pc_trade_guarded(db, _admin_pc_trade_reverse_tx(db, admin_steam_id, sig, trade_id, reason))
+
+
+async def _admin_pc_trade_list_tx(db: AsyncSession, admin_steam_id: str, sig: str, steam_id: str):
+    await _pc_trade_timeouts(db)
+    await _pc_trade_word_gate(db, need_ready=False)
+    if not _PC_TRADE_STEAM_RE.match(steam_id or ""):
+        raise _pc_trade_refusal("bad_request", 422, permanent=True)
+    await _require_admin(db, admin_steam_id, "pc_trade_list", steam_id, sig)
+    rows = (await db.execute(text("""
+        SELECT t.id, t.status, t.created_at, t.expires_at, t.closed_at, t.executed_at, t.reversed_at,
+               t.reversed_by, t.void_reason, t.a_prints, t.b_prints,
+               lo.steam_id AS lo_steam_id, hi.steam_id AS hi_steam_id, pr.steam_id AS proposer_steam_id
+          FROM pc_trades t
+          JOIN players lo ON lo.id = t.pair_lo
+          JOIN players hi ON hi.id = t.pair_hi
+          JOIN players pr ON pr.id = t.proposer
+         WHERE (lo.steam_id = CAST(:sid AS text) OR hi.steam_id = CAST(:sid AS text))
+           AND t.created_at > now() - INTERVAL '30 days'
+         ORDER BY t.created_at DESC, t.id
+    """), {"sid": steam_id})).mappings().all()
+    return {"steam_id": steam_id, "trades": [{
+        "trade_id": str(r["id"]), "state": r["status"], "proposer_steam_id": r["proposer_steam_id"],
+        "pair_lo_steam_id": r["lo_steam_id"], "pair_hi_steam_id": r["hi_steam_id"],
+        "a_prints": [str(p) for p in r["a_prints"]], "b_prints": [str(p) for p in r["b_prints"]],
+        "created_at": _pc_iso(r["created_at"]), "expires_at": _pc_iso(r["expires_at"]),
+        "closed_at": _pc_iso(r["closed_at"]), "executed_at": _pc_iso(r["executed_at"]),
+        "reversed_at": _pc_iso(r["reversed_at"]), "reversed_by": r["reversed_by"],
+        "void_reason": r["void_reason"]} for r in rows]}
+
+
+@app.get("/api/v1/admin/pc/trades", tags=["Admin"])
+async def admin_pc_trades(
+    steam_id: str = Query(..., max_length=32),
+    admin_steam_id: str = Query(..., max_length=32),
+    sig: str = Query(..., max_length=128),
+    db: AsyncSession = Depends(get_db),
+):
+    """A player's trades of the last 30 days, for an admin to find the id to
+    reverse (admin HMAC, action 'pc_trade_list', target the steam id).
+    Writes nothing."""
+    return await _pc_trade_guarded(db, _admin_pc_trade_list_tx(db, admin_steam_id, sig, steam_id))
+
+
 # ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
 # The bot is a singleton on the primary; these answer only to the shared
 # internal key. Discord identity resolves through players.discord_id (the
