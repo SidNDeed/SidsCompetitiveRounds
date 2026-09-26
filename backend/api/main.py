@@ -27356,6 +27356,132 @@ async def pc_trade_propose(
         request, db, steam_id, sig, nonce, to, give, get, digest))
 
 
+# ---- accept (3.5) ----
+
+async def _pc_trade_closed_answer(db: AsyncSession, request, t, actor: str):
+    """A4: an accept of a trade that is not open. The acceptor's own executed
+    trade answers its stored projection (replayed: true, whichever nonce);
+    anything else is 409 with the state as the code. No write."""
+    if t["status"] == "executed" and str(t["closed_by"]) == actor:
+        view = await _pc_trade_projection(db, request, str(t["id"]), actor)
+        if view is not None:
+            return {**view, "replayed": True, "received": view["get"]}
+    if t["status"] != "proposed":
+        raise _pc_trade_refusal(t["status"], permanent=True, state=t["status"])
+    if t["past_expiry"]:
+        raise _pc_trade_refusal("expired", permanent=True, state="expired")
+    return None
+
+
+async def _pc_trade_accept_tx(request, db: AsyncSession, steam_id: str, sig: str, nonce: str,
+                              trade_id: str, digest: str):
+    await _pc_trade_timeouts(db)                                                   # AT
+    await _pc_trade_word_gate(db, need_ready=True)                                 # A0
+    tid = _pc_trade_uuid(trade_id)                                                 # A1
+    if (tid is None or not _PC_TRADE_STEAM_RE.match(steam_id or "")
+            or not _PC_TRADE_NONCE_RE.match(nonce or "") or not _PC_TRADE_DIGEST_RE.match(digest or "")):
+        raise _pc_trade_refusal("bad_request", 422, permanent=True)
+    player = await _pc_verified_actor(request, steam_id, sig,
+                                      _pc.canon_trade(steam_id, nonce, "accept", tid, digest), db)
+    actor = str(player.id)
+    t = (await db.execute(text(_PC_TRADE_STATE_SQL), {"t": tid})).mappings().first()   # A2
+    if t is None or actor not in (str(t["pair_lo"]), str(t["pair_hi"])):
+        raise _pc_trade_refusal("not_found", 404, permanent=True)
+    if str(t["proposer"]) == actor:
+        raise _pc_trade_refusal("wrong_party", permanent=True)
+    if t["digest"] != digest:                                                      # A3
+        raise _pc_trade_refusal("bad_terms", permanent=True)
+    answer = await _pc_trade_closed_answer(db, request, t, actor)                  # A4
+    if answer is not None:
+        return answer
+    lo, hi, proposer = str(t["pair_lo"]), str(t["pair_hi"]), str(t["proposer"])
+    proposer_steam = t["lo_steam_id"] if proposer == lo else t["hi_steam_id"]
+    named = list(t["a_prints"]) + list(t["b_prints"])
+    subjects = await _pc_trade_subjects(db, named)                                 # A5 (L1)
+    if not await _pc_trade_try_identities(db, [proposer_steam, *subjects], actor=steam_id):
+        raise _pc_trade_refusal("busy", retry_after=3)
+    await db.execute(text(_PC_TRADE_STATE_SQL + " FOR NO KEY UPDATE OF t"), {"t": tid})   # A6 (L2)
+    claimed = (await db.execute(text(_PC_TRADE_CLAIM_SQL), {                       # A7: the claim
+        "actor": actor, "nonce": nonce, "t": tid, "digest": digest})).scalar_one_or_none()
+    if claimed is None:
+        await db.rollback()
+        await _pc_trade_timeouts(db)
+        fresh = (await db.execute(text(_PC_TRADE_STATE_SQL), {"t": tid})).mappings().first()
+        if fresh is None:
+            raise _pc_trade_refusal("not_found", 404, permanent=True)
+        answer = await _pc_trade_closed_answer(db, request, fresh, actor)
+        if answer is not None:
+            return answer
+        raise _pc_trade_refusal("busy", retry_after=1)
+    await _pc_trade_lock_players(db, [lo, hi])                                     # A8 (L3)
+    locked = await _pc_trade_lock_prints(db, named)                                # A9 (L4)
+    await _pc_trade_accept_recheck(db, t, actor, locked)                           # A10
+    for ids, source, target in ((t["a_prints"], lo, hi), (t["b_prints"], hi, lo)):   # A11: the move
+        moved = (await db.execute(text(_PC_TRADE_MOVE_SQL), {
+            "to": target, "ids": [str(p) for p in ids], "from": source})).all()
+        if len(moved) != len(ids):
+            raise _pc_trade_refusal("transfer_conflict")
+    done = (await db.execute(text("""
+        UPDATE pc_trades SET status = 'executed', executed_at = now(), closed_at = now()
+         WHERE id = CAST(:t AS uuid) AND status = 'executing'
+        RETURNING id
+    """), {"t": tid})).scalar_one_or_none()                                         # A12
+    if done is None:
+        raise _pc_trade_refusal("transfer_conflict")
+    await db.commit()                                                              # A13
+    view = await _pc_trade_projection(db, request, tid, actor)                     # A14
+    print(f"[PC-TRADE] executed trade={tid} lo={t['lo_steam_id']} hi={t['hi_steam_id']} "
+          f"a={len(t['a_prints'])} b={len(t['b_prints'])}")                         # A15
+    return {**view, "replayed": False, "received": view["get"]}
+
+
+async def _pc_trade_accept_recheck(db: AsyncSession, t, actor: str, locked: dict) -> None:
+    """A10: every predicate re-read on the locked rows (#208). Any failure
+    raises 409 with its code; the accept never writes a refusal (`void` has
+    one writer, the janitor)."""
+    lo, hi, proposer = str(t["pair_lo"]), str(t["pair_hi"]), str(t["proposer"])
+    parties = await _pc_trade_parties(db, [lo, hi])
+    _pc_trade_raise(_pc_trade_party_refusal(parties.get(actor), own=True,
+                                            stamped_generation=t["counterparty_generation"]))
+    _pc_trade_raise(_pc_trade_party_refusal(parties.get(proposer), own=False,
+                                            stamped_generation=t["proposer_generation"]))
+    _pc_trade_raise(_pc_trade_prints_refusal(((t["a_prints"], lo), (t["b_prints"], hi)), locked))
+    frozen = await _pc_trade_freeze_left(db, list(t["a_prints"]) + list(t["b_prints"]))
+    if frozen is not None:
+        raise _pc_trade_refusal("recently_traded", retry_after=frozen)
+    acceptor_side = t["a_prints"] if actor == lo else t["b_prints"]
+    if await _pc_trade_held(db, acceptor_side):
+        raise _pc_trade_refusal("print_offered_elsewhere")
+    counts = await _pc_trade_executed_counts(db, lo, hi)
+    cap = int(_pc.PC_TRADE["executed_per_day"])
+    if int(counts["lo_today"]) >= cap or int(counts["hi_today"]) >= cap:
+        raise _pc_trade_refusal("cap_executed_day", retry_after=int(counts["to_midnight"] or 1))
+    if int(counts["pair_today"]) >= int(_pc.PC_TRADE["executed_per_pair_day"]):
+        raise _pc_trade_refusal("cap_executed_pair_day", retry_after=int(counts["to_midnight"] or 1))
+    cooldown = await _pc_trade_reversal_cooldown_left(db, [lo, hi])
+    if cooldown is not None:
+        raise _pc_trade_refusal("cooldown_reversal", retry_after=cooldown)
+    await _assert_no_service_subject(db, affected_player_ids=[lo, hi],
+                                     affected_steam_ids=[t["lo_steam_id"], t["hi_steam_id"]])
+
+
+@app.post("/api/v1/pc/trades/accept", tags=["Player Cards"])
+async def pc_trade_accept(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    sig: str = Query(..., max_length=128),
+    nonce: str = Query(..., max_length=64),
+    trade_id: str = Query(..., max_length=64),
+    digest: str = Query(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Accept a trade proposed to `steam_id` (3.5): HMAC over
+    pctrade:{steam}:{nonce}:accept:{trade_id}:{digest}, strict session. The
+    prints of both sides change owner in one transaction or not at all; the
+    answer carries the trade and `received`, the prints now held."""
+    return await _pc_trade_guarded(db, _pc_trade_accept_tx(request, db, steam_id, sig, nonce, trade_id, digest))
+
+
 # ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
 # The bot is a singleton on the primary; these answer only to the shared
 # internal key. Discord identity resolves through players.discord_id (the

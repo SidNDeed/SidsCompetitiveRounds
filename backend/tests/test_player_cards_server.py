@@ -866,6 +866,7 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/portrait", ("POST",)),
         # card trading (migration 353): the five player routes
         ("/api/v1/pc/trades/propose", ("POST",)),
+        ("/api/v1/pc/trades/accept", ("POST",)),
     }
     admin = [r for r in main.app.routes if getattr(r, "path", "") == "/api/v1/admin/pc/snapshot"]
     assert len(admin) == 1 and "_require_admin(db, admin_steam_id, \"pc_snapshot\", \"pool\", sig)" in inspect.getsource(main.admin_pc_snapshot)
