@@ -47,7 +47,7 @@ LABEL_IDS: tuple[str, ...] = (
     "pc.band.common", "pc.band.uncommon", "pc.band.rare", "pc.band.epic",
     "pc.band.legendary", "pc.band_short.common", "pc.band_short.uncommon",
     "pc.band_short.rare", "pc.band_short.epic", "pc.band_short.legendary",
-    "pc.foil", "pc.foil_short", "pc.signed", "pc.top_card", "pc.stat.rank",
+    "pc.foil", "pc.foil_short", "pc.signed", "pc.stat.rank",
     "pc.stat.rating", "pc.stat.pool", "pc.stat.board", "pc.stat.record",
     "pc.preview_footer", "pc.unnamed", "pc.edition", "pc.unranked",
 )
@@ -701,25 +701,54 @@ class _EmojiFont:
         return canvas
 
 
+# The font directory is part of every font-derived cache KEY below; none of
+# these cached bodies reads `_FONTS_PATH` itself. It is a module global, and a
+# cache that reads it at CALL time while keying only on (role, size) keeps
+# whatever it loaded while the global pointed somewhere else -- for the rest
+# of the process. Restoring the global does not evict the entry; most of
+# these caches are unbounded, so nothing else evicts it either, and where one
+# IS bounded an eviction is luck rather than correctness. Either way a later
+# measurement answers from a font the renderer never declared. Keying on the
+# directory means pointing `_FONTS_PATH` elsewhere can only ADD entries
+# beside the real ones, never shadow them.
+def _fonts_dir() -> str:
+    return str(_FONTS_PATH)
+
+
 @functools.lru_cache(maxsize=None)
-def _font(role: str, size: int) -> ImageFont.FreeTypeFont:
+def _font_at(fonts_dir: str, role: str, size: int) -> ImageFont.FreeTypeFont:
     actual_size = 109 if role == "emoji" else max(1, int(size))
     return ImageFont.truetype(
-        str(_FONTS_PATH / _FONT_FILES[role]),
+        str(Path(fonts_dir) / _FONT_FILES[role]),
         actual_size,
         layout_engine=_LAYOUT_ENGINE,
     )
 
 
+def _font(role: str, size: int) -> ImageFont.FreeTypeFont:
+    return _font_at(_fonts_dir(), role, size)
+
+
 @functools.lru_cache(maxsize=None)
-def _cmap(role: str) -> _Cmap:
-    tables = _font_tables((_FONTS_PATH / _FONT_FILES[role]).read_bytes())
+def _cmap_at(fonts_dir: str, role: str) -> _Cmap:
+    tables = _font_tables((Path(fonts_dir) / _FONT_FILES[role]).read_bytes())
     return _Cmap(tables["cmap"])
 
 
-@functools.lru_cache(maxsize=1)
+def _cmap(role: str) -> _Cmap:
+    return _cmap_at(_fonts_dir(), role)
+
+
+# Bounded, unlike its siblings: each entry holds the parsed CBDT tables of a
+# ~10.6 MB font. Production has exactly one directory; a test adds at most one
+# stand-in beside it, and two is enough that neither evicts the other.
+@functools.lru_cache(maxsize=2)
+def _emoji_font_at(fonts_dir: str) -> _EmojiFont:
+    return _EmojiFont((Path(fonts_dir) / _FONT_FILES["emoji"]).read_bytes())
+
+
 def _emoji_font() -> _EmojiFont:
-    return _EmojiFont((_FONTS_PATH / _FONT_FILES["emoji"]).read_bytes())
+    return _emoji_font_at(_fonts_dir())
 
 
 # Code points every role is treated as covering: none of them is a glyph and
@@ -733,10 +762,17 @@ _ALWAYS_GLYPH = frozenset({0x20, 0x200C, 0x200D, 0xFE0E, 0xFE0F}
 
 
 @functools.lru_cache(maxsize=None)
-def _has_glyph(role: str, codepoint: int) -> bool:
+def _has_glyph_at(fonts_dir: str, role: str, codepoint: int) -> bool:
     if codepoint in _ALWAYS_GLYPH:
         return True
-    return bool(_cmap(role).lookup(codepoint))
+    return bool(_cmap_at(fonts_dir, role).lookup(codepoint))
+
+
+def _has_glyph(role: str, codepoint: int) -> bool:
+    # Keyed on the directory for the reason `_font_at` is: this answer decides
+    # which role draws a code point, so one cached against a stand-in font
+    # changes which font every later name is measured with.
+    return _has_glyph_at(_fonts_dir(), role, codepoint)
 
 
 _EMOJI_RE = regex.compile(
@@ -986,13 +1022,13 @@ def _runs(text: str, base_role: str) -> list[tuple[str, str, int]]:
 
 
 @functools.lru_cache(maxsize=1024)
-def _emoji_image(text: str, size: int) -> Image.Image | None:
+def _emoji_image_at(fonts_dir: str, text: str, size: int) -> Image.Image | None:
     source = None
     try:
         # This is the specified Pillow path.  Stock Windows Pillow has no RAQM
         # and returns a blank canvas for this CBDT font, so the table reader
         # below supplies the same embedded strike (including GSUB sequences).
-        font = _font("emoji", 109)
+        font = _font_at(fonts_dir, "emoji", 109)
         ascent, descent = font.getmetrics()
         width = max(1, int(math.ceil(font.getlength(text))))
         scratch = Image.new("RGBA", (width + 4, ascent + descent), (0, 0, 0, 0))
@@ -1001,12 +1037,20 @@ def _emoji_image(text: str, size: int) -> Image.Image | None:
     except Exception:
         source = None
     if source is None:
-        source = _emoji_font().render(text)
+        source = _emoji_font_at(fonts_dir).render(text)
     if source is None:
         return None
     target_height = max(1, int(size))
     target_width = max(1, int(round(source.width * target_height / source.height)))
     return source.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+
+def _emoji_image(text: str, size: int) -> Image.Image | None:
+    # Its result is built FROM the fonts, so it carries the directory in its
+    # key too. Keying only the leaf font caches is not enough: those would be
+    # correct and this one would go on handing back a picture drawn with a
+    # stand-in.
+    return _emoji_image_at(_fonts_dir(), text, size)
 
 
 def _run_metrics(role: str, text: str, size: int) -> tuple[float, int, int, Image.Image | None]:
@@ -1194,14 +1238,26 @@ def _scale_rect(rect: Sequence[int], scale: float) -> tuple[int, int, int, int]:
     return tuple(_scale_value(value, scale) for value in rect)  # type: ignore[return-value]
 
 
+def _assets_dir() -> str:
+    return str(_ASSETS_PATH)
+
+
+# `_ASSETS_PATH` is redirectable exactly as `_FONTS_PATH` is, and an artwork
+# cached while it pointed elsewhere would survive the restore and composite
+# into every later face. No test redirects it today; that is a fact about
+# today's tests, not about the cache, and it is the same defect either way.
 @functools.lru_cache(maxsize=64)
-def _asset(name: str, size: str) -> Image.Image:
-    with Image.open(_ASSETS_PATH / name) as source:
+def _asset_at(assets_dir: str, name: str, size: str) -> Image.Image:
+    with Image.open(Path(assets_dir) / name) as source:
         source.load()
         image = source.copy()
     if size == "tile":
         image = image.reduce(2)
     return image
+
+
+def _asset(name: str, size: str) -> Image.Image:
+    return _asset_at(_assets_dir(), name, size)
 
 
 def _effective_labels(labels: dict) -> dict[str, str]:
@@ -1359,8 +1415,102 @@ def _draw_chip(image: Image.Image, x_right: int, y: int, full: str, short: str,
     return x_right - width
 
 
-def _draw_badge(image: Image.Image, band_colour: tuple[int, int, int], labels: dict[str, str],
-                scale: float, size: str) -> None:
+# The name column is sized against BadgeFrame.png's own INK, not against the
+# badge rect: the frame's rails and corner arcs own the box edges, so a run
+# measured off the 112 px rect puts the first and last glyphs on the frame.
+# At x 64..96 the frame is clear from y 654 to y 742, which is where
+# rects.badge_name comes from -- [64, 654, 96, 742], a 32 px column, ending
+# four pixels before the artwork region at x=100. (An earlier version of this
+# comment said x 64..84 and called it a 20 px column, and the same 20 recurred
+# further down the file. The 20 predates a widening and survived in prose on
+# both sides of it, while the numbers below -- and the rect itself -- are the
+# 32.) The column's WIDTH caps the line height and its HEIGHT caps the advance.
+# ONE size, and a long name is CUT rather than shrunk (Sid, 2026-09-19:
+# "truncating is preferable to smaller text here"). The earlier rule stepped
+# down a ladder until the whole name fitted, which kept every name complete but
+# put the longest ones at 9 px -- so the cards that had the most to say said it
+# most quietly, and the type size varied card to card with nothing a reader
+# could attribute it to. At 19 px Kalam-Bold's line box is exactly 32 px, which
+# is the column width: the largest type this column can hold.
+BADGE_NAME_SIZE = 19
+BADGE_NAME_MARGIN = 2        # _fit_text bounds the pen ADVANCE; Kalam's ink overruns it by ~1 px
+
+
+def _badge_name_fit(name: str, size: str) -> tuple[str, int]:
+    """(text, px) for the name column. Parity by construction, the same rule
+    `_name_fit`'s tile branch applies: the text is decided ONCE at card scale
+    and the size halved, so the card and the tile always say the SAME thing --
+    including the same truncation. Deciding each independently is what let one
+    of them cut a name the other showed whole."""
+    if size not in ("card", "tile"):
+        raise ValueError("size")
+    rect = LAYOUT["rects"]["badge_name"]
+    run = (rect[3] - rect[1]) - BADGE_NAME_MARGIN
+    width = (rect[2] - rect[0])
+    if size == "tile":
+        text, px = _badge_name_fit(name, "card")
+        px = max(1, int(round(px * 0.5)))
+        budget = max(1.0, run * 0.5)
+        # TWO bounds, not one. The length budget is the obvious one; the
+        # column WIDTH is the one the card scale never hits, because the card
+        # size is chosen to match it exactly. Halved, the line box does not
+        # halve with it -- 19 px gives a 32 px line, but 10 px gives 17, which
+        # is a pixel wider than the 16 px tile column -- so without this the
+        # clip would shave the edge off 56 of the 67 names, on the tile only.
+        while px > 3 and (_measure_text(text, px, "script") > budget
+                          or _render_text_line(text, px, (0, 0, 0, 0), "script")[0].height
+                          > width * 0.5):
+            px -= 1
+        return text, px
+    return _fit_text(name, run, (BADGE_NAME_SIZE,), "script", normalize=True)
+
+
+def _draw_badge_name(image: Image.Image, name: str, rgb: tuple[int, int, int],
+                     scale: float) -> None:
+    box = _scale_rect(LAYOUT["rects"]["badge_name"], scale)
+    fitted, font_size = _badge_name_fit(name, "card" if scale == 1.0 else "tile")
+    if not fitted:
+        return
+    line, _width = _render_text_line(fitted, font_size, _rgba(rgb), "script")
+    # ROTATE_90 is an exact pixel permutation: no resampling, and no
+    # premultiply fringe against the transparent background. `.rotate()` is
+    # for angles that are not multiples of 90 (_draw_autograph's 6 degrees) --
+    # it allocates and resamples the whole 750x1050 canvas, which measured
+    # 41.7 ms against this transpose's 0.006 ms. Source column 0 becomes the
+    # bottom row, so the first glyph sits lowest and the name reads UPWARD.
+    rotated = line.transpose(Image.Transpose.ROTATE_90)
+    ink = rotated.getchannel("A").getbbox()
+    if ink is None:
+        return
+    # Centre on the INK, not on the metric box. `_draw_text`'s "m" anchor
+    # subtracts line.height / 2, and that height carries the font's descent
+    # whether or not this name has a descender -- rotated, that asymmetry
+    # becomes a sideways wander of about 2 px across the 32 px column,
+    # correlated with nothing a reader can see. (32, not the 20 an earlier
+    # version of this line said: rects.badge_name is [64, 654, 96, 742].)
+    centre_x = (box[0] + box[2]) / 2.0
+    centre_y = (box[1] + box[3]) / 2.0
+    left = int(round(centre_x - (ink[0] + ink[2]) / 2.0))
+    top = int(round(centre_y - (ink[1] + ink[3]) / 2.0))
+    layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    layer.alpha_composite(rotated, (left, top))
+    clip = Image.new("L", image.size, 0)
+    ImageDraw.Draw(clip).rectangle(box, fill=255)
+    layer.putalpha(ImageChops.multiply(layer.getchannel("A"), clip))
+    image.alpha_composite(layer)
+
+
+def _draw_badge(image: Image.Image, band_colour: tuple[int, int, int], name: str,
+                theme_rgb: tuple[int, int, int] | None, scale: float, size: str) -> None:
+    """The top-card badge: the band frame over the card fill, the ROUNDS card's
+    own name reading upward in that card's theme colour, and an art area the
+    CLIENT overlays with the real card art.
+
+    The card fill stays. The portrait rect overlaps this box and is pasted
+    before it, so without the fill a Discord or bot face would show the
+    subject's portrait through the frame; and an un-updated client still
+    paints an opaque panel matched to `colours.card` over part of the area.
+    """
     badge = _scale_rect(LAYOUT["rects"]["badge"], scale)
     ImageDraw.Draw(image).rounded_rectangle(
         badge,
@@ -1372,16 +1522,7 @@ def _draw_badge(image: Image.Image, band_colour: tuple[int, int, int], labels: d
     tinted = ImageChops.multiply(neutral, tint)
     tinted.putalpha(neutral.getchannel("A"))
     image.alpha_composite(tinted)
-    draw = ImageDraw.Draw(image)
-    mark = _scale_rect(LAYOUT["rects"]["badge_mark"], scale)
-    radius = _scale_value(7, scale)
-    draw.rounded_rectangle(mark, radius=radius, fill=(240, 240, 244, 255),
-                           outline=(30, 30, 30, 255), width=max(1, _scale_value(3, scale)))
-    inner = _scale_rect((102, 666, 134, 690), scale)
-    draw.rectangle(inner, fill=(30, 30, 30, 255))
-    anchor = tuple(_scale_value(value, scale) for value in LAYOUT["anchors"]["badge_label"])
-    _draw_fitted(image, anchor, labels["pc.top_card"], _scale_value(108, scale),
-                 11, 8, scale, _rgba(band_colour), "mm", "bold")
+    _draw_badge_name(image, name, theme_rgb or band_colour, scale)
 
 
 # ── the autograph of a signed print, in the subject's shop name styling ──────
@@ -1738,8 +1879,13 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
         body = _foil(body, size)
 
     _draw_stats(body, spec, effective, scale)
-    if bool(spec.get("top_card")):
-        _draw_badge(body, colour, effective, scale, size)
+    # Normalised, not merely truthy: the spec builders project the name
+    # through `coverage_strip`, which collapses to "" -- so a value that
+    # is only whitespace means the same "no top card" that "" does, and
+    # must not draw the badge chrome around an empty column.
+    top_name = " ".join(str(spec.get("top_card") or "").split())
+    if top_name:
+        _draw_badge(body, colour, top_name, spec.get("top_card_rgb"), scale, size)
     if bool(spec.get("signed")):
         _draw_autograph(body, display_name, scale, spec.get("sign"))
         _draw_seal(body, effective, scale, size)

@@ -1,0 +1,21 @@
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r18-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      1 paths differ from HEAD or are untracked; fingerprinted before and after
+  1e0f0f022f2b73359e9fc324a9ae0d9a  backend/tests/evidence/r18-mutation-run.log
+=== opt-out started 20:28:26 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1890 passed, 38 skipped, 5 warnings in 807.71s (0:13:27)
+=== live DSN started 20:41:59 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1922 passed, 6 skipped, 5 warnings in 802.14s (0:13:22)
+=== tree re-fingerprinted 20:55:27 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 1 paths, each byte-identical to the pre-run fingerprint
+=== done 20:55:28 ===

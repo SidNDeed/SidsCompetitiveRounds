@@ -1,0 +1,223 @@
+The evidence assembler and the scope it binds, 2026-09-22 (round 11)
+====================================================================
+
+stdout: r11-suites-assembly-run.log
+
+The r6 lens raised the assembler as a HIGH and as bar item B17: every report in
+this directory CLAIMED to be generated from the stdout of the run it describes,
+and nothing checked the claim. Round 9's suites report carried a file count its
+own run never printed, in a sentence shaped exactly like the sentences around it
+that WERE quoted, and nothing here could tell the two apart -- because nothing
+compared a report against the bytes it came from.
+
+`backend/tests/evidence/assemble-evidence.py` is that comparison, committed
+rather than described. It does not transcribe and then hope: it REFUSES, exiting
+non-zero and naming how many claims it could not derive, whenever a number in a
+report's prose is absent from the stdout that report names.
+
+== what counts as a claim, stated rather than left to taste ==
+Two rules, complementary, neither catching what the other does:
+
+  R1, the counting terms. An integer immediately followed by a term a run
+      reports in -- passed, skipped, deselected, paths, controls, rows -- must
+      appear in the stdout as the same integer next to the same term. This is
+      the rule that catches round 9's defect, which was two digits wide and so
+      invisible to any rule about big numbers.
+
+  R2, the big numbers. Any integer of three digits or more that survives the
+      typed exemptions must appear somewhere in the stdout. This is the rule
+      that catches a summary total quoted with one digit changed, which R1
+      would pass whenever the term beside it is right.
+
+THE EXEMPTIONS ARE TYPED, NOT PER-NUMBER. A list of individually excused numbers
+grows until the check cannot fail (#342), so what is exempt is a SHAPE -- a
+numbered lesson, a date, a clock time, an evidence-file round tag, a bar or
+finding row, a version or section number, a migration, an HTTP status, an
+inclusive range. Adding a number to a report never silences the check; only
+writing it in one of those shapes does, and each shape is something a run
+genuinely does not print.
+
+== THE INSTRUMENT NOW DERIVES ITS OWN CHECK COUNT ==
+Round 11's third finding was against this file. The self-test's closing line
+printed a constant written beside the body -- `len(TERMS) + 19` -- while the
+body runs two loops and a row of standalone checks, and the constant was one
+short of what the run made. It printed a smaller number than the checks it had
+just run, on the one instrument in this directory whose whole purpose is to
+refuse a number a run did not produce, and it printed it verbatim into every
+report of round 10. The test that read the line asserted the PHRASE and never
+the number.
+
+The checks are RECORDS now. `run_checks()` returns one record per check and the
+self-test prints how many records it has, so adding or removing a check moves
+the printed number by construction. The committed test compares that printed
+number against the records AND against the invocations the run actually made,
+counted by TRACING the run rather than by reading the source -- the source's
+two loops being exactly why a count read off the source went wrong. The
+mutation control `selftest-count-is-not-derived` puts the constant back and
+requires the test to red, with the same expression REFLOWED as its inert twin,
+so the assertion is shown to be about the number and not about the line's shape.
+
+== WHO THE RULE BINDS, and why that had to be derived too ==
+Round 11's second finding was against the SCOPE rather than against any rule.
+Round 10 required every report DECLARING a `stdout:` header to carry a verbatim
+run section with an invocation above every result, and added a clause stopping
+a round adopting the rule for one report and not another. That clause keyed on
+the newest round among the reports that had ALREADY OPTED IN. So a later round
+whose reports carried no header was not the newest ADOPTING round: the scope
+moved back to the previous round, its files were re-checked, and the new round
+was bound by nothing. A check that cannot fail on the class it exists for is
+worse than no check (#342).
+
+The round is derived from the FILE NAMES now, which no report can opt out of,
+and every report of the newest round is bound: it names its stdout, it carries
+a verbatim run section, and every result in that section has its command above
+it. A report whose NAME carries no round is refused too -- that is the same
+escape one spelling over, and leaving it open would have made the naming an
+assumption under the rule instead of part of it.
+
+Earlier rounds stay exempt, and for a reason that still holds: their reports
+are the record of rounds already judged, on the shapes their instruments
+printed at the time, and rewriting one now would be editing a log to satisfy a
+rule written after it. What is NOT exempt is a narrative sentence that is false
+about its own round; the round-10 mutation-controls report is corrected in
+place for that reason, with not one byte of its verbatim run touched.
+
+== both directions, on the rule rather than on this directory ==
+The self-test below asserts that every matching rule FIRES and every exemption
+STAYS QUIET, in both directions, so a typo in any pattern reds there rather than
+passing for ever. Then the tool is run against each of this round's reports, and
+then the refusal itself is executed on a fabricated pair: a narrative claiming a
+count its stdout does not print is refused, and the refusal names the count. A
+check that has only ever been seen to pass is a check nobody has seen work
+(#391).
+
+The scope rule is driven the same way and for a sharper reason: this directory
+satisfies the old reading and the new one alike, so a run over THIS directory
+cannot tell them apart. The fabricated directory below can -- it carries an
+early round with no header, a round that adopted the rule, and a later round
+that declared nothing at all -- and the run shows the first two clean and the
+third refused by name. The live directory is then run as well, and is clean.
+
+The same refusal is driven against the REAL report, not just a fabricated one,
+by the mutation control `suites-report-carries-an-underived-number` in
+r11-mutation-controls.txt: it puts into the suites report's prose a count no run
+here can print, and requires the committed check to go red.
+
+== WHAT PRODUCED THE LOG BELOW, and the one thing done to it ==
+Stated rather than left to be discovered, because this is the one report of
+the round whose producer is not a committed instrument. The log below is a
+SEQUENCE of invocations, each printed immediately above the output it
+produced, so a reader re-derives it by running the commands the log itself
+shows rather than by running a script this directory ships. Every other
+report here names an instrument committed beside it.
+
+Each of those invocations sets its own line endings, and the command lines
+below show it: the python calls reconfigure stdout to LF, because a Windows
+text stream writes CRLF and every file under this directory is LF. ONE line
+is not covered that way -- pytest runs as a subprocess and its output cannot
+be reconfigured from outside -- so that single capture is piped through
+`tr -d '\r'`, which is a normalisation at the copy step of exactly the kind
+round 10 recorded as a deviation and this round moved into the instruments
+everywhere it could. It is carried as a deviation again rather than hidden:
+what closes it is making this sequence a committed instrument, which is work
+this round did not do and no finding of this round asked for.
+
+== this is not a step somebody remembers to take ==
+The closing run below is the committed test pair -- `--selftest` plus a
+re-check of every assembled report of the newest round -- so a report that
+stopped matching its own stdout reds in the suite, not in a log nobody
+re-reads. That is what makes the assembler a gate rather than a courtesy, and
+it is the half of B17 the brief asked for by name.
+
+== and it applies to itself ==
+This file declares its own stdout and is assembled from it by the same tool. It
+is a report of the newest round, so the scope reaches it by its NAME, whatever
+it declares -- which is the whole of this round's correction: a round cannot
+adopt the rule for the file that satisfies it and drop it for the file that
+would not.
+
+The one file the rule cannot reach this way is the record of the re-pin, which
+is written after every pytest run by construction. That report is produced by a
+wrapper that applies these same rules -- imported from here, not restated -- to
+its own text before writing it, and writes nothing if either refuses. The
+wrapper takes its own round from this directory too now; it used to hold the
+round in the two output names it writes, which would have had this round's
+re-pin overwrite the previous round's record under the previous round's name
+and report success.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r11-suites-assembly-run.log ==========
+== the assembler's own self-test, both directions on every rule ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --selftest
+selftest: 34 rule checks, all as stated
+selftest rc=0
+
+== r11-suites.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r11-suites.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r11-suites.txt -- 9 claim(s) all derived from r11-suite-run.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r11-postgresql-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r11-postgresql-controls.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r11-postgresql-controls.txt -- 6 claim(s) all derived from r11-pg-controls.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r11-mutation-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r11-mutation-controls.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r11-mutation-controls.txt -- 1 claim(s) all derived from r11-mutation-run.log r11-freeze-guard.log r11-citation-pin.log r11-residual-reach.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== the REFUSAL, executed rather than described ==
+A narrative claiming a count its stdout does not print is refused, and
+the refusal names the count. The pair is fabricated here so the
+direction is proved on the RULE rather than on whatever this directory
+happens to hold; the same two directions are asserted from the closing
+test below, and the same refusal is driven against the real report by
+the mutation control suites-report-carries-an-underived-number.
+
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location('a','backend/tests/evidence/assemble-evidence.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('derivable   ->', m.undrivable('the run hashed 9 paths', '9 paths'))"
+derivable   -> []
+clean rc=0
+
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location('a','backend/tests/evidence/assemble-evidence.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('undrivable  ->', m.undrivable('the run hashed 12 paths', '9 paths'))"
+undrivable  -> [('count', '12 paths')]
+dirty rc=0
+
+== the SCOPE rule, executed on the fabricated directory ==
+The round this rule binds is derived from the file NAMES, so a round
+that declares no stdout anywhere cannot leave the scope by declaring
+nothing. Both directions are driven here on a fabricated directory
+rather than on this one, because this directory satisfies the old
+reading and the new one alike and cannot tell them apart.
+
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location('r','backend/tests/evidence/evidence_rules.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('adopting round clean ->', m.scope_problems(m.FABRICATED_DIRECTORY)); print('round that opted out ->', sorted(n for n,_ in m.scope_problems(m.FABRICATED_DIRECTORY_OPTED_OUT)))"
+adopting round clean -> []
+round that opted out -> ['r3-mutation-controls.txt', 'r3-suites.txt']
+scope rc=0
+
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location('r','backend/tests/evidence/evidence_rules.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('this directory       ->', m.scope_problems({p: open('backend/tests/evidence/'+p, encoding='utf-8').read() for p in __import__('os').listdir('backend/tests/evidence') if p.endswith('.txt')}))"
+this directory       -> []
+live scope rc=0
+
+== the closing evidence check, which RUNS the assembler ==
+The assembler is not a step somebody remembers to take: the committed
+check below runs its self-test and re-checks every assembled report of
+the newest round, so a report that stopped matching its own stdout reds
+in the suite rather than in a log nobody re-reads.
+cwd       <repo>/backend
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k "committed_evidence or assembled_from_its_run"
+..                                                                       [100%]
+2 passed, 156 deselected in 4.03s
+closing rc=0

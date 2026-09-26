@@ -1,0 +1,34 @@
+script    backend/tests/evidence/repin-last.py
+cwd       <repo>
+capture   backend/tests/evidence/r14-repin-run.log
+
+== closing evidence check, over this directory as committed ==
+cwd       <repo>/backend
+started   2026-09-23 04:27:42 UTC
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k committed_evidence or assembled_from_its_run or round_eight_control or round_seven_control or production_file or runner_carries or control_tally or counts_the_checks or new_controls_a_report or residual_reach or negation_admits or repin_trailer or inert_twin
+.............                                                            [100%]
+13 passed, 150 deselected in 6.50s
+closing rc=0
+
+== route manifest re-pin, by its own tool ==
+cwd       <repo>
+started   2026-09-23 04:27:51 UTC
+command   python backend\tests\repin_route_manifest.py
+manifest rows      : 362
+fingerprinted      : 361
+rows rewritten now : 0
+MOVED vs HEAD      : 0
+ENTRY POINTS moved vs HEAD: 0
+(dry run; pass --write)
+repin rc=0
+
+== the final-tip attribution sweep ==
+cwd       <repo>
+command   python backend/tests/evidence/repin-last.py (derive_trailer, then foreign_attributions over every message this tip carries)
+trailer   Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>  (derived from the branch, not typed)
+  about to commit (run log)  clean
+  about to commit (report)   clean
+  HEAD~0                     clean
+  HEAD~1                     clean
+sweep rc=0
+

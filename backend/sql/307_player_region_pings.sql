@@ -1,7 +1,7 @@
 -- 307_player_region_pings.sql
 -- Sept 10 batch: the multiplayer room-region pick (2v2 / 1v2 / FFA queue rooms
--- and hosted lobbies) — ai-collab/sept10-batch/02-region-v4.md over
--- ai-collab/sept9-plans/02-multiplayer-region.md §2.
+-- and hosted lobbies): a bounded-minimax pick over a cost bound, reading the
+-- per-member ping map this migration creates.
 --
 -- Each member's own Photon ping map, one row per player, written by the
 -- session-bound multiplayer polls (the 2v2 / 1v2 / FFA queue polls and the

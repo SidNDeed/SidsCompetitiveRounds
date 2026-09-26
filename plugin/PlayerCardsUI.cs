@@ -983,15 +983,68 @@ namespace CompetitiveRounds
             PlaceTopCard(t);
         }
 
-        // ── the Top card overlay (Sept 14 batch, C3) ─────────────────────────
+        // ── the Top card overlay (Sept 14 batch, C3; regeometried for 9a) ────
         // The face draws its Top card badge at [58,642,178,754] of 750x1050
-        // (backend face_layout_v1.json): a silhouette above the TOP CARD label.
-        // In game the silhouette is covered by the actual card art from
-        // CardSnapshot; outside the game (Discord) the badge stands as drawn.
-        // Fractions of the face, top-left origin; the art box keeps the
-        // snapshot's own aspect inside it (preserveAspect).
-        private const float TC_BACK_X = 88f / 750f, TC_BACK_Y = 650f / 1050f, TC_BACK_W = 60f / 750f, TC_BACK_H = 77f / 1050f;
-        private const float TC_ART_X = 93f / 750f, TC_ART_Y = 652f / 1050f, TC_ART_W = 50f / 750f, TC_ART_H = 73f / 1050f;
+        // (backend face_layout_v1.json). Since 9a that badge is a NAME COLUMN
+        // up the left -- the ROUNDS card's own name, sideways, in the card's
+        // theme colour -- and an empty ART AREA beside it, which is what this
+        // overlay fills with the real card art from CardSnapshot. Outside the
+        // game (Discord, the bot) the badge stands as drawn: name, framed
+        // empty area.
+        //
+        // The art area is [94,646,172,750] -- 78x104. Its HEIGHT is the badge
+        // frame's full clear run: BadgeFrame.png's rails own y 642-645 and
+        // y 751-754, so 646..750 is every row the art can use, and the card's
+        // top and bottom edges meet the box.
+        //
+        // The WIDTH is 78 and not 72 because of what fills the height. The
+        // vanilla card body (Canvas/Front/Background, the rect the four
+        // corner marks sit on) measures 351.9 x 479.9, aspect 0.7333, and
+        // preserveAspect fits by whichever axis runs out first. At 72x104
+        // the box is aspect 0.6923 -- NARROWER than the card -- so the fit
+        // is width-limited and the card draws 98.2 px tall, 5.8 px short of
+        // the box, which is corner marks that do not reach the rails
+        // (observation 1, 2026-09-21). At 78x104 the box is 0.75, wider than
+        // the card, so the fit is HEIGHT-limited: the card draws the full
+        // 104 px and the corner marks land on 646 and 750. The 1.7 px that
+        // 78 has over the exact-match 76.26 is deliberate slack, so a small
+        // error in the measured card aspect cannot flip the fit back to
+        // width-limited and reopen the gap; it costs under a pixel either
+        // side. Measured from the asset: the frame's inner clear area is
+        // x 62..174, so 94..172 is inside it, and the badge name's own ink
+        // ends at x=89, so the art clears the name by five pixels.
+        //
+        // preserveAspect (CreatePanelCentred) does the scaling, and what it
+        // scales is CardSnapshot's THUMBNAIL: the capture cropped to the
+        // card's corner band, not the whole 380x600 render. That crop is
+        // what makes the corner marks meet this box -- the full render
+        // carries the camera's 8% wobble pad and the letterbox the fixed RT
+        // aspect adds, and fitting THAT lands the card's own edge ~9-10 px
+        // inside the box (observation 1, 2026-09-21). The band is still
+        // taller than it is wide, so the fit stays HEIGHT-limited: the band
+        // fills 104 px vertically, takes whatever width its aspect gives,
+        // centred, with the framed backing showing either side. A band
+        // wider than the box would fit to width instead, which is the same
+        // rule and still never overlaps the name.
+        //
+        // Before 9a these were 60x77 and 50x73, inset and offset up-left
+        // inside the old silhouette; the art did not reach the box edges.
+        //
+        // The BACKING starts eight pixels further left than the art, at
+        // x=92 rather than x=100. That strip is what a pre-9a server face
+        // draws its badge_mark in ([92,654,144,722]), and a client carrying
+        // these constants against such a face shows its left sliver as a
+        // white bar beside the card (observation 2, 2026-09-21). The real
+        // close for that is deploying the 9a renderer; this covers the strip
+        // meanwhile and is harmless once it is deployed. It does not reach
+        // the name: the 9a face draws the card name in the x 64..96 column,
+        // and the name's own INK ends at x=89 measured over nine card names
+        // at the fitter's 19 px (ai-collab probe, 2026-09-21) -- three
+        // pixels of clearance. A larger badge-name font would eat that, so
+        // the clearance belongs to the measurement, not to the rect's edge.
+        // Fractions of the face, top-left origin.
+        private const float TC_BACK_X = 92f / 750f, TC_BACK_Y = 646f / 1050f, TC_BACK_W = 80f / 750f, TC_BACK_H = 104f / 1050f;
+        private const float TC_ART_X = 94f / 750f, TC_ART_Y = 646f / 1050f, TC_ART_W = 78f / 750f, TC_ART_H = 104f / 1050f;
         private static readonly Color C_BADGE_DARK = new Color(0.08f, 0.08f, 0.10f, 1f);
         private static readonly Color C_FACE_DIM = new Color(0.42f, 0.42f, 0.48f, 1f);
 
@@ -1047,7 +1100,12 @@ namespace CompetitiveRounds
             var p = t.print;
             string card = (p != null && t.face.activeSelf) ? p.top_card : null;
             Sprite spr = null;
-            bool show = !string.IsNullOrEmpty(card) && CardSnapshot.TryGetSprite(card, out spr) && spr != null;
+            // The THUMBNAIL, not the full snapshot: cropped to the card's
+            // corner band so the corner marks reach this box's top and
+            // bottom edges and the card's own name plate stays out of a
+            // 104 px picture. The full sprite is unchanged for every other
+            // consumer (CardImageLoader, TabStatsOverlay, the card preview).
+            bool show = !string.IsNullOrEmpty(card) && CardSnapshot.TryGetThumbSprite(card, out spr) && spr != null;
             if (!show)
             {
                 if (!string.IsNullOrEmpty(card) && !CardSnapshot.IsFailed(card)) CardSnapshot.RequestSnapshot(card, false);
@@ -2057,6 +2115,20 @@ namespace CompetitiveRounds
         {
             string[] rar = { "legendary", "epic", "rare", "uncommon", "common" };
             string[] names = { "Sid", "Rival", "Challenger", "Contender", "Newcomer" };
+            // The Top Card thumbnail is a picture of a DIFFERENT card prefab
+            // per print, so a lever that seeds one card everywhere can only
+            // ever measure that one card's art and that one card's name
+            // plate. These three are a one-word name, a two-word name and the
+            // card the first witness used, so a measurement can be repeated
+            // across names rather than asserted to generalise from one.
+            string[] tops = { "Poison", "Wind Up", "Bombs Away" };
+            // "card" opens the first print; "card:N" opens print N, so the
+            // witness can measure a second card's art without a second build.
+            const string CARD_AT = "card:";
+            bool cardMode = mode == "card" || mode.StartsWith(CARD_AT);
+            int cardIndex = 0;
+            if (cardMode && mode.Length > CARD_AT.Length)
+                int.TryParse(mode.Substring(CARD_AT.Length), out cardIndex);
             var a = new ApiClient.PcPackAnswer { pack_id = "dev", status = "done", source = "bought", pay = "gold", price = 100, opened_at = "2026-09-11T00:00:00" };
             for (int i = 0; i < 5; i++)
                 a.prints.Add(new ApiClient.PcPrint
@@ -2064,7 +2136,7 @@ namespace CompetitiveRounds
                     print_id = "dev" + i, card_id = "card" + i, subject_player_id = "p" + i, subject_name = names[i],
                     edition_id = "1", minted_at = "2026-09-11T00:00:00", rarity = rar[i], foil = i == 1, signed = i == 0,
                     pool_rank = i == 0 ? 1 : i * 9, rating = 1850 - i * 120, peak_rating = 1900 - i * 100, board_rank = i == 0 ? 1 : i * 9,
-                    series_wins = 60 - i * 8, series_losses = 12 + i * 3, top_card = "Bombs Away", title = i == 0 ? "Grandmaster" : "", rank_name = "Diamond", source = "bought", slot = i,
+                    series_wins = 60 - i * 8, series_losses = 12 + i * 3, top_card = tops[i % tops.Length], title = i == 0 ? "Grandmaster" : "", rank_name = "Diamond", source = "bought", slot = i,
                     dup_at_pull = i == 0 ? 0 : (i == 3 ? 2 : -1),   // one NEW, one DUPLICATE +2, the rest silent
                     discarded = i == 4, discard_shards = i == 4 ? 3 : -1,   // one DISCARDED stamp, for the screenshot
                 });
@@ -2072,7 +2144,7 @@ namespace CompetitiveRounds
             HistoryInsertHead(a);
             historyLoaded = true; historyExhausted = true;   // the pager shows this one; no server page behind it
             view = mode == "binder" ? View.Binder : (mode == "info" ? View.Info : View.Open);
-            if (mode == "binder" || mode == "binder-faces")
+            if (mode == "binder" || mode == "binder-faces" || cardMode)
             {
                 // A synthetic binder (this seat's account is a service account:
                 // 403 on the collection): ten prints, two of them copies of one
@@ -2090,17 +2162,35 @@ namespace CompetitiveRounds
                         print_id = "devb" + i, card_id = "cardb" + subj, subject_player_id = "pb" + subj, subject_name = i == 0 ? "Sid" : "Player " + subj,
                         edition_id = "1", minted_at = "2026-09-12T00:00:00", rarity = rar2[i], foil = i == 2, signed = i == 0,
                         pool_rank = i + 1, rating = 1900 - i * 40, peak_rating = 1950 - i * 40, board_rank = i < 5 ? i + 1 : 0,
-                        series_wins = 40 - i * 3, series_losses = 10 + i, top_card = "Bombs Away", title = i == 1 ? "Champion" : "", rank_name = "Advanced I",
+                        series_wins = 40 - i * 3, series_losses = 10 + i, top_card = tops[i % tops.Length], title = i == 1 ? "Champion" : "", rank_name = "Advanced I",
                         source = "bought", slot = i % 5, dup_at_pull = -1,
-                        face_rev = mode == "binder-faces" ? "dev" : null,
+                        face_rev = (mode == "binder-faces" || cardMode) ? "dev" : null,
                     });
                 }
-                if (mode == "binder-faces")
+                if (mode == "binder-faces" || cardMode)
                     for (int i = 0; i < col.prints.Count; i++)
                         PlayerCardFaces.DevPut(col.prints[i].print_id, "dev", "en", "tile", DevSprite(FrameColor(col.prints[i].rarity, false)), 375L * 525L * 4L);
                 col.count = col.prints.Count;
                 ApiClient.DevSetCollection(col);
                 view = View.Binder;
+                // "card" also opens the full-size card view on the first
+                // print, and "card:N" on print N — the prints carry different
+                // top cards, so N is how a second card's art gets measured.
+                // The Top card overlay is ~104/1050 of the face, so
+                // on a binder tile it is ~35 px tall and on this popup it is
+                // ~100 px: the popup is the only surface on this seat where
+                // the corner marks can be measured against the box edges to
+                // the pixel. Needs a face at the "card" size too — without
+                // one ShowCard asks the server, which answers 403 for this
+                // service account and falls back to the text view.
+                if (cardMode && col.prints.Count > 0)
+                {
+                    int idx = Mathf.Clamp(cardIndex, 0, col.prints.Count - 1);
+                    PlayerCardFaces.DevPut(col.prints[idx].print_id, "dev", "en", "card",
+                                           DevSprite(FrameColor(col.prints[idx].rarity, false)), 750L * 1050L * 4L);
+                    ShowCard(new Tile { print = col.prints[idx] });
+                    Plugin.Log.LogInfo("[PC] dev card view: print " + idx + " top_card='" + col.prints[idx].top_card + "'");
+                }
             }
             Plugin.Log.LogInfo("[PC] synthetic tiles seeded (dev lever, mode=" + mode + ")");
             NativeUI.MarkDirty();

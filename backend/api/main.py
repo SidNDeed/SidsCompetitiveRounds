@@ -38,6 +38,7 @@ from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_relea
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
+import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from schemas import (
     AchievementUnlockRequest,
@@ -921,6 +922,117 @@ def _group_game_positively_live(group_id) -> bool:
         return False
     at = _in_match_seen.get(str(group_id))
     return at is not None and (time.monotonic() - at) <= IN_MATCH_TTL_SEC
+
+
+# ── Queue-leave cause vocabulary (bug #392) ──────────────────────────────
+#
+# Every queue-leave route takes `cause` from the client. TWO different
+# questions are asked of that one string, and conflating them is the defect
+# this vocabulary exists to prevent:
+#
+#   in-room?      Was the leaver demonstrably at or past assembly? An exit
+#                 from inside the room can never be "failed assembly", so it
+#                 VETOES the dissolution branch in every leave handler.
+#   involuntary?  Did the player choose to go? Read for DISPLAY only.
+#
+# Both handlers used to answer the first question with a bare
+# `cause == "in_room_exit"`. Adding a second in-room tag beside that equality
+# would have removed the veto for the new tag: a seat dropped by a transport
+# timeout during live game 1 (games_played still 0, heartbeat evidence not yet
+# trustworthy) would have taken the dissolution branch, cancelling the game
+# and refunding the wagers of the three players still in it. The recognition
+# is therefore a SET, asked through the helper below, and every site that used
+# to compare against the literal asks the helper instead.
+#
+# Wire constraint: both leave routes declare `cause: str = Query("",
+# max_length=16)`, so a tag of 17+ characters is rejected with 422 before the
+# handler runs. `in_room_timeout` is 15. The test reads that limit off the
+# live route rather than restating the number.
+_IN_ROOM_EXIT_CAUSES = frozenset({"in_room_exit", "in_room_timeout"})
+# The involuntary tags are a strict SUBSET of the in-room ones, and must stay
+# one: an involuntary tag that was not also in-room would un-veto dissolution
+# on the exact path this bug is about. test_ffa_leave_cause.py asserts the
+# containment, and the capability advertised on /api/v1/mod-version is derived
+# from it rather than hardcoded, so a vocabulary that lost the tag also stops
+# advertising it.
+_INVOLUNTARY_EXIT_CAUSES = frozenset({"in_room_timeout"})
+
+# ── The capability field's NAME is half of the wire contract. ────────────
+# The two lanes of bug #392 were built in separate trees that could not see
+# each other, and the first build of this one advertised the capability under a
+# name the client never asks for: the server said `involuntary_leave_cause`,
+# the client read `ffa_involuntary_cause`. Both lanes were green — the server
+# test asserted its own key was present, the client test asserted its own key
+# was read, and no test compared the two literals — while the gate could never
+# open, the tag could never reach the wire, and every column, writer and
+# renderer this bug added was live and inert. That is the #438/#443 shape:
+# acceptance was a positive signal the PRODUCER emits, not one the CONSUMER
+# consumes.
+#
+# So the canonical name is the one the only consumer actually reads. Both
+# lanes now sit on THIS tree, so that constant is not somewhere a reader has
+# to be sent: it is `plugin/TransportExit.cs`, `CapabilityField`, and it is
+# read at the startup version check in `plugin/ApiClient.cs`, which names the
+# constant rather than repeating its text. The server-side pin is
+# `backend/tests/test_ffa_leave_cause.py`,
+# `test_the_capability_field_is_spelled_the_way_the_client_reads_it`, and it
+# no longer transcribes the literal — it READS `CapabilityField` out of the
+# client source and compares it with the constant below. A rename on one side
+# alone therefore reddens as a disagreement that names both values, which is
+# the case that used to pass on both sides at once.
+#
+# The first spelling was carried beside this one as a transitional alias while
+# the lanes were apart; both keys were bound from one expression so they could
+# not drift. The condition written there for its removal was that the lanes be
+# merged and the client literal be read off the merged tree, and that is this
+# branch. One boolean, one name.
+_INVOLUNTARY_CAUSE_CAPABILITY_FIELD = "ffa_involuntary_cause"
+
+
+def _is_in_room_exit_cause(cause: str | None) -> bool:
+    """True when the client attests this leave came from INSIDE the room.
+
+    The single authority for the dissolution veto, shared by the FFA and 1v2
+    leave handlers. An absent cause (old clients) is False and keeps exactly
+    the evidence-based behaviour those handlers had before any tag existed.
+    """
+    return (cause or "") in _IN_ROOM_EXIT_CAUSES
+
+
+def _is_involuntary_exit_cause(cause: str | None) -> bool:
+    """True when the client attests the departure was NOT chosen.
+
+    Read for one purpose only: labelling a departure that is recorded either
+    way. It grants nothing - no readmission, no refund, no placement or rating
+    change, and no suppression of the departure itself.
+    """
+    return (cause or "") in _INVOLUNTARY_EXIT_CAUSES
+
+
+def _persistable_exit_cause(cause: str | None) -> str:
+    """The cause as it may be STORED, or "" for anything outside the vocabulary.
+
+    The three writers used to persist any non-empty `cause` verbatim, with the
+    route's `max_length=16` as the only filter — which made
+    `ffa_lobbies.departure_causes` a client-writable free-text map keyed by
+    player id, while the migration's own comment described its values as the
+    wire vocabulary. Nothing read the extra values, so there was no defect to
+    see today; the exposure was the NEXT reader, which would have inherited
+    unvalidated text with no schema. The column now holds only what the
+    vocabulary defines, so it means what the migration says it means.
+
+    Both in-room tags are storable, not just the involuntary one, and that is
+    deliberate (#283). A recorded `in_room_exit` occupies the (lobby, player)
+    slot that first-attestation-wins protects, so a seat that has already
+    attested a chosen exit cannot follow it with a transport claim. Narrowing
+    storage to the involuntary tag alone would have left the voluntary
+    attestation unrecorded and handed the slot to the later claim.
+
+    An unrecognised tag stores nothing, which reads downstream as "no cause
+    recorded" — today's behaviour for every client, and the direction that
+    costs only the label (#276).
+    """
+    return (cause or "") if (cause or "") in _IN_ROOM_EXIT_CAUSES else ""
 
 
 # Sept 6 (bug 342 review, Codex Group 2 M1 + L1): the online marker on the four
@@ -2722,6 +2834,35 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             _walk(child, [], (), ())
         return found, dyn
 
+    def _collect_orm_locks(fn_node):
+        """Every `.with_for_update(...)` in one function, with its wait mode.
+
+        The SQL half of this walk sees only `text(<literal>)`, so an ORM lock
+        is invisible to it — and a census built from the SQL half alone
+        reports a lock-taking path count that is wrong in the one direction
+        that matters, too LOW (bug 391 r2 finding 4). This is a separate,
+        deliberately blunt pass: the method name is enough to identify a
+        locking read, and the keywords decide whether it can WAIT.
+
+        `skip_locked=True` or `nowait=True` means the statement DECLINES; no
+        such keyword means it can wait with no bound. A non-constant keyword
+        value is counted as WAIT: a mode this walk cannot prove is a mode it
+        must not certify as declining (#342).
+        """
+        out = []
+        for node in _ast.walk(fn_node):
+            if not (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr == "with_for_update"):
+                continue
+            declines = False
+            for kw in node.keywords:
+                if kw.arg in ("skip_locked", "nowait"):
+                    if isinstance(kw.value, _ast.Constant) and kw.value.value:
+                        declines = True
+            out.append((node.lineno, "DECLINES" if declines else "WAITS"))
+        return out
+
     def _callees(mod, fn_node):
         """Edges from one function. Function-local imports are resolved per
         function AND every plausible resolution of a name is followed —
@@ -2758,9 +2899,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
     statements: dict = {}    # (module, line, sql) -> entry
     dynamic: dict = {}       # (module, line) -> entry
+    orm_locks: dict = {}     # (module, line) -> entry
     root_counts: dict = {}
     lit_cache: dict = {}
     edge_cache: dict = {}
+    orm_cache: dict = {}
 
     for root_mod, root_fn in roots:
         if root_fn not in funcs.get(root_mod, {}):
@@ -2781,6 +2924,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             if (mod, fn) not in lit_cache:
                 lit_cache[(mod, fn)] = _collect_literals(mod, funcs[mod][fn])
                 edge_cache[(mod, fn)] = _callees(mod, funcs[mod][fn])
+                orm_cache[(mod, fn)] = _collect_orm_locks(funcs[mod][fn])
+            for line, mode in orm_cache[(mod, fn)]:
+                orm_locks.setdefault((mod, line), {
+                    "module": mod, "func": fn, "line": line, "mode": mode})
             found, dyn = lit_cache[(mod, fn)]
             for line, sql in found:
                 key = (mod, line, sql)
@@ -2801,8 +2948,64 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                              key=lambda s: (s["module"], s["line"], s["sql"])),
         "dynamic": sorted(dynamic.values(),
                           key=lambda s: (s["module"], s["line"])),
+        "orm_locks": sorted(orm_locks.values(),
+                            key=lambda s: (s["module"], s["line"])),
         "root_counts": root_counts,
     }
+
+
+# Every SQL row-locking clause PostgreSQL has. Listed in longest-first order so
+# `FOR NO KEY UPDATE` is never matched as `FOR UPDATE` and miscounted.
+_ROW_LOCK_CLAUSES = ("FOR NO KEY UPDATE", "FOR KEY SHARE", "FOR UPDATE",
+                     "FOR SHARE")
+
+
+def _janitor_lock_census() -> dict:
+    """Every lock-taking path the janitor roots reach, and whether it can WAIT.
+
+    #432: a flag names a LINE, the defect is a CLASS. The class here is "a
+    janitor statement that can wait with no bound", because a janitor arm that
+    waits holds every arm behind it in the same tick and raises nothing while
+    it does (#276 / #430).
+
+    The first version of this census was authored by hand from the SQL half of
+    `_janitor_sql_inventory()` and therefore could not see an ORM lock at all,
+    so it reported a WAIT count that was wrong in the one direction that
+    matters — too low — while certifying itself exhaustive (bug 391 r2
+    finding 4). Both halves are derived from the SAME live call graph here:
+    SQL literals classified by their lock clause, ORM `.with_for_update(...)`
+    calls classified by their keywords. A statement DECLINES only when it says
+    so (`SKIP LOCKED` / `NOWAIT`); everything else is counted as a waiter,
+    which is the safe direction for a count whose job is to be an upper bound
+    on surprise.
+    """
+    inv = _janitor_sql_inventory()
+    declines, waits = [], []
+    for st in inv["statements"]:
+        up = " ".join(st["sql"].split()).upper()
+        clause = next((c for c in _ROW_LOCK_CLAUSES if c in up), None)
+        if clause is None:
+            continue
+        row = {"module": st["module"], "line": st["line"], "func": st["func"],
+               "kind": "sql", "clause": clause,
+               "sql": " ".join(st["sql"].split())[:110]}
+        (declines if ("SKIP LOCKED" in up or "NOWAIT" in up)
+         else waits).append(row)
+    for lk in inv["orm_locks"]:
+        row = {"module": lk["module"], "line": lk["line"], "func": lk["func"],
+               "kind": "orm", "clause": "with_for_update", "sql": ""}
+        (declines if lk["mode"] == "DECLINES" else waits).append(row)
+    key = (lambda r: (r["module"], r["line"]))
+    # Two different numbers, because one source line can expand into several
+    # statements (the walker expands a constant loop into one statement per
+    # row). "statements" is what EXPLAIN plans; "sites" is what a reader
+    # greps. Reporting only one of them is how two counts from the same
+    # expression get reconciled instead of explained (#342 / #431).
+    return {"declines": sorted(declines, key=key),
+            "waits": sorted(waits, key=key),
+            "decline_sites": sorted({key(r) for r in declines}),
+            "wait_sites": sorted({key(r) for r in waits}),
+            "orm_total": len(inv["orm_locks"])}
 
 
 def _janitor_print(msg: str) -> None:
@@ -3379,6 +3582,15 @@ async def lifespan(app: FastAPI):
             # stack imported; the health word says which of those it is.
             if not IS_REPLICA and _pcs is not None:
                 tasks.append(asyncio.create_task(_pc_steam_sweep_loop()))
+        # Awaited, before anything can render: a face keyed off a colour
+        # this box has not read yet is a promise about pixels it cannot make.
+        if _pcf is not None:
+            # Local import, as every other session site in this module does:
+            # the boot read ran on the primary with this name undefined and
+            # the api never came up (2026-09-22 rollback).
+            from database import async_session
+            async with async_session() as _theme_db:
+                await _pc_load_card_themes(_theme_db)
         # The Steam-render probe (v3 §9) runs on BOTH roles: each box
         # composites a stored Steam picture through its own face path and
         # reports the word on /health; the standby serves faces too.
@@ -4005,6 +4217,431 @@ async def team_dc_fallback_sweep_loop():
             print(f"[TEAM-DC-SWEEP] error: {e}")
 
 
+# ── 1v2 abandoned-series horizon (bug 391) ───────────────────────────────
+# Sid ruled on 2026-09-20 that a ranked series idle for 14 days is closed
+# rather than left live. A 1v2 sitting is UNRANKED (`is_ranked` defaults FALSE
+# and nothing flips it — backend/sql/120_1v2_schema.sql), so there is no rating
+# to move and the settlement is a VOID: `invalidated_at` +
+# `invalidation_reason`, never `completed_at` and never `winner_side`. Nothing
+# is credited to whoever happened to be ahead on games.
+#
+# Sid's ruling for a RANKED series idle this long is the OPPOSITE settlement —
+# the leader takes the rating — so a ranked row must never reach this void.
+# Every 1v2 insert on this tree hardcodes `is_ranked` FALSE, but
+# 120_1v2_schema.sql reserves the column ("FALSE at launch (unscored)"), so the
+# candidate read FILTERS on it instead of trusting that: the day the flag
+# becomes a variable, this arm declines those rows and NAMES them in the log
+# rather than silently applying the unranked rule to a ranked sitting.
+#
+# What the void does NOT do: it does not make the sitting continuable again.
+# `ovt_series_continuation`'s prior-series lookup accepts 'canceled', so the
+# void moves the row INTO its scope; the refusal two statements later is the
+# 60-minute window (_CONTINUATION_WINDOW_MINUTES), anchored on
+# COALESCE(completed_at, created_at). That anchor is the whole of the claim,
+# and it is only `created_at` — 14 days old by construction — while the row
+# carries NO completion stamp. `completed_at` is schema-nullable and
+# independent of `status`, so an `active` row carrying a RECENT one would be
+# voided into the lookup's scope with a recent anchor and then accepted as a
+# continuable prior. The settlement write stays two invalidation columns wide
+# (nothing here clears a stamp), so the refusal is in the PREDICATE instead:
+# both halves require `completed_at IS NULL`, and a past-horizon `active` row
+# that carries one is declined, counted and named in the log rather than
+# voided (bug 391 r2 finding 2). The acceptance of canceled priors is there
+# for a lock canceled MINUTES after creation (assembly_timeout), not for this
+# arm's rows.
+OVT_ABANDONED_HORIZON_DAYS = 14
+# One tick settles at most this many rows; the next tick continues. A full
+# batch SAYS SO in the log, because a silent truncation makes "nothing left"
+# and "two hundred done, four thousand waiting" the same line (#304 / #441).
+OVT_HORIZON_SWEEP_LIMIT = 200
+# The whole arm's wall-clock budget inside one 60-second tick. This arm is NOT
+# the loop's only lock-taking path and the budget does not rest on it being
+# one: `_janitor_lock_census()` enumerates every lock-taking statement the
+# janitor roots reach, in both the SQL and the ORM family, and counts how many
+# of them can WAIT — the stranded-bet payout arms in this same loop are
+# waiters too. What the budget rests on is the consequence: a lock wait raises
+# nothing, no lock_timeout or statement_timeout is configured on this engine,
+# and the arms BEHIND this one in the same tick (the FFA janitor, the lease
+# expiry) run only if this one returns — so an unbounded wait stops them with
+# no log line at all. This arm's own row lock declines rather than waits
+# (SKIP LOCKED below); the budget bounds everything else — a table-level wait
+# behind a migration's DDL, a batch that runs long — so the arm's failure
+# direction is "gives up and says so", never "holds the loop" (#276 / #430).
+OVT_HORIZON_TICK_BUDGET_S = 20
+
+
+async def _ovt_horizon_candidates(db, days: int, limit: int):
+    """1v2 series rows that have been `active` with no activity for `days` days.
+
+    A row carrying a `completed_at` is DECLINED whatever its age. The stamp is
+    schema-nullable and independent of `status`, and it is the anchor the
+    continuation's 60-minute window reads — voiding such a row moves it into
+    the prior-series lookup's scope carrying an anchor this arm has not
+    checked and which MAY be recent, which is exactly what the 14-day-old
+    `created_at` could otherwise be relied on not to be. This arm's write is
+    two invalidation columns wide and clears nothing, so the row is left
+    `active` and `_ovt_horizon_stamped_backlog` names it in the log instead
+    (bug 391 r2 finding 2).
+
+    Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
+    (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
+    ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
+    (PIN main.py:43049 ":started, NOW(),") and `created_at` defaults to NOW()
+    by schema. `ovt_matches.started_at`
+    is the one client-supplied stamp on that row and is deliberately NOT read
+    here: a client-attested value may only move the server toward the
+    conservative outcome, and a future-dated one would hold its own series open
+    forever (#283).
+
+    Queue polls are not activity either. `ovt_queue.last_polled` is a client
+    saying it is still there; a client that never stops polling would pin a row
+    `active` with no bound, which is exactly the blocking-by-default shape this
+    sweep exists to remove (#276 / #430).
+
+    RANKED rows are excluded here rather than declined later. Sid's 14-day
+    ruling for a ranked series is that the leader takes the rating — a
+    different write from this one — and an unbuilt settlement must not be
+    approximated by the one that happens to exist. The tick counts what this
+    filter leaves behind and names it in the log, so the omission is loud.
+
+    This is a candidate READ, not the decision. Every row it returns is
+    re-checked under its own row lock before anything is written (#208), so a
+    report that lands between this SELECT and the write settles the row itself
+    and the sweep declines it.
+    """
+    rows = await db.execute(text("""
+        SELECT s.id AS id,
+               GREATEST(s.created_at,
+                        COALESCE((SELECT MAX(GREATEST(m.ended_at, m.created_at))
+                                    FROM ovt_matches m
+                                   WHERE m.series_id = s.id),
+                                 s.created_at)) AS last_activity_at
+          FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NULL
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+         ORDER BY s.created_at
+         LIMIT CAST(:lim AS int)
+    """), {"days": int(days), "lim": int(limit)})
+    return rows.mappings().all()
+
+
+async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
+    """Void ONE past-horizon 1v2 series under its own row lock. True if written.
+
+    The caller owns the transaction boundary: this function locks, re-checks
+    and writes; the caller commits on True and rolls back on False.
+
+    There is no arm here that DECLINES a past-horizon row on grounds it cannot
+    evaluate. It consults neither the presence map nor the service-account
+    fence, because the alternative to voiding is a row that stays `active`
+    indefinitely, and a blocking-by-default state needs a positive cleanup that
+    always runs (#276 / #430). The write is delta-free — no gold, no XP, no
+    rating, no `winner_side` — so there is no credit for that fence to protect
+    and nothing a wrong call could pay out.
+
+    What 14 days of idleness does NOT prove is that no writer remains. It is a
+    bound on OBSERVED activity, not a guarantee about the future: a returning
+    trio can still report a game against this row and, on the live path, the
+    report advances the tally and can complete the series. The bound the code
+    actually holds is the ordering one — this settlement and that report
+    serialise on the same series row lock: the report sink's lock waits
+    (PIN main.py:42861 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    this one declines. Whichever commits second observes the first, and a
+    report arriving after the void is recorded and paid on the settled-without
+    -play arm of `submit_ovt_match` rather than lost.
+
+    `invalidated_at` is not an inert marker, though, and the delta-free claim
+    rests on a SECOND property rather than on the column being unread: the
+    Player Cards reconciler voids every still-unopened earned pack whose series
+    carries a non-NULL `invalidated_at` (`_PC_VOID_SWEEP_SQL["ovt"]`) and the
+    open route refuses on the same column (`_PC_SERIES_STANDING_SQL["ovt"]`).
+    The rows this arm writes can carry no such pack, because BOTH ovt grant
+    paths are completion-gated — the inline grant sits in the statement group
+    that writes `status='completed'`, and `_PC_RECONCILE_SQL["ovt"]` scans
+    `status = 'completed' AND invalidated_at IS NULL`. If pack granting ever
+    moves to per-game or mid-series, that property is gone and this write
+    starts voiding real packs; `test_the_ovt_earned_pack_paths_are_completion_gated`
+    is the pin that reds when it does.
+    """
+    locked = (await db.execute(text(
+        # FOR NO KEY UPDATE, not FOR UPDATE (#202 / #207): `ovt_matches.series_id`
+        # is an FK to this row, so every report's INSERT takes FOR KEY SHARE on
+        # it, and KEY SHARE conflicts with exactly one mode — FOR UPDATE. NO KEY
+        # UPDATE is the weakest mode that still self-conflicts, so two sweeps
+        # serialize, and so does a sweep against the report sink's own lock on
+        # this row — and SKIP LOCKED means that meeting is a DECLINE, not a
+        # wait. What NO KEY UPDATE keeps out of the way entirely is the FK
+        # check: a report's INSERT INTO ovt_matches never waits on the janitor.
+        #
+        # SKIP LOCKED, like every sibling sweep in this loop (`FOR UPDATE OF q
+        # SKIP LOCKED` in the ovt husk arm, the same in the 1v1 and team arms,
+        # `FOR NO KEY UPDATE OF p2 SKIP LOCKED` in the pair writer). A janitor
+        # arm that WAITS on a row lock waits with no bound — no lock_timeout is
+        # configured on this engine — and it raises nothing while it does, so
+        # the arms behind it in the same tick simply never run (#276 / #430).
+        # The row is 14 days old; losing it for one 60-second tick costs
+        # nothing, and the next tick re-reads it.
+        "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+        " FOR NO KEY UPDATE SKIP LOCKED"
+    ), {"sid": str(series_id)})).mappings().first()
+    # #208: the predicate is re-checked INSIDE the transaction, against the row
+    # version this lock saw — never against the candidate list, which was read
+    # before any lock was held. Each refusal says which one it is: one boolean
+    # must not stand for both "somebody else holds it" and "it is no longer
+    # ours to settle" (#430).
+    if locked is None:
+        print(f"[OVT-HORIZON] Candidate held by another writer or gone; "
+              f"left for the next tick: series {series_id}")
+        return False
+    if locked["status"] != "active":
+        print(f"[OVT-HORIZON] Candidate already settled under the lock: "
+              f"series {series_id} status={locked['status']}")
+        return False
+    still_idle = (await db.execute(text("""
+        SELECT 1 FROM ovt_series s
+         WHERE s.id = CAST(:sid AS uuid)
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NULL
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+    """), {"sid": str(series_id), "days": int(days)})).first()
+    if still_idle is None:
+        print(f"[OVT-HORIZON] Candidate no longer past the horizon under the "
+              f"lock: series {series_id}")
+        return False
+    # 'canceled', one L. Every other ovt path uses that spelling and the
+    # continuation's prior-series lookup filters on it
+    # (PIN main.py:42764 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # janitor's original 'cancelled' made its own rows invisible to that lookup
+    # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
+    # spelling would reopen that hole, so the VOID is carried by
+    # `invalidation_reason`, not by a new status word.
+    upd = await db.execute(text("""
+        UPDATE ovt_series
+           SET status = 'canceled',
+               invalidated_at = NOW(),
+               invalidation_reason = 'abandoned_horizon_void'
+         WHERE id = CAST(:sid AS uuid)
+           AND status = 'active'
+        RETURNING id
+    """), {"sid": str(series_id)})
+    if upd.first() is None:
+        print(f"[OVT-HORIZON] Candidate changed between the lock and the "
+              f"write; not settled: series {series_id}")
+        return False
+    return True
+
+
+async def _ovt_horizon_ranked_backlog(db, days: int) -> int:
+    """How many RANKED 1v2 series are past the horizon and still `active`.
+
+    Zero on this tree — every 1v2 insert hardcodes `is_ranked` FALSE — and
+    that is the point: the day it stops being zero, the arm says so instead of
+    leaving the rows to a settlement nobody wrote (#342, a check that cannot
+    fail is worse than no check; the count is the one that CAN).
+
+    IDLE means the same thing here as it does in the settlement half. Creation
+    age alone is not idleness: a series created twenty days ago whose trio
+    played this morning is live, and counting it would emit a warning about an
+    unbuilt settlement for a sitting that needs none (bug 391 r2 finding 7).
+    The recency term is the same `NOT EXISTS` over server-clock match columns
+    the candidate read uses, so the two halves cannot drift into disagreeing
+    about which rows the arm is leaving behind.
+    """
+    n = (await db.execute(text("""
+        SELECT COUNT(*) FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.is_ranked = TRUE
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+    """), {"days": int(days)})).scalar()
+    return int(n or 0)
+
+
+async def _ovt_horizon_stamped_backlog(db, days: int) -> int:
+    """Past-horizon idle `active` rows this arm declines for a completion stamp.
+
+    The predicate refuses `completed_at IS NOT NULL` because voiding such a row
+    would hand the continuation's 60-minute window an anchor this arm has not
+    checked, which MAY be recent (see `_ovt_horizon_candidates`). A decline
+    nobody can see is the other half of the defect that produced it, so the set
+    is COUNTED and named: zero on this tree — the only ovt writer of
+    `completed_at` sets `status='completed'` too — and loud when that changes.
+    Same unranked scope and same idleness terms as the candidate read, so the
+    number is "rows this arm would otherwise have settled".
+    """
+    n = (await db.execute(text("""
+        SELECT COUNT(*) FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NOT NULL
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+    """), {"days": int(days)})).scalar()
+    return int(n or 0)
+
+
+# Printed once per api process, by the arm itself, the first time it runs: a
+# deploy needs a POSITIVE signal that THIS arm shipped, and the janitor
+# self-test's "all janitor queries plan clean" prints on any build, including
+# one with no horizon arm at all (#438 / #443, and #306 — a probe whose only
+# purpose is to be probed).
+_ovt_horizon_armed_logged = False
+# The last ranked backlog this process reported, so a standing non-zero count
+# is named when it CHANGES rather than every 60 seconds forever.
+_ovt_horizon_ranked_last_seen = -1
+# The same, for rows declined because they carry a completion stamp.
+_ovt_horizon_stamped_last_seen = -1
+# Single-flight: the id of the tick task currently in flight, or None. A tick
+# whose budget expires is CANCELLED and not awaited, so the cancellation can
+# outlive the tick that started it; without this, every 60 seconds would start
+# another one behind the same stuck connection and the pool would drain with
+# no line in the log saying why (bug 391 r2 finding 3).
+_ovt_horizon_tick_inflight = None
+
+
+async def _ovt_horizon_sweep_tick(session_factory) -> int:
+    """One tick of the 1v2 horizon arm. Returns the number of rows settled.
+
+    This is the arm's whole body: `queue_cleanup_loop` calls it through
+    `_ovt_horizon_sweep_tick_bounded` and nothing else, so "the arm exists" and
+    "the arm runs" stay the same claim (#286).
+    """
+    global _ovt_horizon_armed_logged, _ovt_horizon_ranked_last_seen
+    global _ovt_horizon_stamped_last_seen
+    if not _ovt_horizon_armed_logged:
+        _ovt_horizon_armed_logged = True
+        print(f"[OVT-HORIZON] armed: horizon={OVT_ABANDONED_HORIZON_DAYS}d "
+              f"cap={OVT_HORIZON_SWEEP_LIMIT} "
+              f"budget={OVT_HORIZON_TICK_BUDGET_S}s reason="
+              f"abandoned_horizon_void")
+    settled = 0
+    async with session_factory() as db:
+        cands = await _ovt_horizon_candidates(
+            db, OVT_ABANDONED_HORIZON_DAYS, OVT_HORIZON_SWEEP_LIMIT)
+        for hc in cands:
+            # Settled or declined, the row's own line is printed by the
+            # settler — which is the only place that knows WHICH refusal it
+            # was. Here we print the one outcome it cannot name: the write.
+            if await _ovt_settle_horizon_row(
+                    db, hc["id"], OVT_ABANDONED_HORIZON_DAYS):
+                await db.commit()
+                settled += 1
+                print(f"[OVT-HORIZON] Abandoned series voided: series "
+                      f"{hc['id']} last_activity={hc['last_activity_at']} "
+                      f"reason=abandoned_horizon_void")
+            else:
+                await db.rollback()
+        if len(cands) >= OVT_HORIZON_SWEEP_LIMIT:
+            print(f"[OVT-HORIZON] batch full at {OVT_HORIZON_SWEEP_LIMIT} "
+                  f"candidates; more may remain, next tick continues")
+        ranked = await _ovt_horizon_ranked_backlog(
+            db, OVT_ABANDONED_HORIZON_DAYS)
+        stamped = await _ovt_horizon_stamped_backlog(
+            db, OVT_ABANDONED_HORIZON_DAYS)
+        await db.rollback()
+        if ranked != _ovt_horizon_ranked_last_seen:
+            _ovt_horizon_ranked_last_seen = ranked
+            if ranked:
+                print(f"[OVT-HORIZON] {ranked} RANKED 1v2 series past the "
+                      f"horizon left ACTIVE: the ranked settlement (the leader "
+                      f"takes the rating) is not built, and this arm voids "
+                      f"unranked sittings only")
+        if stamped != _ovt_horizon_stamped_last_seen:
+            _ovt_horizon_stamped_last_seen = stamped
+            if stamped:
+                print(f"[OVT-HORIZON] {stamped} idle 1v2 series past the "
+                      f"horizon left ACTIVE: they carry a completed_at while "
+                      f"still 'active', so voiding one could hand the "
+                      f"continuation window an anchor that is not 14 days old")
+    return settled
+
+
+async def _ovt_horizon_sweep_tick_bounded(session_factory) -> int:
+    """Run one tick, and give the loop back inside OVT_HORIZON_TICK_BUDGET_S.
+
+    The budget is not decoration. The arms behind this one in the same tick —
+    the FFA janitor, the lease expiry — run only if this one returns, a wait
+    on a table lock raises nothing while it holds, and no lock_timeout or
+    statement_timeout is configured on this engine (`database.py`). On expiry
+    the tick task is CANCELLED and not awaited: waiting for a wedged
+    connection to finish unwinding would reintroduce the same unbounded wait
+    one level up. The orphan holds at most its own pooled connection, the
+    janitor keeps ticking, and the next tick re-reads the same rows — the
+    sweep is idempotent by construction.
+
+    "At most its own pooled connection" is only true ONCE. `task.cancel()`
+    requests cancellation; it does not complete it, and a task wedged inside a
+    server-side wait unwinds when that wait ends, not when the request is
+    made. Left alone, every 60-second tick would start another sweep behind
+    the same stuck one and each would take another pooled connection — the
+    accumulation that eventually starves every other database user, with no
+    line saying why (bug 391 r2 finding 3). SINGLE FLIGHT: at most one sweep
+    per process is in flight, the next tick DECLINES on its own line, and the
+    slot is released by the task's own done callback — which runs on
+    completion, on cancellation and on error alike, so the failure direction
+    is "the slot always comes back" rather than "one stall silences the arm
+    forever" (#276 / #430).
+    """
+    global _ovt_horizon_tick_inflight
+    if _ovt_horizon_tick_inflight is not None:
+        print(f"[OVT-HORIZON] tick declined: the previous tick is still in "
+              f"flight (cancelled at {OVT_HORIZON_TICK_BUDGET_S}s and not yet "
+              f"unwound); one sweep per process, next tick retries")
+        return 0
+    task = asyncio.create_task(_ovt_horizon_sweep_tick(session_factory))
+    _ovt_horizon_tick_inflight = task
+
+    def _release(_t, _task=task):
+        global _ovt_horizon_tick_inflight
+        if _ovt_horizon_tick_inflight is _task:
+            _ovt_horizon_tick_inflight = None
+
+    task.add_done_callback(_release)
+    done, _pending = await asyncio.wait({task},
+                                        timeout=OVT_HORIZON_TICK_BUDGET_S)
+    if task not in done:
+        task.cancel()
+        # Nothing awaits this task again, so its result would be reported as
+        # "never retrieved" on GC. Swallow it there instead.
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        print(f"[OVT-HORIZON] tick abandoned after "
+              f"{OVT_HORIZON_TICK_BUDGET_S}s (row lock declines, so this is a "
+              f"table-level wait or a long batch); the rest of this janitor "
+              f"tick runs, next tick retries")
+        return 0
+    # The task finished inside the budget. Release the slot HERE rather than
+    # relying on the done callback having been scheduled and run already: a
+    # done callback is dispatched by the loop, not at completion, so leaving
+    # the release to it alone would make "may the next tick start?" depend on
+    # loop scheduling. Both releases are the same idempotent assignment.
+    _release(task)
+    try:
+        return task.result()
+    except Exception as e:
+        print(f"[QUEUE-CLEANUP] ovt horizon sweep error: {e}")
+        return 0
+
+
 async def queue_cleanup_loop():
     """Delete stale queue entries every 60 seconds.
     Logs enough detail to diagnose matchmaking reports like lopi+NotNic where
@@ -4239,6 +4876,26 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] ovt sweep error: {e}")
+        # ── 1v2 abandoned-series horizon backstop (bug 391) ──────────────
+        # Its OWN session and try/except (#228), and deliberately NOT inside
+        # the ovt block above. That block calls _assert_no_service_subject(),
+        # which RAISES on a candidate whose trio includes the broadcast
+        # account, and the raise aborts the rest of that tick's ovt work; this
+        # backstop exists for exactly the rows the classified arms never
+        # settle, so it must not share their failure.
+        #
+        # The classified arms settle what they can NAME: a zero-game lock dead
+        # for 30 minutes, and a mid-series row with games and nothing reported
+        # for 24 hours — the latter fenced off any trio containing a service
+        # account. This arm names nothing. It closes a row that has been
+        # `active` for the whole 14-day horizon with no game and no report,
+        # whatever the reason, so that "the classified arms declined it" can no
+        # longer mean "it is live forever".
+        #
+        # The arm's body, its own session, its own try/except and its own time
+        # budget all live in _ovt_horizon_sweep_tick_bounded — one call here,
+        # so the loop cannot drift from what the tests drive.
+        await _ovt_horizon_sweep_tick_bounded(async_session)
         try:
             async with async_session() as db:
                 # ── FFA janitor (same nobody-is-polling contract as the ovt
@@ -4949,6 +5606,21 @@ app.add_middleware(
 # Tournament endpoints (router module).
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
+
+# Animal title ladders (v1.41.0 item 12): the READ route,
+# GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
+# progress bars from. Pure read, no writes, safe on the replica: one
+# REPEATABLE READ, READ ONLY snapshot per request.
+#
+# The module's per-series completion hook is not called from here. The four
+# rated completion paths call it themselves -- submit_match (1v1),
+# submit_team_match and _complete_team_series_with_ratings (2v2) and
+# submit_ffa_match (FFA) -- each inside a savepoint of its own, so a failed
+# credit is logged and dropped and never costs the completion. 1v2 reports
+# unrated and is not hooked. test_title_ladders.py asserts that set per mode,
+# each call's reference id, and exactly four calls in this file.
+import title_ladders
+app.include_router(title_ladders.router)
 
 
 # ── Version gate ───────────────────────────────────────────────
@@ -6055,6 +6727,39 @@ PC_FOLD = "v4.14"
 # their own and this constant is what says WHICH BUILD a box runs. Raise it
 # when the fences change shape, never when a caller is added.
 _FFA_HOLD_FENCES = 1
+# Its sibling _FFA_GAME_NUMBER (the /health `ffa_game_number` word) is DERIVED
+# from two SQL literals rather than written here, so it is defined after
+# submit_ffa_match, whose insert it reads.
+# RJ-TRIAGE round 2, reported on /health as `rj_triage`. A marker whose only
+# purpose is to be probed (#306): nothing reads it and no behaviour depends on
+# it. 2 = this build carries the quarantine triage view's round 2: PT3's
+# lobby-wide labels need every comparison to have run, the read transaction
+# holds automatic collection off from before statement 1 until its COMMIT or
+# ROLLBACK returns, and a read whose session the server ended answers 503
+# however the driver reports the loss. The round adds no route -- the three
+# triage routes answer on the build before it -- and what it changes is
+# reached only through the admin view and the internal digest feed, so this
+# value is the release train's build discriminator for it. Both arms of the
+# route carry it; a box on the build before round 2 answers without the key.
+# Raise it when a later round of the view must be proven deployed.
+_RJ_TRIAGE_MARKER = 2
+# Its sibling _LADDER_HOOK (the /health `ladder_hook` word) is DERIVED from the
+# compiled code of the four rated completion functions, so it is defined after
+# the last of them in this file, submit_team_match.
+# Its sibling _LEAD_FORFEIT_PERGAME (the /health `lead_forfeit_pergame` word)
+# is DERIVED from the two 2v2 per-game wirings rather than written here, so
+# it is defined after team_series_report_dc, whose reader call it reads.
+# TICKET-REDACTION, reported on /health as `ticket_redaction`. A marker whose
+# only purpose is to be probed (#306): nothing reads it and no behaviour
+# depends on it. 1 = this build applies log_redaction's credential rule (the
+# Steam session ticket's value becomes its marker) at the bug-report receive
+# path before the first write, inside the bundle scrub that every door serving
+# a stored bundle runs, and on the free-text fields every bug-report read door
+# serves. The batch adds no route -- every door it changes answers on the build
+# before it -- so this value is the release train's build discriminator for it.
+# Both arms of the route carry it; a box on the build before answers without
+# the key. Raise it when a later change to the rule must be proven deployed.
+_TICKET_REDACTION_MARKER = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6067,7 +6772,13 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_steam_sweep=_pc_steam_sweep_word(),
                               pc_steam_render=_pc_steam_render_word(),
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
-                              ffa_hold_fences=_FFA_HOLD_FENCES)
+                              ffa_hold_fences=_FFA_HOLD_FENCES,
+                              rj_triage=_RJ_TRIAGE_MARKER,
+                              ticket_redaction=_TICKET_REDACTION_MARKER,
+                              ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              ladder_hook=_LADDER_HOOK,
+                              lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
+                              pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -6075,16 +6786,44 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # Both are code constants, so they answer with no database.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
-                              ffa_hold_fences=_FFA_HOLD_FENCES)
+                              ffa_hold_fences=_FFA_HOLD_FENCES,
+                              rj_triage=_RJ_TRIAGE_MARKER,
+                              ticket_redaction=_TICKET_REDACTION_MARKER,
+                              ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              ladder_hook=_LADDER_HOOK,
+                              lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
+                              pc_card_themes=_pc_card_themes_word())
 
 
 LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
-    """The latest recommended mod version and the gating floor.
+    """Returns the latest recommended mod version, the gating floor, and the
+    capability flags a client must see BEFORE it changes what it puts on the
+    wire.
 
-    NO CAPABILITY IS ADVERTISED HERE, and round 5 removed the one that was.
+    The involuntary-cause capability (bug #392) is the ordering gate between
+    the two lanes of that fix. True means this box's leave handlers recognise the
+    in-room involuntary tag as in-room, so the tag keeps the dissolution veto.
+    False means they do not — on a box still running the pre-#392 code, because
+    it decides in-room-ness by comparing against one literal. The same tag
+    reads there as a PRE-ROOM leave and takes the dissolution branch,
+    cancelling a live game for the seats still in it. A client must therefore
+    send the tag only against a box that advertises it, and this is the route
+    the client already reads at startup (it is in _VERSION_GATE_BYPASS, so even
+    a pre-version-check client can ask).
+
+    Derived from the vocabulary rather than hardcoded (#342): a change that
+    emptied _INVOLUNTARY_EXIT_CAUSES, or moved a tag out of the in-room set,
+    stops the advertisement instead of leaving a flag that cannot go false.
+
+    The NAME is not chosen here — it is the client's own constant, read off
+    this tree by the test that pins it. See the capability constant for how
+    the two files are held to one spelling.
+
+    NO 2v2 SERIES-STATUS CAPABILITY IS ADVERTISED HERE, and round 5 of the 2v2
+    disconnect-fallback work removed the one that was.
     `series_status_readonly` used to say "this box honours ?lifecycle=false on
     the series state endpoint". An answer from this route cannot speak for the
     box that answers a LATER request: the edge chooses an upstream per request
@@ -6096,8 +6835,15 @@ async def get_mod_version():
     argument, and reads "readonly": true out of that response -- proof about
     the box that produced it, and about nothing else.
     """
-    return {"version": LATEST_MOD_VERSION,
-            "min_version": MIN_MOD_VERSION_EFFECTIVE}
+    _involuntary = bool(_INVOLUNTARY_EXIT_CAUSES) and (
+        _INVOLUNTARY_EXIT_CAUSES <= _IN_ROOM_EXIT_CAUSES)
+    return {
+        "version": LATEST_MOD_VERSION,
+        "min_version": MIN_MOD_VERSION_EFFECTIVE,
+        # One boolean under ONE name. The transitional alias that carried the
+        # first spelling went when the client lane landed on this tree.
+        _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
+    }
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────
@@ -7983,6 +8729,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         label="1v1-complete")
             except Exception as pcex:
                 print(f"[PC-EARNED] 1v1 grant failed for series {series.id}: {pcex}")
+            _lref = "?"
+            try:
+                _lref = str(series.id)
+                _lpids = [p1.id, p2.id]
+                async with db.begin_nested():
+                    await title_ladders.record_completed_games(
+                        db, _lpids, mode="1v1", reference_id=_lref)
+            except Exception as _lex:
+                print(f"[LADDER-CREDIT] 1v1 credit dropped (series={_lref}): {_lex}")
         else:
             series_status = "active"
 
@@ -11267,6 +12022,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
         p_rows = (await db.execute(text("""
             SELECT fmp.player_id, p.steam_id, p.display_name,
                    fmp.slot, fmp.placement, fmp.left_early,
+                   fmp.left_early_involuntary,
                    fmp.rounds_won, fmp.points_total, fmp.kills,
                    fmp.rating_change, fmp.xp_gained, fmp.gold_gained,
                    fmp.fps_avg, fmp.ping_avg,
@@ -11318,6 +12074,10 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                 "placement": int(r["placement"]),
                 "won": int(r["placement"]) == 1,
                 "left_early": bool(r["left_early"]),
+                # Bug #392: the departure is still reported — `left_early`
+                # keeps its value — but a renderer can now say WHICH KIND of
+                # departure it was instead of calling every absence a choice.
+                "left_early_involuntary": bool(r["left_early_involuntary"]),
                 "slot": int(r["slot"]) if r["slot"] is not None else None,
                 "rounds_won": int(r["rounds_won"] or 0),
                 "points_total": int(r["points_total"] or 0),
@@ -14817,8 +15577,8 @@ def _region_pings_from_header(value):
 
 
 # ── Multiplayer room region (2v2 / 1v2 / FFA rooms and hosted lobbies) ──────
-# Sept 10 batch — ai-collab/sept10-batch/02-region-v4.md (policy) over
-# ai-collab/sept9-plans/02-multiplayer-region.md §2 (data path). Each member's
+# Sept 10 batch: a bounded-minimax pick over a cost bound (policy) reading the
+# per-member ping map of migration 307 (data path). Each member's
 # own ping map is stored in player_region_pings (migration 307) by the four
 # session-bound writer polls — the 2v2 / 1v2 / FFA queue polls and the 2v2 /
 # 1v2 lobby state poll — from the same X-Region-Pings header the 1v1 poll
@@ -18754,8 +19514,8 @@ def _chat_spam_ok(conn_key: int, message: str) -> bool:
     return True
 
 
-# ── Cross-platform chat moderation support (design: ai-collab/chat-moderation-
-# design.md v3). Everything below is single-worker in-process state (#125). ──
+# ── Cross-platform chat moderation support (schema: migration 263, which
+# carries the shape decisions). Single-worker in-process state (#125). ──
 
 import unicodedata as _unicodedata
 
@@ -19153,7 +19913,7 @@ async def get_recent_multimode_series(
 
     # -- FFA (per GAME, because bets are per game) --
     f_rows = (await db.execute(text(f"""
-        SELECT m.id, m.ended_at, m.player_count, m.lobby_id, m.photon_room_id,
+        SELECT m.id, m.ended_at, m.player_count, m.lobby_id, m.game_number,
                pw.display_name AS winner_name,
                (SELECT fmp.rating_change FROM ffa_match_players fmp
                  WHERE fmp.match_id = m.id AND fmp.player_id = m.winner_id) AS winner_change,
@@ -19180,9 +19940,12 @@ async def get_recent_multimode_series(
         """), {"ids": lobby_ids})).mappings().all():
             f_bets.setdefault((b["lobby_id"], int(b["game_number"])), []).append(b)
     for r in f_rows:
-        # Reuse the SAME helper the settlement path uses to map a room id to its
-        # game number, rather than a second regex that could drift from it.
-        gno = _ffa_room_game_no(r["photon_room_id"])
+        # The row's OWN game_number (migration 327), which is the lobby slot
+        # the wagers were placed and settled on. Re-parsing the room id here
+        # was a second derivation of the game's identity, and a display that
+        # derives it differently from the settlement shows one game's stakes
+        # under another game's result.
+        gno = int(r["game_number"]) if r["game_number"] is not None else None
         blist = f_bets.get((r["lobby_id"], gno), []) if (r["lobby_id"] and gno) else []
         entries.append({
             "mode": "ffa", "id": str(r["id"]),
@@ -24431,6 +25194,57 @@ def _is_shop_owner(steam_id: str | None) -> bool:
     return steam_id is not None and steam_id in SHOP_OWNER_STEAM_IDS
 
 
+# ── The one carve-out from that exemption ──────────────────────────
+#
+# Title-ladder rungs above the first are PROGRESSION, not cosmetics: each one
+# is granted by finishing a number of rated series while wearing the rung
+# below it. The shop-owner exemption above does two things that are wrong for
+# such a row — it lists the whole `rotation_pool = 'achievement'` pool to the
+# exempt account whether owned or not, and it skips the ownership check on
+# equip — and the combination means an exempt account is listed all forty
+# higher rungs and can equip any of them without the ladder ever having
+# advanced. A rung that can be worn without being earned is not a rung.
+#
+# The set is imported from `title_ladders`, which is the module that DEFINES
+# the catalogue, rather than matched on the `title_ladder_` sku prefix: a
+# prefix is a naming convention that a later sku can join by accident and that
+# a rename silently empties, which is the shape of a check that cannot fail
+# (#306/#342). This import wires nothing by itself: the ladder's read route is
+# mounted by the one include_router line beside the tournaments router, and
+# the progression hook is called from the four rated completion paths
+# themselves; that module's docstring records every production reference.
+import title_ladders as _title_ladders
+
+_GRANTED_ONLY_TITLE_SKUS = _title_ladders.GRANTED_ONLY_SKUS
+
+
+def _auto_owned(steam_id: str | None, sku: str | None) -> bool:
+    """Does the shop-owner exemption cover THIS sku?
+
+    Everything except a granted-only ladder rung. The defect this closes was
+    two surfaces reading the same exemption and neither excluding the rungs
+    (#279: a flag names a line, the defect is a class).
+
+    ALL THREE SURFACES CALL THIS FUNCTION: `_set_active_cosmetic` on equip,
+    the achievement append in `list_shop_items` on the listing, and the
+    ladder read route (`title_ladders.get_title_ladders`) for each rung's
+    `owned` -- so an exempt account wearing an entry rung it never bought
+    reads it as owned there, exactly as the listing reports it. That is
+    asserted rather than left to hold: by
+    `test_the_listing_decides_visibility_with_the_same_predicate_as_equip`,
+    which reads the listing's AST for the call, and by
+    `test_the_route_decides_owned_with_the_shared_predicate`, which reads the
+    route's. It is asserted because the listing spent a round spelling the
+    same rule a second time in SQL, under a comment saying the two could not
+    drift. Two predicates that agree are not one predicate; they are one edit
+    away from disagreeing, and no test of the behaviour can see the
+    difference until they do.
+    """
+    if not _is_shop_owner(steam_id):
+        return False
+    return sku not in _GRANTED_ONLY_TITLE_SKUS
+
+
 @app.get("/api/v1/shop/items", tags=["Shop"])
 async def list_shop_items(request: Request, steam_id: str | None = Query(None), db: AsyncSession = Depends(get_db)):
     """Always-available items + (future) today's rotation pick. If steam_id is
@@ -24467,12 +25281,37 @@ async def list_shop_items(request: Request, steam_id: str | None = Query(None), 
     if steam_id:
         ach_q = select(ShopItem).where(ShopItem.rotation_pool == "achievement")
         if not _is_shop_owner(steam_id):
+            # Not exempt: this player sees what this player owns. Narrowed in
+            # SQL because the predicate below cannot widen that set, so there
+            # is nothing to gain by reading rows it would drop.
             if not owned_ids:
                 ach_q = None
             else:
                 ach_q = ach_q.where(ShopItem.id.in_(owned_ids))
+        # The exempt account takes NO sql narrowing, deliberately. The
+        # visibility decision is `_auto_owned` -- one function, the same call
+        # the equip path makes -- and not a second predicate in SQL that says
+        # the same thing today. What is read whole here is the achievement
+        # ROTATION POOL, which is catalogue-sized and not something a player
+        # can grow, so reading it and dropping some of it is bounded by the
+        # catalogue; what it buys is that editing `_auto_owned` moves BOTH
+        # surfaces.
+        #
+        # The previous shape spelled the carve-out a second time, as
+        # `sku NOT IN (...) OR id IN (...)`, under a comment claiming the two
+        # surfaces could not drift. What actually held them together was that
+        # both said the same thing at the time. A flag names a line and the
+        # defect is a class (#279), and here the class is "the exemption,
+        # decided twice".
+        #
+        # What the predicate decides for the exempt account: everything except
+        # a granted-only ladder rung, plus any rung it has actually been
+        # granted. A rung is earned by playing the ladder, and listing forty
+        # unearned ones turns the ladder into a dropdown.
         if ach_q is not None:
-            rows.extend((await db.execute(ach_q.order_by(ShopItem.price))).scalars().all())
+            pool = (await db.execute(ach_q.order_by(ShopItem.price))).scalars().all()
+            rows.extend(r for r in pool
+                        if r.id in owned_ids or _auto_owned(steam_id, r.sku))
 
     # Dance emotes are version-gated (see DANCES_MIN_VERSION): a pre-dance
     # client would list + sell rows it can never play or preview. The header
@@ -24526,7 +25365,7 @@ async def list_shop_items(request: Request, steam_id: str | None = Query(None), 
                 "price": r.price,
                 "rarity": r.rarity,
                 "preview_color": r.preview_color,
-                "owned": _is_shop_owner(steam_id) or (r.id in owned_ids),
+                "owned": _auto_owned(steam_id, r.sku) or (r.id in owned_ids),
                 "artist_steam_id": getattr(r, "artist_steam_id", None) or "",
                 "artist_name": artist_names.get(getattr(r, "artist_steam_id", None) or "", ""),
                 "stock_limit": getattr(r, "stock_limit", None) or 0,
@@ -25133,8 +25972,157 @@ async def _pc_snapshot_due(db: AsyncSession):
     return "daily"
 
 
+# The Discord channel the edition notice posts to: the gambler chat, the
+# same channel the bot's pack-pull announcements land in. Hardcoded for the
+# reason _CHAT_GLOBAL_DISCORD_CHANNEL above is -- docker-compose passes the
+# channel environment to the BOT service only, so the api cannot read the
+# bot's value. This id is the bot's compiled default: LIVE_BETS_CHANNEL is
+# not in the compose environment at all, so the bot always resolves it to
+# this, and PC_EVENTS_CHANNEL (which is) falls back to it when unset. An
+# operator who sets PC_EVENTS_CHANNEL moves the pull posts and not this one.
+_PC_EDITION_DISCORD_CHANNEL = "1456460424831701074"
+
+# ── Player Cards: the edition schedule (2026-09-18) ──────────────────────
+# Editions are seasonal -- four months each, ending on the 21st of December,
+# April and August at 00:00 UTC. The schedule lives in DATA, in the open
+# row's pc_editions.ends_at_planned (migration 332), and not in a constant
+# here: moving a boundary is one UPDATE and needs no deploy. A row whose
+# ends_at_planned is NULL never rolls at all -- no schedule stops the clock
+# rather than starting it early, which is the direction this has to fail in
+# (#276).
+#
+# The successor's planned end comes from the INCUMBENT's planned end, never
+# from now() and never from the successor's started_at. A rollover that runs
+# late -- the api was down across the boundary -- must still put the next
+# boundary on the 21st. generate_series picks the first four-month multiple
+# after the incumbent's planned end that is still in the future, so an
+# outage spanning two boundaries yields ONE successor on the right anchor
+# instead of a chain of empty editions.
+#
+# The month arithmetic runs on a naive UTC timestamp and converts back (AT
+# TIME ZONE 'UTC' both ways, the idiom _pc_snapshot_due already uses):
+# adding months to a timestamptz is evaluated in the SESSION's TimeZone, so
+# on a box whose TimeZone is not UTC the anchor would land on another day.
+#
+# IDEMPOTENT, WHICH IS LOAD-BEARING HERE rather than tidy. This runs on
+# EVERY janitor pass -- queue_cleanup_loop's ~60 s tick, plus once on the
+# primary's boot path via _pc_snapshot_boot_retake -- because it sits
+# AHEAD of the snapshot's due gate and inherits none of that gate's
+# conditions. So it is called some fourteen hundred times a day and must
+# do nothing fourteen hundred times a day. Every case hangs off the
+# incumbent's ended_at:
+#   * not due yet           -> cur is empty, nothing happens;
+#   * already rolled        -> the new row's planned end is months away;
+#   * two api processes     -> the loser's UPDATE blocks on the row lock,
+#     re-checks its own e.ended_at IS NULL against the committed version,
+#     matches no row, and an empty `closed` means no INSERT and no post.
+# That last case is why the close and the insert are ONE statement and why
+# the UPDATE repeats the predicate the CTE already applied: the partial
+# unique index pc_editions_one_active (308:35) makes close-before-insert
+# mandatory, and a second successor would violate it.
+#
+# WHAT IT DOES NOT CLAIM. A pack opened while the rollover TRANSACTION is
+# open -- the statement plus the caller's commit -- can still be refused
+# no_edition. The mint reads the open row FOR SHARE, so it waits on the row
+# lock and is then skipped: the row it waited for no longer satisfies
+# ended_at IS NULL, and the LIMIT 1 above the lock means it does not go
+# looking for another. Nothing is lost -- that refusal is step 2 of the
+# open, before the debit, and a held pack goes back to 'unopened' -- and a
+# retry lands on the new edition. But the refusal is REACHABLE, for the
+# width of one transaction, once every four months. Closing it means
+# teaching the mint path to re-read once before rejecting, which is a
+# change to a route body and belongs to whoever owns that route.
+_PC_EDITION_ROLLOVER_SQL = """
+    WITH cur AS (
+        SELECT id, ends_at_planned
+          FROM pc_editions
+         WHERE ended_at IS NULL
+           AND ends_at_planned IS NOT NULL
+           AND ends_at_planned <= now()
+    ), nxt AS (
+        SELECT COALESCE(MAX(id), 0) + 1 AS id FROM pc_editions
+    ), closed AS (
+        -- The schedule predicates are repeated here against the LIVE row e,
+        -- not carried from cur. cur is materialized from this statement's
+        -- snapshot, so if an operator clears or postpones a due edition and
+        -- commits while this UPDATE is waiting on their lock, cur still holds
+        -- the old due timestamp. Under READ COMMITTED the UPDATE re-evaluates
+        -- its OWN WHERE against the new row version after the wait, so naming
+        -- e.ends_at_planned here is what lets the operator's edit win: the row
+        -- stops qualifying, closed is empty, and ins -- which selects FROM
+        -- closed -- inserts nothing. Matching on e.id = cur.id alone would
+        -- close the edition anyway and mint a successor from the stale anchor.
+        UPDATE pc_editions e
+           SET ended_at = now()
+          FROM cur
+         WHERE e.id = cur.id
+           AND e.ended_at IS NULL
+           AND e.ends_at_planned IS NOT NULL
+           AND e.ends_at_planned <= now()
+        RETURNING e.id AS prev_id, e.ends_at_planned AS prev_planned
+    ), ins AS (
+        -- The successor's anchor comes from closed.prev_planned -- the value
+        -- on the row this statement actually closed, re-read under its lock --
+        -- and never from cur.ends_at_planned, which is the snapshot value the
+        -- comment above explains can be stale.
+        INSERT INTO pc_editions (id, name, started_at, ends_at_planned)
+        SELECT nxt.id,
+               'Edition ' || nxt.id,
+               now(),
+               (SELECT ((closed.prev_planned AT TIME ZONE 'UTC')
+                        + make_interval(months => 4 * n)) AT TIME ZONE 'UTC'
+                  FROM generate_series(1, 1000) AS n
+                 WHERE ((closed.prev_planned AT TIME ZONE 'UTC')
+                        + make_interval(months => 4 * n)) AT TIME ZONE 'UTC' > now()
+                 ORDER BY n
+                 LIMIT 1)
+          FROM closed, cur, nxt
+        RETURNING id, ends_at_planned
+    ), post AS (
+        INSERT INTO pending_channel_posts (channel_id, content)
+        SELECT CAST(:ch AS text),
+               'Edition ' || ins.id || ' begins. Edition ' || closed.prev_id
+                          || ' prints are out of print.'
+          FROM ins, closed
+    )
+    SELECT ins.id AS id,
+           ins.ends_at_planned AS ends_at_planned,
+           setval(pg_get_serial_sequence('pc_editions', 'id'), ins.id) AS seq
+      FROM ins
+"""
+
+
+async def _pc_edition_rollover(db: AsyncSession) -> dict | None:
+    """Close the scheduled-out edition and open its successor, or do
+    nothing. One statement, so the close, the insert and the Discord notice
+    commit together or not at all; see _PC_EDITION_ROLLOVER_SQL for why that
+    is also what makes it safe to run on every janitor pass. The caller
+    commits.
+
+    setval keeps pc_editions' SERIAL aligned with the explicit id: the id
+    is explicit so the row's name and its id can never disagree.
+
+    Neither `name` nor anything else written here reaches a CARD. The face
+    footer is built at render time from the print's edition_id and the
+    'pc.edition' label (a key in pc_face.LABEL_IDS and assets/pc/
+    catalogue.json, projected per locale by _pc_labels), so an edition
+    number is translated wherever it is drawn and no English literal from
+    this function can leak into a locale. The Discord notice the statement
+    queues IS player-visible and IS English -- like every other
+    pending_channel_posts row; that outbox has no locale.
+    """
+    row = (await db.execute(text(_PC_EDITION_ROLLOVER_SQL),
+                            {"ch": _PC_EDITION_DISCORD_CHANNEL})).mappings().first()
+    if row is None:
+        return None
+    print(f"[PC-EDITION] rolled over to edition {int(row['id'])}; "
+          f"next planned end {row['ends_at_planned']}")
+    return {"edition_id": int(row["id"]), "ends_at_planned": row["ends_at_planned"]}
+
+
 async def _pc_snapshot_janitor_step() -> None:
-    """Janitor: event retention on every step, then a pool snapshot when
+    """Janitor: event retention on every step, then the edition rollover
+    when pc_editions says the season is over, then a pool snapshot when
     none exists (first boot after the migration), when the latest one was
     taken under an older pool rule than this build carries (`_pc_snapshot_due`'s
     'rule' -- the members scan that term used to be is gone since the
@@ -25157,6 +26145,21 @@ async def _pc_snapshot_janitor_step() -> None:
         # ten unreferenced minutes, each under its P lock.
         await _pc_portrait_blob_janitor(db)
         await db.commit()
+        # The edition schedule: four-month seasons, the boundary carried by
+        # pc_editions.ends_at_planned. Deliberately placed BEFORE the
+        # snapshot's due gate below and not inside it -- the gate returns
+        # None for the rest of a day whose snapshot has already been taken
+        # (by an older build mid-deploy, or by the admin route), and a
+        # rollover behind it would then wait until tomorrow. Its own commit
+        # and its own try: a rollover that fails must not cost the pool its
+        # snapshot, and the retry is the next pass a minute later.
+        try:
+            await _pc_edition_rollover(db)
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            print(f"[PC-EDITION] rollover skipped ({type(e).__name__}: {e}) -- "
+                  "the janitor retries on its next pass")
         # Derived faces age out in _pc_face_cache_expire_loop, on BOTH roles
         # (v4 §4): this step runs on the primary alone, and the standby owns
         # a cache of its own.
@@ -26157,7 +27160,7 @@ _PC_EVENTS_PENDING_SQL = """
     SELECT e.id, e.kind, e.created_at, e.print_id,
            pl.display_name AS puller_name, pl.id AS puller_ref,
            su.display_name AS subject_name, su.id AS subject_ref, e.dup_at_pull,
-           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title,
+           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title, pr.top_card,
            """ + _PC_EVENTS_RESOLVED_SQL + """ AS face_ready
       FROM pc_events e
       JOIN players pl ON pl.id = e.player_id
@@ -26206,9 +27209,13 @@ async def internal_pc_events_pending(
         "subject_ref": str(r["subject_ref"]),
         "dup_at_pull": int(r["dup_at_pull"]) if r["dup_at_pull"] is not None else None,
         "face_ready": bool(r["face_ready"]),
+        # top_card is the print's own column, carried so the relay line can
+        # name it the way /card and the binder line do. A print minted with
+        # no top card sends null and the bot's line drops the segment.
         "print": ({"print_id": str(r["print_id"]), "rarity": r["rarity"], "foil": bool(r["foil"]),
                    "signed": bool(r["signed"]), "pool_rank": int(r["pool_rank"]),
-                   "rating": _pc_num(r["rating"]), "title": r["title"]} if r["rarity"] is not None else None),
+                   "rating": _pc_num(r["rating"]), "title": r["title"],
+                   "top_card": r["top_card"]} if r["rarity"] is not None else None),
     } for r in rows], "page_size": _PC_EVENTS_PAGE}
 
 
@@ -26393,8 +27400,8 @@ async def internal_pc_card(
 
 
 # ── Player Cards: portraits, delivery leases and faces ──────────────────────
-# Design: ai-collab/sept10-batch/21-player-cards-look-v22.md §1.7, §2.2, §3,
-# §6, §8 as amended by look-r18-dispositions.md. Pure helpers live in
+# Schema: migrations 308, 310 and 311, which carry the shape decisions.
+# Pure helpers live in
 # pc_portrait.py, pixels in pc_face.py. Every route here is answered by the
 # PRIMARY only (§2.2 routing): the face route is not on the edge's routed
 # list and the bot calls the primary's local api.
@@ -26454,6 +27461,69 @@ def _pc_hex_rgb(hex_color):
         return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
     except ValueError:
         return None
+
+
+# The ROUNDS card -> ink colour map the top-card badge draws its name in,
+# seeded by migration 333 from the game's own assets.
+_PC_CARD_THEMES: dict = {}
+
+
+async def _pc_load_card_themes(db: AsyncSession) -> None:
+    """Once, at startup. Deliberately NOT a TTL cache like `_rank_colors`
+    (:369): that one serves an empty map on failure because a rank title
+    without its colour is cosmetic. This value is a cache KEY. An empty map
+    does not dim a colour -- it re-keys every top-card face onto the band
+    colour, re-renders that whole generation under fresh one-year immutable
+    URLs, and re-keys it back when the read next succeeds. Two full
+    re-renders out of one transient failure, logged as nothing worse than a
+    colour refresh. So it is loaded once and the face routes refuse while it
+    is empty (`_pc_renderer_unavailable`)."""
+    rows = (await db.execute(text("SELECT card_name, hex FROM pc_card_themes"))).mappings().all()
+    loaded = {}
+    for row in rows:
+        rgb = _pc_hex_rgb(row["hex"])
+        if rgb is not None:
+            loaded[row["card_name"]] = rgb
+    _PC_CARD_THEMES.clear()
+    _PC_CARD_THEMES.update(loaded)
+    # The JOIN count, not just the row count. A table seeded on the asset
+    # names ("Poison bullets") instead of the canonical ones ("Poison") loads
+    # 67 rows and matches nothing, and every face then falls back to the band
+    # -- which is indistinguishable from this feature never having shipped.
+    # This one line is where that failure is visible.
+    joined = 0
+    distinct = 0
+    try:
+        stats = (await db.execute(text(
+            "SELECT count(*) AS n,"
+            " count(*) FILTER (WHERE EXISTS (SELECT 1 FROM pc_card_themes t"
+            "                                WHERE t.card_name = p.top_card)) AS hit"
+            " FROM (SELECT DISTINCT top_card FROM pc_prints"
+            "        WHERE top_card IS NOT NULL AND top_card <> '') p"))).mappings().first()
+        if stats is not None:
+            distinct = int(stats["n"] or 0)
+            joined = int(stats["hit"] or 0)
+    except Exception as ex:                                   # pragma: no cover
+        print(f"[PC-THEME] live join count unavailable: {ex}")
+    print(f"[PC-THEME] {len(_PC_CARD_THEMES)} card themes loaded; "
+          f"{joined} of {distinct} distinct pc_prints.top_card values mapped")
+
+
+def _pc_card_themes_word() -> str:
+    """The /health word for the card ink map: `ready` or `empty`.
+
+    THREE STATES, NOT TWO, and the third is the absence of the key itself on a
+    build that predates this batch -- which is what makes this the release
+    train's discriminator. `ready` is the new build with migration 333 applied;
+    the key missing is the old build; `empty` is the new code against a
+    database that has not got the table's rows yet, and it must read as NEITHER
+    so a half-landed deploy stops the train instead of passing it.
+
+    Deliberately a WORD and not the row count. A count invites a reviewer to
+    pin the expected number, and the number is a property of the seed rather
+    than of the build; the question this answers is whether the map the face
+    routes refuse without is populated at all."""
+    return "ready" if _PC_CARD_THEMES else "empty"
 
 
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
@@ -26526,6 +27596,11 @@ def _pc_renderer_unavailable():
         return "renderer_fingerprint_unavailable"
     if _pcp.coverage_ready() is not None:
         return "name_coverage_unavailable"
+    if not _PC_CARD_THEMES:
+        # The top card's colour is part of `face_rev`. A box that could not
+        # load the map would key its faces differently from the box that
+        # could, which is the half-deploy failure with no error anywhere.
+        return "card_themes_unavailable"
     if not _pc_raqm():
         # The coverage projection admits Arabic, Hebrew, Thai, Devanagari,
         # Bengali, Tamil, Georgian and Armenian because the renderer carries
@@ -26595,6 +27670,11 @@ def _pc_face_inputs(row, ctx):
     # (no `unranked` local: the spec's `rating` is None for exactly that case,
     # and the rev is now derived from the spec)
     minted = row["minted_at"]
+    # The NAME, projected before it enters the spec so a modded card carrying
+    # an undrawable cluster cannot become a tofu box under a `face_rev` that
+    # promises the pixels are right. "" and None tokenise differently in
+    # `spec_records`, so the empty case is spelled once, here, as "".
+    top_name = _pcp.coverage_strip(row["top_card"] or "")
     spec = {
         "band": band, "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
         "subtitle": subtitle,
@@ -26606,7 +27686,8 @@ def _pc_face_inputs(row, ctx):
         "edition_label": f"{labels.get('pc.edition', 'Edition')} {int(row['edition_id'])}",
         "minted_on": minted.strftime("%Y-%m-%d") if minted is not None else "",
         "print_short": "#" + str(row["print_id"]).replace("-", "")[:6],
-        "top_card": bool(row["top_card"]),
+        "top_card": top_name,
+        "top_card_rgb": _PC_CARD_THEMES.get(top_name),
     }
     # AFTER the spec, and over the spec: the key is derived from the argument
     # the renderer draws from, so a field added above is in the key with it.
@@ -27352,7 +28433,12 @@ async def _pc_steam_render_probe() -> str:
     spec = {"band": "common", "name": _pcp.public_render_name(sub["display_name"]) or "", "title": None,
             "subtitle": None, "title_rgb": None, "rating": None, "pool_rank": 1, "board_rank": None,
             "wins": 0, "losses": 0, "foil": False, "signed": False, "sign": None, "edition_label": "Probe",
-            "minted_on": "", "print_short": "", "top_card": False}
+            "minted_on": "", "print_short": "",
+            # A real name, not False: this probe is the ONLY always-on render
+            # on either box, and with a falsy top card it never entered the
+            # badge at all -- a check that could not fail for the one part of
+            # the face this release rewrites.
+            "top_card": "Poison", "top_card_rgb": _PC_CARD_THEMES.get("Poison")}
     data = await _pcp.in_pool(_pcf.render_face, spec, labels, pbytes, "card")
     if not data or bytes(data[:8]) != b"\x89PNG\r\n\x1a\n":
         return "failed:bytes"
@@ -28100,7 +29186,8 @@ async def internal_pc_face_preview(
         "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
         "foil": False, "signed": False, "sign": None,
         "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
-        "top_card": bool(member["top_card"]),
+        "top_card": _pcp.coverage_strip(member["top_card"] or ""),
+        "top_card_rgb": _PC_CARD_THEMES.get(_pcp.coverage_strip(member["top_card"] or "")),
     }
     rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
     bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
@@ -29557,7 +30644,11 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
     item = (await db.execute(select(ShopItem).where(ShopItem.id == item_id))).scalar_one_or_none()
     if item is None or item.kind != kind:
         raise HTTPException(status_code=400, detail=f"Not a valid {kind}")
-    if not _is_shop_owner(steam_id):
+    # `_auto_owned`, not `_is_shop_owner`: the exemption covers every cosmetic
+    # EXCEPT a granted-only title-ladder rung, which has to be in player_items
+    # like anyone else's. The listing applies the same predicate; a carve-out
+    # on only one of the two leaves the other reachable by naming a sku.
+    if not _auto_owned(steam_id, item.sku):
         owned = (await db.execute(
             select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
         )).scalar_one_or_none()
@@ -29570,6 +30661,107 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
 
 
 # ── Routes: Betting + Live series ────────────────────────────
+
+class StakeRefundRefused(RuntimeError):
+    """One refund could not return the EXACT stake, so it returned nothing.
+
+    A subclass of RuntimeError, so every caller that already contains a
+    RuntimeError keeps containing it unchanged; a NAMED class because the two
+    BATCH sweeps have to tell this apart from a database-level failure. The
+    two say opposite things about the NEXT item: this refusal is about one
+    wager and every other row in the batch is unaffected, while a DBAPIError
+    or a lost connection is about the transaction and there is no next row to
+    try. A sweep that treats them alike either abandons a batch it could have
+    finished or spins against a connection that is gone."""
+
+
+async def _return_stake_exactly(db: AsyncSession, player_id, amount,
+                                *, reason: str, reference_id: str) -> None:
+    """Return one refunded stake by the EXACT amount, or refuse and move nothing.
+
+    ONE definition for every refund in this file, because every one of them
+    used to write `gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt)`
+    beside a ledger row for the WHOLE stake. The clamp is silent, and what it
+    produces is not a smaller refund: with `gold_spent = 5` and a 10-gold
+    stake the ledger records 10 returned while the balance moves 5, so the
+    ledger's sum and `gold_earned - gold_spent` stop agreeing and the player is
+    5 gold short with nothing in the record that says so.
+
+    #326 is the rule this restores: a money mutation is a DB delta, and a
+    delta is the amount or it is wrong. The cover predicate lives IN the
+    statement, so the check and the write are one operation no concurrent
+    debit can get between, and the RETURNING is what says whether it applied
+    -- `0` is a real balance, so the ABSENCE of a row is the only signal read
+    here.
+
+    A balance that cannot cover the exact delta is a corrupt state, so this
+    RAISES `StakeRefundRefused` rather than paying part of it. Every caller
+    CLAIMS the stake with a conditional `UPDATE ... RETURNING` in THIS
+    transaction, so the raise takes the claim down with it and the wager goes
+    back to unsettled for the next pass to find.
+
+    WHAT A REFUSAL COSTS IS THE THING TO JUDGE IT BY (#430), and it is not the
+    same at the four kinds of call site. Each is named from a resolved caller
+    rather than covered by one sentence, because the first draft of this list
+    was written from the shape it expected and got two of them wrong:
+
+      * AN UNGUARDED REQUEST HANDLER -- `admin_reverse_series` through
+        `_refund_series_bets`, and `cancel_lobby_bet` through
+        `_lobby_bet_pay_refund` -- surfaces it as a 500 over a transaction
+        that rolled back. Nothing moved, the operator or the bettor retries,
+        and that is the conservative direction.
+      * THE CONFIG-SKEW SETTLEMENT does better and deliberately: it catches
+        the refusal and re-raises it as a 503 `FfaReportRefusal` carrying the
+        lobby's progress, so the client's outbox RETRIES a report that
+        changed nothing instead of spending it on a 4xx. The settlement does
+        not commit either way.
+      * A SAVEPOINTED BATCH (`_refund_lobby_bets`, `_refund_ffa_lobby_bets`,
+        `_reconcile_team_series_bets`, and so the team reversal that calls the
+        last of them) loses its own batch and nothing outside it; the caller's
+        disband, leave or reversal still commits and the janitor retries.
+      * A BATCH SWEEP over rows belonging to DIFFERENT players
+        (`_flush_lobby_bet_refunds`, `_prune_stale_series`) must SKIP the
+        refused item and keep going. This is why the refusal has its own
+        class: those two select their work ordered and unfiltered, so a single
+        uncoverable row at the head of the order is a permanent block on every
+        other player's refund if the sweep stops at it. Both now record the
+        item, log it and take the next one, which is the per-item degradation
+        #204 asks for -- and neither treats a DBAPI failure that way, because
+        there is no next row to take when the transaction itself is gone.
+
+    The per-bettor loop inside `_refund_series_bets` is not a fifth shape: its
+    claim covers every bettor of one series in one statement, so a refusal
+    there is that series, atomically, and it is the caller above it that
+    decides what the series costs.
+
+    The ledger row is added AFTER the balance has moved, so neither half of
+    the record can be committed without the other, whichever path called.
+
+    It writes the ledger row itself, so no caller can keep one half of the
+    record without the other.
+
+    `:amt` is CAST and `:pid` deliberately is NOT, which is the one place this
+    file departs from "type every bind" (#448) and it departs for a reason the
+    live control proves rather than asserts. Compared against `id`, the
+    parameter is typed by that column, and the driver then accepts both shapes
+    callers arrive with -- a `UUID` off an ORM row and a `str` off a mappings
+    row. Wrapping it as `CAST(:pid AS uuid)` retypes the parameter itself to
+    text, and every `UUID`-passing caller becomes a driver type error at the
+    moment a refund is due. Whichever way it is written, the column is never
+    the thing cast: casting `id` is what turns this into a sequential scan."""
+    moved = (await db.execute(text(
+        "UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST(:amt AS integer)"
+        " WHERE id = :pid AND COALESCE(gold_spent, 0) >= CAST(:amt AS integer)"
+        " RETURNING gold_spent"
+    ), {"amt": int(amount), "pid": player_id})).scalar()
+    if moved is None:
+        raise StakeRefundRefused(
+            f"refund of {int(amount)} gold to player {player_id} ({reason}) was "
+            f"refused: the balance does not cover the stake the wager records, "
+            f"so no gold and no ledger row were written")
+    db.add(GoldTransaction(player_id=player_id, amount=int(amount),
+                           reason=reason, reference_id=str(reference_id)))
+
 
 async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_abandoned") -> int:
     """Refund every UNSETTLED bet on a series. Stake was charged via gold_spent
@@ -29612,15 +30804,11 @@ async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_aband
     for r in sorted(claimed, key=lambda x: str(x.player_id)):
         # Aug 9 bet audit r1 find 3: atomic delta (an absolute write here
         # could clobber a concurrent stake debit and hand back gold twice).
-        await db.execute(text("""
-            UPDATE players
-               SET gold_spent = GREATEST(0, COALESCE(gold_spent, 0) - :amt)
-             WHERE id = :pid
-        """), {"amt": r.amount, "pid": r.player_id})
-        db.add(GoldTransaction(
-            player_id=r.player_id, amount=r.amount,
-            reason=reason, reference_id=str(sid),
-        ))
+        # EXACT, never clamped: _return_stake_exactly refuses a balance that
+        # cannot cover the stake instead of writing a ledger row for more gold
+        # than it moved (#326).
+        await _return_stake_exactly(db, r.player_id, r.amount,
+                                    reason=reason, reference_id=str(sid))
     return len(claimed)
 
 
@@ -29727,9 +30915,43 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     # selection predicate before writing (mode 1 gained that in r13 — until then
     # it decided from the unlocked snapshot and overwrote whatever had arrived),
     # _refund_series_bets claims the rows it pays, and a mode-1 abandon takes the
-    # series out of the 'active' predicate this job selects on. A failure
-    # mid-batch now leaves the items before it committed and the rest for the
-    # next call, which is the degradation #204 asks for.
+    # series out of the 'active' predicate this job selects on.
+    #
+    # Committing per item is only half of what #204 asks for, though: the other
+    # half is that one item's failure must not END the pass. A refund can now
+    # REFUSE (StakeRefundRefused — one bettor's gold_spent does not cover the
+    # stake their wager records), and an unguarded call let that refusal
+    # propagate out of this function entirely, so the remaining mode-2 rows and
+    # the WHOLE mode-1 abandon loop never ran. The three selects above are
+    # ordered and unfiltered, so the next tick rebuilds the same sets in the
+    # same order and stops at the same series: the sweep is dead, for every
+    # OTHER pair, for as long as that one bettor's row exists. `_refund_or_skip`
+    # is where that is contained — it is the only failure kind this sweep can
+    # take a next item after, so it is the only one it catches.
+    async def _refund_or_skip(_sid, _reason: str):
+        """This series' refund, contained at the ITEM boundary.
+
+        The count on success, or None when this series could not be paid and
+        the sweep should move to the next one. On None the transaction has
+        been rolled back, so the caller must NOT commit: the series keeps
+        every row it had, including — for mode 1 — the 'active' status whose
+        abandonment shares that transaction. Nothing half-done, nothing
+        marked, nothing to un-mark; the next tick simply tries again.
+
+        Only the refusal. A DBAPI-level failure is about the transaction and
+        not about this series, there is no next item to take, and it
+        propagates as it did before."""
+        try:
+            return await _refund_series_bets(db, _sid, _reason)
+        except StakeRefundRefused as _refusal:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            print(f"[SERIES] stale-series sweep could not refund {_sid} and "
+                  f"left it exactly as it was; the sweep continues: {_refusal}")
+            return None
+
     for sid, player1_id, player2_id in stale_rows_c:
         await _assert_no_service_subject(
             db, affected_player_ids=[player1_id, player2_id])
@@ -29747,7 +30969,9 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         if _still_c is None:
             await db.commit()
             continue
-        n = await _refund_series_bets(db, sid, "refund_tournament_forfeit")
+        n = await _refund_or_skip(sid, "refund_tournament_forfeit")
+        if n is None:
+            continue
         await db.commit()
         if n:
             changed += 1
@@ -29789,7 +31013,9 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         if _still_b is None:
             await db.commit()
             continue
-        n = await _refund_series_bets(db, sid, "refund_abandoned")
+        n = await _refund_or_skip(sid, "refund_abandoned")
+        if n is None:
+            continue
         await db.commit()
         if n:
             changed += 1
@@ -29826,7 +31052,12 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         if _still_a is None:
             await db.commit()
             continue
-        n = await _refund_series_bets(db, sid, "refund_abandoned")
+        n = await _refund_or_skip(sid, "refund_abandoned")
+        if n is None:
+            # The abandon shares this series' transaction with its refund, so
+            # a refused refund leaves the row 'active' rather than abandoning
+            # a series whose stakes are still out. Conservative, and retried.
+            continue
         await db.execute(text(
             "UPDATE ranked_series SET status = 'abandoned', "
             "  invalidated_at = NOW(), invalidation_reason = :reason "
@@ -30734,6 +31965,8 @@ async def update_team_live_points(
     t2_points: int = Query(..., ge=0, le=10),
     reporter_steam_id: str = Query(...),
     sig: str = Query(...),
+    game_number: int = Query(None, ge=1, le=99),
+    photon_room_id: str = Query(None, max_length=128),
     db: AsyncSession = Depends(get_db),
 ):
     """2v2 game-1 points, so betting locks at 2 exactly as 1v1 does.
@@ -30742,12 +31975,46 @@ async def update_team_live_points(
     Slot order is team_series' own (t1a/t1b vs t2a/t2b) — the reporter maps
     its in-game side to that order before signing, the same contract the
     match report already uses.
+
+    Clients post here in EVERY game of a series, not only game 1, and each
+    accepted post also sets its seat's pair in the current game's record in
+    team_series_games: the per-game record the DC report's lead-forfeit rule
+    reads. See _record_team_game_points below.
+
+    OPTIONAL, both or neither: game_number, the series' 1-based number of the
+    game whose running score the pair is, and photon_room_id, the room that
+    game is played in. A post that sends them signs
+    'team-live-points-game:{series_id}:{reporter_steam_id}:{t1}:{t2}:{game_number}:{photon_room_id}'
+    instead. It is then filed only under exactly that game of the stored
+    sitting. The names give the pair its game and nothing more: no single
+    post proves a crossing, attested or not, and the record rule described
+    above _record_team_game_points needs a pair of two points from a seat of
+    each team. A client sending them must take game_number from the same event
+    that resets its pair, so the two can never describe different games. No
+    client sends them yet. A post without them is accepted and filed as
+    before, but after the first game of a series' original sitting only the
+    posts that named their game count toward a crossing.
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
+    # Called directly rather than through FastAPI, the two optional parameters
+    # arrive as their Query() markers; only real values are values.
+    if not isinstance(game_number, int):
+        game_number = None
+    if not isinstance(photon_room_id, str):
+        photon_room_id = None
+    _names_game = game_number is not None or photon_room_id is not None
+    if _names_game and (game_number is None or not (photon_room_id or "").strip()):
+        raise HTTPException(status_code=400,
+                            detail="game_number and photon_room_id are sent together")
+    _canonical = (
+        f"team-live-points-game:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}"
+        f":{game_number}:{photon_room_id}"
+        if _names_game else
+        f"team-live-points:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}")
     expected = hmac.new(
         MATCH_HMAC_SECRET.encode(),
-        f"team-live-points:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}".encode(),
+        _canonical.encode(),
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
@@ -30781,7 +32048,10 @@ async def update_team_live_points(
                live_t2_points = GREATEST(COALESCE(live_t2_points, 0), :t2)
          WHERE id = :sid AND status = 'active' AND invalidated_at IS NULL
            AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)
-        RETURNING live_t1_points, live_t2_points
+        RETURNING live_t1_points, live_t2_points,
+                  t1_series_wins, t2_series_wins, photon_room_id,
+                  CASE WHEN t1a_id = :pid THEN 0 WHEN t1b_id = :pid THEN 1
+                       WHEN t2a_id = :pid THEN 2 ELSE 3 END AS reporter_seat
     """), {"t1": t1_points, "t2": t2_points, "sid": sid, "pid": reporter.id})).first()
     if pts is None:
         await db.rollback()
@@ -30792,6 +32062,15 @@ async def update_team_live_points(
     # it). Attesting before it would record a seat for a series it may not be in.
     await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
                                    (t1_points or 0) + (t2_points or 0))
+    # The per-game record the DC report's lead-forfeit rule reads. Same
+    # transaction, after the UPDATE above has established membership and
+    # locked the series row: the game this post is filed under is named from
+    # the row that lock pins, by the helper the DC report names its game with.
+    # Savepointed inside: a failure to record costs this post nothing.
+    _game = _team_game_identity(pts.t1_series_wins, pts.t2_series_wins, pts.photon_room_id)
+    _slot = int(pts.reporter_seat)
+    _attested = (game_number, photon_room_id.strip()) if _names_game else None
+    await _record_team_game_points(db, sid, t1_points, t2_points, _game, _slot, _attested)
     await db.commit()
     return {
         "status": "ok",
@@ -30799,6 +32078,267 @@ async def update_team_live_points(
         "live_t2_points": pts[1],
         "bets_locked": (pts[0] + pts[1]) >= 2,
     }
+
+
+# -- The 2v2 per-game record: did THIS game see real play? -------------------
+#
+# team_series_report_dc settles a mid-series leave one of two ways: the whole
+# series completes to the team that stayed, with ratings and gold, or it goes
+# to dc_incomplete for an admin. It auto-completes only when the team that
+# stayed was already a game up AND the abandoned game saw real play, two
+# points between the teams. That second half used to be read from the DC
+# report's query string: one survivor's snapshot, outside the DC signature,
+# so two honest survivors holding different snapshots of one game got
+# different settlements depending on whose report took the series lock first.
+# It is now read from team_series_games (migrations 348, 351 and 352),
+# written by the live-points POST above while the game is played. The DC
+# report reads it after it has locked the series row; the snapshot it carries
+# is only logged.
+#
+# WHICH GAME. A game is named by _team_game_identity: the series, the games
+# recorded on it plus one, and the sitting's room (team_series.photon_room_id),
+# all read from the series row under its lock -- by the POST from its own
+# UPDATE's RETURNING, by the DC report from its FOR NO KEY UPDATE read. A
+# relock clears the room and the next sitting is issued a new one, so a game
+# number replayed in a new sitting is a different record, and a post processed
+# while no room is stored is filed nowhere. Nothing in this rule reads a time.
+#
+# What that name cannot tell is which game a POST describes. Nothing in a
+# legacy post (every client today) names its game, and the production client
+# never withdraws one (plugin/ApiClient.cs at TAG v1.40.3, SendLivePoints and
+# SendLivePointsOnce): it dispatches a post at every change of its pair and
+# at every 20-second refresh, whatever is already in flight, and a newer pair
+# stops only the older one's RETRIES; a request already sent runs until it
+# completes or times out. So a post that left a client during game N can be
+# processed after game N's report carrying any pair game N passed through,
+# first-round pairs included, and it is filed under game N+1, where it can be
+# byte-identical to a post from game N+1. Nothing in the client bounds how
+# many such posts there are; only time does, and this rule reads no time. So
+# a post may also carry game_number and photon_room_id, signed with its pair.
+# Such an ATTESTED post is filed only under exactly the game and sitting it
+# names. The names give its pair an identity and nothing more.
+#
+# WHICH POSTS COUNT (_team_game_evidence). In the first game of the series'
+# original sitting no earlier post of the series exists, so every post filed
+# there is that game's own (or the next game's, landing before this game's
+# report, which exists only once this game is over) and all of them count.
+# In any later game a post that names no game may be the game before's, and
+# in the first game of a relocked sitting it may be the dead sitting's: there
+# only the posts that named the game count. A lead-forfeit is only ever asked
+# about a later game (the team that stayed must already be a game up), so
+# until a seat of each team sends the names, every lead-forfeit settles as
+# dc_incomplete, the outcome an admin can still change.
+#
+# BOTH TEAMS. Each accepted post sets one bit: which seat posted which pair
+# (each side capped at 2, as the client caps it). An attested post sets the
+# same bit in a second mask. A crossing is proven only by a pair of two
+# points or more among the counted posts, from a seat of EACH team (seats
+# 0,1 = team 1, 2,3 = team 2). One team's evidence proves nothing, however
+# many of its seats posted it, attested or not.
+#
+# What this does NOT change: a live-points post is accepted on the shared mod
+# secret and the series membership of the seat it names in a query parameter,
+# and neither check reads what was played, exactly as neither did for the old
+# query-string snapshot. This record removes the disagreement between honest
+# seats and the dependence on when a post arrived. It does not authenticate
+# the points. The two-team rule requires two accepted posts naming seats of
+# different teams; neither check binds a post to the session of the player
+# whose seat it names, so the rule counts seats named by accepted posts, not
+# distinct players.
+
+
+def _team_game_identity(t1_series_wins, t2_series_wins, photon_room_id):
+    """The game in progress on a series as (ordinal, sitting room): the games
+    recorded plus one, and the room the series row stores. Both callers pass
+    values read from the series row under its lock. '' = no room is stored
+    (between a relock and the next sitting's room): nothing is filed or read."""
+    return (int(t1_series_wins or 0) + int(t2_series_wins or 0) + 1,
+            (photon_room_id or "").strip())
+
+
+def _team_game_same_sitting(claimed: str, stored: str) -> bool:
+    """An attested post's room against the stored one, with the suffix
+    tolerance of the report-room grammar that team_series_report_dc applies."""
+    return bool(stored) and (claimed == stored or claimed.startswith(stored + "_"))
+
+
+# A pair (t1, t2), each side capped at 2, is pair index 3 * t1 + t2, and seat
+# k (0..3 = t1a, t1b, t2a, t2b) posting pair p is bit 4 * p + k of pair_seats
+# (and of attested_seats, for the posts that named their game).
+def _team_game_two_points_bits(team_seats) -> int:
+    """Every bit of a seat in `team_seats` posting a pair of two points or
+    more (t1 + t2 >= 2, each side capped at 2)."""
+    return sum(1 << (4 * (3 * t1 + t2) + seat)
+               for t1 in range(3) for t2 in range(3) if t1 + t2 >= 2
+               for seat in team_seats)
+
+
+# Team 1's (t1a, t1b) and team 2's (t2a, t2b) bits of a pair of two points or
+# more.
+_TEAM_GAME_TWO_POINTS = (_team_game_two_points_bits((0, 1)),
+                         _team_game_two_points_bits((2, 3)))
+
+
+def _team_game_both_teams_reached_two(seats: int) -> bool:
+    """Whether the bits in `seats` hold a pair of two points or more from a
+    seat of EACH team: what a crossing needs. One team's bits, from however
+    many of its seats, never prove one."""
+    return all(seats & team for team in _TEAM_GAME_TWO_POINTS)
+
+
+def _team_game_shape(original: bool, ordinal: int, first_ordinal) -> str:
+    """What can have reached the record of game `ordinal` besides its own
+    posts. It decides which posts _team_game_evidence counts, and names the
+    record in the DC report's log.
+
+    `original` = the series was never relocked and has no record in another
+    room; `first_ordinal` = the lowest game on record in the current room.
+      "first"         game 1 of the original sitting: nothing, no game came
+                      before it.
+      "second"        game 2 of the original sitting: game 1's late posts.
+      "later"         a later game: the game before's late posts.
+      "after-relock"  the game after a relocked sitting's first: that first
+                      game's late posts.
+      "unclean"       the first game of a relocked sitting: anything posted in
+                      the dead sitting."""
+    if original:
+        return "first" if ordinal <= 1 else "second" if ordinal == 2 else "later"
+    if first_ordinal is None or first_ordinal >= ordinal:
+        return "unclean"
+    return "after-relock" if first_ordinal == ordinal - 1 else "later"
+
+
+def _team_game_evidence(shape: str, cur_seats: int, attested_seats: int) -> int:
+    """The bits of the game's record that count toward a crossing: every
+    post's (`cur_seats`) in the first game of the original sitting, where no
+    earlier post of the series exists; in every other shape only the posts
+    that named exactly this game and sitting (`attested_seats`), because a
+    post that names no game may be a late post of the game before, or of a
+    dead sitting, and nothing but time bounds how many there are (the comment
+    above _team_game_identity)."""
+    return cur_seats if shape == "first" else attested_seats
+
+
+_TEAM_GAME_POINTS_UPSERT_SQL = (
+    "INSERT INTO team_series_games"
+    "  (series_id, game_ordinal, sitting_room, pair_seats, attested_seats)"
+    " VALUES (:sid, CAST(:ord AS integer), CAST(:room AS text),"
+    "         CAST(:bits AS bigint), CAST(:att AS bigint))"
+    " ON CONFLICT (series_id, game_ordinal, sitting_room) DO UPDATE"
+    "    SET pair_seats = team_series_games.pair_seats | EXCLUDED.pair_seats,"
+    "        attested_seats = team_series_games.attested_seats | EXCLUDED.attested_seats,"
+    "        last_posted_at = NOW()")
+
+# One row: the current game's bits, from every post and from the posts that
+# named it (both in the current sitting), the lowest game on record in this
+# sitting, and whether the series has had another sitting (a relock stamp,
+# read as a boolean, or a record in another room). Rows written before
+# migration 351 carry sitting_room '' and are never read; rows written before
+# migration 352 hold attested_seats 0.
+_TEAM_GAME_CROSSED_SQL = (
+    "SELECT COALESCE(BIT_OR(g.pair_seats)"
+    "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_seats,"
+    "       COALESCE(BIT_OR(g.attested_seats)"
+    "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_attested,"
+    "       MIN(g.game_ordinal) AS first_ordinal,"
+    "       (SELECT ts.relocked_at IS NOT NULL FROM team_series ts"
+    "         WHERE ts.id = :sid) AS relocked,"
+    "       EXISTS (SELECT 1 FROM team_series_games o"
+    "                WHERE o.series_id = :sid"
+    "                  AND o.sitting_room NOT IN (CAST(:room AS text), '')) AS other_room"
+    "  FROM team_series_games g"
+    " WHERE g.series_id = :sid AND g.sitting_room = CAST(:room AS text)")
+
+
+async def _record_team_game_points(db, series_id, t1_points, t2_points, game, seat,
+                                   attested=None) -> bool:
+    """Set this post's bit, its seat and its capped pair, in the record of
+    `game`: the game in progress as _team_game_identity names it from the
+    series row the caller's UPDATE has locked. `seat` is the reporter's slot,
+    0..3 = t1a, t1b, t2a, t2b.
+
+    `attested` is (game_number, room) when the post named its game. It is then
+    filed only when that is exactly `game` in the stored sitting, and its bit
+    is also set in attested_seats; a post naming any other game or sitting is
+    not filed at all.
+
+    Only ever raises: both masks are only OR-ed, so no later post clears
+    anything. Returns whether a row was written. Never raises. The isolation
+    is a SAVEPOINT, not a bare try/except, because under asyncpg a caught
+    statement error still aborts the whole transaction (#235) and would take
+    the points write with it. Before migrations 348, 351 and 352 are applied
+    this records nothing, and the DC report then treats every game as not
+    played: the conservative settlement."""
+    ordinal, room = game
+    if not room:
+        return False
+    if attested is not None:
+        named_game, named_room = attested
+        if named_game != ordinal or not _team_game_same_sitting(named_room, room):
+            print(f"[TEAM-GAME-POINTS] series={series_id} attested post names game "
+                  f"{named_game} or another sitting; game {ordinal} is in progress. "
+                  f"Not filed.")
+            return False
+    t1, t2 = min(int(t1_points or 0), 2), min(int(t2_points or 0), 2)
+    bit = 1 << (4 * (3 * t1 + t2) + int(seat))
+    try:
+        async with db.begin_nested():
+            await db.execute(text(_TEAM_GAME_POINTS_UPSERT_SQL), {
+                "sid": series_id, "ord": ordinal, "room": room,
+                "bits": bit, "att": bit if attested is not None else 0})
+        return True
+    except Exception as ex:
+        print(f"[TEAM-GAME-POINTS] series={series_id} not recorded: {type(ex).__name__}")
+        return False
+
+
+async def _team_game_crossed_two(db, series_id, series_row, reported_points=None) -> bool:
+    """Whether the game in progress on this series saw real play, by the
+    server's own record: a pair of two points or more from a seat of each
+    team (_team_game_both_teams_reached_two) among the posts that count for
+    this game (_team_game_evidence) -- every post in the first game of the
+    original sitting, only the posts that named exactly this game and sitting
+    in any other. The caller holds the series row lock and passes the row it
+    read under that lock, so the game is named by the same helper, from the
+    same locked state, that the posts were filed by.
+
+    `reported_points` is the DC report's own snapshot. It is LOGGED when it
+    disagrees with the record and never read by the answer: that disagreement
+    is exactly what this record takes out of the settlement.
+
+    False when no room is stored, when the record cannot be read (before
+    migration 348, 351 or 352, or any statement error inside the savepoint),
+    and when the counted posts do not show two points from both teams (in
+    any game but the first of the original sitting, only the posts that
+    named it are counted). Every one of those settles as dc_incomplete, the
+    outcome an admin can still change. Never raises."""
+    ordinal, room = _team_game_identity(series_row["t1_series_wins"],
+                                        series_row["t2_series_wins"],
+                                        series_row["photon_room_id"])
+    if not room:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: no sitting room is "
+              f"stored; treated as not played")
+        return False
+    try:
+        async with db.begin_nested():
+            rec = (await db.execute(text(_TEAM_GAME_CROSSED_SQL), {
+                "sid": series_id, "ord": ordinal, "room": room})).mappings().first()
+    except Exception as ex:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: per-game record "
+              f"unreadable ({type(ex).__name__}); treated as not played")
+        return False
+    original = not rec["relocked"] and not rec["other_room"]
+    shape = _team_game_shape(original, ordinal, rec["first_ordinal"])
+    evidence = _team_game_evidence(shape, int(rec["cur_seats"] or 0),
+                                   int(rec["cur_attested"] or 0))
+    crossed = _team_game_both_teams_reached_two(evidence)
+    basis = "the record (%s, %s)" % (
+        shape, "every post" if shape == "first" else "posts naming the game")
+    if reported_points is not None and (int(reported_points) >= 2) != crossed:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: {basis} says "
+              f"{'played' if crossed else 'not played'}; the report's snapshot "
+              f"said {int(reported_points)} point(s). The record decides.")
+    return crossed
 
 
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
@@ -31512,12 +33052,16 @@ async def get_player_bets(
                 ('game ' || fb.game_number) AS series_score,
                 -- Settlement-cause discriminator (Codex round-5 find 2):
                 -- payout+odds cannot tell a floored 1g win from a refund; a
-                -- RECORDED game for this bet's exact _rN room suffix can.
-                -- The underscore is LIKE's any-char wildcard, hence ESCAPE.
+                -- RECORDED game for this bet's own game number can. Matched on
+                -- ffa_matches.game_number (migration 327), not on a LIKE over
+                -- the room string: the wager's game_number is the lobby slot,
+                -- the column is that same slot, and a second derivation from
+                -- the report's room id is how a bet gets judged against a
+                -- different game than the one it was placed on.
                 EXISTS (SELECT 1 FROM ffa_matches fm2
                          WHERE fm2.lobby_id = fb.lobby_id
                            AND fm2.invalidated_at IS NULL
-                           AND fm2.photon_room_id LIKE ('%!_r' || fb.game_number) ESCAPE '!'
+                           AND fm2.game_number = fb.game_number
                        ) AS outcome_recorded,
                 fb.settlement_kind
             FROM ffa_bets fb
@@ -35084,13 +36628,23 @@ async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> No
         print(f"[ACHIEVEMENT] twins check failed: {e}")
 
 
-async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
-    """Idempotently grant a shop title item (used for achievement titles)."""
+async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> bool:
+    """Idempotently grant a shop title item. True if the player now holds it.
+
+    The return value exists because a MISSING shop row is indistinguishable
+    from success to a caller that ignores it, and one caller must not ignore
+    it: the title-ladder hook grants a run of consecutive rungs and then
+    advances the player's tier past all of them. Told nothing, it advances
+    past a rung the player never received, and that hole is permanent -- the
+    threshold is already behind them. Every other caller may keep ignoring it;
+    for them a cosmetic title that did not land is not worth failing a match
+    report over.
+    """
     item_id = (await db.execute(
         select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
     if item_id is None:
         print(f"[ACHIEVEMENT] title sku {sku} missing from shop_items — run the titles migration")
-        return
+        return False
     owned = (await db.execute(
         select(PlayerItem).where(PlayerItem.player_id == player_id,
                                  PlayerItem.item_id == item_id))).scalar_one_or_none()
@@ -35104,6 +36658,7 @@ async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
             "ON CONFLICT (player_id, item_id) DO NOTHING"
         ), {"pid": player_id, "iid": item_id})
         print(f"[ACHIEVEMENT] granted title item {sku} to {player_id}")
+    return True
 
 
 async def _achievement_payment_eligible(db: AsyncSession, player_id, achievement_key: str) -> bool:
@@ -35475,6 +37030,18 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 #   * Discord snowflakes -- an off-platform identity linking a game account to
 #     a person. Nothing in a gameplay log needs one.
 #
+# SCRUBBED -- credentials:
+#   * The Steam session ticket. ROUNDS' own Steam runtime logs the web-API
+#     ticket it receives as "Steam Login success. Session Ticket: <hex>", and
+#     that hex can be the credential POST /api/v1/auth/steam exchanges for a
+#     session. log_redaction.py holds the one rule: the value becomes
+#     "[redacted len=<n> sha256=<first 8 hex>]". It runs FIRST in pass one
+#     below, so every API door that serves a stored bundle applies it, and
+#     submit_bug_report applies the same rule before its first write, so no
+#     bundle stored by this build holds a ticket. Bundles stored before it
+#     still do on disk; this read-time pass is what keeps those out of the API.
+#     (The ops `bug-log:` verb reads the file itself and is outside this pass.)
+#
 # NOT SCRUBBED -- pseudonymous game identifiers with real diagnostic value:
 #   * SteamID64s and display names of LIVE accounts. They are public on every
 #     leaderboard, and they are how an admin answers "who did this player
@@ -35491,9 +37058,10 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 # header on the download endpoint, and as a `log_scrub_version` field on
 # GET /bug-reports/{id} -- so a borrower can always prove which ruleset
 # produced what they are holding. Bump it whenever the rules below change.
-_BUG_LOG_SCRUB_VERSION = "1"
+_BUG_LOG_SCRUB_VERSION = "2"             # 2 = the credential class above joined the ruleset
 _BUG_LOG_MAX_GZ = 8 * 1024 * 1024        # refuse a stored blob bigger than this
 _BUG_LOG_MAX_TEXT = 16 * 1024 * 1024     # gunzip ceiling
+_BUG_LOG_CARRY_MAX = 1 << 20             # longest unfinished ticket the over-ceiling read holds back
 _BUG_LOG_STEAMID_PROBE_MAX = 500         # distinct ids fed to the purge lookup
 
 # Quote characters are deliberately NOT in these exclusion classes: a path
@@ -35525,6 +37093,16 @@ def _read_bug_log_sync(path_str: str) -> str:
 
     Overflow keeps the TAIL. A log's recent lines are the ones that explain
     the crash; head-truncating a bundle discards the part being asked about.
+
+    Overflow applies the CREDENTIAL RULE BEFORE THE WINDOW CUTS. A text that
+    fits comes back whole and _scrub_pass_one applies the rule to all of it.
+    One that does not is cut to its tail here, and a tail cut made first can
+    drop a ticket's label and keep its value, which the rule, run afterwards,
+    no longer recognises. So every piece is redacted as it arrives, before
+    anything is dropped; only an unfinished end that the next piece could
+    still complete waits for it (log_redaction.settled_length). An unfinished
+    end longer than _BUG_LOG_CARRY_MAX is no ticket any client writes: the
+    read is refused rather than holding it without bound or cutting it.
     """
     p = _pathlib.Path(path_str)
     if not p.exists():
@@ -35541,19 +37119,31 @@ def _read_bug_log_sync(path_str: str) -> str:
         # [-N:] off that yields characters 1..N -- the beginning of the file,
         # under a banner promising the end of it (review MEDIUM). Stream the
         # remainder and keep a rolling window instead, so the banner is true.
-        window = data[-_BUG_LOG_MAX_TEXT:]
+        # The window holds REDACTED text only: `pending` is what has been read
+        # and not yet redacted, and it reaches the window through the rule.
+        window, pending, dropped = "", data, False
         while True:
             chunk = f.read(1 << 20)
+            pending += chunk
+            settled = _logred.settled_length(pending) if chunk else len(pending)
+            if len(pending) - settled > _BUG_LOG_CARRY_MAX:
+                raise ValueError(f"stored log holds an unfinished ticket-shaped run over "
+                                 f"{_BUG_LOG_CARRY_MAX} characters; not served")
+            window += _logred.redact_credentials(pending[:settled])
+            pending = pending[settled:]
+            if len(window) > _BUG_LOG_MAX_TEXT:
+                window, dropped = window[-_BUG_LOG_MAX_TEXT:], True
             if not chunk:
                 break
-            window = (window + chunk)[-_BUG_LOG_MAX_TEXT:]
+    if not dropped:
+        return window    # the markers alone brought it under the ceiling
     return ("[scrubber: bundle exceeded the read ceiling; OLDEST lines dropped, "
             "tail kept]\n") + window
 
 
 def _scrub_pass_one(body: str) -> tuple:
-    """Regex half, stage 1: path usernames + discord ids, and collect the
-    distinct SteamID64s the caller must ask the database about.
+    """Regex half, stage 1: credentials, path usernames + discord ids, and
+    collect the distinct SteamID64s the caller must ask the database about.
 
     SYNCHRONOUS AND THREAD-DESTINED. Review measured the split the first
     version got backwards: the gunzip that was moved off the loop costs ~0.035s
@@ -35562,9 +37152,13 @@ def _scrub_pass_one(body: str) -> tuple:
     cheap half and keeping the expensive half is not an optimisation. Touches
     no session and no async state, so it is safe in a worker thread.
     """
-    counts = {"os_user": 0, "discord_id": 0, "deleted_steam_id": 0}
+    counts = {"os_user": 0, "discord_id": 0, "deleted_steam_id": 0, "credential": 0}
     if not body:
         return body, counts, []
+
+    # Credentials first (the posture above): every Steam session ticket value
+    # is its marker before any other pass reads the text.
+    body, counts["credential"] = _logred.redact_credentials_counted(body)
 
     def _user(m):
         counts["os_user"] += 1
@@ -35707,7 +37301,13 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     if not admin_exempt:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         recent = await db.execute(
-            text("SELECT COUNT(*) FROM bug_reports WHERE steam_id = :sid AND created_at >= :cutoff"),
+            # kind = 'report' is what keeps the two budgets apart: automatic
+            # post-match uploads (kind='auto', migration 336) live in their
+            # own 12-per-24h bucket in auto_logs.py and must not consume a
+            # player's ten reports a day. Without this predicate a player who
+            # turned the setting on would silently lose the ability to file.
+            text("SELECT COUNT(*) FROM bug_reports "
+                 "WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff"),
             {"sid": req.steam_id, "cutoff": cutoff},
         )
         if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
@@ -35715,7 +37315,16 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
 
     log_filename: str | None = None
     log_bytes_stored: int | None = None
+    # No credential reaches storage (the bug-log posture above): the Steam
+    # session ticket's value is already its marker in the bundle AND in the two
+    # free-text fields, where a pasted log line lands. The rule ran in
+    # BugReportRequest's validators (schemas.py), over the text as the client
+    # sent it and BEFORE their length clamps -- a clamp made first can leave the
+    # rule too little of a ticket to recognise -- so none of the three, as the
+    # flush (the row) and the open() (the file) below write them, carries one.
     log_blob = (req.log_text or "").strip()
+    description = req.description.strip()
+    repro_steps = (req.repro_steps or "").strip() or None
 
     report = BugReport(
         player_id=player.id if player else None,
@@ -35725,8 +37334,8 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         game_version=req.game_version,
         severity=severity,
         category=category,
-        description=req.description.strip(),
-        repro_steps=(req.repro_steps or "").strip() or None,
+        description=description,
+        repro_steps=repro_steps,
     )
     db.add(report)
     await db.flush()  # need report.id for the filename
@@ -35792,10 +37401,16 @@ async def list_bug_reports(
         filters.append("severity = :severity")
         params["severity"] = severity.lower()
     where = " WHERE " + " AND ".join(filters) if filters else ""
+    # `kind` is SELECTed and carried out: an automatic post-match upload
+    # (migration 336) and a player-filed ticket are otherwise the same row in
+    # this list, and the triage actions beside them -- status, comment -- mean
+    # completely different things for the two. The list is deliberately NOT
+    # filtered to kind='report': an admin should be able to see automatic
+    # uploads, just not mistake one for a ticket somebody is waiting on.
     rows = await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
                         severity, category, status, description,
-                        log_filename, log_bytes
+                        log_filename, log_bytes, kind
                    FROM bug_reports{where}
                   ORDER BY created_at DESC
                   LIMIT :limit OFFSET :offset"""),
@@ -35813,9 +37428,12 @@ async def list_bug_reports(
                 severity=r["severity"],
                 category=r["category"],
                 status=r["status"],
-                description=r["description"],
+                # Read-time credential rule: rows stored before it reached
+                # ingest still hold the text they were sent.
+                description=_logred.redact_credentials(r["description"]),
                 has_log=r["log_filename"] is not None,
                 log_bytes=r["log_bytes"],
+                kind=r["kind"] or "report",
             ).model_dump()
             for r in rows.mappings().all()
         ],
@@ -35839,17 +37457,29 @@ async def recent_bug_report_events(
     while the bot was restarting/deploying — which is exactly when comment
     sweeps happen — so DMs looked 'inconsistent'. Ack-based delivery makes
     them at-least-once."""
+    # kind = 'report' on BOTH arms, for the same reason recent_bug_reports
+    # filters it -- and this one matters more. An automatic post-match log
+    # upload (kind='auto', migration 336) is not a ticket the player filed:
+    # it creates no initial event, so it never appears here on its own. But
+    # the moment an admin comments on one or changes its status, THAT writes
+    # a bug_report_events row, and this feed hands it to the bot with the
+    # linked player's discord_id attached -- which DMs them that staff acted
+    # on 'your report' for something they never filed and cannot see.
+    # Filtering the feed is the fix rather than filtering in the bot: the
+    # reporter_discord_id join above is what makes the row deliverable, and
+    # it should not be built for a row that is not a player's ticket.
     if unnotified:
-        where = "bre.notified_at IS NULL AND bre.created_at >= NOW() - INTERVAL '7 days'"
+        where = ("br.kind = 'report' AND bre.notified_at IS NULL "
+                 "AND bre.created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "bre.created_at >= :cutoff"
+        where = "br.kind = 'report' AND bre.created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT bre.id              AS event_id,
                        bre.bug_report_id::text AS bug_report_id,
                        br.bug_number,
-                       LEFT(br.description, 140) AS description_snippet,
+                       br.description,
                        br.steam_id        AS reporter_steam_id,
                        reporter.discord_id AS reporter_discord_id,
                        reporter.display_name AS reporter_name,
@@ -35874,7 +37504,10 @@ async def recent_bug_report_events(
                 "event_id": str(r["event_id"]),
                 "bug_report_id": r["bug_report_id"],
                 "bug_number": r["bug_number"] or 0,
-                "description_snippet": r["description_snippet"] or "",
+                # The credential rule BEFORE the 140-character cut, which used
+                # to be LEFT() in the SQL: cutting first could leave the head of
+                # a ticket too short for the rule to recognise.
+                "description_snippet": (_logred.redact_credentials(r["description"]) or "")[:140],
                 "reporter_steam_id": r["reporter_steam_id"],
                 "reporter_discord_id": r["reporter_discord_id"],
                 "reporter_name": r["reporter_name"],
@@ -35883,7 +37516,11 @@ async def recent_bug_report_events(
                 "event_type": r["event_type"],
                 "old_status": r["old_status"],
                 "new_status": r["new_status"],
-                "comment": r["comment"],
+                # Read-time rule (the T3 choice): a comment stored before the
+                # store-time rule still holds what it was sent. This is the
+                # bot's own feed; the reporter DM and the bug-thread mirror
+                # both republish this field as served.
+                "comment": _logred.redact_credentials(r["comment"]),
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
             for r in rows
@@ -35950,10 +37587,18 @@ async def recent_bug_reports(
     unposted=true (v1.29): ack-based variant — reports not yet posted to the
     feed channel (up to 7 days back), so a bot restart can't drop one."""
     if unposted:
-        where = "channel_posted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'"
+        # kind = 'report' on BOTH arms. This is the feed the bot turns into
+        # #bug-reports posts, and an automatic log upload is not something to
+        # announce -- it is not a report, nobody wrote it, and a player with
+        # the setting on would spam the channel after every match. The gate
+        # lives here rather than in the bot because the bot is a separate
+        # deployable and a server-side feed should not hand out rows whose
+        # only correct handling is to drop them.
+        where = ("kind = 'report' AND channel_posted_at IS NULL "
+                 "AND created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "created_at >= :cutoff"
+        where = "kind = 'report' AND created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
@@ -35976,7 +37621,8 @@ async def recent_bug_reports(
                 "severity": r["severity"],
                 "category": r["category"],
                 "status": r["status"],
-                "description": r["description"],
+                # Read-time credential rule: this text becomes a Discord post.
+                "description": _logred.redact_credentials(r["description"]),
             }
             for r in rows
         ],
@@ -36000,10 +37646,14 @@ async def get_bug_report(
         rid = UUID(report_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid report_id")
+    # `kind` rides out here too (migration 336). The detail pane is where an
+    # admin decides to comment or change a status, and both of those reach the
+    # reporter for a kind='report' row and nobody for a kind='auto' one. The
+    # pane cannot make that distinction from a field it is not sent.
     row = (await db.execute(
         text("""SELECT id, bug_number, player_id, steam_id, display_name, mod_version, game_version,
                        severity, category, description, repro_steps, log_filename, log_bytes,
-                       status, triage_notes, created_at, updated_at
+                       status, triage_notes, created_at, updated_at, kind
                   FROM bug_reports WHERE id = :rid"""),
         {"rid": rid},
     )).mappings().first()
@@ -36047,7 +37697,9 @@ async def get_bug_report(
             "event_type": e["event_type"],
             "old_status": e["old_status"],
             "new_status": e["new_status"],
-            "comment": e["comment"],
+            # Read-time rule, as on the event feed: rows stored before the
+            # store-time rule still hold what they were sent.
+            "comment": _logred.redact_credentials(e["comment"]),
             "created_at": e["created_at"].isoformat() if e["created_at"] else None,
         }
         for e in ev_rows
@@ -36059,6 +37711,13 @@ async def get_bug_report(
         out["player_id"] = str(out["player_id"])
     out["created_at"] = out["created_at"].isoformat() if out["created_at"] else None
     out["updated_at"] = out["updated_at"].isoformat() if out["updated_at"] else None
+    # Read-time credential rule on the stored free-text columns (the bundle got
+    # it inside _scrub_bug_log): rows stored before it reached ingest still hold
+    # the text they were sent, and triage_notes gets it whatever wrote it --
+    # every door that returns stored bug-report text applies the rule.
+    out["description"] = _logred.redact_credentials(out["description"])
+    out["repro_steps"] = _logred.redact_credentials(out["repro_steps"])
+    out["triage_notes"] = _logred.redact_credentials(out["triage_notes"])
     out["log_text"] = log_text
     # The scrub receipt, on THIS door too. The download endpoint returns it as
     # an X-Scrub-Version header, and the posture comment claimed the version
@@ -36080,6 +37739,14 @@ _BUG_REPORT_VALID_STATUSES = ("open", "triaged", "resolved", "wontfix", "dupe")
 
 async def _record_bug_event(db, report_id, actor_steam_id, actor_name, event_type,
                             old_status=None, new_status=None, comment=None):
+    # Every comment reaches bug_report_events.comment through here: the admin
+    # comment, a status change's optional comment, the internal comment and the
+    # reporter's own reply that the bot relays from a Discord DM (the one other
+    # writer, submit_bug_report's "created" event, stores none). A pasted log
+    # line lands in a comment as easily as in a description, so the credential
+    # rule is applied once, at the store, for all of them (None and "" come
+    # back unchanged). The reply path applies it before its own length cut too.
+    comment = _logred.redact_credentials(comment)
     db.add(BugReportEvent(
         bug_report_id=report_id,
         actor_steam_id=actor_steam_id,
@@ -36174,7 +37841,7 @@ async def download_bug_report_log(
 
     body, counts = await _scrub_bug_log(db, raw)
     print(f"[BUG-LOG] #{row['bug_number']} downloaded by {admin_steam_id} "
-          f"({len(body)} chars; redacted os_user={counts['os_user']} "
+          f"({len(body)} chars; redacted credential={counts['credential']} os_user={counts['os_user']} "
           f"discord={counts['discord_id']} deleted_steam={counts['deleted_steam_id']})")
 
     return PlainTextResponse(
@@ -36309,7 +37976,11 @@ async def user_comment_on_bug_report(
     # Key-gated, not source-IP-gated — same reasoning as
     # internal_comment_on_bug_report above. The bot already holds the key.
     _require_internal_key(x_internal_key)
-    comment = (req.comment or "").strip()
+    # The credential rule BEFORE the 2000-character cut, the order the event
+    # feed's description_snippet uses: a cut made first can leave the head of a
+    # ticket too short for the rule to recognise. _record_bug_event applies the
+    # rule again at the store, where it is then a no-op.
+    comment = _logred.redact_credentials((req.comment or "").strip())
     if not comment:
         raise HTTPException(400, "Comment cannot be empty")
     if len(comment) > 2000:
@@ -36321,6 +37992,30 @@ async def user_comment_on_bug_report(
         select(BugReport).where(BugReport.bug_number == bug_number)
     )).scalar_one_or_none()
     if not report:
+        raise HTTPException(404, "Bug report not found")
+    # AUTOMATIC UPLOADS ARE NOT TICKETS, and this is the door that would let
+    # one become one. An automatic post-match log upload (kind='auto',
+    # migration 336) carries the uploader's steam_id, so the ownership test
+    # below PASSES for it: the player's own Discord id matches, and a comment
+    # relayed from a DM lands on a row the player never filed, cannot see, and
+    # did not ask anyone to read. That comment then writes a bug_report_events
+    # row, which is the feed the bot answers from.
+    #
+    # Refused as a 404 rather than a 403: a number that names no ticket of
+    # theirs is, from the reporter surface's point of view, not a ticket.
+    #
+    # The column is read in raw SQL because models.BugReport deliberately does
+    # not map `kind` (see the class). The statement is exactly
+    # `SELECT kind FROM bug_reports WHERE id = :rid`: it filters on the id and
+    # on nothing else, and the kind is judged underneath it, in Python. That
+    # split is deliberate -- it is what lets a row that is missing and a row
+    # whose kind is not 'report' arrive at the same refusal without the query
+    # having to carry the decision as well. A NULL kind, which is what a row
+    # predating any backfill has, refuses along with them.
+    row_kind = (await db.execute(
+        text("SELECT kind FROM bug_reports WHERE id = :rid"), {"rid": report.id},
+    )).scalar_one_or_none()
+    if row_kind is None or row_kind != "report":
         raise HTTPException(404, "Bug report not found")
     # Ownership: the report's reporter (matched by steam_id) must have THIS
     # Discord account linked. No link or a mismatch → not their ticket.
@@ -39498,6 +41193,12 @@ async def _complete_team_series_with_ratings(
                 label=f"team-{reason}")
     except Exception as pcex:
         print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
+    try:
+        async with db.begin_nested():
+            await title_ladders.record_completed_games(
+                db, gids, mode="2v2-settled", reference_id=str(series_uuid))
+    except Exception as _lex:
+        print(f"[LADDER-CREDIT] 2v2-settled credit dropped for {series_uuid} ({reason}): {_lex}")
 
     # Free the queue rows.
     await _lock_queue_rows_ordered(db, "team_queue", gids)
@@ -39622,11 +41323,9 @@ async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str
                             str(series_uuid))
                 else:
                     refunded += 1
-                    await db.execute(text(
-                        "UPDATE players SET gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt) WHERE id = :pid"
-                    ), {"amt": b["amount"], "pid": b["player_id"]})
-                    db.add(GoldTransaction(player_id=b["player_id"], amount=b["amount"],
-                                           reason="team_bet_refund", reference_id=str(series_uuid)))
+                    await _return_stake_exactly(
+                        db, b["player_id"], b["amount"],
+                        reason="team_bet_refund", reference_id=str(series_uuid))
             # Flush INSIDE the savepoint — an unflushed ORM add would survive
             # the rollback and write a ledger row without its gold move (#187).
             await db.flush()
@@ -40433,14 +42132,17 @@ async def team_series_report_dc(
     all; see the branch below for why, and team_dc_fallback_sweep_loop for
     what eventually closes such a series. The two settling outcomes are
     unchanged and are what every report without that flag still gets:
-    (1) lead-forfeit — if the non-DC team was already up a game AND the
-    abandoned game had >=2 total points, the whole series completes to them
-    with full ratings/economy; (2) otherwise the series flips to
-    status='dc_incomplete' (invalidation_reason='dc_manual_pending') for
-    manual admin resolution — UNLESS the same four re-queue within ~30
-    minutes, in which case the matcher's sticky resume / same-four dedupe
-    re-locks them onto THIS series (original partition, scores kept) and
-    clears the pending flag (bug 245). The old dc_paused-with-grace flow is
+    (1) lead-forfeit -- if the
+    non-DC team was already up a game AND the server's own per-game record
+    (team_series_games, raised by the live-points POST during play; never the
+    report's point snapshot) shows the abandoned game reached >=2 total
+    points, the whole series completes to them with full ratings/economy;
+    (2) otherwise the series flips to status='dc_incomplete'
+    (invalidation_reason='dc_manual_pending') for manual admin resolution —
+    UNLESS the same four re-queue within ~30 minutes, in which case the
+    matcher's sticky resume / same-four dedupe re-locks them onto THIS series
+    (original partition, scores kept) and clears the pending flag (bug 245).
+    The old dc_paused-with-grace flow is
     legacy in its WRITER -- no statement in this api sets that status any more
     -- and it has many READERS still: the state GET's expiry sweep resolves an
     overdue one, this handler's own status gate and the deferred-fallback
@@ -40703,7 +42405,8 @@ async def team_series_report_dc(
     # restart DC (little or no play) or an even series is NOT auto-decided — it drops
     # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
     # that breaks and needs a restart never auto-penalizes anyone.
-    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:
+    if ((other_team_existing_wins or 0) >= 1
+            and await _team_game_crossed_two(db, sid_uuid, s, total_points)):
         # Record a synthetic forfeit game for history parity.
         await db.execute(
             text("""INSERT INTO team_matches
@@ -40748,6 +42451,45 @@ async def team_series_report_dc(
         "reason": "awaiting_admin_resolution",
         "deferred": False,
     }
+
+
+# -- The 2v2 lead-forfeit build marker (/health `lead_forfeit_pergame`) ----
+# team_series_report_dc completes a series to the team that stayed only when
+# that team was already a game up AND the abandoned game saw real play. This
+# build decides the second half from the server's own per-game record,
+# team_series_games (migrations 348, 351 and 352): update_team_live_points raises
+# it during play through _record_team_game_points, and the DC report reads it
+# through _team_game_crossed_two instead of the point snapshot in its own
+# query string. The batch adds no route and no key to any GET answer both
+# builds serve -- the record is written and read only by signed POSTs -- so this
+# word is what tells the new build from the old one. The release train
+# asserts it on both roles and reads any value but the expected one as the
+# old build; nothing else reads it (#306). It is a statement about the code
+# only: whether migrations 348, 351 and 352 have been applied is proven by
+# their own checks, and until all three are, every DC report settles as
+# dc_incomplete.
+#
+# DERIVED, never written down (#342): 1 when update_team_live_points'
+# compiled code loads _record_team_game_points AND team_series_report_dc's
+# loads _team_game_crossed_two, else 0. Both are read from the endpoints'
+# code objects (co_names), not from their source text, so a comment, or a
+# string that quotes either helper's name, cannot move the value, and an
+# endpoint that stops loading its helper reads 0.
+def _lead_forfeit_loaded_name(code, name: str) -> str:
+    """`name` when it is one of the names `code` loads (co_names), else ''."""
+    return name if name in code.co_names else ""
+
+
+def _lead_forfeit_pergame_marker(writer: str, reader: str) -> int:
+    """1 when both names were found among the endpoints' loaded names, else 0."""
+    return int(bool(writer) and bool(reader))
+
+
+_LEAD_FORFEIT_PERGAME = _lead_forfeit_pergame_marker(
+    _lead_forfeit_loaded_name(update_team_live_points.__code__,
+                              "_record_team_game_points"),
+    _lead_forfeit_loaded_name(team_series_report_dc.__code__,
+                              "_team_game_crossed_two"))
 
 
 # ── 2v2 series continuation (recording-gap fix) ─────────────────────────────
@@ -41091,6 +42833,108 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
     return m, labels
 
 
+# The 1v2 series statuses that mean "settled WITHOUT play" — a janitor void, an
+# assembly timeout, an abandoned sitting, an administrative cancel. A game
+# reported against one of these is still a game that was played, and no
+# series-completion bonus was ever paid on that series, so the report sink pays
+# its per-game award there (bug 391 r2 finding 1). 'completed' is deliberately
+# absent: that series was resolved BY play and already paid its own bonus.
+# Both spellings are listed because migration 145 had to normalise 'cancelled'
+# rows that an older janitor wrote and the reader set still accepts both.
+_OVT_SETTLED_WITHOUT_PLAY = ("canceled", "cancelled")
+
+# A 1v2 sitting is a best-of-three, and that is what bounds how many games ONE
+# series can ever be paid for. On the live arm the bound is implicit in the
+# tally: the moment a side reaches OVT_SERIES_WINS_REQUIRED the series is set
+# 'completed', and every later report lands on the arm that pays nothing.
+#
+# The settled-without-play arm deliberately does NOT advance the tally — a
+# settled series' score is final — so it cannot inherit that bound and must
+# carry the same one explicitly. Without it the live path would be bounded and
+# this one would not, and an unbounded arm is not a difference two paths into
+# the same XP and gold may have. Found by re-reading the comments this round's
+# own fix wrote (#351); the bar is the integrity one — this arm moves money.
+#
+# ONE constant, read by both halves, rather than two numbers that happen to
+# agree today: two literals that must match are a check that cannot fail
+# (#342).
+OVT_SERIES_WINS_REQUIRED = 2
+OVT_SERIES_MAX_GAMES = OVT_SERIES_WINS_REQUIRED * 2 - 1
+
+
+async def _ovt_award_seats(award, *, solo_id, duo_a_id, duo_b_id,
+                           winner_side: int, extra_pick: bool,
+                           solo_r: float, duo_avg_r: float, podium) -> tuple:
+    """Pay ONE 1v2 game to all three seats; returns (results, labels) by pid.
+
+    Module level rather than a closure so the two rules it carries can be
+    tested without standing up a route: (1) seats are paid in canonical
+    `str(pid)` order — NOT slot order — because the players-row tuple locks
+    must follow one global order across concurrent completions (#197); and
+    (2) each seat's difficulty multiplier reads the OPPOSING side's rating and
+    podium standing, so a mirrored argument is a real defect rather than a
+    cosmetic one.
+
+    `award` is the caller's own per-player write, so this helper holds no
+    transaction and no money logic of its own.
+    """
+    solo_won_game = winner_side == 1
+    duo_pod = (str(duo_a_id) in podium) or (str(duo_b_id) in podium)
+    solo_pod = str(solo_id) in podium
+    results: dict = {}
+    labels: dict = {}
+    for pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):
+        is_solo = (pid == solo_id)
+        won = solo_won_game if is_solo else (not solo_won_game)
+        mult, lbl = _ovt_difficulty_mult(
+            is_solo, extra_pick,
+            duo_avg_r if is_solo else solo_r,
+            duo_pod if is_solo else solo_pod)
+        labels[pid] = lbl
+        results[pid] = await award(pid, won, mult)
+    return results, labels
+
+
+# ── One order for the duo pair (bug 391 r3) ────────────────────────────────
+# The ovt_matches replay key is ORDERED —
+# UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id) — while the report sink
+# accepts the two duo seats in either order (it checks the three players as a
+# SET against the series). With no single order for the pair, the same game
+# reported again with its duo reversed missed the key, inserted a second match
+# row and was paid a second time. The order is the players' Steam ids compared
+# ordinally: the order the client has built every 1v2 report in since the
+# report first shipped (it sorts the duo with StringComparer.Ordinal before it
+# signs), so a report built by the client comes through unchanged.
+def _ovt_canonical_duo(report):
+    """The report with its duo pair in canonical order — the SAME object when
+    it already is.
+
+    The sink applies this after the HMAC check (the signature covers the order
+    the client sent) and before any comparison or write, so everything after
+    it reads one order. Every seat-keyed field travels with its own player:
+    the two PlayerMatchData records (steam id, name, cards, end stats), the
+    two fps averages and the two damage timelines. A copy, never an in-place
+    edit, so the caller's object keeps the order it arrived in.
+    """
+    if report.duo_a.steam_id <= report.duo_b.steam_id:
+        return report
+    return report.model_copy(update={
+        "duo_a": report.duo_b, "duo_b": report.duo_a,
+        "duo_a_fps": report.duo_b_fps, "duo_b_fps": report.duo_a_fps,
+        "duo_a_damage_timeline": report.duo_b_damage_timeline,
+        "duo_b_damage_timeline": report.duo_a_damage_timeline,
+    })
+
+
+# Advisory-lock class for "one report of a given 1v2 game room at a time"
+# (bug 391 r3). The two-key form is a key space of its own, so it never meets
+# the single-key Steam-id locks elsewhere in this module. Keyed by
+# hashtext(room): the only reports that wait on each other are reports of the
+# same room — and, rarely, two rooms whose hashes collide, which costs a short
+# wait and nothing else.
+OVT_REPORT_ROOM_LOCK_CLASS = 391120
+
+
 # 1v2 podium (factor iv). Runs the SAME query shape as GET
 # /ovt/leaderboard?role=combined — same UNION ALL over ovt_matches, same
 # invalidated_at/deleted_at filters, same `games DESC, win-rate DESC` ordering,
@@ -41325,7 +43169,13 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
         # one-shot dissolution (#270a).
         # Round-9 gate: same cause-fencing as the FFA leave — an exit from
         # inside the ovt_ ROOM is never assembly failure.
-        _ovt_in_room_exit = cause == "in_room_exit"
+        # Bug #392: the recognition is the shared SET, not an equality against
+        # one literal. The client's exit hook is a mode-agnostic sweep, so a
+        # new in-room tag reaches THIS handler too; left as an equality it
+        # would have dissolved a live 1v2 series for the same reason it would
+        # have dissolved a live FFA lobby (#432 — the flag named a line, the
+        # defect was the class).
+        _ovt_in_room_exit = _is_in_room_exit_cause(cause)
         _ovt_startup_indeterminate = False
         if (not _ovt_in_room_exit
                 and srow is not None and srow["status"] == "active"
@@ -41938,6 +43788,10 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_ovt_hmac(report):
         raise HTTPException(403, "Invalid 1v2 match signature")
+    # bug 391 r3: ONE order for the duo pair before any comparison and any
+    # write (see _ovt_canonical_duo). After the HMAC check on purpose: the
+    # signature covers the order the client sent.
+    report = _ovt_canonical_duo(report)
     try:
         series_uuid = UUID(report.series_id)
     except (ValueError, TypeError):
@@ -42029,13 +43883,83 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     if {solo_id, duo_a_id, duo_b_id} != {series["solo_id"], series["duo_a_id"], series["duo_b_id"]}:
         raise HTTPException(403, "Reported players do not match the series")
 
+    # The id this report's match row gets if it is recorded. The answer to a
+    # game already on record carries it too, exactly as it always has.
+    match_id = uuid.uuid4()
+
+    async def _already_recorded():
+        """The ONE answer a second report of a game on record gets — from the
+        replay check just below and from a key conflict at the INSERT — so the
+        two can never say different things: 200, "Already recorded", the
+        series as it stands and the score from the reporter's side. Nothing
+        this report did is kept."""
+        await db.rollback()
+        # Already recorded (replay). Return the current series state idempotently.
+        s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
+        if s2 is None:
+            raise HTTPException(404, "Series not found")
+        # Reporter-first score (learning #121) — a duo-member reporter must not
+        # see the solo-first order and read a won series as a loss.
+        rep_side_r = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+        score_r = (f"{s2['solo_series_wins']}-{s2['duo_series_wins']}" if rep_side_r == 1
+                   else f"{s2['duo_series_wins']}-{s2['solo_series_wins']}")
+        return OvtMatchResponse(
+            match_id=match_id, series_id=series_uuid, series_status=s2["status"],
+            series_score=score_r, winner_side=report.winner_side, message="Already recorded")
+
+    # ── One game, one record, whichever seat each player arrives in (bug 391 r3)
+    # The report room IS the game: it is per-game suffixed ("<room>_<token>_r<n>",
+    # held to the series room above). The set comparison above accepts every
+    # assignment of these three players to the solo seat and the two duo seats,
+    # so "is this game already on record?" must not depend on the assignment
+    # either. It is asked here, before any write, as a SET: a row for this room
+    # naming exactly these three players, in any seats, means the game is on
+    # record, and this report gets the answer a key conflict gets.
+    #
+    # Under a lock on the ROOM. The series row lock above makes reports of one
+    # series take turns, but one room's reports can also arrive under two
+    # series ids (a continuation series keeps the sitting's room), and two such
+    # reports would each find nothing committed and both record. The room lock
+    # makes this check and the INSERT below one step for every report of the
+    # room. It is taken after the series row lock, and a report holding it
+    # never waits on another series' row, so it adds no lock cycle.
+    #
+    # The ordered UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id) stays the
+    # database's own backstop: the duo pair reaches the INSERT in canonical
+    # order, so the key conflicts on either order of the pair, and a report
+    # that gets to the INSERT anyway is answered by _already_recorded too.
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:room AS text)))"
+    ), {"cls": OVT_REPORT_ROOM_LOCK_CLASS, "room": (report.photon_room_id or "")[:64]})
+    _on_record = (await db.execute(text("""
+        SELECT id, solo_id FROM ovt_matches
+         WHERE photon_room_id = :room
+           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])
+           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])
+         LIMIT 1
+    """), {"room": (report.photon_room_id or "")[:64],
+           "trio": [solo_id, duo_a_id, duo_b_id]})).mappings().first()
+    if _on_record is not None:
+        if str(_on_record["solo_id"]) != str(solo_id):
+            # Not a repeat of the recorded report: the room is on record with
+            # another of these three players in the solo seat. Answered the
+            # same way, and named here, because a second account of one game
+            # is worth being able to find.
+            print(f"[OVT-REPORT] series {series_uuid}: this room is already recorded "
+                  f"as match {_on_record['id']} with a different solo seat; the report "
+                  f"is answered as already recorded and nothing is written")
+        return await _already_recorded()
+
     # Slot-identity realign (July 22 forensics): the series row's solo/duo_a/duo_b
     # is a queue-time preference; the report's is the in-game truth (team sizes).
     # When they disagree, the per-slot accumulators (solo_xp_earned, ...) and a
     # future ranked replay would credit the wrong player. On the FIRST match of
     # a series, rewrite the series row's slot ids to the report's ordering —
-    # under the row lock, before any accumulator applies. Mid-series drift
-    # (should be impossible: sides are fixed per sitting) is logged only.
+    # under the row lock, before any accumulator applies. From then on the
+    # series' solo-versus-duo split is fixed: see the refusal below (bug 391 r4).
+    # The report's duo pair is in canonical order by here (bug 391 r3), so a
+    # game-1 realignment writes that order into the series row, and a later
+    # report of the sitting with the same sides meets it.
     # The slot ids the series ROW carries from here on (c3 B): the report's
     # after a game-1 realignment, the stored ones otherwise.
     slot_solo, slot_da, slot_db = series["solo_id"], series["duo_a_id"], series["duo_b_id"]
@@ -42051,12 +43975,40 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
             print(f"[OVT] series {series_uuid} slots realigned to report ordering "
                   f"(solo={report.solo.steam_id})")
             slot_solo, slot_da, slot_db = solo_id, duo_a_id, duo_b_id
+        elif solo_id != series["solo_id"]:
+            # ONE solo-versus-duo split per series (bug 391 r4). The series has
+            # a recorded game, and that game fixed who plays alone; this report
+            # puts another of the same three players in the solo seat. Nothing
+            # on the server moves a series' seats after its first game (the
+            # realignment above is the only UPDATE of these three columns, and
+            # a continuation series copies them), so the series has no place
+            # for a game under another split. Recorded, it would be counted and
+            # paid under a split the series never had (the tally and the awards
+            # read the report's seats, the pack recipients the stored ones), so
+            # it is refused HERE: before the INSERT and before any award, as the
+            # set check above refuses a report naming other players. A room
+            # already on record for these three players never gets this far:
+            # the replay check above answers it as that game.
+            print(f"[OVT-REPORT] series {series_uuid}: report refused, nothing written: "
+                  f"it names solo {solo_id} with duo {duo_a_id}, {duo_b_id}; the series "
+                  f"holds solo {series['solo_id']} with duo {series['duo_a_id']}, "
+                  f"{series['duo_b_id']} and has {prior_games} recorded game(s); a "
+                  f"series keeps one solo-versus-duo split for every game")
+            await db.rollback()
+            raise HTTPException(403, "Reported solo seat does not match the series")
         else:
+            # The series' own split, its duo pair stored in the other order.
+            # With the canonical form above, a series row holds its pair in
+            # ordinal order from its first game on, so this is only a row whose
+            # first game was recorded before that and did not leave it in that
+            # order (every client since v1.31.0 sends it). The game is recorded
+            # and paid by player id; the stored order is left as it is, so
+            # this game's two duo-seat ledger columns follow the report.
             print(f"[OVT] WARNING: series {series_uuid} slot ordering differs from "
                   f"report mid-series (game {prior_games + 1}) — leaving as-is")
 
-    # Insert the match (dedup on the room+players unique constraint → replay no-op).
-    match_id = uuid.uuid4()
+    # Insert the match. A game already on record was answered above; the
+    # room+players UNIQUE — duo pair in canonical order — is the backstop.
     try:
         await db.execute(text("""
             INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id, duo_b_id,
@@ -42105,19 +44057,9 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                "hmac": (report.hmac_signature or "")[:128] or None, "rep": id_by_steam.get(report.reported_by_steam_id),
                "started": report.started_at})
     except IntegrityError:
-        await db.rollback()
-        # Already recorded (replay). Return the current series state idempotently.
-        s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
-        if s2 is None:
-            raise HTTPException(404, "Series not found")
-        # Reporter-first score (learning #121) — a duo-member reporter must not
-        # see the solo-first order and read a won series as a loss.
-        rep_side_r = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
-        score_r = (f"{s2['solo_series_wins']}-{s2['duo_series_wins']}" if rep_side_r == 1
-                   else f"{s2['duo_series_wins']}-{s2['solo_series_wins']}")
-        return OvtMatchResponse(
-            match_id=match_id, series_id=series_uuid, series_status=s2["status"],
-            series_score=score_r, winner_side=report.winner_side, message="Already recorded")
+        # The key conflicted: this game is already on record (the backstop
+        # behind the replay check above).
+        return await _already_recorded()
 
     # Per-game card picks (both duo members + solo).
     for pmd, pid in ((report.solo, solo_id), (report.duo_a, duo_a_id), (report.duo_b, duo_b_id)):
@@ -42129,21 +44071,6 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                 "INSERT INTO ovt_match_cards (match_id, player_id, card_name, pick_order) "
                 "VALUES (:m, :p, :c, :o)"
             ), {"m": match_id, "p": pid, "c": _canon_card_name(str(nm))[:64], "o": i})
-
-    # Advance the series win tally only if still active (re-check under the lock).
-    if series["status"] != "active":
-        await db.commit()  # keeps the match/card rows we already inserted
-        rep_side2 = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
-        score2 = (f"{series['solo_series_wins']}-{series['duo_series_wins']}" if rep_side2 == 1
-                  else f"{series['duo_series_wins']}-{series['solo_series_wins']}")
-        return OvtMatchResponse(
-            match_id=match_id, series_id=series_uuid, series_status=series["status"],
-            series_score=score2, winner_side=report.winner_side, message="Series already resolved")
-
-    solo_wins = series["solo_series_wins"] + (1 if report.winner_side == 1 else 0)
-    duo_wins = series["duo_series_wins"] + (1 if report.winner_side == 2 else 0)
-    series_done = solo_wins >= 2 or duo_wins >= 2
-    winner_side = 1 if solo_wins > duo_wins else 2
 
     # ── Per-match XP + gold. Review CONFIRMED: use an ATOMIC increment
     # (total_xp = total_xp + delta) with RETURNING, not a Python-computed
@@ -42181,25 +44108,161 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                                    reason="level_reward", reference_id=str(match_id)))
         return xp, gold_delta + level_gold
 
-    solo_won_game = report.winner_side == 1
-    # Award in canonical str(pid) order, not solo/duo slot order — players-row
-    # tuple locks must follow one global order across concurrent completions
-    # (learning #197 / review find).
-    _award_results = {}
-    _bonus_labels: dict = {}
-    _duo_pod = (str(duo_a_id) in _ovt_pod) or (str(duo_b_id) in _ovt_pod)
-    _solo_pod = str(solo_id) in _ovt_pod
-    # solo_extra_pick is already in scope — the series SELECT is `SELECT *`.
-    _extra_pick = bool(series["solo_extra_pick"])
-    for _pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):
-        _is_solo = (_pid == solo_id)
-        _won = solo_won_game if _is_solo else (not solo_won_game)
-        _m, _lbl = _ovt_difficulty_mult(
-            _is_solo, _extra_pick,
-            _duo_avg_r if _is_solo else _solo_r,
-            _duo_pod if _is_solo else _solo_pod)
-        _bonus_labels[_pid] = _lbl
-        _award_results[_pid] = await _award(_pid, _won, _m)
+    async def _award_the_game():
+        """Pay THIS game to all three seats. One call; two callers below.
+
+        The seat loop itself is `_ovt_award_seats` (module level, so the
+        canonical-order and multiplier rules are testable without a route):
+        award in canonical str(pid) order, not solo/duo slot order, because
+        players-row tuple locks must follow one global order across concurrent
+        completions (learning #197 / review find). `solo_extra_pick` is in
+        scope — the series SELECT is `SELECT *`.
+        """
+        return await _ovt_award_seats(
+            _award, solo_id=solo_id, duo_a_id=duo_a_id, duo_b_id=duo_b_id,
+            winner_side=report.winner_side,
+            extra_pick=bool(series["solo_extra_pick"]),
+            solo_r=_solo_r, duo_avg_r=_duo_avg_r, podium=_ovt_pod)
+
+    # ── The series is no longer `active` (re-check under the lock) ──────────
+    #
+    # SERIALISATION, not refusal (bug 391 r2 finding 1). The series row lock
+    # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
+    # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
+    # — its locking read is
+    # PIN main.py:3965 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # and the clause is the line under it. So the two can
+    # never both decide this row: either the janitor meets this report's lock
+    # and DECLINES the row for that tick, or it commits its void first and
+    # this read blocks until it does, then sees the committed 'canceled' under
+    # READ COMMITTED. Whichever commits second observes the first, and this
+    # branch is the one determinate path out of that meeting. Do not add SKIP
+    # LOCKED or NOWAIT here: a declining report would answer on the row
+    # version it did not wait to see.
+    #
+    # What the determinate path OWES the seats: the game was played and its
+    # row is being committed, so its per-game award is paid here too. Before
+    # this, the award lived below this return and all three seats silently
+    # missed a game they earned whenever the janitor won the race. A skip that
+    # nobody can see is exactly what #276/#430 call the blocking-by-default
+    # outcome, and an award is not something the server may lose quietly.
+    #
+    # FAILURE DIRECTION. Paying is scoped to a series settled WITHOUT play —
+    # a void/cancel, where no series-completion bonus was ever paid and
+    # nothing else will ever pay this game. A game is recorded, and so paid,
+    # at most once whichever seats its players arrive in: the replay check
+    # above answers a second report of a room already on record for these
+    # three players — in ANY seats — before any write and under the room
+    # lock, and the duo pair reaches the INSERT in canonical order, so the
+    # ordered room+players UNIQUE also conflicts on either order of the pair
+    # and a report that gets that far returns above, before any award. (The
+    # key alone did not hold this: it is ordered, and the sink accepts the
+    # three players in any seats — bug 391 r3.)
+    # AT MOST once, not exactly once — a match row committed by the second arm
+    # below carries no award at all, deliberately, and says so. Sibling arms,
+    # swept (#432): the live path and this one are the only two that pay, and
+    # both sit after the same check and the same UNIQUE. Any OTHER resolved
+    # status — by play today, an unknown word tomorrow — falls to the second
+    # arm and is NOT paid: money is the integrity bar, so the unhandled case
+    # fails toward not paying. That arm is no longer silent: it prints the
+    # match id, the status and the reason, so a skip is on the record and can
+    # be settled by hand.
+    #
+    # BOUNDED, the same way the live arm is. "At most once per match row" is
+    # not by itself a bound on what one SERIES can pay: the live arm stops
+    # because the tally resolves the series and every later report is refused,
+    # and this arm deliberately never advances the tally. So it reads the
+    # series' recorded game count and pays only within OVT_SERIES_MAX_GAMES —
+    # the best-of-three a 1v2 sitting is, from the one constant the live arm's
+    # own comparison reads. Past that the game is still recorded and the award
+    # is refused, on its own named reason in the log rather than in silence.
+    if series["status"] != "active":
+        # How many games this series has on record, INCLUDING the row inserted
+        # above — same transaction, under the same series row lock, so this is
+        # the count as it will be committed and not a stale read. It is READ
+        # rather than derived from the tally, because the tally is exactly what
+        # this arm does not advance.
+        _games_recorded = (await db.execute(text(
+            "SELECT COUNT(*) FROM ovt_matches WHERE series_id = :sid"
+        ), {"sid": series_uuid})).scalar() or 0
+        _within_series_bound = _games_recorded <= OVT_SERIES_MAX_GAMES
+        if (series["status"] in _OVT_SETTLED_WITHOUT_PLAY
+                and _within_series_bound):
+            _res_a, _lbl_a = await _award_the_game()
+            _sx, _sg = _res_a[solo_id]
+            _ax, _ag = _res_a[duo_a_id]
+            _bx, _bg = _res_a[duo_b_id]
+            # The per-slot ledger follows the payment so the series row does
+            # not report zero for xp that reached the players. The WIN TALLY
+            # is deliberately NOT advanced: a settled series' score is final,
+            # and this arm must not resurrect it.
+            await db.execute(text("""
+                UPDATE ovt_series SET
+                    solo_xp_earned = solo_xp_earned + :sx,
+                    duo_a_xp_earned = duo_a_xp_earned + :ax,
+                    duo_b_xp_earned = duo_b_xp_earned + :bx,
+                    solo_gold_earned = solo_gold_earned + :sg,
+                    duo_a_gold_earned = duo_a_gold_earned + :ag,
+                    duo_b_gold_earned = duo_b_gold_earned + :bg
+                 WHERE id = :sid
+            """), {"sx": _sx, "ax": _ax, "bx": _bx, "sg": _sg, "ag": _ag,
+                   "bg": _bg, "sid": series_uuid})
+            await db.commit()
+            print(f"[OVT-REPORT] match {match_id} series {series_uuid} landed on a "
+                  f"series settled without play (status={series['status']} "
+                  f"reason={series['invalidation_reason']}); the game and its "
+                  f"per-game award are recorded, the series tally stays "
+                  f"{series['solo_series_wins']}-{series['duo_series_wins']}")
+            _rp = id_by_steam.get(report.reported_by_steam_id)
+            _rx, _rg = _res_a.get(_rp, (0, 0))
+            rep_side_a = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+            score_a = (f"{series['solo_series_wins']}-{series['duo_series_wins']}"
+                       if rep_side_a == 1
+                       else f"{series['duo_series_wins']}-{series['solo_series_wins']}")
+            return OvtMatchResponse(
+                match_id=match_id, series_id=series_uuid, series_status=series["status"],
+                series_score=score_a, winner_side=report.winner_side,
+                xp_gained=_rx, gold_gained=_rg,
+                xp_bonuses=list(_lbl_a.get(_rp, [])),
+                message="Series already resolved")
+        await db.commit()  # keeps the match/card rows we already inserted
+        # 'completed' today; any status word outside the settled-without-play
+        # set lands here, which is why this line names the status instead of
+        # asserting how the series was resolved (#302). TWO reasons reach this
+        # arm now and they are different facts, so the line says WHICH: a
+        # status this path does not pay, or a settled series already carrying
+        # every game a best-of-three can have. Naming only the status would
+        # make the bound the silent skip that finding 1 exists to remove.
+        _why_unpaid = (
+            f"status={series['status']} is not a settled-without-play status"
+            if _within_series_bound else
+            f"the series already carries {_games_recorded} recorded games, "
+            f"past the {OVT_SERIES_MAX_GAMES} a best-of-"
+            f"{OVT_SERIES_MAX_GAMES} sitting can have")
+        print(f"[OVT-REPORT] match {match_id} series {series_uuid} recorded against a "
+              f"series resolved as status={series['status']} ({_why_unpaid}), which this path does "
+              f"not pay; the game and its card rows are kept and no per-game "
+              f"award is granted")
+        rep_side2 = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+        score2 = (f"{series['solo_series_wins']}-{series['duo_series_wins']}" if rep_side2 == 1
+                  else f"{series['duo_series_wins']}-{series['solo_series_wins']}")
+        return OvtMatchResponse(
+            match_id=match_id, series_id=series_uuid, series_status=series["status"],
+            series_score=score2, winner_side=report.winner_side, message="Series already resolved")
+
+    solo_wins = series["solo_series_wins"] + (1 if report.winner_side == 1 else 0)
+    duo_wins = series["duo_series_wins"] + (1 if report.winner_side == 2 else 0)
+    # The SAME constant the settled-without-play arm bounds itself by. These
+    # two are the only paths that pay a 1v2 game, and the live one's bound on
+    # "how many games may one series pay" is this comparison: once it holds,
+    # the series is 'completed' and every later report is refused an award.
+    # Two literals that must agree are a check that cannot fail (#342), so
+    # there is one constant and both halves read it.
+    series_done = (solo_wins >= OVT_SERIES_WINS_REQUIRED
+                   or duo_wins >= OVT_SERIES_WINS_REQUIRED)
+    winner_side = 1 if solo_wins > duo_wins else 2
+
+    _award_results, _bonus_labels = await _award_the_game()
     sx, sg = _award_results[solo_id]
     ax, ag = _award_results[duo_a_id]
     bx, bg = _award_results[duo_b_id]
@@ -42297,6 +44360,39 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         series_score=score, winner_side=report.winner_side,
         xp_gained=_rep_xp, gold_gained=_rep_gold,
         xp_bonuses=_rep_labels)
+
+
+# -- The 1v2 solo-seat build marker (/health `ovt_solo_split`) -------------
+# A 1v2 series keeps one solo-versus-duo split for every game. Once a series
+# holds a recorded game, submit_ovt_match refuses a report that puts another
+# of its three players in the solo seat: it answers 403 "Reported solo seat
+# does not match the series" before anything is written, and logs the refusal
+# with both splits. The batch adds no route and no key to any GET answer both
+# builds serve -- the refusal rides only the report answer, which needs a
+# signed report -- so this word is what tells the new build from the old one.
+# The release train asserts it on both roles and reads any value but the
+# expected one as the old build; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): 1 when submit_ovt_match's compiled
+# string constants carry both the refusal's HTTPException detail and the
+# trailing literal segment of its log line, else 0. Both are read from the
+# endpoint's code object, not from its source text, so a comment beside
+# either cannot move the value, and an edit to either string reads 0.
+def _ovt_const_literal(code, text: str) -> str:
+    """`text` when it is one of `code`'s compiled constants, else ''."""
+    return text if text in code.co_consts else ""
+
+
+def _ovt_solo_split_marker(detail: str, log_segment: str) -> int:
+    """1 when both literals were found among the endpoint's constants, else 0."""
+    return int(bool(detail) and bool(log_segment))
+
+
+_OVT_SOLO_SPLIT = _ovt_solo_split_marker(
+    _ovt_const_literal(submit_ovt_match.__code__,
+                       "Reported solo seat does not match the series"),
+    _ovt_const_literal(submit_ovt_match.__code__,
+                       " recorded game(s); a series keeps one solo-versus-duo split for every game"))
 
 
 @app.get("/api/v1/ovt/series/active", tags=["1v2 Matches"])
@@ -42775,6 +44871,166 @@ def _ffa_battle_rate(n_live: int) -> float:
     return gpm * _ffa_sec_per_battle(n_live) / 60.0
 
 
+# ── Which game of the sitting a report records (RJ-4, migration 327) ───────
+# THE NUMBER IS THE LOBBY'S, NOT THE CLIENT'S. ffa_lobbies.games_played is
+# incremented by exactly one at the end of every settled report, inside the
+# same transaction as the INSERT and under the lobby's FOR NO KEY UPDATE, so
+# `games_played + 1` IS the slot this sitting is on. That is the number the
+# row is stored with, the number the pace anchor excludes, and the number the
+# bet settle pays -- the same expression the two other per-game surfaces have
+# always bound to: ffa_bet_place refuses any game_number other than
+# `games_played + 1` (the "Bet window for game N is closed" arm) and the
+# live-points UPDATE carries `COALESCE(games_played, 0) + 1 = :gn`. Deriving
+# the report's number the same way is what makes a row, its wagers and its
+# live-points figure name the same game by construction, not by agreement.
+#
+# The report room id is "<photon room>_<HHmmss>_r<N>" (GameStateWatcher.cs),
+# HMAC-covered, and N is the REPORTING CLIENT's own game counter. It is kept
+# as a CROSS-CHECK, never as the source: _ffa_game_number_refusal below says
+# when the two disagree in a way the endpoint must refuse rather than settle.
+# Nothing new is asked of any client and a 1.40.3 build reports exactly as it
+# does today.
+#
+# The bound is the column's, not the game's: photon_room_id is 64 characters
+# of free text (schemas.FfaMatchReport), ffa_matches.game_number is SMALLINT
+# with a CHECK of 1..999 (migration 327), and FFA_MAX_GAMES_PER_LOBBY is 40.
+FFA_GAME_NUMBER_MAX = 999
+
+
+def _ffa_game_number_refusal(tail, expected: int) -> str | None:
+    """Why a report's own game counter forbids settling it, or None.
+
+    `tail` is _ffa_room_game_no(photon_room_id) -- raw, unbounded, None when
+    the room id carries no `_rN` at all. `expected` is the lobby's own next
+    slot (games_played + 1), read under the lobby row's FOR NO KEY UPDATE.
+
+    The caller runs this only AFTER the already-recorded lookup has come back
+    empty, so "this names a game with a row" is never one of these answers --
+    a report naming a number this lobby HOLDS (live or admin-reversed) is
+    compared against that row and echoed or recorded instead. What is left is
+    a report for a game nobody has recorded, and the rule for it is ONE
+    EQUALITY: the tail has to be the slot the lobby is on.
+
+      no tail / outside 1..999 -> REFUSE. Every shipped build appends `_r`
+        plus its counter, and the counter is 0 only on a seat that has not run
+        OnFfaMatchStarted for this game -- precisely the partial-view seat
+        whose scoreboard RJ-3 exists to keep out. The room id is inside the
+        HMAC canonical, so an honest build's tail is what it emitted.
+      tail < expected -> REFUSE. The report names a game this sitting has
+        already gone past and holds no record of, so there is nothing to
+        compare it against and nothing it can settle; its wagers, if any,
+        were refused at placement for the same reason.
+      tail > expected -> REFUSE. Round 2 accepted this and settled `expected`
+        anyway, on the reading that a counter ahead of the lobby is what one
+        lost report leaves behind (#430). Storing a report under a number that
+        is not the one it names is what that costs: the row for the game the
+        client calls K sits at slot N, so the lobby's NEXT report -- the second
+        client of that same game, whose own tail is also K -- looks for K and
+        for N+1, finds neither, and settles the SAME physical game a second
+        time under a second slot. Both rated, both paid. The equality is what
+        makes the stored number and the named number one number, so the
+        already-recorded lookup can never miss a repeat.
+
+    So a misreported counter -- higher, lower, reused-live, reused-invalidated,
+    zero, missing or over the bound -- gains nothing: it never selects a slot,
+    never opens a second settlement of one game, never retargets a wager and
+    never widens a payout window.
+
+    WHAT IT COSTS, WITHOUT THE UNDERSTATEMENT. One refused report per
+    disagreeing tail is the cost of ONE accidental skew. It is not the cost of
+    a client whose counter has moved: that counter is local and advances at
+    every game start, so a sitting that has had one report terminally refused
+    goes on naming numbers the lobby is not on, one further out each game, and
+    settles nothing more until the two are brought back together. That is why
+    every answer this endpoint gives — the refusals included — carries the
+    lobby's own games_played/expected_game (_ffa_progress), and why the client
+    contract resynchronises from them (RJ-CLIENT-RESYNC-CONTRACT.md, carried in
+    the rejoin lane's review bundle rather than in this repository). A client
+    that does not
+    read them is not corrupted, only stuck for the rest of the sitting, and its
+    reports are RECORDED rather than dropped: submit_ffa_match quarantines the
+    whole payload before it answers and names `expected_game` in the refusal,
+    so an operator can settle one by hand."""
+    if tail is None:
+        return "report room id carries no game number"
+    if not (1 <= int(tail) <= FFA_GAME_NUMBER_MAX):
+        return f"game number {int(tail)} is outside 1..{FFA_GAME_NUMBER_MAX}"
+    if int(tail) < expected:
+        return (f"report names game {int(tail)}, which this lobby has no record "
+                f"of (expected_game={expected})")
+    if int(tail) > expected:
+        return (f"report names game {int(tail)}, ahead of the game this sitting "
+                f"is on (expected_game={expected})")
+    return None
+
+
+# ── Pace anchor: the window a report's payout is metered against (RJ-4) ────
+# paid_battles is capped by what the elapsed window could honestly have
+# produced, and that window is measured from SERVER receipt times only. Until
+# migration 327 its start was MAX(ended_at) over every row of the lobby, so any
+# earlier row moved it -- including a second row recording the SAME game. The
+# one verified instance (lobby 0ea879a4-..., 2026-08-07) metered its second row
+# against the 57-second gap between the two receipts rather than the ~686-second
+# game and paid about a tenth; the same arithmetic would have throttled the next
+# real game of that sitting.
+#
+# The anchor now takes the FIRST receipt of each OTHER game of the lobby and
+# keeps the latest of those:
+#   * MIN per game -- a second row for an earlier game cannot pull the anchor
+#     forward to its own receipt time;
+#   * IS DISTINCT FROM :g, not < :g -- the game being reported is excluded, so
+#     a same-game row can never be its own anchor, while every other game still
+#     counts. A `<` bound would let the reported number choose how far back the
+#     window starts (a report numbered 1 arriving late in a long sitting would
+#     meter against lobby creation), and a client-derived input may only ever
+#     move the server toward the conservative outcome (#283).
+#   * a row with no derivable number counts on its own. Migration 327 leaves
+#     no such row behind and makes the column NOT NULL, so this arm covers
+#     only a reader running against a database the migration has not reached
+#     yet; it is kept rather than removed because the alternative to a
+#     GROUP BY it cannot see is silently dropping that row from the window.
+# Invalidated rows are NOT excluded: a reversal does not give back the
+# wall-clock the game consumed, and skipping them would only widen the window.
+# _FFA_PRIOR_GAME_SQL makes the SAME choice, and they have to agree: a lookup
+# that skipped an invalidated row while this excluded its number would let a
+# reused number settle a second game AND remove that game's consumed time
+# from the window it is metered against.
+# WHAT "every OTHER game" ACTUALLY MEANS HERE, AND WHAT IT DOES NOT. For rows
+# this api writes, the numbers of a lobby are 1..games_played with no gap and
+# no repeat: submit_ffa_match stores `games_played + 1` and increments
+# games_played in the same transaction. That is a statement about NEW rows
+# only. Migration 327 backfilled every historical row from its room tail, and
+# the 2026-08-07 lobby carries the same number on TWO rows -- deliberately, a
+# recorded contradiction is not a key violation -- so a repeat exists in the
+# table today, and a lobby whose sitting lost a report can carry a gap. Both
+# are handled rather than assumed away: GROUP BY game_number collapses a
+# repeat to its first receipt, and a gap simply means one fewer group.
+_FFA_PACE_ANCHOR_SQL = """
+    SELECT MAX(e) FROM (
+        SELECT MIN(ended_at) AS e
+          FROM ffa_matches
+         WHERE lobby_id = CAST(:lid AS uuid)
+           AND game_number IS NOT NULL
+           AND game_number IS DISTINCT FROM CAST(:g AS SMALLINT)
+         GROUP BY game_number
+        UNION ALL
+        SELECT ended_at AS e
+          FROM ffa_matches
+         WHERE lobby_id = CAST(:lid AS uuid)
+           AND game_number IS NULL
+    ) q
+"""
+
+
+def _ffa_paid_battles(battles_total, elapsed_seconds: float, n_live: int) -> float:
+    """Battles a report may be paid for: the claimed count, capped by what the
+    elapsed window could have produced at FFA_PACE_HEADROOM x the fitted pace.
+    One definition, so the endpoint and its tests read the same arithmetic."""
+    return min(float(battles_total),
+               float(elapsed_seconds) * FFA_PACE_HEADROOM
+               / _ffa_sec_per_battle(max(2, int(n_live))))
+
+
 def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
     """Placement shape on the per-player pool: FFA_SHAPE_TOP at 1st, its
     mirror at last, linear in the beaten-fraction, mean 1.0 absent ties."""
@@ -42877,7 +45133,7 @@ FFA_CONFIG_DEFAULTS = {
     "sudden_death": False,
 }
 
-# ── Room rules (Sept 10 batch, ai-collab/sept10-batch/01-room-rules.md) ──────
+# ── Room rules (Sept 10 batch; schema and shape decisions: migration 306) ───
 # Every server-issued 1v1 / 2v2 / 1v2 room carries a rules record {ff, sc}:
 # friendly fire (default ON, which is today's behaviour) and the Same Cards
 # rule (default OFF). Decided BEFORE the room exists (host knobs on the 2v2 /
@@ -43157,9 +45413,105 @@ def _ffa_max_points(n_players: int, score_target: int | None = None) -> int:
 FFA_MAX_GAMES_PER_LOBBY = 40
 
 
+def _quarantine_same_payload(stored, incoming: str) -> bool:
+    """Is a captured payload the SAME account as this one?
+
+    Used only where (mode, photon_room_id) already holds a row: the question
+    is "is this the outbox delivering the same report again", and the answer
+    decides whether a second, differing account of that room is kept or
+    dropped. Compared as VALUES, not as text — `stored` arrives as a decoded
+    object or as JSON text depending on the driver's codec, and two encodings
+    of one report (key order, separator spacing) are the same report.
+
+    Returns False when the stored side cannot be read at all. That is the
+    conservative direction: an unreadable comparison keeps the new payload as
+    its own row rather than discarding it on an answer nobody checked."""
+    try:
+        left = _json.loads(stored) if isinstance(stored, (str, bytes)) else stored
+    except Exception:
+        return False
+    if left is None:
+        return False
+    try:
+        right = _json.loads(incoming)
+    except Exception:
+        return False
+    return left == right
+
+
+async def _quarantine_on_file(db: AsyncSession, *, mode: str, room: str | None,
+                              group_id, body: str) -> tuple[str | None, bool]:
+    """Is THIS payload already captured, and is the room's slot taken?
+
+    Returns (outcome, room_taken). `outcome` is "already" or "variant" when a
+    row holding this exact payload is on file, and None when nothing is; both
+    answers mean the caller's refusal message may honestly say the report was
+    kept. `room_taken` says whether (mode, room) already holds a row, which is
+    what decides between the keyed INSERT and a variant row.
+
+    ASKED BEFORE THE PENDING QUOTA, deliberately. A delivery that adds no row
+    is not new work and may not be charged for one: round 3 counted first, so
+    at 50 pending rows an outbox retry of a payload the table ALREADY held got
+    503 instead of its idempotent terminal answer, i.e. the bound spent the
+    report it existed to preserve.
+
+    Two rows can hold one payload. The keyed row is (mode, photon_room_id) and
+    is the honest retry's idempotency. A VARIANT row — a second, differing
+    account of the same room — carries photon_room_id NULL so it cannot take
+    that key, which left it with no idempotency of its own: round 3 inserted a
+    fresh row for every redelivery, so four deliveries of one differing payload
+    cost four rows of a bounded quota. The NULL-room rows of this group are
+    compared as values too, and a repeat of a variant already on file adds
+    nothing.
+
+    THE VARIANT SCAN READS THE SAME SET THE QUOTA COUNTS -- this group's
+    PENDING NULL-room rows -- and never more of them than the quota admits.
+    Round 5's note claimed a bound the statement did not have: it read every
+    NULL-room row the group had ever produced, reviewed and discarded history
+    included, under the advisory lock the caller holds, so a long-lived lobby's
+    refusals scanned an unbounded number of JSON documents. The consequence of
+    the bound is worth naming rather than hiding: a redelivery of a variant an
+    admin has already REVIEWED is not recognised any more and is captured as a
+    new pending row. That is the same treatment a genuinely new payload gets,
+    it is charged against the quota exactly as one, and it is the direction
+    that keeps a report rather than dropping it. The KEYED row's idempotency is
+    unaffected -- it is the partial unique index on (mode, photon_room_id) and
+    the read above it asks nothing about status.
+
+    A payload with no room id has no key of either kind; it is not deduplicated
+    here and the quota is what bounds it, exactly as before."""
+    if room is None:
+        return None, False
+    stored = (await db.execute(text(
+        "SELECT payload FROM match_report_quarantine"
+        " WHERE mode = :m AND photon_room_id = :room"
+    ), {"m": mode, "room": room})).scalar()
+    if stored is None:
+        return None, False
+    if _quarantine_same_payload(stored, body):
+        return "already", True
+    if group_id is not None:
+        # The 50 is the per-group pending quota's own number, and it is written
+        # as a literal here for the same reason every other bound in this file
+        # is (the janitor's boot self-test EXPLAINs each reachable SQL literal
+        # and refuses SQL assembled at runtime). The two are asserted to be the
+        # same number by test_the_variant_scan_is_bounded_by_the_quota_it_claims,
+        # so they cannot drift apart silently.
+        for prior in (await db.execute(text(
+            "SELECT payload FROM match_report_quarantine"
+            " WHERE mode = :m AND group_id = :g AND photon_room_id IS NULL"
+            "   AND status = 'pending'"
+            " ORDER BY created_at, id"
+            " LIMIT 50"
+        ), {"m": mode, "g": group_id})).scalars().all():
+            if _quarantine_same_payload(prior, body):
+                return "variant", True
+    return None, True
+
+
 async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status_code: int,
                              payload, group_id=None, photon_room_id: str | None = None,
-                             reporter_id=None, player_ids=None) -> None:
+                             reporter_id=None, player_ids=None) -> str:
     """Preserve a match report that was rejected for a LIFECYCLE reason.
 
     Sid, July 30, after two completed FFA games were destroyed: "if it fails
@@ -43175,6 +45527,40 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
     afterwards: every lifecycle gate fires BEFORE the endpoint's first write, so
     rolling back here discards nothing. Never raises — a failure to quarantine
     must not change the response the client already had coming (#187).
+
+    RETURNS which of the five things happened, because "never raises" is not
+    the same as "always recorded" and a caller whose refusal MESSAGE says the
+    report was kept has to know the difference:
+      "recorded" — a new row holds this payload.
+      "already"  — (mode, photon_room_id) was captured before AND the stored
+                   payload says the same thing as this one (compared as VALUES,
+                   not as text — see _quarantine_same_payload), so the payload
+                   is in the table under that room id; that key is the
+                   retry-idempotency.
+      "variant"  — (mode, photon_room_id) is held by a DIFFERENT account of the
+                   same room. That is not a retry and must not be answered as
+                   one, so this payload is kept as its own row (see below) —
+                   or, when a redelivery finds its own variant row already on
+                   file, kept by that row and nothing is written.
+      "quota"    — the per-group pending bound was reached; nothing was kept.
+      "failed"   — the insert raised; nothing was kept.
+
+    EVERY kept outcome means this exact payload IS in the table: "recorded",
+    "already" and "variant" all say so, and a caller may answer terminally on
+    any of them. What redelivery then costs differs by which row holds it, and
+    the difference is stated rather than averaged away. A payload held by the
+    KEYED row is free to redeliver for as long as the row exists, whatever its
+    review status, because that idempotency is the partial unique index on
+    (mode, photon_room_id). A payload held by a VARIANT row is free while that
+    row is still PENDING; once an admin has reviewed it the scan no longer
+    sees it and the next delivery is captured as a new pending row, charged
+    against the quota like any other (_quarantine_on_file, which says why the
+    bound is drawn there). "quota" and "failed" mean the payload is NOT in the
+    table, and the caller must not answer terminally.
+    Ignoring the return value is the historical behaviour and stays correct
+    for every caller whose own response does not claim the report was kept;
+    the RJ-3 branches below DO claim it, and answer 503 (which the client's
+    outbox retries) rather than a 409 that would spend the report.
     """
     try:
         await db.rollback()
@@ -43183,17 +45569,35 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
         # retrying two real games of a since-closed lobby shares the
         # (mode, group, reporter, reason) tuple, so game 2's payload was
         # dropped forever. Distinct games have distinct per-game room ids and
-        # MUST each be kept: the (mode, photon_room_id) ON CONFLICT below is
-        # the retry-idempotency. Hostile flooding (fresh fabricated room ids)
+        # MUST each be kept: the (mode, photon_room_id) key below is the
+        # retry-idempotency. Hostile flooding (fresh fabricated room ids)
         # is bounded instead by a PER-GROUP pending QUOTA — generous above
         # FFA_MAX_GAMES_PER_LOBBY so every honest multi-game sitting fits —
         # counted under a transaction-scoped ADVISORY lock, because a plain
         # count-then-insert races two concurrent captures past the bound
-        # (#207: serialize on a value that exists before the rows do).
+        # (#207: serialize on a value that exists before the rows do). The
+        # lock is taken before the on-file read too, so the read, the count
+        # and the insert are ONE decision per group.
+        _room = (photon_room_id or "")[:64] or None
+        _body = (payload if isinstance(payload, str)
+                 else _json.dumps(payload, default=str))
         if group_id is not None:
             await db.execute(text(
                 "SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST(:g AS text)))"
             ), {"g": str(group_id)})
+        # IDEMPOTENCY FIRST, QUOTA SECOND (Codex round-3 finds at 44450 and
+        # 44502 — see _quarantine_on_file). A delivery whose payload the table
+        # already holds adds no row, so it is charged nothing and gets its
+        # terminal answer even at saturation; and a REPEAT of a variant is one
+        # of those deliveries, instead of a fresh row per redelivery.
+        _outcome, _room_taken = await _quarantine_on_file(
+            db, mode=mode, room=_room, group_id=group_id, body=_body)
+        if _outcome is not None:
+            await db.commit()
+            print(f"[QUARANTINE] {mode} report already on file: {reason} "
+                  f"room={photon_room_id} ({_outcome})")
+            return _outcome
+        if group_id is not None:
             _pending = (await db.execute(text("""
                 SELECT COUNT(*) FROM match_report_quarantine
                  WHERE mode = :m AND group_id = :g AND status = 'pending'
@@ -43201,26 +45605,75 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
             if int(_pending) >= 50:
                 await db.rollback()
                 print(f"[QUARANTINE] pending quota reached for {mode} group={group_id} — not capturing more")
-                return
-        await db.execute(text("""
-            INSERT INTO match_report_quarantine
-                (mode, reason, http_status, group_id, photon_room_id,
-                 reporter_id, player_ids, payload)
-            VALUES (:m, :r, :s, :g, :room, :rep, :pids, CAST(:pl AS JSONB))
-            ON CONFLICT (mode, photon_room_id) WHERE photon_room_id IS NOT NULL
-                DO NOTHING
-        """), {"m": mode, "r": reason[:64], "s": status_code, "g": group_id,
-               "room": (photon_room_id or "")[:64] or None, "rep": reporter_id,
-               "pids": list(player_ids or []),
-               "pl": payload if isinstance(payload, str) else _json.dumps(payload, default=str)})
+                return "quota"
+        if _room_taken:
+            # The room's key is held by a DIFFERENT account and no variant row
+            # holds this one. "Same room id" is NOT "same report" — the
+            # report room id is "<photon room>_<HHmmss>_r<N>", so two clients
+            # of one game that started inside the same second build the same
+            # string. Answering "already" without looking is how a DISTINCT
+            # account of that game gets dropped while its reporter is told the
+            # server kept it. So it is kept as its OWN row.
+            #
+            # That row carries photon_room_id NULL, because the partial unique
+            # index (mode, photon_room_id) is what makes an honest outbox retry
+            # idempotent and widening it would undo that. The room is not lost:
+            # every mode's payload names its own photon_room_id, and group_id
+            # still points the admin queue at the lobby or series. The per-group
+            # pending quota above bounds these exactly as it bounds any other
+            # capture, and the read above is what keeps a redelivery of this
+            # same variant from spending that quota a second time.
+            await db.execute(text("""
+                INSERT INTO match_report_quarantine
+                    (mode, reason, http_status, group_id, photon_room_id,
+                     reporter_id, player_ids, payload)
+                VALUES (:m, :r, :s, :g, NULL, :rep, :pids, CAST(:pl AS JSONB))
+            """), {"m": mode, "r": reason[:64], "s": status_code,
+                   "g": group_id, "rep": reporter_id,
+                   "pids": list(player_ids or []), "pl": _body})
+            _outcome = "variant"
+        else:
+            _kept = (await db.execute(text("""
+                INSERT INTO match_report_quarantine
+                    (mode, reason, http_status, group_id, photon_room_id,
+                     reporter_id, player_ids, payload)
+                VALUES (:m, :r, :s, :g, :room, :rep, :pids, CAST(:pl AS JSONB))
+                ON CONFLICT (mode, photon_room_id) WHERE photon_room_id IS NOT NULL
+                    DO NOTHING
+                RETURNING id
+            """), {"m": mode, "r": reason[:64], "s": status_code, "g": group_id,
+                   "room": _room, "rep": reporter_id,
+                   "pids": list(player_ids or []),
+                   "pl": _body})).scalar()
+            _outcome = "recorded"
+            if _kept is None:
+                # The key was taken between the read and the insert. Only a
+                # capture that names NO group can reach this — the advisory
+                # lock serializes every capture that names one — so ask again
+                # and take whichever answer is now true rather than assume.
+                _outcome, _ = await _quarantine_on_file(
+                    db, mode=mode, room=_room, group_id=group_id, body=_body)
+                if _outcome is None:
+                    await db.execute(text("""
+                        INSERT INTO match_report_quarantine
+                            (mode, reason, http_status, group_id, photon_room_id,
+                             reporter_id, player_ids, payload)
+                        VALUES (:m, :r, :s, :g, NULL, :rep, :pids, CAST(:pl AS JSONB))
+                    """), {"m": mode, "r": reason[:64], "s": status_code,
+                           "g": group_id, "rep": reporter_id,
+                           "pids": list(player_ids or []), "pl": _body})
+                    _outcome = "variant"
         await db.commit()
-        print(f"[QUARANTINE] {mode} report kept for admin review: {reason} room={photon_room_id}")
+        print(f"[QUARANTINE] {mode} report kept for admin review: {reason} "
+              f"room={photon_room_id} ({_outcome})")
+        return _outcome
     except Exception as ex:
         print(f"[QUARANTINE] capture failed ({mode}/{reason}): {ex}")
         try:
             await db.rollback()
         except Exception:
             pass
+        return "failed"
 
 
 def _ffa_sort_key(steam_id: str) -> tuple:
@@ -46071,6 +48524,11 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     that room (Codex design find 4 — leaving them 'ready_join' would re-feed
     a dead room forever). Everyone's rows are deleted; they requeue fresh."""
     await _check_steam_session(request, steam_id, db)
+    # Bug #392 lens find 7: narrowed ONCE, here, so all three writers below
+    # bind the same value and none of them can be the site that persists an
+    # unrecognised tag. `cause` itself is left alone — the in-room decisions
+    # and the fresh_cancel log read the tag as sent.
+    _pcause = _persistable_exit_cause(cause)
     # Fenced on the lobby the client actually means, so a delayed retry for a
     # finished lobby cannot revoke the lease of one joined since.
     await _lease_release_by_steam(db, steam_id, expected_lobby_id)
@@ -46098,17 +48556,54 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                 marked = (await db.execute(text("""
                     UPDATE ffa_lobbies l
                        SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e
-                                             FROM unnest(l.departed_ids || p.id) e))
+                                             FROM unnest(l.departed_ids || p.id) e)),
+                           departure_causes = CASE WHEN CAST(:cause AS text) = ''
+                                                   THEN l.departure_causes
+                                                   ELSE jsonb_build_object(p.id::text,
+                                                                           CAST(:cause AS text))
+                                                        || l.departure_causes END
                       FROM players p
                      WHERE p.steam_id = :sid
                        AND l.id = CAST(:lid AS uuid)
                        AND l.status = 'active'
                        AND p.id = ANY(l.member_ids)
-                       AND NOT (l.departed_ids @> ARRAY[p.id])
+                       -- Bug #392 lens find 2: TWO ways in, not one. The
+                       -- original predicate admitted only a departure that
+                       -- was not yet marked, which made the cause reachable
+                       -- ONLY on the request that first appended the player.
+                       -- The client's durable-cause machinery exists to
+                       -- re-send the attestation on a LATER request, after a
+                       -- teardown's own untagged leave has already taken the
+                       -- row path, appended the player and deleted the queue
+                       -- row: by the time the tagged retry arrives there is
+                       -- no row (so `me` is None, we are here) and the player
+                       -- is already departed (so the old predicate was false
+                       -- and zero rows were updated). Every attestation that
+                       -- survived a teardown was dropped in silence.
+                       --
+                       -- "First attestation wins" still holds, and now means
+                       -- what it says: the slot is the CAUSE key, not
+                       -- membership of departed_ids. A tagged retry may fill
+                       -- an empty slot; it can never overwrite a filled one.
+                       -- An untagged retry ON AN ALREADY-MARKED departure
+                       -- still matches nothing and stays the no-op it was;
+                       -- an untagged FIRST leave is unaffected and marks the
+                       -- departure through the original clause, as before.
+                       AND (NOT (l.departed_ids @> ARRAY[p.id])
+                            OR (CAST(:cause AS text) <> ''
+                                AND NOT jsonb_exists(l.departure_causes,
+                                                     p.id::text)))
                      RETURNING l.id
-                """), {"sid": steam_id, "lid": expected_lobby_id})).scalars().all()
+                """), {"sid": steam_id, "lid": expected_lobby_id,
+                       "cause": _pcause})).scalars().all()
                 if marked:
-                    print(f"[FFA-LOCK] rowless leaver {steam_id} marked departed on lobby {expected_lobby_id}")
+                    # "recorded", not "marked departed": this statement now
+                    # reaches the row to append the departure OR to fill an
+                    # empty cause slot for a departure already marked, and
+                    # PostgreSQL 16's RETURNING sees only the new row, so the
+                    # print cannot honestly claim which of the two it did
+                    # (#302 — a claim a reader cannot trace to the code).
+                    print(f"[FFA-LOCK] rowless leaver {steam_id} departure recorded on lobby {expected_lobby_id}")
             except Exception as ex:
                 print(f"[FFA-LOCK] rowless departure mark failed for {steam_id}: {ex}")
                 try:
@@ -46193,7 +48688,13 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         # clicks, declines, watchdog bails — cause absent or other) may
         # dissolve. Old clients send no cause and keep the evidence-based
         # behaviour below.
-        _in_room_exit = cause == "in_room_exit"
+        # Bug #392: the recognition is the shared SET
+        # (_IN_ROOM_EXIT_CAUSES), so a seat taken out of the room by a
+        # transport timeout is in-room too and keeps the veto. Every reader of
+        # `_in_room_exit` below — the two dissolution predicates and
+        # `game_live_now` — is therefore covered by one change; none of them
+        # compares against a literal any more.
+        _in_room_exit = _is_in_room_exit_cause(cause)
         # Round-13 REVERSAL of the round-12 fresh_cancel override: Codex
         # proved it was a hostile-void primitive — ONE member's unverified
         # claim cancelled a LIVE game (warm heartbeat and all), refunded its
@@ -46289,27 +48790,55 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                 # survivor-freeing DELETE below was unreachable from it. The
                 # comment above justified that by deferring to "the report's
                 # own completion path" — which does not exist: the only
-                # ffa_lobbies write in submit_ffa_match is
-                # `games_played = games_played + 1`. A crossed threshold was
+                # ffa_lobbies writes in submit_ffa_match are the slot's
+                # `games_played = games_played + 1` and the catch-up in
+                # _ffa_lock_lobby_slot, and neither touches `status` or
+                # `departed_ids`. A crossed threshold was
                 # therefore recorded and then acted on by nobody, leaving the
                 # last survivor holding a ready_join row on a permanently
                 # 'active' lobby.
+                # Bug #392: the cause rides the SAME statement as the
+                # departed_ids append, at all three append sites, so the two
+                # can never disagree about which lobby a departure belongs to
+                # and a persisted cause can never exist without its departure.
+                # `jsonb_build_object(new) || existing` keeps the EXISTING key
+                # on a conflict (`||` lets the right operand win), so the
+                # FIRST attestation for a (lobby, player) pair is what sticks
+                # and a retried or contradicting later leave cannot rewrite
+                # it. `:pidt` is a second bind of the same value deliberately:
+                # binding one parameter under both CAST(... AS uuid) and
+                # CAST(... AS text) asks Postgres to deduce two types for one
+                # placeholder, which fails at parse time.
                 all_but_one = bool((await db.execute(text("""
                     UPDATE ffa_lobbies
-                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e))
+                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),
+                           departure_causes = CASE WHEN CAST(:cause AS text) = ''
+                                                   THEN departure_causes
+                                                   ELSE jsonb_build_object(CAST(:pidt AS text),
+                                                                           CAST(:cause AS text))
+                                                        || departure_causes END
                      WHERE id = :lid AND status = 'active'
                     RETURNING cardinality(departed_ids)
                               >= COALESCE(player_count, cardinality(member_ids)) - 1
-                """), {"lid": lobby_id, "pid": me["player_id"]})).scalar())
+                """), {"lid": lobby_id, "pid": me["player_id"],
+                       "pidt": str(me["player_id"]), "cause": _pcause})).scalar())
                 # Still 'active' on purpose: the final game's report may be in
                 # flight, and closing here would quarantine it and refund bets
                 # that should settle. The survivors are released below without
                 # touching the lobby (round-3 regression 7 stands).
                 closed = "active"
             else:
+                # Bug #392: same cause persistence as the live-game branch
+                # above — same statement, same first-wins order, same second
+                # text bind of the player id.
                 closed = (await db.execute(text("""
                     UPDATE ffa_lobbies
                        SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),
+                           departure_causes = CASE WHEN CAST(:cause AS text) = ''
+                                                   THEN departure_causes
+                                                   ELSE jsonb_build_object(CAST(:pidt AS text),
+                                                                           CAST(:cause AS text))
+                                                        || departure_causes END,
                            status = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)))
                                               >= COALESCE(player_count, cardinality(member_ids)) - 1
                                          THEN 'completed' ELSE status END,
@@ -46318,7 +48847,8 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                                                THEN NOW() ELSE completed_at END
                      WHERE id = :lid AND status = 'active'
                      RETURNING status
-                """), {"lid": lobby_id, "pid": me["player_id"]})).scalar()
+                """), {"lid": lobby_id, "pid": me["player_id"],
+                       "pidt": str(me["player_id"]), "cause": _pcause})).scalar()
             if closed == "completed" or all_but_one:
                 # The sitting is over — now the survivors' rows go too, so
                 # nobody stays locked out of other queues by a closed lobby.
@@ -47024,6 +49554,44 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
         #   null  = startup-unknown -> client neither joins nor leaves, just
         #           polls again.
         "game_in_progress": await _ffa_game_in_progress_tristate(db, lobby_id, lobby),
+        # The sitting's settled-game count, so a client can name the game it is
+        # about to play the way the server names it. The report room id's `_rN`
+        # tail has to equal `games_played + 1` or the report is refused and
+        # kept, and the client's counter is its own local one, incremented at
+        # every game start — so the gap is NOT fixed at one: it is the number
+        # of games the seat has started since the last one the server settled,
+        # and it grows by one at every further refusal. Round 3 wrote "one
+        # apart for the rest of the sitting" here, which understates the cost
+        # of the rule it was describing.
+        # This is the join-time copy of the same count submit_ffa_match's own
+        # answers now carry (_ffa_progress). NO CLIENT READS IT YET -- verified
+        # by grep over the client lane's own tip, and recorded with the printed
+        # hits in the rejoin lane's RJ-CLIENT-RESYNC-CONTRACT.md, which is the
+        # specification for the consumer. The field is emitted so that a
+        # consumer CAN be built to start a sitting aligned instead of learning
+        # the gap from a refusal; it does not itself make any client do that.
+        # Additive either way: a client that ignores it is exactly as correct
+        # as it was.
+        #
+        # BOTH counters, from the ONE derivation: `_ffa_progress` is what the
+        # report endpoint's answers are built from, so the join-time copy and
+        # the report-time copy cannot be two different pieces of arithmetic.
+        # The contract makes the server the sole allocator of the game number
+        # and forbids a seat to count one for itself, and `games_played + 1` is
+        # arithmetic -- so a seat that had to do it here would be doing exactly
+        # what the rule removes. It reads the number instead.
+        #
+        # ADVISORY, and the difference from the report path's copy is stated
+        # rather than left to be discovered: this row is read WITHOUT the lobby
+        # lock and without _ffa_lock_lobby_slot's catch-up, because this is a
+        # poll and taking the settlement's lock here would put every poller
+        # behind every settlement. So it can be BEHIND -- never ahead, since
+        # games_played only advances and the catch-up only ever raises it. A
+        # seat that names a behind number is refused once and told the current
+        # one in that refusal, which is the same one-refusal cost every other
+        # stale reading has. Naming an AHEAD number is the direction that would
+        # cost a second settlement, and this read cannot produce one.
+        **_ffa_progress(int(lobby["games_played"] or 0)),
         "players": [
             {"steam_id": m["steam_id"], "display_name": m["display_name"],
              "slot": int(m["slot"]) if m["slot"] is not None else -1}
@@ -47032,7 +49600,463 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
     }
 
 
-async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n):
+# ── The slot a settlement takes, and the lock that makes it one (RJ-4) ────
+# The lock, the derivation and the increment are three statements of ONE
+# transaction, and the order between them is the whole guarantee: the row is
+# locked, the slot is read from the locked row, the settlement writes, the
+# slot is consumed, and only then does the transaction commit. A second report
+# of the same lobby waits on that lock and, under READ COMMITTED, re-reads the
+# updated row when it is let through (#208), so it cannot derive the number
+# the first one just took.
+#
+# They are FUNCTIONS rather than three inline statements because that is what
+# a test can put under two live connections. Round 3's contention test rebuilt
+# the two statements out of the endpoint's source and ran them inside its own
+# transaction, so it proved PostgreSQL's locking and nothing about production's
+# ordering: moving the derivation above the lock, or splitting the transaction,
+# left it green (Codex round-3 find on the test). Now the test drives these,
+# and `test_the_lock_the_derivation_and_the_increment_are_one_transaction`
+# pins that the endpoint keeps them in one.
+#
+# FOR NO KEY UPDATE, not FOR UPDATE (#202/#203/#207): take the WEAKEST mode
+# that still conflicts with everything this transaction has to exclude, and
+# nothing broader. The settlement never changes a KEY column of ffa_lobbies
+# (the only one is `id`), so FOR UPDATE was strictly more than it needed. What
+# the weaker mode still conflicts with is what the mutual exclusion is
+# actually made of -- another FOR NO KEY UPDATE, the `games_played` UPDATE
+# below, and every FOR UPDATE taker on this table -- so two settlements of one
+# lobby serialise exactly as before.
+#
+# WHAT IT DOES NOT DO IS FREE A CONCURRENT WAGER, and an earlier draft of this
+# comment claimed it did. ffa_bets.lobby_id and ffa_matches.lobby_id do both
+# reference this row, so every INSERT into either takes FOR KEY SHARE on it,
+# and FOR KEY SHARE conflicts with exactly one mode -- FOR UPDATE. But the FK's
+# lock is not what excludes those writers today: BOTH ffa_bets inserters take
+# an explicit lock on this same row first. `place_ffa_bet` -- the
+# `POST /api/v1/ffa/bets` handler, which the older comments in this file call
+# ffa_bet_place, a name no identifier here actually carries -- takes FOR NO KEY
+# UPDATE (which conflicts with FOR NO KEY UPDATE just as it conflicted with FOR
+# UPDATE), and the lobby-bet bind (`_bind_one_lobby_bet`, under
+# `_bind_lobby_bets`) runs inside ffa_lobby_start, below the group lock --
+# _lock_queue_group_for_player takes `SELECT 1 FROM ffa_lobbies WHERE id =
+# :sid FOR UPDATE` on the caller's lobby, and the Start binds that lobby.
+# (That second one was checked rather than assumed: the queue-leave path's
+# FOR UPDATE on this table is a different endpoint and does not cover the
+# bind.) So no writer is freed by this change, and the benefit of the weaker
+# mode here is the standing one: a lock no wider than the write it protects,
+# and no hazard added if an FK-only ffa_bets writer is ever introduced.
+#
+# THE EXPLICIT LOCK IN place_ffa_bet IS LOAD-BEARING AND IS NOT REDUNDANT WITH
+# THIS ONE. It is what stops a wager being inserted for the game currently
+# settling -- specifically after _refund_ffa_game_bets_strict has taken its
+# claim SELECT, which would leave that stake on a config-skewed game neither
+# paid nor returned. `test_a_wager_cannot_be_inserted_while_its_game_settles`
+# pins it, because a reader who believed the deleted claim above would drop it.
+_FFA_LOBBY_LOCK_SQL = "SELECT * FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
+_FFA_LOBBY_ADVANCE_SQL = "UPDATE ffa_lobbies SET games_played = games_played + 1 WHERE id = :lid"
+# The highest number this lobby actually HOLDS a row for, and the statement
+# that brings a counter that is behind its own rows back up to it. Both are
+# module literals rather than strings assembled at the call site: the janitor's
+# boot self-test EXPLAINs every reachable SQL literal and refuses SQL built at
+# runtime (Codex selftest r7).
+_FFA_LOBBY_HIGHEST_GAME_SQL = (
+    "SELECT COALESCE(MAX(game_number), 0) FROM ffa_matches WHERE lobby_id = :lid")
+_FFA_LOBBY_CATCH_UP_SQL = (
+    "UPDATE ffa_lobbies SET games_played = CAST(:gp AS INTEGER)"
+    " WHERE id = :lid AND COALESCE(games_played, 0) < CAST(:gp AS INTEGER)")
+
+
+async def _ffa_lock_lobby_slot(db: AsyncSession, lobby_uuid):
+    """Lock the lobby row and derive the slot the next settlement takes.
+
+    Returns (row, expected_game), or (None, 0) when the lobby has no row. The
+    derivation is INSIDE this function on purpose: `games_played + 1` read
+    from anything but the row this statement just locked is a number from a
+    snapshot, and acting on a snapshot is how the same slot gets settled
+    twice.
+
+    THE SLOT IT RETURNS IS ALWAYS ONE THE LOBBY DOES NOT ALREADY HOLD, and on
+    every lobby the endpoint will still take a report from, one it can settle.
+    Round 5 wrote only the second half, and the two are different sentences:
+    `games_played + 1` is always a FREE number, but on a lobby holding 999 it
+    is 1000, which is outside the column's 1..999 domain and outside
+    _ffa_game_number_refusal's, so no report can name it and the answer is a
+    refusal rather than a settlement. Reaching that state means passing the
+    caller's 40-game cap first -- FFA_MAX_GAMES_PER_LOBBY is read off the row
+    this function returns, and 999 is twenty-five times past it -- so the
+    unsettleable slot exists in the domain and not on any path a report takes.
+    Stated rather than claimed away.
+
+    For rows this api
+    writes, the equality in _ffa_game_number_refusal makes a lobby's numbers
+    1..games_played with no gap, so `games_played + 1` is free by
+    construction. A lobby whose rows came from elsewhere need not satisfy that:
+    migration 327 numbers every historical row from its own room tail and does
+    not touch games_played, so a sitting that had one report refused by an
+    older api -- the client advancing anyway and its NEXT report settling --
+    carries a row at a number the counter never reached. Its counter then says
+    "next = N" about a number a row already holds.
+
+    That state is not survivable by the answer this endpoint gives. Every
+    report naming N is compared against that row and echoed or refused with
+    `settled_game = N`, while the same body says `expected_game = N` -- two
+    instructions that cancel: the client adopts N, plays on, names N again, and
+    the sitting settles nothing more for as long as the seats keep playing. So
+    the counter is brought up to the rows HERE, under the same FOR NO KEY UPDATE, and
+    every number this function hands out is one the lobby does not already
+    hold.
+
+    It only ever moves the counter FORWARD, so nothing that reads it can go
+    backwards: the 40-game cap gets stricter, the bet window and the
+    live-points UPDATE (both `games_played + 1` off this same column) follow it
+    in step, and wagers left on the skipped number become stragglers that
+    _ffa_recorded_game_outcome resolves against the row that is actually
+    recorded there. What it does NOT claim is that games_played counts games
+    THIS lobby settled through this api -- after a catch-up it counts the
+    sitting's position, which is what every one of its readers uses it as.
+
+    INVALIDATED ROWS COUNT, for the same reason _FFA_PRIOR_GAME_SQL and the
+    pace anchor count them: an admin reversal says the recorded RESULT is no
+    longer defended, not that the number is free again. The three have to agree
+    -- a catch-up that skipped a reversed row while the lookup found it would
+    put back exactly the answer this removes, `settled_game` naming a number
+    `expected_game` had not passed.
+
+    WHAT A CLIENT GAINS BY HAVING DRIFTED, stated rather than waved at (#283).
+    For every row this api writes, game_number IS the slot this function
+    handed out, so the MAX above is a server-derived number. The one class of
+    row where it is not is the 327 backfill, which numbered historical rows
+    from their `_rN` room tail -- client-attested, and a one-time historical
+    fact rather than an input any live report can supply. So a sitting whose
+    client had drifted to 9 while the lobby settled 3 resumes at 10 rather
+    than at 4, and the numbers in between are never used. That gains the
+    client nothing: the number is an identity, not a quantity anything is paid
+    against. The pace anchor is measured in server receipt TIMES and keyed on
+    "every other game", so skipping numbers cannot widen a payout window; a
+    wager is refused unless it names this same expression; and the only
+    direction it moves the 40-game cap is closer, against the lobby. The
+    alternative -- refusing to advance -- is the state where nothing settles
+    at all.
+
+    Normal lobbies pay one indexed SELECT for this (idx_ffa_matches_lobby_game)
+    and never the UPDATE.
+
+    THE CATCH-UP IS A STATEMENT, NOT AN OUTCOME, and the line it logs says so.
+    Whether it survives is decided by the request that issued it, not here: the
+    settling path commits and the correction stands, while every path that ends
+    in `FfaReportRefusal` returns a JSONResponse and never commits, so `get_db`
+    closes the session and the UPDATE is rolled back with it. Both are ordinary
+    and neither is a failure. What was NOT ordinary is a log line that read
+    `games_played 3 -> 7`, in the past tense, on a path that discards it: an
+    operator reading it concluded the counter had been repaired, and the next
+    report of that lobby re-derived and re-logged the same repair for as long
+    as the lobby kept being refused. The numbers were right and the claim was
+    not, which is the class this lane keeps finding in its own comments (#302,
+    and #249 for the same shape one layer out). The line now states what it
+    derived and names the condition its persistence hangs on."""
+    lobby = (await db.execute(text(_FFA_LOBBY_LOCK_SQL),
+                              {"lid": lobby_uuid})).mappings().first()
+    if lobby is None:
+        return None, 0
+    counted = int(lobby["games_played"] or 0)
+    held = int((await db.execute(text(_FFA_LOBBY_HIGHEST_GAME_SQL),
+                                 {"lid": lobby_uuid})).scalar() or 0)
+    if held > counted:
+        await db.execute(text(_FFA_LOBBY_CATCH_UP_SQL),
+                         {"lid": lobby_uuid, "gp": held})
+        print(f"[FFA] lobby {lobby_uuid} counter is behind its own rows: "
+              f"games_played {counted}, highest recorded game {held}; this "
+              f"answer derives the sitting's next slot as {held + 1}. The "
+              f"correction is issued in this request's transaction and stands "
+              f"only if that request commits")
+        # Re-read under the same lock, so the row the caller inspects (the
+        # game cap reads games_played off it) and the number returned below
+        # are the SAME state, not the snapshot from before the catch-up.
+        lobby = (await db.execute(text(_FFA_LOBBY_LOCK_SQL),
+                                  {"lid": lobby_uuid})).mappings().first()
+    return lobby, int(lobby["games_played"] or 0) + 1
+
+
+async def _ffa_advance_lobby_slot(db: AsyncSession, lobby_uuid):
+    """Consume the slot this transaction settled. Exactly one per settlement,
+    in the settling transaction, under the lock taken above — which is what
+    makes `games_played + 1` the sitting's next slot rather than an estimate
+    of it."""
+    await db.execute(text(_FFA_LOBBY_ADVANCE_SQL), {"lid": lobby_uuid})
+
+
+# ── The lobby's progress, as every FFA report answer carries it (RJ-3 r4) ──
+# The number a report names comes from the seats' own physical game counter --
+# the HOST publishes it as a room property, and each seat freezes that value
+# once per game at the game-over edge and builds its report key from the frozen
+# copy, which is what makes two electors of one game produce ONE key. It is
+# incremented at every game start and reset when the room is left. The number a
+# report may SETTLE is the lobby's `games_played + 1`, and the two have to be
+# equal. So a terminally refused report leaves the seats one ahead for the rest
+# of the sitting: the refusal is kept locally and nothing moves the published
+# counter back, the next report is refused for being one ahead, the one after
+# that two, and the sitting settles nothing more. Round 3 emitted
+# `games_played` in the lobby-state payload and called that the enabler; it is
+# not reachable from a refusal, and the refusal is where a client would learn
+# it was wrong.
+#
+# Every statement in that paragraph about the client is a grep-verified reading
+# of the client lane's own tip, printed with its anchors in the rejoin lane's
+# RJ-CLIENT-RESYNC-CONTRACT.md. NOTHING ON THE CLIENT READS THE FIELDS BELOW
+# YET: the consumer is specified by that document and built in the client lane,
+# so this endpoint's guarantee is about what it SENDS, never about what any
+# client does with it.
+#
+# So every answer given ONCE THE LOBBY ROW HAS BEEN LOCKED carries the same
+# three fields, in the success body and in the refusal body alike -- success,
+# echo, refusal, the service-account 403, a failed INSERT and a database-level
+# refusal of it. Two classes carry none of them, and they are the two raised
+# BEFORE there is a locked lobby row to read: the integrity 400s (malformed
+# roster, missing room id, bad signature) and the 404s (unknown player, lobby
+# not found). A consumer reads the fields WHEN PRESENT rather than assuming
+# they always are; saying "every answer" here would be a guarantee this
+# endpoint does not keep. The three, in the body as TOP-LEVEL integers:
+#   games_played  — settled games of this sitting, including this one when this
+#                   answer settled it;
+#   expected_game — games_played + 1, the number the NEXT report must name;
+#   settled_game  — present only when the report NAMED a number and the lobby
+#                   already holds a row for that same number, which makes the
+#                   report terminal rather than retryable however it is
+#                   answered. A report that names no usable number names no
+#                   game, so no answer to it carries this field: saying "N is
+#                   settled" to a report that never mentioned N would drop an
+#                   outbox entry over a number it did not ask about.
+# They are read under the lobby's FOR NO KEY UPDATE and are therefore the value
+# as of the moment this report was judged; a later report of the same sitting can
+# only have advanced them, never moved them back (games_played is incremented
+# by exactly one per settlement, brought forward to the lobby's own rows by
+# _ffa_lock_lobby_slot's catch-up, and never decremented).
+#
+# `expected_game` NEVER NAMES A NUMBER THE LOBBY ALREADY HOLDS A ROW FOR, and
+# that is a property of the pair rather than of either field: an answer saying
+# `settled_game = N` and `expected_game = N` in one body tells a client both
+# "this number is finished" and "name this number next", and a client that
+# obeys it names N for the rest of the sitting. _ffa_lock_lobby_slot is what
+# makes the pair consistent; `settled_game < expected_game` on every answer
+# that carries both is the invariant to hold on to when either is changed.
+# The client half is a CONTRACT, not code in this lane, and not a file in this
+# repository either: RJ-CLIENT-RESYNC-CONTRACT.md is carried in the rejoin
+# lane's review bundle. Naming a repository path for it here would be a
+# reference that does not resolve for anyone reading this file.
+def _ffa_progress(games_played: int, *, settled_game: int | None = None) -> dict:
+    """The three progress fields, from the lobby's settled-game count."""
+    gp = max(0, int(games_played or 0))
+    out = {"games_played": gp, "expected_game": gp + 1}
+    if settled_game is not None:
+        out["settled_game"] = int(settled_game)
+    return out
+
+
+async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid) -> dict:
+    """The lobby's progress, re-read under its own lock after a rollback -- or
+    a 503 that carries no progress at all.
+
+    A rollback releases the lobby lock, so every number read before it is a
+    snapshot of a sitting that may have moved. An answer given after one has to
+    re-read or say nothing, and it re-reads through _ffa_lock_lobby_slot (the
+    same catch-up every other answer's number comes from, never a bare SELECT
+    of the column, which would let `settled_game` name a number `expected_game`
+    had not passed).
+
+    IT TRIES TWICE. The likeliest reason the first attempt failed is a
+    statement that failed earlier in this transaction: under asyncpg one failed
+    statement poisons the whole transaction (#235), and that is exactly what
+    the rollback below clears. So the handler rolls back and asks again, once.
+    That rollback is also what puts the session back in a state the caller's
+    remaining reads can run in -- on the replay arm the very next statement is
+    _ffa_replay_echo's SELECT, which over an aborted transaction would raise
+    into a bare 500. The one residue is a connection that is gone, where the
+    rollback cannot succeed either; nothing in this process can answer over
+    that, and it is a stated residue rather than a silent one.
+
+    WHEN BOTH ATTEMPTS FAIL, OR THE LOBBY HAS NO ROW, IT FAILS CLOSED. It used
+    to answer from the caller's pre-rollback copy and call that safe because it
+    could only be stale-LOW. A guard is judged by what its refusal costs, and a
+    substitute reading by what ITS answer costs (#430): the pre-rollback copy
+    is a number the server may no longer accept, and an answer carrying it
+    tells a resynchronising seat to name the one number that earns it another
+    terminal refusal -- one more game of the sitting spent, on a path that had
+    nothing to say. There is no reading of the lobby to give here, so this
+    gives none: FfaReportRefusal(503, <reason>, {}), a status the client's
+    outbox retries, with no games_played, no expected_game and no settled_game
+    anywhere in the body. The contract's rule for an answer with no progress
+    fields is RETRY THE SAME BODY LATER, never re-key -- and a body carrying no
+    advertised number cannot be mistaken for one that does.
+
+    THE CALLER'S COPY IS NOT REACHABLE FROM HERE AT ALL, which is the point
+    rather than a tidy-up: it was a parameter of this function until round 10,
+    and while it was, every exit added here had a stale answer within one line
+    of it. The identifier does not appear in this function, and
+    test_every_progress_the_endpoint_builds_comes_from_a_locked_slot asserts
+    that it occurs zero times in this span."""
+    try:
+        _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)
+    except Exception as _relock_ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        # ...and now ASK AGAIN, on the session the rollback just cleared. The
+        # first attempt's likeliest cause is a statement that failed earlier in
+        # this transaction, which the rollback has just ended; refusing without
+        # retrying would spend an answer on a condition that no longer holds.
+        try:
+            _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)
+        except Exception as _retry_ex:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress "
+                  f"after a rollback, twice; answering 503 with no progress "
+                  f"fields: {_relock_ex} / then {_retry_ex}")
+            raise FfaReportRefusal(
+                503, "Could not read this lobby's progress - retry this "
+                     "report unchanged", {})
+        print(f"[FFA-REPORT] lobby {lobby_uuid} progress re-read succeeded on the "
+              f"second attempt, once the failed statement was cleared: {_relock_ex}")
+    if _lobby is None:
+        print(f"[FFA-REPORT] lobby {lobby_uuid} has no row left to read progress "
+              f"from; answering 503 with no progress fields")
+        raise FfaReportRefusal(
+            503, "This lobby's progress is unavailable - retry this report "
+                 "unchanged", {})
+    return _ffa_progress(max(0, int(_expected) - 1))
+
+
+async def _ffa_progress_after_capture(db: AsyncSession, lobby_uuid,
+                                      progress: dict) -> dict:
+    """The lobby's progress for an answer given AFTER a quarantine capture.
+
+    A capture is not a passive write. `_quarantine_report` rolls this request's
+    transaction back before it takes its advisory lock, and commits its own row
+    -- so the lobby lock the endpoint was holding is RELEASED inside it, and a
+    report of the same sitting that had been waiting on that row can derive its
+    slot and settle in the gap. The `progress` the caller is still holding was
+    read before all of that. Answering with it tells a resynchronising client to
+    name a number the sitting has already taken, which earns it the very refusal
+    this endpoint is trying to stop it earning -- and, on the replay arm, can
+    put `settled_game` and `expected_game` on the same number, the pair of
+    instructions that cancel (see _ffa_progress).
+
+    So the two counters are re-derived under a FRESH lock. `settled_game` is not
+    re-derived with them: it is a claim about a ROW that this report named, the
+    row does not move when the counter does, and re-deriving it here would need
+    the named number the caller has already resolved. It is CARRIED across
+    instead -- but only while it still satisfies the pair's own inequality,
+    `settled_game < expected_game`.
+
+    That re-check should never fire: `games_played` is incremented by one per
+    settlement and brought forward by `_ffa_lock_lobby_slot`'s catch-up, never
+    decremented, so a fresh read can only have moved `expected_game` UP. It is
+    written as a check rather than as a sentence because the sentence is exactly
+    the kind this round was told to stop writing -- a guarantee about the whole
+    state space, asserted from the one state its author had in mind. If it ever
+    fires, the answer keeps the two counters and says nothing about a settled
+    game, which is the retryable direction and the conservative one.
+
+    A re-read that cannot be COMPLETED answers nothing at all:
+    `_ffa_progress_relocked` raises a 503 carrying no progress fields, and it
+    propagates through here and through the caller. That is the conservative
+    direction and it is cheap where it lands -- the capture is already
+    committed by the time this runs, the client's outbox retries a 503, and the
+    retry meets the same capture (the (mode, room) idempotency answers
+    `already`) and, by then, a lobby it can read. What it removes is the answer
+    this function used to give: a number the sitting may have passed, which
+    earns the next report the very refusal this endpoint exists to stop it
+    earning. That is `_ffa_progress_relocked`'s own contract and this function
+    adds nothing to it."""
+    _named_settled = None
+    if isinstance(progress, dict) and progress.get("settled_game") is not None:
+        _named_settled = int(progress["settled_game"])
+    fresh = await _ffa_progress_relocked(db, lobby_uuid)
+    if _named_settled is not None and "settled_game" not in fresh:
+        if _named_settled < int(fresh.get("expected_game", 0)):
+            fresh["settled_game"] = _named_settled
+        else:
+            print(f"[FFA-REPORT] lobby {lobby_uuid} moved past settled_game "
+                  f"{_named_settled} while this report was captured; the answer "
+                  f"carries the counters alone")
+    return fresh
+
+
+def _ffa_named_game_number(room_id: str | None) -> int | None:
+    """The game number a report NAMES, or None when it names none.
+
+    The raw `_rN` tail bounded to the column's domain, in ONE place. The
+    endpoint used to bound it inline and the replay path never asked the
+    question at all, so an answer built from the row alone could name a number
+    the report had not (see _ffa_with_settled). A tail of 0, of 1000, or a room
+    id with no tail are all the same answer here: this report names no game."""
+    tail = _ffa_room_game_no(room_id)
+    if tail is None or not (1 <= int(tail) <= FFA_GAME_NUMBER_MAX):
+        return None
+    return int(tail)
+
+
+def _ffa_with_settled(progress: dict, prior, named) -> dict:
+    """The same progress, plus the number the recorded row holds -- but only
+    when the report NAMED that number.
+
+    Used by every answer that is about a row already holding the number the
+    report named: such a report can never succeed however often it is sent, so
+    the answer says which number is settled and the entry is dropped rather
+    than retried against a lobby that has moved on.
+
+    `named` IS THE NUMBER THE REPORT NAMED, or None when it named none, and it
+    is a parameter rather than a re-derivation so the two readings cannot
+    differ. Round 5 took the row's number unconditionally, which is right for
+    the game-number lookup (that lookup keys on the named number, so they are
+    equal by construction) and wrong for the room-keyed replay: a report whose
+    room id carries no usable `_rN` tail names no game at all, and the row
+    found under that room id still has a number, so the answer told the client
+    "game N is settled" about a number the report never mentioned. A client
+    obeying `settled_game` drops the outbox entry as terminal, so that answer
+    spent a report over a number it had not asked about -- reachable during the
+    migration window, where 327 numbers a tail-less historical row from the
+    lobby's own sequence.
+
+    The rule is therefore an EQUALITY, not a presence test: the field appears
+    only when the report named a number and the row holds that same one. When
+    they differ -- a stored row whose number came from neither the writer nor
+    its room id -- the answer keeps games_played and expected_game and says
+    nothing about a settled game, which is the retryable direction."""
+    out = dict(progress or {})
+    gno = None if prior is None else prior["game_number"]
+    if gno is not None and named is not None and int(gno) == int(named):
+        out["settled_game"] = int(gno)
+    return out
+
+
+class FfaReportRefusal(HTTPException):
+    """An FFA report refusal that carries the lobby's progress in its body.
+
+    A plain HTTPException serialises as {"detail": ...} and nothing else, so a
+    refused client learns only that it was refused. This subclass keeps the
+    detail STRING exactly as it was — every existing client reads that field
+    and none of them changes behaviour — and adds the progress fields beside
+    it, so the answer that tells a client its number was wrong also tells it
+    which number is right. Raised only from the FFA report path."""
+
+    def __init__(self, status_code: int, detail: str, progress: dict):
+        super().__init__(status_code=status_code, detail=detail)
+        self.progress = dict(progress or {})
+
+
+@app.exception_handler(FfaReportRefusal)
+async def _ffa_report_refusal_handler(request: Request, exc: FfaReportRefusal):
+    """{"detail": "<the same string as before>", ...progress}."""
+    return JSONResponse({"detail": exc.detail, **exc.progress},
+                        status_code=exc.status_code)
+
+
+async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n,
+                           kills_signed: bool, progress: dict):
     """Idempotent echo for an already-recorded room, or None when the room is
     unrecorded. Runs BEFORE every quarantine branch in submit_ffa_match
     (Codex Aug-3 r4 find 1): the durable client outbox legitimately retries a
@@ -47040,24 +50064,83 @@ async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n)
     the inactive-status branch used to QUARANTINE that duplicate (and the
     admin endpoint could show it can_accept=true because the real match
     predates the quarantine row). Also the sole duplicate handler for the
-    INSERT's unique-violation path."""
+    INSERT's unique-violation path.
+
+    A same-room second report is NOT automatically the same report (RJ-3): the
+    report room id is "<photon room>_<HHmmss>_r<N>", so two clients of one
+    game that started inside the same second build the SAME string. This used
+    to return 200 with the stored result without ever comparing the two
+    accounts, which is the contradiction case wearing the retry's clothes.
+    Both room-level and game-level duplicates now run the same comparison and
+    take the same two exits — echo when they agree, recorded-and-refused when
+    they do not."""
     prior = (await db.execute(text(
-        "SELECT id, player_count, lobby_id FROM ffa_matches WHERE photon_room_id = :room"
+        "SELECT id, player_count, lobby_id, winner_id, game_number"
+        "  FROM ffa_matches WHERE photon_room_id = :room"
     ), {"room": (report.photon_room_id or "")[:64]})).mappings().first()
     if prior is None:
         return None
+    # The number THIS report names, which is not necessarily the one the row
+    # holds: the row was found by room id, and a room id with no usable `_rN`
+    # tail names no game. _ffa_with_settled is where that distinction is spent.
+    _named = _ffa_named_game_number(report.photon_room_id)
+    # Both refusals below are TERMINAL for the client's outbox, so both keep
+    # the payload first. Round 2 answered them bare, on the reading that this
+    # height runs above the endpoint's own roster validation and a capture here
+    # would be a write primitive for anyone holding the report secret (Codex
+    # Aug-3 r5 find 1, r3 find 1). What that reading left out is the cost of
+    # the refusal (#430): a terminal answer over nothing kept SPENDS a report,
+    # and the payload it spends is the only evidence there was. The flood these
+    # two sites can produce is bounded exactly as every other capture is — the
+    # per-group pending quota, counted under an advisory lock, and the
+    # (mode, room) idempotency — and the caller answers 503 when that bound
+    # refuses, which the outbox retries rather than spends.
     if str(prior["lobby_id"]) != str(lobby_uuid):
-        raise HTTPException(409, "Room already recorded for a different lobby")
-    # The detailed echo requires the submitted roster to BE the recorded one
-    # (Codex Aug-3 r5 find 1: running before the endpoint's exact-roster
-    # validation, a bare existence check would hand match details to any
-    # HMAC-holding session that knows the lobby+room ids but wasn't in the
-    # game). An honest outbox retry always carries the original roster.
-    rec_ids = set((await db.execute(text(
-        "SELECT player_id FROM ffa_match_players WHERE match_id = :m"
-    ), {"m": prior["id"]})).scalars().all())
-    if set(id_by_steam.values()) != rec_ids:
-        raise HTTPException(409, "Duplicate room id")
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="ffa_room_other_lobby",
+            why=f"room is recorded under lobby {prior['lobby_id']}",
+            detail="Room already recorded for a different lobby",
+            progress=progress)
+    if not await _ffa_prior_roster_matches(db, prior, id_by_steam):
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="ffa_replay_roster_mismatch",
+            why="recorded roster is not the submitted one",
+            detail="Duplicate room id",
+            progress=_ffa_with_settled(progress, prior, _named))
+    why = await _ffa_prior_field_disagreement(db, prior, id_by_steam, report, kills_signed)
+    if why is not None:
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="ffa_game_contradiction", why=why,
+            detail="This game is already recorded",
+            progress=_ffa_with_settled(progress, prior, _named))
+    return await _ffa_match_echo(db, prior, lobby_uuid, id_by_steam, report, n,
+                                 progress, _named)
+
+
+async def _ffa_match_echo(db: AsyncSession, prior, lobby_uuid, id_by_steam, report, n,
+                          progress: dict, named):
+    """The recorded result of one already-stored match, as this reporter's own
+    response. Both callers have already run the two comparisons in order —
+    _ffa_prior_roster_matches, then _ffa_prior_field_disagreement — so by the
+    time this runs the submitted roster IS the recorded one and the two
+    accounts of the game agree. (There is no single `_ffa_prior_disagreement`
+    helper; the roster question and the field question are deliberately kept
+    apart, because a refusal that means two things is how one boolean ends up
+    lying about both — #430.)
+
+    Split out of _ffa_replay_echo (RJ-3) because two different questions reach
+    the same answer: a retry of the SAME room id, and a second report of the
+    same GAME under a different room id that agrees with what is stored. Both
+    return the stored result; neither settles anything a second time.
+
+    An INVALIDATED prior row echoes too, and the figures it echoes are the ones
+    an admin reversal has since taken back. That is stale information in a
+    response, not a second settlement, and the alternative — treating a
+    reversed game as never played — is the hole _FFA_PRIOR_GAME_SQL's comment
+    describes: it would let the number settle again and widen its own meter."""
     mine = (await db.execute(text(
         "SELECT placement, rating_change, xp_gained, gold_gained FROM ffa_match_players"
         " WHERE match_id = :m AND player_id = :p"
@@ -47073,7 +50156,424 @@ async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n)
         rating_changes={r["steam_id"]: float(r["rating_change"] or 0.0) for r in changes},
         xp_gained=int(mine["xp_gained"] or 0) if mine else 0,
         gold_gained=int(mine["gold_gained"] or 0) if mine else 0,
-        message="Already recorded")
+        message="Already recorded",
+        # The echo is a 200 for a game that is ALREADY settled, so it carries
+        # `settled_game` exactly as the refusals over the same fact do. A
+        # client whose outbox still holds this entry drops it and resumes at
+        # `expected_game`; one whose counter has drifted learns both numbers
+        # from an answer it treats as success.
+        **_ffa_with_settled(progress, prior, named))
+
+
+# ── One game, one settlement (RJ-3) ───────────────────────────────────────
+# The row this lobby already holds for the number the report NAMES, if any.
+#
+# INVALIDATED ROWS COUNT. _FFA_PACE_ANCHOR_SQL includes them — a reversal does
+# not give back the wall-clock the game consumed — and this lookup has to make
+# the SAME choice or the two combine into a hole: a report reusing an
+# invalidated game's number would find no prior row here, settle a second time,
+# AND be metered against a window this lookup's own row had been removed from,
+# which is a wider window and a larger payout than the honest game got. Both
+# include; neither arbitrates. An admin reversal says the recorded RESULT is no
+# longer defended; it does not say the game never happened.
+#
+# ORDER BY ended_at picks the row that settled FIRST when a lobby carries two
+# for one game (the 2026-08-07 pair). Both of those are live — both settled,
+# neither was reversed — so this is not a claim that the earliest is the only
+# live one; it is a deterministic choice, and the earliest is the row the
+# sitting's later games were already metered against.
+#
+# :g IS THE NUMBER THE REPORT NAMED, and only that number. Round 3 asked about
+# a SET — the named number plus the lobby's own next slot — and took the
+# earliest of whatever came back, so in a state where the lobby holds a row at
+# its next slot as well (a migration-preserved legacy gap: 327 numbers every
+# historical row from its room tail, and games_played need not agree with
+# them) the comparison could run against a row for a DIFFERENT game and, if
+# that other game happened to agree, answer 200 to a report of a game nobody
+# has recorded. A comparison has to be against the row that holds the number
+# under discussion or it is not a comparison of that game.
+#
+# Dropping the slot arm costs nothing, because the slot arm was never what
+# stopped a report from renaming its game: _ffa_game_number_refusal is, and it
+# is ONE EQUALITY. A report whose tail is not the lobby's next slot settles
+# only if the lobby already HOLDS that number — which is exactly the row this
+# lookup returns — and is otherwise refused and recorded. A report that names
+# no usable number at all names no game, so there is nothing to look up and
+# the same refusal takes it.
+#
+# The bind is CAST explicitly: an untyped bind is exactly the #275/#448 shape,
+# and one Postgres cannot type aborts the transaction.
+_FFA_PRIOR_GAME_SQL = """
+    SELECT id, winner_id, photon_room_id, player_count, ended_at, game_number,
+           invalidated_at
+      FROM ffa_matches
+     WHERE lobby_id = CAST(:lid AS uuid)
+       AND game_number = CAST(:g AS SMALLINT)
+     ORDER BY ended_at
+     LIMIT 1
+"""
+
+# The recorded account of one game, per player: every stored field that decides
+# whether a second report of it is the same account — see
+# _ffa_report_contradiction for why leave state is in here and timings are not.
+_FFA_PRIOR_VECTOR_SQL = """
+    SELECT p.steam_id, fmp.rounds_won, fmp.points_total, fmp.kills,
+           fmp.left_early, fmp.absent
+      FROM ffa_match_players fmp
+      JOIN players p ON p.id = fmp.player_id
+     WHERE fmp.match_id = CAST(:m AS uuid)
+"""
+
+
+def _ffa_score_shape_error(report, score_target: int, n_players: int) -> str | None:
+    """Why a report's tallies cannot be a completed game of this lobby, or None.
+
+    THE WINNER HOLDS THE UNIQUE ROUND MAXIMUM. An all-zero scoreboard has no
+    unique maximum at all, which is the shape a seat that never ran this
+    game's start reports (its per-game tables are empty). This check used to
+    run at the top of the endpoint and answer a bare 400, before the lobby row
+    had even been read — so the one report class the July-30 rule exists to
+    preserve was the one class it destroyed. It lives here now, after the
+    exact-roster + slot + HMAC binding, where the endpoint quarantines it.
+
+    THE WINNER HOLDS A WHOLE GAME'S WORTH OF ROUNDS. The FFA engine ends a game
+    when one player reaches the lobby's frozen score target, so on a real
+    report the winner holds exactly that many. A report assembled from a
+    partial view cannot show anyone at the target.
+
+    ...EXCEPT that "the lobby's target" is two values, not one. A client that
+    missed the score-target room property plays to the module default and
+    reports a REAL, complete game whose winner holds FFA_ROUNDS_TO_WIN instead
+    (the July-30 config-skew class). Refusing that game costs an honest player
+    the whole thing — no match row, no rating, no XP, no gold — which is worse
+    than the report the refusal was easing (#430). So the admissible set is
+    exactly {this lobby's frozen target, the module default}: two values, both
+    SERVER-derived, and for a default-configured lobby they are the same value
+    and this rule is byte-for-byte as strict as it was. A partial-view report
+    still fails it — 1/0/0 is neither.
+
+    The points ceiling follows the target the game actually ran to, because a
+    longer game honestly banks more. It is a ceiling on ONE of two server-held
+    numbers, never on one the report names; and paid_battles is capped again,
+    independently, by the server-clock pace meter.
+
+    Two rules that WERE here and could not fail are gone (#342/#431/#441):
+    `any(rounds_won > target)` after asserting `max(rounds_won) == target`, and
+    a floor on the SUMMED rounds — rounds_won is non-negative
+    (schemas.FfaPlayerEntry) and the winner alone contributes the target."""
+    max_rounds = max(p.rounds_won for p in report.players)
+    top = [p for p in report.players if p.rounds_won == max_rounds]
+    if len(top) != 1 or top[0].steam_id != report.winner_steam_id:
+        return "winner disagrees with the round tallies"
+    admissible = (int(score_target), int(FFA_ROUNDS_TO_WIN))
+    if max_rounds not in admissible:
+        return (f"winner holds {max_rounds} rounds; a complete game of this "
+                f"lobby ends at {score_target}")
+    if any(p.points_total > _ffa_max_points(n_players, max_rounds)
+           for p in report.players):
+        return "point tally above the game limit"
+    return None
+
+
+def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, list[str]]:
+    """Who this report says did not PLAY the game it describes: the carried
+    roster ghosts, the early-leave graces, and the log lines that say so.
+
+    ONE definition, because two surfaces read it. The settlement writes the
+    union into ffa_match_players.absent, and that flag is what excludes a seat
+    from rating, XP, gold, everyone else's beaten counts and the payout
+    denominator. The duplicate comparison has to ask the same question of a
+    second report, and a second copy of this rule in the comparator is the
+    sibling-drift shape (#279/#432) — one of the two copies would be the one
+    that stopped being updated.
+
+    Both arms carry the REFUTATION GUARD: `absent` and `game_points_at_leave`
+    are client-supplied and outside the frozen HMAC canonical, while
+    rounds_won/points_total are signed, so a signed non-zero tally proves the
+    seat played and refutes the claim against it. Kills count as presence proof
+    only when they are signed too (v2) — an unsigned kills field must never
+    override an honest absent flag.
+
+    Returns (ghosts, graced, log_lines). The caller prints the lines; this
+    function has no side effects, so the comparison path can ask the same
+    question without logging a second copy of the endpoint's own evidence."""
+    log: list[str] = []
+    ghosts: set = set()
+    for p in report.players:
+        if not (p.left_early and bool(getattr(p, "absent", False))):
+            continue
+        if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
+            log.append(f"[FFA] absent claim REFUTED for {p.steam_id}: signed tally "
+                       f"{p.rounds_won}r/{p.points_total}p/{p.kills}k is non-zero "
+                       f"(reporter {report.reported_by_steam_id}, room {report.photon_room_id})")
+            continue
+        ghosts.add(p.steam_id)
+    graced: set = set()
+    for p in report.players:
+        _gp = getattr(p, "game_points_at_leave", None)
+        if not p.left_early or p.steam_id in ghosts or _gp is None:
+            continue
+        if _gp >= FFA_LEAVE_GRACE_POINTS:
+            continue
+        if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
+            log.append(f"[FFA] early-leave grace REFUTED for {p.steam_id}: signed tally "
+                       f"{p.rounds_won}r/{p.points_total}p/{p.kills}k is non-zero "
+                       f"(claimed {_gp} field point(s) at leave, reporter "
+                       f"{report.reported_by_steam_id}, room {report.photon_room_id})")
+            continue
+        graced.add(p.steam_id)
+        log.append(f"[FFA] early-leave grace for {p.steam_id}: left at {_gp} field "
+                   f"point(s) (< {FFA_LEAVE_GRACE_POINTS}) — unrated for this game "
+                   f"(room {report.photon_room_id})")
+    return ghosts, graced, log
+
+
+def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
+                              kills_signed: bool) -> str | None:
+    """None when an incoming report says the same thing about a game as the row
+    already recorded for it; otherwise a short phrase naming the first
+    disagreement, for the log line. (The quarantine row's own reason is the
+    fixed 'ffa_game_contradiction'; the full payload rides in it.)
+
+    WHAT IS COMPARED IS WHAT THE SETTLEMENT ACTS ON. Round 3 compared the
+    winner, rounds_won and points_total, and kills only where they broke ties;
+    Codex's round-3 find is that two other stored facts also change what a
+    settlement does and could differ while the resend was answered 200:
+
+      * the EFFECTIVE `absent` — _ffa_leave_decision's union of the carried
+        roster ghosts and the early-leave graces. It is that union, not the
+        raw client claim, that the settlement stores and that decides whether
+        a seat is rated, paid and counted in anyone else's beaten count, so it
+        is the union that is compared. Two honest clients may state the claim
+        differently and still reach the same decision, and the decision is what
+        the game turns on;
+      * KILLS WHENEVER THEY ARE SIGNED, not only where they break ties. Signed
+        kills award ffa_kills_50 and ffa_kills_100 — achievements with gold —
+        and they refute a false absent or grace claim, in every lobby. The old
+        gate was `kills_break_ties`, which additionally requires the lobby's
+        frozen kills_tiebreak flag, so in a lobby with that flag off a kills
+        difference that moved real gold was classified as agreement.
+
+    Where kills are NOT signed (a v1 report) they decide nothing at all and are
+    still not compared: two honest clients of one game can tally them from
+    different local observations, and a 409 for a difference that changed
+    nothing would spend an honest report (#430).
+
+    RAW `left_early` IS NOT COMPARED, and round 4 comparing it was this rule
+    stated and then broken in the same docstring. It is an unsigned client
+    observation, outside the frozen HMAC canonical, that two honest clients of
+    one game genuinely differ on — a seat that drops on the winning point is
+    "left early" to one machine and "the game was already over" to the other.
+    With the effective decision above equal, it moves no rating, gold, XP,
+    placement or beaten count: all it changes is the stored flag and whether
+    `game_points_at_leave` is kept beside it, neither of which any settlement
+    reads. It is displayed in match history, so a difference is a real
+    difference — but the cost of calling it a contradiction is a terminal 409
+    to an honest reporter, no result figures for it, and a spent quarantine row
+    and operator review item, over two reports that describe one identical
+    settlement (#430). The claim is still the INPUT to the decision that is
+    compared, so a left_early difference that changes who played is caught
+    there, where it means something.
+
+    Timings and telemetry are never compared: they differ routinely and none of
+    them is paid. `game_points_at_leave` is not compared as a NUMBER for the
+    same reason — two clients can read the field's total an instant apart —
+    only through the grace decision it feeds, which is compared above.
+
+    SIGNATURE FORM IS NOT EVIDENCE ABOUT THE GAME. The effective decision is
+    recomputed here from the INCOMING report, while the flag on the row was
+    decided from the first one, and the refutation guard inside
+    _ffa_leave_decision is weaker for an unsigned (v1) report than a signed
+    one: kills count as proof of presence only when they are signed, so the
+    unsigned reading refutes fewer claims and marks a superset of seats
+    unrated. Two members of one lobby can be on different mod versions where
+    the lobby is not kills-capable, so the same claims reach this function in
+    both forms. A disagreement the form alone explains is therefore not a
+    disagreement, and both readings are computed: a recorded flag that agrees
+    with EITHER is agreement. That can only turn a refusal into an echo, and an
+    echo writes nothing — the recorded row stands either way (#283).
+
+    `prior_vec` maps steam id -> (rounds_won, points_total, kills, left_early,
+    absent) as _FFA_PRIOR_VECTOR_SQL reads them back. The left_early slot is
+    read back and deliberately unused here; the settlement still writes it.
+
+    This is a DETECTOR, not an arbiter. It never says which report is right,
+    and no caller may use it to replace a recorded result with a later one."""
+    if prior_winner_steam != report.winner_steam_id:
+        return (f"winner {report.winner_steam_id} vs recorded "
+                f"{prior_winner_steam if prior_winner_steam is not None else 'none'}")
+    # Both readings of the SAME claims — signed and unsigned — so that a
+    # difference explained by the incoming report's HMAC form alone is not
+    # reported as a difference about the game. `kills_signed` still gates the
+    # kills comparison below, where it is a fact about what was signed.
+    _g_signed, _c_signed, _ = _ffa_leave_decision(report, True)
+    _g_plain, _c_plain, _ = _ffa_leave_decision(report, False)
+    _unrated_either = ((_g_signed | _c_signed), (_g_plain | _c_plain))
+    # The message names the reading that matches THIS report's own form, so a
+    # log line says what the submitted report concluded rather than what the
+    # other reading of it would have.
+    _unrated_said = _unrated_either[0 if kills_signed else 1]
+    seen = set()
+    for p in report.players:
+        seen.add(p.steam_id)
+        rec = prior_vec.get(p.steam_id)
+        if rec is None:
+            return f"{p.steam_id} is not in the recorded roster"
+        if rec[:2] != (int(p.rounds_won), int(p.points_total)):
+            return (f"{p.steam_id} {p.rounds_won}r/{p.points_total}p vs recorded "
+                    f"{rec[0]}r/{rec[1]}p")
+        if kills_signed and rec[2] != int(getattr(p, "kills", 0) or 0):
+            return (f"{p.steam_id} {int(getattr(p, 'kills', 0) or 0)} kills vs "
+                    f"recorded {rec[2]}")
+        if all((p.steam_id in u) != bool(rec[4]) for u in _unrated_either):
+            return (f"{p.steam_id} did-not-play="
+                    f"{p.steam_id in _unrated_said} vs "
+                    f"recorded {bool(rec[4])}")
+    missing = set(prior_vec) - seen
+    if missing:
+        return f"recorded roster also holds {sorted(missing)[0]}"
+    return None
+
+
+async def _ffa_prior_roster_matches(db: AsyncSession, prior, id_by_steam) -> bool:
+    """Is the submitted roster the recorded match's roster?
+
+    Its own question, kept apart from the field comparison, because the two
+    answers are acted on differently and collapsing them into one value is how
+    a refusal ends up meaning two things (#430). This one is the AUTHORISATION
+    for the detailed echo — running before the endpoint's exact-roster
+    validation, a bare existence check would hand match details to any
+    HMAC-holding session that knows the lobby and room ids but was not in the
+    game (Codex Aug-3 r5 find 1). A report that fails it is refused and never
+    echoed; its payload is KEPT (the caller's own comment says why a terminal
+    refusal over nothing kept is the worse failure), and the pending quota is
+    what bounds the keeping. An honest outbox retry always carries the original
+    roster."""
+    rec_ids = set((await db.execute(text(
+        "SELECT player_id FROM ffa_match_players WHERE match_id = :m"
+    ), {"m": prior["id"]})).scalars().all())
+    return set(id_by_steam.values()) == rec_ids
+
+
+async def _ffa_prior_field_disagreement(db: AsyncSession, prior, id_by_steam, report,
+                                        kills_signed: bool) -> str | None:
+    """Why an incoming report is a different account of an already-recorded
+    game than the row that holds it, or None when the two agree. Assumes the
+    roster question above has already been answered yes.
+
+    One comparison for both duplicate shapes — same room id, and same game
+    under a different room id — so neither can take an exit the other cannot.
+
+    `kills_signed` is the endpoint's `kills_in_canonical`, NOT its
+    `kills_break_ties`: see _ffa_report_contradiction for why signed kills are
+    settlement-deciding in every lobby and tie-breaking kills only in some."""
+    prior_vec = {r["steam_id"]: (int(r["rounds_won"] or 0), int(r["points_total"] or 0),
+                                 int(r["kills"] or 0), bool(r["left_early"]),
+                                 bool(r["absent"]))
+                 for r in (await db.execute(text(_FFA_PRIOR_VECTOR_SQL),
+                                            {"m": prior["id"]})).mappings().all()}
+    prior_winner = next((s for s, pid in id_by_steam.items()
+                         if pid == prior["winner_id"]), None)
+    return _ffa_report_contradiction(prior_winner, prior_vec, report, kills_signed)
+
+
+async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_steam,
+                                 reason: str, why: str, detail: str,
+                                 progress: dict, status: int = 409):
+    """Keep the whole payload for review, then refuse — and never claim the
+    first half happened when it did not.
+
+    The client's outbox treats a 409 (and a 403) as terminal precisely BECAUSE
+    the server quarantines what it refuses; a terminal answer over a capture
+    that hit the per-group pending bound or raised would spend the report and
+    lose it, which is the July-30 failure this table exists to prevent. When
+    the capture did not record, the answer is 503 — "could not judge this
+    yet" — which the same outbox retries.
+
+    WHAT THAT 503 ACTUALLY BUYS, stated as a bound rather than as a promise:
+    the report survives for as long as the client keeps retrying it, and that
+    is a FINITE ladder (ApiClient's outbox), not "until an operator clears the
+    backlog", which is what round 3 claimed here. A backlog that outlives the
+    ladder loses the report anyway. What the 503 removes is the case that
+    needs no backlog at all — a terminal answer given over nothing kept — and
+    what keeps the ladder long enough to matter is the quota being generous
+    (50 pending per group, against a 40-game lobby cap) and the queue being
+    watched.
+
+    `status` is the terminal status this refusal answers when the capture DID
+    record: 409 for every lifecycle refusal, 403 for the signature downgrade.
+    The 503 arm is the same either way — what is at stake there is the report,
+    not the reason.
+
+    "variant" is a kept outcome and is SAID so in the answer: the room already
+    held a captured payload and this one differs, so both are now on file and
+    the reporter is told that its account is not the one that was there.
+
+    EVERY ANSWER GETS EXACTLY ONE DISPOSITION, AND THE TWO ARMS ARE DISJOINT BY
+    CONSTRUCTION. This helper has exactly two `raise` statements, and the side
+    of the re-derivation each one sits on IS the rule: the capture-failure arm
+    above it, and ONE terminal arm below it.
+
+    THE TERMINAL ARM IS ONE STATEMENT ANSWERING TWO STATUSES — 409 for a
+    lifecycle refusal, 403 for the signature downgrade — so "the two terminal
+    answers" counts values of `status`, never exits. Said this way because the
+    earlier wording counted them positionally, which reads as two raise sites
+    below the capture check and is not what the function holds; a count stated
+    in prose beside a count the code decides is the shape that drifts (#351).
+    test_the_two_503_arms_are_disjoint_on_the_answers_the_endpoint_builds
+    asserts the split — one exit above, one below — and its message is where a
+    later reader is told which reading is authoritative.
+
+    That terminal answer carries `progress`: the lobby's own
+    games_played/expected_game, and settled_game
+    where the caller knows the named game is already settled, so a refused
+    client can resynchronise instead of naming a number one further out on
+    every later game of the sitting. Those counters are RE-READ under a
+    fresh lobby lock after the capture, because the capture ends this request's
+    transaction and the caller's copy predates that;
+    `_ffa_progress_after_capture` is where that is written down.
+
+    The CAPTURE-FAILURE answer is the other arm, and it carries NO progress
+    fields at all — not the counters, and not `settled_game`. It is an answer
+    about THIS DELIVERY and not about the game: nothing was kept, so the body
+    has to come back unchanged, and a body that comes back unchanged needs no
+    number. Carrying one would put a single response into two dispositions at
+    once — `settled_game` means "this game is finished, stop sending it" and a
+    503 means "keep this and send it again", and no consumer can obey both. So
+    this arm RAISES BEFORE the re-derivation runs: the caller's `settled_game`
+    is not merely dropped on the way out, it is never reachable from the
+    response this arm builds, which is what makes the two arms disjoint by the
+    shape of the code rather than by a rule somebody has to keep obeying.
+    This function always raises."""
+    _kept = await _quarantine_report(
+        db, mode="ffa", reason=reason, status_code=status,
+        payload=report.model_dump(), group_id=lobby_uuid,
+        photon_room_id=report.photon_room_id,
+        reporter_id=id_by_steam.get(report.reported_by_steam_id),
+        player_ids=list(id_by_steam.values()))
+    print(f"[FFA] lobby {lobby_uuid} report of room {report.photon_room_id} "
+          f"refused ({reason}: {why}) — capture={_kept} "
+          f"(reporter {report.reported_by_steam_id})")
+    # THE CAPTURE-FAILURE ARM FIRST, AND ABOVE THE RE-DERIVATION. Nothing was
+    # kept, so this answer is about the delivery and not about the game: the
+    # body comes back unchanged and needs no number. It carries no progress
+    # fields at all, and it is raised here — above the line that would compute
+    # them — so no response built on this arm can carry `settled_game` even if
+    # the caller resolved one. That disjointness is what keeps a 503 in ONE
+    # disposition: retryable, keep the body, change nothing.
+    if _kept not in ("recorded", "already", "variant"):
+        raise FfaReportRefusal(503, "Could not record this report for review - "
+                                    "retry this report unchanged", {})
+    # THE CAPTURE ABOVE ENDED THIS REQUEST'S TRANSACTION AND RELEASED THE LOBBY
+    # LOCK, so `progress` is a reading of a sitting that may have moved. The
+    # ONE terminal raise below answers from the re-derivation instead, for
+    # whichever of the two statuses it carries. See
+    # _ffa_progress_after_capture for why settled_game is carried rather than
+    # re-derived, and for the direction a failed re-read takes.
+    progress = await _ffa_progress_after_capture(db, lobby_uuid, progress)
+    if _kept == "variant":
+        detail = f"{detail} - a different account of this room is already on file"
+    raise FfaReportRefusal(status, detail, progress)
 
 
 @app.post("/api/v1/ffa/matches", response_model=FfaMatchResponse, tags=["FFA Matches"])
@@ -47088,11 +50588,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         raise HTTPException(403, "Invalid FFA match signature")
     # Two INDEPENDENT facts derived from the verified form:
     #   kills_in_canonical — the kills values are covered by the signature
-    #     (v2 form). Feeds the absent-refutation guard only.
+    #     (v2 form). Three things read it: the absent-refutation guard, the
+    #     kills achievements (ffa_kills_50/100, which pay gold in EVERY
+    #     lobby), and the duplicate comparison, which has to compare exactly
+    #     what a settlement acts on.
     #   kills_break_ties — kills participate in PLACEMENT. Requires v2 AND
     #     the lobby's FROZEN kills_tiebreak capability flag (Codex Aug-3
     #     find 1): semantics must be a property of the GAME, not of which
-    #     member reports.
+    #     member reports. It is a STRICTLY NARROWER condition than the one
+    #     above and is not the comparison's gate — round 3 used it there, and
+    #     a kills difference that moved achievement gold in a lobby with the
+    #     flag off was classified as agreement.
     # A v1 report keeps the legacy shared-tie semantics ONLY in a lobby that
     # is not kills-capable (some member below the floor at lock); from a
     # kills-capable lobby a v1 report of an UNRECORDED room is quarantined +
@@ -47113,20 +50619,21 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     await _assert_no_service_subject(db, affected_steam_ids=steams)
     if not (report.photon_room_id or "").strip():
         raise HTTPException(400, "photon_room_id is required")
-    # §6 casual path: the ranked AUTHORITY is the LOBBY ROW, decided below the
-    # FOR UPDATE as `rated = lobby.is_ranked AND report.is_ranked` — this
-    # early site fires before the row is loaded, so it can no longer
-    # hard-reject. A crafted is_ranked=false still cannot open an economy
-    # side channel: the server ANDs it against the row it froze at Start, and
-    # a FALSE claim against a ranked lobby only DOWNGRADES the crafter's own
-    # game to casual — quarantine-class skew, handled below. An old client
-    # always sends true, which the AND makes correct for both lobby kinds.
+    # §6 casual path: the ranked AUTHORITY is the LOBBY ROW alone, decided
+    # below the lobby lock as `rated = _lobby_ranked`; the report's is_ranked
+    # is not part of it. A claim that disagrees with the row is logged as
+    # skew evidence and otherwise ignored, so a crafted is_ranked=false opens
+    # no economy side channel and downgrades nothing. This early site fires
+    # before the row is loaded, so it can no longer hard-reject. An old
+    # client always sends true, which is never consulted.
 
-    # Winner must hold the unique round maximum.
+    # The winner-holds-the-unique-round-maximum rule used to answer a bare 400
+    # right here, above the lobby read — so an all-zero scoreboard, the exact
+    # report RJ-3 is about, was refused with nothing kept. The rule moved into
+    # _ffa_score_shape_error, below the roster/slot/HMAC binding, where the
+    # endpoint records the payload before refusing it. Only the value survives
+    # at this height, and only as an input to the lobby-closed capture gate.
     max_rounds = max(p.rounds_won for p in report.players)
-    top = [p for p in report.players if p.rounds_won == max_rounds]
-    if len(top) != 1 or top[0].steam_id != report.winner_steam_id:
-        raise HTTPException(400, "winner disagrees with the round tallies")
 
     prows = (await db.execute(
         select(Player.id, Player.steam_id).where(Player.steam_id.in_(steams))
@@ -47136,9 +50643,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         raise HTTPException(404, "One or more players not registered")
 
     # Lobby row FIRST (the group anchor — serializes concurrent reports).
-    lobby = (await db.execute(text(
-        "SELECT * FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
-    ), {"lid": lobby_uuid})).mappings().first()
+    lobby, _expected_game = await _ffa_lock_lobby_slot(db, lobby_uuid)
     if lobby is None:
         # No row => the report cannot be bound to a real roster, so it is not
         # quarantined (Codex round-3 out-of-scope find: capture-before-binding
@@ -47146,12 +50651,46 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # payloads). The recoverable incident class — a live lobby closed
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
-    await _assert_no_service_subject(db, affected_player_ids=list(lobby["member_ids"] or []))
+    # THE LOBBY'S PROGRESS, read under the lobby lock above and carried by
+    # every answer below — success, echo and refusal alike. See _ffa_progress
+    # for why a refusal that does not say which number is right turns one lost
+    # report into a sitting that settles nothing more.
+    #
+    # Built BEFORE the service-account guard, not after it. Round 5 put the
+    # guard first, so its 403 was an answer given under the lobby lock and
+    # carrying nothing — the one post-lock outcome left outside the rule, and a
+    # terminal status at that, which is the shape that costs a sitting the rest
+    # of its games. The guard's own decision is unchanged; only its body is.
+    _progress = _ffa_progress(_expected_game - 1)
+    try:
+        await _assert_no_service_subject(
+            db, affected_player_ids=list(lobby["member_ids"] or []))
+    except HTTPException as _svc:
+        raise FfaReportRefusal(_svc.status_code, str(_svc.detail), _progress)
+    # ── Kills tie-break capability: read the flag FROZEN at lock time
+    # (migration 187), computed there from each member's OWN session-
+    # authenticated join call (ffa_queue.mod_version) — never from the global,
+    # last-write-wins players.mod_version observation.
+    # Freezing at lock makes the semantics a property of the GAME: no
+    # mid-sitting version change, poll race, or reporter identity can flip
+    # them between games of one sitting. Missing column/NULL (pre-187 lobby
+    # mid-flight during the deploy) => False => legacy shared-tie semantics,
+    # the safe direction (#288: prefer under-application).
+    # Read here, with the lobby row, and used for PLACEMENT only. The
+    # duplicate comparison does not take this flag: it takes
+    # kills_in_canonical, because a kills difference is settlement-deciding
+    # wherever kills are signed and not only where they break a tie.
+    _lobby_kills_capable = bool(lobby["kills_tiebreak"]) if "kills_tiebreak" in lobby else False
+    kills_break_ties = kills_in_canonical and _lobby_kills_capable
     # Duplicate-room replay FIRST — before the status/shape/limit branches
     # below, every one of which quarantines (Codex Aug-3 r4 find 1: an honest
     # outbox retry of a committed report, arriving after the lobby closed,
-    # must get its idempotent echo, never a quarantine capture).
-    _replay = await _ffa_replay_echo(db, report, lobby_uuid, id_by_steam, len(report.players))
+    # must get its idempotent echo, never a quarantine capture). It compares
+    # the two accounts of the game before echoing: a same-room second report
+    # is not automatically a retry (RJ-3).
+    _replay = await _ffa_replay_echo(db, report, lobby_uuid, id_by_steam,
+                                     len(report.players), kills_in_canonical,
+                                     _progress)
     if _replay is not None:
         return _replay
     # Review find 2: a canceled/completed lobby must not keep minting rated
@@ -47164,17 +50703,6 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     _cfg = _ffa_lobby_config(lobby)
     _score_target = _cfg["score_target"]
     _lobby_ranked = bool(lobby["is_ranked"]) if ("is_ranked" in lobby and lobby["is_ranked"] is not None) else True
-    # ── Kills tie-break capability: read the flag FROZEN at lock time
-    # (migration 187), computed there from each member's OWN session-
-    # authenticated join call (ffa_queue.mod_version) — never from the global,
-    # last-write-wins players.mod_version observation.
-    # Freezing at lock makes the semantics a property of the GAME: no
-    # mid-sitting version change, poll race, or reporter identity can flip
-    # them between games of one sitting. Missing column/NULL (pre-187 lobby
-    # mid-flight during the deploy) => False => legacy shared-tie semantics,
-    # the safe direction (#288: prefer under-application).
-    _lobby_kills_capable = bool(lobby["kills_tiebreak"]) if "kills_tiebreak" in lobby else False
-    kills_break_ties = kills_in_canonical and _lobby_kills_capable
     # (The v1-downgrade rejection for kills-capable lobbies lives BELOW the
     # roster/shape/limit binding checks — Codex Aug-3 r3 find 1: quarantining
     # up here would run before binding and become a quota-spam primitive.)
@@ -47193,70 +50721,151 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # Quarantine ONLY a report that binds to this lobby's frozen roster
         # (exact member set, reporter among them) and respects the engine's
         # win invariant — the same trust boundary the team path enforces.
-        _bound = (member_set
-                  and reported_ids == member_set
-                  and report.reported_by_steam_id in id_by_steam
-                  and max_rounds == _score_target)
-        if _bound:
-            await _quarantine_report(
-                db, mode="ffa", reason=f"lobby_{lobby['status']}", status_code=409, payload=report.model_dump(),
-                group_id=lobby_uuid, photon_room_id=report.photon_room_id,
-                reporter_id=id_by_steam.get(report.reported_by_steam_id),
-                player_ids=list(id_by_steam.values()))
-        raise HTTPException(409, "Lobby is not active")
+        # The win invariant is _ffa_score_shape_error's, not a second copy of
+        # it: an open-coded `max_rounds == _score_target` here would refuse to
+        # keep the very config-skew report the rule below now settles, which
+        # is the sibling-drift shape (#279/#432).
+        #
+        # The three answers are now told apart, because round 2 gave all three
+        # the SAME terminal 409 and kept a record for only one of them:
+        #   * roster does not bind -> 403, the same answer the binding check
+        #     below gives an active lobby. Nothing is captured, and nothing
+        #     claims otherwise: an unbound payload is not evidence about this
+        #     lobby's game and capturing it before binding is the quota-spam
+        #     primitive (Codex Aug-3 r3 find 1).
+        #   * roster binds, shape does not -> the shape refusal, which records
+        #     the payload and checks that the capture happened.
+        #   * both bind -> the lifecycle refusal, which does the same. Round 2
+        #     ignored the capture's answer here, so a report that hit the
+        #     pending bound was answered 409 "kept" with nothing kept.
+        _roster_bound = (member_set
+                         and reported_ids == member_set
+                         and report.reported_by_steam_id in id_by_steam)
+        if not _roster_bound:
+            raise FfaReportRefusal(403, "Report must cover exactly the lobby roster",
+                                   _progress)
+        _closed_shape = _ffa_score_shape_error(report, _score_target,
+                                               len(report.players))
+        if _closed_shape:
+            await _ffa_record_and_refuse(
+                db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+                reason="score_shape_mismatch",
+                why=f"target={_score_target} (lobby {lobby['status']}): {_closed_shape}",
+                detail=_closed_shape, progress=_progress)
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason=f"lobby_{lobby['status']}",
+            why=f"lobby status is {lobby['status']}",
+            detail="Lobby is not active", progress=_progress)
     # Roster validation (review finds 1/3): member_ids is the lock-time roster
     # ORDERED BY SLOT (queue rows get pruned; this array doesn't). The report
     # must cover the roster EXACTLY — a subset would let a hostile reporter
     # drop whoever beat them and still bank rating/XP. Leavers stay in the
     # report with left_early=true, so a shrinking lobby is not a valid excuse.
     if not member_set:
-        raise HTTPException(409, "Lobby has no recorded roster")
+        # A live lobby with an empty frozen roster is a structural fault, not a
+        # client one, and the report it refuses is a real game. Kept, like every
+        # other terminal refusal on this path, so an operator can settle it by
+        # hand; bounded by the same per-group pending quota.
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="ffa_lobby_no_roster", why="lobby row carries no member_ids",
+            detail="Lobby has no recorded roster", progress=_progress)
     if reported_ids != member_set:
-        raise HTTPException(403, "Report must cover exactly the lobby roster")
+        raise FfaReportRefusal(403, "Report must cover exactly the lobby roster",
+                               _progress)
     if len(report.players) != int(lobby["player_count"] or len(members)):
-        raise HTTPException(403, "Report player count does not match the lobby")
+        raise FfaReportRefusal(403, "Report player count does not match the lobby",
+                               _progress)
     slot_by_pid = {pid: i for i, pid in enumerate(members)}
     for p in report.players:
         pid = id_by_steam[p.steam_id]
         if slot_by_pid.get(pid) != p.slot:
-            raise HTTPException(403, f"Slot mismatch for {p.steam_id}")
-    # Engine invariants (review find 2): the FFA engine ends a game at exactly
-    # the lobby's frozen score target, and nobody else can have reached it.
-    # Score-SHAPE mismatches vs the row are QUARANTINED, not destroyed: the
-    # honest cause is config skew (a client that missed the score-target room
-    # prop plays to its default and reports a real game whose shape disagrees
-    # with the row — the July-30 destroyed-reports class). This runs AFTER the
+            raise FfaReportRefusal(403, f"Slot mismatch for {p.steam_id}", _progress)
+    # Engine invariants (review find 2): the winner holds the unique round
+    # maximum, and a complete game of this lobby ends at its frozen score
+    # target — or at the module default, which is what a client that missed
+    # the score-target room property honestly plays to. That second arm is the
+    # July-30 destroyed-reports class, and it is now SETTLED rather than
+    # refused: the refusal cost an honest player a real game's whole record
+    # (#430). What the rule still refuses is a report that is not a complete
+    # game at either target — the all-zero or near-zero scoreboard a seat with
+    # no per-game tables of its own produces (RJ-3).
+    # Refusals here are QUARANTINED, not destroyed. This runs AFTER the
     # exact-roster + slot + HMAC binding, so it is not a capture-before-binding
     # write primitive; a crafted score from a real roster member lands in the
     # admin queue instead of silently vanishing either way.
-    max_pts = _ffa_max_points(len(report.players), _score_target)
-    _shape_error = None
-    if max_rounds != _score_target:
-        _shape_error = f"winner must hold exactly {_score_target} rounds"
-    elif any(p.rounds_won > _score_target for p in report.players):
-        _shape_error = "round tally above the game limit"
-    elif any(p.points_total > max_pts for p in report.players):
-        _shape_error = "point tally above the game limit"
+    _shape_error = _ffa_score_shape_error(report, _score_target, len(report.players))
     if _shape_error:
-        print(f"[FFA] score-shape mismatch vs lobby {lobby_uuid} config "
-              f"(target={_score_target}): {_shape_error} — quarantining")
-        await _quarantine_report(
-            db, mode="ffa", reason="score_shape_mismatch", status_code=409,
-            payload=report.model_dump(), group_id=lobby_uuid,
-            photon_room_id=report.photon_room_id,
-            reporter_id=id_by_steam.get(report.reported_by_steam_id),
-            player_ids=list(id_by_steam.values()))
-        raise HTTPException(409, _shape_error)
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="score_shape_mismatch", why=f"target={_score_target}: {_shape_error}",
+            detail=_shape_error, progress=_progress)
+    # ── The target the game was actually played to ────────────────────────
+    # _ffa_score_shape_error has just pinned max_rounds to one of exactly two
+    # SERVER-held numbers: this lobby's frozen target, or the module default a
+    # client that missed the score-target room property honestly plays to.
+    # So the report SELECTS between two server-held numbers and cannot name a
+    # third — which is a narrower claim than round 3's "never a number the
+    # report chose", and the narrower one is the true one: max_rounds is the
+    # report's own tally, and which of the two branches (frozen economics, or
+    # the refund-and-reweight below) runs does follow from it. What it cannot
+    # do is invent a length: a tally at any other value is refused above, so
+    # the two admissible lengths are the lobby's and the module's, never the
+    # reporter's. When the two differ the game is a REAL completed game of a
+    # different length.
+    _played_target = int(max_rounds)
+    _target_skew = _played_target != int(_score_target)
+    if _target_skew:
+        # SETTLED, not refused — refusing cost an honest player the whole game
+        # (#430). But it is not settled with the frozen target's ECONOMICS,
+        # which is what round 2 did and what makes the acceptance wrong:
+        #
+        #   * WAGERS ARE REFUNDED, not paid. ffa_bet_place priced every wager
+        #     on this game through _ffa_field_odds(field, score_target), and
+        #     that function's own docstring says race length changes true win
+        #     probabilities — a first-to-3 favourite is a different price from
+        #     a first-to-5 one. A wager placed against the frozen configuration
+        #     cannot be priced for a game played to another target, and the
+        #     server may not decide after the fact which of the two prices the
+        #     bettor agreed to. Every stake comes back, and the refund is part
+        #     of THIS transaction: it is claim-first, it moves the EXACT stake
+        #     as a delta and refuses a balance that cannot cover it, it ends at
+        #     no silent cap (it refuses past 10 000 wagers on one game), and if
+        #     it cannot complete the settlement does not commit
+        #     (_refund_ffa_game_bets_strict). Round 3 called the fail-soft
+        #     sweep helper here, which swallowed its own failures and stopped
+        #     at 200 rows, so a leftover wager on a skewed game was later
+        #     settled at the frozen price by the closure pass — the one
+        #     outcome this branch exists to prevent (#412: a fail-soft helper
+        #     becomes a bug when a caller with the opposite polarity reuses
+        #     it).
+        #   * RATING SETTLES WITH THE WEIGHT OF THE TARGET PLAYED.
+        #     _ffa_rating_deltas' w(N) is the information weight of the result,
+        #     and the result is evidence about the race that was run, not about
+        #     the one the row froze. XP and gold have no such weight: they are
+        #     computed from this game's own points and battles and the
+        #     server-clock pace meter, none of which reads either target, so
+        #     they already follow the game that was played and are unchanged.
+        #   * THE ROW RECORDS BOTH NUMBERS (score_target_frozen /
+        #     score_target_played, migration 327), so the skew is a readable
+        #     fact afterwards rather than a log line somebody has to still have.
+        print(f"[FFA] lobby {lobby_uuid} score-target skew: report is a complete "
+              f"game to {_played_target}, lobby row froze {_score_target} — "
+              f"settling at the played target, refunding this game's wagers "
+              f"(reporter {report.reported_by_steam_id})")
     # Rate ceiling: a lobby's games are real matches taking minutes each. This
     # bounds a compromised client's fabrication rate even inside a live lobby
     # (a full server-issued per-game nonce is the next hardening step).
     if int(lobby["games_played"] or 0) >= FFA_MAX_GAMES_PER_LOBBY:
-        await _quarantine_report(
-            db, mode="ffa", reason="lobby_game_limit", status_code=409, payload=report.model_dump(),
-            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
-            reporter_id=id_by_steam.get(report.reported_by_steam_id),
-            player_ids=list(id_by_steam.values()))
-        raise HTTPException(409, "Lobby game limit reached")
+        # Status-checked like every other terminal refusal here: round 2 threw
+        # the capture's answer away, so a report arriving once the per-group
+        # pending bound was full got a 409 that said "kept" over nothing kept.
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="lobby_game_limit",
+            why=f"lobby has settled {int(lobby['games_played'] or 0)} game(s)",
+            detail="Lobby game limit reached", progress=_progress)
 
     # A v1 signature from a lobby whose ENTIRE roster advertised a v2-signing
     # build at lock is definitionally a downgrade attempt (Codex Aug-3 r2
@@ -47272,13 +50881,118 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # is held across it. Quarantined, not dropped, so the vanishing-rare
     # honest case (mid-sitting DLL downgrade) stays admin-recoverable.
     if canonical_form == "v1" and _lobby_kills_capable:
-        await _quarantine_report(
-            db, mode="ffa", reason="v1_canonical_downgrade", status_code=403,
-            payload=report.model_dump(), group_id=lobby_uuid,
-            photon_room_id=report.photon_room_id,
-            reporter_id=id_by_steam.get(report.reported_by_steam_id),
-            player_ids=list(id_by_steam.values()))
-        raise HTTPException(403, "This lobby requires the current report signature")
+        # 403, and status-checked for the same reason the 409s are: the client's
+        # outbox spends the report either way, so an answer that depends on the
+        # capture having happened must ask whether it did.
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="v1_canonical_downgrade",
+            why="v1 signature from a lobby whose roster locked kills-capable",
+            detail="This lobby requires the current report signature",
+            progress=_progress, status=403)
+
+    # ── One game, one settlement (RJ-3/RJ-4) ──────────────────────────────
+    # WHICH GAME THIS IS, AND WHO DECIDES. `games_played` counts the reports
+    # this lobby has settled and is incremented once per settlement inside the
+    # settling transaction, under the lobby lock taken above — so `+ 1` is this
+    # sitting's next slot, read after any concurrent report committed (READ
+    # COMMITTED re-reads under the lock, #208). That is the number the row is
+    # stored with, the number the pace anchor excludes, and the number the bet
+    # settle pays. The report's own `_rN` tail is a CROSS-CHECK THAT HAS TO
+    # AGREE: a report naming a number this lobby already holds is compared
+    # against that row, and a report naming any OTHER number than the lobby's
+    # next slot is refused and recorded — never stored under a number it did
+    # not name. Round 2 accepted an ahead tail and stored `expected` anyway;
+    # _ffa_game_number_refusal's docstring has the repeat that allowed. So a
+    # higher, lower, reused-live, reused-invalidated, zero, missing or
+    # out-of-range number buys no extra settlement, no wider payout window and
+    # no retargeted wager.
+    # It is the SAME expression the other two per-game surfaces bind to
+    # (ffa_bet_place's expected_game, the live-points UPDATE's
+    # `COALESCE(games_played,0) + 1 = :gn`), so a row, its wagers and its
+    # live-points figure name one game by construction.
+    _room_tail = _ffa_room_game_no(report.photon_room_id)
+    _game_number = _expected_game
+    # A game this lobby has already recorded does not settle a second time.
+    # The room-id replay echo at the top of the endpoint catches a retry of the
+    # same room; this catches what it cannot see — two clients of ONE game,
+    # each stamping its own start time into its own room id, so the two strings
+    # differ and both used to insert. That is the 2026-08-07 instance: two
+    # rows, two different winners, both rated, both paid.
+    # The lookup asks about ONE number: the one the report NAMED. That is what
+    # catches the second client of one game (its counter says N while the lobby
+    # has moved to N+1) — the tail can be ANY distance behind the slot on an
+    # honest path, a second client whose outbox was offline for three games
+    # delivers its game-1 report while the lobby is on four, and the row for
+    # that game is found because a settled row's number IS its tail (the
+    # equality in _ffa_game_number_refusal). That equality is what makes "look
+    # up the tail" a reliable lookup rather than a guess about how the row was
+    # stored, and it is also what makes the lobby's own slot the WRONG thing to
+    # ask about here: round 3 asked about both and took the earliest answer, so
+    # a lobby holding a row at its next slot as well — a legacy gap state that
+    # migration 327 preserves on purpose — could have this report compared
+    # against another game's row entirely (Codex round-3 find at the lookup).
+    # A report that names a number the lobby does not hold reaches
+    # _ffa_game_number_refusal below, which settles it only if that number IS
+    # the lobby's next slot and otherwise refuses and records it.
+    # Which of the two accounts is right is not a question this endpoint can
+    # answer, so it does not answer it (#283). The recorded row stands
+    # untouched, the second report settles nothing, and when the two disagree
+    # the whole payload is kept in the quarantine queue with the disagreement
+    # named. No rating, XP or gold is written by this branch, and nothing
+    # already applied is reversed or clawed back.
+    # An AGREEING second report is an ordinary duplicate delivery and gets the
+    # same idempotent echo a same-room retry gets.
+    # Placement: after the roster/slot/shape/limit binding above, so it is not
+    # a capture-before-binding write primitive, and before the players lock
+    # pass below, because _quarantine_report rolls back to run.
+    _named_game = _ffa_named_game_number(report.photon_room_id)
+    _prior_game = None
+    if _named_game is not None:
+        _prior_game = (await db.execute(
+            text(_FFA_PRIOR_GAME_SQL),
+            {"lid": lobby_uuid, "g": _named_game})).mappings().first()
+    if _prior_game is not None:
+        # Here the report has already been bound to the lobby's frozen roster
+        # exactly, so a recorded roster that differs IS evidence about the game
+        # (a row from before a member changed, say) and is captured like any
+        # other disagreement — unlike at the endpoint-top replay, which runs
+        # above that binding.
+        _contra = (None if await _ffa_prior_roster_matches(db, _prior_game, id_by_steam)
+                   else "recorded roster is not the submitted one")
+        if _contra is None:
+            _contra = await _ffa_prior_field_disagreement(
+                db, _prior_game, id_by_steam, report, kills_in_canonical)
+        if _contra is None:
+            print(f"[FFA] lobby {lobby_uuid} game {_prior_game['game_number']} is "
+                  f"already recorded as room {_prior_game['photon_room_id']}; this "
+                  f"report of room {report.photon_room_id} agrees with it — "
+                  f"echoing the recorded result, not settling again "
+                  f"(reporter {report.reported_by_steam_id})")
+            return await _ffa_match_echo(db, _prior_game, lobby_uuid, id_by_steam,
+                                         report, len(report.players), _progress,
+                                         _named_game)
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="ffa_game_contradiction",
+            why=f"game {_prior_game['game_number']} recorded as "
+                f"{_prior_game['photon_room_id']}: {_contra}",
+            detail="This game is already recorded",
+            progress=_ffa_with_settled(_progress, _prior_game, _named_game))
+    # No row for the number this report named. The tail is now the only thing
+    # that can say this report is not the game the lobby is on — see
+    # _ffa_game_number_refusal for what each answer costs.
+    _number_error = _ffa_game_number_refusal(_room_tail, _expected_game)
+    if _number_error:
+        await _ffa_record_and_refuse(
+            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+            reason="ffa_game_number_mismatch", why=_number_error,
+            detail=f"{_number_error}; expected_game={_expected_game}",
+            progress=_progress)
+    # Past this line the tail and the slot are the SAME number, so `_game_number`
+    # is both what the lobby says and what the report named. Round 2 had a
+    # counter-skew log line here for the ahead case; there is no ahead case to
+    # log any more, and a log line is not what the two surfaces needed.
 
     # Players pass: sorted FOR NO KEY UPDATE (#202/#203 — never FOR UPDATE,
     # and this pass is the real gate; glicko rows may not exist yet).
@@ -47329,16 +51043,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # a refuted claim is visible evidence, not a silent correction. Kills
     # count as presence proof only when signed (v2) — an unsigned kills field
     # must never override an honest absent flag.
-    ghosts = set()
-    for p in report.players:
-        if not (p.left_early and bool(getattr(p, "absent", False))):
-            continue
-        if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
-            print(f"[FFA] absent claim REFUTED for {p.steam_id}: signed tally "
-                  f"{p.rounds_won}r/{p.points_total}p/{p.kills}k is non-zero "
-                  f"(reporter {report.reported_by_steam_id}, room {report.photon_room_id})")
-            continue
-        ghosts.add(p.steam_id)
+    #
+    # The rule itself lives in _ffa_leave_decision, because the duplicate
+    # comparison asks the same question of a second report and two copies of
+    # one rule is the sibling-drift shape (#279/#432). The log lines it builds
+    # are printed HERE, where the evidence belongs, and nowhere else.
     # EARLY-LEAVE GRACE (Sid, 2026-08-20 — see FFA_LEAVE_GRACE_POINTS): a
     # leaver who left THIS game before the field reached two points did not
     # play a game anyone can be rated on. They join the ghosts in `unrated`:
@@ -47357,23 +51066,9 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     #       client still in the room at game over, never by the leaver, and
     #       voiding a leaver's result is worth nothing to the reporter.
     # Old clients omit the field entirely -> no grace, pre-fix behaviour.
-    graced = set()
-    for p in report.players:
-        _gp = getattr(p, "game_points_at_leave", None)
-        if not p.left_early or p.steam_id in ghosts or _gp is None:
-            continue
-        if _gp >= FFA_LEAVE_GRACE_POINTS:
-            continue
-        if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
-            print(f"[FFA] early-leave grace REFUTED for {p.steam_id}: signed tally "
-                  f"{p.rounds_won}r/{p.points_total}p/{p.kills}k is non-zero "
-                  f"(claimed {_gp} field point(s) at leave, reporter "
-                  f"{report.reported_by_steam_id}, room {report.photon_room_id})")
-            continue
-        graced.add(p.steam_id)
-        print(f"[FFA] early-leave grace for {p.steam_id}: left at {_gp} field "
-              f"point(s) (< {FFA_LEAVE_GRACE_POINTS}) — unrated for this game "
-              f"(room {report.photon_room_id})")
+    ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)
+    for _line in _leave_log:
+        print(_line)
     # Everyone excluded from rating/economy for this game. `ghosts` still names
     # the carried-roster subset on its own; every "did they play THIS game"
     # question below asks `unrated`.
@@ -47388,16 +51083,18 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
 
     # ── Economy meter inputs (v1.36.0, §5 of the config-lobby spec). ──
     # battles = Σ points_total (signed — inside the HMAC canonical).
-    # elapsed is measured from SERVER receipt times only: the previous game's
-    # ended_at (or lobby activation for game 1), never the client-supplied
-    # started_at/duration. GREATEST + floor guards the admin-replay case where
-    # a re-inserted historical row leaves MAX(ended_at) in the future
-    # (monotonic guard — elapsed can never go negative or absurdly small).
+    # elapsed is measured from SERVER receipt times only: the first receipt of
+    # the lobby's most recent OTHER game (or lobby activation for game 1),
+    # never the client-supplied started_at/duration. _FFA_PACE_ANCHOR_SQL is
+    # where per-game and per-row differ, and why. max() + floor guards the
+    # admin-replay case where a re-inserted historical row leaves the anchor in
+    # the future (monotonic guard — elapsed can never go negative or absurdly
+    # small).
     _n_live_meter = len(report.players) - len(unrated)
     battles_total = sum(max(0, int(p.points_total)) for p in report.players)
-    _max_prior_end = (await db.execute(text(
-        "SELECT MAX(ended_at) FROM ffa_matches WHERE lobby_id = :lid"
-    ), {"lid": lobby_uuid})).scalar()
+    _max_prior_end = (await db.execute(
+        text(_FFA_PACE_ANCHOR_SQL),
+        {"lid": lobby_uuid, "g": _game_number})).scalar()
     _anchor_candidates = [t for t in (lobby["created_at"], _max_prior_end) if t is not None]
     # ONE post-lock DB clock for BOTH the elapsed computation and the stored
     # ended_at (Codex find 4): the first draft measured elapsed with a
@@ -47405,14 +51102,12 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # time, frozen before this request waited on the lobby lock. Queued
     # reports would each re-count their predecessors' lock/processing time as
     # payable elapsed, defeating the pace ceiling. clock_timestamp() here runs
-    # after the FOR UPDATE above, and the identical value is bound into the
+    # after the lobby lock above, and the identical value is bound into the
     # INSERT, so the next report's anchor is exactly this report's meter end.
     _now_dt = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
     _anchor = max(_anchor_candidates) if _anchor_candidates else _now_dt
     elapsed_seconds = max(30.0, (_now_dt - _anchor).total_seconds())
-    _sec_per_battle = _ffa_sec_per_battle(max(2, _n_live_meter))
-    paid_battles = min(float(battles_total),
-                       elapsed_seconds * FFA_PACE_HEADROOM / _sec_per_battle)
+    paid_battles = _ffa_paid_battles(battles_total, elapsed_seconds, _n_live_meter)
 
     match_id = uuid.uuid4()
     n = len(report.players)
@@ -47421,10 +51116,18 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             INSERT INTO ffa_matches (id, lobby_id, photon_room_id, player_count, winner_id,
                 duration_seconds, game_version, region, hmac_signature, reported_by,
                 is_ranked, started_at, ended_at, timeline,
-                battles_total, paid_battles, elapsed_seconds)
+                battles_total, paid_battles, elapsed_seconds, game_number,
+                score_target_frozen, score_target_played)
             VALUES (:id, :lid, :room, :n, :win, :dur, :gv, :reg, :hmac, :rep, :ranked, :started, :endts, :tl,
-                :bt, :pb, :es)
+                :bt, :pb, :es, CAST(:gn AS SMALLINT),
+                CAST(:stf AS SMALLINT), CAST(:stp AS SMALLINT))
         """), {"id": match_id, "lid": lobby_uuid, "room": (report.photon_room_id or "")[:64],
+               "gn": _game_number,
+               # BOTH targets, because they can differ and the difference
+               # decides how the row was priced: `frozen` is the lobby's own
+               # configuration, `played` is the race this game actually ran.
+               # Equal on every normally configured lobby.
+               "stf": int(_score_target), "stp": _played_target,
                "n": n, "win": id_by_steam[report.winner_steam_id],
                "dur": report.match_duration, "gv": (report.game_version or "")[:32] or None,
                "reg": (report.region or "")[:8] or None,
@@ -47436,16 +51139,69 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                "es": int(elapsed_seconds), "endts": _now_dt})
     except IntegrityError as ie:
         await db.rollback()
+        # EVERY answer from here down re-reads the progress, because the
+        # rollback released the lobby's lock and `_progress` is now a snapshot
+        # from before it. Taken ONCE, above the branch, so the failure path
+        # cannot be the one that forgets it: round 5 re-read it only on the
+        # replay arm and answered the other arm with a bare 500, which is an
+        # answer below the lobby lock carrying none of the progress this
+        # endpoint promises (_ffa_progress).
+        _race_progress = await _ffa_progress_relocked(db, lobby_uuid)
         # Only the room-id unique means "replay" — any OTHER integrity error
         # (FK violation etc.) is a real failure, not a duplicate (Codex design
         # find 11: a catch-all here would misreport broken inserts as success).
         if "uq_ffa_match_room" not in str(getattr(ie, "orig", ie)):
-            raise HTTPException(500, "FFA match insert failed")
-        # Replay that raced past the early check: same idempotent echo.
-        _echo = await _ffa_replay_echo(db, report, lobby_uuid, id_by_steam, n)
+            print(f"[FFA-REPORT] insert failed for lobby {lobby_uuid} game "
+                  f"{_game_number} — nothing committed: {getattr(ie, 'orig', ie)}")
+            raise FfaReportRefusal(500, "FFA match insert failed", _race_progress)
+        # Replay that raced past the early check: same idempotent echo, and
+        # the same comparison before it — a racing same-room report is no more
+        # automatically a retry here than it was at the top of the endpoint.
+        # The rollback above released the lobby's lock, so `lobby` is a stale
+        # snapshot and the progress this branch reports is re-read rather than
+        # carried: a report answered here is answered about the sitting as it
+        # is NOW, which is the number the client has to resume from.
+        #
+        # Re-read through _ffa_lock_lobby_slot, not as a bare SELECT of the
+        # column. This branch answers with `settled_game` taken from the row
+        # the unique collided with, and a raw counter here would put the two
+        # numbers back into the state the catch-up exists to remove: the echo
+        # would name a settled game and an expected_game that is not past it,
+        # and the client would resume onto a number it cannot settle. Taking
+        # the lock again also makes the number a committed one rather than a
+        # read of a row somebody else is mid-settlement on. That re-read is
+        # `_race_progress` above, taken for both arms of this handler.
+        _echo = await _ffa_replay_echo(db, report, lobby_uuid, id_by_steam, n,
+                                       kills_in_canonical, _race_progress)
         if _echo is None:
-            raise HTTPException(409, "Duplicate room id")
+            # The unique fired, so a row for this room EXISTS — but the lookup
+            # cannot see it, which means the transaction that wrote it has not
+            # committed yet. That is a race, not a verdict, and a terminal 409
+            # over it would spend a report the retry would have been echoed.
+            # 503 is the answer the client's outbox retries; the retry meets
+            # either the committed row (echo) or a clear table (settle).
+            raise FfaReportRefusal(503, "Another report for this room is still "
+                                        "being recorded - retry", _race_progress)
         return _echo
+    except DBAPIError as _insert_ex:
+        # NOT an integrity error: the statement itself could not run. The one
+        # reachable source is migration 327's insert trigger, which RAISES for
+        # a lobby already holding every number in 1..999 rather than handing
+        # back one the lobby is using — a refusal, and the conservative one,
+        # but it arrives as a plpgsql exception and used to leave this endpoint
+        # as an unhandled 500 with no body at all. It is answered here as what
+        # it is: nothing was committed, so the lobby is exactly where it was,
+        # the progress says so, and 503 is the status the client's outbox
+        # retries rather than spends. Anything else DBAPI-level (a lost
+        # connection mid-statement, a statement timeout) takes the same answer
+        # for the same reason — the transaction is rolled back either way.
+        await db.rollback()
+        _fail_progress = await _ffa_progress_relocked(db, lobby_uuid)
+        print(f"[FFA-REPORT] insert refused by the database for lobby "
+              f"{lobby_uuid} game {_game_number} — nothing committed: "
+              f"{getattr(_insert_ex, 'orig', _insert_ex)}")
+        raise FfaReportRefusal(503, "Could not record this game - retry",
+                               _fail_progress)
 
     # ── Pairwise Glicko (pre-match snapshots for everyone). ──
     rating_changes: dict[str, float] = {}
@@ -47473,8 +51229,16 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # are identical to the former per-player compute-then-INSERT
         # interleaving -- only the INSERTs' timing moved, inside this one
         # transaction.
+        # w(N) is the INFORMATION WEIGHT of this result, so it takes the target
+        # the game was played to, not the one the lobby row froze. A first-to-5
+        # result is stronger evidence than a first-to-3 one whatever the row
+        # says, and on every normally configured lobby the two are the same
+        # number. (Round 2 passed the frozen target here and settled a
+        # honestly-skewed game under the wrong weight.) Both values are
+        # server-held: _ffa_score_shape_error admits exactly {frozen, module
+        # default} and nothing the report names.
         _new_ffa = _ffa_rating_deltas([p.steam_id for p in report.players],
-                                      unrated, placements, pre, _score_target)
+                                      unrated, placements, pre, _played_target)
         for p in report.players:
             if p.steam_id in unrated:
                 continue   # not in this game — no rating period for them
@@ -47573,6 +51337,61 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                    reference_id=str(match_id)))
         award_info[sid_] = (xp, total_gold)
 
+    # ── Bug #392: the DISPLAY reconciliation, and nothing else. ──
+    # The `left_early` flag on a report is authored by a SURVIVING seat — the
+    # dropped player cannot report their own absence. Where that seat's OWN
+    # authenticated leave request attested an involuntary cause, the departure
+    # is still a departure: it is already in `departed_ids`, the seat is still
+    # placed, still rated, still paid, and every guard above has already run
+    # on the report as sent. The only thing this changes is how the departure
+    # is LABELLED to readers, through one extra column that renderers read
+    # beside `left_early` (#283 — a client-attested cause moves the server
+    # only toward the conservative outcome, and the conservative outcome here
+    # is to keep recording the departure and qualify it, never to erase it).
+    #
+    # SCOPE, stated because the two sides of this comparison are not scoped
+    # alike (lens find 6): the cause is recorded per LOBBY — per sitting —
+    # while the label it produces is stamped per MATCH ROW. The lobby has one
+    # cause slot per player for the whole sitting, and this read applies no
+    # time and no game bound. The cause map stores a bare string with no
+    # attestation time and no game index. (`ffa_matches` carries `started_at`
+    # and `ended_at`, and since migration 327 `game_number`, so it is the CAUSE
+    # side that lacks the timestamp — a time bound would mean changing the
+    # map's value shape, not adding a predicate here.) So in a multi-game
+    # sitting the label reads "the seat attested an
+    # involuntary departure from this sitting", not "...from this game".
+    # Two consequences, both display
+    # and both accepted here rather than left implied: a report for an earlier
+    # game submitted late — the handler tolerates a late report by design —
+    # takes a cause attested after that game ended, and a frozen-roster row
+    # carried into a later game inherits the same cause. Bounding it needs a
+    # per-match game number; migration 327 adds `ffa_matches.game_number` and
+    # this read does not take it as a predicate. Recorded in the notes as an
+    # ACCEPTED residual — display-only, and it cannot move a placement, a
+    # rating, gold or XP, nor reach another player's row, because the set is
+    # keyed by player id and the label is gated on that row's own left_early —
+    # so the next reader does not have to re-derive it. It is pinned as well
+    # as written down: tests/test_ffa_leave_cause.py's
+    # test_the_cause_carries_no_time_and_the_read_applies_no_game_bound
+    # reddens the moment this read gains a bound or the stored cause gains a
+    # timestamp, which is the moment the residual has to be closed properly
+    # instead of inherited.
+    #
+    # `jsonb_each_text` over a scalar subquery, NOT a LATERAL join: asyncpg
+    # does not support LATERAL (CLAUDE.md hard rule), and text pairs keep the
+    # value's Python type independent of whether a driver JSON codec is
+    # registered. A lobby predating the departure-cause migration has an empty
+    # object, so the set is empty and every row is written exactly as before.
+    _involuntary_departed: set[str] = {
+        str(_dpid)
+        for _dpid, _dcause in (await db.execute(text("""
+            SELECT key, value FROM jsonb_each_text(
+                (SELECT COALESCE(departure_causes, '{}'::jsonb)
+                   FROM ffa_lobbies WHERE id = :lid))
+        """), {"lid": lobby_uuid})).all()
+        if _is_involuntary_exit_cause(_dcause)
+    }
+
     # ── Per-player rows + cards. ──
     for p in report.players:
         pid = id_by_steam[p.steam_id]
@@ -47587,10 +51406,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 blocks_activated, blocks_successful, keys_pressed, active_seconds,
                 fps_timeline, ping_timeline, hit_timeline, block_timeline,
                 damage_dealt, damage_dealt_timeline, kill_timeline, absent, end_stats,
-                game_points_at_leave)
+                game_points_at_leave, left_early_involuntary)
             VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
                     :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,
-                    :dmg, :dmgtl, :killtl, :absent, :estats, :gpal)
+                    :dmg, :dmgtl, :killtl, :absent, :estats, :gpal, :lei)
         """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
                "k": int(getattr(p, "kills", 0) or 0),
                # Aug 12 item 1 (migration 216) — this player's end-of-game
@@ -47621,6 +51440,15 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                # later, and `absent` already carries the decision itself.
                "gpal": (getattr(p, "game_points_at_leave", None)
                         if p.left_early else None),
+               # Bug #392 — the LABEL, never the outcome. True only when this
+               # row is already a left_early row AND the seat's own leave
+               # request attested an involuntary cause on this lobby. It is
+               # written here and read by the two renderers; nothing between
+               # them consumes it. Gated on `p.left_early` because there is no
+               # mark to qualify otherwise, and left at false for every lobby
+               # whose departure has no recorded cause (old clients, and every
+               # lobby that predates the departure-cause migration).
+               "lei": bool(p.left_early) and str(pid) in _involuntary_departed,
                "dmgtl": (getattr(p, "damage_dealt_timeline", None) or None),
                "killtl": (getattr(p, "kill_timeline", None) or None),
                "pl": placements[p.steam_id], "le": bool(p.left_early),
@@ -47751,7 +51579,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 # modified reporter could flip two carried ghosts to
                 # absent=false and turn a genuine 3-player 5-0 into the 4- and
                 # 5-player badges. `members` is the lobby's LOCK-TIME roster
-                # read from ffa_lobbies.member_ids under FOR UPDATE — server
+                # read from ffa_lobbies.member_ids under the lobby lock — server
                 # state the client cannot author — so the tier is decided by
                 # how many people the server SEATED, not by how many the
                 # reporter says stayed.
@@ -47766,10 +51594,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 # unlocks all three). "5-0" = the winner converted 5 full
                 # POINTS and no other player converted even one; losers may
                 # still hold leftover HALF points, which the descriptions say
-                # out loud. winner.rounds_won == 5 is equivalent to
-                # _score_target == 5 here (validation above pins max_rounds to
-                # the lobby's frozen target and the winner holds the unique
-                # max) — checked directly so the rule needs no inference.
+                # out loud. winner.rounds_won == 5 is NOT the same claim as
+                # _score_target == 5: the shape rule admits a game played to
+                # the module default in a lobby frozen at something else, so a
+                # lobby frozen at 3 can produce a winner holding 5. The literal
+                # 5 is what the achievement means (five converted points), and
+                # it is read off the winner's own tally rather than inferred
+                # from either target.
                 _win_entry = next((p for p in report.players
                                    if p.steam_id == report.winner_steam_id), None)
                 if (_win_entry is not None
@@ -47825,11 +51656,23 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                     label="ffa-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] ffa grant failed for {match_id}: {pcex}")
+    if rated:
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, [id_by_steam[p.steam_id] for p in report.players
+                         if p.steam_id not in unrated],
+                    mode="ffa", reference_id=str(lobby_uuid))  # the sitting's id, not the game's
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] ffa credit dropped for lobby {lobby_uuid} (match {match_id}): {_lex}")
 
     # Settle FFA bets. Codex round-2 review finds 3+4: keyed by the game's
-    # REAL identity (the _rN suffix inside the HMAC-covered room id), never
-    # by arrival order — an outbox-delayed game-1 report must not let game
-    # 2's winner pay game-1 wagers. The catch-up pass then re-resolves any
+    # REAL identity, never by arrival order — an outbox-delayed game-1 report
+    # must not let game 2's winner pay game-1 wagers. That identity used to be
+    # the `_rN` suffix inside the HMAC-covered room id; since migration 327 it
+    # is ffa_matches.game_number, which is the lobby's own slot counter and is
+    # what ffa_bet_place required of the wager. The catch-up pass then
+    # re-resolves any
     # OLDER unsettled bets (out-of-order arrival, or a prior settle savepoint
     # rolled back on a deadlock) against their own recorded matches, so a
     # failed settle self-heals on the next report instead of stranding.
@@ -47839,28 +51682,87 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # report instead of being swallowed here. Every statement of the bet
     # block lives inside the guard now.
     try:
-        game_no = _ffa_room_game_no(report.photon_room_id) or (int(lobby["games_played"] or 0) + 1)
+        # The SAME number the row was written with (the lobby's own
+        # `games_played + 1`, taken above the insert) — a second derivation
+        # here could pay game N's wagers against a row stored as something
+        # else, and the room tail is exactly such a second derivation. It is
+        # also the number ffa_bet_place required of every wager on this game,
+        # so the two sides agree by construction rather than by parsing the
+        # same string twice.
+        game_no = _game_number
         async with db.begin_nested():
             winner_pid = id_by_steam[report.winner_steam_id]
-            await _settle_ffa_bets_for_game(db, lobby_uuid, game_no, winner_pid)
+            if not _target_skew:
+                await _settle_ffa_bets_for_game(db, lobby_uuid, game_no, winner_pid)
             stragglers = (await db.execute(text(
                 "SELECT DISTINCT game_number FROM ffa_bets"
                 " WHERE lobby_id = :lid AND settled_at IS NULL AND game_number < :g"
             ), {"lid": lobby_uuid, "g": game_no})).scalars().all()
             for sg in stragglers:
-                past_winner = (await db.execute(text(
-                    "SELECT winner_id FROM ffa_matches"
-                    " WHERE lobby_id = :lid AND photon_room_id LIKE :sfx ESCAPE '\\'"
-                    "   AND invalidated_at IS NULL ORDER BY ended_at LIMIT 1"
-                ), {"lid": lobby_uuid, "sfx": f"%\\_r{int(sg)}"})).scalar()
-                if past_winner is not None:
-                    await _settle_ffa_bets_for_game(db, lobby_uuid, int(sg), past_winner)
+                # game_number, not a LIKE on the room string. Since 327 the
+                # column IS the lobby's slot and the wager's own number; the
+                # LIKE re-derived a second identity from the room id, which is
+                # the one thing the column exists to stop (and it matched
+                # `..._r1` for game 1 whatever the row was stored as).
+                # SETTLE OR REFUND is the recorded ROW's question, not this
+                # call site's: a straggler on a game that was itself a config
+                # skew has to come back, not be paid at the frozen price, and
+                # that rule lives in _ffa_recorded_game_outcome so the closure
+                # reconcile and this loop cannot answer it differently
+                # (#279/#432).
+                _verdict, _past_winner = await _ffa_recorded_game_outcome(
+                    db, lobby_uuid, int(sg))
+                if _verdict == "settle":
+                    await _settle_ffa_bets_for_game(db, lobby_uuid, int(sg), _past_winner)
+                elif _verdict == "refund":
+                    # Fail-soft here on purpose: a PREVIOUS game's leftover is
+                    # not this report's to guarantee, and leaving it unsettled
+                    # costs nothing — the next report and the closure pass both
+                    # reach the same verdict for it.
+                    await _refund_ffa_lobby_bets(db, lobby_uuid, "score_target_skew",
+                                                 game_number=int(sg))
     except Exception as bet_ex:
         print(f"[FFA-BETS] settle failed (report unaffected, catch-up next report): {bet_ex}")
 
-    await db.execute(text(
-        "UPDATE ffa_lobbies SET games_played = games_played + 1 WHERE id = :lid"
-    ), {"lid": lobby_uuid})
+    if _target_skew:
+        # THIS GAME'S refund is NOT inside the guard above, and that is the
+        # whole point. The wagers were priced by _ffa_field_odds against the
+        # FROZEN target and the game was played to another one, so a price the
+        # bettor never agreed to is neither paid nor kept: every stake comes
+        # back, in THIS transaction, with no cap and no swallowed failure. If
+        # it cannot complete, the settlement does not commit and the client
+        # retries a report that has changed nothing — the conservative
+        # direction, and the only one that keeps "its wagers are refunded" a
+        # fact about every committed skewed row rather than about most of
+        # them. Round 3 called the fail-soft sweep helper from inside the
+        # guard, where a failure or a 201st wager left rows unsettled for a
+        # later pass to settle at the frozen price (#412).
+        try:
+            await _refund_ffa_game_bets_strict(db, lobby_uuid, game_no,
+                                               "score_target_skew")
+        except FfaReportRefusal:
+            raise
+        except HTTPException as _skew_http:
+            # A bare HTTPException raised out of the refund would be answered
+            # with `detail` and nothing else — no games_played, no
+            # expected_game, no captured payload — and the client's rule makes
+            # a 4xx terminal, so the reporter would drop the entry with no way
+            # to tell which number the lobby is on. Below the lobby lock EVERY
+            # answer this endpoint gives carries the progress; the status is
+            # what says how the client should treat it, and that is kept
+            # exactly as raised.
+            print(f"[FFA-BETS] skew refund refused for lobby {lobby_uuid} "
+                  f"game {game_no} — settlement rolled back: "
+                  f"{_skew_http.status_code} {_skew_http.detail}")
+            raise FfaReportRefusal(_skew_http.status_code,
+                                   str(_skew_http.detail), _progress)
+        except Exception as _skew_ex:
+            print(f"[FFA-BETS] skew refund failed for lobby {lobby_uuid} "
+                  f"game {game_no} — settlement rolled back: {_skew_ex}")
+            raise FfaReportRefusal(
+                503, "Could not settle this game's wagers - retry", _progress)
+
+    await _ffa_advance_lobby_slot(db, lobby_uuid)
     await db.commit()
 
     rep_place = placements.get(report.reported_by_steam_id, 0)
@@ -47869,7 +51771,70 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
           f"winner={report.winner_steam_id} reporter_place={rep_place}")
     return FfaMatchResponse(
         match_id=match_id, lobby_id=lobby_uuid, placement=rep_place, player_count=n,
-        rating_changes=rating_changes, xp_gained=rep_xp, gold_gained=rep_gold)
+        rating_changes=rating_changes, xp_gained=rep_xp, gold_gained=rep_gold,
+        # The slot this settlement just consumed, and the one the sitting's
+        # next report must name. `_game_number` IS the number that was stored
+        # and the number the report named (the equality above), and the
+        # increment beside it is what makes `+ 1` the next slot — so these two
+        # are the committed state, not a prediction of it.
+        #
+        # `settled_game` rides the ACCEPTANCE too, and it is the same number.
+        # The contract's rule is that every answer about a row holding the
+        # number the report named says which number that is, so that a client
+        # never has to infer "settled" from the absence of a refusal; an
+        # acceptance is the one answer for which that row was written by this
+        # request. Past `_ffa_game_number_refusal` the tail and the slot are
+        # one number, so naming it here cannot disagree with the row, and
+        # `settled_game < expected_game` holds by construction (n < n + 1).
+        **_ffa_progress(_game_number, settled_game=_game_number))
+
+
+# ── The FFA game-number build marker (/health `ffa_game_number`) ──────────
+# This batch keys every FFA game on the number the lobby holds for it:
+# submit_ffa_match stores that number in ffa_matches.game_number (migration
+# 327) and asks _FFA_PRIOR_GAME_SQL about the row at (lobby_id, game_number)
+# before it settles anything. It adds no route and no key to any GET answer
+# both builds serve -- the new progress fields ride only the report answer,
+# which needs a signed report -- so this word is what tells the new build from
+# the old one. The release train asserts it on both roles and reads any value
+# but the expected one as the old build; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): 1 when the ffa_matches insert in
+# submit_ffa_match names game_number in its column list AND the prior-game
+# lookup binds both lobby_id and game_number in its WHERE; 0 when either
+# literal loses the column, which the train then reads as the old build. The
+# insert is read from the endpoint's compiled string constants, not from its
+# source text, so a comment beside either literal cannot move the value.
+_FFA_GN_INSERT_HEAD = _re.compile(r"^\s*INSERT\s+INTO\s+(\w+)\s*\(([^)]*)\)", _re.IGNORECASE)
+_FFA_GN_WHERE_BIND = _re.compile(r"\b(\w+)\s*=\s*(?:CAST\(\s*)?:\w+", _re.IGNORECASE)
+
+
+def _ffa_match_insert_literal(code) -> str:
+    """The one ffa_matches INSERT among `code`'s string constants, or ''.
+
+    None found, or more than one, is '': the marker cannot say which of two
+    statements it describes."""
+    found = [c for c in code.co_consts
+             if isinstance(c, str) and (m := _FFA_GN_INSERT_HEAD.match(c))
+             and m.group(1).lower() == "ffa_matches"]
+    return found[0] if len(found) == 1 else ""
+
+
+def _ffa_game_number_marker(insert_sql: str, lookup_sql: str) -> int:
+    """1 when the insert names game_number and the lookup binds
+    (lobby_id, game_number) in its WHERE, else 0."""
+    head = _FFA_GN_INSERT_HEAD.match(insert_sql or "")
+    columns = {c.strip().lower() for c in head.group(2).split(",")} if head else set()
+    where = (lookup_sql or "").partition("WHERE")[2]
+    bound = {m.group(1).lower() for m in _FFA_GN_WHERE_BIND.finditer(where)}
+    return int("game_number" in columns and {"lobby_id", "game_number"} <= bound)
+
+
+_FFA_GAME_NUMBER = _ffa_game_number_marker(
+    _ffa_match_insert_literal(submit_ffa_match.__code__), _FFA_PRIOR_GAME_SQL)
+# Its sibling _OVT_SOLO_SPLIT (the /health `ovt_solo_split` word) is derived
+# the same way, from two of submit_ovt_match's compiled string constants, and
+# is defined right after that endpoint.
 
 
 _FFA_LB_SORTS = {
@@ -48066,6 +52031,10 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 "points_total": int(r["points_total"] or 0),
                 "kills": int(r["kills"] or 0),
                 "left_early": bool(r["left_early"]),
+                # Bug #392: the involuntary qualifier beside the mark, not
+                # instead of it. `.get` so a row written before the departure-cause migration
+                # degrades to false, exactly as `absent` does below.
+                "left_early_involuntary": bool(r.get("left_early_involuntary")),
                 # Bug 254 follow-up: the authoritative frozen-roster-ghost
                 # bit (#227/#239) — TRUE means this row was carried for
                 # report continuity but the player was NOT in this game.
@@ -48462,13 +52431,166 @@ async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, wi
         print(f"[FFA-BETS] settled {n} bet(s) on lobby {lobby_id} game {game_no}")
 
 
+# How many 200-row passes a strict refund will take before it REFUSES. Not a
+# cap: a pass that stopped quietly at its bound would leave the rest of a
+# game's stakes unsettled while its caller reported success, and a later pass
+# would then resolve them under whatever rule that pass applies. The real
+# domain is a handful of wagers per game, so this bound (10 000 wagers on one
+# game) exists to make an impossible input name itself rather than be
+# truncated. The 200 is the SQL statement's own literal — the janitor's boot
+# self-test EXPLAINs every reachable literal and refuses SQL assembled at
+# runtime, so the number is written once, in the query.
+FFA_REFUND_MAX_BATCHES = 50
+
+
+async def _ffa_recorded_game_outcome(db: AsyncSession, lobby_id, game_number: int):
+    """How one recorded game's wagers must resolve: ("settle", winner_id),
+    ("refund", None) or ("unresolved", None).
+
+    ONE definition for every surface that resolves a wager after the fact —
+    the live report's straggler loop and the closure reconcile — because they
+    used to ask only "who won this game?" and a game played to a target the
+    lobby did not freeze has no answer to that question that may be PAID. Its
+    wagers were priced by _ffa_field_odds for the frozen race length; the
+    settlement refunds them, and a later pass that settled the leftovers
+    against the recorded winner would pay the price the bettor never agreed
+    to. The row itself carries the evidence (score_target_frozen /
+    score_target_played, migration 327), so the rule reads the row rather than
+    reconstructing the skew.
+
+    A NULL in either column -- which is every pre-327 row -- means "no skew
+    recorded", and that is the right default: a guessed skew would refund a
+    game that was paid.
+
+    A DATABASE WITHOUT THE COLUMNS IS NOT THAT CASE, and this function does not
+    pretend otherwise. `SELECT score_target_frozen ...` against a table the
+    migration has not reached raises UndefinedColumn; it never yields NULL, so
+    there is no "degrades to the pre-327 path" here to rely on. Both callers
+    run inside a handler that swallows bet failures, so what that actually
+    produces is a window in which NO wager resolves on any report and the log
+    line says "catch-up next report" about a next report that fails
+    identically. The migration is what keeps that window closed -- 327 runs
+    BEFORE this code, on the primary, and reaches the standby by replication,
+    which its own header states -- and an operator seeing bets stop moving
+    after a deploy should check the columns exist on the box that answered
+    before reading anything here as a fallback."""
+    row = (await db.execute(text(
+        "SELECT winner_id, score_target_frozen, score_target_played"
+        "  FROM ffa_matches"
+        " WHERE lobby_id = :lid AND game_number = CAST(:g AS SMALLINT)"
+        "   AND invalidated_at IS NULL ORDER BY ended_at LIMIT 1"
+    ), {"lid": lobby_id, "g": int(game_number)})).mappings().first()
+    if row is None or row["winner_id"] is None:
+        return "unresolved", None
+    frozen, played = row["score_target_frozen"], row["score_target_played"]
+    if frozen is not None and played is not None and int(frozen) != int(played):
+        return "refund", None
+    return "settle", row["winner_id"]
+
+
+async def _refund_ffa_game_bets_strict(db: AsyncSession, lobby_id, game_number: int,
+                                       reason: str) -> int:
+    """Refund EVERY unsettled wager on one game, in the CALLER's transaction,
+    and raise rather than come up short.
+
+    The deliberate opposite of _refund_ffa_lobby_bets below at all three
+    points, because its caller's polarity is the opposite (#412):
+
+      * no savepoint of its own and no try/except — a failure propagates, so
+        the settlement it belongs to does not commit and the client retries a
+        report that changed nothing;
+      * no LIMIT that ends the pass — it loops until the game has no unsettled
+        wager left, and refuses at FFA_REFUND_MAX_BATCHES rather than stopping
+        quietly;
+      * it returns the count it moved, so the caller's log line is a measured
+        number and not an assumption.
+
+    Everything else matches the sweep: each row is CLAIMED first
+    (`settled_at IS NULL RETURNING id`, so two concurrent passes cannot both
+    pay one wager), and the stake goes back through _return_stake_exactly --
+    the EXACT delta (#326) and the ledger row in one place, refusing a balance
+    that cannot cover the stake rather than moving part of it. A refusal there
+    propagates like any other failure here: the settlement does not commit and
+    the client retries a report that changed nothing. Because the claim
+    stamps settled_at, every later pass — the straggler loop, the closure
+    reconcile, the janitor sweep — skips this game's wagers by construction,
+    and _ffa_recorded_game_outcome makes sure that if one of them ever does
+    see a leftover it refunds it rather than settling it.
+
+    ONE THING THE SWEEP DOES THAT THIS DELIBERATELY DOES NOT: assert no service
+    account is among the subjects. That assertion raises HTTPException(403), and
+    the two helpers cannot afford the same answer to it (#412 again, in the
+    other direction). In the sweep it is swallowed by the savepoint and the
+    batch is skipped. Here it would leave the report's own `except HTTPException:
+    raise` to hand the reporter a bare 403 carrying none of this branch's
+    progress fields and no captured payload, which the client's rule treats as
+    terminal — so the game would never be rated or paid, and every retry would
+    take the same path. It is also the wrong question to ask of THIS operation:
+    the guard exists to keep a service account out of competitive and economy
+    outcomes, and a refund is the one movement that takes such an account back
+    OUT of one, returning a stake it should not have been holding. Refusing it
+    would strand the stake and make the game permanently unsettleable, so the
+    rows are refunded and the count is logged like any other. The route keeps
+    its own guard: submit_ffa_match asserts on the reported roster before it
+    reaches any of this.
+
+    THE BOUND IS A NUMBER OF WAGERS, not a number of loop passes, and the two
+    are not the same thing: only a read that comes back EMPTY returns, so a run
+    that refunds exactly FFA_REFUND_MAX_BATCHES * 200 still needs one more read
+    to prove there is nothing left. The range is therefore one larger than the
+    bound, and the refusal below means what it says — more than 10 000
+    unsettled wagers on one game — rather than firing on a game whose wagers it
+    had in fact just refunded in full."""
+    moved = 0
+    for _ in range(FFA_REFUND_MAX_BATCHES + 1):
+        rows = (await db.execute(text(
+            "SELECT id, player_id, amount FROM ffa_bets"
+            " WHERE lobby_id = :lid AND settled_at IS NULL"
+            " AND game_number = :g"
+            " ORDER BY player_id::text, id LIMIT 200"
+        ), {"lid": lobby_id, "g": int(game_number)})).mappings().all()
+        if not rows:
+            if moved:
+                print(f"[FFA-BETS] refunded {moved} bet(s) on lobby {lobby_id} "
+                      f"game {game_number} ({reason})")
+            return moved
+        for b in rows:
+            claimed = (await db.execute(text(
+                "UPDATE ffa_bets SET payout = amount, settled_at = NOW(),"
+                " settlement_kind = 'refunded'"
+                " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+            ), {"bid": b["id"]})).scalar()
+            if claimed is None:
+                continue
+            moved += 1
+            await _return_stake_exactly(db, b["player_id"], b["amount"],
+                                        reason="ffa_bet_refund",
+                                        reference_id=str(lobby_id))
+        # Flush before the next read so the claims are visible to it and an
+        # unflushed ORM add can never outlive a rollback (#187).
+        await db.flush()
+    raise RuntimeError(
+        f"ffa refund for lobby {lobby_id} game {game_number} still had unsettled "
+        f"wagers after {FFA_REFUND_MAX_BATCHES} passes of 200 "
+        f"({FFA_REFUND_MAX_BATCHES * 200} refunded and more left)")
+
+
 async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_number: int | None = None):
     """Refund unsettled bets on a lobby (cancel/sweep paths), optionally only
     one game's. Payout == stake marks a refund (#107 display rule). Claim-first
     like the settle (no double-refund across concurrent passes). Runs inside
     its OWN savepoint and never raises (Codex round-2 review find 5: a refund
     deadlock used to leave the CALLER's transaction aborted, killing the whole
-    leave/cancel)."""
+    leave/cancel).
+
+    FAIL-SOFT, AND ONLY FOR CALLERS THAT CAN AFFORD IT (#412). It swallows its
+    own failures and its LIMIT ends the pass, so a caller that must GUARANTEE
+    the refund — the config-skew settlement, whose row would otherwise be
+    committed with wagers a later pass settles at the frozen price — calls
+    _refund_ffa_game_bets_strict above instead. The callers here are the
+    cancel/sweep/closure paths, where an unrefunded leftover simply waits for
+    the next tick and the alternative (raising) would take the whole leave or
+    cancel down with it."""
     try:
         async with db.begin_nested():
             # Two explicit statements, not a spliced filter fragment: the
@@ -48500,11 +52622,9 @@ async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_n
                 if claimed is None:
                     continue
                 n += 1
-                await db.execute(text(
-                    "UPDATE players SET gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt) WHERE id = :pid"
-                ), {"amt": b["amount"], "pid": b["player_id"]})
-                db.add(GoldTransaction(player_id=b["player_id"], amount=b["amount"],
-                                       reason="ffa_bet_refund", reference_id=str(lobby_id)))
+                await _return_stake_exactly(db, b["player_id"], b["amount"],
+                                            reason="ffa_bet_refund",
+                                            reference_id=str(lobby_id))
             # Flush INSIDE the savepoint — an unflushed ORM add would survive
             # the rollback and write a ledger row without its gold move (#187).
             await db.flush()
@@ -48516,12 +52636,16 @@ async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_n
 
 async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
     """Terminal bet resolution for a lobby that is closing (or already closed):
-    settle every unsettled bet whose game has a RECORDED result, refund only
-    the wagers on games that never happened (#241 — a blanket refund mis-pays
-    both sides of a played game whose settle savepoint rolled back). Safe on
-    zero-game lobbies (degrades to pure refund), idempotent (settled_at gate),
-    savepoint-contained, never raises."""
+    settle every unsettled bet whose game has a RECORDED result AND was played
+    to the length its wagers were priced for, refund the rest — the wagers on
+    games that never happened, and the wagers on a recorded config skew, which
+    the settlement refunds and which a later pass may therefore never pay
+    (#241 — a BLANKET refund mis-pays both sides of a played game whose settle
+    savepoint rolled back, which is why the two classes are told apart rather
+    than swept together). Safe on zero-game lobbies (degrades to pure refund),
+    idempotent (settled_at gate), savepoint-contained, never raises."""
     unresolved_games: list = []
+    refund_games: list = []
     try:
         async with db.begin_nested():
             games = (await db.execute(text(
@@ -48529,13 +52653,21 @@ async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
                 " WHERE lobby_id = :lid AND settled_at IS NULL ORDER BY game_number"
             ), {"lid": lobby_id})).scalars().all()
             for g in games:
-                winner = (await db.execute(text(
-                    "SELECT winner_id FROM ffa_matches"
-                    " WHERE lobby_id = :lid AND photon_room_id LIKE :sfx ESCAPE '\\'"
-                    "   AND invalidated_at IS NULL ORDER BY ended_at LIMIT 1"
-                ), {"lid": lobby_id, "sfx": f"%\\_r{int(g)}"})).scalar()
-                if winner is not None:
+                # game_number, never the room string. A LIKE on `%_rN` asks the
+                # REPORT what game it was; this has to ask the lobby, because
+                # the wager's own game_number is the lobby's slot (ffa_bet_place
+                # requires `games_played + 1`) and settling by any second
+                # derivation is how one game's stakes get resolved against
+                # another game's winner. Since migration 327 the column carries
+                # that same slot on every row, historical ones included.
+                # WHICH of settle and refund is the ROW's question, asked in
+                # one place (_ffa_recorded_game_outcome) so this pass and the
+                # live report's straggler loop cannot answer it differently.
+                verdict, winner = await _ffa_recorded_game_outcome(db, lobby_id, int(g))
+                if verdict == "settle":
                     await _settle_ffa_bets_for_game(db, lobby_id, int(g), winner)
+                elif verdict == "refund":
+                    refund_games.append(int(g))
                 else:
                     unresolved_games.append(int(g))
             # Flush the settle's ORM ledger adds inside the savepoint (#187).
@@ -48547,13 +52679,18 @@ async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
         # whole reconcile on its next tick instead.
         print(f"[FFA-BETS] closure reconcile failed for {lobby_id} ({reason}) — janitor retries: {ex}")
         return
-    # Refund ONLY games with no recorded result — never a blanket pass over
-    # the leftovers (Codex round-2 find 7: with 200+ bets on one recorded
-    # game, the settle's per-pass cap leaves overflow unsettled, and a
-    # blanket refund would mis-pay it; scoped this way the overflow simply
-    # waits for the sweep's next tick to settle correctly).
+    # Refund the two classes that must not be PAID — a game with no recorded
+    # result, and a recorded config skew whose wagers were priced for the
+    # other race length — and never a blanket pass over the leftovers (Codex
+    # round-2 find 7: with 200+ bets on one recorded game, the settle's
+    # per-pass cap leaves overflow unsettled, and a blanket refund would
+    # mis-pay it; scoped this way the overflow simply waits for the sweep's
+    # next tick to settle correctly).
     for g in unresolved_games:
         await _refund_ffa_lobby_bets(db, lobby_id, reason, game_number=g)
+    for g in refund_games:
+        await _refund_ffa_lobby_bets(db, lobby_id, f"{reason}+score_target_skew",
+                                     game_number=g)
 
 
 @app.get("/api/v1/ffa/bettable", tags=["Betting"])
@@ -48834,7 +52971,9 @@ async def _lobby_bet_pay_refund(db: AsyncSession, bet_id, lobby_id) -> int:
     lobby_bets has no payout/settlement_kind columns — those live on the
     ordinary bet tables — so 'refunded' plus the positive ledger row is the
     refund record here. Gold direction is the house rule: gold_spent comes
-    back down (never gold_earned up, which would invent income), floored at 0.
+    back down (never gold_earned up, which would invent income), by the EXACT
+    stake -- _return_stake_exactly refuses a balance that cannot cover it
+    rather than flooring the move at 0 and recording the whole stake anyway.
 
     Runs in the CALLER's transaction; the caller commits. Returns the amount
     refunded, or 0 when another pass had already claimed it."""
@@ -48852,12 +52991,9 @@ async def _lobby_bet_pay_refund(db: AsyncSession, bet_id, lobby_id) -> int:
     if claimed is None:
         return 0
     amt = int(claimed["amount"])
-    await db.execute(text(
-        "UPDATE players SET gold_spent = GREATEST(0, COALESCE(gold_spent, 0) - :amt)"
-        " WHERE id = :pid"
-    ), {"amt": amt, "pid": claimed["player_id"]})
-    db.add(GoldTransaction(player_id=claimed["player_id"], amount=amt,
-                           reason="lobby_bet_refund", reference_id=str(lobby_id)))
+    await _return_stake_exactly(db, claimed["player_id"], amt,
+                                reason="lobby_bet_refund",
+                                reference_id=str(lobby_id))
     # Flush inside the caller's unit of work — an unflushed ORM add would
     # survive a savepoint rollback and write a ledger row with no gold move
     # behind it (#187).
@@ -48904,15 +53040,35 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
     players row, and holding N of them while working on the next is exactly
     the hold-and-wait shape that deadlocks against a live settle crediting a
     bettor outside our lock set (#204). A transaction that holds at most one
-    row of a class can never be the middle of a wait chain, and a failure
-    degrades to "skip it, the janitor retries" instead of losing the batch.
+    row of a class can never be the middle of a wait chain.
+
+    THE TWO WAYS A PASS CAN FAIL ARE NOT THE SAME FAILURE, and the queue this
+    walks belongs to many different players, so getting that wrong is one
+    player's broken row deciding whether anybody else is paid:
+
+      * `StakeRefundRefused` is about ONE wager -- that player's gold_spent
+        does not cover the stake this row records. The row is rolled back to
+        refund_pending, recorded in `refused`, EXCLUDED from this pass's
+        remaining selects, and the sweep takes the next wager. Without that
+        exclusion the select's `ORDER BY created_at, id` hands back the same
+        head-of-queue row every time, so stopping at it would have blocked
+        every other player's refund for as long as the row existed -- one log
+        line per tick and no refunds at all. The skip is per PASS, never
+        persisted: the next tick retries the row once (one cheap rolled-back
+        transaction) and skips it again, so an operator correction to the
+        balance is picked up without anything having to be un-marked.
+      * Anything else is about the TRANSACTION -- a lost connection, a
+        statement timeout, a deadlock abort. There is no next row to take, so
+        the pass stops and the janitor retries the whole queue.
 
     Called post-commit by each Start (scoped to that lobby) and by the janitor
     (unscoped, with an age floor). Never raises."""
     if mode is not None and mode not in _LOBBY_BET_PARENT:
         return 0
     n = 0
+    refused: list[str] = []
     for _ in range(max(1, int(limit))):
+        row = None
         try:
             row = (await db.execute(text("""
                 SELECT id, lobby_id FROM lobby_bets
@@ -48922,11 +53078,13 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
                    AND (CAST(:age AS int) IS NULL
                         OR COALESCE(resolved_at, created_at)
                            < NOW() - MAKE_INTERVAL(secs => CAST(:age AS int)))
+                   AND NOT (id = ANY(CAST(:skip AS uuid[])))
                  ORDER BY created_at, id
                  LIMIT 1
                  FOR NO KEY UPDATE SKIP LOCKED
             """), {"m": mode, "l": str(lobby_id) if lobby_id is not None else None,
-                   "age": int(older_than_seconds) if older_than_seconds is not None else None
+                   "age": int(older_than_seconds) if older_than_seconds is not None else None,
+                   "skip": refused,
                    })).mappings().first()
             if row is None:
                 await db.commit()
@@ -48935,6 +53093,24 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
             await db.commit()
             if paid:
                 n += 1
+        except StakeRefundRefused as ex:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            if row is None:
+                # Unreachable by construction -- only the pay call raises this
+                # class and it runs below the select -- and written as a stop
+                # rather than an assumption, because the alternative to a row
+                # id is an unbounded loop over the same select.
+                print(f"[LOBBY-BETS] refund flush refused with no row in hand "
+                      f"({mode}/{lobby_id}): {ex}")
+                break
+            refused.append(str(row["id"]))
+            print(f"[LOBBY-BETS] wager {row['id']} cannot be paid and was left "
+                  f"refund_pending ({mode}/{lobby_id}); the rest of the queue "
+                  f"continues: {ex}")
+            continue
         except Exception as ex:
             try:
                 await db.rollback()
@@ -48942,6 +53118,9 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
                 pass
             print(f"[LOBBY-BETS] refund flush stopped early ({mode}/{lobby_id}): {ex}")
             break
+    if refused:
+        print(f"[LOBBY-BETS] {len(refused)} wager(s) refused payment this pass "
+              f"and stay refund_pending: {', '.join(refused)}")
     if n:
         print(f"[LOBBY-BETS] refunded {n} lobby wager(s)")
     return n
@@ -50450,6 +54629,12 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     label="team-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] team grant failed for {series_uuid}: {pcex}")
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, gids, mode="2v2", reference_id=str(series_uuid))
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] 2v2 credit dropped for {series_uuid}: {_lex}")
 
         # Free the queue rows so all 4 can re-queue.
         await _lock_queue_rows_ordered(
@@ -50582,6 +54767,31 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         new_t2a_rating=new_ratings.get(str(p_t2a.id)),
         new_t2b_rating=new_ratings.get(str(p_t2b.id)),
     )
+
+
+# -- The title-ladder hook build marker (/health `ladder_hook`) --------------
+# v1.41.0 item 12's server half credits the worn title ladder from every rated
+# completion path, through title_ladders.record_completed_games: submit_match
+# (1v1), submit_team_match (2v2), _complete_team_series_with_ratings (2v2
+# settled by the admin route or a lead forfeit) and submit_ffa_match (FFA,
+# once per sitting). The batch adds no route and no key to any GET answer both
+# builds serve -- the title-ladder route answers on the build before it, from
+# the same tables -- so this word is what tells the new build from the old
+# one. The release train asserts it on both roles and reads any value but the
+# expected one as the old build; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): how many of those four functions' own
+# compiled code loads the hook's name -- 4 on this build, 0 on the build
+# before it, and between the two on a build that lost a site's call. It is
+# read from each function's code object (the names the function loads), not
+# from its source text, so a comment or a docstring naming the hook cannot
+# move the value. The count is title_ladders.hooked_site_count, kept beside
+# the hook so that this file names the hook at its four awaited calls and
+# nowhere else (test_title_ladders.py's whole-file test). health_check reads
+# the word at request time, so it is bound here, after the last of the four.
+_LADDER_HOOK_SITES = (submit_match, submit_team_match,
+                      _complete_team_series_with_ratings, submit_ffa_match)
+_LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
 
 
 @app.get("/api/v1/team/players/{steam_id}/team-stats", response_model=TeamStatsResponse, tags=["Team Matches"])
@@ -51451,6 +55661,1103 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     await db.commit()
     print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
     return {"status": "accepted"}
+
+
+# ── Quarantine triage: a read-only operator view (RJ-TRIAGE part 1) ────────
+# Three GET routes over match_report_quarantine: the summary (V1), one
+# group's detail (V2) and the bot's digest feed (D1). What they are built to
+# do, in one paragraph:
+#   * every read of a request runs in ONE transaction, entered exactly once
+#     through _triage_read_txn: its first statement makes the transaction
+#     REPEATABLE READ and READ ONLY, its second arms statement_timeout 2s,
+#     lock_timeout 1s and idle_in_transaction_session_timeout 1s, each
+#     transaction-local (is_local true), so the pooled connection keeps none;
+#   * no read starts once t0 + 1 s has passed (t0 = when the second statement
+#     returned); a route whose optional reads the deadline stopped says so in
+#     its response instead of guessing;
+#   * after the COMMIT (or the ROLLBACK attempt of a failed read) the
+#     post-COMMIT seal (database.post_commit_seal) refuses every statement
+#     executed through either engine until the response is built (database.py
+#     says what it does not see), and the response is computed only from
+#     values copied out of the transaction;
+#   * no route calls a lock-taking helper or writes: the lobby and the series
+#     are plain SELECTs, and the expected game is computed after the COMMIT;
+#   * automatic garbage collection is held off from before the first
+#     statement until the COMMIT or the ROLLBACK attempt returns
+#     (_TriageGcHold), and the ORM mappers are configured before the first
+#     statement: a collection pass, or the mappers' first configuration,
+#     would otherwise sit between two statements, where the server counts
+#     it against the 1 s idle bound. Every value a response derives from
+#     the rows is computed after the COMMIT.
+# What those settings bound -- how long the view holds its relation locks --
+# is RJ-TRIAGE-DESIGN-V5 3.1 requirement 2: at most 5 s from t0 enforced by
+# the server, plus a 0.5 s reserve for the COMMIT's own processing, which no
+# setting bounds. The controls in tests/test_ffa_quarantine_triage.py measure
+# it; nothing in this comment is a substitute for that measurement.
+# Nothing here reads PT1's difference for a decision, and no response carries
+# an accept, discard or override action: the existing routes act by id.
+
+import gc as _triage_gc
+import threading as _triage_threading
+
+import asyncpg.exceptions as _triage_apg_exc
+from sqlalchemy.exc import PendingRollbackError as _triage_pending_rollback
+from sqlalchemy.orm import configure_mappers as _triage_configure_mappers
+
+from database import post_commit_seal as _triage_post_commit_seal
+
+_TRIAGE_READ_BUDGET_S = 1.0     # no read starts once t0 + this has passed
+# The capture's per-(mode, group) pending bound: _quarantine_report refuses
+# at `>= 50` and keeps nothing. The view only REPORTS it; a test pins the two
+# numbers together.
+_TRIAGE_QUOTA = 50
+_TRIAGE_V1_PAGE = 50            # group summaries per V1 page
+_TRIAGE_PT3_PAGE = 200          # settled rows per page of a lobby's accounts
+_TRIAGE_PT4_PAGE = 200          # reviewed twins per page
+_TRIAGE_D1_PAGE = 500           # digest rows per D1 page
+_TRIAGE_NIL_GROUP = "00000000-0000-0000-0000-000000000000"   # sort key of a row with no group
+
+_TRIAGE_UNDEFINED = "undefined: this report's key names no game"
+_TRIAGE_INCOMPLETE = "not computed: lobby read incomplete"
+_TRIAGE_NOT_WITHIN_BUDGET = "not computed within the read budget"
+_TRIAGE_REPORTER_LABEL = "reporter as claimed by the report"
+_TRIAGE_PT1_STATEMENT = (
+    "Receipt order and the report's own number. The same values arise when this capture is a "
+    "distinct later game and when it is a second account of a settled game (section 0.5, "
+    "histories X and Y). Never acceptance or override permission.")
+
+# The capture's room: the keyed column, else the room the payload names
+# (a variant row carries photon_room_id NULL). The capture stores at most 64
+# characters of it.
+_TRIAGE_ROOM_SQL = "COALESCE(q.photon_room_id, q.payload->>'photon_room_id')"
+# F3a vs F3b: does a settled row hold the capture's room (uq_ffa_match_room)?
+_TRIAGE_ROOM_HELD_SQL = (
+    "(q.mode = 'ffa' AND q.reason = 'ffa_game_contradiction' AND EXISTS ("
+    "SELECT 1 FROM ffa_matches m WHERE m.photon_room_id = LEFT(" + _TRIAGE_ROOM_SQL + ", 64)))")
+
+_TRIAGE_SQL_PENDING_BY_MODE = """
+    SELECT mode, COUNT(*) AS n
+      FROM match_report_quarantine
+     WHERE status = 'pending'
+     GROUP BY mode
+     ORDER BY mode
+"""
+_TRIAGE_SQL_OLDEST_PENDING = """
+    SELECT id, mode, group_id, created_at
+      FROM match_report_quarantine
+     WHERE status = 'pending'
+     ORDER BY created_at ASC, id ASC
+     LIMIT 1
+"""
+_TRIAGE_SQL_GROUP_COUNT = """
+    SELECT COUNT(*) AS n FROM (
+        SELECT 1 FROM match_report_quarantine
+         WHERE status = 'pending'
+         GROUP BY mode, group_id) g
+"""
+_TRIAGE_SQL_GROUPS_AT_QUOTA = """
+    SELECT mode, group_id, COUNT(*) AS n
+      FROM match_report_quarantine
+     WHERE status = 'pending' AND group_id IS NOT NULL
+     GROUP BY mode, group_id
+    HAVING COUNT(*) >= CAST(:quota AS integer)
+     ORDER BY mode, group_id
+"""
+_TRIAGE_SQL_MULTI_GROUP_SEATS = """
+    SELECT COUNT(*) AS n FROM (
+        SELECT reporter_id FROM match_report_quarantine
+         WHERE status = 'pending' AND mode = 'ffa' AND reporter_id IS NOT NULL
+         GROUP BY reporter_id
+        HAVING COUNT(DISTINCT group_id) >= 2) s
+"""
+_TRIAGE_SQL_V1_PAGE = """
+    SELECT mode, group_id, gkey, oldest, newest, pending FROM (
+        SELECT mode, group_id,
+               COALESCE(group_id, CAST(:nil AS uuid)) AS gkey,
+               MIN(created_at) AS oldest, MAX(created_at) AS newest,
+               COUNT(*) AS pending
+          FROM match_report_quarantine
+         WHERE status = 'pending'
+         GROUP BY mode, group_id) g
+     WHERE NOT CAST(:has_cursor AS boolean)
+        OR (oldest, mode, gkey) > (CAST(:c_oldest AS timestamptz), CAST(:c_mode AS varchar),
+                                   CAST(:c_gkey AS uuid))
+     ORDER BY oldest ASC, mode ASC, gkey ASC
+     LIMIT CAST(:lim AS integer)
+"""
+_TRIAGE_SQL_V1_PAGE_ROWS = f"""
+    SELECT q.mode, q.group_id, q.reason, q.reporter_id, {_TRIAGE_ROOM_HELD_SQL} AS room_held
+      FROM match_report_quarantine q
+      JOIN unnest(CAST(:modes AS varchar[]), CAST(:gkeys AS uuid[])) AS page_keys(mode, gkey)
+        ON q.mode = page_keys.mode
+       AND COALESCE(q.group_id, CAST(:nil AS uuid)) = page_keys.gkey
+     WHERE q.status = 'pending'
+"""
+_TRIAGE_SQL_V2_PENDING = f"""
+    SELECT q.id, q.mode, q.reason, q.http_status, q.group_id, q.photon_room_id,
+           {_TRIAGE_ROOM_SQL} AS room, q.reporter_id, q.player_ids,
+           q.payload::text AS payload, q.created_at,
+           EXTRACT(EPOCH FROM (now() - q.created_at)) AS age_s,
+           {_TRIAGE_ROOM_HELD_SQL} AS room_held
+      FROM match_report_quarantine q
+     WHERE q.status = 'pending' AND q.mode = CAST(:m AS varchar)
+       AND q.group_id = CAST(:g AS uuid)
+     ORDER BY q.created_at ASC, q.id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+_TRIAGE_SQL_V2_LOBBY = """
+    SELECT id, status, games_played, player_count
+      FROM ffa_lobbies
+     WHERE id = CAST(:g AS uuid)
+"""
+_TRIAGE_SQL_V2_SERIES = """
+    SELECT id, status, t1_series_wins, t2_series_wins, created_at, completed_at, invalidated_at
+      FROM team_series
+     WHERE id = CAST(:g AS uuid)
+"""
+_TRIAGE_SQL_V2_ROW_COUNT = """
+    SELECT COUNT(*) AS n FROM ffa_matches WHERE lobby_id = CAST(:g AS uuid)
+"""
+_TRIAGE_SQL_V2_ROWS_PAGE = """
+    SELECT id, game_number, photon_room_id, reported_by, winner_id, game_number_source,
+           invalidated_at, created_at, ended_at
+      FROM ffa_matches
+     WHERE lobby_id = CAST(:g AS uuid)
+       AND (NOT CAST(:has_cursor AS boolean)
+            OR (game_number, id) > (CAST(:c_gn AS smallint), CAST(:c_id AS uuid)))
+     ORDER BY game_number ASC, id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+# The columns of _FFA_PRIOR_VECTOR_SQL, for a whole page in one statement,
+# plus the two keys the page needs to regroup them: match_id, and player_id
+# for the roster question the arm asks first.
+_TRIAGE_SQL_V2_VECTORS = """
+    SELECT fmp.match_id, fmp.player_id, p.steam_id, fmp.rounds_won, fmp.points_total,
+           fmp.kills, fmp.left_early, fmp.absent
+      FROM ffa_match_players fmp
+      JOIN players p ON p.id = fmp.player_id
+     WHERE fmp.match_id = ANY(CAST(:ids AS uuid[]))
+"""
+# A variant's keyed twin, found by room in ANY group and ANY status -- the
+# capture's own keyed read ignores group_id, so the twin may sit elsewhere.
+_TRIAGE_SQL_V2_KEYED_TWINS = """
+    SELECT id, group_id, status, photon_room_id, review_note
+      FROM match_report_quarantine
+     WHERE mode = CAST(:m AS varchar)
+       AND photon_room_id = ANY(CAST(:rooms AS varchar[]))
+"""
+# Reviewed NULL-room rows of this group naming the same rooms: what a pending
+# variant may be a re-capture of. Keyset-paged until a short page.
+_TRIAGE_SQL_V2_REVIEWED = """
+    SELECT id, status, review_note, reviewed_at, created_at,
+           payload->>'photon_room_id' AS room, payload::text AS payload
+      FROM match_report_quarantine
+     WHERE group_id = CAST(:g AS uuid) AND mode = CAST(:m AS varchar)
+       AND photon_room_id IS NULL AND status <> 'pending'
+       AND payload->>'photon_room_id' = ANY(CAST(:rooms AS text[]))
+       AND (NOT CAST(:has_cursor AS boolean)
+            OR (created_at, id) > (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))
+     ORDER BY created_at ASC, id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+# The players the pending payloads name, extracted by the server from the
+# same rows in the same snapshot (payload is JSONB): every string steam_id,
+# other than the empty one, of an object in the payload's "players" array.
+# A payload that validates as a report carries only string steam_ids
+# (FfaPlayerEntry.steam_id is a str field; pydantic refuses any other
+# value for it), and the view looks up only a validated report's players,
+# so the map holds every entry the view reads, and no payload is parsed
+# between two statements of the transaction.
+_TRIAGE_SQL_V2_STEAM_MAP = """
+    SELECT pl.id, pl.steam_id
+      FROM players pl
+     WHERE pl.steam_id IN (
+           SELECT e.p->>'steam_id'
+             FROM (SELECT jsonb_array_elements(q.payload->'players') AS p
+                     FROM match_report_quarantine q
+                    WHERE q.id = ANY(CAST(:ids AS uuid[]))
+                      AND jsonb_typeof(q.payload->'players') = 'array') e
+            WHERE jsonb_typeof(e.p) = 'object'
+              AND jsonb_typeof(e.p->'steam_id') = 'string'
+              AND e.p->>'steam_id' <> '')
+"""
+_TRIAGE_SQL_D1_HW = "SELECT now() AS hw"
+_TRIAGE_SQL_D1_PAGE = f"""
+    SELECT q.id, q.mode, q.group_id, q.reason, q.created_at, {_TRIAGE_ROOM_HELD_SQL} AS room_held
+      FROM match_report_quarantine q
+     WHERE q.status = 'pending'
+       AND q.created_at <= CAST(:hw AS timestamptz)
+       AND (NOT CAST(:has_cursor AS boolean)
+            OR (q.created_at, q.id) > (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))
+     ORDER BY q.created_at ASC, q.id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+
+
+class _TriageReadBudgetSpent(Exception):
+    """The handle refused to start a read: t0 + 1 s had passed."""
+
+
+class _TriageReadHandle:
+    """Runs every application read of one triage request, behind the deadline.
+
+    read() runs one statement and returns its rows copied into plain dicts.
+    run() awaits a helper that takes the session as its first argument --
+    inside a SAVEPOINT when asked, the shape admin_list_quarantine uses for
+    its later-rated count. Both check the deadline FIRST and start nothing
+    once t0 + 1 s has passed. The check is synchronous, so a stall before it
+    can only make it see a later time."""
+
+    def __init__(self, db: AsyncSession, t0: float):
+        self._db = db
+        self.t0 = t0
+        self.reads = 0
+
+    def _admit(self):
+        if time.monotonic() - self.t0 >= _TRIAGE_READ_BUDGET_S:
+            raise _TriageReadBudgetSpent()
+        self.reads += 1
+
+    async def read(self, statement: str, params: dict | None = None) -> list[dict]:
+        self._admit()
+        res = await self._db.execute(text(statement), params or {})
+        return [dict(r) for r in res.mappings().all()]
+
+    async def run(self, helper, *args, savepoint: bool = False):
+        self._admit()
+        if savepoint:
+            async with self._db.begin_nested():
+                return await helper(self._db, *args)
+        return await helper(self._db, *args)
+
+
+_TRIAGE_STATEMENT_ENDED = ("57014", "55P03")   # the statement ended; the transaction is still open
+
+
+def _triage_link_lost(link) -> bool:
+    """Whether one link of an exception chain reports the connection lost
+    without a SQLSTATE of its own. Three kinds do:
+      * a link SQLAlchemy marked connection_invalidated (the driver's
+        connection was already closed when SQLAlchemy handled the error);
+      * asyncpg's InterfaceError whose message says the connection is closed
+        (asyncpg raises it for a call made after it noticed the loss:
+        "connection is closed", "cannot call Transaction.commit(): the
+        underlying connection is closed");
+      * SQLAlchemy's PendingRollbackError 8s2b (it refuses to go on with a
+        connection it invalidated while a transaction was open)."""
+    if getattr(link, "connection_invalidated", False) is True:
+        return True
+    if isinstance(link, _triage_apg_exc.InterfaceError) and "connection is closed" in str(link):
+        return True
+    if isinstance(link, _triage_pending_rollback) and getattr(link, "code", None) == "8s2b":
+        return True
+    return False
+
+
+def _triage_ended_early(exc) -> str | None:
+    """The state in which a failed read's transaction ended early (a bound
+    ended the statement or the session, or the connection is gone), or None.
+    Every link of the exception's chain is visited, breadth first from the
+    exception itself, through each link's .orig (the driver error SQLAlchemy
+    wraps), __cause__ and __context__ (the exception being handled when this
+    one was raised); a link reached twice is visited once, and a value that
+    is not an exception is not a link. The answer is, in this order:
+      1. the SQLSTATE of the first visited link whose SQLSTATE is 25P03 (the
+         server ended the idle session) or of class 08 (the connection is
+         gone; asyncpg reports a loss it notices during a call as 08003);
+      2. "08003" when some link reports the connection lost without a
+         SQLSTATE (_triage_link_lost);
+      3. the SQLSTATE of the first visited link whose SQLSTATE is 57014 (a
+         statement cancelled at statement_timeout) or 55P03 (a lock wait past
+         lock_timeout);
+      4. None.
+    A lost connection comes before a cancelled statement because the
+    later-rated count's handler goes on after 57014 or 55P03 (the count's
+    savepoint leaves the transaction usable) and re-raises a state of class
+    08 or 25P03. In the primitive, any state answers 503 (reopen the view)
+    and None re-raises the exception."""
+    todo, seen = [exc], set()
+    gone, lost, stopped = None, False, None
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        state = str(getattr(cur, "sqlstate", None) or "")
+        if gone is None and (state == "25P03" or state.startswith("08")):
+            gone = state
+        if stopped is None and state in _TRIAGE_STATEMENT_ENDED:
+            stopped = state
+        lost = lost or _triage_link_lost(cur)
+        todo.extend((getattr(cur, "orig", None), cur.__cause__, cur.__context__))
+    if gone:
+        return gone
+    if lost:
+        return "08003"
+    return stopped
+
+
+_TRIAGE_GC_HOLD_MAX_S = 10.0   # a hold still taken this long after it began is released
+_triage_gc_lock = _triage_threading.Lock()
+_triage_gc_state = {"depth": 0, "restore": False}
+
+
+class _TriageGcHold:
+    """Automatic garbage collection held off for one read transaction.
+
+    A collection pass runs wherever an allocation crosses the collector's
+    threshold, so one can land between two statements of the transaction,
+    and a full pass over a large heap outlasts the 1 s idle-in-transaction
+    bound (measured: a 1.2 s pass inside a triage transaction in the test
+    process, which the server then ended). acquire() is called before the
+    first statement and release() when the COMMIT or the ROLLBACK attempt
+    returns. The collector's switch is process-wide, so the holds are
+    counted under a lock: overlapping requests nest, and the last release
+    restores the state the first acquire found. A hold is bounded: a timer
+    releases it _TRIAGE_GC_HOLD_MAX_S after acquire, so a transaction that
+    never returns cannot keep collection off. release() is idempotent. An
+    explicit gc.collect() is not held off; nothing in the transaction calls
+    one."""
+
+    def __init__(self):
+        self._held = False
+        self._timer = None
+
+    def acquire(self):
+        with _triage_gc_lock:
+            if _triage_gc_state["depth"] == 0:
+                _triage_gc_state["restore"] = _triage_gc.isenabled()
+                _triage_gc.disable()
+            _triage_gc_state["depth"] += 1
+            self._held = True
+        self._timer = asyncio.get_running_loop().call_later(_TRIAGE_GC_HOLD_MAX_S, self.release)
+
+    def release(self):
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        with _triage_gc_lock:
+            if not self._held:
+                return
+            self._held = False
+            _triage_gc_state["depth"] -= 1
+            if _triage_gc_state["depth"] == 0 and _triage_gc_state["restore"]:
+                _triage_gc.enable()
+
+
+async def _triage_read_txn(db: AsyncSession, read, build):
+    """The ONE read transaction of a quarantine triage request (C10).
+
+    Statement 1 makes the transaction REPEATABLE READ and READ ONLY; statement
+    2 arms the three timeouts transaction-locally. t0 is taken when statement
+    2 returns, and `read(h)` then runs every application read through the
+    handle. When read returns, the transaction COMMITs; when anything raises,
+    a ROLLBACK is issued (if the server already ended the session, that
+    ROLLBACK fails; the failure is printed, not raised). Either way the
+    post-COMMIT seal is then armed, and
+    `build(rows)` computes the response from the copied values inside it; the
+    seal is reset through its token when build returns or the exception
+    leaves. A read the deadline refused answers 503 (reopen the view), and so
+    does a failure to which _triage_ended_early assigns a state (a bound
+    ended the statement or the session, or the connection is gone); anything
+    else is re-raised.
+
+    Before statement 1 the ORM mappers are configured (a no-op once they
+    are) and automatic garbage collection is held off (_TriageGcHold); the
+    hold is released when the COMMIT, or the ROLLBACK attempt, returns.
+    So neither the mappers' first configuration nor, while the hold lasts,
+    an automatic collection pass runs between two statements of the
+    transaction."""
+    _triage_configure_mappers()
+    hold = _TriageGcHold()
+    hold.acquire()
+    try:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        await db.execute(text(
+            "SELECT set_config('statement_timeout', '2s', true),"
+            " set_config('lock_timeout', '1s', true),"
+            " set_config('idle_in_transaction_session_timeout', '1s', true)"))
+        h = _TriageReadHandle(db, time.monotonic())
+        rows = await read(h)
+        await db.commit()
+        hold.release()
+    except BaseException as exc:
+        try:
+            await db.rollback()
+        except Exception as rb:
+            print(f"[TRIAGE] rollback after a failed read did not complete: {type(rb).__name__}: {rb}")
+        finally:
+            hold.release()
+        with _triage_post_commit_seal("quarantine triage"):
+            if isinstance(exc, _TriageReadBudgetSpent):
+                raise HTTPException(503, "the view's required reads could not start within "
+                                         "the read budget; reopen the view") from exc
+            state = _triage_ended_early(exc)
+            if state:
+                raise HTTPException(503, f"the view's read transaction ended early ({state}); "
+                                         "reopen the view") from exc
+            raise
+    with _triage_post_commit_seal("quarantine triage"):
+        return await build(rows)
+
+
+# ── pure helpers (C4): detached values in, display values out ─────────────
+# None of these takes a session. The comparisons are the arm's own functions,
+# called, never re-implemented.
+
+_TRIAGE_FFA_FAMILIES = {
+    "ffa_room_other_lobby": "F1",
+    "ffa_replay_roster_mismatch": "F2",
+    "score_shape_mismatch": "F4",
+    "ffa_lobby_no_roster": "F6",
+    "lobby_game_limit": "F7",
+    "v1_canonical_downgrade": "F8",
+    "ffa_game_number_mismatch": "F9",
+}
+
+
+def _triage_family(mode: str, reason: str, room_held) -> str:
+    """The capture's family, by its exact reason string. lobby_game_limit is
+    an exact name, so it is decided before the lobby_ prefix (F5) is tried.
+    ffa_game_contradiction is F3a when a settled row holds the capture's
+    room, F3b otherwise. A team row's family is its series_{status} reason."""
+    reason = reason or ""
+    if mode == "team":
+        return reason
+    if reason == "ffa_game_contradiction":
+        return "F3a" if room_held else "F3b"
+    fam = _TRIAGE_FFA_FAMILIES.get(reason)
+    if fam:
+        return fam
+    if reason.startswith("lobby_"):
+        return "F5"
+    return "unclassified"
+
+
+def _triage_named(room) -> int | None:
+    """The game number the capture's key names (1..999), or None."""
+    return _ffa_named_game_number(room)
+
+
+def _triage_expected_game(games_played, highest) -> int:
+    """expected(L): the number _ffa_lock_lobby_slot would hand out after its
+    catch-up -- max(games_played, the highest game_number held by any row of
+    the lobby, invalidated rows included) + 1 -- computed, never written."""
+    return max(int(games_played or 0), int(highest or 0)) + 1
+
+
+def _triage_pt1(r, t) -> dict:
+    """PT1's one line of raw arithmetic, and the fixed statement beside it.
+
+    r = settled rows of the lobby RECEIVED (ended_at) before the capture,
+    t = the number the capture's key names. Nothing interprets d."""
+    t_txt = str(t) if t is not None else _TRIAGE_UNDEFINED
+    if t is None:
+        d = d_txt = _TRIAGE_UNDEFINED
+    elif r is None:
+        d = d_txt = _TRIAGE_INCOMPLETE
+    else:
+        d = r + 1 - t
+        d_txt = str(d)
+    r_txt = str(r) if r is not None else _TRIAGE_INCOMPLETE
+    return {
+        "r": r if r is not None else _TRIAGE_INCOMPLETE,
+        "t": t if t is not None else _TRIAGE_UNDEFINED,
+        "d": d,
+        "line": (f"rows received before this capture: {r_txt}; this report's own game "
+                 f"number: {t_txt}; r + 1 - t = {d_txt}"),
+        "statement": _TRIAGE_PT1_STATEMENT,
+    }
+
+
+def _triage_report(payload_text):
+    """The capture's payload as the report model, or None when it does not
+    validate (it is then shown, never compared)."""
+    try:
+        return FfaMatchReport.model_validate(_json.loads(payload_text))
+    except Exception:
+        return None
+
+
+def _triage_kills_form(report) -> tuple[str, bool]:
+    """The capture's own kills form, as the arm derives it: the canonical form
+    _verify_ffa_hmac verifies, and kills count as signed only under v2."""
+    form = _verify_ffa_hmac(report)
+    return (form or "unverified"), form == "v2"
+
+
+def _triage_row_verdict(report, kills_signed: bool, ids_by_steam: dict, row, row_vec) -> str:
+    """One capture against one settled row, by the arm's two questions in the
+    arm's order: the roster (set equality of player ids), then the arm's own
+    field comparison over a vector and winner built as the arm builds them."""
+    rec_ids = {v["player_id"] for v in row_vec}
+    if set(ids_by_steam.values()) != rec_ids:
+        return "ROSTER DIFFERS"
+    prior_vec = {v["steam_id"]: (int(v["rounds_won"] or 0), int(v["points_total"] or 0),
+                                 int(v["kills"] or 0), bool(v["left_early"]),
+                                 bool(v["absent"]))
+                 for v in row_vec}
+    prior_winner = next((s for s, pid in ids_by_steam.items() if pid == row["winner_id"]), None)
+    why = _ffa_report_contradiction(prior_winner, prior_vec, report, kills_signed)
+    return "AGREES" if why is None else why
+
+
+def _triage_capture_verdict(report, kills_signed: bool, ids_by_steam: dict,
+                            other, other_signed: bool, other_ids: dict) -> str:
+    """One capture against another capture: the same comparison, over a vector
+    built from the other payload the way a settlement of it would store it
+    (its absent flag is _ffa_leave_decision's union, under its own form)."""
+    if set(ids_by_steam.values()) != set(other_ids.values()):
+        return "ROSTER DIFFERS"
+    ghosts, graced, _ = _ffa_leave_decision(other, other_signed)
+    unrated = ghosts | graced
+    other_vec = {p.steam_id: (int(p.rounds_won), int(p.points_total), int(getattr(p, "kills", 0) or 0),
+                              bool(p.left_early), p.steam_id in unrated)
+                 for p in other.players}
+    why = _ffa_report_contradiction(other.winner_steam_id, other_vec, report, kills_signed)
+    return "AGREES" if why is None else why
+
+
+def _triage_recapture(payload_text: str, room, reviewed: list):
+    """The reviewed NULL-room row of the group this pending payload repeats
+    value for value (_quarantine_same_payload), or None."""
+    for rv in reviewed:
+        if rv["room"] == room and _quarantine_same_payload(rv["payload"], payload_text):
+            return rv
+    return None
+
+
+def _triage_iso(v):
+    return v.isoformat() if v is not None else None
+
+
+def _triage_str(v):
+    return str(v) if v is not None else None
+
+
+def _triage_payload_players(report) -> list[dict]:
+    return [{"steam_id": p.steam_id, "rounds_won": int(p.rounds_won), "points_total": int(p.points_total),
+             "kills": int(getattr(p, "kills", 0) or 0), "left_early": bool(p.left_early),
+             "absent": bool(getattr(p, "absent", False))}
+            for p in report.players]
+
+
+def _triage_seats(rows: list, fam_of) -> list[dict]:
+    """PT1 per seat: the pending captures grouped by (mode, group, reporter
+    as claimed by the report), counted by family."""
+    seats: dict = {}
+    for row in rows:
+        seat = (row["mode"], row["group_id"], row["reporter_id"])
+        fams = seats.setdefault(seat, {})
+        fam = fam_of(row)
+        fams[fam] = fams.get(fam, 0) + 1
+    out = []
+    for (mode, group, reporter), fams in seats.items():
+        out.append({"reporter_id": _triage_str(reporter), "reporter_label": _TRIAGE_REPORTER_LABEL,
+                    "pending": sum(fams.values()), "families": dict(sorted(fams.items()))})
+    out.sort(key=lambda s: (-s["pending"], s["reporter_id"] or ""))
+    return out
+
+
+def _triage_v1_cursor(after_oldest, after_mode, after_group):
+    parts = (after_oldest, after_mode, after_group)
+    if all(p is None for p in parts):
+        return None
+    if any(p is None for p in parts):
+        raise HTTPException(422, "a cursor needs after_oldest, after_mode and after_group together")
+    if after_oldest.tzinfo is None:
+        raise HTTPException(422, "after_oldest must carry a UTC offset")
+    return after_oldest, after_mode, after_group
+
+
+# ── V1: the summary ────────────────────────────────────────────────────────
+
+@app.get("/api/v1/admin/quarantine/triage", tags=["Admin"])
+async def admin_quarantine_triage(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    after_oldest: datetime | None = Query(None),
+    after_mode: str | None = Query(None, max_length=8),
+    after_group: UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending quarantined reports, grouped, OLDEST group first.
+
+    The header covers every pending row: pending by mode, the oldest pending
+    row and its group, how many groups hold pending rows, and every group at
+    the capture's quota in either mode. The page holds at most 50 group
+    summaries ordered by (oldest pending created_at, mode, group id), with a
+    keyset cursor on that same tuple, so a group can never be hidden behind
+    newer ones. Admin signature target: "triage". Reads only; see the section
+    comment above for the transaction it runs in."""
+    cursor = _triage_v1_cursor(after_oldest, after_mode, after_group)
+
+    async def read(h):
+        await h.run(_require_admin, admin_steam_id, "quarantine", "triage", hmac_signature)
+        out = {
+            "by_mode": await h.read(_TRIAGE_SQL_PENDING_BY_MODE),
+            "oldest": await h.read(_TRIAGE_SQL_OLDEST_PENDING),
+            "groups_n": await h.read(_TRIAGE_SQL_GROUP_COUNT),
+            "at_quota": await h.read(_TRIAGE_SQL_GROUPS_AT_QUOTA, {"quota": _TRIAGE_QUOTA}),
+            "multi": await h.read(_TRIAGE_SQL_MULTI_GROUP_SEATS),
+        }
+        out["groups"] = await h.read(_TRIAGE_SQL_V1_PAGE, {
+            "nil": _TRIAGE_NIL_GROUP, "has_cursor": cursor is not None,
+            "c_oldest": cursor[0] if cursor else None, "c_mode": cursor[1] if cursor else None,
+            "c_gkey": str(cursor[2]) if cursor else None, "lim": _TRIAGE_V1_PAGE})
+        out["members"] = []
+        if out["groups"]:
+            out["members"] = await h.read(_TRIAGE_SQL_V1_PAGE_ROWS, {
+                "nil": _TRIAGE_NIL_GROUP,
+                "modes": [g["mode"] for g in out["groups"]],
+                "gkeys": [str(g["gkey"]) for g in out["groups"]]})
+        return out
+
+    async def build(r):
+        fam_of = lambda row: _triage_family(row["mode"], row["reason"], row["room_held"])
+        members: dict = {}
+        for m in r["members"]:
+            members.setdefault((m["mode"], m["group_id"]), []).append(m)
+        groups = []
+        for g in r["groups"]:
+            mine = members.get((g["mode"], g["group_id"]), [])
+            fams: dict = {}
+            for m in mine:
+                fams[fam_of(m)] = fams.get(fam_of(m), 0) + 1
+            entry = {
+                "mode": g["mode"], "group_id": _triage_str(g["group_id"]),
+                "pending": int(g["pending"]), "quota": _TRIAGE_QUOTA,
+                "at_quota": int(g["pending"]) >= _TRIAGE_QUOTA,
+                "families": dict(sorted(fams.items())),
+                "oldest": _triage_iso(g["oldest"]), "newest": _triage_iso(g["newest"]),
+            }
+            if g["mode"] == "ffa":
+                entry["pt1_seats"] = _triage_seats(mine, fam_of)
+            groups.append(entry)
+        last = r["groups"][-1] if len(r["groups"]) == _TRIAGE_V1_PAGE else None
+        by_mode = {row["mode"]: int(row["n"]) for row in r["by_mode"]}
+        oldest = r["oldest"][0] if r["oldest"] else None
+        return {
+            "header": {
+                "pending_by_mode": by_mode,
+                "pending_total": sum(by_mode.values()),
+                "groups_with_pending": int(r["groups_n"][0]["n"]),
+                "oldest_pending": None if oldest is None else {
+                    "id": str(oldest["id"]), "mode": oldest["mode"],
+                    "group_id": _triage_str(oldest["group_id"]),
+                    "created_at": _triage_iso(oldest["created_at"])},
+                "quota": _TRIAGE_QUOTA,
+                "groups_at_quota": [{"mode": q["mode"], "group_id": str(q["group_id"]),
+                                     "pending": int(q["n"])} for q in r["at_quota"]],
+                "seats_in_two_or_more_groups": int(r["multi"][0]["n"]),
+                "reporter_label": _TRIAGE_REPORTER_LABEL,
+            },
+            "page": {
+                "size": _TRIAGE_V1_PAGE,
+                "order": "oldest pending created_at, then mode, then group id; ascending",
+                "groups": groups,
+                "next": None if last is None else {
+                    "after_oldest": _triage_iso(last["oldest"]), "after_mode": last["mode"],
+                    "after_group": str(last["gkey"])},
+            },
+        }
+
+    return await _triage_read_txn(db, read, build)
+
+
+# ── V2: one group ─────────────────────────────────────────────────────────
+
+@app.get("/api/v1/admin/quarantine/triage/{mode}/{group_id}", tags=["Admin"])
+async def admin_quarantine_triage_group(
+    mode: str,
+    group_id: UUID,
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """One group's pending captures, with every account the server holds for
+    its lobby beside them. mode is 'ffa' or 'team'; the admin signature
+    target is "triage:{mode}:{group}" with the group id's canonical text.
+
+    Reads, in this order and inside the read deadline: the admin check; the
+    group's pending rows (LIMIT 51: a 51st means the quota bound was
+    exceeded); the lobby or series row, a plain SELECT; for FFA, the lobby's
+    row count and then EVERY settled row with its per-player vectors, 200 per
+    page, until a short page; each variant's keyed twin and the reviewed rows
+    it may repeat; the steam-id map; each pending row's later-rated count,
+    oldest first, each inside its own SAVEPOINT. The read keeps each
+    statement's rows as received; everything the response derives, the
+    per-row vectors, the keyed twins by room and the steam-id map included,
+    is computed after the COMMIT from those copied values. A read the
+    deadline stopped is reported as not read -- a lobby-wide statement is made
+    only over a complete read."""
+    if mode not in ("ffa", "team"):
+        raise HTTPException(422, "mode must be 'ffa' or 'team'")
+    gid = str(group_id)
+    target = f"triage:{mode}:{gid}"
+
+    async def read(h):
+        await h.run(_require_admin, admin_steam_id, "quarantine", target, hmac_signature)
+        pending = await h.read(_TRIAGE_SQL_V2_PENDING, {"m": mode, "g": gid, "lim": _TRIAGE_QUOTA + 1})
+        grp = await h.read(_TRIAGE_SQL_V2_LOBBY if mode == "ffa" else _TRIAGE_SQL_V2_SERIES, {"g": gid})
+        out = {"pending": pending, "group": grp[0] if grp else None,
+               "n_rows": None, "rows": [], "vectors": [], "rows_complete": False,
+               "keyed": [], "keyed_read": False, "reviewed": [], "reviewed_complete": False,
+               "steam": [], "steam_read": False, "c1": {}, "budget_spent": False}
+        try:
+            if mode == "ffa":
+                out["n_rows"] = int((await h.read(_TRIAGE_SQL_V2_ROW_COUNT, {"g": gid}))[0]["n"])
+                cur = None
+                while True:
+                    page = await h.read(_TRIAGE_SQL_V2_ROWS_PAGE, {
+                        "g": gid, "has_cursor": cur is not None,
+                        "c_gn": cur[0] if cur else None, "c_id": str(cur[1]) if cur else None,
+                        "lim": _TRIAGE_PT3_PAGE})
+                    if page:
+                        out["vectors"].extend(await h.read(
+                            _TRIAGE_SQL_V2_VECTORS, {"ids": [str(s["id"]) for s in page]}))
+                        out["rows"].extend(page)
+                    if len(page) < _TRIAGE_PT3_PAGE:
+                        out["rows_complete"] = True
+                        break
+                    cur = (page[-1]["game_number"], page[-1]["id"])
+            rooms = sorted({q["room"] for q in pending
+                            if q["photon_room_id"] is None and q["room"] is not None})
+            if rooms:
+                for k in await h.read(_TRIAGE_SQL_V2_KEYED_TWINS, {"m": mode, "rooms": rooms}):
+                    out["keyed"].append(k)
+            out["keyed_read"] = True
+            cur = None
+            while rooms:
+                page = await h.read(_TRIAGE_SQL_V2_REVIEWED, {
+                    "g": gid, "m": mode, "rooms": rooms, "has_cursor": cur is not None,
+                    "c_at": cur[0] if cur else None, "c_id": str(cur[1]) if cur else None,
+                    "lim": _TRIAGE_PT4_PAGE})
+                out["reviewed"].extend(page)
+                if len(page) < _TRIAGE_PT4_PAGE:
+                    break
+                cur = (page[-1]["created_at"], page[-1]["id"])
+            out["reviewed_complete"] = True
+            if mode == "ffa" and pending:
+                out["steam"] = await h.read(_TRIAGE_SQL_V2_STEAM_MAP, {"ids": [str(q["id"]) for q in pending]})
+            out["steam_read"] = True
+            for q in pending:   # already oldest first
+                try:
+                    out["c1"][q["id"]] = int(await h.run(
+                        _quarantine_later_rated_count, q["mode"], q["player_ids"], q["created_at"],
+                        savepoint=True))
+                except _TriageReadBudgetSpent:
+                    raise
+                except Exception as ex:
+                    # A count the statement bound cancelled inside its own
+                    # savepoint leaves the transaction usable; a session the
+                    # server ended does not, so that one still fails the view.
+                    if (_triage_ended_early(ex) or "").startswith(("08", "25")):
+                        raise
+                    print(f"[TRIAGE] later-rated count for {q['id']} not computed: {type(ex).__name__}")
+        except _TriageReadBudgetSpent:
+            out["budget_spent"] = True
+        return out
+
+    async def build(r):
+        return _triage_group_view(mode, gid, r)
+
+    return await _triage_read_txn(db, read, build)
+
+
+def _triage_group_view(mode: str, gid: str, r: dict) -> dict:
+    """V2's response, from the detached reads of one group (C4: no session)."""
+    # The read kept each statement's rows as received; the three lookups the
+    # view reads are derived here, after the COMMIT.
+    vectors: dict = {}
+    for v in r["vectors"]:
+        vectors.setdefault(v["match_id"], []).append(v)
+    r = {**r, "vectors": vectors, "keyed": {k["photon_room_id"]: k for k in r["keyed"]},
+         "steam": {row["steam_id"]: row["id"] for row in r["steam"]}}
+    pending = r["pending"]
+    fam_of = lambda row: _triage_family(row["mode"], row["reason"], row["room_held"])
+    fams: dict = {}
+    for q in pending:
+        fams[fam_of(q)] = fams.get(fam_of(q), 0) + 1
+    rows = r["rows"]
+    complete = bool(r["rows_complete"])
+    n_rows = r["n_rows"]
+    pt2 = {
+        "pending": len(pending), "quota": _TRIAGE_QUOTA,
+        "at_quota": len(pending) >= _TRIAGE_QUOTA,
+        "quota_bound_exceeded": len(pending) > _TRIAGE_QUOTA,
+        "families": dict(sorted(fams.items())),
+        "oldest": None if not pending else {"id": str(pending[0]["id"]),
+                                            "created_at": _triage_iso(pending[0]["created_at"])},
+        "newest": None if not pending else {"id": str(pending[-1]["id"]),
+                                            "created_at": _triage_iso(pending[-1]["created_at"])},
+    }
+    grp = r["group"]
+    if mode == "ffa":
+        pt2["cannot_say"] = ("a report the quota refused left no row; it lives only on its "
+                             "client's retry ladder")
+        if grp is None:
+            pt2["lobby"] = "lobby missing"
+        else:
+            highest = max((int(s["game_number"]) for s in rows), default=0) if complete else None
+            lobby = {"status": grp["status"], "games_played": int(grp["games_played"] or 0),
+                     "player_count": int(grp["player_count"] or 0),
+                     "highest_held_game": highest if complete else _TRIAGE_INCOMPLETE,
+                     "expected_game": (_triage_expected_game(grp["games_played"], highest)
+                                       if complete else _TRIAGE_INCOMPLETE),
+                     "migration_gap": None}
+            if complete and highest > int(grp["games_played"] or 0):
+                lobby["migration_gap"] = (
+                    f"games_played {int(grp['games_played'] or 0)}; highest held game {highest}; "
+                    f"a report would be expected at {highest + 1} (the endpoint's catch-up moves "
+                    f"the counter; this view does not)")
+            pt2["lobby"] = lobby
+    else:
+        pt2["cannot_say"] = ("a report the quota refused left no row; a team report refused at "
+                             "quota was answered a terminal 400 and dropped")
+        if grp is None:
+            pt2["series"] = "series missing"
+        else:
+            pt2["series"] = {"status": grp["status"],
+                             "score": f"{int(grp['t1_series_wins'] or 0)}-{int(grp['t2_series_wins'] or 0)}",
+                             "created_at": _triage_iso(grp["created_at"]),
+                             "completed_at": _triage_iso(grp["completed_at"]),
+                             "invalidated_at": _triage_iso(grp["invalidated_at"])}
+
+    steam = r["steam"]
+    reports, forms, ids_of = {}, {}, {}
+    for q in pending:
+        rep = _triage_report(q["payload"]) if mode == "ffa" else None
+        reports[q["id"]] = rep
+        if rep is not None:
+            forms[q["id"]] = _triage_kills_form(rep)
+            ids_of[q["id"]] = {p.steam_id: steam[p.steam_id] for p in rep.players if p.steam_id in steam}
+
+    row_view = []
+    for s in rows:
+        row_view.append({
+            "id": str(s["id"]), "game_number": int(s["game_number"]),
+            "room": s["photon_room_id"], "reported_by": _triage_str(s["reported_by"]),
+            "winner_id": _triage_str(s["winner_id"]), "game_number_source": s["game_number_source"],
+            "invalidated_at": _triage_iso(s["invalidated_at"]),
+            "created_at": _triage_iso(s["created_at"]), "ended_at": _triage_iso(s["ended_at"]),
+            "players": [{"steam_id": v["steam_id"], "rounds_won": int(v["rounds_won"] or 0),
+                         "points_total": int(v["points_total"] or 0), "kills": int(v["kills"] or 0),
+                         "left_early": bool(v["left_early"]), "absent": bool(v["absent"])}
+                        for v in r["vectors"].get(s["id"], [])]})
+    read_line = (f"{len(rows)} of {n_rows} read" if n_rows is not None else None)
+
+    captures = []
+    for q in pending:
+        t = _triage_named(q["room"])
+        cap = {"id": str(q["id"]), "reason": q["reason"], "family": fam_of(q),
+               "keyed": q["photon_room_id"] is not None, "room": q["room"],
+               "reporter_id": _triage_str(q["reporter_id"]), "reporter_label": _TRIAGE_REPORTER_LABEL,
+               "created_at": _triage_iso(q["created_at"]),
+               "named_game": t if t is not None else _TRIAGE_UNDEFINED}
+        rep = reports[q["id"]]
+        if mode == "ffa":
+            if rep is None:
+                cap["account"] = "the stored payload does not validate as a report; shown, not compared"
+            else:
+                cap["account"] = {"label": "the report's own account", "winner_steam_id": rep.winner_steam_id,
+                                  "players": _triage_payload_players(rep), "kills_form": forms[q["id"]][0],
+                                  "timeline": {"value": rep.timeline,
+                                               "label": "unsigned: outside the report's signature"}}
+            # PT1: raw receipt-order arithmetic
+            r_count = (sum(1 for s in rows if s["ended_at"] < q["created_at"]) if complete else None)
+            cap["pt1"] = _triage_pt1(r_count, t)
+            # PT3 / PT3b: every row read, nearest the named number first
+            if t is None:
+                order = sorted(rows, key=lambda s: (s["game_number"], s["id"]))
+            else:
+                order = sorted(rows, key=lambda s: (abs(int(s["game_number"]) - t), s["game_number"], s["id"]))
+            comps, agree_at = [], []
+            for s in order:
+                if rep is None:
+                    verdict = "not compared: the payload does not validate"
+                elif not r["steam_read"]:
+                    verdict = "not compared: the steam-id map was not read within the read budget"
+                else:
+                    verdict = _triage_row_verdict(rep, forms[q["id"]][1], ids_of[q["id"]], s,
+                                                  r["vectors"].get(s["id"], []))
+                if verdict == "AGREES":
+                    agree_at.append(int(s["game_number"]))
+                comps.append({"row_id": str(s["id"]), "game_number": int(s["game_number"]),
+                              "distance": (abs(int(s["game_number"]) - t) if t is not None
+                                           else _TRIAGE_UNDEFINED),
+                              "verdict": verdict})
+            others = []
+            for o in pending:
+                if o["id"] == q["id"]:
+                    continue
+                orep = reports[o["id"]]
+                if rep is None or orep is None:
+                    verdict = "not compared: a payload does not validate"
+                elif not r["steam_read"]:
+                    verdict = "not compared: the steam-id map was not read within the read budget"
+                else:
+                    verdict = _triage_capture_verdict(rep, forms[q["id"]][1], ids_of[q["id"]],
+                                                      orep, forms[o["id"]][1], ids_of[o["id"]])
+                others.append({"capture_id": str(o["id"]), "verdict": verdict})
+            if not complete:
+                label = (f"{len(rows)} of {n_rows} rows read before the read budget ran out; "
+                         "no lobby-wide statement is made; reopen the view")
+            elif rep is None or not r["steam_read"] or any(
+                    c["verdict"].startswith("not compared") for c in comps):
+                # The three labels below are lobby-wide conclusions over every
+                # row's comparison. None is issued unless the two inputs every
+                # comparison reads are present -- the payload as a report and the
+                # steam-id map, required at 0 rows too -- and no row's verdict
+                # reads "not compared" (so a cause added later blocks them too).
+                why = next((c["verdict"] for c in comps if c["verdict"].startswith("not compared")),
+                           "not compared: the payload does not validate" if rep is None
+                           else "not compared: the steam-id map was not read within the read budget")
+                label = f"{why}, so no lobby-wide statement is made ({len(rows)} of {n_rows} rows read)"
+            elif agree_at:
+                label = ("agrees with the settled account at " + ", ".join(str(m) for m in agree_at)
+                         + ": consistent with a second account of that game, and with a later game "
+                           "repeating its outcome")
+            elif not rows:
+                label = "no settled account of this lobby exists (0 of 0 read)"
+            else:
+                label = (f"differs from every settled account of this lobby ({n_rows} of {n_rows} read): "
+                         "the server cannot tell a distinct game from a differing account of a settled one")
+            rep_id = q["reporter_id"]
+            same = [int(s["game_number"]) for s in order
+                    if rep_id is not None and s["reported_by"] == rep_id]
+            if same:
+                same_txt = ("the capture's claimed reporter also reported the settled rows at "
+                            + ", ".join(str(m) for m in same)
+                            + ": the planned lever's comparisons skip every such pair; check by hand")
+            elif complete:
+                same_txt = "no settled row of this lobby was reported by the capture's claimed reporter"
+            else:
+                same_txt = _TRIAGE_INCOMPLETE
+            cap["pt3"] = {"order": ("distance from the named number, then game number, then id"
+                                    if t is not None else "game number, then id (the key names no game)"),
+                          "read": read_line, "rows": comps, "captures": others, "label": label,
+                          "same_reporter": {"rows_at": same, "text": same_txt}}
+        # PT4: keyed, variant, re-capture
+        if q["photon_room_id"] is not None:
+            pt4 = {"kind": "keyed"}
+        else:
+            pt4 = {"kind": "variant"}
+            twin = r["keyed"].get(q["room"])
+            if not r["keyed_read"]:
+                pt4["variant_of"] = "not determined within the read budget"
+            elif twin is None:
+                pt4["variant_of"] = "no keyed row holds this room"
+            else:
+                pt4["variant_of"] = {"id": str(twin["id"]), "group_id": _triage_str(twin["group_id"]),
+                                     "status": twin["status"]}
+            if not r["reviewed_complete"]:
+                pt4["recapture_of"] = "re-capture status not determined"
+            else:
+                rv = _triage_recapture(q["payload"], q["room"], r["reviewed"])
+                pt4["recapture_of"] = None if rv is None else {
+                    "id": str(rv["id"]), "status": rv["status"], "review_note": rv["review_note"],
+                    "reviewed_at": _triage_iso(rv["reviewed_at"])}
+        cap["pt4"] = pt4
+        # PT5: age, and the two counts, shown beside PT3's verdict
+        c1 = r["c1"].get(q["id"])
+        pt5 = {"age_s": round(float(q["age_s"]), 3),
+               "c1": c1 if c1 is not None else _TRIAGE_NOT_WITHIN_BUDGET,
+               "c1_label": (f"Rated results for these players RECEIVED after this capture: "
+                            f"{c1 if c1 is not None else _TRIAGE_NOT_WITHIN_BUDGET}. This is what today's "
+                            "accept gate reads. Results received before the capture are not counted, "
+                            "so zero is not a safety signal.")}
+        if mode == "ffa":
+            if t is None:
+                c2 = _TRIAGE_UNDEFINED
+            elif not complete:
+                c2 = _TRIAGE_INCOMPLETE
+            else:
+                c2 = sum(1 for s in rows if int(s["game_number"]) > t)
+            pt5["c2"] = c2
+            pt5["c2_label"] = (f"Settled rows of this lobby numbered above the named number: {c2}, "
+                               "received at any time.")
+        cap["pt5"] = pt5
+        captures.append(cap)
+
+    view = {"mode": mode, "group_id": gid, "pt2": pt2, "captures": captures,
+            "reads": {"budget_spent": bool(r["budget_spent"]), "keyed_twins_read": bool(r["keyed_read"]),
+                      "reviewed_read_complete": bool(r["reviewed_complete"]),
+                      "steam_map_read": bool(r["steam_read"])}}
+    if pending:
+        view["oldest_age_s"] = round(float(pending[0]["age_s"]), 3)
+    if mode == "ffa":
+        view["pt1_seats"] = _triage_seats(pending, fam_of)
+        view["accounts"] = {"read": read_line, "complete": complete, "rows": row_view}
+    return view
+
+
+# ── D1: the digest feed for the bot ───────────────────────────────────────
+
+@app.get("/api/v1/internal/quarantine/digest", tags=["Internal"])
+async def internal_quarantine_digest(
+    hw: datetime | None = Query(None),
+    after_at: datetime | None = Query(None),
+    after_id: UUID | None = Query(None),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending row ids for the #scr-admin digest, one page of a pass.
+
+    A pass's first request carries no cursor: the answer fixes hw = now() of
+    its own transaction and carries the totals (pending by mode, groups,
+    groups at quota in either mode, the oldest pending row) and the first
+    page. Every later request of the pass sends back hw and the last
+    (created_at, id). A page holds pending rows with created_at <= hw ordered
+    by (created_at, id), 500 at most, each as (id, mode, group, family,
+    created_at): no payload, no names. The pass ends on a short page. Nothing
+    is stored: the durable unposted state is the row's own status."""
+    _require_internal_key(x_internal_key)
+    later = (hw, after_at, after_id)
+    if any(p is not None for p in later) and any(p is None for p in later):
+        raise HTTPException(422, "a later page needs hw, after_at and after_id together")
+    if any(p is not None and getattr(p, "tzinfo", 1) is None for p in (hw, after_at)):
+        raise HTTPException(422, "hw and after_at must carry a UTC offset")
+    first = hw is None
+
+    async def read(h):
+        out = {"totals": None}
+        if first:
+            out["hw"] = (await h.read(_TRIAGE_SQL_D1_HW))[0]["hw"]
+            out["totals"] = {
+                "by_mode": await h.read(_TRIAGE_SQL_PENDING_BY_MODE),
+                "groups_n": await h.read(_TRIAGE_SQL_GROUP_COUNT),
+                "at_quota": await h.read(_TRIAGE_SQL_GROUPS_AT_QUOTA, {"quota": _TRIAGE_QUOTA}),
+                "oldest": await h.read(_TRIAGE_SQL_OLDEST_PENDING),
+            }
+        else:
+            out["hw"] = hw
+        out["rows"] = await h.read(_TRIAGE_SQL_D1_PAGE, {
+            "hw": out["hw"], "has_cursor": not first,
+            "c_at": after_at, "c_id": str(after_id) if after_id else None, "lim": _TRIAGE_D1_PAGE})
+        return out
+
+    async def build(r):
+        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE,
+                "rows": [{"id": str(q["id"]), "mode": q["mode"], "group": _triage_str(q["group_id"]),
+                          "family": _triage_family(q["mode"], q["reason"], q["room_held"]),
+                          "created_at": _triage_iso(q["created_at"])} for q in r["rows"]]}
+        t = r["totals"]
+        if t is not None:
+            by_mode = {row["mode"]: int(row["n"]) for row in t["by_mode"]}
+            oldest = t["oldest"][0] if t["oldest"] else None
+            resp["totals"] = {
+                "pending": sum(by_mode.values()), "by_mode": by_mode,
+                "groups": int(t["groups_n"][0]["n"]), "quota": _TRIAGE_QUOTA,
+                "at_quota": [{"mode": q["mode"], "group": str(q["group_id"]), "pending": int(q["n"])}
+                             for q in t["at_quota"]],
+                "oldest": None if oldest is None else {
+                    "id": str(oldest["id"]), "mode": oldest["mode"],
+                    "group": _triage_str(oldest["group_id"]),
+                    "created_at": _triage_iso(oldest["created_at"])}}
+        return resp
+
+    return await _triage_read_txn(db, read, build)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -54642,8 +59949,8 @@ async def get_set_report(request: Request, steam_id: str = "",
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
 
 # Routes: in-game mail (Sept 6 batch, Group 4 item b — server half;
-# migration 297). Design: ai-collab/sept6-triage/group4-design-v2.md §b
-# (B-1 .. B-14, B-L1 .. B-L3); the schema's shape decisions are recorded on
+# migration 297), items B-1 .. B-14 and B-L1 .. B-L3. The schema's shape
+# decisions are recorded on
 # the migration. Player routes resolve their caller from X-Session-Token
 # ALONE — the API contract carries no steam_id — and then run the SAME
 # fail-closed gate the h2h route uses on the id the token names

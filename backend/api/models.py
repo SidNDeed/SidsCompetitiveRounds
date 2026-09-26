@@ -714,6 +714,38 @@ class BugReport(Base):
     log_bytes = Column(Integer, nullable=True)
     status = Column(String(16), nullable=False, default="open")
     triage_notes = Column(Text, nullable=True)
+    # DELIBERATELY UNMAPPED: `kind` (migration 336, 'report' | 'auto').
+    # Not mapped because an ORM assignment to an undeclared column is a SILENT
+    # no-op, invisible at the call site (#346). Nothing in THIS tree writes a
+    # non-default value: every row it inserts is a player-filed 'report' and
+    # takes the column default. The writer of 'auto' rows is the automatic
+    # post-match log upload, which ships in its own branch and uses raw SQL --
+    # 336's own header inventories it, and that is why this file's readers
+    # scope on the column now rather than when the writer arrives.
+    #
+    # MIGRATION 336 MUST BE APPLIED BEFORE THIS CODE REACHES A BOX. Leaving the
+    # column unmapped does NOT make the reverse order safe, which is what an
+    # earlier version of this comment claimed. Being absent from the ORM keeps
+    # `kind` out of submit_bug_report's INSERT, but six raw-SQL sites READ it
+    # and they decide the ordering:
+    #   * the 10-per-24h rate-limit COUNT inside submit_bug_report itself,
+    #     `WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff`
+    #   * the bug_report_events feed both arms
+    #   * the channel-post feed both arms
+    #   * the admin list and the admin detail pane, which carry it out
+    #   * the reporter's own comment route, which refuses a row that is not
+    #     a 'report'
+    # On a box running this code without 336, that first one raises
+    # UndefinedColumn before any INSERT is attempted, so NO player can file a
+    # bug report at all -- the precise outcome the old comment promised the
+    # unmapping prevented. Migration 336's own header states the requirement
+    # correctly; this comment now agrees with it. The count is DERIVED rather
+    # than remembered: test_migration_headers.py walks this api for functions
+    # whose own source runs SQL over bug_reports naming `kind`, and floors the
+    # result, so a reader added later moves that test rather than sitting
+    # outside it.
+    # channel_posted_at (migration 102) is also unmapped and is read and
+    # written by raw SQL in main.py; no reason was ever recorded for that one.
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

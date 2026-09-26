@@ -7862,7 +7862,17 @@ namespace CompetitiveRounds
         // (hidden there regardless of the setting, §9 Q3), never a spectator;
         // the plain-1v1 fighter gate is applied where the lines are produced.
         // Rect registered in the avoided-rects comment above NOTIF_SET_BASE_Y.
+        //
+        // Bug 392 item B: the stack now has a FIRST row that is not one of the
+        // four states — the transport-silence warning. It is drawn on the same
+        // surface, in amber rather than grey, and it is NOT behind the
+        // [Network] LagNotices opt-in: a pre-disconnect warning that only
+        // appears for seats that switched a diagnostic on would never reach
+        // the player it is for (#438/#443). The identity gates are unchanged
+        // and still apply to both — never the broadcast identity (§9 Q3),
+        // never a spectator.
         private static GUIStyle lagNoticeStyle;
+        private static GUIStyle transportNoticeStyle;
 
         private static void DrawLagNotices()
         {
@@ -7874,22 +7884,36 @@ namespace CompetitiveRounds
                 // BEFORE the setting gate, so the self-test's log lines are the
                 // positive signal on seats where the HUD itself never draws.
                 LagNotices.EnsureStartup();
-                if (Plugin.LagNoticesEnabled == null || !Plugin.LagNoticesEnabled.Value) return;
                 if (BroadcastMode.IsBroadcastIdentity) return;
                 if (RoomActors.LocalIsSpectator) return;
-                var lines = LagNotices.ActiveLines;
-                if (lines == null || lines.Length == 0) return;
+                string transport = LagNotices.TransportSilenceLine();
+                bool optIn = Plugin.LagNoticesEnabled != null && Plugin.LagNoticesEnabled.Value;
+                var lines = optIn ? LagNotices.ActiveLines : null;
+                int n = lines == null ? 0 : Math.Min(lines.Length, LagNotices.MAX_LINES);
+                if (transport == null && n == 0) return;
                 if (lagNoticeStyle == null)
                 {
                     lagNoticeStyle = new GUIStyle(GUI.skin.label);
                     lagNoticeStyle.fontSize = 11;
                     lagNoticeStyle.normal.textColor = new Color(0.5f, 0.5f, 0.5f, 0.7f);
                 }
-                int n = Math.Min(lines.Length, LagNotices.MAX_LINES);
+                if (transportNoticeStyle == null)
+                {
+                    transportNoticeStyle = new GUIStyle(GUI.skin.label);
+                    transportNoticeStyle.fontSize = 11;
+                    transportNoticeStyle.fontStyle = FontStyle.Bold;
+                    transportNoticeStyle.normal.textColor = new Color(1f, 0.7f, 0.3f, 0.95f);
+                }
                 // Sits under the H2H banner (y=22, 10 s) while that is visible, else directly under the corner label.
                 int lagBaseY = 24 + (string.IsNullOrEmpty(H2HSummary.BannerLine) ? 0 : 20);
+                int row = 0;
+                if (transport != null)
+                {
+                    GUI.Label(new Rect(6, lagBaseY, 640, 16), transport, transportNoticeStyle);
+                    row = 1;
+                }
                 for (int i = 0; i < n; i++)
-                    GUI.Label(new Rect(6, lagBaseY + 16 * i, 640, 16), lines[i], lagNoticeStyle);
+                    GUI.Label(new Rect(6, lagBaseY + 16 * (row + i), 640, 16), lines[i], lagNoticeStyle);
             }
             catch { }
         }

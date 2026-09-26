@@ -492,13 +492,23 @@ def _middleware_entry_points():
 def _exception_handler_entry_points():
     """First-party exception handlers.
 
-    This app registers NONE today -- all three handlers on the app are
-    FastAPI's own -- so this returns an empty list, and the assertion that
-    keeps it honest is not "non-empty" (which would be a check that cannot
-    pass) but the one in the test below: the RAW handler set must be non-empty,
-    proving the recovery still sees handlers at all. The day a first-party
-    handler is registered it enters the manifest, and its absence there fails
-    the exhaustiveness assertion."""
+    The day predicted below arrived: RJ-4 registered
+    `main._ffa_report_refusal_handler` for `FfaReportRefusal`, and the
+    exhaustiveness assertion below caught it exactly as it was written to --
+    two red tests on a manifest nobody had edited, which is what a gate that
+    fails closed is for. It is a REQUEST-PATH surface: every FFA report
+    refusal is serialised by it, so its body shape is reviewed here and
+    fingerprinted like a route.
+
+    The assertion this replaces was "the section is empty". That was correct
+    while it was true and is now the wrong shape, because it would have to be
+    re-written for every handler ever added. What is asserted instead is the
+    property that made the old one safe: the RAW handler set must be non-empty,
+    proving the recovery still sees handlers at all, and the recovered
+    first-party set must equal the manifest -- which the generic loop already
+    checks for every section. A handler appearing or leaving therefore stays a
+    review item, answerable only by editing the manifest's identity list by
+    hand (repin_route_manifest.py refuses to do it)."""
     keys = []
     for handler in (getattr(main.app, "exception_handlers", None) or {}).values():
         key = _binding_key(handler)
@@ -516,11 +526,26 @@ def _background_entry_points():
     `merged_lifespan` closing over ours. A one-level `__closure__` read finds
     nothing at all, which is a recovery that silently fingerprints an empty
     set. The walk below descends through nested closures and through
-    `__wrapped__`/`func` wrappers, bounded by identity and depth."""
+    `__wrapped__`/`func` wrappers, bounded by identity and depth.
+
+    THE DEPTH IS NOT A COST CONTROL AND MUST NOT BE TUNED LIKE ONE. `seen` is
+    what bounds the work -- every object is visited once -- so depth only
+    decides how deep the chain may be before the recovery gives up. The chain
+    grows by ONE LEVEL PER `include_router`, and `lifespan` itself is behind a
+    `@asynccontextmanager` wrapper, so the real function sits one hop below the
+    level that carries its name. At a bound of 8 it sat exactly at the edge:
+    mounting one more router pushed it past, `_is_ours` refused the contextlib
+    helper that was left, and this returned [] -- the empty set this docstring
+    warns about, arrived at by a number rather than by a missing lifespan.
+    (Measured on the wave B/C tree: four routers, the wrapper at depth 8 and
+    the function at 9.) The bound is now far above any plausible router count,
+    and `test_the_manifest_covers_every_non_route_entry_point` asserts the
+    recovery is NON-EMPTY, so a future chain that outgrows even this fails
+    loudly instead of fingerprinting nothing."""
     found, seen = [], set()
 
     def descend(obj, depth):
-        if depth > 8 or id(obj) in seen or not callable(obj):
+        if depth > 64 or id(obj) in seen or not callable(obj):
             return
         seen.add(id(obj))
         key = _binding_key(obj)
@@ -708,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 363   # 886bed8 r5: +1, the read-only team series status route (362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 367   # 886bed8 r5: +1, the read-only team series status route (366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -719,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 362   # 886bed8 r5: +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 366   # 886bed8 r5: +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -1035,6 +1060,29 @@ def _load_entry_points():
     return {name: [tuple(row) for row in rows] for name, rows in sections.items()}
 
 
+def _entry_point_drift(manifest, sha_of=_entry_point_sha):
+    """EVERY pinned entry point whose fingerprint has moved, not the first.
+
+    This used to be an `assert` inside the loop, which stops at the first
+    mismatch it meets. The sections are walked in a fixed order and middleware
+    comes first, so a drift in the background entry point sat behind a
+    middleware drift owned by another lane and was reported by nothing: the
+    failure line named one function, and a reader had no way to tell whether
+    it was the only one. A gate that reports a subset of what it found is a
+    gate that certifies the rest by silence.
+
+    `sha_of` is a seam, so a control can hand this a scripted oracle and check
+    that a SECOND drifted entry is actually named.
+    """
+    drifted = []
+    for section in sorted(manifest):
+        for module, name, sha in manifest[section]:
+            live = sha_of(module, name)
+            if live != sha:
+                drifted.append((section, module, name, sha, live))
+    return drifted
+
+
 def test_the_manifest_covers_every_non_route_entry_point():
     """r14 M7, GATE C. A route table is not the whole app.
 
@@ -1060,30 +1108,73 @@ def test_the_manifest_covers_every_non_route_entry_point():
         sorted(live["background_entry_points"])
     )
 
-    # This app registers no first-party exception handlers, so asserting that
-    # SECTION is non-empty would be a check that cannot pass. What must be
-    # non-empty is the raw recovery -- proof the mechanism still sees handlers
-    # at all, so that a first-party one added later is picked up rather than
-    # silently skipped.
+    # The raw recovery must be non-empty -- proof the mechanism still sees
+    # handlers at all, so that a first-party one added later is picked up
+    # rather than silently skipped. (FastAPI's own three are always there; the
+    # recovery keeps only the first-party ones, which is why this is asserted
+    # on the RAW set and not on the section.)
     raw_handlers = getattr(main.app, "exception_handlers", None) or {}
     assert raw_handlers, "the exception-handler recovery sees nothing at all"
-    assert live["exception_handlers"] == [], (
-        "a first-party exception handler was registered -- it belongs in the "
-        "manifest, and this assertion is the thing that says so"
+    # ...and the first-party set is what the manifest says it is. The generic
+    # loop below asserts that for every section; this names the one handler
+    # this app registers, so DELETING it from both the app and the manifest --
+    # which the loop would call agreement -- still reddens here.
+    assert live["exception_handlers"] == [("main", "_ffa_report_refusal_handler")], (
+        "the first-party exception-handler set changed. A handler is a "
+        "request-path surface: adding, removing or renaming one is a review "
+        "item, not a re-pin (repin_route_manifest.py refuses to do it)."
     )
 
     for section, entries in live.items():
         recorded = [(m, n) for (m, n, _sha) in manifest[section]]
         assert recorded == entries, f"{section}: manifest {recorded} vs live {entries}"
-        for module, name, sha in manifest[section]:
-            assert _entry_point_sha(module, name) == sha, (
-                f"{module}.{name} source fingerprint changed; re-review it"
-            )
+
+    # Reported TOGETHER. One drifted fingerprint used to hide every later one,
+    # and the sections are walked in a fixed order, so whichever came first
+    # decided what a reader was told (#342: a check whose report is a subset of
+    # what it found).
+    drifted = _entry_point_drift(manifest)
+    assert not drifted, (
+        "%d pinned entry point(s) have moved; every one of them needs "
+        "re-reviewing and re-pinning:\n%s"
+        % (len(drifted), "\n".join(
+            "  %-24s %s.%s  %s -> %s" % (section, module, name, sha[:12], now[:12])
+            for section, module, name, sha, now in drifted)))
 
     before = _entry_point_sha("main", "rate_limit_gate")
     with _mutated_segment("main", "rate_limit_gate"):
         after = _entry_point_sha("main", "rate_limit_gate")
     assert after != before, "editing the rate-limit gate moved no fingerprint"
+
+
+def test_a_drifted_entry_point_does_not_hide_the_ones_behind_it():
+    """The gate above reports EVERY moved fingerprint, not the first.
+
+    Why it needs its own test: on this tree one middleware entry has already
+    drifted, and the sections are walked in a fixed order with middleware
+    first. A `main.lifespan` drift therefore sat behind it and was named by
+    nothing -- so "one function is listed" carried no information about the
+    others, and a background entry point could ship stale behind a failure
+    somebody else was expected to clear.
+
+    The oracle is scripted rather than taken from the live tree: a test that
+    depends on which entry points happen to be drifting today stops testing
+    this the moment somebody re-pins.
+    """
+    manifest = {
+        "middleware": [("main", "rate_limit_gate", "aaaa")],
+        "background_entry_points": [("main", "lifespan", "bbbb")],
+    }
+    both = _entry_point_drift(manifest, sha_of=lambda m, n: "cccc")
+    named = {(module, name) for _section, module, name, _sha, _now in both}
+    assert named == {("main", "rate_limit_gate"), ("main", "lifespan")}, (
+        "two entry points drifted and the gate reported %r -- the ones it "
+        "does not name are certified by its silence" % (sorted(named),))
+
+    # ...and it still says nothing when nothing moved, or the assertion above
+    # would be reporting drift that is not there.
+    assert _entry_point_drift(
+        manifest, sha_of=lambda m, n: "aaaa" if n == "rate_limit_gate" else "bbbb") == []
 
 
 def test_the_admission_rule_is_computed_for_every_module_not_just_main():

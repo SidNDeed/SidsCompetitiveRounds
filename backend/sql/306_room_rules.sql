@@ -1,5 +1,5 @@
 -- 306: per-room rules record — friendly fire (2v2 / 1v2) and the Same Cards
--- rule in every mode (Sept 10 batch, ai-collab/sept10-batch/01-room-rules.md).
+-- rule in every mode (Sept 10 batch; the shape decisions are recorded below).
 --
 -- A room's rules {ff, sc} are decided BEFORE the room exists (host knobs on the
 -- 2v2 / 1v2 lobby rows; the per-player preference below for queue-matched

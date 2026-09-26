@@ -1,0 +1,41 @@
+script    <repo>/backend/tests/evidence/contract-arm-consistency.sh
+capture   <repo>/backend/tests/evidence/<round>-contract-arms.log
+command   bash <repo>/backend/tests/evidence/contract-arm-consistency.sh <contract>
+contract  <the lane's client resync contract, under the gitignored scratch>
+bash      5.3.15(1)-release
+started   2026-09-23T04:00:12Z
+
+LIVE   the document as this round leaves it
+  live    : disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  live    : next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  live    : CONSISTENT
+
+MUTANT 1 the table row REDIRECTS again (the round-9 HIGH, restored)
+  mutant 1: disposition -> REDIRECT - keep the entry, re-sign it ONCE at the advertised expected_game, submit 
+  mutant 1: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  mutant 1: CONTRADICTION - no-TERMINAL no-drop no-capture says-redirect
+
+INERT 1  a doubled space inside that same cell, the rule left alone
+  inert 1 : disposition -> TERMINAL for the entry  — drop it; the server has already kept it for review 
+  inert 1 : next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  inert 1 : CONSISTENT
+
+MUTANT 2 the STATUS SECTION makes the same answer retryable, table intact
+  mutant 2: disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  mutant 2: next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 0
+  mutant 2: CONTRADICTION - no-status-section-rule
+
+INERT 2  a doubled space after that same sentence, the rule left alone
+  inert 2 : disposition -> TERMINAL for the entry — drop it; the server has already kept it for review 
+  inert 2 : next-key rule stated in the row: 1; recovery section drops the same entry: 1; status section states it too: 1
+  inert 2 : CONSISTENT
+
+RESULT: live CONSISTENT; BOTH mutants CONTRADICTION (red); BOTH inert
+        twins CONSISTENT (green). The check reds on the disposition
+        this arm was ruled out of -- a redirect the server cannot make
+        safe, because it cannot tell a later game from a conflicting
+        account of the settled one -- and it reds on it from EITHER of
+        the two places that could drift, not only the table cell.
+        Neither inert twin reds, so it is the rule being read and not
+        the whitespace around it.
+finished  2026-09-23T04:00:17Z

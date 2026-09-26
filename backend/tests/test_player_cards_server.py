@@ -525,6 +525,12 @@ def test_migration_321_converts_the_prints_minted_while_legendary_was_rank_1():
     assert inspect.getsource(pc).count("backend/sql/321_pc_rank2_legendary.sql") == 2
 
 
+# The rollover's own statement, as the fake session normalises it. Matching
+# on the INSERT and not on a comment or a table name keeps this a probe with
+# one purpose (#306): nothing else in the janitor inserts into pc_editions.
+ROLL_KEY = "INSERT INTO pc_editions (id, name, started_at, ends_at_planned)"
+
+
 def _due_row(last_at, db_now, today_at, last_rule=None):
     # The latest snapshot's rule defaults to the CURRENT one, so every test
     # written before the rule column asks about the daily rule alone.
@@ -549,12 +555,18 @@ def test_janitor_takes_the_first_snapshot_when_none_exists(monkeypatch):
     today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
     db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == ["first"] and db.committed == 3   # retention, the blob janitor, then the snapshot
+    # retention, the blob janitor, the edition rollover, then the snapshot
+    assert taken == ["first"] and db.committed == 4
+    # the rollover ran, and ran BEFORE the due read -- it is deliberately not
+    # behind the snapshot's due gate, so its position in the log is the
+    # property under test and not an implementation detail
+    assert db.count(ROLL_KEY) == 1
+    roll = [i for i, (sql, _) in enumerate(db.log) if ROLL_KEY in sql][0]
     assert db.count("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'") == 1
     # the due state is read before the lock and AGAIN under it (c3 F)
     order = [sql[:40] for sql, _ in db.log]
     due_reads = [i for i, s in enumerate(order) if s == "SELECT (SELECT MAX(taken_at) FROM pc_poo"]
-    assert len(due_reads) == 2
+    assert len(due_reads) == 2 and roll < due_reads[0]
     assert due_reads[0] < order.index("SELECT pg_try_advisory_xact_lock(hashtex") < due_reads[1]
 
 
@@ -569,14 +581,48 @@ def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today - timedelta(minutes=2), today))
     _run(main._pc_snapshot_janitor_step())
     assert taken == [] and db.count("pg_try_advisory_xact_lock") == 0
+    # ...and the rollover still ran: it does not share the snapshot's gate
+    assert db.count(ROLL_KEY) == 1
     # already done today: last snapshot after 00:05 today — retention still runs (c3 F)
     db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 2
-    # lock held elsewhere: no snapshot (retention alone committed)
+    # retention + the rollover; no snapshot
+    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 3
+    assert db.count(ROLL_KEY) == 1
+    # lock held elsewhere: no snapshot (retention and the rollover committed)
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today + timedelta(minutes=1), today), lock=False)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.committed == 2
+    assert taken == [] and db.committed == 3
+
+
+def test_the_rollover_runs_on_a_pass_that_takes_no_snapshot(monkeypatch):
+    """The placement, stated as a test. A day whose snapshot has already
+    been taken returns None from _pc_snapshot_due for the rest of that day;
+    a rollover behind that gate would wait until tomorrow. It is in front of
+    it, so the boundary is honoured within one janitor tick."""
+    today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
+    db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30),
+                                               today + timedelta(hours=5), today))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == [], "precondition: this pass takes no snapshot"
+    assert db.count(ROLL_KEY) == 1
+
+
+def test_a_failing_rollover_does_not_cost_the_pool_its_snapshot(monkeypatch):
+    """Which direction the unhandled case fails (#276). The rollover is a
+    four-monthly event; the snapshot is the thing every pack open reads. A
+    rollover that raises -- migration 332 not applied yet, say -- must print
+    and let the snapshot proceed, not starve it on every tick."""
+    today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
+    db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
+
+    async def _boom(_db):
+        raise RuntimeError("column pc_editions.ends_at_planned does not exist")
+
+    monkeypatch.setattr(main, "_pc_edition_rollover", _boom)
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == ["first"], "the snapshot must still be taken"
+    assert db.rolled_back == 1, "the failed transaction is rolled back first"
 
 
 def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
@@ -597,7 +643,7 @@ def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
 
     monkeypatch.setattr(main, "_pc_take_snapshot", _take)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 2
+    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 3
 
 
 # ── the wire shape ───────────────────────────────────────────────────────────

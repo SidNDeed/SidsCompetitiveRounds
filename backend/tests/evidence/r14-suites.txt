@@ -1,0 +1,180 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-23 (round 14)
+======================================================================
+
+stdout: r14-suite-run.log
+
+Never concurrently: the two modes share one local PostgreSQL instance, and a
+concurrent pair would have them fighting over the same scratch databases and
+reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN, its output directory and its round tag from the
+environment. The per-half pytest logs are written OUTSIDE the repository; the
+fence section below says why.
+
+== WHAT THIS ROUND CHANGED AROUND THIS INSTRUMENT ==
+Nothing in the script, and nothing in the rule it is paired with. The
+evidence-log re-inclusion in `.gitignore` gains this round's nine capture
+NAMES beside the earlier rounds', which is the rule working rather than
+changing: a negation here is the whole name of one capture of one round, so a
+round that produces captures has to name them and a name no producer writes is
+refused. The suffix is still DERIVED from this script's own `capture` header
+rather than remembered.
+
+THE CAPTURE ITSELF IS STILL WRITTEN OUTSIDE THE REPOSITORY. The re-inclusion
+means a capture sitting in this directory is UNTRACKED-AND-NOT-IGNORED, which
+is exactly the set the fence walks. A run redirected straight into this
+directory would therefore fingerprint its own growing log, compare it with
+itself and report MOVED. The capture is copied in after every run of the round
+has finished.
+
+== THIS REPORT IS ITS OWN RUN'S OUTPUT ==
+The narrative above the marker is written; everything below it is the exact
+bytes of the log named in the `stdout:` header. This file is ASSEMBLED by
+backend/tests/evidence/assemble-evidence.py, which REFUSES to write it at all
+when a number in the narrative is absent from that log. Two rules decide what
+a number is -- a count next to a term a run reports in, and any integer of
+three digits or more that is not one of the typed exempt shapes -- and the
+assembler's self-test asserts both fire and both stay quiet, so a typo in
+either pattern reds rather than passing for ever.
+
+The invocation of each half is printed by the script immediately before it
+runs, and is in the verbatim block below rather than quoted up here.
+
+== THE FENCE, and the claim it is allowed to make ==
+A suite that overlaps an edit to its own tree certifies nothing, and a sentence
+saying it did not is a claim written from the one state its author had in mind.
+So the tree is fingerprinted by backend/tests/evidence/tree-fingerprint.sh at
+the start and again at the end, and the instrument RE-DERIVES its set at every
+call: `git diff --name-only HEAD` for tracked files differing from HEAD, and
+`git ls-files --others --exclude-standard` for files present but untracked. The
+paths are part of the value, so an addition or a removal moves the fingerprint
+even when every surviving file is untouched, and an unreadable path prints an
+EMPTY hash rather than being skipped. The script refuses to run at all if the
+fingerprint comes back empty.
+
+THE ORDER IS WHY THE SET IS THIS ONE. The previous round's evidence is
+COMMITTED, so it sits inside the fence, and running the controls after this
+pair would leave fingerprinted paths rewritten once the fence had closed. So
+every control -- the mutation run, the freeze guard, the citation pin, the
+residual reach, the arm-table instrument and the PostgreSQL selection -- ran
+BEFORE this pair, and their reports were assembled before it started. Nothing
+the fence lists is written afterwards. What is written afterwards is this
+report and the assembly record, and neither can exist before the run it quotes
+-- which is why the directory is checked again, as committed, by the re-pin
+wrapper that runs last of all.
+
+Ignored paths stay out, by `--exclude-standard`. That is what lets this round
+edit its own notes and its contract while the pair runs -- no suite reads them
+-- and it is also why the per-half pytest logs go outside the repository.
+
+That guard is not an argument; it is run, with its negative control, in
+r14-mutation-controls.txt: each edit class is PERFORMED and the guard is
+required to notice, no edit at all is required to leave it quiet, and the older
+captured-once method is run side by side over the same two mutations.
+
+== no route handler moved this round, and the manifest says so rather than
+   being trusted to ==
+One file under `backend/api/` is touched by this round and it is touched by a
+MUTATION rather than by an edit: `refusal-keeps-nothing-for-review` replaces
+the contradiction arm's capture call, runs one test, and restores the file
+byte-identically, which the runner asserts by md5. The committed tree's
+`backend/api/` is therefore unchanged, so no handler's fingerprint can have
+moved. That is a prediction, not a permission: the re-pin that runs LAST
+reports the rewritten-row count again, and it has to be zero. A manifest that
+needed a row rewritten on a round that shipped no endpoint change would be the
+finding.
+
+== what the numbers mean ==
+The skip count in the opt-out summary IS a check, not a footnote: an opt-out
+run that skipped as few as the live run did is a live run wearing the opt-out's
+name. The two halves are two different questions, and `env -u` is what keeps
+them that way.
+
+== the difference between the halves, and it reconciles ==
+The two summary lines are in the verbatim block below, each under the command
+that produced it:
+
+  opt-out   1744 passed, 45 skipped, 1 xfailed, 2 warnings in 615.49s (0:10:15)
+  live DSN  1774 passed, 15 skipped, 1 xfailed, 2 warnings in 649.05s (0:10:49)
+
+The live half runs the PostgreSQL-gated checks the opt-out half skips, so the
+difference has to appear twice in the same two lines. Two numbers from two
+different columns of the same two lines agreeing is the check; a disagreement
+there would be a finding, not a rounding error.
+
+Those four figures are the assembler's subject, not decoration. Each is a count
+next to a term the run reports in, so each must appear in the log below as the
+same integer beside the same term or this file does not get written -- which is
+what the mutation control `suites-report-carries-an-underived-number`
+demonstrates by putting a figure here that no run can print.
+
+THE ARITHMETIC THIS ROUND PREDICTS, and what it would mean if it failed. This
+round adds ONE test and it IS live-gated: the conflicting-account walk, which
+drives a differing account of a settled physical game through the production
+endpoint. So the live half gains one pass, the opt-out half gains one SKIP
+rather than a pass, and the gated-check difference between the halves grows by
+exactly one. Its other work adds no test: the terminal disposition REWRITES the
+live missed-update walk in place, and the three new mutation controls are
+mutations of code the suite already runs. A new live test that did not move the
+opt-out half's skip count would mean a gate nobody intended; one that moved
+both halves' pass counts would mean it was never gated at all.
+
+No previous round's figure is quoted here, deliberately. Every number in this
+narrative has to appear in the log below it or the assembler refuses to write
+the file, and a number from a DIFFERENT run cannot. Where a comparison needs the
+other round's figures, the other round's report is named instead of copied.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any, so its absence from a line quoted verbatim IS the zero, and it
+is re-derivable from this file alone. Both halves also returned rc=0, printed
+immediately above the line they describe.
+
+Each summary line DOES carry an xfailed count -- a test marked
+expected-to-fail, which did -- and that is not a failure count. The gate used
+for these reports tests the TERM rather than the substring, and carries that
+shape and its negative twin as assertions that run every time it is imported.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r14-suite-run.log ==========
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r14-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      13 paths differ from HEAD or are untracked; fingerprinted before and after
+  34cf322f8cde67d7449ae66cb1fc71cb  .gitignore
+  5bc02e1f032ff1c8ec31e62eba781b67  backend/tests/evidence/contract-arm-consistency.sh
+  39c507f0d4a7f63eaad119622a3925e0  backend/tests/evidence/mutation-runner.py
+  062e4239ccabfa7d7b20d0fbb2356360  backend/tests/evidence/r14-citation-pin.log
+  5d3bac129777e77c7f73731de7a49988  backend/tests/evidence/r14-contract-arms.log
+  04ef13558cbc3639de98179dfe87a33a  backend/tests/evidence/r14-freeze-guard.log
+  b3bbf3e7d4e9375c2bbbf7a82952662d  backend/tests/evidence/r14-mutation-controls.txt
+  0c62fabe2a572e96674f29e3b018a9d8  backend/tests/evidence/r14-mutation-run.log
+  02be826d9ff30e93ab0c0cedcd7ab36e  backend/tests/evidence/r14-pg-controls.log
+  6b26df666cf69b696a2c4c0e7a6b8166  backend/tests/evidence/r14-postgresql-controls.txt
+  1d3a002d6ed4323670492975196487ed  backend/tests/evidence/r14-residual-reach.log
+  94bc02baeb9241af7f004ad08f433f2f  backend/tests/evidence/residual-reach-control.py
+  bfd82f0e64cd2ae241a63dee9c1fdd54  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 04:02:11 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1744 passed, 45 skipped, 1 xfailed, 2 warnings in 615.49s (0:10:15)
+=== live DSN started 04:12:33 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1774 passed, 15 skipped, 1 xfailed, 2 warnings in 649.05s (0:10:49)
+=== tree re-fingerprinted 04:23:28 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 13 paths, each byte-identical to the pre-run fingerprint
+=== done 04:23:29 ===

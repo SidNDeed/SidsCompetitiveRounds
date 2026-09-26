@@ -1375,6 +1375,13 @@ namespace CompetitiveRounds
                 {
                     // Same #150 lifecycle as 1v2: a failed join must dissolve the
                     // FFA lobby server-side or the husk re-feeds this dead room.
+                    // Bug 392 sweep: stays UNTAGGED. The room was never
+                    // entered, so there is no in-room exit to attest, and an
+                    // in-room tag here would veto the dissolution this call
+                    // exists to cause. The cause store is dropped for the same
+                    // reason — a failed join is a plausible neighbour of a
+                    // transport failure, and it must not inherit one.
+                    try { TransportExit.ClearCause(); } catch { }
                     try { ApiClient.FfaLeaveQueue(); } catch { }
                     CompetitiveUI.ShowNotificationCritical("Couldn't join the FFA match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
@@ -2750,6 +2757,22 @@ namespace CompetitiveRounds
             TickUnfocusedFpsCap();
             TickBroadcastWindowPin();
 
+            // Bug 389: the proximity-victim capability withdrawal runs here for
+            // the same reason the fps tick does - ABOVE the modDisabled return.
+            // A guard keyed on a feature's enable-condition and then placed
+            // inside a tick that returns on that same condition inherits the
+            // feature's dead zone, and this withdrawal exists for exactly the
+            // state the return covers: a seat that staged the key and has since
+            // been disabled. Below the return it could never run on the only seat
+            // that needs it (#272/#98).
+            //
+            // Safe above it on the same rule the comment above states: a disabled
+            // mod may only ever RESTORE. This call returns on its first line
+            // unless this seat actually advertised, and it can only ever write
+            // the NOT-capable value - it moves the room toward vanilla and can
+            // apply nothing (#276/#430).
+            try { ProximityVictimGate.RepublishCapability(); } catch { }
+
             if (Plugin.modDisabled) return;
 
             // Menu injection runs independently
@@ -2963,6 +2986,26 @@ namespace CompetitiveRounds
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
+                        // Bug 389: NOT the same shape as the two above.
+                        // This call is a no-op on a first initialisation.
+                        // cr_prox1 is
+                        // staged PRE-JOIN from the queue poll, which cannot run
+                        // before ApiClient.Initialize below - and this branch
+                        // returns above that call - so nothing has been advertised
+                        // yet and RepublishCapability returns on its first line.
+                        // (PoisonSync stages at Awake and GrowNormalize from the
+                        // tick, so their latches ARE set here; W18 holds this
+                        // ordering.) It can only withdraw on a SECOND DoInitialize,
+                        // after a persistent-host respawn whose compat read differs
+                        // from the first, and it is kept for that case: a seat that
+                        // advertises a repair its own gate now refuses leaves every
+                        // peer re-resolving the victim while this seat drains the
+                        // stale one - the same damage tick debiting different
+                        // players on different screens. The transition that covers
+                        // a seat already in a room is the persistent tick, not this
+                        // site; "[PROX-CAP] withdrew" is not a line a plain compat
+                        // disable produces.
+                        try { ProximityVictimGate.RepublishCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
                         // the compat clear below), but Shutdown is idempotent
@@ -4100,12 +4143,21 @@ namespace CompetitiveRounds
             // the key itself, so the generation counter is the trace. Only the
             // properties that participate in that key — bumping on every card
             // or cosmetic property would discard usable windows for nothing.
+            //
+            // cr_prox1 joins that set (bug 389). The proximity-victim census
+            // asks whether EVERY fighter advertises it, caches the answer, and
+            // keys that cache on this counter; a seat whose key arrives after
+            // the census ran would otherwise leave one seat re-resolving the
+            // victim while another drains a stale one on the same damage tick.
+            // The two spectator keys above already move the counter, and they
+            // are the other half of that census's denominator.
             try
             {
                 if (changedProps == null) return;
                 if (changedProps.ContainsKey("u_id")
                     || changedProps.ContainsKey(RoomActors.SPEC_PROP)
-                    || changedProps.ContainsKey(RoomActors.SPEC_LEASE_PROP))
+                    || changedProps.ContainsKey(RoomActors.SPEC_LEASE_PROP)
+                    || changedProps.ContainsKey(ProximityVictim.CapabilityProp))
                     RoomActors.NoteRosterIdentityChange();
             }
             catch { }
@@ -4158,6 +4210,66 @@ namespace CompetitiveRounds
         }
         public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
         {
+            // Bug 392 items A(2)+B: this is the ONLY place the DisconnectCause
+            // exists on this client, and it was logged and dropped — so no
+            // exit hook could tell a transport failure from a player who chose
+            // to leave, and the player was told nothing about why the game
+            // ended. Record it before anything below can return early. The
+            // store keeps ONLY involuntary causes, only for a short validity
+            // window, and any other cause clears it.
+            //
+            // The notice is HANDED OVER here, not torn down. An earlier
+            // version cleared it and left the explaining to the room-exit
+            // toast, which is a surface that can decline the message: it
+            // renders nothing when the player has notifications switched off,
+            // and nothing while a critical cue still owns the slot, reporting
+            // both by returning false. The amber line is deliberately not
+            // behind the [Network] opt-in so that it reaches the player it is
+            // for, so clearing it and promising a toast instead moved the one
+            // guaranteed message onto the one that is not — and removed it a
+            // full hold window before it would have expired. A player with
+            // notifications off then saw the warning vanish and nothing take
+            // its place, which is the complaint this item exists to fix.
+            //
+            // So: an involuntary cause REPLACES the "you may be dropped"
+            // warning with the one that says it happened, on the same
+            // surface; a cause the player chose clears it as before, because
+            // someone who pressed Leave needs no explanation.
+            try
+            {
+                double nowS = TransportExit.NowSeconds();
+                string dcCause = cause.ToString();
+                TransportExit.NoteDisconnect(dcCause, nowS);
+                bool noticeRaised = TransportExit.NoteDisconnectNotice(dcCause, nowS);
+                // The handover decision is LOGGED rather than discarded,
+                // for the reason the room-exit toast logs which surface
+                // spoke: the amber line is drawn only from
+                // CompetitiveUI.DrawLagNotices, which returns on the
+                // broadcast identity and on a spectator seat BEFORE it
+                // computes the line. On those seats the notice is raised
+                // and never drawn, so a screen reading cannot witness this
+                // item there at all, and an acceptance row that can only
+                // be read off the screen is unsatisfiable on them by
+                // construction (#476/#570: confirm the gate admits the
+                // seat the acceptance needs).
+                //
+                // seatCanDraw reports those same two gates as they read
+                // HERE, at the disconnect - it is a reading, not a claim
+                // about a later repaint. It is independent of the
+                // [Network] notices opt-in, which the transport line
+                // deliberately does not sit behind.
+                bool seatCanDraw = false;
+                try
+                {
+                    seatCanDraw = !BroadcastMode.IsBroadcastIdentity
+                                  && !RoomActors.LocalIsSpectator;
+                }
+                catch { }
+                Plugin.Log.LogInfo(
+                    $"[LAG-DIAG] transport notice handover cause={dcCause} " +
+                    $"raised={noticeRaised} seatCanDraw={seatCanDraw}");
+            }
+            catch { }
             // Release B §1: the head-to-head line dies with the room — first
             // statement, so an in-flight response can never bind to the next
             // room. Idempotent.
@@ -4198,6 +4310,14 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // Bug 392: a new room starts with no inherited transport state.
+            // The cause store has its own validity window, but a window is a
+            // soft bound and a room edge is a hard one — without this, a
+            // disconnect recorded seconds before a fast rejoin could tag the
+            // NEXT room's exit as involuntary (#430: a cached flag on a lossy
+            // edge inherited by the next room). Same for a silence notice left
+            // on screen from the previous room.
+            try { TransportExit.ResetAll(); } catch { }
             // Bug 235 diagnostics bind to the reliable Photon room edge so a
             // fast leave+rejoin cannot merge two sittings' counters/budgets.
             try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }
@@ -4787,6 +4907,15 @@ namespace CompetitiveRounds
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+            // Bug 392 item B: a silence notice belongs to the room it was
+            // raised in. On a clean leave the sample loop stops without ever
+            // seeing a recovered sample, so the notice would sit in the MENU
+            // until its hold horizon expired — a warning about a match this
+            // seat is no longer in. The horizon bounds that to seconds; this
+            // makes it none. The cause store is NOT cleared here: the exit
+            // hooks read it immediately after a disconnect-driven leave, and
+            // the join edge plus the validity window are what bound it.
+            try { TransportExit.ClearSilence(); } catch { }
             // Release B §1: the head-to-head line dies with the room — first
             // statement (same reason as OnDisconnected). Idempotent.
             try { H2HSummary.Invalidate(); } catch { }

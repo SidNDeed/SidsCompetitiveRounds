@@ -1,0 +1,150 @@
+script    <repo>/backend/tests/evidence/run-pg-controls.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+dsn       postgresql+asyncpg://<user>@<host>:<port>/<db>
+command   FFA_TEST_PG_DSN=... python -m pytest tests/test_ffa_game_number_anchor.py -v -p no:cacheprovider -k "<selection>"
+
+selection (the expression is part of the evidence; a set nobody can
+rebuild is a count nobody can check):
+
+    pg_ or opt_out or missing_dsn_alone or one_transaction or locked_slot 
+  or weakest_mode or wager_cannot_be_inserted or relock_leaves or 
+  committed_evidence or round_seven_control or round_eight_control or 
+  production_file or counts_the_checks or new_controls_a_report or 
+  residual_reach
+
+------------------------------------------------------------------------------
+== RUN 1, against a database that already held the previous run's tables ==
+command   FFA_TEST_PG_DSN=... python -m pytest tests/test_ffa_game_number_anchor.py -v -p no:cacheprovider -k "<the selection printed above>"
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- <python>
+rootdir: <repo>/backend
+plugins: anyio-4.15.0
+collecting ... collected 158 items / 103 deselected / 55 selected
+
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[1-True] PASSED [  1%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[true-True] PASSED [  3%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[TRUE-True] PASSED [  5%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[ yes -True] PASSED [  7%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[on-True] PASSED [  9%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[0-False] PASSED [ 10%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[false-False] PASSED [ 12%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[no-False] PASSED [ 14%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[off-False] PASSED [ 16%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[-False] PASSED [ 18%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[None-False] PASSED [ 20%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[maybe-False] PASSED [ 21%]
+tests/test_ffa_game_number_anchor.py::test_the_live_checks_cannot_be_skipped_by_a_missing_dsn_alone PASSED [ 23%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_second_row_for_one_game_is_not_the_next_games_anchor PASSED [ 25%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_low_number_late_in_a_sitting_cannot_widen_the_window PASSED [ 27%]
+tests/test_ffa_game_number_anchor.py::test_pg_rows_with_no_derivable_number_still_count_as_earlier_games PASSED [ 29%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_prior_lookup_reads_the_row_that_holds_the_named_number PASSED [ 30%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_tail_behind_the_slot_finds_its_own_game_not_the_next_one PASSED [ 32%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_reused_invalidated_number_cannot_widen_the_window PASSED [ 34%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_recorded_vector_reads_back_for_the_comparison PASSED [ 36%]
+tests/test_ffa_game_number_anchor.py::test_the_lock_the_derivation_and_the_increment_are_one_transaction PASSED [ 38%]
+tests/test_ffa_game_number_anchor.py::test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number PASSED [ 40%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_refusal_carries_the_lobbys_progress_off_the_locked_row PASSED [ 41%]
+tests/test_ffa_game_number_anchor.py::test_pg_migration_327_numbers_every_row_and_rerunning_changes_nothing PASSED [ 43%]
+tests/test_ffa_game_number_anchor.py::test_pg_migration_327_post_check_fails_when_the_backfill_is_neutered PASSED [ 45%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_trigger_never_hands_back_a_number_the_lobby_is_using PASSED [ 47%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_post_check_covers_a_writer_row_that_stored_another_number PASSED [ 49%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_report_endpoint_runs_and_its_echo_carries_the_lobbys_progress PASSED [ 50%]
+tests/test_ffa_game_number_anchor.py::test_pg_an_answer_never_tells_a_client_to_name_a_number_it_just_settled PASSED [ 52%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_catch_up_only_ever_moves_the_counter_forward PASSED [ 54%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number PASSED [ 56%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_recorded_outcome_without_the_columns_raises_rather_than_defaulting PASSED [ 58%]
+tests/test_ffa_game_number_anchor.py::test_every_progress_the_endpoint_builds_comes_from_a_locked_slot PASSED [ 60%]
+tests/test_ffa_game_number_anchor.py::test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself PASSED [ 61%]
+tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_number_space_reaches_the_arm_that_answers_it PASSED [ 63%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_exact_refund_statement_runs_against_a_real_server PASSED [ 65%]
+tests/test_ffa_game_number_anchor.py::test_pg_one_unpayable_wager_does_not_block_the_rest_of_the_queue PASSED [ 67%]
+tests/test_ffa_game_number_anchor.py::test_pg_one_unpayable_series_does_not_stop_the_stale_series_sweep PASSED [ 69%]
+tests/test_ffa_game_number_anchor.py::test_a_wager_cannot_be_inserted_while_its_game_settles PASSED [ 70%]
+tests/test_ffa_game_number_anchor.py::test_the_relock_leaves_a_transaction_the_next_read_can_run_in PASSED [ 72%]
+tests/test_ffa_game_number_anchor.py::test_the_committed_evidence_re_derives_its_own_numbers PASSED [ 74%]
+tests/test_ffa_game_number_anchor.py::test_the_committed_evidence_is_assembled_from_its_run_stdout PASSED [ 76%]
+tests/test_ffa_game_number_anchor.py::test_the_assembler_counts_the_checks_it_ran PASSED [ 78%]
+tests/test_ffa_game_number_anchor.py::test_the_new_controls_a_report_claims_are_the_ones_the_inventory_tags PASSED [ 80%]
+tests/test_ffa_game_number_anchor.py::test_the_residual_reach_rule_holds_in_both_directions PASSED [ 81%]
+tests/test_ffa_game_number_anchor.py::test_every_round_seven_control_names_a_test_that_exists PASSED [ 83%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again PASSED [ 85%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice PASSED [ 87%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_realigned_sitting_issues_each_game_its_own_number PASSED [ 89%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_seat_that_missed_an_update_recovers_in_one_submission PASSED [ 90%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep PASSED [ 92%]
+tests/test_ffa_game_number_anchor.py::test_no_production_file_cites_the_gitignored_scratch PASSED [ 94%]
+tests/test_ffa_game_number_anchor.py::test_every_round_eight_control_names_a_test_that_exists PASSED [ 96%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot PASSED [ 98%]
+tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields PASSED [100%]
+
+===================== 55 passed, 103 deselected in 14.22s =====================
+run 1 rc=0
+
+------------------------------------------------------------------------------
+== RUN 2, the SAME selection against the SAME database, back to back ==
+command   FFA_TEST_PG_DSN=... python -m pytest tests/test_ffa_game_number_anchor.py -v -p no:cacheprovider -k "<the selection printed above>"
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- <python>
+rootdir: <repo>/backend
+plugins: anyio-4.15.0
+collecting ... collected 158 items / 103 deselected / 55 selected
+
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[1-True] PASSED [  1%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[true-True] PASSED [  3%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[TRUE-True] PASSED [  5%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[ yes -True] PASSED [  7%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[on-True] PASSED [  9%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[0-False] PASSED [ 10%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[false-False] PASSED [ 12%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[no-False] PASSED [ 14%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[off-False] PASSED [ 16%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[-False] PASSED [ 18%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[None-False] PASSED [ 20%]
+tests/test_ffa_game_number_anchor.py::test_only_an_affirmative_opt_out_turns_the_live_checks_into_skips[maybe-False] PASSED [ 21%]
+tests/test_ffa_game_number_anchor.py::test_the_live_checks_cannot_be_skipped_by_a_missing_dsn_alone PASSED [ 23%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_second_row_for_one_game_is_not_the_next_games_anchor PASSED [ 25%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_low_number_late_in_a_sitting_cannot_widen_the_window PASSED [ 27%]
+tests/test_ffa_game_number_anchor.py::test_pg_rows_with_no_derivable_number_still_count_as_earlier_games PASSED [ 29%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_prior_lookup_reads_the_row_that_holds_the_named_number PASSED [ 30%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_tail_behind_the_slot_finds_its_own_game_not_the_next_one PASSED [ 32%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_reused_invalidated_number_cannot_widen_the_window PASSED [ 34%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_recorded_vector_reads_back_for_the_comparison PASSED [ 36%]
+tests/test_ffa_game_number_anchor.py::test_the_lock_the_derivation_and_the_increment_are_one_transaction PASSED [ 38%]
+tests/test_ffa_game_number_anchor.py::test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number PASSED [ 40%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_refusal_carries_the_lobbys_progress_off_the_locked_row PASSED [ 41%]
+tests/test_ffa_game_number_anchor.py::test_pg_migration_327_numbers_every_row_and_rerunning_changes_nothing PASSED [ 43%]
+tests/test_ffa_game_number_anchor.py::test_pg_migration_327_post_check_fails_when_the_backfill_is_neutered PASSED [ 45%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_trigger_never_hands_back_a_number_the_lobby_is_using PASSED [ 47%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_post_check_covers_a_writer_row_that_stored_another_number PASSED [ 49%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_report_endpoint_runs_and_its_echo_carries_the_lobbys_progress PASSED [ 50%]
+tests/test_ffa_game_number_anchor.py::test_pg_an_answer_never_tells_a_client_to_name_a_number_it_just_settled PASSED [ 52%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_catch_up_only_ever_moves_the_counter_forward PASSED [ 54%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number PASSED [ 56%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_recorded_outcome_without_the_columns_raises_rather_than_defaulting PASSED [ 58%]
+tests/test_ffa_game_number_anchor.py::test_every_progress_the_endpoint_builds_comes_from_a_locked_slot PASSED [ 60%]
+tests/test_ffa_game_number_anchor.py::test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself PASSED [ 61%]
+tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_number_space_reaches_the_arm_that_answers_it PASSED [ 63%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_exact_refund_statement_runs_against_a_real_server PASSED [ 65%]
+tests/test_ffa_game_number_anchor.py::test_pg_one_unpayable_wager_does_not_block_the_rest_of_the_queue PASSED [ 67%]
+tests/test_ffa_game_number_anchor.py::test_pg_one_unpayable_series_does_not_stop_the_stale_series_sweep PASSED [ 69%]
+tests/test_ffa_game_number_anchor.py::test_a_wager_cannot_be_inserted_while_its_game_settles PASSED [ 70%]
+tests/test_ffa_game_number_anchor.py::test_the_relock_leaves_a_transaction_the_next_read_can_run_in PASSED [ 72%]
+tests/test_ffa_game_number_anchor.py::test_the_committed_evidence_re_derives_its_own_numbers PASSED [ 74%]
+tests/test_ffa_game_number_anchor.py::test_the_committed_evidence_is_assembled_from_its_run_stdout PASSED [ 76%]
+tests/test_ffa_game_number_anchor.py::test_the_assembler_counts_the_checks_it_ran PASSED [ 78%]
+tests/test_ffa_game_number_anchor.py::test_the_new_controls_a_report_claims_are_the_ones_the_inventory_tags PASSED [ 80%]
+tests/test_ffa_game_number_anchor.py::test_the_residual_reach_rule_holds_in_both_directions PASSED [ 81%]
+tests/test_ffa_game_number_anchor.py::test_every_round_seven_control_names_a_test_that_exists PASSED [ 83%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again PASSED [ 85%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice PASSED [ 87%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_realigned_sitting_issues_each_game_its_own_number PASSED [ 89%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_seat_that_missed_an_update_recovers_in_one_submission PASSED [ 90%]
+tests/test_ffa_game_number_anchor.py::test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep PASSED [ 92%]
+tests/test_ffa_game_number_anchor.py::test_no_production_file_cites_the_gitignored_scratch PASSED [ 94%]
+tests/test_ffa_game_number_anchor.py::test_every_round_eight_control_names_a_test_that_exists PASSED [ 96%]
+tests/test_ffa_game_number_anchor.py::test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot PASSED [ 98%]
+tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields PASSED [100%]
+
+===================== 55 passed, 103 deselected in 15.41s =====================
+run 2 rc=0

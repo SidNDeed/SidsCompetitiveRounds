@@ -3976,7 +3976,17 @@ namespace CompetitiveRounds
                 string nameColor=winner?"#FFD700":"#FFFFFF";
                 /* Leading space INSIDE the key: a spaceless "(left)" token fails the
                    extractor's single-token rule and could never be harvested. */
-                string left=player.left_early?I18n.Tr(" <color=#888888>(left)</color>"):"";
+                /* Bug 392: this is the surface the reporting player actually
+                   looks at. The server records WHY a seat went early and both
+                   Discord renderers were taught to say it; this one kept
+                   printing "(left)" for a seat the transport dropped, which is
+                   the wording the report was about. A row the server did not
+                   mark stays exactly as it was. */
+                string left=player.left_early
+                    ?I18n.Tr(player.left_early_involuntary
+                             ?" <color=#888888>(disconnected)</color>"
+                             :" <color=#888888>(left)</color>")
+                    :"";
                 UIFactory.SetTextRaw(ui.txtIdentity,
                     $"<color={nameColor}>{FfaSafeRich(Trunc(player.display_name??"?",18))}</color>{title}{left}");
 

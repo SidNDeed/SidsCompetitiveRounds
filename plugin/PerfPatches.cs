@@ -188,16 +188,38 @@ namespace CompetitiveRounds
     // frame the stun coroutine ticks. Skipping the original call when the
     // ancestor Player is missing turns the cascade into a silent no-op — the
     // stun visuals are cosmetic so missing them on a dead player is fine.
+    //
+    // THE DECISION AND THE RETURN BOTH COME FROM THE SEAM, and this is the only
+    // reason that matters: StunPlayer.Go carries a SECOND prefix — bug 389's
+    // victim repair (ProximityVictimPatches.StunPlayerFreshVictimPatch) — and
+    // neither declares a priority, so their order is undefined. Two prefixes on
+    // one method answering Harmony through two different shapes is how they drift
+    // apart on what a given answer means (#432). Both now map their facts to a
+    // ProximityPrefixAction and return through ProximityVictim.PrefixReturn, so
+    // the ordering case in the bug 389 harness can compose the two SHIPPED
+    // decisions rather than a boolean the test supplies for them.
+    //
+    // Behaviour is unchanged: gate off -> run vanilla; instance and ancestor both
+    // present -> run vanilla; otherwise skip the original and count the hit.
     [HarmonyPatch(typeof(StunPlayer), "Go")]
     internal class StunPlayerGoNullGuard
     {
         static bool Prefix(StunPlayer __instance)
         {
-            if (!PerfGate.Check(Plugin.PerfStunPlayerNullGuard)) return true;
-            bool ok = __instance != null
+            // The ancestor walk stays behind the gate, exactly as the early return
+            // used to keep it: with the fix switched off its answer is not consulted
+            // (NullGuardAction returns on guardEnabled first), so paying for a
+            // component walk per stun tick would be a cost this patch existed to
+            // remove.
+            bool guardEnabled = PerfGate.Check(Plugin.PerfStunPlayerNullGuard);
+            bool instancePresent = __instance != null;
+            bool ancestorPresent = guardEnabled && instancePresent
                 && __instance.GetComponentInParent<global::Player>() != null;
-            if (!ok) PerfGate.Hit("StunPlayerGoNullGuard");
-            return ok;
+
+            ProximityPrefixAction action =
+                ProximityVictim.NullGuardAction(guardEnabled, instancePresent, ancestorPresent);
+            if (action == ProximityPrefixAction.SkipOriginal) PerfGate.Hit("StunPlayerGoNullGuard");
+            return ProximityVictim.PrefixReturn(action);
         }
     }
 

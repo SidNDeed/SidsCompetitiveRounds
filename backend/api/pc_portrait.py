@@ -1,7 +1,7 @@
 """Player Cards portraits, delivery leases and face keys — pure helpers.
 
-Design: ai-collab/sept10-batch/21-player-cards-look-v22.md (§1.7, §2.2,
-§3.1-3.4, §6, §8) plus look-r18-dispositions.md. No FastAPI, no database and
+Schema: migrations 308, 310 and 311, which carry the shape decisions.
+No FastAPI, no database and
 no pixels here: main.py owns the routes and the SQL, pc_face.py owns the
 rendering. Everything in this module is deterministic and unit-testable.
 """

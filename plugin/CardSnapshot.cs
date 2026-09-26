@@ -159,6 +159,14 @@ namespace CompetitiveRounds
 
         private static readonly Dictionary<string, Sprite> _cache =
             new Dictionary<string, Sprite>(StringComparer.OrdinalIgnoreCase);
+        // The Top Card THUMBNAIL for the same key: a second Sprite over the
+        // SAME Texture2D, cropped to the card's corner band. Written only
+        // beside _cache[key] in CaptureOne and removed only by EvictKey, so
+        // the two maps hold the same keys. Never handed to the full-size
+        // consumers (CardImageLoader.GetSprite, TabStatsOverlay) — they read
+        // _cache through TryGetSprite and are unaffected by the crop.
+        private static readonly Dictionary<string, Sprite> _thumbs =
+            new Dictionary<string, Sprite>(StringComparer.OrdinalIgnoreCase);
         // Insertion order of _cache keys — the F1 insert-time cap evicts
         // (and DESTROYS) the oldest entry first. Kept in lockstep with
         // _cache at every add/remove site.
@@ -247,12 +255,39 @@ namespace CompetitiveRounds
                     if (s != null) { sprite = s; return true; }
                     // Sprite destroyed underneath us (should not happen —
                     // HideAndDontSave — but a fake-null cached entry must
-                    // read as a miss, not serve a dead sprite).
-                    _cache.Remove(key);
-                    _cacheOrder.Remove(key);
+                    // read as a miss, not serve a dead sprite). The
+                    // thumbnail over the same texture goes with it.
+                    EvictKey(key);
                 }
             }
             catch { /* miss — PNG fallback serves */ }
+            return false;
+        }
+
+        /// <summary>Cache hit only, like TryGetSprite, but returns the Top
+        /// Card THUMBNAIL: the same capture cropped to the card's corner
+        /// band, so the vanilla name plate above that band is not in the
+        /// picture and the card's own corners reach the edges of whatever
+        /// box the caller draws it in. Every key in _cache has an entry
+        /// here (CaptureOne writes both, EvictKey removes both), and when
+        /// the crop could not be built that entry IS the full sprite — so a
+        /// caller always gets a picture, and the degraded case is a logged
+        /// warning rather than an empty slot.</summary>
+        public static bool TryGetThumbSprite(string cardName, out Sprite sprite)
+        {
+            sprite = null;
+            if (!UseNativeSnapshots || string.IsNullOrEmpty(cardName)) return false;
+            try
+            {
+                string key = KeyFor(cardName);
+                if (string.IsNullOrEmpty(key)) return false;
+                if (_thumbs.TryGetValue(key, out var s))
+                {
+                    if (s != null) { sprite = s; return true; }
+                    EvictKey(key);
+                }
+            }
+            catch { /* miss — the caller re-requests, PNG fallback serves */ }
             return false;
         }
 
@@ -354,8 +389,9 @@ namespace CompetitiveRounds
                 // — the sprites it already grabbed references to are
                 // destroyed underneath it here. Cosmetic, self-serve fix
                 // (user re-runs the export); no machinery to guard it.
-                foreach (var kv in _cache) DestroySprite(kv.Value);
+                foreach (var key in new List<string>(_cache.Keys)) EvictKey(key);
                 _cache.Clear();
+                _thumbs.Clear();
                 _cacheOrder.Clear();
                 _failed.Clear();
                 _queue.Clear();
@@ -384,6 +420,33 @@ namespace CompetitiveRounds
                 if (t != null) UnityEngine.Object.Destroy(t);
             }
             catch { /* teardown must never throw */ }
+        }
+
+        /// <summary>Drops one key from BOTH sprite maps and from the eviction
+        /// order, destroying what it finds. The full sprite goes through
+        /// DestroySprite, which frees the Texture2D; the thumbnail is a
+        /// second Sprite over that same texture, so it is destroyed on its
+        /// own — freeing the texture twice is what this split avoids. The
+        /// thumbnail entry can BE the full sprite (the crop failed at
+        /// capture); destroying an already-destroyed Unity object is a
+        /// no-op, so that case needs no special handling here.
+        ///
+        /// Every removal from _cache goes through this method, which is what
+        /// keeps the two maps holding the same keys.</summary>
+        private static void EvictKey(string key)
+        {
+            _cache.TryGetValue(key, out var full);
+            _thumbs.TryGetValue(key, out var thumb);
+            _cache.Remove(key);
+            _thumbs.Remove(key);
+            _cacheOrder.Remove(key);
+            // The full sprite FIRST: it is the one that frees the shared
+            // Texture2D. Destroying the thumbnail first would leave the
+            // full sprite fake-null when thumb and full are the same object
+            // (the failed-crop case), and DestroySprite would then return
+            // before freeing the texture.
+            DestroySprite(full);
+            try { if (thumb != null) UnityEngine.Object.Destroy(thumb); } catch { }
         }
 
         // ── Internals ──
@@ -790,6 +853,61 @@ namespace CompetitiveRounds
                 cam.nearClipPlane = 0.1f;
                 cam.farClipPlane = 20f + depth + 10f;
 
+                // ── Top Card thumbnail rect (item 9a, reopened 2026-09-21) ──
+                // Texels, computed from the SAME framing the camera just got,
+                // so nothing here scans pixels. The camera is orthographic
+                // and its aspect is the RT's, so one scale serves both axes:
+                // orthographicSize is the visible world half-HEIGHT, and
+                // RT_H / (2 * that) is texels per world unit. Texel origin is
+                // bottom-left, matching ReadPixels and Sprite.Create.
+                //
+                // The ink rect is the framed FACE bounds projected back
+                // through that scale. On the prefab this was measured against
+                // that one step drops all three unwanted things: the 1.08
+                // wobble pad, the letterbox the fixed RT aspect adds, and the
+                // vanilla name plate — the last because Text_Name sits ABOVE
+                // the "Canvas" child TryComputeBounds framed on. The band
+                // keying below is a hedge for a prefab where the body is a
+                // SMALLER rect than the framed face; on this one the two
+                // rects agree and it changes nothing. See BAND_HOLDER_PATHS.
+                float pxPerWorld = RT_H / (2f * cam.orthographicSize);
+                Rect inkRect = WorldRectToTexels(center, bMin, bMax, pxPerWorld);
+                Rect thumbRect = inkRect;
+                string thumbFrom = "ink:" + _faceBoundsSource;
+                if (TryComputeBandBounds(clone, out var cMin, out var cMax))
+                {
+                    thumbRect = WorldRectToTexels(center, cMin, cMax, pxPerWorld);
+                    thumbFrom = _bandHolderName;
+                }
+                else
+                {
+                    // Harmless by itself WHEN the face was found by name — the
+                    // framed face rect is a crop, and on the measured prefab
+                    // it is the same rect the band would have given. When it
+                    // was not, the next check is what says so. Either way a
+                    // prefab child this code names by string has gone, and the
+                    // only other trace would be one field of one Info line.
+                    // Say it at WARNING so a rename is visible in a log that
+                    // is read by grepping for warnings.
+                    Plugin.Log?.LogWarning($"[CARDSNAP] Top Card thumbnail for '{cardName}': no corner-band holder under the clone (looked for Front/Background) — using the framed face bounds instead; a prefab rename is the usual reason");
+                }
+                // The failure that takes the Top Card away again:
+                // TryComputeBounds found no child named "Canvas" and
+                // encapsulated EVERY RectTransform instead, which includes
+                // Particles — larger than the card — so the framing, the ink
+                // rect and therefore the thumbnail are all wider than the card
+                // face. HOW that then shows was MEASURED, not assumed
+                // (mutation M7, 2026-09-21): the card ends up small enough in
+                // frame that the #139 lit probe reads 0.2% and soft-defers
+                // every capture, so nothing is cached and the Top Card row
+                // hides itself — no picture rather than a wrong one. This line
+                // therefore claims only the part that held, that the thumbnail
+                // is not a crop of the card. Before it existed, nothing above
+                // Info said any of it.
+                if (_faceBoundsSource != FACE_SOURCE_NAMED)
+                    Plugin.Log?.LogWarning($"[CARDSNAP] Top Card thumbnail for '{cardName}': the card face was framed by encapsulating every RectTransform, not by the '{FACE_SOURCE_NAMED}' child — the framing is wider than the card, so this thumbnail is not a crop of it");
+                DumpCardHierarchyOnce(clone, cardName, center, pxPerWorld);
+
                 rt = new RenderTexture(RT_W, RT_H, 24);
                 cam.targetTexture = rt;
                 cam.Render();
@@ -865,14 +983,27 @@ namespace CompetitiveRounds
                     new Vector2(0.5f, 0.5f), 100f);
                 sprite.name = $"CardSnap_{key}";
                 sprite.hideFlags = HideFlags.HideAndDontSave;
+                // The Top Card thumbnail: a second Sprite over the SAME
+                // texture, so the crop costs no extra pixels. If it cannot
+                // be built, the full sprite stands in — the Top Card slot
+                // then shows the old framing instead of nothing, and the
+                // warning below is how that is noticed.
+                Sprite thumb = null;
+                try
+                {
+                    thumb = Sprite.Create(tex, thumbRect, new Vector2(0.5f, 0.5f), 100f);
+                    thumb.name = $"CardSnapThumb_{key}";
+                    thumb.hideFlags = HideFlags.HideAndDontSave;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log?.LogWarning($"[CARDSNAP] thumbnail crop failed for '{cardName}' ({ex.Message}) — Top Card shows the full card picture");
+                    thumb = null;
+                }
                 // F1(c): a re-capture landing on a live key (alias re-keying
                 // after CardRarityLookup.ScanAll populates, generation races)
                 // must destroy the sprite/texture it replaces, or it leaks.
-                if (_cache.TryGetValue(key, out var replaced))
-                {
-                    DestroySprite(replaced);
-                    _cacheOrder.Remove(key);
-                }
+                if (_cache.ContainsKey(key)) EvictKey(key);
                 // F1(b): hard cap at INSERT time — the enqueue-time check
                 // alone can be exceeded by items already sitting in the
                 // queue when the cap is crossed. Evict + DESTROY the oldest
@@ -884,19 +1015,18 @@ namespace CompetitiveRounds
                 while (_cache.Count >= MAX_CACHED && _cacheOrder.Count > 0)
                 {
                     string oldest = _cacheOrder[0];
-                    _cacheOrder.RemoveAt(0);
-                    if (_cache.TryGetValue(oldest, out var old))
-                    {
-                        _cache.Remove(oldest);
-                        DestroySprite(old);
+                    bool had = _cache.ContainsKey(oldest);
+                    EvictKey(oldest);   // removes it from _cacheOrder too
+                    if (had)
                         Plugin.Log?.LogInfo($"[CARDSNAP] cache cap {MAX_CACHED} — evicted oldest '{oldest}' to admit '{key}'");
-                    }
                 }
                 _cache[key] = sprite;
+                _thumbs[key] = thumb ?? sprite;
                 _cacheOrder.Add(key);
                 keepTex = true;
                 _lastOutcome = Outcome.Success;
                 Plugin.Log?.LogInfo($"[CARDSNAP] captured '{cardName}' ({RT_W}x{RT_H}, lit {litFraction:P1}, opaque={opaque}) in {(Time.realtimeSinceStartup - t0) * 1000f:F0}ms — {_cache.Count} cached");
+                Plugin.Log?.LogInfo($"[CARDSNAP-THUMB] '{cardName}' rect=({thumbRect.x:F1},{thumbRect.y:F1},{thumbRect.width:F1}x{thumbRect.height:F1}) from={thumbFrom} ink=({inkRect.x:F1},{inkRect.y:F1},{inkRect.width:F1}x{inkRect.height:F1}) rt={RT_W}x{RT_H}");
             }
             finally
             {
@@ -1027,14 +1157,33 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The child name that IS the card face. Also the value
+        /// _faceBoundsSource carries when that child was the one used, which
+        /// is the only case where the framing is the card's own rect.</summary>
+        private const string FACE_SOURCE_NAMED = "Canvas";
+
+        /// <summary>Which path TryComputeBounds last took: FACE_SOURCE_NAMED
+        /// when it framed on that child, "encapsulated" when it had to union
+        /// every RectTransform instead. Read by the capture to decide whether
+        /// the thumbnail rect is the card's rect or something larger.
+        /// Static, and safe to read that way for one reason only: the capture
+        /// coroutine has no yield between the call that writes it and the two
+        /// reads of it, so nothing can run in between. Moving either the call
+        /// or the reads across a yield breaks that and the value would then
+        /// belong to whichever capture wrote it last.</summary>
+        private static string _faceBoundsSource = FACE_SOURCE_NAMED;
+
         /// <summary>World-XY bounds of the card face. Prefers the cardBase's
         /// "Canvas" RectTransform (vanilla structure per CardVisuals.Awake:
         /// "Canvas/Front/Grid") — exactly the card face, right aspect. Falls
-        /// back to encapsulating every RectTransform under the clone.</summary>
+        /// back to encapsulating every RectTransform under the clone, which is
+        /// a WIDER box than the card (Particles alone overruns it), so the
+        /// fallback is recorded rather than taken silently.</summary>
         private static bool TryComputeBounds(GameObject root, out Vector3 min, out Vector3 max)
         {
             min = Vector3.zero;
             max = Vector3.zero;
+            _faceBoundsSource = "encapsulated";
             try
             {
                 var rts = root.GetComponentsInChildren<RectTransform>(true);
@@ -1042,8 +1191,9 @@ namespace CompetitiveRounds
                 RectTransform face = null;
                 for (int i = 0; i < rts.Length; i++)
                 {
-                    if (rts[i] != null && rts[i].gameObject.name == "Canvas") { face = rts[i]; break; }
+                    if (rts[i] != null && rts[i].gameObject.name == FACE_SOURCE_NAMED) { face = rts[i]; break; }
                 }
+                if (face != null) _faceBoundsSource = FACE_SOURCE_NAMED;
                 var corners = new Vector3[4];
                 bool got = false;
                 Vector3 mn = Vector3.zero, mx = Vector3.zero;
@@ -1071,6 +1221,147 @@ namespace CompetitiveRounds
             {
                 Plugin.Log?.LogWarning("[CARDSNAP] bounds compute failed: " + ex.Message);
                 return false;
+            }
+        }
+
+        // ── Top Card thumbnail: what actually crops it, and what this does ──
+        //
+        // The thumbnail has to exclude three things: the camera's 1.08 wobble
+        // pad, the letterbox the fixed RT aspect adds, and the vanilla name
+        // plate (a second copy of the card's name, unreadable at 104 px and
+        // crowding the badge's top rail). On the prefab this was measured
+        // against, ALL THREE go for ONE reason, and it is not this table.
+        //
+        // DumpCardHierarchyOnce read 150 RectTransforms off a real clone on
+        // this seat (2026-09-21, ai-collab/wavebc-r3-9a-child-dump.log):
+        //
+        //   00 Canvas                  (14.1, 60.1) 351.9 x 479.9  top = 540.0
+        //   02 Canvas/Front/Background (14.1, 60.1) 351.9 x 479.9  <- IDENTICAL
+        //   28 Canvas/Front/Text_Name  (37.1,539.4) 305.8 x  60.6  <- ABOVE it
+        //   47/57/67/77 Canvas/Front/Edges/EdgePart[0..3] 31.9 x 31.9, at the
+        //       four corners of that same rect (x 14.1|334.0, y 60.1|508.0)
+        //
+        // TryComputeBounds frames on the child named "Canvas", so the ink
+        // rect IS entry 00 — and entry 02 is the same rect to a tenth of a
+        // texel. So the pad and the letterbox go because the thumbnail is the
+        // framed face rect rather than the whole texture, the corner marks
+        // land on its edges because they sit on that same rect, and the name
+        // plate goes because Text_Name STARTS at y 539.4, above Canvas's top
+        // at 540.0 — outside the face, not merely outside the band.
+        //
+        // On this prefab the table below therefore changes NOTHING: the
+        // capture log line says so on its own face, rect == ink. Keeping it
+        // is a hedge for a prefab where the two rects differ — a name plate
+        // moved inside Canvas, an outer frame added — where Background would
+        // still be the body and the face rect would not. It is matched by
+        // parent AND child name because "Background" also occurs under
+        // Canvas/Back and choosing by traversal order would be luck.
+        //
+        // Nothing here has been SHOWN to fix anything, and no comment should
+        // say it has: a check bound to something that merely correlates with
+        // the property stops meaning what its name says while staying green
+        // (#732). What the witness demonstrated is the crop; the keying rides
+        // along. Both outcomes are logged, and the caller warns when the
+        // holder is missing AND when the face bounds came from the
+        // encapsulate-everything fallback — that second case is the one that
+        // silently restores the reported picture.
+        private static readonly string[,] BAND_HOLDER_PATHS = { { "Front", "Background" } };
+        private static string _bandHolderName = "(none)";
+
+        /// <summary>Project a world-space XY box onto the render texture, in
+        /// texels with a bottom-left origin. The camera is orthographic with
+        /// the RT's own aspect, so pxPerWorld is the same on both axes and
+        /// the camera's XY position is the texture's centre.</summary>
+        private static Rect WorldRectToTexels(Vector3 camCenter, Vector3 wMin, Vector3 wMax, float pxPerWorld)
+        {
+            float x0 = RT_W * 0.5f + (wMin.x - camCenter.x) * pxPerWorld;
+            float x1 = RT_W * 0.5f + (wMax.x - camCenter.x) * pxPerWorld;
+            float y0 = RT_H * 0.5f + (wMin.y - camCenter.y) * pxPerWorld;
+            float y1 = RT_H * 0.5f + (wMax.y - camCenter.y) * pxPerWorld;
+            x0 = Mathf.Clamp(x0, 0f, RT_W); x1 = Mathf.Clamp(x1, 0f, RT_W);
+            y0 = Mathf.Clamp(y0, 0f, RT_H); y1 = Mathf.Clamp(y1, 0f, RT_H);
+            // Sprite.Create throws on a rect outside the texture or with a
+            // non-positive extent; one texel is the smallest thing that is
+            // still a picture.
+            return new Rect(x0, y0, Mathf.Max(1f, x1 - x0), Mathf.Max(1f, y1 - y0));
+        }
+
+        /// <summary>World-XY bounds of the card's corner band — the first
+        /// BAND_HOLDER_PATHS parent/child pair present under the clone.
+        /// False when none is, which leaves the thumbnail on the framed face
+        /// rect and makes the caller warn. Records which pair answered, for
+        /// the capture log line.</summary>
+        private static bool TryComputeBandBounds(GameObject root, out Vector3 min, out Vector3 max)
+        {
+            min = Vector3.zero;
+            max = Vector3.zero;
+            try
+            {
+                var rts = root.GetComponentsInChildren<RectTransform>(true);
+                if (rts == null || rts.Length == 0) return false;
+                var corners = new Vector3[4];
+                for (int n = 0; n < BAND_HOLDER_PATHS.GetLength(0); n++)
+                {
+                    string wantParent = BAND_HOLDER_PATHS[n, 0], wantChild = BAND_HOLDER_PATHS[n, 1];
+                    for (int i = 0; i < rts.Length; i++)
+                    {
+                        if (rts[i] == null || rts[i].gameObject.name != wantChild) continue;
+                        var parent = rts[i].transform.parent;
+                        if (parent == null || parent.gameObject.name != wantParent) continue;
+                        rts[i].GetWorldCorners(corners);
+                        Vector3 mn = corners[0], mx = corners[0];
+                        for (int c = 1; c < 4; c++) { mn = Vector3.Min(mn, corners[c]); mx = Vector3.Max(mx, corners[c]); }
+                        if ((mx.x - mn.x) <= 0.05f || (mx.y - mn.y) <= 0.05f) continue;
+                        min = mn; max = mx;
+                        _bandHolderName = wantParent + "/" + wantChild;
+                        return true;
+                    }
+                }
+                _bandHolderName = "(none)";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning("[CARDSNAP] band bounds compute failed: " + ex.Message);
+                _bandHolderName = "(error)";
+                return false;
+            }
+        }
+
+        private static bool _dumpedHierarchy;
+
+        /// <summary>One-shot dump of the cloned card's RectTransform children
+        /// — name, path, and the texel box each one would crop to — so the
+        /// corner-band holder can be read off a real prefab instead of
+        /// guessed. Broadcast seat only, once per session, same gate and
+        /// log-prefix idiom as the other [Broadcast] Test* levers.</summary>
+        private static void DumpCardHierarchyOnce(GameObject root, string cardName, Vector3 camCenter, float pxPerWorld)
+        {
+            try
+            {
+                if (_dumpedHierarchy || root == null) return;
+                if (!BroadcastMode.IsBroadcastIdentity) return;
+                _dumpedHierarchy = true;
+                var rts = root.GetComponentsInChildren<RectTransform>(true);
+                if (rts == null) return;
+                Plugin.Log?.LogInfo($"[CARDSNAP-DUMP] '{cardName}': {rts.Length} RectTransform(s); rect is texels in a {RT_W}x{RT_H} capture, origin bottom-left");
+                var corners = new Vector3[4];
+                for (int i = 0; i < rts.Length; i++)
+                {
+                    if (rts[i] == null) continue;
+                    string path = rts[i].gameObject.name;
+                    var t = rts[i].transform.parent;
+                    while (t != null && t != root.transform) { path = t.gameObject.name + "/" + path; t = t.parent; }
+                    rts[i].GetWorldCorners(corners);
+                    Vector3 mn = corners[0], mx = corners[0];
+                    for (int c = 1; c < 4; c++) { mn = Vector3.Min(mn, corners[c]); mx = Vector3.Max(mx, corners[c]); }
+                    Rect r = WorldRectToTexels(camCenter, mn, mx, pxPerWorld);
+                    Plugin.Log?.LogInfo($"[CARDSNAP-DUMP]   {i:D2} name='{rts[i].gameObject.name}' active={rts[i].gameObject.activeInHierarchy} path='{path}' rect=({r.x:F1},{r.y:F1},{r.width:F1}x{r.height:F1})");
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning("[CARDSNAP-DUMP] failed: " + ex.Message);
             }
         }
 

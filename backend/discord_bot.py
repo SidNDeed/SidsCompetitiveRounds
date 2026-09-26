@@ -426,6 +426,7 @@ async def on_ready():
     if not poll_ffa_recent_matches.is_running(): poll_ffa_recent_matches.start()
     if not poll_team_recent_series.is_running(): poll_team_recent_series.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
+    if not poll_quarantine_digest.is_running(): poll_quarantine_digest.start()
     if not poll_new_bans.is_running(): poll_new_bans.start()
     if not poll_github_releases.is_running(): poll_github_releases.start()
     if not poll_live_bets.is_running(): poll_live_bets.start()
@@ -3315,7 +3316,7 @@ async def chat_ws_listener():
 # Twitch: the VM overlay keeps its own native IRC read, so bridged twitch
 # copies are dropped there by source. YouTube: this bridge is the ONLY reader
 # anywhere — the VM overlay renders the bridged copies it receives over the
-# SCR websocket (ai-collab/streaming-design-addendum-chat.md).
+# SCR websocket.
 STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
 # The prefix (`:login!login@login.tmi...`) carries the sender's LOGIN — the
 # stable lowercase handle, captured for mute identity (design S1). The tags
@@ -3487,7 +3488,7 @@ async def youtube_chat_bridge():
     (video id via poll_stream_posts). Polls the OFFICIAL YouTube Data API —
     the previous chat_downloader reader was deleted, not bypassed (#310):
     0.2.8 (its latest release, 2023) is parse-broken against current YouTube
-    page variants, reproduced in ai-collab/streaming-design-addendum-chat.md.
+    page variants.
     Missing creds degrade to a one-time log; Twitch is unaffected. Replays
     after a re-attach are harmless — the server's native-id guard drops them.
 
@@ -6557,7 +6558,13 @@ async def cmd_game(ctx, code: str):
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(pl, f"#{pl}")
             head = f"{medal} {display_name}"
             if p.get("left_early"):
-                head += "  *(left)*"
+                # Bug #392: the departure is reported either way; only the
+                # WORD changes. `*(left)*` reads as a choice, and a seat whose
+                # own leave attested a transport failure did not choose. The
+                # key is absent on a pre-#392 payload, so an older api answers
+                # into exactly today's rendering.
+                head += ("  *(disconnected)*" if p.get("left_early_involuntary")
+                         else "  *(left)*")
         else:
             head = f"{'🏆 ' if won else ''}{display_name}"
         if mode == "2v2":
@@ -7099,7 +7106,10 @@ async def log_ffa_match_result(guild, m):
         # Match-time stamps from the row, so later games can't rewrite them.
         rb, ra = p.get("rating_before"), p.get("rating_after")
         ba_s = f" {rb:.0f}→{ra:.0f}" if (rb is not None and ra is not None) else ""
-        left = " *(left)*" if p.get("left_early") else ""
+        # Bug #392: same two-word split as the /game embed above — the mark
+        # stays, the word tells a transport failure from a choice.
+        left = ((" *(disconnected)*" if p.get("left_early_involuntary") else " *(left)*")
+                if p.get("left_early") else "")
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(p.get("placement", 0), f"#{p.get('placement', '?')}")
         nm = discord.utils.escape_markdown(str(p.get("display_name") or p.get("steam_id")))
         # Bug 215 (Sid): points AND unconverted half points, in the game's own
@@ -8394,12 +8404,49 @@ def _pc_name(s):
 
 
 def _pc_print_line(p):
-    """One binder line: rarity, name, pool rank, rating, flags."""
+    """One binder line: rarity, name, pool rank, rating, top card, flags."""
     flags = ("✨ foil" if p.get("foil") else "") + (" ✒️ signed" if p.get("signed") else "")
     rating = p.get("rating")
     rt = f" · {int(rating)}" if isinstance(rating, (int, float)) else ""
+    # The print's Top card, routed through _pc_name exactly as /card renders
+    # it. An absent or empty value contributes the empty string -- no
+    # separator and no placeholder dash -- so a print without a top card
+    # renders the same characters it rendered before this field was added.
+    top = p.get("top_card")
+    tc = f" · 🃏 {_pc_name(top)}" if top else ""
     return (f"{_PC_RARITY_EMOJI.get(p.get('rarity'), '')} **{_pc_name(p.get('subject_name'))}**"
-            f" #{p.get('pool_rank', '?')}{rt} {flags}").rstrip()
+            f" #{p.get('pool_rank', '?')}{rt}{tc} {flags}").rstrip()
+
+
+def _pc_fit_field(lines, cap=1024):
+    """Join lines into an embed field value, cutting only BETWEEN lines.
+
+    Discord rejects a field value longer than 1024 characters, so a block of
+    lines has to be bounded somewhere. Slicing the joined string is the wrong
+    place: the cut lands wherever 1024 falls, which can be inside a `**bold**`
+    run — the field then renders with an unclosed run that swallows the rest
+    of it. Lines are added here only while the WHOLE value still fits, so a
+    line is either present in full or not at all. When something was left out
+    the value ends with a single-character marker, and that marker is inside
+    the cap too (lines are popped to make room for it if need be).
+
+    A single line longer than the cap yields just the marker. That is a
+    degradation rather than a failure -- a one-character value is still a
+    legal field -- and it is the honest outcome, because the alternative is
+    the mid-line cut this function exists to avoid. Whether any caller can
+    actually produce such a line is NOT claimed here: it depends on how long
+    a name the api will hand over and on what escaping does to it.
+    """
+    out = []
+    for line in lines:
+        if len("\n".join(out + [line])) > cap:
+            break
+        out.append(line)
+    if len(out) < len(lines):
+        while out and len("\n".join(out + ["…"])) > cap:
+            out.pop()
+        out.append("…")
+    return "\n".join(out)
 
 
 def _pc_not_linked(ctx, target):
@@ -8669,7 +8716,11 @@ async def cmd_pc_collection(ctx, member: discord.Member = None):
                     inline=False)
     best = body.get("best") or []
     if best:
-        embed.add_field(name="⭐  Best prints", value="\n".join(_pc_print_line(p) for p in best[:10])[:1024], inline=False)
+        # Line-wise, not a slice of the join: the Top card segment added up to
+        # ~24 characters per line, which is what brings a ten-print binder of
+        # long names within reach of the 1024 cap.
+        embed.add_field(name="⭐  Best prints",
+                        value=_pc_fit_field([_pc_print_line(p) for p in best[:10]]), inline=False)
     else:
         embed.add_field(name="⭐  Best prints", value="No prints yet — `/daily` claims today's free pack.", inline=False)
     if face is None:
@@ -8792,10 +8843,16 @@ def _pc_event_lines(events):
         copy = ""
         if isinstance(dup, int):
             copy = "  ·  NEW to the binder" if dup == 0 else f"  ·  Duplicate · copy {dup + 1}"
+        # The print's Top card, from the event payload's nested print dict.
+        # Absent contributes the empty string, which is what an api older
+        # than this field hands the bot: the line then reads exactly as it
+        # read before, rather than carrying a separator with nothing after it.
+        top = p.get("top_card")
+        tc = f"  ·  🃏 {_pc_name(top)}" if top else ""
         if "self" in kinds:
-            lines.append(f"🪞 **{puller}** pulled their OWN card — a {what.strip()}{rank}!{copy}")
+            lines.append(f"🪞 **{puller}** pulled their OWN card — a {what.strip()}{rank}!{copy}{tc}")
         else:
-            lines.append(f"**{puller}** pulled a {what.strip()} **{subject}**{rank}!{copy}")
+            lines.append(f"**{puller}** pulled a {what.strip()} **{subject}**{rank}!{copy}{tc}")
         lines.append([int(e["id"]) for e in group])
     return lines
 
@@ -9156,6 +9213,231 @@ async def poll_chat_catchup():
         await _catchup_ingame_since()
     except Exception as e:
         print(f"[CHAT] catchup pass error: {e}")
+
+
+# ── Quarantine digest (RJ-TRIAGE part 1, C7) ───────────────────────────────
+# Lists every pending quarantined match report in #scr-admin, one line each,
+# from the api's read-only digest feed (GET /api/v1/internal/quarantine/digest,
+# D1). The unposted state that matters is the row's own status: every pending
+# row of a pass's cohort is re-read on every pass. The in-memory announced set
+# holds the ids whose message send returned without an error, and this process
+# does not list those again. A restart lists the whole pending set again. The
+# loop writes nothing to the api or the database.
+#
+# One loop iteration is one pass followed by at most one posting step, with no
+# wait of its own. A pass is D1's pages, from a first request without a cursor
+# to the first short page; a page that cannot be read ends the pass
+# INCOMPLETE (nothing is pruned, and the ids already read may still be
+# posted). A posting step is the round, when something is new and the 600 s
+# window is open, plus the online line once per process or the 24 h reminder
+# when due. A round's lines are packed whole into messages, each closed before
+# the next line would take it past 2,000 characters; an id is marked announced
+# only when the message carrying its line has been accepted, and a failed
+# message ends the round.
+
+QDIGEST_PAGE_TIMEOUT_S = 45          # the bot's own total timeout per D1 page
+QDIGEST_ROUND_EVERY_S = 600          # from the start of the last round whose first message was accepted
+QDIGEST_REMINDER_EVERY_S = 86400     # the totals line, while anything is pending
+QDIGEST_MESSAGE_LIMIT = 2000         # Discord's content limit; messages carry whole lines only
+
+_qdigest = {
+    "announced": set(),       # ids listed by an accepted message of this process
+    "quota_named": set(),     # (mode, group) named at quota by an accepted message
+    "round_at": None,         # monotonic start of the last round whose first message was accepted
+    "reminder_at": None,      # monotonic time of the online line or of the last reminder
+    "online_posted": False,
+    "first_pass_logged": False,
+    "channel_logged": False,
+    "first_post_logged": False,
+}
+
+
+async def _qdigest_page(params: dict):
+    """One D1 page, or None when it could not be read (the pass then ends
+    INCOMPLETE)."""
+    try:
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/internal/quarantine/digest",
+            params=params,
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=QDIGEST_PAGE_TIMEOUT_S),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[QDIGEST] digest page status={resp.status}")
+                return None
+            return await resp.json()
+    except Exception as e:
+        print(f"[QDIGEST] digest page error: {type(e).__name__}: {e}")
+        return None
+
+
+async def _qdigest_pass():
+    """One pass: (rows in cohort order, the first page's totals, complete).
+
+    The first request carries no cursor and D1 fixes the pass's hw in its
+    answer; every later request sends back hw and the last (created_at, id)
+    read. The pass ends on a short page, or on a page that could not be read,
+    which leaves it incomplete. The api bounds the cohort by hw, which is what
+    ends a pass over a table that keeps receiving captures."""
+    first = await _qdigest_page({})
+    if not isinstance(first, dict):
+        return [], None, False
+    rows = list(first.get("rows") or [])
+    totals = first.get("totals")
+    size = int(first.get("page_size") or 0)
+    if size <= 0:
+        return rows, totals, False
+    page = rows
+    while len(page) >= size:
+        last = page[-1]
+        nxt = await _qdigest_page({"hw": first.get("hw"), "after_at": last["created_at"],
+                                   "after_id": last["id"]})
+        if not isinstance(nxt, dict):
+            return rows, totals, False
+        page = list(nxt.get("rows") or [])
+        rows.extend(page)
+    return rows, totals, True
+
+
+def _qdigest_when(value) -> str:
+    """A D1 timestamp to the second, in UTC."""
+    try:
+        return datetime.fromisoformat(str(value)).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _qdigest_line(row: dict) -> str:
+    return (f"{row.get('id')} {row.get('mode')} {row.get('group') or 'no-group'} "
+            f"{row.get('family')} {_qdigest_when(row.get('created_at'))}")
+
+
+def _qdigest_messages(lines: list, keys: list, header: str) -> list:
+    """Whole lines packed into messages, each closed before the next line
+    would take it past QDIGEST_MESSAGE_LIMIT characters and paired with the
+    keys of the lines it carries. A line is never cut: a cut line would mark
+    an id that no one could read."""
+    out, cur, cur_keys, size = [], [header], [], len(header)
+    for line, key in zip(lines, keys):
+        if cur_keys and size + 1 + len(line) > QDIGEST_MESSAGE_LIMIT:
+            out.append(("\n".join(cur), cur_keys))
+            cur, cur_keys, size = [], [], -1
+        cur.append(line)
+        cur_keys.append(key)
+        size += 1 + len(line)
+    if cur_keys:
+        out.append(("\n".join(cur), cur_keys))
+    return out
+
+
+async def _qdigest_channel():
+    try:
+        channel = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
+    except Exception as ex:
+        print(f"[QDIGEST] admin channel resolution failed: {type(ex).__name__}: {ex}")
+        return None
+    if channel is None:
+        print(f"[QDIGEST] admin channel {ADMIN_CHANNEL_ID} not resolvable")
+        return None
+    if not _qdigest["channel_logged"]:
+        _qdigest["channel_logged"] = True
+        print("[QDIGEST] admin channel resolved")
+    return channel
+
+
+async def _qdigest_send(channel, content: str) -> bool:
+    """True only when Discord accepted the message."""
+    try:
+        await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as ex:
+        print(f"[QDIGEST] post failed: {type(ex).__name__}: {ex}")
+        return False
+    if not _qdigest["first_post_logged"]:
+        _qdigest["first_post_logged"] = True
+        print("[QDIGEST] first post accepted")
+    return True
+
+
+async def _qdigest_round(channel, new: list, quota: list):
+    """One posting round: groups newly at quota, then every new id in cohort
+    order. Each message's keys are marked when that message is accepted; a
+    failed message ends the round and leaves its keys, and every later one,
+    unmarked. The window is used only when the first message is accepted."""
+    started = time.monotonic()
+    lines, keys = [], []
+    for q in quota:
+        lines.append(f"group at quota: {q.get('mode')} {q.get('group')} holds {q.get('pending')} pending "
+                     "reports; its next refused report is not kept")
+        keys.append(("quota", (q.get("mode"), q.get("group"))))
+    for r in new:
+        lines.append(_qdigest_line(r))
+        keys.append(("id", r["id"]))
+    header = (f"quarantined reports pending review, new since the last round: {len(new)} "
+              "(id mode group family created_at UTC)")
+    for n, (content, mkeys) in enumerate(_qdigest_messages(lines, keys, header)):
+        if not await _qdigest_send(channel, content):
+            return
+        if n == 0:
+            _qdigest["round_at"] = started
+        for kind, key in mkeys:
+            (_qdigest["announced"] if kind == "id" else _qdigest["quota_named"]).add(key)
+
+
+def _qdigest_totals_line(totals: dict, prefix: str) -> str:
+    oldest = (totals.get("oldest") or {}).get("created_at")
+    return (f"{prefix}: {int(totals.get('pending') or 0)} pending in {int(totals.get('groups') or 0)} groups, "
+            f"oldest {_qdigest_when(oldest) if oldest else 'none'}; "
+            f"{len(totals.get('at_quota') or [])} group(s) at quota")
+
+
+async def _qdigest_iteration():
+    """One pass, then at most one posting step. No sleep and no cooldown: the
+    loop's own 60 s schedule is the only spacing between iterations."""
+    if not http_session or not API_SECRET_KEY or not ADMIN_CHANNEL_ID:
+        return
+    rows, totals, complete = await _qdigest_pass()
+    totals = totals if isinstance(totals, dict) else None
+    st = _qdigest
+    if complete:
+        st["announced"] &= {r["id"] for r in rows}
+        st["quota_named"] &= {(q.get("mode"), q.get("group")) for q in (totals or {}).get("at_quota") or []}
+        if not st["first_pass_logged"]:
+            st["first_pass_logged"] = True
+            print(f"[QDIGEST] first pass complete: {int((totals or {}).get('pending') or 0)} pending in "
+                  f"{int((totals or {}).get('groups') or 0)} groups")
+    new = [r for r in rows if r["id"] not in st["announced"]]
+    quota = [q for q in ((totals or {}).get("at_quota") or [])
+             if (q.get("mode"), q.get("group")) not in st["quota_named"]]
+    now = time.monotonic()
+    online_due = complete and totals is not None and not st["online_posted"]
+    round_due = bool(new or quota) and (st["round_at"] is None or now - st["round_at"] >= QDIGEST_ROUND_EVERY_S)
+    reminder_due = (totals is not None and st["online_posted"] and int(totals.get("pending") or 0) > 0
+                    and now - st["reminder_at"] >= QDIGEST_REMINDER_EVERY_S)
+    if not (online_due or round_due or reminder_due):
+        return
+    channel = await _qdigest_channel()
+    if channel is None:
+        return
+    if online_due:
+        oldest = (totals.get("oldest") or {}).get("created_at")
+        if await _qdigest_send(channel, f"quarantine digest online: {int(totals.get('pending') or 0)} pending, "
+                                        f"oldest {_qdigest_when(oldest) if oldest else 'none'}"):
+            st["online_posted"] = True
+            st["reminder_at"] = time.monotonic()
+    if round_due:
+        await _qdigest_round(channel, new, quota)
+    if reminder_due and await _qdigest_send(channel, _qdigest_totals_line(totals, "quarantine digest reminder")):
+        st["reminder_at"] = time.monotonic()
+
+
+@tasks.loop(seconds=60)
+async def poll_quarantine_digest():
+    """The #scr-admin quarantine digest (RJ-TRIAGE C7). The body is guarded
+    (#129): a tasks.loop that raises stays dead until the next deploy."""
+    try:
+        await _qdigest_iteration()
+    except Exception as e:
+        print(f"[QDIGEST] iteration error: {type(e).__name__}: {e}")
 
 
 @tasks.loop(seconds=60)
