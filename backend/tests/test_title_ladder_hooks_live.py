@@ -603,8 +603,11 @@ async def _ladder(conn):
 
 
 def _rounded(rows, places):
-    return sorted(tuple(round(v, places) if isinstance(v, float) else v for v in r)
-                  for r in rows)
+    """Rows as tuples, floats rounded to `places`, sorted on a key that puts
+    NULL apart from every value -- an unrated player's rating_change is NULL
+    beside a rated one's float."""
+    out = [tuple(round(v, places) if isinstance(v, float) else v for v in r) for r in rows]
+    return sorted(out, key=lambda t: tuple((v is None, 0 if v is None else v) for v in t))
 
 
 async def _economy(conn):
@@ -1222,6 +1225,191 @@ def test_pg_ffa_failed_skew_refund_takes_the_credit_back(opened, monkeypatch, ho
             after, econ = await _look(schema)
             assert after == seeded and econ["ffa_matches"] == 0, (
                 "H8: a rolled-back FFA settlement kept its credit")
+    _run(_go())
+
+
+# -- FFA: one credit per sitting (design V3 section 12.3) ---------------------
+
+# W, R and G each wear the first rung of a line at a recorded count; V and X
+# wear nothing. X is the second lobby's third seat: a lobby forms at
+# FFA_MIN_PLAYERS (three), so step 7's "a new rated lobby with W and V" is
+# played three-handed.
+W, V, R, G, X = ("76561190000000411", "76561190000000412", "76561190000000413",
+                 "76561190000000414", "76561190000000415")
+SITTING_WEAR = {W: (LINES[0], 3), R: (LINES[1], 3), G: (LINES[2], 3)}
+NAME = {W: "W", V: "V", R: "R", G: "G", X: "X"}
+
+
+def _sitting_game_1(lobby):
+    """Game 1 of the sitting: W wins and V plays it out; R leaves with six
+    field points on the board, late enough to be rated; G leaves at one,
+    inside the grace (FFA_LEAVE_GRACE_POINTS), and is unrated."""
+    return _report_ffa(lobby, "ffa_lhS_r1", [
+        _entry(W, 0, 5, 10), _entry(V, 1, 3, 6),
+        _entry(R, 2, 2, 4, left=True, gp=6),
+        _entry(G, 3, 0, 0, left=True, gp=1)], W)
+
+
+def _sitting_game_2(lobby):
+    """Game 2, in a new room: W and V play; R and G ride the frozen roster
+    as ghosts (left early, absent, nothing on the board)."""
+    return _report_ffa(lobby, "ffa_lhT_r2", [
+        _entry(W, 0, 5, 10), _entry(V, 1, 3, 6),
+        _entry(R, 2, 0, 0, left=True, absent=True),
+        _entry(G, 3, 0, 0, left=True, absent=True)], W)
+
+
+async def _per_game(schema, lobbies):
+    """What stays per game: each lobby's ffa_matches ids in game order, the
+    FFA games each player has been rated in, and the ffa_placement gold rows
+    as {reference id: sorted steam ids}."""
+    conn = await harness.connect_bound(DSN, schema)
+    try:
+        matches = {}
+        for lobby in lobbies:
+            matches[str(lobby)] = [str(r["id"]) for r in await conn.fetch(
+                "SELECT id FROM ffa_matches WHERE lobby_id = $1 ORDER BY game_number", lobby)]
+        played = {r["steam_id"]: r["games_played"] for r in await conn.fetch(
+            "SELECT p.steam_id, g.games_played FROM glicko_ratings_ffa g "
+            "  JOIN players p ON p.id = g.player_id WHERE g.games_played > 0")}
+        placed = {}
+        for r in await conn.fetch(
+                "SELECT g.reference_id, p.steam_id FROM gold_transactions g "
+                "  JOIN players p ON p.id = g.player_id WHERE g.reason = 'ffa_placement'"):
+            placed.setdefault(r["reference_id"], []).append(r["steam_id"])
+        return matches, played, {k: sorted(v) for k, v in placed.items()}
+    finally:
+        await conn.close()
+
+
+def _sitting_problems(when, look, got, games, refs):
+    """Every way the ladder disagrees with `games` (worn-line count per
+    wearer) and `refs` (credit references per player), as sentences."""
+    out = []
+    for s, (line, _start) in sorted(SITTING_WEAR.items()):
+        have = look["progress"].get((s, line), (None, None))[0]
+        if have != games[s]:
+            out.append("%s: %s's worn line holds %s games, want %s"
+                       % (when, NAME[s], have, games[s]))
+        status, body = got[s]
+        read = _worn_games(body) if status == 200 else ("HTTP", status)
+        if read != (line, games[s]):
+            out.append("%s: the GET reads %s's worn line as %r, want %r"
+                       % (when, NAME[s], read, (line, games[s])))
+    for s in sorted(refs):
+        have = sorted(c[1] for c in look["credits"] if c[0] == s)
+        if have != sorted(refs[s]):
+            out.append("%s: %s holds %d credit(s) %r, want %r"
+                       % (when, NAME[s], len(have), have, sorted(refs[s])))
+    return out
+
+
+def test_pg_ffa_credit_is_keyed_by_the_sitting(opened, hook_calls):
+    """FFA, design V3 section 12.3 steps 1-8 (H1, H3, H6 and H8 per sitting).
+
+    One rated lobby L, two games. Game 1 rates W, V and R -- R left late --
+    and not G, who left inside the grace; game 2, in a new room, rates W and
+    V while R and G ride as ghosts. The per-game writes stay per game: two
+    ffa_matches rows, one FFA game per rated player per game (W and V twice,
+    R once, G never), one ffa_placement gold row per rated player per game
+    referencing THAT game's match id. The ladder counts the SITTING: after
+    game 1, W and R each hold one credit keyed by the lobby and their worn
+    lines read +1 through the GET; after game 2 still exactly one each, still
+    +1, and no credit carries a game's id; G, graced and then a ghost, ends
+    the sitting with none and R, rated once and then a ghost, keeps exactly
+    one. Game 2 sent again is the replay echo and moves nothing. A new lobby
+    gives W the next +1.
+
+    The hook is reached by both games of L -- three players, then two -- so
+    the second game's no-op is the lobby key's doing, not a path that never
+    called it. Step 8's mutation control, main.py's FFA call keyed by
+    str(match_id) again, must turn this red: the first sitting's checks are
+    collected and reported together, so the red run names W's two credits
+    and the GET's +2 rather than stopping at the first difference."""
+    _require_live_pg()
+
+    async def _go():
+        async with _case() as (schema, sm):
+            ids = await _seed(sm, SITTING_WEAR, plain=(V, X))
+            seeded, _ = await _look(schema)
+            start = {s: seeded["progress"][(s, line)][0]
+                     for s, (line, _g) in SITTING_WEAR.items()}
+            once = {W: start[W] + 1, R: start[R] + 1, G: start[G]}
+            lobby = await _ffa_lobby(sm, ids, members=(W, V, R, G))
+            L = str(lobby)
+            problems = []
+
+            # Steps 2-5, game 1.
+            g1 = await _submit(sm, main.submit_ffa_match, _sitting_game_1(lobby))
+            assert g1[1] is None, g1
+            assert any(ln.startswith("[FFA] early-leave grace for %s" % G) for ln in g1[2]), (
+                "G's leave did not take the grace", g1[2])
+            m1 = str(g1[0].match_id)
+            matches, played, placed = await _per_game(schema, [lobby])
+            assert matches == {L: [m1]}, ("step 3, game 1", matches)
+            assert played == {W: 1, V: 1, R: 1}, ("step 3, game 1: FFA games", played)
+            assert placed == {m1: sorted([W, V, R])}, ("step 3, game 1: placement gold", placed)
+            assert [(m, n) for m, _r, n in hook_calls] == [("ffa", 3)], hook_calls
+            after1, _ = await _look(schema)
+            got1 = await _get_ladders(schema, [W, R, G])
+            problems += _sitting_problems("after game 1", after1, got1, once,
+                                          {W: [L], V: [], R: [L], G: []})
+
+            # Steps 2-5, game 2.
+            game_2 = _sitting_game_2(lobby)
+            g2 = await _submit(sm, main.submit_ffa_match, game_2)
+            assert g2[1] is None, g2
+            m2 = str(g2[0].match_id)
+            assert m2 != m1, (m1, m2)
+            matches, played, placed = await _per_game(schema, [lobby])
+            assert matches == {L: [m1, m2]}, ("step 3, game 2", matches)
+            assert played == {W: 2, V: 2, R: 1}, ("step 3, game 2: FFA games", played)
+            assert placed == {m1: sorted([W, V, R]), m2: sorted([W, V])}, (
+                "step 3, game 2: placement gold", placed)
+            assert [(m, n) for m, _r, n in hook_calls] == [("ffa", 3), ("ffa", 2)], hook_calls
+            after2, econ2 = await _look(schema)
+            got2 = await _get_ladders(schema, [W, R, G])
+            problems += _sitting_problems("after game 2", after2, got2, once,
+                                          {W: [L], V: [], R: [L], G: []})
+            by_game = sorted((NAME[c[0]], c[1]) for c in after2["credits"] if c[1] in (m1, m2))
+            if by_game:
+                problems.append("after game 2: %d credit(s) keyed by a game's id, "
+                                "not the lobby's: %r" % (len(by_game), by_game))
+            keys = sorted({r for _m, r, _n in hook_calls})
+            if keys != [L]:
+                problems.append("the hook was called with %r, not the lobby %r" % (keys, L))
+
+            # Step 6: game 2 sent again is the replay echo.
+            again = await _submit(sm, main.submit_ffa_match, game_2)
+            assert again[1] is None and str(again[0].match_id) == m2, (
+                "step 6: the resend was not the replay echo of game 2", again)
+            after3, econ3 = await _look(schema)
+            matches3, _played, _placed = await _per_game(schema, [lobby])
+            assert matches3 == {L: [m1, m2]}, ("step 6: a third ffa_matches row", matches3)
+            assert after3 == after2 and econ3 == econ2, "step 6: the replay echo moved something"
+            assert len(hook_calls) == 2, ("step 6: the replay echo reached the hook", hook_calls)
+
+            assert not problems, ("the sitting did not count once:\n  "
+                                  + "\n  ".join(problems))
+
+            # Step 7: the sitting ends; a new lobby is the next sitting.
+            async with sm() as db:
+                await db.execute(text(
+                    "UPDATE ffa_lobbies SET status = 'completed', completed_at = NOW() "
+                    " WHERE id = :i"), {"i": lobby})
+                await db.commit()
+            lobby2 = await _ffa_lobby(sm, ids, members=(W, V, X))
+            L2 = str(lobby2)
+            g3 = await _submit(sm, main.submit_ffa_match,
+                               _report_ffa(lobby2, "ffa_lhU_r1", _ffa_game((W, V, X)), W))
+            assert g3[1] is None, g3
+            assert hook_calls[2:] == [("ffa", L2, 3)], hook_calls
+            after4, _ = await _look(schema)
+            got4 = await _get_ladders(schema, [W, R, G])
+            twice = {W: start[W] + 2, R: start[R] + 1, G: start[G]}
+            late = _sitting_problems("after the second lobby", after4, got4, twice,
+                                     {W: [L, L2], V: [], R: [L], G: [], X: []})
+            assert not late, late
     _run(_go())
 
 
