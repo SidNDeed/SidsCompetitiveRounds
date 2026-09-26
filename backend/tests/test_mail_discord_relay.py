@@ -103,7 +103,7 @@ needs_pg = pytest.mark.skipif(
 # Exactly this many tests in this module need the DSN. Pinned from OUT here
 # so that moving one behind the gate is a deliberate edit and not a silent
 # "1 skipped" that still reads as a clean run.
-LIVE_TESTS = 14
+LIVE_TESTS = 15
 
 
 def _read(path):
@@ -2909,6 +2909,81 @@ def test_turning_the_relay_off_withdraws_only_this_players_queued_mail():
     # to wait out a lease on a row nobody will ever send.
     assert not state["in flight relay"][1], (
         "a withdrawn row kept its claim: %s" % (state,))
+
+
+@needs_pg
+def test_a_dm_that_went_out_before_the_relay_was_turned_off_still_answers():
+    """Round 3 finding 18, the race executed in the order it happens.
+
+    The bot claims two relay rows and sends them. Before its ACK arrives the
+    player turns the relay off, and the off-sweep cancels both, because
+    delivered_at is still NULL on each. Then the ACK lands: one DM Discord
+    accepted, one it refused. The accepted one must stay answerable -- its
+    code is in the player's DMs -- so the ACK clears its cancellation; the
+    refused one keeps it, and nobody can quote a code they never saw.
+    Before the fix the delivered row stayed cancelled and the reply
+    resolved to unknown_code."""
+    import asyncpg
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        try:
+            await _seed(conn)
+            # The accepted DM comes from the real fan-out, the refused one
+            # is a second relay row of the same mail for the same player.
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code(), SENDER_SID)
+            await conn.execute(
+                "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code)"
+                " VALUES ('1', 'refused relay', $1, $2)", MAIL, _code())
+            polled = await _claim(conn)
+            ids = {r["content"]: str(r["dm_id"]) for r in polled}
+            if sorted(ids) != ["refused relay", "the DM body"]:
+                return ("poll", sorted(ids), None, None, None)
+            codes = {c: await conn.fetchval(
+                "SELECT relay_code FROM pending_dms WHERE id::text = $1", i)
+                for c, i in ids.items()}
+            # -- both DMs are with Discord now; the player turns the relay off --
+            await conn.execute(
+                "UPDATE players SET mail_discord_relay = false WHERE steam_id = '1'")
+            swept = await conn.execute(
+                _pg(mail_discord.RELAY_OFF_CANCEL_SQL, "sid"), "1")
+            # -- the bot's ACK: one accepted, one refused --
+            await conn.execute(_pg(main._PENDING_DM_ACK_SQL, "und", "ids"),
+                               False, [ids["the DM body"]])
+            await conn.execute(_pg(main._PENDING_DM_ACK_SQL, "und", "ids"),
+                               True, [ids["refused relay"]])
+            pid = await conn.fetchval(
+                "SELECT id::text FROM players WHERE steam_id = '1'")
+            hits = {}
+            for c, code in codes.items():
+                row = await conn.fetchrow(
+                    _pg(mail_discord._REPLY_BY_CODE_SQL, "c", "s", "pid"),
+                    code, "1", pid)
+                hits[c] = row and str(row["mail_id"])
+            state = {r["content"]: (r["delivered_at"] is not None, r["undeliverable"],
+                                    r["cancelled_at"] is not None)
+                     for r in await conn.fetch(
+                         "SELECT content, delivered_at, undeliverable, cancelled_at"
+                         "  FROM pending_dms")}
+            both = await conn.fetchval(
+                "SELECT count(*) FROM pending_dms WHERE delivered_at IS NOT NULL"
+                "   AND NOT undeliverable AND cancelled_at IS NOT NULL")
+            return (swept, sorted(ids), hits, state, both)
+        finally:
+            await conn.close()
+
+    swept, polled, hits, state, both = _live(run)
+    assert polled == ["refused relay", "the DM body"], polled
+    # The race really ran: the sweep found both rows still undelivered.
+    assert swept == "UPDATE 2", (
+        "the off-sweep did not catch the two sent-but-unacked rows: %r %s" % (swept, state))
+    assert hits["the DM body"] == MAIL, (
+        "a reply to a DM the player received resolved to nothing: %s" % (state,))
+    assert state["the DM body"] == (True, False, False), state
+    assert hits["refused relay"] is None, hits
+    assert state["refused relay"] == (True, True, True), (
+        "a DM Discord refused lost its withdrawal: %s" % (state,))
+    assert both == 0, "a delivered row is still cancelled: %s" % (state,)
 
 
 @needs_pg

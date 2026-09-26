@@ -35881,8 +35881,21 @@ _PENDING_DM_CLAIM_SQL = """
 # nobody reads "settlement quotes its claim" as covering both halves: a
 # garbled dm_id from the bot can still retire the wrong row, exactly as it
 # can today. That is unchanged, not closed.
+#
+# Terminal over a cancellation too (v1.41.0 beta round 3, finding 18). A
+# relay-off or a mail delete landing between the bot's send and this ACK
+# finds delivered_at still NULL and cancels the row, and the reply resolver
+# (mail_discord._RELAY_ROW_FROM) skips a cancelled row -- so a reply to a DM
+# the player had in hand resolved to unknown_code. A DELIVERED ack therefore
+# clears cancelled_at: the DM is out, and the row is its code. An
+# undeliverable ack keeps it: Discord refused that DM, nobody saw its code,
+# and "withdrawn" stays distinguishable from "refused". A mail its
+# recipient deleted stays unanswerable either way -- the resolver's own
+# r.deleted_at predicate refuses it. The garbled-dm_id case above now also
+# un-cancels the row it names; every reply is still gated by the envelope.
 _PENDING_DM_ACK_SQL = (
     "UPDATE pending_dms SET delivered_at = NOW(), undeliverable = :und, "
+    "cancelled_at = CASE WHEN CAST(:und AS boolean) THEN cancelled_at END, "
     "claim_id = NULL, claim_until = NULL "
     "WHERE id::text = ANY(:ids) AND delivered_at IS NULL")
 
