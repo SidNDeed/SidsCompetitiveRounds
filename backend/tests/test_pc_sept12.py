@@ -465,6 +465,26 @@ SUPERSEDED_SEPT12 = {
     "e56a6d9c5bfe3b65": ("fd240ccd9449ca74", "317_i18n_keys_sept14.sql"),
 }
 
+# Sept-12 keys whose SITE moved while the string did not: same English, same
+# key_id, same source_hash, a different extractor context ("surface \u00b7
+# method"). The v1.41.0 settings reorganisation (item 13) built the page's
+# explainers into the settings help pane, so these two now live in the
+# functions that fill it. The release key sync carries the new context to
+# the server (sync-keys upserts context = EXCLUDED.context), so the rows 312
+# inserted are refreshed, not orphaned. Each entry names the context it moved
+# FROM as well, so a later move of the same key fails here until it is
+# accounted for too.
+MOVED_SEPT12 = {
+    # "Other players can pull, collect and trade a card of you ...": the
+    # Player Cards explainer, now in the pane beside the Player Cards rows.
+    "811bcbb0ed9a6ef4": ("PlayerCardsUI \u00b7 BuildSettingsRows",
+                         "PlayerCardsUI \u00b7 BuildSettingsPaneExtras"),
+    # "Also removes your Player Cards: ...": the delete-my-data warning, now
+    # in the destructive rows' help pane.
+    "8296ada6cf24fcb6": ("NativeUI \u00b7 BuildSettingsTab",
+                         "NativeUI \u00b7 BuildSettingsPaneTexts"),
+}
+
 
 def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_bundled_catalogues():
     import difflib
@@ -502,7 +522,12 @@ def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_b
             continue
         rec = recs[key_id]   # a key no successor accounts for is a live client string
         assert msg == rec["msgctxt"] and source_hash == rec["source_hash"], key_id
+        if key_id in MOVED_SEPT12:
+            was, now = MOVED_SEPT12[key_id]
+            assert ctx == was and rec.get("context") == now, (key_id, ctx, rec.get("context"))
+            continue
         assert ctx == rec.get("context"), key_id
+    assert set(MOVED_SEPT12) <= set(frozen) - set(SUPERSEDED_SEPT12), sorted(MOVED_SEPT12)
 
     seeds, seeds_sql = _seed_migration("313_seed_machine_translations_sept12.sql", "_seed313", 100)
     assert "of 100 seed pairs" in seeds_sql and "(25 keys x es/ru/uk/sv)" in seeds_sql
