@@ -269,7 +269,11 @@ namespace CompetitiveRounds
             UIFactory.SetWordWrap(setDetRecTxt, true);
             UIFactory.SetOverflowMode(setDetRecTxt, 0);
             UIFactory.SetTextAutoHeight(setDetRecTxt, 22f);
-            setDetReasonTxt = UIFactory.CreateText("SetDetReason", band.transform, "", 13f, C_LABEL,
+            // 14f, not the design's 13f (section 6.1 item 3): at 13f this face
+            // dropped the hyphen from this line in the build's screenshots
+            // ("machine  translated"), bold and the heavy material
+            // notwithstanding, and ten of the English reasons carry one.
+            setDetReasonTxt = UIFactory.CreateText("SetDetReason", band.transform, "", 14f, C_LABEL,
                 UIFactory.AlignTopLeft, sizeDelta: new Vector2(728, 18));
             UIFactory.SetWordWrap(setDetReasonTxt, true);
             UIFactory.SetOverflowMode(setDetReasonTxt, 0);
