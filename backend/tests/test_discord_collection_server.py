@@ -2442,7 +2442,9 @@ def _engine_connect_params(eng):
     of any other records the parameter dict SQLAlchemy hands it and stops
     the connect before a socket opens; the pool is first swapped for an
     empty one, without closing (as the harness does), so the connect cannot
-    be served from a pooled connection."""
+    be served from a pooled connection. It runs on an event loop of its own
+    and leaves the thread's current loop as it was, because it also runs
+    when this module is imported (below), before any module's tests."""
     seen = []
 
     def probe(dialect, conn_rec, cargs, cparams):
@@ -2456,12 +2458,28 @@ def _engine_connect_params(eng):
                 pass
 
     event.listen(eng.sync_engine, "do_connect", probe, insert=True)
+    loop = asyncio.new_event_loop()
     try:
-        H.run(attempt())
+        loop.run_until_complete(attempt())
     finally:
         event.remove(eng.sync_engine, "do_connect", probe)
+        loop.close()
     assert len(seen) == 1, len(seen)
     return seen[0]
+
+
+def _app_engines():
+    import database
+    return (database.engine, database.release_engine)
+
+
+# The guard's baseline, captured when this module is imported: pytest imports
+# every module before it runs any test body, so no test anywhere in the process
+# has run yet. Captured inside the guard, the baseline was whatever the tests
+# before it had left on the engines, and the old in-place redirect, having
+# written the lane's values there first, left it equal to the guard's own
+# reading after its lane Env (R1 LOW Finding 7).
+_APP_ENGINE_PARAMS_AT_IMPORT = [_engine_connect_params(e) for e in _app_engines()]
 
 
 async def _lane_search_path(env):
@@ -2476,16 +2494,15 @@ def test_the_lane_leaves_the_app_engines_connect_parameters_as_it_found_them(mon
     search_path, and later modules in the same process then read their
     tables from a schema their own database does not have: 74 of
     test_ffa_quarantine_triage's tests failed in the full suite and passed
-    alone (build notes, FINDING 10). Only the names of changed keys are
+    alone (build notes, FINDING 10). The baseline is the one this module
+    captured at import (R1 LOW Finding 7), so what an earlier test left on
+    the engines cannot become it. Only the names of changed keys are
     reported, never their values."""
-    import database
-    engines = (database.engine, database.release_engine)
-    before = [_engine_connect_params(e) for e in engines]
     assert live(monkeypatch, tmp_path, _lane_search_path) == SCHEMA
-    after = [_engine_connect_params(e) for e in engines]
-    moved = [(i, k) for i, (b, a) in enumerate(zip(before, after))
+    after = [_engine_connect_params(e) for e in _app_engines()]
+    moved = [(i, k) for i, (b, a) in enumerate(zip(_APP_ENGINE_PARAMS_AT_IMPORT, after))
              for k in sorted(set(b) | set(a)) if b.get(k) != a.get(k)]
-    assert not moved, f"connect parameters the lane left changed (engine index, key): {moved}"
+    assert not moved, f"connect parameters changed since this module was imported (engine index, key): {moved}"
 
 
 def test_c_harness_the_lane_redirect_still_reaches_the_lane_schema(monkeypatch, tmp_path):
