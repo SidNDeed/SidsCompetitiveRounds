@@ -127,6 +127,11 @@ FILES = [
     # committed descriptor table into SettingsDescriptors.g.cs.  Both are
     # new files, so both are named here (#357).
     "NativeUI.Settings.cs", "SettingsDescriptors.g.cs",
+    # The generated value writers (item 13) render recommended-value labels
+    # through I18n.Tr with computed arguments, so nothing there is a literal
+    # to harvest today; named anyway because the list is FIXED and a literal
+    # added there later would otherwise be silently unharvestable (#357).
+    "SettingsDescriptorWriters.g.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
