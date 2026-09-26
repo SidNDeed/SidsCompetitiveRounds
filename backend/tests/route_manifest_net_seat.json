@@ -1231,7 +1231,7 @@
           ],
           "main",
           "update_team_live_points",
-          "5c86ecd799db5d44e39aedb15e6a8eb02f3f6394"
+          "2cde357cc667cf78583f79d5469ac249cc1f399d"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
