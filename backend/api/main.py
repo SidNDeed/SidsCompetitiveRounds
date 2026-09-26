@@ -26770,6 +26770,17 @@ async def pc_collection(
     """), {"owner": owner_pid})).mappings().all()
     ctx = await _pc_face_ctx(db, _pc_locale(request))
     prints = [_pc_print_dict(r, ctx) for r in rows]
+    # Card trading (migration 353): the OWN binder marks every print ever
+    # received by trade (the permanent acquired_by_trade flag, 6.1), read
+    # only while the schema probe finds the schema; another player's binder
+    # never carries it.
+    if not (subject and subject != steam_id) and prints and await _pc_trade_schema(db) == "found":
+        traded = {str(r[0]) for r in (await db.execute(text("""
+            SELECT id FROM pc_prints
+             WHERE owner_player_id = CAST(:owner AS uuid) AND discarded_at IS NULL AND acquired_by_trade
+        """), {"owner": owner_pid})).all()}
+        for p in prints:
+            p["traded"] = p["print_id"] in traded
     counts = {k: 0 for k in _pc.RARITIES}
     for p in prints:
         counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
