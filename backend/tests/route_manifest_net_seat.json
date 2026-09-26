@@ -1231,7 +1231,7 @@
           ],
           "main",
           "update_team_live_points",
-          "9008da436caac9eed031654e8e6ed8c6515f60d6"
+          "25a5ac841b85b14a86e1337e3fba743740c81958"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "29204be172e8528fad32a7f6631b227bd7bcf29c"
+          "29cfc196ddf8719a073ea326ce6f68036e27d6cd"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
