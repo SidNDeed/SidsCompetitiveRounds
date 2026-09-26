@@ -2074,18 +2074,20 @@ def test_c28_a_live_pool_member_is_still_minted(monkeypatch, tmp_path):
 
 # -- 26, 26b, 26c, 26d: the manifest and the composite statement --------------------------
 
-BRANCH_POINT = "bb7d716957d735ebf781e0d2c14defb5f18fe39c"
 NEW_ROUTES = {"internal_pc_packs", "internal_pc_pack_strip", "internal_pc_binder", "internal_pc_binder_page"}
 # The existing bindings this branch is expected to change, each named where
 # it is recorded: S13's savepoint and its success-only stamp (_rank_colors and
 # the cache's "ok" key; build notes FINDING 1), B11's marker, its two
 # health_check arms and its schema field (FINDING 2), and the three bindings
 # whose PIN comments cite lines the branch's insertions moved, re-pinned
-# comment-only (FINDING 9).
+# comment-only (FINDING 9). Measured against the main this lane has merged
+# (_lane_reference), never against a fixed revision.
 EXPECTED_CHANGED = {("main", "_rank_colors"), ("main", "_rank_colors_cache"), ("main", "health_check"),
                     ("main", "_DISCORD_COLLECTION_MARKER"), ("schemas", "HealthResponse"),
                     ("main", "_ovt_horizon_candidates"), ("main", "_ovt_settle_horizon_row"),
                     ("main", "submit_ovt_match")}
+# Design row 26's scope, stated in every skip the row takes.
+ROW26_SCOPE = "design row 26 is a landing-time property of the lane delta and has no subject on main"
 
 
 def _git(*args):
@@ -2093,13 +2095,53 @@ def _git(*args):
     return subprocess.run(["git", "-C", str(root)] + list(args), capture_output=True, check=True).stdout
 
 
-def _branch_point_index(tmp_path, gate):
-    names = [n for n in _git("ls-tree", "--name-only", BRANCH_POINT, "backend/api/").decode().split()
+def _lane_reference():
+    """The revision row 26 measures this lane's delta against: the main the lane
+    has merged, `git merge-base HEAD main`, computed from the tree under test.
+
+    Design row 26 is a landing-time property of the lane delta and has no
+    subject on main. Until the LAND the reference was a hard-coded branch
+    point, and a hard-coded reference goes stale by construction the moment
+    anything else lands on main: merging main put main's own changed bindings
+    into the set this row asserts is the lane's, and the row failed although
+    nothing in the lane had changed. So the reference is computed on every
+    run, and the row skips, saying why, when it has no subject:
+    - the reference IS HEAD: the lane has landed (HEAD is main, or main has
+      caught up with it) and its delta is empty;
+    - the reference's manifest already lists the four new routes: the lane
+      has landed in the main this tree merged, and a later branch's
+      merge-base is its own, whose delta is that branch's, not this lane's.
+    A reference listing only some of the four fails (an inconsistent
+    landing), and so does a reference git cannot compute (no `main` ref):
+    the row does not pass for want of a subject it cannot find.
+
+    Returns (the reference sha, the reference's route manifest document)."""
+    head = _git("rev-parse", "HEAD").decode().strip()
+    try:
+        ref = _git("merge-base", "HEAD", "main").decode().strip()
+    except subprocess.CalledProcessError as exc:
+        raise AssertionError("row 26 cannot compute its reference, git merge-base HEAD main: "
+                             + exc.stderr.decode("utf-8", "replace").strip()[:300]) from exc
+    if ref == head:
+        pytest.skip(f"{ROW26_SCOPE}: the reference, git merge-base HEAD main, is HEAD itself "
+                    f"({head[:12]}), so the lane has landed and its delta is empty")
+    doc = json.loads(_git("show", f"{ref}:backend/tests/route_manifest_net_seat.json"))
+    carried = {r[3] for g in doc["groups"] for r in g["routes"]} & NEW_ROUTES
+    assert carried in (set(), NEW_ROUTES), (
+        f"the reference {ref[:12]} (git merge-base HEAD main) lists {sorted(carried)} of the four new routes")
+    if carried == NEW_ROUTES:
+        pytest.skip(f"{ROW26_SCOPE}: the reference, git merge-base HEAD main ({ref[:12]}), already lists "
+                    "the four new routes, so the lane has landed in the main this tree merged")
+    return ref, doc
+
+
+def _reference_index(tmp_path, gate, ref):
+    names = [n for n in _git("ls-tree", "--name-only", ref, "backend/api/").decode().split()
              if n.endswith(".py")]
     out = {}
     for rel in names:
         p = tmp_path / Path(rel).name
-        p.write_bytes(_git("show", f"{BRANCH_POINT}:{rel}"))
+        p.write_bytes(_git("show", f"{ref}:{rel}"))
         out[p.stem] = gate._index_module(p)
     return out
 
@@ -2134,7 +2176,7 @@ def _live_routes(gate):
 
 
 def _changed_for(gate, seeds, old_index):
-    """The bindings whose presence or text differs between the branch point's
+    """The bindings whose presence or text differs between the reference's
     closure of `seeds` and today's: exactly what moves their fingerprint."""
     new = set(gate._reached(seeds))
     old = set(gate._walk_bindings(seeds, index=old_index))
@@ -2149,20 +2191,26 @@ def test_only_the_four_new_routes_move_in_the_route_manifest(tmp_path):
     """REBUILT at binding level (build notes, row 26): on this base every
     route that reaches _PC_PRINT_FACE_SELECT also reaches _rank_colors, whose
     savepoint (S13) the branch carries, so the ROUTE moved set cannot tell a
-    column added to the face select from the savepoint. The branch point's
+    column added to the face select from the savepoint. The reference's
     own index and manifest are read from git, and the assertion is that the
     set of existing bindings the branch changed is exactly the recorded one,
     that the new routes are exactly the four, and that the recorded
     fingerprints moved for exactly the routes and entry points that reach a
-    changed binding."""
+    changed binding.
+
+    The reference is the main this lane has merged (_lane_reference: git
+    merge-base HEAD main, computed from the tree under test), never a fixed
+    revision. Design row 26 is a landing-time property of the lane delta and
+    has no subject on main: once the lane has landed, the row skips and its
+    skip text says so."""
     gate = _route_surface()
-    old_doc = json.loads(_git("show", f"{BRANCH_POINT}:backend/tests/route_manifest_net_seat.json"))
+    ref, old_doc = _lane_reference()
     old_ids = {(r[0], tuple(r[1]), r[2], r[3]) for g in old_doc["groups"] for r in g["routes"]}
     old_sha = {(r[0], tuple(r[1]), r[2], r[3]): r[4] for g in old_doc["groups"] for r in g["routes"] if len(r) > 4}
     routes = _live_routes(gate)
     new = {k for k in routes if k not in old_ids}
     assert {k[3] for k in new} == NEW_ROUTES and len(new) == 4, sorted(new)
-    old_index = _branch_point_index(tmp_path, gate)
+    old_index = _reference_index(tmp_path, gate, ref)
     changed, per_route = set(), {}
     for key, route in routes.items():
         if key in new:
@@ -2183,6 +2231,7 @@ def test_only_the_four_new_routes_move_in_the_route_manifest(tmp_path):
     ep_moved = {k for k, (sha, _c) in per_entry.items() if gate._entry_point_sha(*k) != sha}
     ep_expected = {k for k, (_sha, c) in per_entry.items() if c}
     assert ep_moved == ep_expected, (sorted(ep_moved), sorted(ep_expected))
+    print(f"ROW26 reference (git merge-base HEAD main): {ref}")
     print(f"ROW26 new routes: {sorted(k[3] for k in new)}")
     print(f"ROW26 changed existing bindings: {sorted(changed)}")
     print(f"ROW26 existing fingerprinted routes moved: {len(moved)}; entry points moved: {sorted(ep_moved)}")
@@ -2190,12 +2239,12 @@ def test_only_the_four_new_routes_move_in_the_route_manifest(tmp_path):
 
 def test_c26_the_new_route_set_is_still_exactly_the_four():
     gate = _route_surface()
-    old_doc = json.loads(_git("show", f"{BRANCH_POINT}:backend/tests/route_manifest_net_seat.json"))
+    _ref, old_doc = _lane_reference()
     old_ids = {(r[0], tuple(r[1]), r[2], r[3]) for g in old_doc["groups"] for r in g["routes"]}
     live_ids = {(e["path"], tuple(e["methods"]), e["module"], e["qualname"])
                 for e in gate._route_identities(gate.main.app.routes)}
     assert {k[3] for k in live_ids - old_ids} == NEW_ROUTES
-    assert old_ids - live_ids == set(), "a route pinned at the branch point is gone"
+    assert old_ids - live_ids == set(), "a route pinned at the reference is gone"
 
 
 _BINDER_WHERE = "WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL"
