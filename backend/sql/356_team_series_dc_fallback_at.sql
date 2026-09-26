@@ -1,4 +1,4 @@
--- 326_team_series_dc_fallback_at.sql
+-- 356_team_series_dc_fallback_at.sql
 --
 -- 2v2 disconnect fallback: the DEFERRAL MARKER (2026-09-20, 886bed8 round 4).
 --

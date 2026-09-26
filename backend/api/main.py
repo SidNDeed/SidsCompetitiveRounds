@@ -1944,7 +1944,7 @@ _JANITOR_SELFTEST_ROOTS = (
     # move the row out of the two open statuses as well -- the shape suite's
     # writer census names every such writer. It is janitor SQL in exactly the
     # sense this self-test exists for: it runs unattended every minute and its
-    # failure is silent. It also names a column migration 326 adds, which makes
+    # failure is silent. It also names a column migration 356 adds, which makes
     # the boot banner the loud half of the migration-before-api deploy order.
     ("main", "team_dc_fallback_sweep_loop"),
     ("tournaments", "tournament_tick"),
@@ -3923,7 +3923,7 @@ async def _team_clear_dc_fallback_marker(db, series_id) -> None:
     CALLER MAY REASON FROM. A revival says nothing about how old the marker
     is. A settlement inside the bound followed by an immediate revival leaves
     a marker YOUNGER than the bound; a post-bound sweep followed by a later
-    revival leaves one OLDER. This comment and the header of migration 326
+    revival leaves one OLDER. This comment and the header of migration 356
     each used to assert one of those as if it were the only case, in opposite
     directions, and neither followed from the revival. Both cases need the
     same clear, so the clear is age-independent. WHAT THIS CALL GUARANTEES,
@@ -3931,7 +3931,7 @@ async def _team_clear_dc_fallback_marker(db, series_id) -> None:
     state space (#351): it ATTEMPTS the clear inside its own savepoint and
     swallows every exception the attempt raises. On a clean return the row
     carries no marker ONLY when that UPDATE actually ran; a swallowed database
-    error -- the pre-326 missing column, a lock timeout, a connection the
+    error -- the pre-356 missing column, a lock timeout, a connection the
     driver has already given up on -- leaves the revived row still carrying
     its marker, and a later tick past the bound can settle a series that has
     resumed. That is a recorded residual of this design and not a case a
@@ -3949,7 +3949,7 @@ async def _team_clear_dc_fallback_marker(db, series_id) -> None:
     without either calling it or reddening.
 
     Its own savepoint rather than a clause in the callers' own UPDATE (#235):
-    pre-migration-326 the columns do not exist and a caught SQL error poisons
+    pre-migration-356 the columns do not exist and a caught SQL error poisons
     the whole enclosing transaction under asyncpg -- neither resume may start
     failing because a deploy ran out of order. Skipping it then is harmless,
     because with no column there are no markers.
@@ -39929,7 +39929,7 @@ async def team_queue_poll(steam_id: str, request: Request,
                 # -- or when the marker itself is cleared, which only the
                 # helper's callers do: the revival funnels and this call. The
                 # shape suite's writer census derives both lists from this file
-                # and migration 326's header names the roles without a count,
+                # and migration 356's header names the roles without a count,
                 # so a marker that vanished from a row still open, with no
                 # funnel in the log, was cleared here.
                 # test_sept16_dc_fallback_shape.py counts the room-issue
@@ -40633,9 +40633,9 @@ async def team_series_status_readonly(
     satisfied by any series this server produces. It is deleted on the client
     rather than patched (#310, #389), and these fields are what replaces it.
 
-    THIS ROUTE NOW REQUIRES MIGRATION 326. The SELECT below reads
+    THIS ROUTE NOW REQUIRES MIGRATION 356. The SELECT below reads
     dc_fallback_at directly -- no savepoint, no fallback branch -- so on a box
-    where 326 has not been applied the statement raises UndefinedColumn and
+    where 356 has not been applied the statement raises UndefinedColumn and
     this route answers 500. That is the reason the deploy order is the
     migration FIRST and then the api on both boxes, and it is a deliberate
     choice rather than an oversight: a branch that answered 200 with the
@@ -42293,7 +42293,7 @@ async def team_series_report_dc(
     #
     # THE BOUND, and it is a bound rather than a guarantee. Both lanes carry
     # this sentence verbatim (client ApiClient.cs and the header of migration
-    # 326):
+    # 356):
     #
     #   A real-totals report wins while the deferred marker is younger than
     #   420 seconds, and after that only until a sweep tick finds no live-game

@@ -247,7 +247,7 @@ def test_the_sweep_is_a_primary_only_scheduler():
 
 
 def test_the_sweep_is_a_janitor_selftest_root():
-    # Its SQL names a column migration 326 adds; the boot-time EXPLAIN is what
+    # Its SQL names a column migration 356 adds; the boot-time EXPLAIN is what
     # makes a migration-after-api deploy loud instead of silent.
     roots = next(n for n in TREE.body
                  if isinstance(n, ast.Assign)
@@ -361,12 +361,12 @@ def test_the_route_docstring_states_the_migration_dependency_it_created():
     """A guarantee in a comment is a claim about the whole state space (#351).
 
     The SELECT reads dc_fallback_at with no savepoint and no fallback branch,
-    so an api carrying this route on a box without migration 326 answers 500.
+    so an api carrying this route on a box without migration 356 answers 500.
     That is the deploy order's reason and it is stated where the reader of the
     SELECT is, not only in a notes file nobody re-reads.
     """
     doc = ast.get_docstring(node_named("team_series_status_readonly"))
-    assert "MIGRATION 326" in doc.upper(), doc
+    assert "MIGRATION 356" in doc.upper(), doc
     assert "UndefinedColumn" in doc, doc
     # And the refusal is priced at what it actually costs, not at "the banner".
     assert "WHAT A REFUSAL COSTS" in doc, doc
@@ -1243,7 +1243,7 @@ def test_the_state_docstring_says_the_get_writes_and_sends_readers_elsewhere():
 @pytest.mark.parametrize("token", ["dc_fallback_at", "dc_fallback_player_id"])
 def test_the_marker_columns_are_added_by_a_migration_on_disk(token):
     sql = (pathlib.Path(__file__).resolve().parents[1] / "sql"
-           / "326_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
+           / "356_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
     assert f"ADD COLUMN IF NOT EXISTS {token}" in sql
     assert sql.strip().startswith("--")
     assert "\nBEGIN;" in sql and sql.rstrip().endswith("COMMIT;")
@@ -1481,7 +1481,7 @@ def test_no_revival_site_claims_the_marker_has_a_known_age():
     assert "The clear is unconditional for that reason" in adopt
     assert "the revival tells us nothing about the age" in adopt
     sql = (pathlib.Path(__file__).resolve().parents[1] / "sql"
-           / "326_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
+           / "356_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
     assert "UNCONDITIONAL and reads no age" in sql, sql
     assert "a YOUNGER marker" in sql and "an OLDER one" in sql, sql
 
@@ -1563,7 +1563,7 @@ def test_the_marker_clear_lives_in_one_savepointed_helper():
                      re.I), helper_sql
     # Its own savepoint: a caught SQL error poisons the whole transaction under
     # asyncpg (#235), and neither resume may start failing because a deploy ran
-    # before migration 326.
+    # before migration 356.
     at = first_index(code, "SET dc_fallback_at = NULL")
     assert any("begin_nested()" in ln for ln in code[max(0, at - 4):at]), code
     assert "begin_nested()" in joined
@@ -1761,7 +1761,7 @@ def test_the_room_issue_clear_is_introduced_as_an_attempt_not_an_invariant():
 # a def whose UPDATE team_series assigns a status other than the two open
 # ones, and a def that calls the clearing helper. This registry is the other
 # side of the comparison, so a writer added later is a def nobody has
-# classified and the census reddens on it. Migration 326's header typed a
+# classified and the census reddens on it. Migration 356's header typed a
 # count twice -- three, then four -- and the round-8 cold lens found the
 # second short as well (finding 6); a count typed beside a comment is the
 # defect, so none is typed now (#342, #432).
@@ -1830,7 +1830,7 @@ async def _team_void_on_rehost(db, series_id):
 
 
 def test_every_writer_that_ends_a_deferral_is_derived_and_none_is_counted():
-    """326's writer list, derived from the tree and never typed as a number.
+    """356's writer list, derived from the tree and never typed as a number.
 
     The header enumerated three writers, then four; the round-8 cold lens
     found the four short too -- admin void and completion, a completing game
@@ -1856,7 +1856,7 @@ def test_every_writer_that_ends_a_deferral_is_derived_and_none_is_counted():
                   re.I)]
     assert others == [], others
     # The header names the roles and types no count.
-    flat = _collapsed(_dc_claim_sources()["326_team_series_dc_fallback_at.sql"])
+    flat = _collapsed(_dc_claim_sources()["356_team_series_dc_fallback_at.sql"])
     counted = re.findall(r"\b(\w+) writers end it\b", flat, re.I)
     assert counted == [], counted
     for phrase in ("A deferral ends in one of two ways, and neither is a count "
@@ -1957,11 +1957,11 @@ def test_the_bound_sentence_is_one_sentence_in_every_copy():
         "beside _DC_FALLBACK_DEFER_SECONDS, the deferral branch of report-dc, "
         "and the sweep loop's docstring")
     sql = (pathlib.Path(__file__).resolve().parents[1] / "sql"
-           / "326_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
+           / "356_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
     assert sentence_words in normalized(sql)
     # And the claim it replaced is gone from both.
     for where, text_ in (("main.py", SRC),
-                         ("326_team_series_dc_fallback_at.sql", sql)):
+                         ("356_team_series_dc_fallback_at.sql", sql)):
         at, why = absent_at("at ANY later moment still finds", text_, where)
         assert at < 0, why
 
@@ -3166,10 +3166,10 @@ def _without_claim_tables(text_):
 
 def _dc_claim_sources():
     here = pathlib.Path(__file__).resolve().parent
-    sql = (here.parents[0] / "sql" / "326_team_series_dc_fallback_at.sql")
+    sql = (here.parents[0] / "sql" / "356_team_series_dc_fallback_at.sql")
     return {
         "main.py": SRC,
-        "326_team_series_dc_fallback_at.sql": sql.read_text(encoding="utf-8"),
+        "356_team_series_dc_fallback_at.sql": sql.read_text(encoding="utf-8"),
         "test_sept16_dc_fallback_shape.py":
             (here / "test_sept16_dc_fallback_shape.py").read_text(encoding="utf-8"),
         "test_sept16_dc_fallback_orderings.py":
@@ -3222,7 +3222,7 @@ SUPERSEDED_CLAIMS = (
     # now names roles and types no count, and the census derives the writers.
     "Four writers end it",
     "the FOURTH writer that ends a deferral",
-    "migration 326's header enumerates the four",
+    "migration 356's header enumerates the four",
     "The deferred-fallback sweep is the only UNATTENDED writer that settles a series",
     "the marker can never be acted on again",
     # ...and the two sentences that still asserted the retracted clear
@@ -3279,10 +3279,10 @@ CORRECTED_CLAIMS = (
      "a heartbeat that arrives DURING this lookup is ordered AFTER the "
      "settlement"),
     ("main.py", "This call is also a writer that ends a deferral."),
-    ("326_team_series_dc_fallback_at.sql",
+    ("356_team_series_dc_fallback_at.sql",
      "A deferral ends in one of two ways, and neither is a count to type "
      "here."),
-    ("326_team_series_dc_fallback_at.sql",
+    ("356_team_series_dc_fallback_at.sql",
      "the marker cannot be acted on while the row stays out of them"),
     ("test_sept16_dc_fallback_orderings.py",
      "Evidence reaches a HELD sweep's gaps below in one way only: through "
@@ -3295,10 +3295,10 @@ CORRECTED_CLAIMS = (
     # onto one. Two rows say the same thing about the same paragraph without
     # the check depending on where the line happens to break.
     ("main.py", "and it has many READERS still"),
-    ("326_team_series_dc_fallback_at.sql",
+    ("356_team_series_dc_fallback_at.sql",
      "THE MARKER PERSISTS; THE DEFERRAL IS ENDED BY A WRITER, NEVER BY THE "
      "CLOCK."),
-    ("326_team_series_dc_fallback_at.sql",
+    ("356_team_series_dc_fallback_at.sql",
      "its point totals are whatever the client sent and are NOT read on this "
      "path"),
     ("test_sept16_dc_fallback_shape.py",

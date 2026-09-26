@@ -18,7 +18,7 @@ never runs against a real deployment: it drops and recreates its own three
 tables, and every Steam id it uses is outside the real id space.
 
 THE SCHEMA IS DELIBERATELY PRE-MIGRATION. The tables are created WITHOUT the
-two marker columns, and then backend/sql/326_team_series_dc_fallback_at.sql is
+two marker columns, and then backend/sql/356_team_series_dc_fallback_at.sql is
 executed verbatim from disk. The harness therefore exercises the migration
 itself, and an edit to that file is carried into every scenario below rather
 than silently diverging from a copy.
@@ -59,7 +59,7 @@ pytestmark = pytest.mark.skipif(
     reason="SEPT16DC_TEST_PG_DSN unset; live-PostgreSQL ordering acceptance")
 
 SQL_DIR = pathlib.Path(__file__).resolve().parents[1] / "sql"
-MIGRATION = SQL_DIR / "326_team_series_dc_fallback_at.sql"
+MIGRATION = SQL_DIR / "356_team_series_dc_fallback_at.sql"
 
 # Outside the real SteamID64 space, so a misconfigured DSN cannot collide with
 # production rows. T1 disconnects; T2A is the elected reporter.
@@ -68,7 +68,7 @@ SID_T1B = "90000000000000022"
 SID_T2A = "90000000000000023"          # the reporter (non-DC team)
 SID_T2B = "90000000000000024"
 
-PRE_326_SCHEMA = """
+PRE_356_SCHEMA = """
 DROP TABLE IF EXISTS team_matches;
 DROP TABLE IF EXISTS team_series;
 DROP TABLE IF EXISTS ovt_series;
@@ -100,7 +100,7 @@ CREATE TABLE team_series (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     room_issued_at TIMESTAMPTZ,
     spawn_confirmations INT NOT NULL DEFAULT 0,
-    -- Migration 206's frozen team colours. PRE-326 is what this schema is,
+    -- Migration 206's frozen team colours. PRE-356 is what this schema is,
     -- not pre-everything: the read-only status route reads these in its one
     -- SELECT, and a harness missing a column the route legitimately expects
     -- would be testing the harness.
@@ -194,7 +194,7 @@ async def _take_clean_slate() -> None:
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
             " WHERE datname = current_database() AND pid <> pg_backend_pid()")
         await conn.execute("SET lock_timeout = '5s'")
-        await conn.execute(PRE_326_SCHEMA)
+        await conn.execute(PRE_356_SCHEMA)
     finally:
         await conn.close()
 
@@ -261,7 +261,7 @@ def _harness_globals():
 
 
 async def _fresh_series(t2_wins: int = 1):
-    """Reset the schema, apply migration 326, seed one active series.
+    """Reset the schema, apply migration 356, seed one active series.
 
     t2_wins=1 puts the NON-disconnecting team one game up, which is the
     condition under which a real-totals report carrying >=2 points completes
