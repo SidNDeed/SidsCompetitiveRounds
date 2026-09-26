@@ -705,16 +705,18 @@ def test_the_same_four_can_lead_forfeit_twice(wired):
     second series. This also runs the INSERT itself: built in the statement,
     the room gave :sid two types and the INSERT could not be prepared.
 
-    Each abandoned game shows 1-1 from TWO seats, the record's proof of play:
-    one seat's 1-1 alone could be the previous game's irregular seat and
-    proves nothing (the hotfix round-1 record rule)."""
+    Each abandoned game shows 1-1 from a seat of EACH team, each post naming
+    game 2: the record's proof of play since hotfix round 2 (one team's
+    seats prove nothing, and after the first game of a sitting only a post
+    naming its game counts). Before that round's picks this test proved play
+    with two team-1 seats' legacy posts (beta round 4, step 0)."""
     async def go():
         async with _Lab() as lab:
             first = await lab.series()
             again = await lab.series(same_four_as=first)
             for ser in (first, again):
-                await lab.post(ser, 0, 1, 1)
-                await lab.post(ser, 1, 1, 1)
+                await lab.post(ser, 0, 1, 1, game=2, room=ROOM)
+                await lab.post(ser, 2, 1, 1, game=2, room=ROOM)
                 await _two_reports(lab, ser, HIGH, HIGH)
             rooms = await lab.sql(
                 "SELECT series_id, photon_room_id FROM team_matches"
@@ -737,13 +739,15 @@ def test_every_survivor_reporting_settles_the_series_once(wired, played):
     server's F6 gate refuses the leaver's teammate (400, nothing written), the
     first report from the team that stayed settles the series, and the second
     finds it settled. One settlement, one forfeit row at most. A played game
-    shows 1-1 from TWO seats, the record's proof of play."""
+    shows 1-1 from a seat of EACH team, each post naming game 2, the record's
+    proof of play since hotfix round 2 (beta round 4, step 0: it was two
+    team-1 seats' legacy posts before)."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
             if played:
-                await lab.post(ser, 0, 1, 1)
-                await lab.post(ser, 1, 1, 1)
+                await lab.post(ser, 0, 1, 1, game=2, room=ROOM)
+                await lab.post(ser, 2, 1, 1, game=2, room=ROOM)
             with pytest.raises(HTTPException) as refused:
                 await lab.report_dc(ser, reporter_seat=3, dc_seat=2, **HIGH)
             after_refusal = await lab.settlement(ser)
@@ -1434,12 +1438,15 @@ def test_the_leavers_teammate_is_refused_wherever_its_report_lands(wired, order)
     among the reporters, first, second or last. While the series is open its
     report is the F6 gate's 400; once the series is settled it is a no-op like
     any late report. Either way it writes nothing, it never settles the
-    series, and the first report from the team that stayed settles it once."""
+    series, and the first report from the team that stayed settles it once.
+    The game shows 1-1 from a seat of EACH team, each post naming game 2,
+    the record's proof of play since hotfix round 2 (beta round 4, step 0:
+    it was two team-1 seats' legacy posts before)."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
-            await lab.post(ser, 0, 1, 1)
-            await lab.post(ser, 1, 1, 1)
+            await lab.post(ser, 0, 1, 1, game=2, room=ROOM)
+            await lab.post(ser, 2, 1, 1, game=2, room=ROOM)
             seen = []
             for seat in order:
                 before = await lab.settlement(ser)
