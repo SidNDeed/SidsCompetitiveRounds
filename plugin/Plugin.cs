@@ -2383,8 +2383,13 @@ namespace CompetitiveRounds
         /// half, round 4). Runs TeamGameNumber.RunSentinel: synthetic series
         /// against a model of the server's filing rule, under the Tracker the
         /// seat runs and three kept rules this round did not build, plus direct
-        /// checks of the tracker, the bounds and both canonicals. Nothing is
-        /// sent and TeamGameNumber.Live is never touched. Logs
+        /// checks of the tracker, the bounds and both canonicals. Round 5
+        /// (finding F25) adds the physical game's token: the reviewer's
+        /// scenario and its neighbours on two Trackers (a host and a peer)
+        /// against the server's token rule and the rule before it, direct
+        /// checks of taking, dropping and publishing a token, and the token's
+        /// canonicals and pin. Nothing is sent, no room property is written, and
+        /// TeamGameNumber.Live is never touched. Logs
         /// [TEAM-GAME-NUMBER-SENTINEL] PASS/FAIL.</summary>
         internal static void DevTeamGameNumberSentinelTest()
         {
@@ -4410,8 +4415,13 @@ namespace CompetitiveRounds
                 // (round 2 finding 1).
                 int t1Points = GameStateWatcher.LastP1Points;
                 int t2Points = GameStateWatcher.LastP2Points;
-                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points);
-                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} pts={t1Points}/{t2Points}");
+                // v1.41.0 beta round 5, finding F25: the token of the physical
+                // game this seat is in ("" = none: the server then settles no
+                // lead-forfeit and the series goes to an admin).
+                string dcToken = GameStateWatcher.TeamTokenForReport(seriesId);
+                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points, dcToken);
+                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} pts={t1Points}/{t2Points}"
+                    + (dcToken.Length > 0 ? $" game token {dcToken.Substring(0, 8)}" : " no game token (no automatic lead-forfeit)"));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }

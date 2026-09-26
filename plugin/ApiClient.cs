@@ -2888,9 +2888,18 @@ namespace CompetitiveRounds
         /// room is outside what the server accepts (TeamGameNumber.Sendable),
         /// or when this series' server has already refused the pair once
         /// (a server that does not know it: the 403 fallback in
-        /// SendLivePointsOnce).</summary>
+        /// SendLivePointsOnce).
+        ///
+        /// v1.41.0 beta round 5, finding F25: gameToken is the physical
+        /// game's token (TeamGameNumber.Live.TokenFor). A post WITH the pair
+        /// also carries it, as game_token plus token_sig over
+        /// 'team-live-points-token:{series}:{reporter}:{t1}:{t2}:{game}:{room}:{token}'
+        /// (TeamGameNumber.TokenCanonical), signed apart from the pair's own
+        /// sig, which is unchanged. A server that does not know the token
+        /// ignores the two parameters; one that cannot verify it files the
+        /// post without it. A post without the pair never carries it.</summary>
         public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points,
-                                              int gameNumber = 0, string photonRoomId = null)
+                                              int gameNumber = 0, string photonRoomId = null, string gameToken = null)
         {
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
             string query = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
@@ -2908,6 +2917,12 @@ namespace CompetitiveRounds
             string namedUrl = query + TeamGameNumber.QueryPair(gameNumber, UnityWebRequest.EscapeURL(photonRoomId))
                               + "&sig=" + ComputeHmacHex(TeamGameNumber.AttestedCanonical(
                                   seriesId, reporterSteamId, t1Points, t2Points, gameNumber, photonRoomId));
+            if (TeamGameNumber.TokenValid(gameToken))
+            {
+                namedUrl += TeamGameNumber.QueryToken(gameToken, ComputeHmacHex(TeamGameNumber.TokenCanonical(
+                    seriesId, reporterSteamId, t1Points, t2Points, gameNumber, photonRoomId, gameToken)));
+                tag += " token " + gameToken.Substring(0, 8);
+            }
             SendLivePoints("2v2:" + seriesId, namedUrl, tag + " game " + gameNumber,
                 fallbackUrl: legacyUrl,
                 onFallbackOk: () => TeamGameNumber.Live.NoteAttestationRefused(seriesId));
@@ -14547,10 +14562,19 @@ namespace CompetitiveRounds
         /// game up AND its own per-game record shows the abandoned game reached two
         /// points; otherwise the series goes to dc_incomplete for an admin. The
         /// point totals sent here are logged and kept on the forfeit row, never
-        /// used to decide.</summary>
+        /// used to decide.
+        ///
+        /// v1.41.0 beta round 5, finding F25: gameToken is the token of the
+        /// physical game the reporter is in (GameStateWatcher.
+        /// TeamTokenForReport). With one, the report carries game_token plus
+        /// token_sig over 'team-dc-token:{reporter}:{series}:{dc_player}:{token}'
+        /// (TeamGameNumber.DcTokenCanonical); hmac_sig and its canonical are
+        /// unchanged. The server reads the abandoned game's crossing only from
+        /// posts that carried this token; without one it settles no
+        /// lead-forfeit.</summary>
         public static void ReportTeamSeriesDc(
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
-            int t1PointsTotal, int t2PointsTotal)
+            int t1PointsTotal, int t2PointsTotal, string gameToken = null)
         {
             // §2c identity fence: the broadcast service account never reports.
             if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
@@ -14572,6 +14596,9 @@ namespace CompetitiveRounds
                          $"&t2_points_total={t2PointsTotal}" +
                          $"&photon_room_id={UnityWebRequest.EscapeURL(dcRoom)}" +
                          $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
+            if (TeamGameNumber.TokenValid(gameToken))
+                url += TeamGameNumber.QueryToken(gameToken, ComputeHmacHex(TeamGameNumber.DcTokenCanonical(
+                    reporterSteamId, seriesId, dcPlayerSteamId, gameToken)));
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 if (ok) Plugin.Log.LogInfo($"[2v2-DC] report accepted: {resp}");
