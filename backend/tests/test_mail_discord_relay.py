@@ -103,7 +103,7 @@ needs_pg = pytest.mark.skipif(
 # Exactly this many tests in this module need the DSN. Pinned from OUT here
 # so that moving one behind the gate is a deliberate edit and not a silent
 # "1 skipped" that still reads as a clean run.
-LIVE_TESTS = 15
+LIVE_TESTS = 17
 
 
 def _read(path):
@@ -2984,6 +2984,248 @@ def test_a_dm_that_went_out_before_the_relay_was_turned_off_still_answers():
     assert state["refused relay"] == (True, True, True), (
         "a DM Discord refused lost its withdrawal: %s" % (state,))
     assert both == 0, "a delivered row is still cancelled: %s" % (state,)
+
+
+# -- Round 3 finding 19: a send in flight and the relay-off that races it --
+#
+# main._MAIL_FANOUT_SQL runs here for real, because its FOR KEY SHARE OF p is
+# the lock the relay-off gate waits on. To plan, it needs players' mail_from
+# and deleted_at, the block table and the four "played together" sources;
+# empty stubs suffice, since every recipient here is 'delivered' through the
+# ELSE branch. steam_sessions (and mod_seen_at) let the in-game settings
+# route resolve its caller as it does in production.
+_RACE_TABLES = ("mail_blocks", "matches", "team_matches", "ffa_match_players",
+                "ovt_matches", "steam_sessions")
+_RACE_SCHEMA = (
+    "ALTER TABLE players"
+    "  ADD COLUMN IF NOT EXISTS mail_from TEXT NOT NULL DEFAULT 'everyone',"
+    "  ADD COLUMN IF NOT EXISTS mod_seen_at TIMESTAMPTZ,"
+    "  ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;"
+    " DROP TABLE IF EXISTS " + ", ".join(_RACE_TABLES) + ";"
+    " CREATE TABLE mail_blocks (blocker_id UUID, blocked_id UUID);"
+    " CREATE TABLE matches (player1_id UUID, player2_id UUID);"
+    " CREATE TABLE team_matches (t1a_id UUID, t1b_id UUID, t2a_id UUID, t2b_id UUID);"
+    " CREATE TABLE ffa_match_players (match_id UUID, player_id UUID);"
+    " CREATE TABLE ovt_matches (solo_id UUID, duo_a_id UUID, duo_b_id UUID);"
+    " CREATE TABLE steam_sessions (token_hash TEXT PRIMARY KEY,"
+    "   steam_id VARCHAR(20) NOT NULL, verified BOOLEAN NOT NULL,"
+    "   expires_at TIMESTAMPTZ);")
+_RACE_TOKEN = "r3-f19-session"
+RACED_MAIL = "44444444-4444-4444-4444-444444444444"
+# CAST's "a": steam id "1", discord "d1", relay on.
+RACED_PID = "00000001-0000-0000-0000-000000000000"
+_LIVE_RELAY_ROWS_SQL = (
+    "SELECT count(*) FROM pending_dms WHERE steam_id = '1'"
+    "   AND relay_code IS NOT NULL AND delivered_at IS NULL"
+    "   AND cancelled_at IS NULL")
+
+
+async def _race_world(conn):
+    import hashlib
+    await _seed(conn)
+    await conn.execute(_RACE_SCHEMA)
+    await conn.execute(
+        "INSERT INTO steam_sessions (token_hash, steam_id, verified)"
+        " VALUES ($1, '1', true)",
+        hashlib.sha256(_RACE_TOKEN.encode()).hexdigest())
+
+
+async def _send_until_commit(conn):
+    """A send's transaction up to, not including, its COMMIT: the mail row,
+    the REAL envelope fan-out and the REAL relay fan-out, in the order
+    _mail_finish_send runs them. Returns the open transaction and the relay
+    statement's status tag."""
+    tr = conn.transaction()
+    await tr.start()
+    await conn.execute(
+        "INSERT INTO mail_messages (id, sender_id, subject, body)"
+        " VALUES ($1, $2, 'raced', 'raced body')", RACED_MAIL, SENDER_PID)
+    await conn.execute(_pg(main._MAIL_FANOUT_SQL, "mid", "sid", "rids", "kinds"),
+                       RACED_MAIL, SENDER_PID, [RACED_PID], ["to"])
+    tag = await conn.execute(_asyncpg_sql(), "the raced DM", RACED_MAIL, _code(),
+                             SENDER_SID)
+    return tr, tag
+
+
+async def _relay_off(route, db):
+    """One OFF toggle through the real route: the bot's `/mail relay off` or
+    the in-game settings PUT."""
+    if route == "bot":
+        return await mail_discord.mail_relay_pref(
+            mail_discord._RelayPrefReq(discord_id="d1", enabled=False),
+            x_internal_key="the-key", db=db)
+    request = types.SimpleNamespace(headers={"X-Session-Token": _RACE_TOKEN},
+                                    state=types.SimpleNamespace())
+    return await main.mail_settings_put(
+        main._MailSettingsReq(discord_relay=False), request, db)
+
+
+async def _blocked_or_done(conn, task):
+    """True once another session of this database waits on a lock, False if
+    `task` finished first. Bounded: 200 polls, 25 ms apart."""
+    import asyncio
+    for _ in range(200):
+        if task.done():
+            return False
+        if await conn.fetchval(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database()"
+                "   AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()"):
+            return True
+        await asyncio.sleep(0.025)
+    raise AssertionError("neither waiting nor finished after 5 s")
+
+
+async def _race_cleanup(conn, send, engine, tasks):
+    """Release the send first, so a toggle parked behind it can finish, then
+    drop the stubs. Nothing here decides a verdict."""
+    import asyncio
+    await send.close()
+    for t in tasks:
+        if not t.done():
+            try:
+                await asyncio.wait_for(t, 10)
+            except Exception:
+                pass
+    await engine.dispose()
+    await conn.execute("DROP TABLE IF EXISTS " + ", ".join(_RACE_TABLES))
+    await conn.close()
+
+
+@needs_pg
+@pytest.mark.parametrize("route", ["bot", "settings"])
+def test_a_send_in_flight_is_withdrawn_by_the_relay_off_it_raced(route, monkeypatch):
+    """Round 3 finding 19, the race in the order it escaped.
+
+    A send has written its envelope, holding FOR KEY SHARE on the
+    recipient's players row, and queued its relay row, reading the relay as
+    on; it has not committed. The recipient turns the relay off, through
+    either route. Before the fix the toggle's UPDATE took FOR NO KEY UPDATE,
+    which does not wait for FOR KEY SHARE: its sweep ran before the send
+    committed, could not see the row, and the row committed live after it --
+    to be sent once the relay was on again. The gate makes the toggle wait
+    for the send, and its sweep then sees the row and cancels it."""
+    import asyncio
+    import asyncpg
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    monkeypatch.setenv("API_SECRET_KEY", "the-key")
+    sa_dsn = "postgresql+asyncpg://" + DSN.split("://", 1)[1]
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        send = await asyncpg.connect(DSN)
+        engine = create_async_engine(sa_dsn, poolclass=NullPool)
+        tasks = []
+        try:
+            await _race_world(conn)
+            tr, queued = await _send_until_commit(send)
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+
+            async def toggle():
+                async with sm() as db:
+                    return await _relay_off(route, db)
+
+            tasks.append(asyncio.ensure_future(toggle()))
+            blocked = await _blocked_or_done(conn, tasks[0])
+            await tr.commit()
+            out = await asyncio.wait_for(tasks[0], 10)
+            row = await conn.fetchrow(
+                "SELECT delivered_at, cancelled_at FROM pending_dms"
+                " WHERE mail_id = $1", RACED_MAIL)
+            live = await conn.fetchval(_LIVE_RELAY_ROWS_SQL)
+            # What the finding says happens next: the relay comes back on
+            # and the bot polls.
+            await conn.execute(
+                "UPDATE players SET mail_discord_relay = true WHERE steam_id = '1'")
+            handed = [r["content"] for r in await _claim(conn)]
+            return queued, blocked, out, row, live, handed
+        finally:
+            await _race_cleanup(conn, send, engine, tasks)
+
+    queued, blocked, out, row, live, handed = _live(run)
+    # The race really started: the send read the relay as on and queued.
+    assert queued == "INSERT 0 1", queued
+    assert row is not None and row["delivered_at"] is None, row
+    assert row["cancelled_at"] is not None and live == 0, (
+        "a relay row queued by a send in flight escaped the relay-off: "
+        "out=%r live=%r" % (out, live))
+    assert out == {"discord_relay": False, "withdrawn": 1}, out
+    assert "the raced DM" not in handed, (
+        "the escaped row went out once the relay was back on: %r" % (handed,))
+    # ...and it was closed by the toggle waiting, not by timing.
+    assert blocked, "the relay-off never waited for the send in flight"
+
+
+@needs_pg
+@pytest.mark.parametrize("route", ["bot", "settings"])
+def test_a_send_that_meets_a_relay_off_in_progress_queues_nothing(route, monkeypatch):
+    """Round 3 finding 19, the other order. The toggle has taken its lock,
+    written the preference and swept, and has not committed; a send to the
+    same player arrives. Its envelope fan-out waits for the toggle, so the
+    relay statement after it reads the relay as off and queues nothing.
+    Before the fix the send did not wait: it read the preference the toggle
+    had not committed yet, still on, and committed a live relay row after
+    the sweep."""
+    import asyncio
+    import asyncpg
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    monkeypatch.setenv("API_SECRET_KEY", "the-key")
+    sa_dsn = "postgresql+asyncpg://" + DSN.split("://", 1)[1]
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        send = await asyncpg.connect(DSN)
+        engine = create_async_engine(sa_dsn, poolclass=NullPool)
+        swept, release = asyncio.Event(), asyncio.Event()
+        tasks = []
+        try:
+            await _race_world(conn)
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+
+            async def toggle():
+                async with sm() as db:
+                    real_commit = db.commit
+
+                    async def held_commit():
+                        # everything but the COMMIT has run
+                        swept.set()
+                        await release.wait()
+                        await real_commit()
+                    db.commit = held_commit
+                    return await _relay_off(route, db)
+
+            tasks.append(asyncio.ensure_future(toggle()))
+            await asyncio.wait_for(swept.wait(), 10)
+            tasks.append(asyncio.ensure_future(_send_until_commit(send)))
+            blocked = await _blocked_or_done(conn, tasks[1])
+            release.set()
+            out = await asyncio.wait_for(tasks[0], 10)
+            tr, queued = await asyncio.wait_for(tasks[1], 10)
+            await tr.commit()
+            envelope = await conn.fetchval(
+                "SELECT count(*) FROM mail_recipients WHERE message_id = $1",
+                RACED_MAIL)
+            live = await conn.fetchval(_LIVE_RELAY_ROWS_SQL)
+            await conn.execute(
+                "UPDATE players SET mail_discord_relay = true WHERE steam_id = '1'")
+            handed = [r["content"] for r in await _claim(conn)]
+            return blocked, out, queued, envelope, live, handed
+        finally:
+            release.set()
+            await _race_cleanup(conn, send, engine, tasks)
+
+    blocked, out, queued, envelope, live, handed = _live(run)
+    assert envelope == 1, "control: the send wrote no envelope: %r" % (envelope,)
+    assert queued == "INSERT 0 0" and live == 0, (
+        "a send that met a relay-off in progress queued a live relay row: "
+        "queued=%r live=%r" % (queued, live))
+    assert "the raced DM" not in handed, handed
+    assert out == {"discord_relay": False, "withdrawn": 0}, out
+    assert blocked, "the send never waited for the relay-off in progress"
 
 
 @needs_pg

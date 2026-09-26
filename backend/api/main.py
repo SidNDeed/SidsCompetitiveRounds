@@ -61992,6 +61992,13 @@ async def mail_settings_put(req: _MailSettingsReq, request: Request,
         # swallow: it usually means a field was renamed on one side.
         raise HTTPException(status_code=400, detail="mail_from_or_relay_required")
     out = {}
+    if req.discord_relay is not None and not req.discord_relay:
+        # Turning the relay OFF takes its row lock before any write in this
+        # transaction, the mail_from write included (v1.41.0 beta round 3,
+        # finding 19): mail_discord.RELAY_OFF_GATE_BY_ID_SQL says why, and
+        # the bot's `/mail relay off` takes the same lock the same way.
+        await db.execute(text(mail_discord.RELAY_OFF_GATE_BY_ID_SQL),
+                         {"me": me["id"]})
     if req.mail_from is not None:
         value = (req.mail_from or "").strip().lower()
         if value not in MAIL_FROM_VALUES:

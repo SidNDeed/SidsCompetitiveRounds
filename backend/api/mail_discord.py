@@ -570,6 +570,43 @@ RELAY_OFF_CANCEL_SQL = (
     " WHERE steam_id = :sid AND relay_code IS NOT NULL"
     "   AND delivered_at IS NULL AND cancelled_at IS NULL")
 
+# The OFF edge's row lock (v1.41.0 beta round 3, finding 19). A send holds
+# FOR KEY SHARE on each recipient's players row from its envelope fan-out
+# (main._MAIL_FANOUT_SQL) until it commits, and queues its relay rows
+# (_RELAY_FANOUT_SQL) later in that same transaction, reading
+# mail_discord_relay as it does. The toggle's UPDATE of that non-key column
+# takes FOR NO KEY UPDATE, which does not conflict with FOR KEY SHARE. So
+# without this lock a send could read the relay as still on, queue a row
+# the off-sweep above could not see yet, and commit it after the sweep: a
+# live relay row for a player whose relay is off, sent once it is turned
+# back on.
+#
+# FOR UPDATE is the only row-lock mode that conflicts with FOR KEY SHARE,
+# which makes it the weakest mode that does this job (#202's rule, applied
+# to what this lock has to wait for; the conflict table was checked on
+# PostgreSQL 16 for this change). Taken on the OFF edge only, as its own
+# statement, before the preference write and before the sweep:
+#   a send locked the row first -> the toggle waits for that send to
+#     commit, and the sweep, a later statement, sees its relay row and
+#     cancels it
+#   the toggle locked it first  -> the send's envelope fan-out waits for
+#     the toggle to commit, and the relay statement after it reads the
+#     relay as off
+# Taken first, so the toggle holds no row lock of its own while it waits.
+# The cost is the one #202 warns of, accepted here for three statements:
+# while the toggle holds it, an FK insert that references this player's
+# row waits too. The ON edge takes no lock: a send that reads a stale
+# "off" queues nothing, which is the safe way round.
+#
+# What this covers: relay rows queued by a transaction that holds the
+# envelope's FOR KEY SHARE on the recipient. _mail_finish_send is the one
+# producer of relay rows and runs _MAIL_FANOUT_SQL before queue_mail_relay;
+# a producer that does not hold that lock is not covered by this gate.
+RELAY_OFF_GATE_BY_DISCORD_SQL = (
+    "SELECT steam_id FROM players WHERE discord_id = :d FOR UPDATE")
+RELAY_OFF_GATE_BY_ID_SQL = (
+    "SELECT steam_id FROM players WHERE id = :me FOR UPDATE")
+
 
 class _RelayPrefReq(BaseModel):
     discord_id: str = Field("", max_length=32)
@@ -592,6 +629,12 @@ async def mail_relay_pref(
     did = (req.discord_id or "").strip()
     if not did:
         raise HTTPException(status_code=400, detail="discord_id_required")
+    if not req.enabled:
+        # The row lock first, before the preference write and the sweep
+        # (finding 19; RELAY_OFF_GATE_BY_DISCORD_SQL says why). Its row is
+        # not used: an unlinked id locks nothing, and the UPDATE below
+        # answers not_linked exactly as it did.
+        await db.execute(text(RELAY_OFF_GATE_BY_DISCORD_SQL), {"d": did})
     row = (await db.execute(text(
         "UPDATE players SET mail_discord_relay = :v WHERE discord_id = :d"
         " RETURNING steam_id"

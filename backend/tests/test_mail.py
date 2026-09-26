@@ -334,6 +334,14 @@ class FakeDb:
                                              "cancelled_at": None})
                     n += 1
             return _Res(rowcount=n)
+        # The relay-off gate (round 3 finding 19): FOR UPDATE on the
+        # player's own row, the first lock on the OFF edge of both toggles.
+        # Emulated as the read it also is and recorded as a lock; the lock
+        # itself is exercised on PostgreSQL in test_mail_discord_relay.
+        if "FROM players WHERE id = :me FOR UPDATE" in sql:
+            p = self.players.get(params["me"])
+            self.locks.append(("relay-off-gate", params["me"]))
+            return _Res([(p["steam_id"],)] if p else [])
         if "UPDATE players SET mail_discord_relay" in sql:
             self.players[params["me"]]["mail_discord_relay"] = params["r"]
             return _Res()
@@ -1643,6 +1651,76 @@ def test_both_relay_toggles_run_the_same_withdrawal_statement():
     assert "mail_id" not in flat, (
         "the withdrawal keys on mail_id again, which a tombstone lacks: " + flat)
     assert "DELETE" not in flat.upper(), flat
+
+
+def test_turning_the_relay_off_takes_its_row_lock_before_any_write(monkeypatch):
+    """Round 3 finding 19. The OFF edge of BOTH relay toggles takes
+    mail_discord's gate -- FOR UPDATE on the player's own players row --
+    before the preference write and before the withdrawal sweep. FOR UPDATE
+    is the one mode that waits for a send holding the envelope fan-out's
+    FOR KEY SHARE, and the wait only helps if the sweep comes after it.
+    test_mail_discord_relay runs the race itself on PostgreSQL through both
+    routes; this pins the order, the mode, and that the ON edge and a
+    mail_from-only PUT take no gate.
+
+    MUTATION: move either route's gate below its UPDATE, or weaken FOR
+    UPDATE to FOR NO KEY UPDATE. Must fail."""
+    import mail_discord as _md
+    for const in (_md.RELAY_OFF_GATE_BY_ID_SQL, _md.RELAY_OFF_GATE_BY_DISCORD_SQL):
+        flat = " ".join(const.split())
+        assert flat.startswith("SELECT ") and flat.endswith(" FOR UPDATE"), flat
+        assert "NO KEY" not in flat and "SHARE" not in flat, flat
+    # The lock the gate waits on. Weakening or dropping it undoes the gate
+    # without touching it, so it is pinned from here as well.
+    assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL
+
+    def _after_gate(statements, gate):
+        at = [i for i, s in enumerate(statements) if s == gate]
+        assert len(at) == 1, ("the OFF edge ran its gate %d times" % len(at), statements)
+        before = statements[:at[0]]
+        assert not any(_is_write(s) or " FOR " in s for s in before), (
+            "a write or a row lock came before the relay-off gate", before)
+        after = statements[at[0] + 1:]
+        assert _md.RELAY_OFF_CANCEL_SQL in after, after
+        return after
+
+    # the in-game settings PUT, with a mail_from write in the same request
+    db, ids = _world()
+    out = _run(main.mail_settings_put(main._MailSettingsReq(
+        mail_from="played", discord_relay=False), _req("tokA"), db))
+    assert out["discord_relay"] is False and out["mail_from"] == "played", out
+    after = _after_gate(db.statements, _md.RELAY_OFF_GATE_BY_ID_SQL)
+    assert any(s.startswith("UPDATE players SET mail_from") for s in after), after
+    assert any(s.startswith("UPDATE players SET mail_discord_relay") for s in after), after
+    assert ("relay-off-gate", ids[A_SID]) in db.locks, db.locks
+    for req in (main._MailSettingsReq(discord_relay=True),
+                main._MailSettingsReq(mail_from="everyone")):
+        db, ids = _world()
+        _run(main.mail_settings_put(req, _req("tokA"), db))
+        assert _md.RELAY_OFF_GATE_BY_ID_SQL not in db.statements, (req, db.statements)
+
+    # the bot's `/mail relay off`
+    class _Rec:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, clause, params=None):
+            self.statements.append(str(clause))
+            return SimpleNamespace(rowcount=0, first=lambda: ("1",))
+
+        async def commit(self):
+            self.statements.append("COMMIT")
+
+    monkeypatch.setenv("API_SECRET_KEY", "the-key")
+    for enabled in (False, True):
+        rec = _Rec()
+        _run(_md.mail_relay_pref(_md._RelayPrefReq(discord_id="d-1", enabled=enabled),
+                                 x_internal_key="the-key", db=rec))
+        if enabled:
+            assert _md.RELAY_OFF_GATE_BY_DISCORD_SQL not in rec.statements, rec.statements
+            continue
+        after = _after_gate(rec.statements, _md.RELAY_OFF_GATE_BY_DISCORD_SQL)
+        assert any(s.startswith("UPDATE players SET mail_discord_relay") for s in after), after
 
 
 def test_neither_settings_field_carries_a_default_that_could_write():
