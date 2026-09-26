@@ -26926,6 +26926,436 @@ async def admin_pc_snapshot(
     return {"status": "ok", **summary}
 
 
+# -- Player Cards trading: the routes (design 3.4-3.7, 3.10) --------------
+# Five player routes under the /api/v1/pc/ family bucket and two admin
+# routes. Every transaction opens with the two timeouts (PT, AT, DT), then
+# reads the schema word before its first statement that names trading
+# schema, and runs inside _pc_trade_guarded, which rolls back every refusal
+# and answers a lock or statement timeout with 409 busy. The lock order is
+# the lattice of 3.3: L0 the actor's identity key (the verified actor), L1
+# the other identities (try-locks), L2 the trade row, L3 the pair's players
+# rows, L4 the named prints, L5 the hold rows (insert only).
+
+_PC_TRADE_ROW_SQL = """
+    SELECT t.id, t.pair_lo, t.pair_hi, t.proposer, t.a_prints, t.b_prints, t.digest, t.propose_nonce,
+           t.proposer_generation, t.counterparty_generation, t.status, t.created_at, t.expires_at,
+           t.closed_at, t.closed_by, t.close_nonce, t.void_reason, t.executed_at, t.reversed_at,
+           (t.status = 'proposed' AND t.expires_at <= now()) AS lapsed,
+           (t.status = 'proposed' AND t.expires_at > now() AND NOT """ + _PC_TRADE_DEAD_SQL + """) AS possible,
+           lo.steam_id AS lo_steam_id, lo.display_name AS lo_name, glo.rating AS lo_rating,
+           hi.steam_id AS hi_steam_id, hi.display_name AS hi_name, ghi.rating AS hi_rating
+      FROM pc_trades t
+      JOIN players lo ON lo.id = t.pair_lo
+      JOIN players hi ON hi.id = t.pair_hi
+      LEFT JOIN glicko_ratings glo ON glo.player_id = t.pair_lo
+      LEFT JOIN glicko_ratings ghi ON ghi.player_id = t.pair_hi
+"""
+
+# The state an accept, a decline or a cancel acts on: A2 / D1's plain read
+# and, with FOR NO KEY UPDATE appended, L2.
+_PC_TRADE_STATE_SQL = """
+    SELECT t.id, t.pair_lo, t.pair_hi, t.proposer, t.a_prints, t.b_prints, t.digest,
+           t.proposer_generation, t.counterparty_generation, t.status, t.closed_by, t.close_nonce,
+           t.executed_at, (clock_timestamp() >= t.expires_at) AS past_expiry,
+           lo.steam_id AS lo_steam_id, hi.steam_id AS hi_steam_id
+      FROM pc_trades t
+      JOIN players lo ON lo.id = t.pair_lo
+      JOIN players hi ON hi.id = t.pair_hi
+     WHERE t.id = CAST(:t AS uuid)
+"""
+
+_PC_TRADE_SLIM_KEYS = ("print_id", "card_id", "subject_player_id", "subject_name", "subject_deleted",
+                       "edition_id", "rarity", "foil", "signed", "discarded")
+
+
+async def _pc_trade_prints_by_id(db: AsyncSession, print_ids, ctx) -> dict:
+    """Print dicts with faces (the binder's own shape) for the named ids; a
+    print a data deletion removed is absent."""
+    ids = sorted({str(p) for p in print_ids})
+    if not ids:
+        return {}
+    rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+     WHERE pr.id = ANY(CAST(:ids AS uuid[]))
+    """), {"ids": ids})).mappings().all()
+    return {str(r["print_id"]): _pc_print_dict(r, ctx) for r in rows}
+
+
+def _pc_trade_view(t, viewer_pid: str, prints: dict, ctx, slim: bool = False) -> dict:
+    """One trade from its viewer's side: `give` is what the viewer gives,
+    `get` what the viewer receives; `state` (never `status`, #608) reads
+    `expired` for a proposal past its expiry that the janitor has not swept
+    yet; `reason` is the void code as the viewer reads it."""
+    viewer_lo = str(t["pair_lo"]) == str(viewer_pid)
+    mine, theirs = (t["a_prints"], t["b_prints"]) if viewer_lo else (t["b_prints"], t["a_prints"])
+    other = "hi" if viewer_lo else "lo"
+    sent = str(t["proposer"]) == str(viewer_pid)
+    reason = t["void_reason"]
+    if reason and not sent:
+        reason = _PC_TRADE_REASON_FOR_RECEIVER.get(reason, reason)
+
+    def side(ids):
+        out = []
+        for print_id in ids:
+            d = prints.get(str(print_id))
+            if d is None:
+                out.append({"print_id": str(print_id), "gone": True})
+            else:
+                out.append({k: d.get(k) for k in _PC_TRADE_SLIM_KEYS} if slim else d)
+        return out
+    return {
+        "trade_id": str(t["id"]),
+        "role": "sent" if sent else "received",
+        "state": "expired" if t["lapsed"] else t["status"],
+        "counterparty_steam_id": t[other + "_steam_id"],
+        "counterparty_name": _pcp.public_render_name(t[other + "_name"]) or _pc_neutral_name(ctx),
+        "counterparty_rating": _pc_num(t[other + "_rating"]),
+        "give": side(mine),
+        "get": side(theirs),
+        "digest": t["digest"],
+        "created_at": _pc_iso(t["created_at"]),
+        "expires_at": _pc_iso(t["expires_at"]),
+        "closed_at": _pc_iso(t["closed_at"]),
+        "executed_at": _pc_iso(t["executed_at"]),
+        "reason": reason,
+        "possible": bool(t["possible"]),
+    }
+
+
+async def _pc_trade_projection(db: AsyncSession, request, trade_id: str, viewer_pid: str) -> dict | None:
+    """The stored projection of one trade from its viewer's side, or None
+    when retention or a data deletion has removed the row."""
+    t = (await db.execute(text(_PC_TRADE_ROW_SQL + " WHERE t.id = CAST(:t AS uuid)"),
+                          {"t": trade_id})).mappings().first()
+    if t is None:
+        return None
+    ctx = await _pc_face_ctx(db, _pc_locale(request))
+    prints = await _pc_trade_prints_by_id(db, list(t["a_prints"]) + list(t["b_prints"]), ctx)
+    return _pc_trade_view(t, viewer_pid, prints, ctx)
+
+
+async def _pc_trade_word_gate(db: AsyncSession, need_ready: bool) -> None:
+    """P0 / A0 / D0 and the reads' and admin routes' opening: propose and
+    accept need the switch on (503 trading_off, checked first, before any
+    probe) and the word 'ready'; decline, cancel, the reads and the admin
+    routes work while the switch is off and need only a found schema and a
+    sound derivation. Anything else answers 503 trading_unavailable before
+    any statement that names trading schema."""
+    if need_ready and not _pc.PC_TRADE["enabled"]:
+        raise _pc_trade_refusal("trading_off", 503, retry_after=300)
+    word = await _pc_trading_word(db)
+    if word not in (("ready",) if need_ready else ("ready", "off")):
+        raise _pc_trade_refusal("trading_unavailable", 503, retry_after=60)
+
+
+async def _pc_trade_replay(db: AsyncSession, request, actor_pid: str, nonce: str):
+    """P4 / P9: a spent (proposer, nonce) answers the stored projection with
+    replayed: true, or, once retention has deleted the trade row, 409
+    already_processed; None when the nonce is unspent. No write."""
+    spent = (await db.execute(text("""
+        SELECT trade_id FROM pc_trade_spent_nonces
+         WHERE proposer = CAST(:actor AS uuid) AND propose_nonce = CAST(:nonce AS text)
+    """), {"actor": actor_pid, "nonce": nonce})).scalar_one_or_none()
+    if spent is None:
+        return None
+    view = await _pc_trade_projection(db, request, str(spent), actor_pid)
+    if view is None:
+        raise _pc_trade_refusal("already_processed", permanent=True)
+    return {**view, "replayed": True}
+
+
+# P11 / A10's gate reads, one helper per term so each reads the rows it
+# names under the locks the caller already holds (#208).
+
+async def _pc_trade_held(db: AsyncSession, print_ids) -> bool:
+    """A hold on any of the prints: offered in another open trade."""
+    return (await db.execute(text(
+        "SELECT 1 FROM pc_trade_holds WHERE print_id = ANY(CAST(:ids AS uuid[])) LIMIT 1"),
+        {"ids": sorted({str(p) for p in print_ids})})).first() is not None
+
+
+async def _pc_trade_freeze_left(db: AsyncSession, print_ids) -> int | None:
+    """The re-trade freeze: seconds until the last trade that executed within
+    reversal_window_minutes and named any of the prints leaves the window,
+    or None. Reads now() (the transaction's start): never later than
+    clock_timestamp(), so the freeze lasts at least the reversal window."""
+    left = (await db.execute(text("""
+        SELECT CEIL(EXTRACT(EPOCH FROM (max(x.executed_at)
+                    + make_interval(mins => CAST(:w AS integer)) - now())))
+          FROM pc_trades x
+         WHERE x.status IN ('executed', 'reversed')
+           AND x.executed_at > now() - make_interval(mins => CAST(:w AS integer))
+           AND (x.a_prints || x.b_prints) && CAST(:ids AS uuid[])
+    """), {"w": int(_pc.PC_TRADE["reversal_window_minutes"]),
+           "ids": sorted({str(p) for p in print_ids})})).scalar_one_or_none()
+    return max(int(left), 1) if left is not None else None
+
+
+async def _pc_trade_open_counts(db: AsyncSession, actor_pid: str, cp_pid: str) -> dict:
+    """The actor's open sent proposals, the counterparty's open received ones,
+    the actor's proposals of today's UTC date, and the seconds to the next
+    UTC midnight -- counts over rows, no counter column (#148, #326)."""
+    return dict((await db.execute(text("""
+        SELECT (SELECT count(*) FROM pc_trades
+                 WHERE proposer = CAST(:actor AS uuid) AND status = 'proposed') AS open_sent,
+               (SELECT count(*) FROM pc_trades
+                 WHERE (pair_lo = CAST(:cp AS uuid) OR pair_hi = CAST(:cp AS uuid))
+                   AND proposer <> CAST(:cp AS uuid) AND status = 'proposed') AS open_received,
+               (SELECT count(*) FROM pc_trades
+                 WHERE proposer = CAST(:actor AS uuid)
+                   AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS proposed_today,
+               CEIL(EXTRACT(EPOCH FROM ((date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day')
+                                        AT TIME ZONE 'UTC' - now()))) AS to_midnight
+    """), {"actor": actor_pid, "cp": cp_pid})).mappings().one())
+
+
+async def _pc_trade_decline_cooldown_left(db: AsyncSession, actor_pid: str, cp_pid: str) -> int | None:
+    """The decline cooldown, actor to counterparty: seconds left since the
+    counterparty declined the actor's last proposal to them, or None."""
+    left = (await db.execute(text("""
+        SELECT CEIL(EXTRACT(EPOCH FROM (max(closed_at)
+                    + make_interval(hours => CAST(:h AS integer)) - now())))
+          FROM pc_trades
+         WHERE status = 'declined' AND proposer = CAST(:actor AS uuid)
+           AND pair_lo = LEAST(CAST(:actor AS uuid), CAST(:cp AS uuid))
+           AND pair_hi = GREATEST(CAST(:actor AS uuid), CAST(:cp AS uuid))
+           AND closed_at > now() - make_interval(hours => CAST(:h AS integer))
+    """), {"actor": actor_pid, "cp": cp_pid,
+           "h": int(_pc.PC_TRADE["decline_cooldown_hours"])})).scalar_one_or_none()
+    return max(int(left), 1) if left is not None else None
+
+
+async def _pc_trade_reversal_cooldown_left(db: AsyncSession, pids) -> int | None:
+    """The reversal cooldown of either party: seconds left since a trade of
+    theirs was reversed, or None. reversed_at is written under the players
+    locks (3.10 step 3), which every caller of this holds."""
+    left = (await db.execute(text("""
+        SELECT CEIL(EXTRACT(EPOCH FROM (max(reversed_at)
+                    + make_interval(hours => CAST(:h AS integer)) - now())))
+          FROM pc_trades
+         WHERE status = 'reversed'
+           AND (pair_lo = ANY(CAST(:ids AS uuid[])) OR pair_hi = ANY(CAST(:ids AS uuid[])))
+           AND reversed_at > now() - make_interval(hours => CAST(:h AS integer))
+    """), {"ids": sorted({str(p) for p in pids}),
+           "h": int(_pc.PC_TRADE["reversal_cooldown_hours"])})).scalar_one_or_none()
+    return max(int(left), 1) if left is not None else None
+
+
+async def _pc_trade_pair_open(db: AsyncSession, a_pid: str, b_pid: str) -> bool:
+    """An open proposal between the two players, in either direction."""
+    return (await db.execute(text("""
+        SELECT 1 FROM pc_trades
+         WHERE pair_lo = LEAST(CAST(:a AS uuid), CAST(:b AS uuid))
+           AND pair_hi = GREATEST(CAST(:a AS uuid), CAST(:b AS uuid))
+           AND status = 'proposed'
+         LIMIT 1
+    """), {"a": a_pid, "b": b_pid})).first() is not None
+
+
+async def _pc_trade_executed_counts(db: AsyncSession, lo_pid: str, hi_pid: str) -> dict:
+    """Executed trades of today's UTC date (executed and reversed rows, by
+    executed_at) for each party and for the pair, and the seconds to the
+    next UTC midnight."""
+    return dict((await db.execute(text("""
+        SELECT (SELECT count(*) FROM pc_trades
+                 WHERE status IN ('executed', 'reversed')
+                   AND (pair_lo = CAST(:lo AS uuid) OR pair_hi = CAST(:lo AS uuid))
+                   AND (executed_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS lo_today,
+               (SELECT count(*) FROM pc_trades
+                 WHERE status IN ('executed', 'reversed')
+                   AND (pair_lo = CAST(:hi AS uuid) OR pair_hi = CAST(:hi AS uuid))
+                   AND (executed_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS hi_today,
+               (SELECT count(*) FROM pc_trades
+                 WHERE status IN ('executed', 'reversed')
+                   AND pair_lo = CAST(:lo AS uuid) AND pair_hi = CAST(:hi AS uuid)
+                   AND (executed_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS pair_today,
+               CEIL(EXTRACT(EPOCH FROM ((date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day')
+                                        AT TIME ZONE 'UTC' - now()))) AS to_midnight
+    """), {"lo": lo_pid, "hi": hi_pid})).mappings().one())
+
+
+def _pc_trade_prints_refusal(sides, locked: dict):
+    """The print terms of 2.7 on the locked rows (L4), in its order: every
+    print live (print_gone), owned by the party whose side names it
+    (not_owned), its subject not banned (subject_unavailable). `sides` is
+    ((print ids, owner player id), ...). (code, permanent) or None."""
+    for ids, _owner in sides:
+        for print_id in ids:
+            row = locked.get(str(print_id))
+            if row is None or row["discarded_at"] is not None:
+                return "print_gone", True
+    for ids, owner in sides:
+        for print_id in ids:
+            if str(locked[str(print_id)]["owner_player_id"]) != str(owner):
+                return "not_owned", True
+    for ids, _owner in sides:
+        for print_id in ids:
+            if locked[str(print_id)]["subject_banned"]:
+                return "subject_unavailable", True
+    return None
+
+
+def _pc_trade_party_refusal(row, own: bool, stamped_generation=None):
+    """The trader word (2.7) on one party's locked row, and at accept its
+    consent generation against the trade's stamp (F4). `own` names the
+    actor's side. (code, permanent) or None. The word (trader_ok) is the
+    gate; its terms, read one by one, only choose the code. A test pins
+    the conjunction of these terms to _PC_TRADER_OK_SQL on one fixture set."""
+    if row is None or not row["live"] or not row["not_banned"]:
+        return ("not_eligible", True) if own else ("counterparty_unavailable", True)
+    if not row["switch_on"]:
+        return ("trading_closed", True) if own else ("counterparty_closed", True)
+    if stamped_generation is not None and int(row["generation"]) != int(stamped_generation):
+        return ("trading_closed", True) if own else ("counterparty_closed", True)
+    # permanent for what can never change (2.7: the switch, the generation,
+    # a ban, a deletion, and the id's shape); transient for what time can
+    # still bring (running the mod, the account age, the history floor)
+    if not _sid64.is_individual_id(row["steam_id"]):
+        return ("not_eligible", True) if own else ("counterparty_not_eligible", True)
+    if not (row["has_mod"] and row["old_enough"] and row["has_history"]):
+        return ("not_eligible", False) if own else ("counterparty_not_eligible", False)
+    if not row["trader_ok"]:
+        # every term passed and the word did not: the word decides, and the
+        # refusal names no term it cannot point at as permanent
+        return ("not_eligible", False) if own else ("counterparty_not_eligible", False)
+    return None
+
+
+def _pc_trade_raise(refusal, status: int = 409, retry_after: int | None = None):
+    if refusal is not None:
+        code, permanent = refusal
+        raise _pc_trade_refusal(code, status, permanent=permanent, retry_after=retry_after)
+
+
+# ---- propose (3.4) ----
+
+async def _pc_trade_propose_tx(request, db: AsyncSession, steam_id: str, sig: str, nonce: str,
+                               to: str, give: str, get: str, digest: str):
+    await _pc_trade_timeouts(db)                                                   # PT
+    await _pc_trade_word_gate(db, need_ready=True)                                 # P0
+    give_ids, get_ids = _pc_trade_side(give), _pc_trade_side(get)                  # P1
+    if (not _PC_TRADE_STEAM_RE.match(steam_id or "") or not _PC_TRADE_STEAM_RE.match(to or "")
+            or not _PC_TRADE_NONCE_RE.match(nonce or "") or not _PC_TRADE_DIGEST_RE.match(digest or "")
+            or give_ids is None or get_ids is None or set(give_ids) & set(get_ids)):
+        raise _pc_trade_refusal("bad_request", 422, permanent=True)
+    if to == steam_id:
+        raise _pc_trade_refusal("self_trade", 422, permanent=True)
+    player = await _pc_verified_actor(request, steam_id, sig,                      # P2 (L0)
+                                      _pc.canon_trade(steam_id, nonce, "propose", to, digest), db)
+    actor = str(player.id)
+    if _pc.trade_digest(_pc.trade_items(steam_id, give_ids, to, get_ids)) != digest:   # P3
+        raise _pc_trade_refusal("bad_terms", permanent=True)
+    replay = await _pc_trade_replay(db, request, actor, nonce)                     # P4
+    if replay is not None:
+        return replay
+    cp = (await db.execute(text("""
+        SELECT id, deleted_at, pc_collection_public FROM players WHERE steam_id = CAST(:sid AS text)
+    """), {"sid": to})).mappings().first()                                          # P5
+    if cp is None or cp["deleted_at"] is not None:
+        raise _pc_trade_refusal("counterparty_unavailable", 404, permanent=True)
+    cp_pid = str(cp["id"])
+    await _assert_no_service_subject(db, affected_player_ids=[actor, cp_pid], affected_steam_ids=[steam_id, to])
+    if not cp["pc_collection_public"]:                                             # P6
+        raise _pc_trade_refusal("private", 403, permanent=True)
+    subjects = await _pc_trade_subjects(db, give_ids + get_ids)                    # P7 (L1)
+    if not await _pc_trade_try_identities(db, [to, *subjects], actor=steam_id):
+        raise _pc_trade_refusal("busy", retry_after=3)
+    await _pc_trade_lock_players(db, [actor, cp_pid])                              # P8 (L3)
+    replay = await _pc_trade_replay(db, request, actor, nonce)                     # P9
+    if replay is not None:
+        return replay
+    locked = await _pc_trade_lock_prints(db, give_ids + get_ids)                   # P10 (L4)
+    parties = await _pc_trade_parties(db, [actor, cp_pid])                         # P11
+    _pc_trade_raise(_pc_trade_party_refusal(parties.get(actor), own=True))
+    _pc_trade_raise(_pc_trade_party_refusal(parties.get(cp_pid), own=False))
+    if not parties[cp_pid]["binder_public"]:              # the binder term, before any print term (F43)
+        raise _pc_trade_refusal("private", 403, permanent=True)
+    _pc_trade_raise(_pc_trade_prints_refusal(((give_ids, actor), (get_ids, cp_pid)), locked))
+    if await _pc_trade_held(db, give_ids):
+        raise _pc_trade_refusal("print_offered_elsewhere")
+    frozen = await _pc_trade_freeze_left(db, give_ids + get_ids)
+    if frozen is not None:
+        raise _pc_trade_refusal("recently_traded", retry_after=frozen)
+    counts = await _pc_trade_open_counts(db, actor, cp_pid)
+    if int(counts["open_sent"]) >= int(_pc.PC_TRADE["open_sent_max"]):
+        raise _pc_trade_refusal("cap_open_sent")
+    if int(counts["open_received"]) >= int(_pc.PC_TRADE["open_received_max"]):
+        raise _pc_trade_refusal("cap_open_received")
+    if int(counts["proposed_today"]) >= int(_pc.PC_TRADE["proposals_per_day"]):
+        raise _pc_trade_refusal("cap_proposals_day", retry_after=int(counts["to_midnight"] or 1))
+    cooldown = await _pc_trade_decline_cooldown_left(db, actor, cp_pid)
+    if cooldown is not None:
+        raise _pc_trade_refusal("cooldown_declined", retry_after=cooldown)
+    cooldown = await _pc_trade_reversal_cooldown_left(db, [actor, cp_pid])
+    if cooldown is not None:
+        raise _pc_trade_refusal("cooldown_reversal", retry_after=cooldown)
+    if await _pc_trade_pair_open(db, actor, cp_pid):
+        raise _pc_trade_refusal("pair_busy")
+    trade_id = str(uuid.uuid4())                                                   # P12: the claim
+    claimed = (await db.execute(text("""
+        INSERT INTO pc_trade_spent_nonces (proposer, propose_nonce, trade_id)
+        VALUES (CAST(:actor AS uuid), CAST(:nonce AS text), CAST(:trade AS uuid))
+        ON CONFLICT DO NOTHING RETURNING trade_id
+    """), {"actor": actor, "nonce": nonce, "trade": trade_id})).scalar_one_or_none()
+    if claimed is None:
+        await db.rollback()
+        await _pc_trade_timeouts(db)
+        replay = await _pc_trade_replay(db, request, actor, nonce)
+        if replay is not None:
+            return replay
+        raise _pc_trade_refusal("busy", retry_after=1)
+    inserted = (await db.execute(text("""
+        INSERT INTO pc_trades (id, pair_lo, pair_hi, proposer, a_prints, b_prints, digest, propose_nonce,
+                               proposer_generation, counterparty_generation, expires_at)
+        VALUES (CAST(:trade AS uuid),
+                LEAST(CAST(:actor AS uuid), CAST(:cp AS uuid)),
+                GREATEST(CAST(:actor AS uuid), CAST(:cp AS uuid)),
+                CAST(:actor AS uuid),
+                CASE WHEN CAST(:actor AS uuid) < CAST(:cp AS uuid) THEN CAST(:give AS uuid[]) ELSE CAST(:get AS uuid[]) END,
+                CASE WHEN CAST(:actor AS uuid) < CAST(:cp AS uuid) THEN CAST(:get AS uuid[]) ELSE CAST(:give AS uuid[]) END,
+                CAST(:digest AS text), CAST(:nonce AS text),
+                CAST(:actor_gen AS integer), CAST(:cp_gen AS integer),
+                now() + make_interval(hours => CAST(:ttl AS integer)))
+        ON CONFLICT DO NOTHING RETURNING id
+    """), {"trade": trade_id, "actor": actor, "cp": cp_pid, "give": give_ids, "get": get_ids,
+           "digest": digest, "nonce": nonce,
+           "actor_gen": int(parties[actor]["generation"]), "cp_gen": int(parties[cp_pid]["generation"]),
+           "ttl": int(_pc.PC_TRADE["ttl_hours"])})).scalar_one_or_none()
+    if inserted is None:
+        raise _pc_trade_refusal("pair_busy")          # the pair index; the tombstone rolls back with it
+    held = (await db.execute(text("""
+        INSERT INTO pc_trade_holds (print_id, trade_id)
+        SELECT unnest(CAST(:give AS uuid[])), CAST(:trade AS uuid)
+        ON CONFLICT DO NOTHING RETURNING print_id
+    """), {"give": give_ids, "trade": trade_id})).all()                            # P13 (L5)
+    if len(held) != len(give_ids):
+        raise _pc_trade_refusal("print_offered_elsewhere")
+    await db.commit()                                                              # P14
+    view = await _pc_trade_projection(db, request, trade_id, actor)
+    print(f"[PC-TRADE] proposed trade={trade_id} from={steam_id} to={to} give={len(give_ids)} get={len(get_ids)}")
+    return {**view, "replayed": False}
+
+
+@app.post("/api/v1/pc/trades/propose", tags=["Player Cards"])
+async def pc_trade_propose(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    sig: str = Query(..., max_length=128),
+    nonce: str = Query(..., max_length=64),
+    to: str = Query(..., max_length=32),
+    give: str = Query(..., max_length=200),
+    get: str = Query(..., max_length=200),
+    digest: str = Query(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Propose a trade (3.4): `steam_id` gives the prints `give` and receives
+    the prints `get` (each 1..prints_per_side_max comma-separated print ids)
+    from `to`. HMAC over pctrade:{steam}:{nonce}:propose:{to}:{digest}, the
+    digest the canonical item list's (2.6), strict session. A retry with the
+    same nonce answers the stored trade with replayed: true."""
+    return await _pc_trade_guarded(db, _pc_trade_propose_tx(
+        request, db, steam_id, sig, nonce, to, give, get, digest))
+
+
 # ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
 # The bot is a singleton on the primary; these answer only to the shared
 # internal key. Discord identity resolves through players.discord_id (the
