@@ -485,6 +485,37 @@ def test_the_renderer_fences_its_pixel_inputs_and_keeps_a_refused_request_armed(
     assert tick.index("if (!onSettings) settingsVisited = false;") < tick.index("if (Time.unscaledTime < tickAt) return;")
 
 
+def test_a_partial_preset_row_is_derived_again_not_kept_for_the_process():
+    """v1.41.0 beta round 3 finding 10. PresetSlotCount cached any bounded
+    count for good, so a row first seen half-built (three of eight
+    portraits) answered three for the rest of the process and kept
+    PresetCountIsCredible false until a restart. A count below the shipped
+    one is now provisional: derived again at most once a second, kept rather
+    than traded for the fallback when a sweep finds no row, and only a count
+    at or above the shipped one is final. A shape pin only: the round-3
+    harness runs the method, and [PRESET-SLOT-SENTINEL] runs it in game.
+
+    MUTATION: put round 2's `if (_presetSlots > 0) return _presetSlots;`
+    back at the top, or drop the retry window. Must fail."""
+    pr = PORTRAIT.read_text(encoding="utf-8")
+    body = _span(pr, "internal static int PresetSlotCount()",
+                 "internal static bool PresetCountIsCredible()")
+    code = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("//"))
+    assert "if (_presetSlots >= PresetSlotsFallback) return _presetSlots;" in code, (
+        "a count below the shipped one is final again")
+    assert "if (_presetSlots > 0) return _presetSlots;" not in code, (
+        "any cached count answers for the rest of the process again")
+    assert "if (now < _presetSlotsRetryAt) return _presetSlots;" in code, (
+        "a provisional count is no longer answered from the cache inside its window")
+    assert code.count("_presetSlotsRetryAt = now + PresetSlotsRetrySeconds;") == 2, (
+        "the retry window is not stamped both when a sweep runs and when a count is cached")
+    assert "if (slots <= 0) return _presetSlots > 0 ? _presetSlots : PresetSlotsFallback;" in code, (
+        "a sweep that finds no row trades a provisional count for the fallback")
+    assert "private const float PresetSlotsRetrySeconds = 1f;" in pr
+    assert ("internal static bool PresetCountIsCredible() "
+            "{ return _presetSlots >= PresetSlotsFallback; }") in pr
+
+
 # ── item 20: the wiki page's translations are an asset, not a comment ────────
 
 CATALOGUES = ROOT / "plugin" / "I18nCatalogues.cs"

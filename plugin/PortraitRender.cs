@@ -379,6 +379,11 @@ namespace CompetitiveRounds
 
         private const int PresetSlotsFallback = 8;
         private static int _presetSlots;
+        /// <summary>The earliest moment a cached count BELOW <c>PresetSlotsFallback</c>
+        /// may be derived again (v1.41.0 beta round 3, finding 10): such a count is
+        /// provisional, and PresetSlotCount says why.</summary>
+        private static float _presetSlotsRetryAt;
+        private const float PresetSlotsRetrySeconds = 1f;
         /// <summary>One-shot: an out-of-range saved preset has been written back
         /// as -1, so it is not re-logged or re-written on every read.</summary>
         private static bool _presetMigrated;
@@ -405,10 +410,27 @@ namespace CompetitiveRounds
         /// guess for the process. ("Cached on the first non-zero answer" is what this
         /// said before r5, and it described neither path.) The fallback is the shipped
         /// count, so the feature stays correct even on a seat where the menu has not been
-        /// built yet.</para></summary>
+        /// built yet.</para>
+        ///
+        /// <para>A bounded count BELOW the shipped one is cached only PROVISIONALLY
+        /// (v1.41.0 beta round 3, finding 10). Cached for good, the first sighting of a
+        /// row still being built was this function's answer for the rest of the process:
+        /// three of eight portraits seen once meant three slots, and PresetCountIsCredible
+        /// false, until the game restarted. Such a count is derived again at most once
+        /// every <c>PresetSlotsRetrySeconds</c> and answered from the cache in between;
+        /// only a count at or above the shipped one is final. A sweep that finds no row
+        /// keeps the provisional count rather than trading it for the fallback. A creator
+        /// that genuinely has fewer slots costs one sweep a second while something
+        /// asks.</para></summary>
         internal static int PresetSlotCount()
         {
-            if (_presetSlots > 0) return _presetSlots;
+            if (_presetSlots >= PresetSlotsFallback) return _presetSlots;
+            float now = Time.realtimeSinceStartup;
+            if (_presetSlots > 0)
+            {
+                if (now < _presetSlotsRetryAt) return _presetSlots;
+                _presetSlotsRetryAt = now + PresetSlotsRetrySeconds;
+            }
             int slots = 0;
             try
             {
@@ -449,7 +471,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset slot discovery threw: {ex.Message}"); slots = 0; }
 
-            if (slots <= 0) return PresetSlotsFallback;   // menu not built yet — do not cache a guess
+            // Menu not built yet, or no row found this time: never cache a guess, and
+            // keep a provisional count rather than trading it for the fallback.
+            if (slots <= 0) return _presetSlots > 0 ? _presetSlots : PresetSlotsFallback;
 
             // Never CACHE a number that could not be bounded. playerFaces is the array
             // every lookup below indexes; with it absent the discovered value is an
@@ -474,11 +498,15 @@ namespace CompetitiveRounds
             // finished; a complete three-slot row and a half-built eight-slot row are
             // indistinguishable from here. So this function no longer pretends to
             // know. It answers with what it found, bounded by the array that actually
-            // limits face ids, and caches that. The judgement that DID depend on
+            // limits face ids, and caches that -- for good at or above the shipped
+            // count, provisionally below it (finding 10). The judgement that DID depend on
             // completeness — may an irreversible action run off this number — moved
             // to PresetCountIsCredible, where both destructive consumers now ask.
+            if (slots != _presetSlots)
+                Plugin.Log.LogInfo($"[PC] preset slots discovered: {slots}"
+                    + (slots < PresetSlotsFallback ? " (provisional: derived again until the row is complete)" : ""));
             _presetSlots = slots;
-            Plugin.Log.LogInfo($"[PC] preset slots discovered: {slots}");
+            if (slots < PresetSlotsFallback) _presetSlotsRetryAt = now + PresetSlotsRetrySeconds;
             return slots;
         }
 
@@ -495,6 +523,52 @@ namespace CompetitiveRounds
         /// deliberately NOT gated on this — showing the player's own character while
         /// the menu builds costs nothing and reverses itself.</para></summary>
         internal static bool PresetCountIsCredible() { return _presetSlots >= PresetSlotsFallback; }
+
+        /// <summary>[PRESET-SLOT-SENTINEL] (v1.41.0 beta round 3, finding 10): runs
+        /// PresetSlotCount against the game's REAL portrait row. It derives the count from
+        /// scratch, then plants a provisional sighting of a partial row (three slots) and
+        /// checks that it is answered from the cache inside the retry window and derived
+        /// again from the real row once the window has passed. Both fields it moves are put
+        /// back. Inconclusive, not failed, when no complete row exists to derive from.</summary>
+        internal static string RunPresetSlotSentinel(out bool pass)
+        {
+            pass = false;
+            int savedSlots = _presetSlots;
+            float savedAt = _presetSlotsRetryAt;
+            try
+            {
+                _presetSlots = 0; _presetSlotsRetryAt = 0f;
+                int real = PresetSlotCount();
+                if (_presetSlots < PresetSlotsFallback)
+                    return $"INCONCLUSIVE: no complete portrait row to derive from (answer {real}, cached {_presetSlots})";
+                var fails = new List<string>();
+                _presetSlots = 3; _presetSlotsRetryAt = Time.realtimeSinceStartup + 60f;
+                int held = PresetSlotCount();
+                if (held != 3 || PresetCountIsCredible())
+                    fails.Add($"inside the window: {held}, credible {PresetCountIsCredible()} (want 3, False)");
+                _presetSlotsRetryAt = Time.realtimeSinceStartup - 1f;
+                int again = PresetSlotCount();
+                if (again != real || !PresetCountIsCredible())
+                    fails.Add($"after the window: {again}, credible {PresetCountIsCredible()} (want {real}, True)");
+                int settled = PresetSlotCount();
+                if (settled != real) fails.Add($"once final: {settled} (want {real})");
+                pass = fails.Count == 0;
+                return pass
+                    ? $"PASS: 3 checks (a partial row's count is held inside the window and derived again from the "
+                      + $"real row after it, which has {real} slots; the derived count is then final)"
+                    : "FAIL: " + string.Join("; ", fails);
+            }
+            catch (Exception ex) { return "FAIL: threw " + ex.Message; }
+            finally { _presetSlots = savedSlots; _presetSlotsRetryAt = savedAt; }
+        }
+
+        internal static void DevPresetSlotSentinelTest()
+        {
+            bool pass;
+            string result = RunPresetSlotSentinel(out pass);
+            if (pass) Plugin.Log.LogInfo("[PRESET-SLOT-SENTINEL] " + result);
+            else Plugin.Log.LogWarning("[PRESET-SLOT-SENTINEL] " + result);
+        }
 
         internal static int CurrentPreset()
         {
@@ -533,9 +607,11 @@ namespace CompetitiveRounds
                 // `_presetSlots > 0` is not the same test as "the number is
                 // credible". The discovery refuses a ONE-portrait bucket because a
                 // row of one is a row still being built — but a row of three is
-                // also a row still being built, and it passes: 3 is cached for the
-                // process and a legitimate saved preset of 5 is written to -1 and
-                // gone. Rendering can afford a wrong small count (it shows the
+                // also a row still being built, and it passes: 3 is the count until
+                // the row is seen again (round 3 finding 10; it used to be the count
+                // for the process), and a legitimate saved preset of 5 read against it
+                // would be written to -1 and gone. Rendering can afford a wrong small
+                // count (it shows the
                 // player's own character); an irreversible write to their config
                 // cannot, so the two stop sharing a gate here. Corroborate against
                 // the count this build ships knowing about: a discovery at or above
