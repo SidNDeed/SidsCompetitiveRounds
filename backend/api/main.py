@@ -26546,7 +26546,8 @@ async def pc_discard_print(
 ):
     """Discard ONE print for shards (HMAC over pcdiscard:{steam}:{print_id},
     strict session): the owner check and the discard are one conditional
-    UPDATE under the player lock; the shard value is the print's rarity."""
+    UPDATE under the player lock; the shard value is the print's rarity,
+    or PC_TRADE["traded_discard_shards"] for a print ever received by trade."""
     player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_discard(steam_id, print_id), db)
     pid = str(player.id)
     try:
@@ -26554,13 +26555,43 @@ async def pc_discard_print(
     except Exception:
         raise HTTPException(status_code=404, detail="Print not found")
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
-    rarity = (await db.execute(text(
-        "SELECT rarity FROM pc_prints WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL"),
-        {"print": print_id, "pid": pid})).scalar_one_or_none()
-    if rarity is None:
+    # Card trading (migration 353, V8 3.9): a print ever received by trade
+    # discards for PC_TRADE['traded_discard_shards'] whatever its rarity
+    # (F1). The flag is a column of the print, so no retention step can
+    # change what a print pays. The probe runs here, after the owner lock:
+    # an accept that flagged this owner's print held the same players row,
+    # so it has committed. Found (ready / off): the flag governs.
+    # partial / unknown / broken: 503 and nothing paid of either kind -- no
+    # value is provably right (F29, F36). A positively confirmed
+    # schema_missing: the legacy branch, which reads the column's own
+    # existence in a savepoint (present: the flag governs; absent: today's
+    # value, right because the column is never dropped, so no print ever
+    # carried the flag; the read raising: 503).
+    word = await _pc_trading_word(db)
+    if word in ("ready", "off"):
+        flag_governs = True
+    elif word == "schema_missing":
+        try:
+            async with db.begin_nested():
+                flag_governs = bool((await db.execute(text(_PC_TRADE_FLAG_COLUMN_SQL))).scalar_one())
+        except Exception:
+            await db.rollback()
+            raise HTTPException(status_code=503, detail={"error": "trading_unavailable"})
+    else:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail={"error": "trading_unavailable"})
+    found = (await db.execute(text(
+        "SELECT rarity" + (", acquired_by_trade" if flag_governs else "")
+        + " FROM pc_prints WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL"),
+        {"print": print_id, "pid": pid})).mappings().first()
+    if found is None:
         await db.rollback()
         raise HTTPException(status_code=404, detail={"error": "not_owned"})
-    value = _pc.shards_for(rarity)
+    rarity = found["rarity"]
+    if flag_governs and found["acquired_by_trade"]:
+        value = int(_pc.PC_TRADE["traded_discard_shards"])
+    else:
+        value = _pc.shards_for(rarity)
     done = (await db.execute(text("""
         UPDATE pc_prints SET discarded_at = now(), discard_shards = CAST(:value AS integer)
          WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL
