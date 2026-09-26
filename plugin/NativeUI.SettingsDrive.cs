@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -47,7 +48,7 @@ namespace CompetitiveRounds
         internal static bool SettingsTestRunning => SettingsDriveRunning || SettingsSelfTestRunning;
 
         /// <summary>The scenarios, in the order "5:drive" runs them.</summary>
-        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2" };
+        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2", "l11" };
 
         private static void DrvOk(string m) { drvPass++; Plugin.Log.LogInfo("[SETTINGS-DRIVE] PASS " + m); }
         private static void DrvBad(string m) { drvFail++; Plugin.Log.LogWarning("[SETTINGS-DRIVE] FAIL " + m); }
@@ -144,6 +145,7 @@ namespace CompetitiveRounds
                 case "m1": return DriveM1();
                 case "l3": return DriveL3();
                 case "l2": return DriveL2();
+                case "l11": return DriveL11();
             }
             return DriveNothing();
         }
@@ -403,6 +405,54 @@ namespace CompetitiveRounds
                 else DrvBad("L2 the activate button on the armed delete row: " + calls + " confirmation call(s), armed=" + deleteArmed);
             }
             DrvDisarm();
+        }
+
+        /// <summary>LOW-11 (design S16 Q3): the language row's Detected line
+        /// names the OS-suggested language as a word ("Detected: Svenska"),
+        /// the same word as its Recommended line. The OS suggestion is
+        /// I18n.SuggestFromOs, which reads this thread's UI culture: the
+        /// scenario sets it to sv-SE and then en-US for the pane's repaint and
+        /// puts the original back. F1 pins the row first, so a row under the
+        /// mouse cannot take the pane.</summary>
+        private static IEnumerator DriveL11()
+        {
+            SettingsSelectKey("SLang");
+            yield return 0.6f;
+            if (!DrvFocusIs("SLang", "L11")) yield break;
+            string savedPin = settingsPinnedKey;
+            settingsPinnedKey = null;
+            var thread = System.Threading.Thread.CurrentThread;
+            var savedCulture = thread.CurrentUICulture;
+            try
+            {
+                yield return DrvPress(SettingsModel.SettingsKey.Pin, 0.4f);
+                if (settingsPinnedKey != "SLang")
+                {
+                    DrvBad("L11 F1 did not pin the language row (pinned " + (settingsPinnedKey ?? "nothing") + ")");
+                    yield break;
+                }
+                foreach (var culture in new[] { "sv-SE", "en-US" })
+                {
+                    thread.CurrentUICulture = new CultureInfo(culture);
+                    string id = I18n.SuggestFromOs();
+                    settingsPaneDirty = true;
+                    yield return 0.6f;
+                    string det = SettingsModel.StripTags(UIFactory.GetTmpText(setDetDetectedTxt) ?? "");
+                    string recd = SettingsModel.StripTags(UIFactory.GetTmpText(setDetRecTxt) ?? "");
+                    string wantDet = SettingsModel.StripTags(I18n.TrF("Detected: {0}", LanguageName(id)));
+                    string wantRec = SettingsModel.StripTags(I18n.TrF("Recommended: {0}", LanguageName(id)));
+                    if (det == wantDet) DrvOk("L11 OS culture " + culture + " (suggests " + id + "): the Detected line reads '" + det + "'");
+                    else DrvBad("L11 OS culture " + culture + " (suggests " + id + "): the Detected line reads '" + det + "', want '" + wantDet + "'");
+                    if (recd == wantRec) DrvOk("L11 control: OS culture " + culture + ": the Recommended line reads '" + recd + "'");
+                    else DrvBad("L11 control: OS culture " + culture + ": the Recommended line reads '" + recd + "', want '" + wantRec + "'");
+                }
+            }
+            finally
+            {
+                thread.CurrentUICulture = savedCulture;
+                settingsPinnedKey = savedPin;
+                settingsPaneDirty = true;
+            }
         }
     }
 }

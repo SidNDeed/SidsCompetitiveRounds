@@ -1214,9 +1214,12 @@ namespace CompetitiveRounds
             bool isLang = rec.Key == "SLang";
             if (isLang)
             {
+                // Round-2 L11: the detected language as a word, the same word the
+                // Recommended line shows (design S16 Q3: "Detected: Svenska").
+                // Design S5's raw-id rule is superseded for this one row.
                 string det = "en";
                 try { det = I18n.SuggestFromOs(); } catch { }
-                UIFactory.SetTextNoHook(setDetDetectedTxt, I18n.TrF("Detected: {0}", det));
+                UIFactory.SetTextNoHook(setDetDetectedTxt, I18n.TrF("Detected: {0}", LanguageName(det)));
             }
             SettingsSetActive(setDetDetectedGO, isLang);
 

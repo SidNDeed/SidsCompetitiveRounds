@@ -8038,8 +8038,8 @@
    "kind": "Tr"
   },
   "Detected: {0}": {
-   "surface": "NativeUI.Settings",
-   "location": "SettingsRenderPane",
+   "surface": "NativeUI.Settings, NativeUI.SettingsDrive",
+   "location": "DriveL11, SettingsRenderPane",
    "kind": "TrF"
   },
   "Devil Horns": {
@@ -13113,8 +13113,8 @@
    "kind": "Tr"
   },
   "Recommended: {0}": {
-   "surface": "NativeUI.Settings",
-   "location": "SettingsRenderPane",
+   "surface": "NativeUI.Settings, NativeUI.SettingsDrive",
+   "location": "DriveL11, SettingsRenderPane",
    "kind": "TrF"
   },
   "Reconnect suppressed (broadcast identity)": {

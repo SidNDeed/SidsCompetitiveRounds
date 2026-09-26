@@ -132,6 +132,11 @@ FILES = [
     # to harvest today; named anyway because the list is FIXED and a literal
     # added there later would otherwise be silently unharvestable (#357).
     "SettingsDescriptorWriters.g.cs",
+    # The settings drive harness (item 13 round 2): it computes the EXPECTED
+    # language-row lines through I18n.TrF with the painter's own literal
+    # templates, so it adds no string the registry lacks; named because the
+    # list is FIXED and every file with a call site belongs on it (#357).
+    "NativeUI.SettingsDrive.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
