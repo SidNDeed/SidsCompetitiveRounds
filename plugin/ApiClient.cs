@@ -3160,6 +3160,7 @@ namespace CompetitiveRounds
             // the old one's name and cosmetics.
             CachedPlayerStats = null;
             CachedPcMe = null; CachedPcCollection = null;
+            ClearPcTradeCaches();
             PcMeError = null; PcCollectionError = null;
             PcMeFetchedAt = -1f; PcMeDispatchedAt = -1f; PcCollectionFetchedAt = -1f;
             pcMeAttemptAt = -100f; pcCollAttemptAt = -100f;
@@ -3890,7 +3891,13 @@ namespace CompetitiveRounds
             public string print_id, card_id, subject_player_id, subject_name, edition_id, minted_at, rarity, top_card, title, rank_name, source;
             public string face_rev;   // v22 §2.2: the server's face revision; null on an api without the renderer
             public string face_locale = "en";   // the locale the answer keyed face_rev under (set by the parsers)
-            public bool subject_deleted, foil, signed, discarded;
+            public bool subject_deleted, foil, signed, discarded, traded;
+            // Card trading: `traded` is the own-binder answer's permanent flag
+            // (pc_prints.acquired_by_trade, F1), absent -> false on an api
+            // without trading. `gone` is set only inside a trade's give/get
+            // list, where a print a data deletion removed is named by its id
+            // alone ({"print_id": ..., "gone": true}).
+            public bool gone;
             public int pool_rank, board_rank, series_wins, series_losses, slot;
             public int discard_shards = -1;   // what the discard paid; -1 = not discarded, or an answer without the field
             // v22 7: copies of this exact card the opener held BEFORE this slot,
@@ -3916,6 +3923,12 @@ namespace CompetitiveRounds
         public class PcMe
         {
             public bool collection_public, announce, daily_claimed;
+            public bool trades_open;       // card trading consent (Settings); meaningful only while has_trades_open
+            // The settings answer CARRIED trades_open. An api without the
+            // trading schema never sends the key (F3), and its absence is not
+            // "off": the Settings row is hidden, never shown as a switch the
+            // server would refuse.
+            public bool has_trades_open;
             public bool paid_cap_exempt;   // the server skips the daily paid-pack cap for this account (testing exemption)
             public int revision, shards, price_gold, price_shards, paid_packs_per_day, prints_per_pack, paid_today, prints, pool_member_count;
             public string daily_pack_id, next_reset_utc, pool_taken_at;
@@ -4167,6 +4180,355 @@ namespace CompetitiveRounds
                 if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] settings callback threw: {cex.Message}"); }
             }));
+        }
+
+        // -- Card trading (v1.41.0, design V8 3.4-3.7 and 6.5) ------------------
+        // Cards for cards between two players; the server is the only
+        // authority. Every route takes QUERY parameters and answers a refusal
+        // as {"detail": {"error", "permanent", "state", "retry_after"}}. The
+        // canonical item list, its digest and the signed terms are built by
+        // PcTradeRules (executed by tools/client-rules-harness against the
+        // server's own vectors). Every answer is fenced on the Player Cards
+        // epoch it was dispatched under: an identity or consent edge between
+        // dispatch and landing drops it.
+
+        /// <summary>One trade from the viewer's side (V8 3.7): `give` is what
+        /// the viewer gives, `get` what the viewer receives. `state` is the
+        /// stored status, or "expired" for a lapsed proposal the janitor has
+        /// not swept yet.</summary>
+        public class PcTrade
+        {
+            public string trade_id, role, state, counterparty_steam_id, counterparty_name, digest;
+            public string created_at, expires_at, closed_at, executed_at, reason;
+            public float? counterparty_rating;   // null on the wire: no rating row
+            public bool possible;
+            public List<PcPrint> give = new List<PcPrint>();
+            public List<PcPrint> get = new List<PcPrint>();
+        }
+        /// <summary>view=summary (V8 3.7). Named ...Answer because C# forbids a
+        /// nested type and a method of one name in one class, and the method
+        /// is PcTradeSummary (design 6.5).</summary>
+        public class PcTradeSummaryAnswer
+        {
+            public bool enabled, tradesOpen;
+            public int revision;
+            public string serverNow;
+            public List<string> receivedOpen = new List<string>();   // TRADE ids, never print ids
+            public List<string> sentOpen = new List<string>();       // TRADE ids, never print ids
+        }
+        /// <summary>The PC_TRADE values the client displays (it hardcodes none), plus today's two counts.</summary>
+        public class PcTradeBounds
+        {
+            public int prints_per_side_max, ttl_hours, open_sent_max, open_received_max, proposals_per_day,
+                       executed_per_day, executed_per_pair_day, decline_cooldown_hours, reversal_window_minutes,
+                       reversal_cooldown_hours, min_ranked_series, min_mod_age_days, traded_discard_shards,
+                       recent_days, executed_today, proposals_today;
+        }
+        /// <summary>view=full: the summary's fields plus the bounds, the locale
+        /// the faces were keyed under, the open offers (full prints, with
+        /// faces) and the recent trades (slim prints, at most 20).</summary>
+        public class PcTradeFull : PcTradeSummaryAnswer
+        {
+            public PcTradeBounds bounds = new PcTradeBounds();
+            public string locale = "en";
+            public List<PcTrade> offers = new List<PcTrade>();
+            public List<PcTrade> recent = new List<PcTrade>();
+        }
+
+        public static PcTradeSummaryAnswer CachedPcTradeSummary { get; private set; }
+        public static PcTradeFull CachedPcTrades { get; private set; }
+        public static string PcTradeSummaryError { get; private set; }
+        public static string PcTradesError { get; private set; }
+        public static float PcTradeSummaryFetchedAt = -1f, PcTradesFetchedAt = -1f;
+        private static bool pcTradeSummaryInFlight, pcTradesInFlight, pcTradesForceAgain, pcCollOfInFlight;
+        private static float pcTradeSummaryAttemptAt = -100f, pcTradesAttemptAt = -100f;
+
+        /// <summary>Called at both Player Cards cache-clearing edges (identity
+        /// change, consent revoke), after the epoch has advanced.</summary>
+        private static void ClearPcTradeCaches()
+        {
+            CachedPcTradeSummary = null; CachedPcTrades = null;
+            PcTradeSummaryError = null; PcTradesError = null;
+            PcTradeSummaryFetchedAt = -1f; PcTradesFetchedAt = -1f;
+            pcTradeSummaryAttemptAt = -100f; pcTradesAttemptAt = -100f;
+            pcTradesForceAgain = false;
+        }
+
+        /// <summary>GET /pc/trades?view=summary, HMAC over
+        /// pcread:{steam}:trades:summary, strict session. Throttled to one read
+        /// per 10 s unless forced.</summary>
+        public static void PcTradeSummary(string steamId, bool force, Action<bool, string> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcTradeSummaryAttemptAt < 10f) { callback?.Invoke(CachedPcTradeSummary != null, null); return; }
+            if (pcTradeSummaryInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            pcTradeSummaryInFlight = true; pcTradeSummaryAttemptAt = Time.realtimeSinceStartup;
+            string url = PcUrl("trades", steamId, PcTradeRules.CanonRead(steamId, "trades", "summary"), "view=summary");
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                pcTradeSummaryInFlight = false;
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] trade summary answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                if (ok)
+                {
+                    var s = ParsePcTradeSummary(resp);
+                    if (s != null) { CachedPcTradeSummary = s; PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }
+                    else { PcTradeSummaryError = "parse"; ok = false; resp = "parse"; }
+                }
+                else { PcTradeSummaryError = resp; Plugin.Log.LogInfo($"[PC] trade summary failed: {PcShort(resp)}"); }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade summary callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>GET /pc/trades?view=full, HMAC over pcread:{steam}:trades:full
+        /// (the signed view and the queried view are one string: a mismatch is
+        /// refused). Throttled to one read per 10 s unless forced; a forced
+        /// read while one is on the wire is remembered and re-issued when that
+        /// one lands (the collection's rule: a forced read is demand).</summary>
+        public static void PcTrades(string steamId, bool force, Action<bool, string> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcTradesAttemptAt < 10f) { callback?.Invoke(CachedPcTrades != null, null); return; }
+            if (pcTradesInFlight)
+            {
+                if (force) pcTradesForceAgain = true;
+                callback?.Invoke(false, "in-flight");
+                return;
+            }
+            pcTradesInFlight = true; pcTradesAttemptAt = Time.realtimeSinceStartup;
+            string url = PcUrl("trades", steamId, PcTradeRules.CanonRead(steamId, "trades", "full"), "view=full");
+            int epoch = _pcCacheEpoch;
+            // The offers' prints carry faces keyed by the locale the read was
+            // ASKED in; an answer from before a language switch is re-asked.
+            string locale = I18n.Locale;
+            string who = steamId;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                pcTradesInFlight = false;
+                bool again = pcTradesForceAgain; pcTradesForceAgain = false;
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] trades answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                if (locale != I18n.Locale)
+                {
+                    Plugin.Log.LogInfo("[PC] trades answer dropped: language changed while it was in flight");
+                    pcTradesAttemptAt = -100f;
+                    PcTrades(who, true, callback);
+                    return;
+                }
+                if (again)
+                {
+                    pcTradesAttemptAt = -100f;
+                    try { Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who)); } catch { }
+                }
+                if (ok)
+                {
+                    var f = ParsePcTradeFull(resp);
+                    if (f != null)
+                    {
+                        CachedPcTrades = f; PcTradesFetchedAt = Time.realtimeSinceStartup; PcTradesError = null;
+                        // the full read carries every summary field: the summary cache follows it
+                        CachedPcTradeSummary = f; PcTradeSummaryFetchedAt = PcTradesFetchedAt; PcTradeSummaryError = null;
+                    }
+                    else { PcTradesError = "parse"; ok = false; resp = "parse"; }
+                }
+                else { PcTradesError = resp; Plugin.Log.LogInfo($"[PC] trades read failed: {PcShort(resp)}"); }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trades callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        private static IEnumerator RefetchTradesNextFrame(string steamId)
+        {
+            yield return null;                       // let this answer commit first
+            PcTrades(steamId, true, null);
+        }
+
+        /// <summary>POST /pc/trades/propose (V8 3.4): `steamId` gives `give`
+        /// (own print ids) to `toSteamId` for `get` (their print ids). The
+        /// digest is the canonical item list's (PcTradeRules, C6); the nonce is
+        /// the caller's and must be re-sent unchanged by a retry after a lost
+        /// answer, which then answers the stored row. A side that is not all
+        /// UUIDs never leaves the client ("bad_terms_local").</summary>
+        public static void PcTradePropose(string steamId, string nonce, string toSteamId, List<string> give, List<string> get, Action<bool, string> callback)
+        {
+            var g = PcTradeRules.CanonicalIds(give);
+            var t = PcTradeRules.CanonicalIds(get);
+            string digest = (g != null && t != null) ? PcTradeRules.Digest(steamId, g, toSteamId, t) : null;
+            if (string.IsNullOrEmpty(steamId) || string.IsNullOrEmpty(toSteamId) || string.IsNullOrEmpty(nonce)
+                || g == null || t == null || g.Count == 0 || t.Count == 0 || digest == null)
+            { callback?.Invoke(false, "bad_terms_local"); return; }
+            string url = PcUrl("trades/propose", steamId, PcTradeRules.CanonTrade(steamId, nonce, "propose", toSteamId, digest),
+                $"nonce={nonce}&to={toSteamId}&give={string.Join(",", g.ToArray())}&get={string.Join(",", t.ToArray())}&digest={digest}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Log.LogInfo($"[PC] trade propose give={g.Count} get={t.Count} digest={digest.Substring(0, 12)} nonce={nonce.Substring(0, Math.Min(8, nonce.Length))}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] trade propose answer ok={ok} resp={PcShort(resp)}");
+                if (epoch != _pcCacheEpoch) { try { callback?.Invoke(false, "stale-identity"); } catch { } return; }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade propose callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>POST /pc/trades/{accept|decline|cancel} (V8 3.5, 3.6): one
+        /// method, three callers. `tradeId` is sent exactly as the server gave
+        /// it (the server accepts only its own canonical spelling) and
+        /// `digest` is the trade's own, from the read.</summary>
+        public static void PcTradeAct(string action, string steamId, string nonce, string tradeId, string digest, Action<bool, string> callback)
+        {
+            if ((action != "accept" && action != "decline" && action != "cancel")
+                || string.IsNullOrEmpty(steamId) || string.IsNullOrEmpty(nonce)
+                || string.IsNullOrEmpty(tradeId) || string.IsNullOrEmpty(digest))
+            { callback?.Invoke(false, "bad_terms_local"); return; }
+            string url = PcUrl("trades/" + action, steamId, PcTradeRules.CanonTrade(steamId, nonce, action, tradeId, digest),
+                $"nonce={nonce}&trade_id={tradeId}&digest={digest}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Log.LogInfo($"[PC] trade {action} {tradeId.Substring(0, Math.Min(8, tradeId.Length))} nonce={nonce.Substring(0, Math.Min(8, nonce.Length))}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] trade {action} answer ok={ok} resp={PcShort(resp)}");
+                if (epoch != _pcCacheEpoch) { try { callback?.Invoke(false, "stale-identity"); } catch { } return; }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade {action} callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Another player's binder for a proposal's "You get" side
+        /// (V8 6.2): GET /pc/collection with subject=, HMAC over
+        /// pcread:{steam}:collection:{subject}. One-shot: no cache and no
+        /// throttle beyond one request in flight; the caller parses the answer
+        /// with ParsePcCollection. A private binder answers 403 private.</summary>
+        public static void FetchPcCollectionOf(string steamId, string subjectSteamId, Action<bool, string> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown" || string.IsNullOrEmpty(subjectSteamId))
+            { callback?.Invoke(false, "no-id"); return; }
+            if (pcCollOfInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            pcCollOfInFlight = true;
+            string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:{subjectSteamId}", $"subject={subjectSteamId}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                pcCollOfInFlight = false;
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] collection-of answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                Plugin.Log.LogInfo($"[PC] collection-of ok={ok} resp={PcShort(ok ? "(binder)" : resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] collection-of callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>The machine-readable reason of a failed trade call:
+        /// PcErrorCode, plus the one plain-string detail the trade routes
+        /// answer with (403 "service_account_forbidden", from the service
+        /// account guard), which PcErrorCode reads as "http".</summary>
+        public static string PcTradeErrorCode(string resp)
+        {
+            string code = PcErrorCode(resp);
+            if (code != "http" || string.IsNullOrEmpty(resp)) return code;
+            int b = resp.IndexOf('{');
+            if (b < 0) return code;
+            string detail = PcStr(PcTopLevel(resp.Substring(b), "detail"));
+            return detail == "service_account_forbidden" ? detail : code;
+        }
+
+        internal static PcTrade ParsePcTrade(string obj, string faceLocale = "en")
+        {
+            if (string.IsNullOrEmpty(obj)) return null;
+            string id = PcStr(PcTopLevel(obj, "trade_id"));
+            if (string.IsNullOrEmpty(id)) return null;
+            string rating = PcTopLevel(obj, "counterparty_rating");
+            return new PcTrade
+            {
+                trade_id = id,
+                role = PcStr(PcTopLevel(obj, "role")),
+                state = PcStr(PcTopLevel(obj, "state")),
+                counterparty_steam_id = PcStr(PcTopLevel(obj, "counterparty_steam_id")),
+                counterparty_name = PcStr(PcTopLevel(obj, "counterparty_name")),
+                counterparty_rating = (rating == null || rating == "null") ? (float?)null : PcFloat(rating),
+                give = ParsePcPrints(PcTopLevel(obj, "give"), faceLocale),
+                get = ParsePcPrints(PcTopLevel(obj, "get"), faceLocale),
+                digest = PcStr(PcTopLevel(obj, "digest")),
+                created_at = PcStr(PcTopLevel(obj, "created_at")),
+                expires_at = PcStr(PcTopLevel(obj, "expires_at")),
+                closed_at = PcStr(PcTopLevel(obj, "closed_at")),
+                executed_at = PcStr(PcTopLevel(obj, "executed_at")),
+                reason = PcStr(PcTopLevel(obj, "reason")),
+                possible = PcBool(PcTopLevel(obj, "possible")),
+            };
+        }
+
+        internal static List<PcTrade> ParsePcTrades(string arrayRaw, string faceLocale = "en")
+        {
+            var list = new List<PcTrade>();
+            if (string.IsNullOrEmpty(arrayRaw) || arrayRaw == "null") return list;
+            foreach (var o in SliceTopLevelObjects(arrayRaw))
+            {
+                var t = ParsePcTrade(o, faceLocale);
+                if (t != null) list.Add(t);
+            }
+            return list;
+        }
+
+        private static void FillPcTradeSummary(PcTradeSummaryAnswer s, string json)
+        {
+            s.enabled = PcBool(PcTopLevel(json, "enabled"));
+            s.tradesOpen = PcBool(PcTopLevel(json, "trades_open"));
+            s.revision = PcInt(PcTopLevel(json, "revision"));
+            s.serverNow = PcStr(PcTopLevel(json, "server_now"));
+            s.receivedOpen = new List<string>(PcStrArray(PcTopLevel(json, "received_open")));
+            s.sentOpen = new List<string>(PcStrArray(PcTopLevel(json, "sent_open")));
+        }
+
+        /// <summary>A summary answer, or null when the body is not one (no
+        /// top-level `enabled`).</summary>
+        internal static PcTradeSummaryAnswer ParsePcTradeSummary(string json)
+        {
+            if (string.IsNullOrEmpty(json) || PcTopLevel(json, "enabled") == null) return null;
+            var s = new PcTradeSummaryAnswer();
+            FillPcTradeSummary(s, json);
+            return s;
+        }
+
+        internal static PcTradeFull ParsePcTradeFull(string json)
+        {
+            if (string.IsNullOrEmpty(json) || PcTopLevel(json, "enabled") == null) return null;
+            var f = new PcTradeFull();
+            FillPcTradeSummary(f, json);
+            string b = PcTopLevel(json, "bounds") ?? "";
+            f.bounds = new PcTradeBounds
+            {
+                prints_per_side_max = PcInt(PcTopLevel(b, "prints_per_side_max")),
+                ttl_hours = PcInt(PcTopLevel(b, "ttl_hours")),
+                open_sent_max = PcInt(PcTopLevel(b, "open_sent_max")),
+                open_received_max = PcInt(PcTopLevel(b, "open_received_max")),
+                proposals_per_day = PcInt(PcTopLevel(b, "proposals_per_day")),
+                executed_per_day = PcInt(PcTopLevel(b, "executed_per_day")),
+                executed_per_pair_day = PcInt(PcTopLevel(b, "executed_per_pair_day")),
+                decline_cooldown_hours = PcInt(PcTopLevel(b, "decline_cooldown_hours")),
+                reversal_window_minutes = PcInt(PcTopLevel(b, "reversal_window_minutes")),
+                reversal_cooldown_hours = PcInt(PcTopLevel(b, "reversal_cooldown_hours")),
+                min_ranked_series = PcInt(PcTopLevel(b, "min_ranked_series")),
+                min_mod_age_days = PcInt(PcTopLevel(b, "min_mod_age_days")),
+                traded_discard_shards = PcInt(PcTopLevel(b, "traded_discard_shards")),
+                recent_days = PcInt(PcTopLevel(b, "recent_days")),
+                executed_today = PcInt(PcTopLevel(b, "executed_today")),
+                proposals_today = PcInt(PcTopLevel(b, "proposals_today")),
+            };
+            f.locale = PcStr(PcTopLevel(json, "locale")) ?? "en";
+            f.offers = ParsePcTrades(PcTopLevel(json, "offers"), f.locale);
+            f.recent = ParsePcTrades(PcTopLevel(json, "recent"), f.locale);
+            return f;
         }
 
         // ── Player Cards faces + the portrait writer (design v22 §2.2 / §3.2) ──
@@ -4516,6 +4878,8 @@ namespace CompetitiveRounds
                 source = PcStr(PcTopLevel(obj, "source")),
                 slot = PcInt(PcTopLevel(obj, "slot")),
                 discarded = PcBool(PcTopLevel(obj, "discarded")),
+                traded = PcBool(PcTopLevel(obj, "traded")),
+                gone = PcBool(PcTopLevel(obj, "gone")),
                 discard_shards = PcIntOr(PcTopLevel(obj, "discard_shards"), -1),
                 face_rev = PcStr(PcTopLevel(obj, "face_rev")),
                 dup_at_pull = PcIntOr(PcTopLevel(obj, "dup_at_pull"), -1),
@@ -4550,6 +4914,7 @@ namespace CompetitiveRounds
             if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
             if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
             if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
+            if (PcHas(settingsObj, "trades_open")) { me.trades_open = PcBool(PcTopLevel(settingsObj, "trades_open")); me.has_trades_open = true; }
         }
 
         internal static PcMe ParsePcMe(string json)
@@ -21427,6 +21792,7 @@ namespace CompetitiveRounds
                 // data may since have been deleted.
                 _pcCacheEpoch++;
                 CachedPcMe = null; CachedPcCollection = null;
+                ClearPcTradeCaches();
                 try { PlayerCardFaces.Clear(); } catch { }
                 try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { PortraitRender.OnIdentityChanged(); } catch { }
