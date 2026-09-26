@@ -897,6 +897,19 @@ class HealthResponse(BaseModel):
     # (#441: the value a broken feature reports must not look like success).
     # Absent on any build before this batch, which is how the old build reads.
     pc_card_themes: str | None = None
+    # ladder_hook: how many of the four rated completion paths credit the worn
+    # title ladder in this build (main._LADDER_HOOK; 4 = submit_match,
+    # submit_team_match, _complete_team_series_with_ratings and
+    # submit_ffa_match each call title_ladders.record_completed_games, v1.41.0
+    # item 12). DERIVED from those four functions' compiled code when main is
+    # imported, never written down, so a build that lost a site's call reads
+    # less than 4 (#342). The release train's build discriminator for the
+    # ladder-hook batch, which adds no route and no key to a GET answer both
+    # builds serve; equal on both boxes by construction, and read by nothing
+    # else (#306). Declared without a default, so building the answer without
+    # it raises instead of silently leaving the key out. Absent on any build
+    # before that batch, which is how the train reads the old build.
+    ladder_hook: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
