@@ -850,9 +850,9 @@ def test_the_helper_closure_stays_affordable():
     indexed bindings, with the walk itself taking 0.1 s once the index is built
     (~5.3 s, once per process). The bounds below sat above those with room, so
     this fails on a walk that has gone wrong rather than on ordinary growth;
-    the worst-route bounds have since moved for measured growth in bindings
-    a route really runs, each move recorded with its measurement at its
-    assertion.
+    the worst-route bounds, and once the all-tier p90 bound, have since moved
+    for measured growth in bindings routes really run, each move recorded
+    with its measurement at its assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -920,7 +920,29 @@ def test_the_helper_closure_stays_affordable():
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
     assert all_median <= 90, f"median closure {all_median} of {total}"
-    assert all_p90 <= 150, f"p90 closure {all_p90} of {total}"
+    # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
+    # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
+    # the same walk with the same route seeds over main 7541261's backend/api.
+    # The same walk over this tree WITHOUT the seven trade routes gives
+    # 72 / 140 / 457 again, so the move is those seven routes and nothing
+    # else. (The code tier: p90 69 -> 73, median 21 and worst 326 unmoved,
+    # all under the bounds above, which stay.)
+    #
+    # The five player trade routes reach 229 to 257 bindings each, 83 of them
+    # in the face modules, and they enter those modules through the bindings
+    # GET /api/v1/pc/collection enters them through (_pc_print_dict,
+    # _pc_face_inputs, _pc_labels, _pc_face_ctx, _pc_locale, _pc_renderer_fp;
+    # the same 83 face-module bindings): a trade answers with the binder's
+    # own print projection. The two admin trade routes reach 91 and 73. Seven
+    # routes join a population of 365, five of them above the old p90, and
+    # the 90th percentile moves from 140 to 151.
+    #
+    # The bound moves to 160 -- ~6% over the measurement, the headroom 335
+    # gave over 315 and 300 over 282 at the code-worst moves -- for that
+    # reason and no other. A walk that has gone wrong still fails at the
+    # median bounds first (the data-into-data hub case measured median 179),
+    # and those stay, as does the worst bound.
+    assert all_p90 <= 160, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
