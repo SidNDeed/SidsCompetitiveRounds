@@ -465,13 +465,22 @@ async def reset_schema(url, sent, info):
 
 
 def _redirect_for(url):
+    """A do_connect listener that opens the lane's connection itself, from a
+    copy of the engine's connect parameters, and returns it. SQLAlchemy
+    hands every listener the engine's own parameter dict, made once per
+    engine, so an edit in place outlives the listener's removal: the
+    lane's search_path, written there, stayed on database.py's engines for
+    every later module in the process, whose tables then resolved in a
+    schema their database does not have (build notes, FINDING 10). This
+    listener writes nothing to that dict."""
     def redirect(dialect, conn_rec, cargs, cparams):
-        cparams.update(host=url.host, port=url.port, user=url.username, database=url.database)
+        params = dict(cparams, host=url.host, port=url.port, user=url.username, database=url.database)
         if url.password:
-            cparams["password"] = url.password
+            params["password"] = url.password
         else:
-            cparams.pop("password", None)
-        cparams["server_settings"] = dict(cparams.get("server_settings") or {}, search_path=SCHEMA)
+            params.pop("password", None)
+        params["server_settings"] = dict(params.get("server_settings") or {}, search_path=SCHEMA)
+        return dialect.connect(*cargs, **params)
     return redirect
 
 

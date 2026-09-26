@@ -2381,4 +2381,67 @@ def test_c27_the_formula_canvases_still_match_the_rendered_sizes():
         assert H.image_of(data).size == size
 
 
+# -- the lane harness's isolation (build notes, FINDING 10) --------------------------------
+
+class _ConnectProbeStop(Exception):
+    """Raised by the probe below, so the probe opens no connection."""
+
+
+def _engine_connect_params(eng):
+    """What `eng` would connect with now. A do_connect listener placed ahead
+    of any other records the parameter dict SQLAlchemy hands it and stops
+    the connect before a socket opens; the pool is first swapped for an
+    empty one, without closing (as the harness does), so the connect cannot
+    be served from a pooled connection."""
+    seen = []
+
+    def probe(dialect, conn_rec, cargs, cparams):
+        seen.append({k: (dict(v) if isinstance(v, dict) else v) for k, v in cparams.items()})
+        raise _ConnectProbeStop()
+
+    async def attempt():
+        await eng.dispose(close=False)
+        with pytest.raises(_ConnectProbeStop):
+            async with eng.connect():
+                pass
+
+    event.listen(eng.sync_engine, "do_connect", probe, insert=True)
+    try:
+        H.run(attempt())
+    finally:
+        event.remove(eng.sync_engine, "do_connect", probe)
+    assert len(seen) == 1, len(seen)
+    return seen[0]
+
+
+async def _lane_search_path(env):
+    async with env.database.async_session() as db:
+        return (await db.execute(text("SHOW search_path"))).scalar()
+
+
+def test_the_lane_leaves_the_app_engines_connect_parameters_as_it_found_them(monkeypatch, tmp_path):
+    """SQLAlchemy hands every do_connect listener the engine's own parameter
+    dict, made once per engine, so a listener that edits it in place
+    outlives its removal. The lane's redirect once did that with its
+    search_path, and later modules in the same process then read their
+    tables from a schema their own database does not have: 74 of
+    test_ffa_quarantine_triage's tests failed in the full suite and passed
+    alone (build notes, FINDING 10). Only the names of changed keys are
+    reported, never their values."""
+    import database
+    engines = (database.engine, database.release_engine)
+    before = [_engine_connect_params(e) for e in engines]
+    assert live(monkeypatch, tmp_path, _lane_search_path) == SCHEMA
+    after = [_engine_connect_params(e) for e in engines]
+    moved = [(i, k) for i, (b, a) in enumerate(zip(before, after))
+             for k in sorted(set(b) | set(a)) if b.get(k) != a.get(k)]
+    assert not moved, f"connect parameters the lane left changed (engine index, key): {moved}"
+
+
+def test_c_harness_the_lane_redirect_still_reaches_the_lane_schema(monkeypatch, tmp_path):
+    """Control: the connections the app opens inside a lane Env still land in
+    the lane's schema, which is what the redirect is for."""
+    assert live(monkeypatch, tmp_path, _lane_search_path) == SCHEMA
+
+
 # -- end of part 3 --
