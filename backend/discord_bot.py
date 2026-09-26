@@ -8813,6 +8813,32 @@ async def _render_board(board: dict):
     return embeds, view
 
 
+async def _own_embed_messages(ch):
+    """Every message of this bot's in `ch` that carries an embed, newest
+    first, read from the channel's WHOLE history (v1.41.0 beta round 4,
+    findings 12, 13 and 15: absolute convergence). limit=None: discord.py
+    pages it, 100 messages per request, back to the channel's first message.
+    The sweeps used to read the newest 50 messages only, so a board buried
+    deeper -- under chat, or left by an earlier process -- was never adopted,
+    retired or swept, however often the sweep was retried. The walk costs one
+    request per 100 messages of the channel, and it runs only while a sweep
+    is owed: at the start of every process, and after a failure.
+
+    Returns (messages, error). error is None when the walk reached the
+    channel's first message; otherwise it is the failure, and messages are
+    the newest ones read before it. Only a COMPLETE walk shows that a board
+    is not in the channel. A partial one still names the newest copy of every
+    board it did reach, because history is newest-first."""
+    found = []
+    try:
+        async for msg in ch.history(limit=None):
+            if msg.author == bot.user and msg.embeds:
+                found.append(msg)
+    except Exception as e:
+        return found, e
+    return found, None
+
+
 async def _adopt_board_messages(ch, boards: list, ids: dict):
     """Re-attach to boards already in the channel (this map is process memory,
     so a restart starts empty) and delete older duplicates of the same board.
@@ -8820,7 +8846,9 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
     board's title is the keeper and any later one is a leftover from an
     earlier re-anchor — whichever of those a viewer or a pin is looking at may
     not be the one we edit, which is what made a board look permanently stale
-    before. Only this bot's own messages are ever touched.
+    before. Only this bot's own messages are ever touched. The walk reads the
+    whole channel (_own_embed_messages), so a board is found however deep it
+    is buried (round 4).
 
     The channel is marked swept (_lb_swept) only when the history was read
     and every delete tried here went through; anything less leaves the sweep
@@ -8834,37 +8862,34 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
     emptied -- stayed in the channel for good."""
     by_title = {b["title"]: b["key"] for b in boards}
     retire = {b["title"]: b["key"] for b in BOARDS if b["title"] not in by_title}
-    keepers, dupes, retired, complete = {}, 0, 0, True
-    try:
-        async for msg in ch.history(limit=50):
-            if msg.author != bot.user or not msg.embeds:
-                continue
-            title = msg.embeds[0].title or ""
-            if title in retire:
-                try:
-                    await msg.delete()
-                    retired += 1
-                except Exception as e:
-                    complete = False
-                    print(f"[LB] couldn't retire {retire[title]} board mid={msg.id} "
-                          f"(not in LEADERBOARD_BOARDS): {e}")
-                continue
-            key = by_title.get(title)
-            if key is None:
-                continue
-            if key not in keepers:
-                keepers[key] = msg.id
-                continue
+    ours, walk_error = await _own_embed_messages(ch)
+    keepers, dupes, retired, complete = {}, 0, 0, walk_error is None
+    if walk_error is not None:
+        print(f"[LB] rescan failed ({walk_error}) -- boards not found here are posted fresh; "
+              "the sweep runs again next tick")
+    for msg in ours:
+        title = msg.embeds[0].title or ""
+        if title in retire:
             try:
                 await msg.delete()
-                dupes += 1
+                retired += 1
             except Exception as e:
                 complete = False
-                print(f"[LB] couldn't delete duplicate {key} board mid={msg.id}: {e}")
-    except Exception as e:
-        complete = False
-        print(f"[LB] rescan failed ({e}) — boards not found here are posted fresh; "
-              "the sweep runs again next tick")
+                print(f"[LB] couldn't retire {retire[title]} board mid={msg.id} "
+                      f"(not in LEADERBOARD_BOARDS): {e}")
+            continue
+        key = by_title.get(title)
+        if key is None:
+            continue
+        if key not in keepers:
+            keepers[key] = msg.id
+            continue
+        try:
+            await msg.delete()
+            dupes += 1
+        except Exception as e:
+            complete = False
+            print(f"[LB] couldn't delete duplicate {key} board mid={msg.id}: {e}")
     ids.update(keepers)
     if dupes:
         print(f"[LB] deleted {dupes} duplicate stale board message(s)")

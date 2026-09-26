@@ -33,8 +33,8 @@ TREE = ast.parse(TEXT)
 
 WANT_FUNC = {"rank_emoji", "get_rank_name", "_escape_md", "_lb_line", "_split_lb_descriptions",
              "_build_board_embeds", "_board_medal", "_lb_line_2v2", "_lb_line_ffa", "_lb_line_ovt",
-             "_enabled_boards", "_render_board", "_adopt_board_messages", "_boards_are_anchored",
-             "_repost_board_set", "publish_boards", "publish_lb_loop"}
+             "_enabled_boards", "_render_board", "_own_embed_messages", "_adopt_board_messages",
+             "_boards_are_anchored", "_repost_board_set", "publish_boards", "publish_lb_loop"}
 WANT_CLASS = {"LeaderboardPaginator"}
 WANT_ASSIGN = {"RANK_ROLES", "LB_PAGE_SIZE", "LB_TOTAL_FETCH", "BOARDS",
                "_lb_message_ids", "_lb_unknown_board_keys", "_lb_swept"}
@@ -125,6 +125,9 @@ class _Channel:
         self.id, self.bot_user = cid, bot_user
         self.messages, self.deleted, self.sent = [], [], []
         self.history_raises = False
+        # A walk whose later page fails: this many messages are read, newest
+        # first, and then the read raises (round 4).
+        self.history_fails_after = None
         self.fetch_fails_once = set()
         # A live channel refuses sends and deletes: a 5xx, a rate limit, a
         # revoked Manage-Messages. Without these the repost path -- the only
@@ -159,10 +162,15 @@ class _Channel:
     def history(self, limit=100):
         if self.history_raises:
             raise RuntimeError("history boom")
-        snapshot = list(self.messages)[-limit:][::-1]      # newest first, as Discord answers
+        # limit=None is the whole channel, as discord.py pages it (round 4).
+        msgs = list(self.messages) if limit is None else list(self.messages)[-limit:]
+        snapshot = msgs[::-1]                              # newest first, as Discord answers
+        fails_after = self.history_fails_after
 
         async def gen():
-            for m in snapshot:
+            for i, m in enumerate(snapshot):
+                if fails_after is not None and i >= fails_after:
+                    raise RuntimeError("history page failed")
                 yield m
         return gen()
 
@@ -1061,6 +1069,88 @@ def test_a_transient_edit_failure_posts_fresh_and_re_anchors_next_tick(ns):
     _tick(ns)                                            # self-heals: order restored, no duplicate
     assert ch.titles() == [T_1V1, T_2V2, T_FFA]
     assert sum(1 for ln in ns["_log"] if "not at the channel bottom" in ln) == 1
+
+
+# -- round 4: the sweep reads the whole channel (findings 12, 13, 15) ----------
+
+_DEEP = 120      # messages of chat: deeper than the 50-message window the sweep used to read
+
+
+def _bury(ch, n=_DEEP):
+    for _ in range(n):
+        ch.post_from_someone_else()
+
+
+def _post_set(ns, description):
+    """A set of our board messages, as an earlier process left it."""
+    ch = ns["_ch"]
+    return [_run(ch.send(embeds=[_Embed(title=b["title"], description=description)], view=None)).id
+            for b in ns["_enabled_boards"]()]
+
+
+def _board_titles(ch):
+    return [t for t in ch.titles() if t is not None]
+
+
+def test_a_set_buried_deeper_than_any_window_is_found_on_restart(ns):
+    """Round 4, findings 12, 13 and 15, the depth half. The sweep read the
+    newest 50 messages, so a set buried under more chat than that was never
+    adopted: a restart posted a second set below it, and the first stayed for
+    good. The walk now reads the whole channel. A restart finds the set under
+    120 messages of chat and moves it to the bottom -- one set, never two --
+    and nobody else's message is touched.
+
+    MUTATION: the walk back to the newest 50 messages. Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    old = dict(ns["_lb_message_ids"][CID])
+    _bury(ch)
+    ns["_lb_message_ids"].clear()               # the process restarts
+    ns["_lb_swept"].clear()
+    _tick(ns)
+    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], _board_titles(ch)
+    assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
+    assert sorted(ch.deleted) == sorted(old.values()), (ch.deleted, old)
+    assert len(ch.messages) == _DEEP + 3
+    assert CID in ns["_lb_swept"]
+
+
+def test_a_duplicate_set_buried_deep_is_swept_on_restart(ns):
+    """Round 4, finding 15's depth. An older set of ours sits under 120
+    messages of chat and the current set is at the bottom. The restart's walk
+    keeps the newest copy of each board and deletes the old set, wherever it
+    is; the current set is adopted and edited in place.
+
+    MUTATION: the walk back to the newest 50 messages. Must fail."""
+    ch = ns["_ch"]
+    stale = _post_set(ns, "stale")
+    _bury(ch)
+    current = _post_set(ns, "current")
+    _tick(ns)                                   # a fresh process: nothing tracked, a sweep owed
+    assert sorted(ch.deleted) == sorted(stale), (ch.deleted, stale)
+    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], _board_titles(ch)
+    assert sorted(ns["_lb_message_ids"][CID].values()) == sorted(current)
+    assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
+    assert CID in ns["_lb_swept"]
+
+
+def test_a_retired_board_buried_deep_is_still_retired(ns):
+    """Round 4, finding 13's depth. The list drops FFA and the bot restarts
+    while the FFA board sits under 120 messages of chat: the walk still finds
+    it and retires it, and only it.
+
+    MUTATION: the walk back to the newest 50 messages. Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    old = dict(ns["_lb_message_ids"][CID])
+    _bury(ch)
+    ns["LEADERBOARD_BOARDS_RAW"] = "1v1,2v2"        # the list changes; the bot restarts
+    ns["_lb_message_ids"].clear()
+    ns["_lb_swept"].clear()
+    _tick(ns)
+    assert old["ffa"] in ch.deleted, (ch.deleted, old)
+    assert _board_titles(ch) == [T_1V1, T_2V2], _board_titles(ch)
+    assert CID in ns["_lb_swept"]
 
 
 # ── paginators ────────────────────────────────────────────────────────────
