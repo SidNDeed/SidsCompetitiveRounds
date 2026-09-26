@@ -78,8 +78,9 @@ ORM-made table get explicit values for such columns instead (_insert).
 The handlers run with MATCH_HMAC_SECRET cleared -- the module's own "no secret
 configured" path -- and the Steam session check replaced, as
 test_ffa_game_number_anchor.py drives submit_ffa_match; neither is what this
-file is about. Every observation is made on a connection of its own, never on
-the session that ran the write.
+file is about. The one exception is the lead-forfeit test's two signed
+live-points posts (the comment above _live_points_sig). Every observation is
+made on a connection of its own, never on the session that ran the write.
 
 Live PostgreSQL is REQUIRED, and a missing DSN FAILS, naming the variable --
 the gate test_title_ladders.py's live half uses:
@@ -91,6 +92,8 @@ import ast
 import asyncio
 import contextlib
 import glob
+import hashlib
+import hmac
 import io
 import os
 import re
@@ -972,21 +975,87 @@ def test_pg_2v2_settled_admin_completion_credits_once_and_reads_back(opened, hoo
     _run(_go())
 
 
-def test_pg_2v2_settled_lead_forfeit_credits_once(opened, hook_calls):
+# The per-game record a 2v2 lead forfeit is settled from. Since the lead-forfeit
+# hotfix (migrations 348, 351 and 352), team_series_report_dc settles a lead
+# forfeit from team_series_games -- the record update_team_live_points writes
+# during play -- and never from the DC report's own point snapshot: the
+# abandoned game counts as played only when the posts that count for it show a
+# pair of two points or more from a seat of EACH team, and in any game but the
+# first of the original sitting only the posts that named exactly that game and
+# sitting count (_team_game_crossed_two). A report on a series with no such
+# record parks the series as dc_incomplete for an admin, by design.
+# The lead-forfeit test therefore writes that record the way a client does: one
+# attested post naming game 2 of the stored sitting from a seat of each team.
+# Those two posts are signed, so for them alone the secret is set and the seat
+# gate answers unbound, as the hotfix's own tests post; every other handler
+# call in this file runs with MATCH_HMAC_SECRET cleared (module docstring).
+_LIVE_POINTS_SECRET = "ladder-hooks-live-points"
+
+
+def _live_points_sig(sid, reporter, t1, t2, game, room):
+    msg = "team-live-points-game:%s:%s:%s:%s:%s:%s" % (sid, reporter, t1, t2, game, room)
+    return hmac.new(_LIVE_POINTS_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+async def _unbound_seat(request, steam_id, db):
+    return main.SEAT_UNBOUND
+
+
+async def _lead_forfeit_series(monkeypatch, sm, ids, posters):
+    """Team 1 wins game 1 of a team_lhF series through submit_team_match; then
+    each seat in `posters` posts the pair 1-1 for game 2 of the stored sitting,
+    naming it (attested). Returns the series id."""
+    sid = await _team_series(sm, ids, "team_lhF")
+    g1 = await _submit(sm, main.submit_team_match,
+                       _report_2v2(sid, "team_lhF_000001_r1"))
+    assert g1[1] is None and g1[0].series_status == "active", g1
+    if posters:
+        monkeypatch.setattr(main, "MATCH_HMAC_SECRET", _LIVE_POINTS_SECRET)
+        monkeypatch.setattr(main, "_seat_gate_for_live_points", _unbound_seat)
+        for reporter in posters:
+            async with sm() as db:
+                post = await _call(main.update_team_live_points, series_id=str(sid),
+                                   request=None, t1_points=1, t2_points=1,
+                                   reporter_steam_id=reporter,
+                                   sig=_live_points_sig(str(sid), reporter, 1, 1, 2,
+                                                        "team_lhF"),
+                                   game_number=2, photon_room_id="team_lhF", db=db)
+            assert post[1] is None and post[0]["status"] == "ok", post
+        monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
+    return sid
+
+
+def test_pg_2v2_settled_lead_forfeit_credits_once(opened, hook_calls, monkeypatch):
     """2v2-settled through the helper's other caller: team 1 up a game, a
-    team-2 disconnect with two points on the board is a lead forfeit and
-    completes the series through the helper -- one credit per player, keyed
-    by the team series; the same report again is ignored."""
+    team-2 disconnect in game 2 whose per-game record shows the pair from a
+    seat of each team is a lead forfeit and completes the series through the
+    helper -- one credit per player, keyed by the team series; the same report
+    again is ignored. Two negative controls come first, the same steps each on
+    a schema of its own: with no per-game record, and with team 1's post
+    alone, the same report parks the series as dc_incomplete, the hook is
+    never reached and nothing is credited (the comment above
+    _live_points_sig)."""
     _require_live_pg()
 
-    async def _go():
+    async def _control(posters):
         async with _case() as (schema, sm):
             ids = await _seed(sm)
             seeded, _ = await _look(schema)
-            sid = await _team_series(sm, ids, "team_lhF")
-            g1 = await _submit(sm, main.submit_team_match,
-                               _report_2v2(sid, "team_lhF_000001_r1"))
-            assert g1[1] is None and g1[0].series_status == "active", g1
+            sid = await _lead_forfeit_series(monkeypatch, sm, ids, posters)
+            dc = await _team_dc(sm, sid, P1, P3, 2, 1, "team_lhF_000002_r2")
+            assert dc[1] is None and dc[0]["status"] == "dc_incomplete", (posters, dc)
+            assert hook_calls == [], (posters, hook_calls)
+            after, _ = await _look(schema)
+            assert after == seeded, ("a credit moved without a settled lead forfeit", posters)
+
+    async def _go():
+        await _control(())
+        await _control((P1,))
+        async with _case() as (schema, sm):
+            ids = await _seed(sm)
+            seeded, _ = await _look(schema)
+            sid = await _lead_forfeit_series(monkeypatch, sm, ids, (P1, P3))
+            assert hook_calls == [], hook_calls
             dc = await _team_dc(sm, sid, P1, P3, 2, 1, "team_lhF_000002_r2")
             assert dc[1] is None and dc[0].get("reason") == "dc_leadforfeit", dc
             assert hook_calls == [("2v2-settled", str(sid), 4)], hook_calls
