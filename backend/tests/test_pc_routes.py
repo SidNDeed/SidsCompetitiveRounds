@@ -517,6 +517,20 @@ def test_no_player_cards_answer_carries_a_steam_or_discord_identifier():
 # keys that end in `name` and are not a player's name
 _NOT_A_PLAYER_NAME = ("rank_name", "font_name", "file_name", "band_name")
 
+# The neutral label is not a name: `_pc_neutral_name` answers the locale's
+# `pc.unnamed` label or the built-in, never a stored name, so a value that is
+# that call and nothing else discloses nothing. The collection reveal's gone
+# roster entry answers it, as its design states (build notes, FINDING 9). Only the
+# bare call is admitted: in `x or _pc_neutral_name()` the `x` still needs its
+# projection, and a second name key after the call on the same line is not
+# carried through by the admission.
+_NEUTRAL_ONLY = re.compile(r"_pc_neutral_name\([a-z_]*\)(?P<rest>.*)$")
+
+
+def _neutral_only(expr):
+    m = _NEUTRAL_ONLY.match(expr.strip())
+    return bool(m) and re.search(r'"[a-z_]*name"\s*:', m.group("rest")) is None
+
 
 def test_the_player_cards_boundary_applies_the_coverage_projection_too():
     """`public_name` is P alone, which is correct for the global display name
@@ -549,7 +563,8 @@ def test_every_player_cards_name_answer_goes_through_the_public_projection():
             checked += 1
             expr = m.group(2)
             ok = ("public_name" in expr or "public_render_name" in expr
-                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected))
+                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected)
+                  or _neutral_only(expr))
             assert ok, (name, line.strip())
     assert checked >= 8, checked
 

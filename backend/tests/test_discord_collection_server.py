@@ -2078,10 +2078,14 @@ BRANCH_POINT = "bb7d716957d735ebf781e0d2c14defb5f18fe39c"
 NEW_ROUTES = {"internal_pc_packs", "internal_pc_pack_strip", "internal_pc_binder", "internal_pc_binder_page"}
 # The existing bindings this branch is expected to change, each named where
 # it is recorded: S13's savepoint and its success-only stamp (_rank_colors and
-# the cache's "ok" key; build notes FINDING 1) and B11's marker, its two
-# health_check arms and its schema field (FINDING 2).
+# the cache's "ok" key; build notes FINDING 1), B11's marker, its two
+# health_check arms and its schema field (FINDING 2), and the three bindings
+# whose PIN comments cite lines the branch's insertions moved, re-pinned
+# comment-only (FINDING 9).
 EXPECTED_CHANGED = {("main", "_rank_colors"), ("main", "_rank_colors_cache"), ("main", "health_check"),
-                    ("main", "_DISCORD_COLLECTION_MARKER"), ("schemas", "HealthResponse")}
+                    ("main", "_DISCORD_COLLECTION_MARKER"), ("schemas", "HealthResponse"),
+                    ("main", "_ovt_horizon_candidates"), ("main", "_ovt_settle_horizon_row"),
+                    ("main", "submit_ovt_match")}
 
 
 def _git(*args):
