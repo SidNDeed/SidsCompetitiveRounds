@@ -6340,6 +6340,8 @@ _RJ_TRIAGE_MARKER = 2
 # Both arms of the route carry it; a box on the build before answers without
 # the key. Raise it when a later change to the rule must be proven deployed.
 _TICKET_REDACTION_MARKER = 1
+# Release-train verification plumbing, not a design mechanism: the Discord collection lane's one addition.
+_DISCORD_COLLECTION_MARKER = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6355,6 +6357,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
+                              discord_collection=_DISCORD_COLLECTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
@@ -6367,6 +6370,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
+                              discord_collection=_DISCORD_COLLECTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
 
