@@ -1196,3 +1196,218 @@ def test_the_shape_names_what_can_reach_a_record():
     assert shape(False, 2, 2) == "unclean"             # the sitting's first game
     assert shape(False, 3, 2) == "after-relock"
     assert shape(False, 3, 1) == "later"
+
+
+# -- what the production client can prove, from both teams (hotfix round 2) ---
+#
+# Review round 1 of the hotfix. Finding 1: the production client dispatches a
+# post at every change of its pair and at every 20-second refresh, never
+# withdraws one in flight, and names no game in it (TAG v1.40.3,
+# plugin/ApiClient.cs:2602-2666), so a previous game's posts, first-round
+# pairs included, can be processed after that game's report, and are filed
+# under the next game. Finding 2: one attested post proved a crossing by
+# itself. Scenario (c): two seats of one team proved a crossing under the
+# legacy rule alone. Each scenario is RED on f67b22a and GREEN after, with a
+# mutation control on its own path and a twin.
+
+async def _stale_first_round_posts(lab):
+    """Scenario (a), in review finding 1's own shape: game 1 goes 1-0, 1-1,
+    2-1, 2-2, but two seats of different teams (1 and 2) still have their 1-1
+    in flight when game 1 is reported. Those two are processed now, filed
+    under game 2, and game 2 itself has reached 1-0 when seat 2 leaves."""
+    ser = await lab.series(t1_wins=0, t2_wins=0)
+    await _post_all(lab, ser, (1, 0))
+    await _post_all(lab, ser, (1, 1), seats=(0, 3))        # 1 and 2 still in flight
+    await _post_all(lab, ser, (2, 1), (2, 2))
+    await lab.win_game(ser, winner=1)
+    await _post_all(lab, ser, (1, 1), seats=(1, 2))        # game 1's, landing late
+    await _post_all(lab, ser, (1, 0))                      # game 2's own
+    await _two_reports(lab, ser, LOW, LOW)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+def test_a_previous_games_first_round_posts_landing_late_settle_nothing(wired):
+    """Scenario (a). Game 2's record holds a 1-1 from a seat of each team, and
+    game 2 never passed 1-0. Round 1's rule read the two 1-1 bits as game 2's
+    own first round (a 1-1 exists only in a first round, and it excused one
+    seat) and settled a forfeit. They are game 1's, and the production client
+    can deliver them this late. After the first game of a sitting only a post
+    that names its game says which game its pair describes."""
+    async def go():
+        async with _Lab() as lab:
+            return await _stale_first_round_posts(lab)
+
+    settled = _run(go())
+    assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
+    assert wired == [], wired
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["legacy-read-in-every-game", "pass-through"])
+def test_the_stale_first_round_test_can_fail(wired, monkeypatch, mutant):
+    """Control for scenario (a), on its own path: a rule that reads a legacy
+    post as belonging to the game it was filed under, in every game (round
+    1's attribution by arrival, the two-team rule kept), completes the same
+    series, so the test above would fail; the inert twin wraps the real
+    evidence rule, is reached once, and changes nothing."""
+    calls = _wrap_the_evidence(monkeypatch, (lambda shape, cur, att: cur | att)
+                               if mutant == "legacy-read-in-every-game" else None)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _stale_first_round_posts(lab)
+
+    settled = _run(go())
+    assert calls == ["second"], calls
+    if mutant == "legacy-read-in-every-game":
+        assert settled == ("completed", 1, None, None, 1), settled
+    else:
+        assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
+
+
+async def _one_team_attests(lab, other_team_seat=None):
+    """Scenario (b): team 1 won game 1. In game 2 seat 0 (team 1) posts 2-0
+    naming game 2 and its room, and nothing else is filed for game 2. With
+    `other_team_seat`, a seat of team 2 posts the same pair, also naming the
+    game: attested, because after the first game of a sitting only a post
+    that names its game is read. Seat 2 leaves."""
+    ser = await lab.series()
+    await lab.post(ser, 0, 2, 0, game=2, room=ROOM)
+    if other_team_seat is not None:
+        await lab.post(ser, other_team_seat, 2, 0, game=2, room=ROOM)
+    await _two_reports(lab, ser, LOW, LOW)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("other_team_seat, played", [(None, False), (3, True)],
+                         ids=["leader-alone", "each-team"])
+def test_an_attested_crossing_needs_a_seat_of_each_team(wired, other_team_seat, played):
+    """Scenario (b), review finding 2, and its twin. A post naming its game
+    gives its pair an identity and nothing more: one seat of the team already
+    up a game, attesting two points alone, proves nothing (dc_incomplete). The
+    same post, with a seat of the other team attesting a pair of two points
+    for the same game, proves the crossing (completed)."""
+    async def go():
+        async with _Lab() as lab:
+            return await _one_team_attests(lab, other_team_seat)
+
+    settled = _run(go())
+    if played:
+        assert settled == ("completed", 1, None, None, 1), settled
+    else:
+        assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["one-seat-suffices", "pass-through"])
+def test_the_attested_crossing_test_can_fail(wired, monkeypatch, mutant):
+    """Control for scenario (b), on its own path: with the two-team rule put
+    back to "any one seat's pair of two points proves it" (round 1's reading
+    of an attested post), the leader-alone series completes, so the test
+    above would fail, while the each-team twin completes either way; the
+    inert twin wraps the real rule, is reached once per series, and changes
+    nothing."""
+    real = main._team_game_both_teams_reached_two
+    calls = []
+
+    def wrapped(seats):
+        calls.append(seats)
+        if mutant == "one-seat-suffices":
+            return bool(seats & _TWO_OR_MORE)
+        return real(seats)
+
+    monkeypatch.setattr(main, "_team_game_both_teams_reached_two", wrapped)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _one_team_attests(lab), await _one_team_attests(lab, 3)
+
+    alone, each = _run(go())
+    assert len(calls) == 2, calls
+    assert each == ("completed", 1, None, None, 1), each
+    if mutant == "one-seat-suffices":
+        assert alone == ("completed", 1, None, None, 1), alone
+    else:
+        assert alone == ("dc_incomplete", None, 1, "dc_manual_pending", 0), alone
+
+
+async def _one_team_two_seats(lab, *, game_one, other_team_seat=None):
+    """Scenario (c): two seats of team 1 (0 and 1) each post 1-1, and nothing
+    comes from team 2 unless `other_team_seat` posts the same pair.
+    game_one=True: game 1 of a fresh series (shape "first"), legacy posts --
+    the one game legacy evidence is still read in. game_one=False: game 2 of
+    a series team 1 leads, every post naming game 2. Returns the record
+    rule's verdict for the game in progress, then the settlement after seat 2
+    leaves."""
+    ser = await lab.series(t1_wins=0 if game_one else 1, t2_wins=0)
+    named = {} if game_one else {"game": 2, "room": ROOM}
+    seats = (0, 1) + ((other_team_seat,) if other_team_seat is not None else ())
+    for seat in seats:
+        await lab.post(ser, seat, 1, 1, **named)
+    verdict = await lab.crossed(ser)
+    await _two_reports(lab, ser, LOW, LOW)
+    return verdict, await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("game_one", [True, False], ids=["game-1-legacy", "game-2-attested"])
+@pytest.mark.parametrize("other_team_seat", [None, 2], ids=["one-team", "each-team"])
+def test_two_seats_of_one_team_prove_no_crossing(wired, game_one, other_team_seat):
+    """Scenario (c) and its twin. Two seats of the SAME team posting a pair of
+    two points prove nothing: a seat count is not a team count, and one
+    team's evidence alone is what ruling 2 refuses. A third post, from a seat
+    of the other team, proves it. In game 1 -- the one game legacy evidence
+    is read in -- the verdict is the record rule's own answer: the DC report
+    never asks about game 1, because no team is a game up yet, so it settles
+    dc_incomplete either way, on f67b22a and after. In game 2 the same rule
+    settles the series."""
+    async def go():
+        async with _Lab() as lab:
+            return await _one_team_two_seats(lab, game_one=game_one,
+                                             other_team_seat=other_team_seat)
+
+    verdict, settled = _run(go())
+    played = other_team_seat is not None
+    assert verdict is played, (verdict, settled)
+    if played and not game_one:
+        assert settled == ("completed", 1, None, None, 1), settled
+    else:
+        assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
+
+
+def _two_seats_suffice(seats):
+    """Round 1's legacy reading as a seat count: any two seats with a pair of
+    two points prove a crossing (one irregular seat excused), whatever their
+    teams."""
+    return sum(1 for k in range(4)
+               if any(seats & _bit(a, b, k)
+                      for a in range(3) for b in range(3) if a + b >= 2)) >= 2
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["two-seats-suffice", "pass-through"])
+def test_the_one_team_test_can_fail(wired, monkeypatch, mutant):
+    """Control for scenario (c), on its own path: with the two-team rule put
+    back to a seat count, both one-team records read as crossed -- game 1's
+    verdict and game 2's settlement flip -- so the test above would fail. The
+    same mutant leaves scenario (b)'s lone attester unsettled (one seat is
+    not two), so (b) and (c) pin different rules. The inert twin wraps the
+    real rule and changes nothing."""
+    real = main._team_game_both_teams_reached_two
+    monkeypatch.setattr(main, "_team_game_both_teams_reached_two",
+                        _two_seats_suffice if mutant == "two-seats-suffice" else real)
+
+    async def go():
+        async with _Lab() as lab:
+            return (await _one_team_two_seats(lab, game_one=True),
+                    await _one_team_two_seats(lab, game_one=False),
+                    await _one_team_attests(lab))
+
+    game_one, game_two, lone = _run(go())
+    flipped = mutant == "two-seats-suffice"
+    assert game_one == (flipped, ("dc_incomplete", None, 1, "dc_manual_pending", 0)), game_one
+    assert game_two == (flipped, ("completed", 1, None, None, 1) if flipped
+                        else ("dc_incomplete", None, 1, "dc_manual_pending", 0)), game_two
+    assert lone == ("dc_incomplete", None, 1, "dc_manual_pending", 0), lone
