@@ -112,8 +112,10 @@ def app_rig(env, hooks=None, stub=None, **kw):
 
 
 def is_json(call, kind):
+    """A reveal's JSON read; for /pack, step 1 (`index`) or the final re-read
+    (`pack_id`)."""
     return call.method == "GET" and call.path == (PACKS if kind == "pack" else BINDER) and (
-        kind != "pack" or "pack_id" in call.params)
+        kind != "pack" or "pack_id" in call.params or "index" in call.params)
 
 
 def is_bytes(call):
@@ -565,7 +567,7 @@ async def _n7_reread(env):
 
     async def move(call):
         await env.rebind(own.discord, other)
-    rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 3, move)])
+    rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 2, move)])
     await run_pack(rig, own)
     assert rig.attachments() == [], "clause 7: the picture posted"
     assert rig.texts() == [PACK_GONE_LINE], f"clause 7: posted {[t[:80] for t in rig.texts()]}"
@@ -1014,7 +1016,7 @@ def test_a_rename_after_the_image_still_posts_the_new_name(monkeypatch, tmp_path
 
         async def rename(call):
             await env.rename(subs[1], "Fixture renamed late")
-        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 3, rename)])
+        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 2, rename)])
         await run_pack(rig, own)
         assert byte_call(rig).status == 200 and not logged(rig, "manifest assertion")
         text_ = one_post_without_image(rig)
@@ -1044,7 +1046,7 @@ def test_a_discard_between_the_revalidation_and_the_reread_drops_the_image(monke
 
         async def discard(call):
             await env.discard(own, target)
-        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 3, discard)])
+        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 2, discard)])
         await run_pack(rig, own)
         assert [c.status for c in checks(rig)] == [200] * 5, "step 5 did not pass"
         first, again = [body_of(c)["packs"][0]["prints"] for c in json_calls(rig, "pack")]
@@ -1077,7 +1079,7 @@ def test_c14q_a_discard_in_a_different_pack_still_attaches_this_one(monkeypatch,
 
         async def discard(call):
             await env.discard(own, elsewhere)
-        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 3, discard)])
+        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 2, discard)])
         await run_pack(rig, own)
         assert body_of(json_calls(rig, "pack")[0])["packs"][0]["pack_id"] == pack
         one_post_with_image(rig)
@@ -1127,7 +1129,7 @@ def test_leases_are_released_on_every_exit_path(monkeypatch, tmp_path):
 
         async def move(call):
             await env.rebind(owners[2].discord, other)
-        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 3, move)])
+        rig = app_rig(env, hooks=[(lambda c: is_json(c, "pack") and c.n == 2, move)])
         await run_pack(rig, owners[2])
         assert rig.texts() == [PACK_GONE_LINE]
         _released_all(rig)
@@ -1244,7 +1246,7 @@ class Synth:
 
     async def __call__(self, call):
         if call.method == "GET" and call.path in (PACKS, BINDER):
-            if self.kind == "pack" and "pack_id" not in call.params:
+            if self.kind == "pack" and not ({"pack_id", "index"} & set(call.params)):
                 return H.Reply(200, json={"packs": [{"pack_id": self.pack_id, "status": "done"}], "total": 1,
                                           "next_before": None, "actor_ref": self.actor})
             return H.Reply(200, json=self.answer())
@@ -2067,7 +2069,7 @@ def test_c24e_a_renderer_unavailable_503_is_not_retried(monkeypatch, tmp_path):
 
         async def on(call):
             env.mp.setattr(env.main, "_pc_raqm", lambda: True)
-        rig = app_rig(env, hooks=[(is_bytes, off), (lambda c: is_json(c, "pack") and c.n == 3, on)])
+        rig = app_rig(env, hooks=[(is_bytes, off), (lambda c: is_json(c, "pack") and c.n == 2, on)])
         await run_pack(rig, own)
         got = rig.byte_gets()
         assert len(got) == 1 and got[0].status == 503, [c.status for c in got]
@@ -2353,4 +2355,85 @@ def test_c31_a_live_slot_still_carries_its_subjects_current_name(monkeypatch, tm
         subs, out = await _erased_slot_lines(env)
         for locale, (_line3, line1, _label) in out.items():
             assert len(line1) == 1 and f"**{subs[0].name}**" in line1[0], (locale, line1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- round 2, R1 MEDIUM Finding 1: /pack N reads its pack in one step ------------------------
+
+F1_DEEP = 181
+
+
+async def _f1_history(env, n):
+    """`n` packs opened through the production open route by one owner, and
+    their ids newest first - (opened_at, id) descending, the route's own
+    order, sorted here from the rows rather than asked of the route."""
+    subs = await H.pool(env, 5, tag="f1")
+    price = int(env.main._pc.PC_ECONOMY["pack_price_shards"])
+    own = await env.player("f1-owner", rating=None, shards=price * (n + 1))
+    await env.snapshot()
+    for _ in range(n):
+        await env.open_pack(own, subs)
+    rows = await env.rows(f"SELECT id::text AS id, opened_at FROM {SCHEMA}.pc_packs"
+                          " WHERE player_id = CAST(:p AS uuid) AND status = 'done'", {"p": own.id})
+    assert len(rows) == n, len(rows)
+    return own, [r["id"] for r in sorted(rows, key=lambda r: (r["opened_at"], r["id"]), reverse=True)]
+
+
+def test_f1_a_deep_pack_reveals_in_two_json_reads_whatever_its_index(monkeypatch, tmp_path):
+    """R1 MEDIUM Finding 1. /pack N found its pack by walking the summary
+    pages from the newest, ten a read, against the same 20-a-minute JSON
+    pacing as step 1 and the final re-read: /pack 181 spent 19 reads before
+    step 1, and its final re-read, the 21st, answered 429 and nothing
+    posted. The pacing clock is frozen here, so every read of a run falls in
+    one window. /pack 181 and /pack 90 each post their own pack whole,
+    reading the packs route exactly twice - step 1 by `index`, the final
+    re-read by `pack_id` - with no 429 on any request, in no more requests
+    than S2.5's bound of 18."""
+    async def body(env):
+        own, newest_first = await _f1_history(env, F1_DEEP)
+        env.mp.setattr(env.main, "_pc_reveal_clock", lambda: 1000.0)
+        for index in (F1_DEEP, 90):
+            env.mp.setattr(env.main, "_pc_reveal_windows", {})
+            rig = app_rig(env)
+            await run_pack(rig, own, index)
+            one_post_with_image(rig)
+            refused = [(c.method, c.path) for c in rig.calls if c.status == 429]
+            assert not refused, (index, refused)
+            reads = [c for c in rig.calls if c.path == PACKS]
+            assert [c.status for c in reads] == [200, 200], [(c.params, c.status) for c in reads]
+            assert reads[0].params.get("index") == index and "pack_id" not in reads[0].params, reads[0].params
+            assert reads[1].params.get("pack_id") == newest_first[index - 1], (index, reads[1].params)
+            assert len(rig.calls) <= 18, (index, [(c.method, c.path) for c in rig.calls])
+            print(f"F1 /pack {index}: {len(reads)} JSON reads of the packs route, {len(rig.calls)} internal requests")
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_c_f1_the_latest_pack_posts_however_it_is_found(monkeypatch, tmp_path):
+    """Control for Finding 1: /pack 1 never came near the pacing allowance -
+    the walk read one summary page - so it posts whole with no 429 whichever
+    way step 1 finds the pack, and the pack it reveals is the newest."""
+    async def body(env):
+        own, newest_first = await _f1_history(env, 3)
+        env.mp.setattr(env.main, "_pc_reveal_clock", lambda: 1000.0)
+        rig = app_rig(env)
+        await run_pack(rig, own, 1)
+        one_post_with_image(rig)
+        assert not [c for c in rig.calls if c.status == 429], [(c.path, c.status) for c in rig.calls]
+        assert [c for c in rig.calls if c.path == PACKS][-1].params.get("pack_id") == newest_first[0]
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_f1_an_index_past_the_last_pack_answers_the_count_from_one_read(monkeypatch, tmp_path):
+    """The out-of-range line comes from step 1's own answer: one read, no
+    image, and the count - for an index no route takes as well, which goes
+    as the route's largest."""
+    async def body(env):
+        own, _newest_first = await _f1_history(env, 3)
+        for index in (4, 10 ** 12):
+            rig = app_rig(env)
+            await run_pack(rig, own, index)
+            assert rig.texts() == ["You have 3 opened packs: `/pack` goes from 1 (the latest) to 3."], rig.texts()
+            assert rig.attachments() == []
+            reads = [c for c in rig.calls if c.path == PACKS]
+            assert [c.status for c in reads] == [200], [(c.params, c.status) for c in reads]
     e2e(monkeypatch, tmp_path, body)

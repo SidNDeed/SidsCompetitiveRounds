@@ -1288,7 +1288,8 @@ class _NoSession:
 def _handlers(main, pack_id, owner_ref):
     return {
         "internal_pc_packs": lambda key, db: main.internal_pc_packs(
-            discord_id="1", pack_id=None, before=None, limit=5, locale=None, x_internal_key=key, db=db),
+            discord_id="1", pack_id=None, before=None, index=None, limit=5, locale=None, x_internal_key=key,
+            db=db),
         "internal_pc_pack_strip": lambda key, db: main.internal_pc_pack_strip(
             pack_id=pack_id, locale="en", discord_id="1", x_internal_key=key, db=db),
         "internal_pc_binder": lambda key, db: main.internal_pc_binder(
@@ -1318,8 +1319,8 @@ def test_c19_the_same_handlers_with_the_key_still_answer(monkeypatch, tmp_path):
         owner, _subs, pack = await five(env)
         main = env.main
         async with env.database.async_session() as db:
-            packs = await main.internal_pc_packs(discord_id=owner.discord, pack_id=None, before=None, limit=5,
-                                                 locale=None, x_internal_key=H.INTERNAL_KEY, db=db)
+            packs = await main.internal_pc_packs(discord_id=owner.discord, pack_id=None, before=None, index=None,
+                                                 limit=5, locale=None, x_internal_key=H.INTERNAL_KEY, db=db)
             assert packs["total"] == 1
         async with env.database.async_session() as db:
             strip = await main.internal_pc_pack_strip(pack_id=pack, locale="en", discord_id=owner.discord,
@@ -2491,6 +2492,25 @@ def test_c_harness_the_lane_redirect_still_reaches_the_lane_schema(monkeypatch, 
     """Control: the connections the app opens inside a lane Env still land in
     the lane's schema, which is what the redirect is for."""
     assert live(monkeypatch, tmp_path, _lane_search_path) == SCHEMA
+
+
+# -- round 2, R1 MEDIUM Finding 1: the packs route's `index` --------------------------------
+
+def test_f1_index_answers_one_pack_and_takes_no_cursor_and_no_pack_id(monkeypatch, tmp_path):
+    """S3's `index`: the pack index - 1 places down the newest-first order,
+    answered as the `pack_id` filter answers it (the one pack and its five
+    prints); with `pack_id` or `before` beside it, or below 1, it is a 422."""
+    async def body(env):
+        owner, _subs, pack = await five(env)
+        r = await env.packs_json(owner.discord, index=1)
+        assert r.status_code == 200, (r.status_code, r.text[:200])
+        got = r.json()
+        assert [p["pack_id"] for p in got["packs"]] == [pack] and got["total"] == 1, got
+        assert len(got["packs"][0]["prints"]) == 5 and got["next_before"] is None, got
+        for extra in ({"index": 1, "pack_id": pack}, {"index": 1, "before": pack}, {"index": 0}):
+            r = await env.packs_json(owner.discord, **extra)
+            assert r.status_code == 422, (extra, r.status_code, r.text[:200])
+    live(monkeypatch, tmp_path, body)
 
 
 # -- end of part 3 --

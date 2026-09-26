@@ -28943,6 +28943,7 @@ async def internal_pc_packs(
     discord_id: str = Query(..., max_length=32),
     pack_id: str | None = Query(None, max_length=36),
     before: str | None = Query(None, max_length=36),
+    index: int | None = Query(None, ge=1, le=2147483647),
     limit: int = Query(5, ge=1, le=10),
     locale: str | None = Query(None, max_length=16),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
@@ -28952,11 +28953,15 @@ async def internal_pc_packs(
     summary rows - pack_id, status, source, kind, opened_at and the slot
     rarities from the stored roster (null when the roster cannot be read) -
     keyset-paged on (opened_at, id) like /pc/packs, `limit` at a time. No
-    summary row reads a print. With `pack_id` (the pack the bot is about to
-    reveal, and its pre-send re-read) the answer is that one pack, its
-    `prints` from _pc_roster_prints, and 404 unless it is this player's opened
-    pack. `actor_ref` is the resolved players.id, compared by the bot across
-    its reads. The renderer gate comes first, as on the strip route: this
+    summary row reads a print. With `index` (step 1 of the bot's /pack N: the
+    pack index - 1 places down that same order, reached by OFFSET inside the
+    one statement, never by walking the pages before it) or `pack_id` (the
+    pre-send re-read) the answer is that one pack and its `prints` from
+    _pc_roster_prints. `pack_id` answers 404 unless it is this player's opened
+    pack; an `index` past the last pack answers no pack, beside the `total`
+    that says how many there are. `index` takes neither `pack_id` nor
+    `before`. `actor_ref` is the resolved players.id, compared by the bot
+    across its reads. The renderer gate comes first, as on the strip route: this
     answer keys every face it lists (face_rev), and a box that cannot key a
     face answers the reason instead of a list without keys."""
     _require_internal_key(x_internal_key)
@@ -28972,6 +28977,8 @@ async def internal_pc_packs(
             _ = uuid.UUID(cursor)
         except Exception:
             raise HTTPException(status_code=422, detail="bad cursor")
+    if index is not None and (cursor or pack_id is not None):
+        raise HTTPException(status_code=422, detail="index takes no cursor and no pack_id")
     _pc_reveal_pace(pid, "json")
     loc = _pcp.effective_locale(locale, _pc_served_locales())
     rows = (await db.execute(text("""
@@ -28986,11 +28993,13 @@ async def internal_pc_packs(
                                        WHERE c.id = CAST(:before AS uuid)
                                          AND c.player_id = CAST(:pid AS uuid)))
          ORDER BY opened_at DESC, id DESC
-         LIMIT CAST(:lim AS integer)
-    """), {"pid": pid, "pack": pack_id, "before": cursor or None, "lim": int(limit) + 1})).mappings().all()
+         LIMIT CAST(:lim AS integer) OFFSET CAST(:skip AS integer)
+    """), {"pid": pid, "pack": pack_id, "before": cursor or None,
+           "lim": 1 if index is not None else int(limit) + 1,
+           "skip": index - 1 if index is not None else 0})).mappings().all()
     if pack_id is not None and not rows:
         raise HTTPException(status_code=404, detail="Not found")
-    more = len(rows) > int(limit)
+    more = index is None and len(rows) > int(limit)
     rows = rows[:int(limit)]
     packs = []
     for r in rows:
@@ -29004,6 +29013,10 @@ async def internal_pc_packs(
         packs.append({"pack_id": str(r["id"]), "status": r["status"], "source": r["source"],
                       "kind": r["kind"], "opened_at": _pc_iso(r["opened_at"]),
                       "rarities": [e["rarity"] for e in roster] if roster is not None else None})
+    if index is not None and rows:
+        # `index` found the pack; from here it is answered exactly as the
+        # `pack_id` filter answers it.
+        pack_id = str(rows[0]["id"])
     if pack_id is not None:
         ctx = await _pc_face_ctx(db, loc)
         packs[0]["prints"], _live = await _pc_roster_prints(db, pack_id, ctx)

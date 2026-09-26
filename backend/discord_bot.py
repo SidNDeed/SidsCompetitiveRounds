@@ -9288,39 +9288,39 @@ async def _pc_reveal_pack(ctx, index, private):
         await _pc_reveal_say(ctx, "Pack numbers start at 1 (your latest pack).", ephemeral)
         return
     me, locale = str(ctx.author.id), _pc_locale_of(ctx)
-    # The pack at `index`: summary pages, newest first, ten at a time.
-    pack_id, before, seen = None, None, 0
-    while pack_id is None:
-        params = {"discord_id": me, "limit": 10, "locale": locale}
-        if before:
-            params["before"] = before
-        status, body = await _pc_api("GET", "/internal/pc/packs", params=params)
-        if status != 200 or not isinstance(body, dict):
-            await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, body, "pack"), ephemeral)
-            return
-        rows, total = body.get("packs") or [], int(body.get("total") or 0)
-        if total == 0:
-            await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims today's free pack, and it opens"
-                                      " in the mod.", ephemeral)
-            return
-        if index > total:
-            await _pc_reveal_say(ctx, f"You have {total} opened pack{'s' if total != 1 else ''}:"
-                                      f" `/pack` goes from 1 (the latest) to {total}.", ephemeral)
-            return
-        if index <= seen + len(rows):
-            pack_id = str(rows[index - seen - 1].get("pack_id"))
-            break
-        seen += len(rows)
-        before = body.get("next_before")
-        if not rows or not before:
-            await _pc_reveal_say(ctx, "That pack could not be found - try again in a moment.", ephemeral)
-            return
-    # Step 1: that one pack, its slots from the stored roster.
-    params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
-    status, first = await _pc_api("GET", "/internal/pc/packs", params=params)
-    if status != 200 or _pc_reveal_prints(first, "pack") is None:
+    # Step 1: the pack at `index` and its slots, in one read - the route skips
+    # index - 1 packs of its newest-first order inside the same statement (S3's
+    # `index`). The walk from the newest summary page that stood here spent
+    # ceil(N/10) reads before step 1 from the same 20-a-minute JSON pacing, so
+    # /pack 181's final re-read was the 21st JSON read and was refused (R1
+    # MEDIUM Finding 1). /pack N is now two JSON reads whatever N is - this one
+    # and the final re-read - and S2.5's bound, which counts exactly one read
+    # before the leases, holds again. An index past any possible total goes as
+    # the route's largest: the answer's total then says how many packs there are.
+    status, first = await _pc_api("GET", "/internal/pc/packs",
+                                  params={"discord_id": me, "index": min(index, 2147483647), "locale": locale})
+    if status != 200 or not isinstance(first, dict):
         await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "pack"), ephemeral)
         return
+    total = int(first.get("total") or 0)
+    if total == 0:
+        await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims today's free pack, and it opens"
+                                  " in the mod.", ephemeral)
+        return
+    if index > total:
+        await _pc_reveal_say(ctx, f"You have {total} opened pack{'s' if total != 1 else ''}:"
+                                  f" `/pack` goes from 1 (the latest) to {total}.", ephemeral)
+        return
+    if not first.get("packs"):
+        await _pc_reveal_say(ctx, "That pack could not be found - try again in a moment.", ephemeral)
+        return
+    if _pc_reveal_prints(first, "pack") is None:
+        await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "pack"), ephemeral)
+        return
+    pack_id = str(first["packs"][0].get("pack_id"))
+    # The final re-read names the pack, never the index: a pack opened in
+    # between moves every index by one.
+    params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
 
     async def _reread():
         return await _pc_api("GET", "/internal/pc/packs", params=params, timeout=5.0)
