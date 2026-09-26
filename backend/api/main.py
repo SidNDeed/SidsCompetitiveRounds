@@ -364,18 +364,28 @@ def _rank_fallback_color(name: str) -> str:
 
 # 5-minute cache over rank_role_colors so per-row leaderboard lookups don't
 # hammer the table. Refreshed lazily; bot pushes invalidate it directly.
-_rank_colors_cache: dict = {"at": 0.0, "map": {}}
+_rank_colors_cache: dict = {"at": 0.0, "ok": False, "map": {}}
 
 
 async def _rank_colors(db: AsyncSession) -> dict:
     now = time.monotonic()
-    if now - _rank_colors_cache["at"] > 300:
+    if not _rank_colors_cache["ok"] or now - _rank_colors_cache["at"] > 300:
         try:
-            rows = (await db.execute(select(RankRoleColor))).scalars().all()
+            # Savepoint: this swallows its own error and serves the stale map,
+            # but its callers carry on issuing SQL on the same session -
+            # unguarded, a failed refresh aborted the TRANSACTION and the
+            # caller's next statement failed instead (the Discord reveal's row
+            # read among them, through _pc_face_ctx).
+            async with db.begin_nested():
+                rows = (await db.execute(select(RankRoleColor))).scalars().all()
             _rank_colors_cache["map"] = {r.name: r.color_hex for r in rows}
+            # Stamped on SUCCESS only, so a failure retries on the next call
+            # instead of being cached for 300 s. A cold failure does not raise:
+            # an empty map costs a rank title its colour, and nothing else.
+            _rank_colors_cache["ok"] = True
+            _rank_colors_cache["at"] = now
         except Exception as ex:
             print(f"[RANK] color cache refresh failed: {ex}")
-        _rank_colors_cache["at"] = now
     return _rank_colors_cache["map"]
 
 
