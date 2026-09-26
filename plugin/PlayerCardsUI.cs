@@ -831,8 +831,9 @@ namespace CompetitiveRounds
                 // text lines opted out above and the buttons had not (c4/c5).
                 foreach (var o in new[] { t.btnDiscardTxt, t.btnDupesTxt })
                     if (o != null) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }
-                // the binder's In a trade / Traded badge (V8 6.1), created last so it draws on top
-                AddBadge(t, name + "_bd", TILE_W - 24f, 13f);
+                // the binder's In a trade / Traded badge (V8 6.1), created last so it draws on
+                // top, just above the 22 px action row (root pad 3 + inner pad 4 below that row)
+                AddBadge(t, name + "_bd", TILE_W - 24f, 13f, 3f + 4f + 22f + 4f);
             }
             t.root.SetActive(false);
             return t;
@@ -1030,6 +1031,7 @@ namespace CompetitiveRounds
             if (p.signed) lines.Add("~ " + name + " ~");
             try { NativeUI.ShowInfoPopupRaw(name, string.Join("\n\n", lines.ToArray())); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] card view failed: {ex.Message}"); }
+            MaybeAddTextOfferButton(p);   // card trading (V8 6.1): the text view offers the card too
         }
 
         private static void FillTile(Tile t, ApiClient.PcPrint p, int dupes)
@@ -2524,7 +2526,7 @@ namespace CompetitiveRounds
             string[] a = w.Split(':');
             string verb = a[0];
             int n = -1;
-            if (a.Length > 1) int.TryParse(a[1], out n);
+            if (a.Length > 1 && verb != "pick" && verb != "offer" && !int.TryParse(a[1], out n)) n = -1;   // pick/offer carry a Steam id, not an index
             switch (verb)
             {
                 case "poll": tradeSummaryAt = 0f; if (id != null) ReadTrades(id, true); break;
@@ -2532,10 +2534,10 @@ namespace CompetitiveRounds
                 case "pick": if (a.Length > 1) StartCompose(a[1], null, null); break;
                 case "offer":
                     {
-                        var p = cardPopupTile != null ? cardPopupTile.print : null;
-                        if (p == null || a.Length < 2) { Plugin.Log.LogInfo("[PC] act: trade offer - no card view open"); return; }
-                        string pid = p.print_id;
-                        HideCardPopup();
+                        // the Offer button showing on a card view (face or text), then that player
+                        if (offerBtnGO == null || offerBtnPid == null || a.Length < 2) { Plugin.Log.LogInfo("[PC] act: trade offer - no Offer button showing"); return; }
+                        string pid = offerBtnPid;
+                        try { offerBtnHide?.Invoke(); } catch { }
                         StartCompose(a[1], null, pid);
                         break;
                     }
@@ -2599,6 +2601,8 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, string> actNonces = new Dictionary<string, string>();
         private static bool tradeSelfChecked;
         private static bool lastOnTrades;   // the last tick was on the Collection tab AND the Trades view
+        private static float lastTradesTickAt = -100f;   // the overlay does not tick while it is closed
+        private static GameObject offerBtnGO; private static string offerBtnPid; private static Action offerBtnHide;   // the card view's Offer button
         private static string tradePanelSig, tradeBadgeSig, tradesLabelPainted, collectionLabelPainted;
         private static object collectionLabelObj;
         // compose (V8 6.2)
@@ -2623,7 +2627,8 @@ namespace CompetitiveRounds
             lastReceivedOpen = null; pendingNotify.Clear();
             offeredIds = new HashSet<string>(StringComparer.Ordinal);
             armedTradeId = null; tradeActInFlight = false; actNonces.Clear();
-            lastOnTrades = false;
+            lastOnTrades = false; lastTradesTickAt = -100f;
+            offerBtnGO = null; offerBtnPid = null; offerBtnHide = null;
             tradePanelSig = null; tradeBadgeSig = null; tradesLabelPainted = null; collectionLabelPainted = null;
             EndCompose();
         }
@@ -2645,6 +2650,10 @@ namespace CompetitiveRounds
             ProcessTradeAnswers();
             // entering = the Trades view became visible (the tab AND the view): that read is forced
             bool onTrades = onTab && view == View.Trades;
+            // the overlay does not tick while it is closed: re-opening it on the
+            // Trades view is entering the view too, so a gap forgets the last tick
+            if (Now - lastTradesTickAt > 5f) lastOnTrades = false;
+            lastTradesTickAt = Now;
             bool entered = onTrades && !lastOnTrades;
             lastOnTrades = onTrades;
             if (armedTradeId != null && Now - armedTradeAt > PcTradeRules.ArmWindowSeconds) { armedTradeId = null; NativeUI.MarkDirty(); }
@@ -2951,14 +2960,16 @@ namespace CompetitiveRounds
                 var ch = go.AddComponent<ClickHandler>();
                 ch.onClick = () => OnTileClick(tile);
             }
-            if (withBadge) AddBadge(t, name + "_bd", MINI_W - 6f, 12f);
+            if (withBadge) AddBadge(t, name + "_bd", MINI_W - 6f, 12f, 4f);
             t.root.SetActive(false);
             return t;
         }
 
-        /// <summary>The badge strip across the top of a tile: out of the tile's
-        /// layout (ignoreLayout) and click-through, hidden until painted.</summary>
-        private static void AddBadge(Tile t, string name, float w, float fontSize)
+        /// <summary>The badge strip along the bottom of a tile, `bottom` above its
+        /// lower edge (on a binder tile, just above the action row), clear of the
+        /// name at the top: out of the tile's layout (ignoreLayout) and
+        /// click-through, hidden until painted.</summary>
+        private static void AddBadge(Tile t, string name, float w, float fontSize, float bottom)
         {
             var go = UIFactory.CreatePanel(name, t.root.transform, new Color(0f, 0f, 0f, 0.80f));
             try
@@ -2974,8 +2985,8 @@ namespace CompetitiveRounds
             }
             catch { }
             var rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0.5f, 1f); rt.anchorMax = new Vector2(0.5f, 1f); rt.pivot = new Vector2(0.5f, 1f);
-            rt.anchoredPosition = new Vector2(0f, -4f); rt.sizeDelta = new Vector2(w, fontSize + 8f);
+            rt.anchorMin = new Vector2(0.5f, 0f); rt.anchorMax = new Vector2(0.5f, 0f); rt.pivot = new Vector2(0.5f, 0f);
+            rt.anchoredPosition = new Vector2(0f, bottom); rt.sizeDelta = new Vector2(w, fontSize + 8f);
             t.badge = UIFactory.CreateText(name + "_t", go.transform, "", fontSize, C_WARN, UIFactory.AlignMidCenter, sizeDelta: Vector2.zero);
             var tc = t.badge as Component;
             var trt = tc != null ? tc.GetComponent<RectTransform>() : null;
@@ -3352,21 +3363,57 @@ namespace CompetitiveRounds
         /// carries TRADE ids, never print ids).</summary>
         private static void MaybeAddOfferButton(ApiClient.PcPrint p, float h)
         {
-            if (cardPopupGO == null || p == null || p.discarded || !PcTradeRules.ProposeAllowed(tradeDiscovery) || OwnTradingClosed()) return;
-            var own = ApiClient.CachedPcCollection;
-            if (own == null || !own.prints.Exists(x => x.print_id == p.print_id && !x.discarded)) return;
-            if (IsOffered(p.print_id)) return;
-            string pid = p.print_id;
-            var btn = UIFactory.CreateButton("Offer", cardPopupGO.transform, "Offer in a trade", 16f, C_WHITE, C_BUY,
-                () => { HideCardPopup(); StartTradeSearch(pid); NativeUI.MarkDirty(); }, sizeDelta: new Vector2(260, 40));
-            var rt = btn.GetComponent<RectTransform>();
+            if (cardPopupGO == null || !OfferAllowed(p)) return;
             float fw = h * PlayerCardFaces.CARD_W / PlayerCardFaces.CARD_H;
+            AddOfferButton(cardPopupGO.transform, p.print_id, fw / 2f + 24f, HideCardPopup, "face");
+        }
+
+        private static bool OfferAllowed(ApiClient.PcPrint p)
+        {
+            if (p == null || p.discarded || !PcTradeRules.ProposeAllowed(tradeDiscovery) || OwnTradingClosed()) return false;
+            var own = ApiClient.CachedPcCollection;
+            if (own == null || !own.prints.Exists(x => x.print_id == p.print_id && !x.discarded)) return false;
+            return !IsOffered(p.print_id);
+        }
+
+        /// <summary>The text card view (a print with no face to show) is
+        /// NativeUI's info popup: Offer in a trade sits to the right of its box,
+        /// as it does beside a face, parented to that popup so closing the popup
+        /// removes it. The newest popup is the last child of that name: one
+        /// closed this frame may not be destroyed yet.</summary>
+        private static void MaybeAddTextOfferButton(ApiClient.PcPrint p)
+        {
+            if (!OfferAllowed(p)) return;
+            Transform pop = null;
+            try
+            {
+                var overlay = NativeUI.OverlayRoot;
+                for (int i = overlay != null ? overlay.childCount - 1 : -1; i >= 0 && pop == null; i--)
+                {
+                    var c = overlay.GetChild(i);
+                    if (c != null && c.name == "CR_InfoPopup") pop = c;
+                }
+            }
+            catch { }
+            if (pop == null) return;
+            float bw = 960f;
+            var box = pop.Find("Box") as RectTransform;
+            if (box != null && box.sizeDelta.x > 0f) bw = box.sizeDelta.x;
+            AddOfferButton(pop, p.print_id, bw / 2f + 24f, NativeUI.HideInfoPopup, "text");
+        }
+
+        private static void AddOfferButton(Transform parent, string pid, float x, Action hide, string kind)
+        {
+            var btn = UIFactory.CreateButton("Offer", parent, "Offer in a trade", 16f, C_WHITE, C_BUY,
+                () => { hide(); StartTradeSearch(pid); NativeUI.MarkDirty(); }, sizeDelta: new Vector2(260, 40));
+            var rt = btn.GetComponent<RectTransform>();
             rt.anchorMin = new Vector2(0.5f, 0.5f); rt.anchorMax = new Vector2(0.5f, 0.5f); rt.pivot = new Vector2(0f, 0.5f);
-            rt.anchoredPosition = new Vector2(fw / 2f + 24f, 0f);
+            rt.anchoredPosition = new Vector2(x, 0f);
             // the popup's own control, like its backdrop: it must work while the popup holds the input
             var ch = btn.GetComponent<ClickHandler>();
             if (ch != null) ch.bypassModalBlock = true;
-            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] offer-button shown=1");
+            offerBtnGO = btn; offerBtnPid = pid; offerBtnHide = hide;
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] offer-button shown=1 view=" + kind);
         }
 
         // -- the proposal flow (V8 6.2) ----------------------------------------
