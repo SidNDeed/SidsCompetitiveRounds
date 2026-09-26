@@ -5469,8 +5469,17 @@ def _escape_md(text) -> str:
 
     TRUNCATE FIRST, then escape -- never the other way round. Cutting an
     escaped name can strand a lone backslash at its end, and that escapes
-    the row's closing ** instead."""
-    return re.sub(r"([\\*_~|`\[\]<>])", r"\\\1", str(text))
+    the row's closing ** instead.
+
+    A row is one line whatever the name holds (round 4, finding 16's newline
+    half): every line break becomes a single space before anything is
+    escaped -- CR, LF, a CRLF pair (one break, one space), and the other
+    characters str.splitlines() breaks a line on (VT, FF, FS, GS, RS, NEL,
+    and the Unicode line and paragraph separators). A name like
+    "Alice\\n# 2 Fake" no longer starts a line of its own, so it can
+    neither fake an extra row nor open a heading, a list or a quote."""
+    one_line = re.sub(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", " ", str(text))
+    return re.sub(r"([\\*_~|`\[\]<>])", r"\\\1", one_line)
 
 
 def _lb_line(e, rank=None):

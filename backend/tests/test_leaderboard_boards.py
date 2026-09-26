@@ -406,11 +406,27 @@ _MD_ROWS = {"_lb_line": _rows_1v1, "_lb_line_2v2": _rows_2v2,
             "_lb_line_ffa": _rows_ffa, "_lb_line_ovt": _rows_ovt}
 
 
+# Round 4, finding 16's newline half: the characters str.splitlines() breaks a
+# line on. A CRLF pair is one break.
+_MD_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _one_line(name):
+    """Every line break one space, a CRLF pair one break (round 4)."""
+    out, i = [], 0
+    while i < len(name):
+        step = 2 if name.startswith("\r\n", i) else 1
+        out.append(" " if name[i] in _MD_BREAKS else name[i])
+        i += step
+    return "".join(out)
+
+
 def _expected_md(name):
-    """The name as a row must show it: cut to 24 characters FIRST, then each
-    significant character preceded by one backslash. Written out here, not
-    taken from the bot's helper, so the helper does not grade itself."""
-    return "".join("\\" + ch if ch in _MD_LITERAL else ch for ch in name[:24])
+    """The name as a row must show it: cut to 24 characters FIRST, then every
+    line break a single space, and each significant character preceded by one
+    backslash. Written out here, not taken from the bot's helper, so the
+    helper does not grade itself."""
+    return "".join("\\" + ch if ch in _MD_LITERAL else ch for ch in _one_line(name[:24]))
 
 
 def _bold_segment(line):
@@ -429,8 +445,11 @@ def _bold_segment(line):
 
 
 @pytest.mark.parametrize("renderer", sorted(_MD_ROWS))
-@pytest.mark.parametrize("name", [_MD_NAME, "x" * 23 + "*tail", "y" * 23 + "\\tail"],
-                         ids=["every-significant-character", "cut-at-a-star", "cut-at-a-backslash"])
+@pytest.mark.parametrize("name", [_MD_NAME, "x" * 23 + "*tail", "y" * 23 + "\\tail",
+                                  "Alice\n# 2 Fake", "Bob\r\n- 3 Fake", "Cy\r> 4 Fake",
+                                  "Dee\u2028**5 Fake**", "z" * 23 + "\r\nrow"],
+                         ids=["every-significant-character", "cut-at-a-star", "cut-at-a-backslash",
+                              "lf", "crlf", "cr", "line-separator", "crlf-cut-at-24"])
 def test_a_display_name_is_literal_inside_every_board_row(ns, renderer, name):
     """A display name went into `**...**` as typed, so a name carrying * _ `
     ~ | could close the bold early, open italics, code or a spoiler, or bleed
@@ -438,11 +457,34 @@ def test_a_display_name_is_literal_inside_every_board_row(ns, renderer, name):
     after the 24-character cut: the two cut cases put a * or a backslash
     exactly at character 24, where escaping first and cutting second strands
     a lone backslash that swallows the closing **. Controls: the escape
-    skipped at one renderer reds that renderer's cases only."""
+    skipped at one renderer reds that renderer's cases only.
+
+    Round 4, finding 16's newline half: the frozen requirement is literal,
+    SINGLE-ROW text, newlines included. The round-3 report's example
+    ("Alice" then a new line and "# 2 Fake") still made an apparent extra
+    row. Every line break is now one space, and the row one line."""
     row = _MD_ROWS[renderer](1)[0]
     row["display_name"] = name
     line = ns[renderer](row, 1)
     assert _bold_segment(line) == _expected_md(name), (renderer, line)
+    assert len(line.splitlines()) == 1, (renderer, line)
+
+
+@pytest.mark.parametrize("renderer", sorted(_MD_ROWS))
+def test_a_line_break_in_a_name_never_makes_a_second_row(ns, renderer):
+    """Round 4, finding 16's newline half, on a whole board: three players
+    whose names carry a LF, a CRLF pair and a Unicode line separator, each
+    followed by text shaped like a row, render as exactly three rows.
+
+    MUTATION: the breaks left in, or only LF made a space. Must fail."""
+    rows = _MD_ROWS[renderer](3)
+    for r, name in zip(rows, ("Alice\n# 2 Fake", "Bob\r\n`#  3` Fake", "Cy\u2028> 4 Fake")):
+        r["display_name"] = name
+    board = next(b for b in ns["BOARDS"] if b["line"] is ns[renderer])
+    embeds = ns["_build_board_embeds"](board, rows, 3, 0, 1)
+    header, body = embeds[0].description.split("\n\n", 1)
+    assert header.startswith("Updated <t:"), header
+    assert len(body.splitlines()) == 3, body
 
 
 @pytest.mark.parametrize("renderer", sorted(_MD_ROWS))
