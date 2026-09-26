@@ -14699,11 +14699,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 15f, C_LABEL, sizeDelta: new Vector2(748, 22));
             UIFactory.SetWordWrap(txtConsentStatus, true); UIFactory.SetTextAutoHeight(txtConsentStatus, 22f);
             // Item 5 companion: point players at the chat language channels.
-            // 14f (13f on the old page): at 13f this face drops the line's
-            // dash, as the comment on SetDetReason records.
             var note = UIFactory.CreateText("SLangChatNote", extras,
                 "Chat has language channels - use the dropdown on the Home tab, or tap Alt while typing, to switch.",
-                14f, C_DIM, sizeDelta: new Vector2(748, 18));
+                13f, C_DIM, sizeDelta: new Vector2(748, 18));
             UIFactory.SetWordWrap(note, true); UIFactory.SetTextAutoHeight(note, 18f);
             var sdd = UIFactory.CreateText("SDD", extras,
                 "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' " +
