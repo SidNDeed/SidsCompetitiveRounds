@@ -38,6 +38,7 @@ from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_relea
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
+import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from schemas import (
     AchievementUnlockRequest,
@@ -3859,7 +3860,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:42577 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:42670 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3925,7 +3926,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:42389 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:42482 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -3995,7 +3996,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:42292 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:42385 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6318,6 +6319,17 @@ _FFA_HOLD_FENCES = 1
 # route carry it; a box on the build before round 2 answers without the key.
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
+# TICKET-REDACTION, reported on /health as `ticket_redaction`. A marker whose
+# only purpose is to be probed (#306): nothing reads it and no behaviour
+# depends on it. 1 = this build applies log_redaction's credential rule (the
+# Steam session ticket's value becomes its marker) at the bug-report receive
+# path before the first write, inside the bundle scrub that every door serving
+# a stored bundle runs, and on the free-text fields every bug-report read door
+# serves. The batch adds no route -- every door it changes answers on the build
+# before it -- so this value is the release train's build discriminator for it.
+# Both arms of the route carry it; a box on the build before answers without
+# the key. Raise it when a later change to the rule must be proven deployed.
+_TICKET_REDACTION_MARKER = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6332,6 +6344,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
+                              ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
@@ -6343,6 +6356,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
+                              ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               pc_card_themes=_pc_card_themes_word())
 
@@ -36111,6 +36125,18 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 #   * Discord snowflakes -- an off-platform identity linking a game account to
 #     a person. Nothing in a gameplay log needs one.
 #
+# SCRUBBED -- credentials:
+#   * The Steam session ticket. ROUNDS' own Steam runtime logs the web-API
+#     ticket it receives as "Steam Login success. Session Ticket: <hex>", and
+#     that hex can be the credential POST /api/v1/auth/steam exchanges for a
+#     session. log_redaction.py holds the one rule: the value becomes
+#     "[redacted len=<n> sha256=<first 8 hex>]". It runs FIRST in pass one
+#     below, so every API door that serves a stored bundle applies it, and
+#     submit_bug_report applies the same rule before its first write, so no
+#     bundle stored by this build holds a ticket. Bundles stored before it
+#     still do on disk; this read-time pass is what keeps those out of the API.
+#     (The ops `bug-log:` verb reads the file itself and is outside this pass.)
+#
 # NOT SCRUBBED -- pseudonymous game identifiers with real diagnostic value:
 #   * SteamID64s and display names of LIVE accounts. They are public on every
 #     leaderboard, and they are how an admin answers "who did this player
@@ -36127,9 +36153,10 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 # header on the download endpoint, and as a `log_scrub_version` field on
 # GET /bug-reports/{id} -- so a borrower can always prove which ruleset
 # produced what they are holding. Bump it whenever the rules below change.
-_BUG_LOG_SCRUB_VERSION = "1"
+_BUG_LOG_SCRUB_VERSION = "2"             # 2 = the credential class above joined the ruleset
 _BUG_LOG_MAX_GZ = 8 * 1024 * 1024        # refuse a stored blob bigger than this
 _BUG_LOG_MAX_TEXT = 16 * 1024 * 1024     # gunzip ceiling
+_BUG_LOG_CARRY_MAX = 1 << 20             # longest unfinished ticket the over-ceiling read holds back
 _BUG_LOG_STEAMID_PROBE_MAX = 500         # distinct ids fed to the purge lookup
 
 # Quote characters are deliberately NOT in these exclusion classes: a path
@@ -36161,6 +36188,16 @@ def _read_bug_log_sync(path_str: str) -> str:
 
     Overflow keeps the TAIL. A log's recent lines are the ones that explain
     the crash; head-truncating a bundle discards the part being asked about.
+
+    Overflow applies the CREDENTIAL RULE BEFORE THE WINDOW CUTS. A text that
+    fits comes back whole and _scrub_pass_one applies the rule to all of it.
+    One that does not is cut to its tail here, and a tail cut made first can
+    drop a ticket's label and keep its value, which the rule, run afterwards,
+    no longer recognises. So every piece is redacted as it arrives, before
+    anything is dropped; only an unfinished end that the next piece could
+    still complete waits for it (log_redaction.settled_length). An unfinished
+    end longer than _BUG_LOG_CARRY_MAX is no ticket any client writes: the
+    read is refused rather than holding it without bound or cutting it.
     """
     p = _pathlib.Path(path_str)
     if not p.exists():
@@ -36177,19 +36214,31 @@ def _read_bug_log_sync(path_str: str) -> str:
         # [-N:] off that yields characters 1..N -- the beginning of the file,
         # under a banner promising the end of it (review MEDIUM). Stream the
         # remainder and keep a rolling window instead, so the banner is true.
-        window = data[-_BUG_LOG_MAX_TEXT:]
+        # The window holds REDACTED text only: `pending` is what has been read
+        # and not yet redacted, and it reaches the window through the rule.
+        window, pending, dropped = "", data, False
         while True:
             chunk = f.read(1 << 20)
+            pending += chunk
+            settled = _logred.settled_length(pending) if chunk else len(pending)
+            if len(pending) - settled > _BUG_LOG_CARRY_MAX:
+                raise ValueError(f"stored log holds an unfinished ticket-shaped run over "
+                                 f"{_BUG_LOG_CARRY_MAX} characters; not served")
+            window += _logred.redact_credentials(pending[:settled])
+            pending = pending[settled:]
+            if len(window) > _BUG_LOG_MAX_TEXT:
+                window, dropped = window[-_BUG_LOG_MAX_TEXT:], True
             if not chunk:
                 break
-            window = (window + chunk)[-_BUG_LOG_MAX_TEXT:]
+    if not dropped:
+        return window    # the markers alone brought it under the ceiling
     return ("[scrubber: bundle exceeded the read ceiling; OLDEST lines dropped, "
             "tail kept]\n") + window
 
 
 def _scrub_pass_one(body: str) -> tuple:
-    """Regex half, stage 1: path usernames + discord ids, and collect the
-    distinct SteamID64s the caller must ask the database about.
+    """Regex half, stage 1: credentials, path usernames + discord ids, and
+    collect the distinct SteamID64s the caller must ask the database about.
 
     SYNCHRONOUS AND THREAD-DESTINED. Review measured the split the first
     version got backwards: the gunzip that was moved off the loop costs ~0.035s
@@ -36198,9 +36247,13 @@ def _scrub_pass_one(body: str) -> tuple:
     cheap half and keeping the expensive half is not an optimisation. Touches
     no session and no async state, so it is safe in a worker thread.
     """
-    counts = {"os_user": 0, "discord_id": 0, "deleted_steam_id": 0}
+    counts = {"os_user": 0, "discord_id": 0, "deleted_steam_id": 0, "credential": 0}
     if not body:
         return body, counts, []
+
+    # Credentials first (the posture above): every Steam session ticket value
+    # is its marker before any other pass reads the text.
+    body, counts["credential"] = _logred.redact_credentials_counted(body)
 
     def _user(m):
         counts["os_user"] += 1
@@ -36357,7 +36410,16 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
 
     log_filename: str | None = None
     log_bytes_stored: int | None = None
+    # No credential reaches storage (the bug-log posture above): the Steam
+    # session ticket's value is already its marker in the bundle AND in the two
+    # free-text fields, where a pasted log line lands. The rule ran in
+    # BugReportRequest's validators (schemas.py), over the text as the client
+    # sent it and BEFORE their length clamps -- a clamp made first can leave the
+    # rule too little of a ticket to recognise -- so none of the three, as the
+    # flush (the row) and the open() (the file) below write them, carries one.
     log_blob = (req.log_text or "").strip()
+    description = req.description.strip()
+    repro_steps = (req.repro_steps or "").strip() or None
 
     report = BugReport(
         player_id=player.id if player else None,
@@ -36367,8 +36429,8 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         game_version=req.game_version,
         severity=severity,
         category=category,
-        description=req.description.strip(),
-        repro_steps=(req.repro_steps or "").strip() or None,
+        description=description,
+        repro_steps=repro_steps,
     )
     db.add(report)
     await db.flush()  # need report.id for the filename
@@ -36461,7 +36523,9 @@ async def list_bug_reports(
                 severity=r["severity"],
                 category=r["category"],
                 status=r["status"],
-                description=r["description"],
+                # Read-time credential rule: rows stored before it reached
+                # ingest still hold the text they were sent.
+                description=_logred.redact_credentials(r["description"]),
                 has_log=r["log_filename"] is not None,
                 log_bytes=r["log_bytes"],
                 kind=r["kind"] or "report",
@@ -36510,7 +36574,7 @@ async def recent_bug_report_events(
         text(f"""SELECT bre.id              AS event_id,
                        bre.bug_report_id::text AS bug_report_id,
                        br.bug_number,
-                       LEFT(br.description, 140) AS description_snippet,
+                       br.description,
                        br.steam_id        AS reporter_steam_id,
                        reporter.discord_id AS reporter_discord_id,
                        reporter.display_name AS reporter_name,
@@ -36535,7 +36599,10 @@ async def recent_bug_report_events(
                 "event_id": str(r["event_id"]),
                 "bug_report_id": r["bug_report_id"],
                 "bug_number": r["bug_number"] or 0,
-                "description_snippet": r["description_snippet"] or "",
+                # The credential rule BEFORE the 140-character cut, which used
+                # to be LEFT() in the SQL: cutting first could leave the head of
+                # a ticket too short for the rule to recognise.
+                "description_snippet": (_logred.redact_credentials(r["description"]) or "")[:140],
                 "reporter_steam_id": r["reporter_steam_id"],
                 "reporter_discord_id": r["reporter_discord_id"],
                 "reporter_name": r["reporter_name"],
@@ -36544,7 +36611,11 @@ async def recent_bug_report_events(
                 "event_type": r["event_type"],
                 "old_status": r["old_status"],
                 "new_status": r["new_status"],
-                "comment": r["comment"],
+                # Read-time rule (the T3 choice): a comment stored before the
+                # store-time rule still holds what it was sent. This is the
+                # bot's own feed; the reporter DM and the bug-thread mirror
+                # both republish this field as served.
+                "comment": _logred.redact_credentials(r["comment"]),
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
             for r in rows
@@ -36645,7 +36716,8 @@ async def recent_bug_reports(
                 "severity": r["severity"],
                 "category": r["category"],
                 "status": r["status"],
-                "description": r["description"],
+                # Read-time credential rule: this text becomes a Discord post.
+                "description": _logred.redact_credentials(r["description"]),
             }
             for r in rows
         ],
@@ -36720,7 +36792,9 @@ async def get_bug_report(
             "event_type": e["event_type"],
             "old_status": e["old_status"],
             "new_status": e["new_status"],
-            "comment": e["comment"],
+            # Read-time rule, as on the event feed: rows stored before the
+            # store-time rule still hold what they were sent.
+            "comment": _logred.redact_credentials(e["comment"]),
             "created_at": e["created_at"].isoformat() if e["created_at"] else None,
         }
         for e in ev_rows
@@ -36732,6 +36806,13 @@ async def get_bug_report(
         out["player_id"] = str(out["player_id"])
     out["created_at"] = out["created_at"].isoformat() if out["created_at"] else None
     out["updated_at"] = out["updated_at"].isoformat() if out["updated_at"] else None
+    # Read-time credential rule on the stored free-text columns (the bundle got
+    # it inside _scrub_bug_log): rows stored before it reached ingest still hold
+    # the text they were sent, and triage_notes gets it whatever wrote it --
+    # every door that returns stored bug-report text applies the rule.
+    out["description"] = _logred.redact_credentials(out["description"])
+    out["repro_steps"] = _logred.redact_credentials(out["repro_steps"])
+    out["triage_notes"] = _logred.redact_credentials(out["triage_notes"])
     out["log_text"] = log_text
     # The scrub receipt, on THIS door too. The download endpoint returns it as
     # an X-Scrub-Version header, and the posture comment claimed the version
@@ -36753,6 +36834,14 @@ _BUG_REPORT_VALID_STATUSES = ("open", "triaged", "resolved", "wontfix", "dupe")
 
 async def _record_bug_event(db, report_id, actor_steam_id, actor_name, event_type,
                             old_status=None, new_status=None, comment=None):
+    # Every comment reaches bug_report_events.comment through here: the admin
+    # comment, a status change's optional comment, the internal comment and the
+    # reporter's own reply that the bot relays from a Discord DM (the one other
+    # writer, submit_bug_report's "created" event, stores none). A pasted log
+    # line lands in a comment as easily as in a description, so the credential
+    # rule is applied once, at the store, for all of them (None and "" come
+    # back unchanged). The reply path applies it before its own length cut too.
+    comment = _logred.redact_credentials(comment)
     db.add(BugReportEvent(
         bug_report_id=report_id,
         actor_steam_id=actor_steam_id,
@@ -36847,7 +36936,7 @@ async def download_bug_report_log(
 
     body, counts = await _scrub_bug_log(db, raw)
     print(f"[BUG-LOG] #{row['bug_number']} downloaded by {admin_steam_id} "
-          f"({len(body)} chars; redacted os_user={counts['os_user']} "
+          f"({len(body)} chars; redacted credential={counts['credential']} os_user={counts['os_user']} "
           f"discord={counts['discord_id']} deleted_steam={counts['deleted_steam_id']})")
 
     return PlainTextResponse(
@@ -36982,7 +37071,11 @@ async def user_comment_on_bug_report(
     # Key-gated, not source-IP-gated — same reasoning as
     # internal_comment_on_bug_report above. The bot already holds the key.
     _require_internal_key(x_internal_key)
-    comment = (req.comment or "").strip()
+    # The credential rule BEFORE the 2000-character cut, the order the event
+    # feed's description_snippet uses: a cut made first can leave the head of a
+    # ticket too short for the rule to recognise. _record_bug_event applies the
+    # rule again at the store, where it is then a no-op.
+    comment = _logred.redact_credentials((req.comment or "").strip())
     if not comment:
         raise HTTPException(400, "Comment cannot be empty")
     if len(comment) > 2000:
@@ -42684,7 +42777,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:3964 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:3965 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and

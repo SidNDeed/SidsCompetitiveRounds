@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+import log_redaction as _schema_logred   # the credential rule (standard library only); BugReportRequest applies it before its clamps
+
 
 # ── Match Submission ───────────────────────────────────────────
 
@@ -833,6 +835,15 @@ class HealthResponse(BaseModel):
     # value is what tells its build from the one before it. Absent on any
     # build before round 2.
     rj_triage: int | None = None
+    # ticket_redaction: whether this build applies the credential rule
+    # (main._TICKET_REDACTION_MARKER; 1 = log_redaction's Steam session ticket
+    # rule at the bug-report receive path before the first write, in the bundle
+    # scrub every stored-bundle door runs, and on the free-text fields every
+    # bug-report read door serves). A code constant, equal on both boxes by
+    # construction, probed by the release train and read by nothing else
+    # (#306): the batch adds no route, so this value is what tells its build
+    # from the one before it. Absent on any build before it.
+    ticket_redaction: int | None = None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
@@ -1036,12 +1047,26 @@ class BugReportRequest(BaseModel):
             return v[:64]
         return v
 
+    # THE CREDENTIAL RULE RUNS HERE, BEFORE EACH CLAMP (log_redaction.py). This
+    # is where the text of a bug report is first received, and the clamps below
+    # are its first cut: a Steam session ticket that straddles one can keep,
+    # after a head cut, a head of its value shorter than the rule's 32
+    # characters, and after the log's tail cut, its value without its label.
+    # Either way the rule no longer recognises what survives, and what survives
+    # is part of the credential. So the rule runs over the text as sent, then
+    # the cut.
+    # It runs on the event loop, where FastAPI has just decoded the body: over a
+    # 12 MB log, 6.6 ms with no ticket and 15.9 ms with one, against 38.6 ms for
+    # the JSON decode of the same body (measured on a development seat, 2026-09-25).
+
     @field_validator("description", "repro_steps", mode="before")
     @classmethod
     def _clamp_text(cls, v):
         # Keep the HEAD of free-text fields (the user's own words come first).
-        if isinstance(v, str) and len(v) > 8000:
-            return v[:8000]
+        if isinstance(v, str):
+            v = _schema_logred.redact_credentials(v)    # the rule, over the text as sent
+            if len(v) > 8000:
+                v = v[:8000]                            # then the head is kept
         return v
 
     @field_validator("log_text", mode="before")
@@ -1050,8 +1075,10 @@ class BugReportRequest(BaseModel):
         # Keep the TAIL of the log — the most recent events are what matter for a
         # bug report. 12MB pre-gzip ceiling (matches the prior intent) but as a
         # truncation, not a 422-triggering hard cap.
-        if isinstance(v, str) and len(v) > 12_000_000:
-            return v[-12_000_000:]
+        if isinstance(v, str):
+            v = _schema_logred.redact_credentials(v)    # the rule, over the log as sent
+            if len(v) > 12_000_000:
+                v = v[-12_000_000:]                     # then the tail is kept
         return v
 
 
