@@ -1168,9 +1168,14 @@ _FAQ_ACHIEVEMENTS_TEXT = (
 async def _faq_top_player(message):
     """Dynamic: read the live leaderboard and name the top player(s)."""
     data = await api_get("/leaderboard?limit=3&min_matches=1")
-    entries = (data or {}).get("entries") or []
-    if not entries:
+    entries = (data or {}).get("entries")
+    if entries is None:
         return "Couldn't reach the leaderboard right now — try `/lb` in a minute."
+    if not entries:
+        # An empty board is an answer, not a failed read (round 4, finding
+        # 24): nobody meets the board's active or minimum-match filter.
+        return ("Nobody is on the ranked leaderboard right now. `/lb all` also lists "
+                "the players who have not played for a while.")
     top = entries[0]
     line = (f"Right now the top-rated player is **{_escape_md(top['display_name'])}** at "
             f"**{top['rating']}** ({top['wins']}W/{top['losses']}L).")
@@ -5309,8 +5314,12 @@ async def cmd_rank(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 async def get_lb_position(steam_id):
+    # "?" only when a read fails. An empty list is an answer (round 4,
+    # finding 24): nobody meets the active or minimum-match filter, and the
+    # lookup goes on to the full list below as it does for any player not on
+    # this one.
     data = await api_get("/leaderboard?limit=200&min_matches=1")
-    if not data or not data.get("entries"): return "?"
+    if not data or data.get("entries") is None: return "?"
     for e in data["entries"]:
         if e["steam_id"] == steam_id: return str(e["rank"])
     # Item d: the default board hides players not seen for LB_ACTIVE_DAYS days.
@@ -5319,7 +5328,8 @@ async def get_lb_position(steam_id):
     # a player absent from BOTH lists. The api's limit cap (500) is used here
     # because the unfiltered list is the longer one.
     data = await api_get("/leaderboard?limit=500&min_matches=1&include_inactive=true")
-    for e in (data or {}).get("entries") or []:
+    if not data or data.get("entries") is None: return "?"   # unknown, not "Unranked"
+    for e in data["entries"]:
         if e["steam_id"] == steam_id:
             if e.get("inactive"):
                 return f"{e['rank']} (inactive {LB_ACTIVE_DAYS}d+)"
@@ -5573,7 +5583,12 @@ async def cmd_leaderboard(ctx, page: str = "1", scope: str = ""):
     offset = (page - 1) * per_page
     data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1"
                          + ("&include_inactive=true" if include_inactive else ""))
-    if not data or not data.get("entries"): await ctx.send("❌ No data."); return
+    # A failed read says so; an empty page is an answer (round 4, finding 24)
+    # -- nobody meets the active or minimum-match filter, or the page is past
+    # the last one -- and renders as an empty board.
+    if not data or data.get("entries") is None:
+        await ctx.send("❌ Couldn't reach the leaderboard right now -- try again in a minute.")
+        return
     # Rank is derived from offset + position, NOT from entry["rank"] — the
     # server double-adds offset to an already-absolute ROW_NUMBER (see
     # _lb_line docstring), which made /lb 2 start at #201 instead of #101.
@@ -5583,7 +5598,10 @@ async def cmd_leaderboard(ctx, page: str = "1", scope: str = ""):
     total_pages = max(1, (total + per_page - 1) // per_page)
     # 50 rows can still exceed one embed's 4096-char description in the worst
     # case — split across up to 3 embeds in ONE message.
-    descs = _split_lb_descriptions(lines)
+    if not lines and page > total_pages:
+        descs = [f"(no players on page {page}; the last page is {total_pages})"]
+    else:
+        descs = _split_lb_descriptions(lines)
     embeds = []
     for ci, desc in enumerate(descs):
         em = discord.Embed(

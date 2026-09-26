@@ -1586,3 +1586,117 @@ def test_a_failed_probe_never_blocks_the_board():
     assert n2["_ch"].titles() == [T_1V1]
     assert any("inactive count fetch failed" in ln for ln in n2["_log"])
     assert "inactive hidden" not in n2["_ch"].messages[0].embeds[-1].footer
+
+
+# -- round 4, finding 24: an empty board is an answer, not a failed read -------
+
+ONE_SHOT_FUNC = {"rank_emoji", "get_rank_name", "_escape_md", "_lb_line", "_split_lb_descriptions",
+                 "get_lb_position", "cmd_leaderboard", "_faq_top_player"}
+ME = "76561190000000042"
+TOP3 = "/leaderboard?limit=3&min_matches=1"
+ACTIVE = "/leaderboard?limit=200&min_matches=1"
+EVERYONE = "/leaderboard?limit=500&min_matches=1&include_inactive=true"
+PAGE1 = "/leaderboard?limit=50&offset=0&min_matches=1"
+
+
+class _Ctx:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, embeds=None, embed=None):
+        self.sent.append((content, embeds if embeds is not None else ([embed] if embed else [])))
+
+
+def _one_shot(payloads):
+    """The four one-shot leaderboard readers -- the FAQ's top player, the
+    profile footer's position (two reads) and /lb -- against _Api: a path
+    mapped to None is a failed read (api_get returns None for a non-200 or a
+    transport error)."""
+    api = _Api(payloads)
+    ns = {"discord": FAKE_DISCORD, "re": re, "api_get": api.get, "LB_ACTIVE_DAYS": 90}
+    body = _lift(want_func=ONE_SHOT_FUNC, want_assign={"RANK_ROLES"}, want_class=set())
+    exec(compile(ast.Module(body=body, type_ignores=[]), SRC, "exec"), ns)
+    ns["_api"] = api
+    return ns
+
+
+def _row(steam_id, rank, **kw):
+    return dict({"rank": rank, "steam_id": steam_id, "display_name": "Someone", "rating": 1500,
+                 "wins": 3, "losses": 2}, **kw)
+
+
+def test_an_empty_active_board_is_an_answer_on_the_profile_footer():
+    """Round 4, finding 24. The profile footer's position read took an empty
+    list for a failed read: "?", and no second look. The empty active board is
+    an answer now, and the lookup goes on to the full list as it does for any
+    player who is not on the active one.
+
+    MUTATION: the first read's empty list taken for a failure again. Must fail."""
+    ns = _one_shot({ACTIVE: {"entries": [], "total_players": 0},
+                    EVERYONE: {"entries": [_row(ME, 4, inactive=True)], "total_players": 1}})
+    assert _run(ns["get_lb_position"](ME)) == "4 (inactive 90d+)"
+    assert ns["_api"].calls == [ACTIVE, EVERYONE]
+    ns = _one_shot({ACTIVE: {"entries": [], "total_players": 0},
+                    EVERYONE: {"entries": [], "total_players": 0}})
+    assert _run(ns["get_lb_position"](ME)) == "Unranked"
+
+
+def test_a_failed_read_is_a_question_mark_on_the_profile_footer_never_unranked():
+    """A read that fails gives "?" -- unknown -- at either of the two reads.
+    The second one used to fall through to "Unranked", which says the player
+    is on neither list, from a list that was never read.
+
+    MUTATION: the second read's failure taken for an empty list again. Must fail."""
+    ns = _one_shot({ACTIVE: None})
+    assert _run(ns["get_lb_position"](ME)) == "?"
+    assert ns["_api"].calls == [ACTIVE]
+    ns = _one_shot({ACTIVE: {"entries": [_row("76561190000000001", 1)], "total_players": 1},
+                    EVERYONE: None})
+    assert _run(ns["get_lb_position"](ME)) == "?"
+    ns = _one_shot({ACTIVE: {"entries": [_row(ME, 7)], "total_players": 9}})
+    assert _run(ns["get_lb_position"](ME)) == "7"
+
+
+def test_lb_shows_an_honest_empty_board_and_says_it_failed_only_when_the_read_fails():
+    """/lb on a board nobody is on (nobody meets the active or minimum-match
+    filter) shows the empty board, not a failed read's reply; a failed read
+    says it could not reach the leaderboard.
+
+    MUTATION: the empty list taken for a failure again. Must fail."""
+    ns = _one_shot({PAGE1: {"entries": [], "total_players": 0}})
+    ctx = _Ctx()
+    _run(ns["cmd_leaderboard"](ctx))
+    [(content, embeds)] = ctx.sent
+    assert content is None and len(embeds) == 1
+    assert embeds[0].description == "(no players)"
+    assert "Page 1/1" in embeds[0].footer and "0 ranked players" in embeds[0].footer
+    ns = _one_shot({PAGE1: None})
+    ctx = _Ctx()
+    _run(ns["cmd_leaderboard"](ctx))
+    [(content, embeds)] = ctx.sent
+    assert "Couldn't reach the leaderboard" in content and embeds == []
+
+
+def test_a_page_past_the_last_one_says_which_page_is_the_last():
+    """/lb 5 on a two-page board: an answer too, and it says where the board
+    ends rather than showing an empty page as if the board were empty.
+
+    MUTATION: the past-the-end description removed. Must fail."""
+    ns = _one_shot({"/leaderboard?limit=50&offset=200&min_matches=1": {"entries": [], "total_players": 80}})
+    ctx = _Ctx()
+    _run(ns["cmd_leaderboard"](ctx, "5"))
+    [(content, embeds)] = ctx.sent
+    assert content is None
+    assert embeds[0].description == "(no players on page 5; the last page is 2)"
+
+
+def test_the_faq_top_player_tells_an_empty_board_from_an_unreachable_one():
+    """The FAQ's top-player answer said it could not reach the leaderboard
+    when the board was only empty.
+
+    MUTATION: the empty list taken for a failure again. Must fail."""
+    ns = _one_shot({TOP3: {"entries": [], "total_players": 0}})
+    empty = _run(ns["_faq_top_player"](None))
+    assert "Nobody is on the ranked leaderboard" in empty and "Couldn't reach" not in empty
+    ns = _one_shot({TOP3: None})
+    assert "Couldn't reach the leaderboard" in _run(ns["_faq_top_player"](None))
