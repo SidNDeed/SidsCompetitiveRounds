@@ -459,6 +459,48 @@ def test_the_consent_caption_is_in_the_extracted_registry():
         "translation pipeline cannot see it")
 
 
+# -- a consent revoke discards what was composed under it (round 3 finding 9) --
+
+# An assignment to a chat field, as (field, value), read from code only.
+_CHAT_WRITE = re.compile(r"\b(chat\w+)\s*=\s*([^;=][^;]*);")
+
+
+def _chat_discards(signature: str) -> set:
+    body = code_of(COMPETITIVE_UI, signature)
+    found = {(name, value.strip()) for name, value in _CHAT_WRITE.findall(body)}
+    if body.count("DropStash();") == 1:
+        found.add(("DropStash()", "called"))
+    return found
+
+
+def test_a_consent_revoke_discards_the_open_line_as_an_account_change_does():
+    """The consent-revoke path called DropChatDraftOnRevoke, which dropped
+    only the held stash: a revoke that the chat loop's own guard never reached
+    (a throwing draw path) left the typed line in the open box. It now
+    discards everything DropChatOnAccountChange discards -- the stash, the
+    open line and the resume notice -- and the two are pinned equal so
+    neither can gain a field the other forgets.
+
+    A shape pin only. The runtime proof is CompetitiveUI.RunChatRevokeSentinel
+    ([Broadcast] TestChatRevokeSentinel). Reds on: the round-2 body
+    `{ DropStash(); }`, either assignment removed, the call site removed.
+    """
+    revoke = _chat_discards("internal static void DropChatDraftOnRevoke()")
+    change = _chat_discards("internal static void DropChatOnAccountChange()")
+    for needed in (("DropStash()", "called"), ("chatInputText", '""'),
+                   ("chatResumeNoticeUntil", "-999f")):
+        assert needed in change, (
+            "the account-change path no longer discards %s=%s; re-derive this "
+            "pin before trusting it" % needed)
+        assert needed in revoke, (
+            "a consent revoke no longer discards %s=%s: %s" % (needed + (sorted(revoke),)))
+    assert revoke == change, (
+        "the revoke and account-change discards differ: %s vs %s" % (sorted(revoke), sorted(change)))
+    api = code_of(API_CLIENT.read_text(encoding="utf-8"))
+    assert api.count("CompetitiveUI.DropChatDraftOnRevoke();") == 1, (
+        "the consent-revoke path no longer calls DropChatDraftOnRevoke exactly once")
+
+
 # ── the negative control for the readers themselves ──────────────────────
 
 def test_the_gates_read_blocks_that_exist():

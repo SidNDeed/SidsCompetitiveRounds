@@ -6880,11 +6880,25 @@ namespace CompetitiveRounds
         // that makes Time.time crawl (#221).
         private const float CHAT_DRAFT_STASH_TTL = 180f;
 
-        /// <summary>Destroy any held chat draft. Called from the consent-revoke
-        /// path itself so the hard-discard does not depend on the chat loop
-        /// running a frame later — a revoke arriving while the draw path is
-        /// throwing would otherwise never reach the guard that drops it.</summary>
-        internal static void DropChatDraftOnRevoke() { DropStash(); }
+        /// <summary>Destroy everything the player composed under the consent
+        /// they just withdrew: the held stash AND whatever is sitting in the open
+        /// box, the same pair DropChatOnAccountChange below destroys. Called from
+        /// the consent-revoke path itself so the hard-discard does not depend on
+        /// the chat loop running a frame later -- a revoke arriving while the draw
+        /// path is throwing would otherwise never reach the guard that drops it.
+        /// That guard is also what empties the open line, so a revoke it never
+        /// reached used to leave the typed line in the box (v1.41.0 beta round 3
+        /// finding 9). RunChatRevokeSentinel below checks all three.</summary>
+        internal static void DropChatDraftOnRevoke()
+        {
+            bool hadText = !string.IsNullOrEmpty(chatDraftStash)
+                        || !string.IsNullOrEmpty(chatInputText);
+            DropStash();
+            chatInputText = "";
+            chatResumeNoticeUntil = -999f;
+            if (hadText)
+                Plugin.Log.LogInfo("[CHAT] data consent withdrawn -- the held draft and the open line were discarded");
+        }
 
         /// <summary>The resolved account CHANGED — not merely resolved for the
         /// first time. Everything the previous account composed is destroyed
@@ -6921,6 +6935,67 @@ namespace CompetitiveRounds
             chatDraftStash = null;
             chatDraftStashChannel = null;
             chatDraftStashAt = -999f;
+        }
+
+        /// <summary>Round 3 finding 9's self-test. Seeds the open line, the held
+        /// stash and the resume notice with synthetic values, calls
+        /// DropChatDraftOnRevoke -- the method the consent-revoke path calls --
+        /// and checks that each of them reads empty afterwards, for an open line
+        /// alone, a stash alone, and both. The five fields are put back as they
+        /// were whatever happens, so a real draft outlives the test; the [CHAT]
+        /// discard lines it causes are its own. Nothing is sent.</summary>
+        internal static string RunChatRevokeSentinel(out bool pass)
+        {
+            const string tag = "[CHAT-REVOKE-SENTINEL]";
+            string keepText = chatInputText, keepStash = chatDraftStash, keepChannel = chatDraftStashChannel;
+            float keepAt = chatDraftStashAt, keepNotice = chatResumeNoticeUntil;
+            var failures = new List<string>();
+            int checks = 0;
+            try
+            {
+                foreach (string state in new[] { "open line only", "stash only", "open line and stash" })
+                {
+                    bool line = state != "stash only", stash = state != "open line only";
+                    chatInputText = line ? "sentinel: a line typed before the revoke" : "";
+                    chatDraftStash = stash ? "sentinel: a draft held before the revoke" : null;
+                    chatDraftStashChannel = stash ? "sentinel" : null;
+                    chatDraftStashAt = stash ? Time.unscaledTime : -999f;
+                    chatResumeNoticeUntil = Time.unscaledTime + 60f;
+                    DropChatDraftOnRevoke();
+                    checks++;
+                    if (!string.IsNullOrEmpty(chatInputText)) failures.Add(state + ": the open line survived");
+                    checks++;
+                    if (chatDraftStash != null || chatDraftStashChannel != null || chatDraftStashAt >= 0f)
+                        failures.Add(state + ": the stash survived");
+                    checks++;
+                    if (chatResumeNoticeUntil > Time.unscaledTime) failures.Add(state + ": the resume notice survived");
+                }
+            }
+            finally
+            {
+                chatInputText = keepText; chatDraftStash = keepStash; chatDraftStashChannel = keepChannel;
+                chatDraftStashAt = keepAt; chatResumeNoticeUntil = keepNotice;
+            }
+            pass = failures.Count == 0;
+            return pass
+                ? tag + " PASS: " + checks + " checks (the open line, the stash and the resume notice all empty after a revoke, in each of 3 states)"
+                : tag + " FAIL: " + string.Join("; ", failures.ToArray());
+        }
+
+        /// <summary>[Broadcast] TestChatRevokeSentinel's entry: runs the
+        /// sentinel once and logs its line.</summary>
+        internal static void DevChatRevokeSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = RunChatRevokeSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[CHAT-REVOKE-SENTINEL] FAIL: threw " + ex.Message);
+            }
         }
 
         /// <summary>Returns a stashed draft to resume, or "" when there is none, it
