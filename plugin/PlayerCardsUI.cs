@@ -944,7 +944,8 @@ namespace CompetitiveRounds
         /// modal block lifts.</summary>
         private static void OnTileClick(Tile t)
         {
-            if (t == null || t.print == null || t.print.gone || Time.frameCount == cardPopupFrame) return;
+            if (t == null || t.print == null || Time.frameCount == cardPopupFrame) return;
+            if (t.print.gone) return;   // a print a data deletion removed (card trading): nothing to open or pick
             if (!ClickGuard.Claim(t.root)) return;
             // a compose picker's tile selects instead of opening the card (card trading)
             if (t.click != null) { t.click(t); return; }

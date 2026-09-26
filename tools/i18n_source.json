@@ -11589,7 +11589,7 @@
   },
   "Offer in a trade": {
    "surface": "PlayerCardsUI",
-   "location": "MaybeAddOfferButton",
+   "location": "AddOfferButton",
    "kind": "CreateButton"
   },
   "Older >": {

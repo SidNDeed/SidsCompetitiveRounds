@@ -4184,13 +4184,20 @@ namespace CompetitiveRounds
 
         // -- Card trading (v1.41.0, design V8 3.4-3.7 and 6.5) ------------------
         // Cards for cards between two players; the server is the only
-        // authority. Every route takes QUERY parameters and answers a refusal
-        // as {"detail": {"error", "permanent", "state", "retry_after"}}. The
-        // canonical item list, its digest and the signed terms are built by
-        // PcTradeRules (executed by tools/client-rules-harness against the
-        // server's own vectors). Every answer is fenced on the Player Cards
-        // epoch it was dispatched under: an identity or consent edge between
-        // dispatch and landing drops it.
+        // authority. Every route takes QUERY parameters. A trade refusal is
+        // {"detail": {"error", "permanent", "state", "retry_after"}}; the
+        // guards in front of the trade code answer in other shapes (a 401, a
+        // plain-string detail such as "Invalid signature" or
+        // "service_account_forbidden", the read replica's top-level error),
+        // and PcTradeErrorCode reads those as PcErrorCode does
+        // ("session_required", "read_replica", "http" for a plain string),
+        // except that it names service_account_forbidden. Only the code is
+        // read: busy is retried once after two seconds (V8 1.4), whatever
+        // retry_after says. The canonical item list, its digest and the
+        // signed terms are built by PcTradeRules (executed by
+        // tools/client-rules-harness against the server's own vectors). Every
+        // answer is fenced on the Player Cards epoch it was dispatched under:
+        // an identity or consent edge between dispatch and landing drops it.
 
         /// <summary>One trade from the viewer's side (V8 3.7): `give` is what
         /// the viewer gives, `get` what the viewer receives. `state` is the
