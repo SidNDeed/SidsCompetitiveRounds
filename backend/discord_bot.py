@@ -8765,6 +8765,18 @@ def _enabled_boards() -> list:
 # messages buried the board (item 8).
 _lb_message_ids: dict = {}
 
+# Channels whose board cleanup is COMPLETE for this process (v1.41.0 beta
+# round 3, findings 12 and 15). The adoption sweep below is the only thing
+# that removes a leftover board message -- a replaced board whose delete
+# failed, or the set a restart could not see because its history read
+# failed -- and it used to run only while a board id was missing, so once a
+# fresh set was anchored nothing ever swept again. A channel owes a sweep
+# from the start of every process, and again after any failed delete or
+# failed history read; publish_boards runs one on every tick that gets as
+# far as the channel while it is owed, until a sweep reads the history and
+# every delete it tries goes through.
+_lb_swept: set = set()
+
 
 async def _render_board(board: dict):
     """Fetch one board and render it. Returns (embeds, view), or None when the
@@ -8803,9 +8815,13 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
     board's title is the keeper and any later one is a leftover from an
     earlier re-anchor — whichever of those a viewer or a pin is looking at may
     not be the one we edit, which is what made a board look permanently stale
-    before. Only this bot's own messages are ever touched."""
+    before. Only this bot's own messages are ever touched.
+
+    The channel is marked swept (_lb_swept) only when the history was read
+    and every delete tried here went through; anything less leaves the sweep
+    owed, and publish_boards runs it again next tick (findings 12 and 15)."""
     by_title = {b["title"]: b["key"] for b in boards}
-    keepers, dupes = {}, 0
+    keepers, dupes, complete = {}, 0, True
     try:
         async for msg in ch.history(limit=50):
             if msg.author != bot.user or not msg.embeds:
@@ -8820,12 +8836,19 @@ async def _adopt_board_messages(ch, boards: list, ids: dict):
                 await msg.delete()
                 dupes += 1
             except Exception as e:
+                complete = False
                 print(f"[LB] couldn't delete duplicate {key} board mid={msg.id}: {e}")
     except Exception as e:
-        print(f"[LB] rescan failed ({e}) — boards not found here are posted fresh")
+        complete = False
+        print(f"[LB] rescan failed ({e}) — boards not found here are posted fresh; "
+              "the sweep runs again next tick")
     ids.update(keepers)
     if dupes:
         print(f"[LB] deleted {dupes} duplicate stale board message(s)")
+    if complete:
+        _lb_swept.add(ch.id)
+    else:
+        _lb_swept.discard(ch.id)
 
 
 async def _boards_are_anchored(ch, boards: list, ids: dict) -> bool:
@@ -8900,6 +8923,10 @@ async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict):
             msg = await ch.fetch_message(old)
             await msg.delete()
         except Exception as e:
+            # Owed: publish_boards sweeps this channel again until the
+            # duplicate is gone (finding 12). Before, nothing swept once the
+            # new set was anchored, whatever this line promised.
+            _lb_swept.discard(ch.id)
             print(f"[LB] {b['key']}: old message mid={old} not deleted ({e}) -- next tick's re-adopt sweeps it")
 
 
@@ -8938,7 +8965,10 @@ async def publish_boards(guild):
         return
     ids = _lb_message_ids.setdefault(ch.id, {})
     adopted = False
-    if any(b["key"] not in ids for b in boards):
+    # Also while the channel owes a sweep: from the start of every process,
+    # and again after a delete or a history read failed, until one sweep
+    # completes (_lb_swept; findings 12 and 15).
+    if any(b["key"] not in ids for b in boards) or ch.id not in _lb_swept:
         await _adopt_board_messages(ch, boards, ids)
         adopted = True
     if not await _boards_are_anchored(ch, boards, ids):

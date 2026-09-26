@@ -37,7 +37,7 @@ WANT_FUNC = {"rank_emoji", "get_rank_name", "_escape_md", "_lb_line", "_split_lb
              "_repost_board_set", "publish_boards", "publish_lb_loop"}
 WANT_CLASS = {"LeaderboardPaginator"}
 WANT_ASSIGN = {"RANK_ROLES", "LB_PAGE_SIZE", "LB_TOTAL_FETCH", "BOARDS",
-               "_lb_message_ids", "_lb_unknown_board_keys"}
+               "_lb_message_ids", "_lb_unknown_board_keys", "_lb_swept"}
 
 CID = 777
 T_1V1 = "🏆 Ranked Leaderboard"
@@ -819,6 +819,78 @@ def test_a_failed_repost_delete_leaves_a_duplicate_not_a_hole(ns):
     assert titles.count(T_2V2) == 2, titles
     assert ns["_lb_message_ids"][CID]["2v2"] != old_2v2
     assert any("not deleted" in ln for ln in ns["_log"])
+
+
+def test_a_failed_repost_delete_is_swept_on_a_later_tick(ns):
+    """Round 3 finding 12. The replacement is posted and anchored and the old
+    message will not delete; the log promised that the next tick's re-adopt
+    sweeps it, but the sweep ran only while a board id was missing, so the
+    duplicate stayed for good. The channel now owes a sweep until one
+    completes: retried while the delete keeps failing, done once it goes
+    through, and not run again after that.
+
+    MUTATION: drop the owed-sweep trigger, or leave the channel marked swept
+    after the failed delete. Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
+    ch.post_from_someone_else()
+    ch.delete_fails = {old_2v2}
+    _tick(ns)                                   # re-anchor; the old 2v2 will not go
+    assert [t for t in ch.titles() if t is not None].count(T_2V2) == 2, ch.titles()
+    ns["_log"].clear()
+    _tick(ns)                                   # still refused: swept again, still owed
+    assert any("couldn't delete duplicate 2v2 board mid=%d" % old_2v2 in ln
+               for ln in ns["_log"]), ns["_log"]
+    assert CID not in ns["_lb_swept"]
+    ch.delete_fails = set()
+    ns["_log"].clear()
+    _tick(ns)                                   # goes through: the duplicate is gone
+    assert old_2v2 in ch.deleted
+    assert ch.titles() == [None, T_1V1, T_2V2, T_FFA], ch.titles()
+    assert CID in ns["_lb_swept"]
+    assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
+    # ...and a clean channel is not swept again on every tick.
+    calls = []
+    real = ns["_adopt_board_messages"]
+
+    async def counting(*a, **kw):
+        calls.append(1)
+        return await real(*a, **kw)
+    ns["_adopt_board_messages"] = counting
+    _tick(ns)
+    assert calls == [], "a channel with nothing owed was swept again"
+
+
+def test_a_restart_whose_rescan_fails_sweeps_the_old_set_on_a_later_tick(ns):
+    """Round 3 finding 15. After a restart the id map is empty and the rescan
+    is what finds the set already in the channel. When that history read
+    fails, a fresh set is posted and anchored -- and the sweep ran only while
+    an id was missing, so the old set stayed above it for good. A failed
+    rescan now leaves the sweep owed, and the next tick's sweep keeps the
+    newest copy of each board and removes the old set.
+
+    MUTATION: mark the channel swept although the rescan failed, or drop the
+    owed-sweep trigger. Must fail."""
+    _tick(ns)
+    ch = ns["_ch"]
+    old = dict(ns["_lb_message_ids"][CID])
+    ns["_lb_message_ids"].clear()               # the process restarts: both maps are
+    ns["_lb_swept"].clear()                     # process memory
+    ch.history_raises = True
+    ns["_log"].clear()
+    _tick(ns)
+    assert any("rescan failed" in ln for ln in ns["_log"]), ns["_log"]
+    assert len([t for t in ch.titles() if t is not None]) == 6, ch.titles()
+    fresh = dict(ns["_lb_message_ids"][CID])
+    assert set(fresh.values()).isdisjoint(old.values())
+    ch.history_raises = False
+    ns["_log"].clear()
+    _tick(ns)
+    assert sorted(ch.deleted) == sorted(old.values()), (ch.deleted, old)
+    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
+    assert ns["_lb_message_ids"][CID] == fresh
+    assert CID in ns["_lb_swept"]
 
 
 def test_history_failure_edits_in_place_rather_than_deleting(ns):
