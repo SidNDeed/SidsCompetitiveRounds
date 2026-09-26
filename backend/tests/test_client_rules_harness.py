@@ -268,7 +268,7 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The count on the commit that added the suite, not a floor far below
     # it (#342). Raise it when cases are added.
-    assert run >= 25, "the SettingsModel suite shrank to %d cases" % run
+    assert run >= 37, "the SettingsModel suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -289,6 +289,19 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
     "T5-g perf writes exactly its 11",
     "T5-g langmenus writes exactly its 2",
     "T5-g privacy writes exactly its 0",
+    # M1 (design 6.3): a destructive row takes Enter only; each key keeps its source
+    "M1 Space never arms or confirms a destructive row",
+    "M1 Enter arms and confirms a destructive row",
+    "M1 Enter activates an action row",
+    "M1 Space activates an action row",
+    "M1 Enter opens a dropdown",
+    "M1 Space opens a dropdown",
+    "M1 Enter and Space never activate a switch, a segmented row or a slider",
+    "M1 the Space key reaches the row as Space, never as Enter",
+    "M1 the Enter key reaches the row as Enter",
+    "Tab moves to the next sub-tab and wraps",
+    "Shift+Tab moves to the previous sub-tab and wraps",
+    "Up/Down move the focus, Left/Right step the row, F1 pins, no key does nothing",
 ])
 def test_the_settings_model_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "settingsmodel")

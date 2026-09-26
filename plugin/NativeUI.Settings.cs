@@ -1391,18 +1391,40 @@ namespace CompetitiveRounds
                 settingsHintPollAt = Time.unscaledTime + 0.1f;
                 SettingsUpdateHint();
             }
-            bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
-            if (Input.GetKeyDown(KeyCode.Tab))
-                SettingsSwitchSubTab((settingsSubTab + (shift ? SETTINGS_TABS - 1 : 1)) % SETTINGS_TABS);
-            else if (Input.GetKeyDown(KeyCode.UpArrow)) SettingsMoveFocus(-1);
-            else if (Input.GetKeyDown(KeyCode.DownArrow)) SettingsMoveFocus(1);
-            else if (Input.GetKeyDown(KeyCode.LeftArrow)) SettingsStep(-1);
-            else if (Input.GetKeyDown(KeyCode.RightArrow)) SettingsStep(1);
-            else if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter) || Input.GetKeyDown(KeyCode.Space))
-                SettingsActivate();
-            else if (Input.GetKeyDown(KeyCode.F1)) SettingsTogglePin();
+            SettingsDispatchKey(SettingsReadKey());
             SettingsPollAxes();
             if (settingsPaneDirty) SettingsRenderPane();
+        }
+
+        /// <summary>This frame's key, one per frame in the order the page
+        /// has always read them; a key the driven-input harness pressed is
+        /// taken first, so it passes the same gates a real key does. Enter
+        /// (either Return or the keypad's) and Space come back as DIFFERENT
+        /// keys: a destructive row takes Enter only (design 6.3), so the
+        /// source must survive to the row.</summary>
+        private static SettingsModel.SettingsKey SettingsReadKey()
+        {
+            SettingsModel.SettingsKey driven;
+            if (SettingsTakeDriveKey(out driven)) return driven;   // the driven-input harness's press
+            bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+            if (Input.GetKeyDown(KeyCode.Tab)) return shift ? SettingsModel.SettingsKey.ShiftTab : SettingsModel.SettingsKey.Tab;
+            if (Input.GetKeyDown(KeyCode.UpArrow)) return SettingsModel.SettingsKey.Up;
+            if (Input.GetKeyDown(KeyCode.DownArrow)) return SettingsModel.SettingsKey.Down;
+            if (Input.GetKeyDown(KeyCode.LeftArrow)) return SettingsModel.SettingsKey.Left;
+            if (Input.GetKeyDown(KeyCode.RightArrow)) return SettingsModel.SettingsKey.Right;
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) return SettingsModel.SettingsKey.Enter;
+            if (Input.GetKeyDown(KeyCode.Space)) return SettingsModel.SettingsKey.Space;
+            if (Input.GetKeyDown(KeyCode.F1)) return SettingsModel.SettingsKey.Pin;
+            return SettingsModel.SettingsKey.None;
+        }
+
+        /// <summary>One key onto the page (SettingsModel.DispatchKey). The
+        /// keyboard poll and the driven-input harness both come through here.</summary>
+        private static void SettingsDispatchKey(SettingsModel.SettingsKey key)
+        {
+            if (key == SettingsModel.SettingsKey.None) return;
+            SettingsModel.DispatchKey(key, settingsSubTab, SETTINGS_TABS,
+                SettingsSwitchSubTab, SettingsMoveFocus, SettingsStep, SettingsActivate, SettingsTogglePin);
         }
 
         /// <summary>Stick/pad axes through an edge detector, read only while no
@@ -1501,10 +1523,18 @@ namespace CompetitiveRounds
             settingsPaneDirty = true;
         }
 
-        private static void SettingsActivate()
+        /// <summary>The descriptor's kind word for a row kind ("DESTRUCTIVE").</summary>
+        private static string SettingsKindWord(SettingsKind kind) { return kind.ToString().ToUpperInvariant(); }
+
+        /// <summary>Activate the focused row from one source. Which kinds take
+        /// which source is SettingsModel.ActivationAccepts (design 6.3): a
+        /// destructive row refuses anything but Enter, so a Space press on it
+        /// does nothing at the arm and nothing at the confirm.</summary>
+        private static void SettingsActivate(SettingsModel.SettingsActivation source)
         {
             var rec = SettingsFocusedRec();
             if (rec == null) return;
+            if (!SettingsModel.ActivationAccepts(SettingsKindWord(rec.Kind), source)) return;
             switch (rec.Kind)
             {
                 case SettingsKind.Action:
@@ -1525,7 +1555,9 @@ namespace CompetitiveRounds
 
         /// <summary>Enter on the delete row arms it; Enter again confirms, and
         /// only once the armed state has been on screen for a full second, so
-        /// a held or doubled key cannot arm and confirm in one gesture.</summary>
+        /// a held or doubled key cannot arm and confirm in one gesture. Only
+        /// Enter reaches this method: SettingsActivate refuses every other
+        /// source on a destructive row before it gets here.</summary>
         private static void SettingsActivateDelete(SettingsRowRec grp)
         {
             if (grp.Members == null) return;
@@ -1554,9 +1586,9 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The TestOpenTab lever's settings grammar (broadcast seat):
-        /// "selftest", "&lt;sub-tab&gt;", "&lt;sub-tab&gt;:expand",
-        /// "&lt;sub-tab&gt;:&lt;key&gt;". A sub-tab is its home id, its body name
-        /// or its index.</summary>
+        /// "selftest", "drive", "drive:&lt;id&gt;[,&lt;id&gt;]", "&lt;sub-tab&gt;",
+        /// "&lt;sub-tab&gt;:expand", "&lt;sub-tab&gt;:&lt;key&gt;". A sub-tab is its
+        /// home id, its body name or its index.</summary>
         internal static void DevSettingsDirective(string d)
         {
             try
@@ -1565,6 +1597,8 @@ namespace CompetitiveRounds
                 if (d.Length == 0) return;
                 if (string.Equals(d, "selftest", StringComparison.OrdinalIgnoreCase)) { SettingsSelfTestStart("lever"); return; }
                 if (d.StartsWith("selftest:", StringComparison.OrdinalIgnoreCase)) { SettingsSelfTestStart("lever", d.Substring(9)); return; }
+                if (string.Equals(d, "drive", StringComparison.OrdinalIgnoreCase)) { SettingsDriveStart(""); return; }
+                if (d.StartsWith("drive:", StringComparison.OrdinalIgnoreCase)) { SettingsDriveStart(d.Substring(6)); return; }
                 string[] p = d.Split(':');
                 int idx = SettingsModel.SubTabIndex(p[0].Trim());
                 int n;
@@ -1657,7 +1691,7 @@ namespace CompetitiveRounds
 
         private static void SettingsSelfTestStart(string why, string mutation = "")
         {
-            if (stPhase >= 0) { Plugin.Log.LogInfo("[SETTINGS-SELFTEST] already running"); return; }
+            if (stPhase >= 0 || SettingsDriveRunning) { Plugin.Log.LogInfo("[SETTINGS-SELFTEST] a settings test is already running"); return; }
             mutation = (mutation ?? "").Trim().ToLowerInvariant();
             if (mutation.Length > 0 && Array.IndexOf(SettingsSelfTestMutations, mutation) < 0)
             {

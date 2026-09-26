@@ -1979,6 +1979,9 @@ namespace CompetitiveRounds
 
         public static void Tick()
         {
+            // Item 13 round 2: the settings driven-input harness ticks before the
+            // open gate, so a scenario that closes or rebuilds the page keeps going.
+            SettingsDriveTick();
             if(!isOpen||!pageBuilt)return;
             ApplyPendingInfoScroll();
             if(pageGO==null||!pageGO.activeInHierarchy)
@@ -14653,6 +14656,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     var id = MatchTracker.LocalSteamId;
                     if (string.IsNullOrEmpty(id) || id == "unknown") return;
                     deleteArmed = false;
+                    // Item 13 round 2: while a settings test drives this page the
+                    // confirmation reaches a stub and no deletion request is sent.
+                    if (SettingsTestRunning)
+                    {
+                        settingsDeleteStubCalls++;
+                        Plugin.Log.LogInfo("[SETTINGS-DRIVE] delete confirmation reached the stub (no request sent)");
+                        dirty = true;
+                        return;
+                    }
                     ApiClient.DeletePlayerData(id, (ok, msg) =>
                     {
                         Plugin.Log.LogInfo($"[PRIVACY] Delete result: ok={ok} msg={msg}");

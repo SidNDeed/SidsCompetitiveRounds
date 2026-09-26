@@ -24,6 +24,11 @@ namespace CompetitiveRounds
     ///         the design, not derived from the table the rule reads.
     ///         Privacy's set is empty by rule. The effect half (each row's
     ///         writer actually runs) needs the built client.
+    ///
+    ///   M1    (design 6.3's input table) a destructive row takes Enter
+    ///         only, Space and Enter each reach the row as themselves, and
+    ///         the keys route to the page action the table names. The same
+    ///         dispatch drives the built page in the in-game harness.
     /// </summary>
     internal static class SettingsModelCases
     {
@@ -130,7 +135,56 @@ namespace CompetitiveRounds
                   SettingsModel.ResetSet("nope").Count == 0, SettingsModel.ResetSet("nope").Count.ToString());
             r.Report.Append("INFO | T5-g the seven sets sum to ").Append(sum)
              .Append(" (printed for information, never asserted)").Append('\n');
+
+            // -- M1 (design 6.3): which source activates which kind ------------
+            var enter = SettingsModel.SettingsActivation.Enter;
+            var space = SettingsModel.SettingsActivation.Space;
+            Accepts(r, "M1 Space never arms or confirms a destructive row", "DESTRUCTIVE", space, false);
+            Accepts(r, "M1 Enter arms and confirms a destructive row", "DESTRUCTIVE", enter, true);
+            Accepts(r, "M1 Enter activates an action row", "ACTION", enter, true);
+            Accepts(r, "M1 Space activates an action row", "ACTION", space, true);
+            Accepts(r, "M1 Enter opens a dropdown", "DROPDOWN", enter, true);
+            Accepts(r, "M1 Space opens a dropdown", "DROPDOWN", space, true);
+            var inert = new List<string>();
+            foreach (var kind in new[] { "SWITCH", "SEGMENTED", "SLIDER" })
+                foreach (var src in new[] { enter, space })
+                    if (SettingsModel.ActivationAccepts(kind, src)) inert.Add(kind + "/" + src);
+            Check(r, "M1 Enter and Space never activate a switch, a segmented row or a slider",
+                  inert.Count == 0, "accepted={" + string.Join(",", inert) + "}");
+            Keys(r, "M1 the Space key reaches the row as Space, never as Enter",
+                 SettingsModel.SettingsKey.Space, 0, "activate:Space");
+            Keys(r, "M1 the Enter key reaches the row as Enter", SettingsModel.SettingsKey.Enter, 0, "activate:Enter");
+            Keys(r, "Tab moves to the next sub-tab and wraps", SettingsModel.SettingsKey.Tab, 6, "switch:0");
+            Keys(r, "Shift+Tab moves to the previous sub-tab and wraps", SettingsModel.SettingsKey.ShiftTab, 0, "switch:6");
+            string moves = Dispatch(SettingsModel.SettingsKey.Up, 3) + "|" + Dispatch(SettingsModel.SettingsKey.Down, 3) + "|"
+                         + Dispatch(SettingsModel.SettingsKey.Left, 3) + "|" + Dispatch(SettingsModel.SettingsKey.Right, 3) + "|"
+                         + Dispatch(SettingsModel.SettingsKey.Pin, 3) + "|" + Dispatch(SettingsModel.SettingsKey.None, 3);
+            Check(r, "Up/Down move the focus, Left/Right step the row, F1 pins, no key does nothing",
+                  moves == "focus:-1|focus:1|step:-1|step:1|pin|", moves);
             return r;
+        }
+
+        private static void Accepts(SelfTestResult r, string name, string kind,
+                                    SettingsModel.SettingsActivation source, bool want)
+        {
+            bool got = SettingsModel.ActivationAccepts(kind, source);
+            Check(r, name, got == want, kind + "/" + source + " accepted=" + got);
+        }
+
+        /// <summary>Every page action one key reaches, in call order.</summary>
+        private static string Dispatch(SettingsModel.SettingsKey key, int subTab)
+        {
+            var got = new List<string>();
+            SettingsModel.DispatchKey(key, subTab, SettingsModel.SubTabHomes.Length,
+                t => got.Add("switch:" + t), d => got.Add("focus:" + d), d => got.Add("step:" + d),
+                s => got.Add("activate:" + s), () => got.Add("pin"));
+            return string.Join(";", got);
+        }
+
+        private static void Keys(SelfTestResult r, string name, SettingsModel.SettingsKey key, int subTab, string want)
+        {
+            string got = Dispatch(key, subTab);
+            Check(r, name, got == want, key + " on sub-tab " + subTab + " -> " + (got.Length == 0 ? "nothing" : got));
         }
 
         private static void Split(SelfTestResult r, string name, string input, bool wantSplit,
