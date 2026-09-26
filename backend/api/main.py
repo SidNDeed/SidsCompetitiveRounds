@@ -42854,7 +42854,7 @@ async def team_series_report_dc(
     # helped: it authenticates the disagreement without resolving it.
     #
     # The rule now reads a fact the server records for the CURRENT game,
-    # _team_game_crossed_two: team_series_games (migrations 348 and 351), one
+    # _team_game_crossed_two: team_series_games (migrations 348, 351 and 352), one
     # record per game as _team_game_identity names it (the series, its games
     # recorded plus one, the sitting's room), written by the team live-points
     # POST during play; the comment above _team_game_identity says what such a
