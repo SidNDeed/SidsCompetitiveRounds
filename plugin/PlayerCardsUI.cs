@@ -150,6 +150,11 @@ namespace CompetitiveRounds
         // settings rows
         private static GameObject btnPublic, btnAnnounce, btnPreset, presetPreview, presetPreviewRow;
         private static object btnPublicTxt, btnAnnounceTxt, btnPresetTxt, txtPicNote;
+        // the Card trading row (v1.41.0, V8 2.1/6.1): the button, its label and
+        // the whole [button + caption] group, which is what gets hidden
+        private static GameObject btnTrades, tradesRowGroup;
+        private static object btnTradesTxt;
+        private static string tradesRowSig;   // the last settings-row state logged
         private static int previewShown = -1;   // PortraitRender.PreviewSerial the preview sprite was made from
         private static Sprite previewSprite;
         private static bool setInFlight; private static float setAt;
@@ -2440,6 +2445,17 @@ namespace CompetitiveRounds
             btnAnnounce = SettingsRow(parent, "SPcAnn", () => ToggleSetting("announce"),
                 "Rare pulls may be posted to the Discord gambler chat with your name.", 18f);
             btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
+            // Card trading (v1.41.0, V8 2.1/6.1): after the announcements row.
+            // Shown only while /pc/me's settings carry trades_open (F3), which
+            // PaintTradesRow decides on every settings repaint; hidden until then.
+            btnTrades = SettingsRow(parent, "SPcTrd", () => ToggleSetting("trades_open"),
+                "Other players can send you card-for-card trade proposals. Nothing moves until you accept. Turning this off ends your open proposals.", 18f);
+            btnTradesTxt = UIFactory.GetButtonText(btnTrades);
+            var tg = btnTrades != null ? btnTrades.transform : null;
+            while (tg != null && !tg.name.EndsWith("_grp")) tg = tg.parent;
+            tradesRowGroup = tg != null ? tg.gameObject : null;
+            tradesRowSig = null;
+            TradesRowVisible(false);
             btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
                 "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.", 18f);
             btnPresetTxt = UIFactory.GetButtonText(btnPreset);
@@ -2518,6 +2534,7 @@ namespace CompetitiveRounds
             {
                 UIFactory.SetText(btnPublicTxt, "My collection is public: <color=#888>...</color>");
                 UIFactory.SetText(btnAnnounceTxt, "Announce my pulls: <color=#888>...</color>");
+                UIFactory.SetText(btnTradesTxt, "Card trading: <color=#888>...</color>");
             }
             else
             {
@@ -2527,8 +2544,34 @@ namespace CompetitiveRounds
                 UIFactory.SetText(btnAnnounceTxt, me.announce
                     ? "Announce my pulls: <color=#88FF88>ON</color>"
                     : "Announce my pulls: <color=#FF9966>OFF</color>");
+                UIFactory.SetText(btnTradesTxt, me.trades_open
+                    ? "Card trading: <color=#88FF88>ON</color>"
+                    : "Card trading: <color=#FF9966>OFF</color>");
             }
+            PaintTradesRow(me);
             RefreshPictureRows();
+        }
+
+        /// <summary>The Card trading row is shown only while /pc/me's settings
+        /// carry trades_open (V8 6.1, F3). Three states, never two: /pc/me not
+        /// answered yet (hidden, waiting), answered WITH the key (shown, ON or
+        /// OFF), answered WITHOUT it - a server before the trading schema
+        /// (hidden). Absent is never read as OFF: that would offer a switch the
+        /// server refuses.</summary>
+        private static void PaintTradesRow(ApiClient.PcMe me)
+        {
+            string state = me == null ? "unknown" : (me.has_trades_open ? "present" : "absent");
+            TradesRowVisible(state == "present");
+            string value = state == "present" ? (me.trades_open ? "on" : "off") : "-";
+            string sig = state + "|" + value;
+            if (sig == tradesRowSig) return;
+            tradesRowSig = sig;
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] settings-row state=" + state + " value=" + value);
+        }
+
+        private static void TradesRowVisible(bool on)
+        {
+            if (tradesRowGroup != null && tradesRowGroup.activeSelf != on) tradesRowGroup.SetActive(on);
         }
 
         /// <summary>The preset row and its preview are local (the preset is a
@@ -2553,14 +2596,21 @@ namespace CompetitiveRounds
             }
         }
 
+        // Three keys, three branches (V8 6.1, M20): a third key must never read
+        // or write the second one's value, which the old two-way form did for
+        // every key that was not collection_public.
         private static bool SettingValue(ApiClient.PcMe me, string key)
         {
-            return key == "collection_public" ? me.collection_public : me.announce;
+            if (key == "collection_public") return me.collection_public;
+            if (key == "announce") return me.announce;
+            return me.trades_open;
         }
         private static void ApplySetting(ApiClient.PcMe me, string key, bool v)
         {
             if (me == null) return;
-            if (key == "collection_public") me.collection_public = v; else me.announce = v;
+            if (key == "collection_public") me.collection_public = v;
+            else if (key == "announce") me.announce = v;
+            else me.trades_open = v;
         }
 
         private static void ToggleSetting(string key)
