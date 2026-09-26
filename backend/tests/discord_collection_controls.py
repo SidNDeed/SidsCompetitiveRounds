@@ -782,6 +782,11 @@ def main():
     ap.add_argument("--skip-baseline", action="store_true")
     ap.add_argument("--timeout", type=int, default=VARIANT_TIMEOUT_S)
     args = ap.parse_args()
+    # A red message can quote response bytes (a PNG body read as text); on a
+    # console or file whose encoding cannot hold them, print escapes them
+    # rather than raising mid-run.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="backslashreplace")
 
     variants = [dict(v) for v in ROWS]
     rows = list(dict.fromkeys(v["row"] for v in variants))
