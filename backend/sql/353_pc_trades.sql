@@ -44,7 +44,11 @@
 -- trading_unavailable, a settings write of the new trades_open key answers
 -- 503 trading_unavailable (the build before it answered 422 for a key it did
 -- not know), and every other route this release modified behaves as it did
--- before trading. Safe before the api in the other direction as well:
+-- before trading. The trade janitor step skips until the probe finds the
+-- schema, but the boot janitor self-test EXPLAINs its statements and
+-- reports them failed (relation does not exist) until the api's first
+-- boot after this file: a report, not a behaviour, and the reason this
+-- file goes first. Safe before the api in the other direction as well:
 -- the running api never names anything here, its discard and ownership
 -- writes leave the new flag alone, and its mint's card upsert rewrites
 -- variant to the value it already has, which pc_cards_immutable admits.

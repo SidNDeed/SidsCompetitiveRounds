@@ -1577,9 +1577,12 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # Both counts, because one source line can expand into several statements
     # and reporting only one number is how two counts get reconciled instead
     # of explained (#431).
-    assert len(census["declines"]) == 23, census["declines"]
+    # Card trading's janitor step (migration 353) adds four declining sites,
+    # one statement each and every one FOR UPDATE SKIP LOCKED: the expiry,
+    # the void and the two retention deletes (23/20 before). No new waiter.
+    assert len(census["declines"]) == 27, census["declines"]
     assert len(census["waits"]) == 13, census["waits"]
-    assert len(census["decline_sites"]) == 20, census["decline_sites"]
+    assert len(census["decline_sites"]) == 24, census["decline_sites"]
     assert len(census["wait_sites"]) == 10, census["wait_sites"]
 
 

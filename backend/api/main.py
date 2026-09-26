@@ -4296,6 +4296,13 @@ async def queue_cleanup_loop():
             await _pc_snapshot_janitor_step()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] player cards snapshot error: {e}")
+        # Player Cards trading (migration 353): expire, void and retire trade
+        # rows -- its own session and its own try, so a failure never costs
+        # the snapshot; it skips until the schema probe finds the schema.
+        try:
+            await _pc_trade_janitor_step()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] player cards trading error: {e}")
         # Player Cards (WP-D): re-derive, at the earned-pack odds in force,
         # the grants a failed savepoint lost, and void the unopened packs of
         # invalidated series (its own session, every PC_RECONCILE_EVERY_S).
@@ -25241,44 +25248,66 @@ _PC_TRADE_PARTY_SQL = """
      WHERE p.id = ANY(CAST(:ids AS uuid[]))
 """
 
-# The counterparty of a trade row t, from the proposer's side.
-_PC_TRADE_OTHER_SQL = "(CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)"
-
 # The dead word (2.7), alias t: a proposed trade that can never execute as
-# stored. ONE ordered term list builds both the word and the janitor's
-# void_reason (the first failing term, in the order of 2.7), so the two
-# cannot disagree. Codes are stored from the PROPOSER's side:
-# trading_closed / not_eligible are the proposer's switch or generation /
-# deletion or ban, counterparty_closed / counterparty_unavailable the other
-# party's; a read translates them to its viewer's side.
-_PC_TRADE_DEAD_TERMS = (
-    ("print_gone", """EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
+# stored -- a named print missing, discarded or not owned by its side, a
+# print's subject banned, or a party deleted, banned, switched off or past
+# the consent generation the trade stamped (F4). _PC_TRADE_VOID_REASON_SQL
+# is the janitor's void_reason: the first failing term, in the order of 2.7
+# (_PC_TRADE_DEAD_CODES). Both are written out whole, one literal each: the
+# janitor self-test (_janitor_sql_inventory) resolves a statement built from
+# str constants and `+` only to a bounded depth, and the void statement
+# built from one constant per term sits past it, a dynamic site the
+# self-test reports as a failure. A test pins the reason to the CASE built
+# from the word's own terms and these codes, so the two cannot disagree.
+# Codes are stored from the PROPOSER's side: trading_closed / not_eligible
+# are the proposer's switch or generation / deletion or ban,
+# counterparty_closed / counterparty_unavailable the other party's (the
+# other party of a row t is CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi
+# ELSE t.pair_lo END); a read translates them to its viewer's side.
+_PC_TRADE_DEAD_CODES = ("print_gone", "not_owned", "subject_unavailable", "trading_closed",
+                        "counterparty_closed", "not_eligible", "counterparty_unavailable")
+_PC_TRADE_DEAD_SQL = """(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
                     WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
-                                       WHERE pr.id = n.print_id AND pr.discarded_at IS NULL))"""),
-    ("not_owned", """EXISTS (SELECT 1 FROM pc_prints pr
+                                       WHERE pr.id = n.print_id AND pr.discarded_at IS NULL))
+      OR EXISTS (SELECT 1 FROM pc_prints pr
                     WHERE (pr.id = ANY(t.a_prints) AND pr.owner_player_id <> t.pair_lo)
-                       OR (pr.id = ANY(t.b_prints) AND pr.owner_player_id <> t.pair_hi))"""),
-    ("subject_unavailable", """EXISTS (SELECT 1 FROM pc_prints pr
+                       OR (pr.id = ANY(t.b_prints) AND pr.owner_player_id <> t.pair_hi))
+      OR EXISTS (SELECT 1 FROM pc_prints pr
                       JOIN pc_cards c ON c.id = pr.card_id
                       JOIN players s ON s.id = c.subject_player_id
                     WHERE pr.id = ANY(t.a_prints || t.b_prints)
-                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL))"""),
-    ("trading_closed", """EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
-                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation))"""),
-    ("counterparty_closed", """EXISTS (SELECT 1 FROM players p WHERE p.id = """ + _PC_TRADE_OTHER_SQL + """
-                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation))"""),
-    ("not_eligible", """EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL))
+      OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
+                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation))
+      OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
+                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation))
+      OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))"""),
-    ("counterparty_unavailable", """EXISTS (SELECT 1 FROM players p WHERE p.id = """ + _PC_TRADE_OTHER_SQL + """
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))
+      OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))"""),
-)
-_PC_TRADE_DEAD_SQL = ("(t.status = 'proposed' AND ("
-                      + "\n      OR ".join(term for _code, term in _PC_TRADE_DEAD_TERMS) + "))")
-_PC_TRADE_VOID_REASON_SQL = ("(CASE "
-                             + "\n      ".join(f"WHEN {term} THEN '{code}'" for code, term in _PC_TRADE_DEAD_TERMS)
-                             + " END)")
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))))"""
+_PC_TRADE_VOID_REASON_SQL = """(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
+                    WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
+                                       WHERE pr.id = n.print_id AND pr.discarded_at IS NULL)) THEN 'print_gone'
+      WHEN EXISTS (SELECT 1 FROM pc_prints pr
+                    WHERE (pr.id = ANY(t.a_prints) AND pr.owner_player_id <> t.pair_lo)
+                       OR (pr.id = ANY(t.b_prints) AND pr.owner_player_id <> t.pair_hi)) THEN 'not_owned'
+      WHEN EXISTS (SELECT 1 FROM pc_prints pr
+                      JOIN pc_cards c ON c.id = pr.card_id
+                      JOIN players s ON s.id = c.subject_player_id
+                    WHERE pr.id = ANY(t.a_prints || t.b_prints)
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL)) THEN 'subject_unavailable'
+      WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
+                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation)) THEN 'trading_closed'
+      WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
+                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation)) THEN 'counterparty_closed'
+      WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
+                    AND (p.deleted_at IS NOT NULL
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))) THEN 'not_eligible'
+      WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
+                    AND (p.deleted_at IS NOT NULL
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))) THEN 'counterparty_unavailable' END)"""
 
 # A stored (proposer-side) void code as the RECEIVER reads it.
 _PC_TRADE_REASON_FOR_RECEIVER = {
@@ -27809,6 +27838,66 @@ async def admin_pc_trades(
     reverse (admin HMAC, action 'pc_trade_list', target the steam id).
     Writes nothing."""
     return await _pc_trade_guarded(db, _admin_pc_trade_list_tx(db, admin_steam_id, sig, steam_id))
+
+
+# ---- the janitor step (3.8) ----
+
+_PC_TRADE_EXPIRE_SQL = """
+    UPDATE pc_trades SET status = 'expired', closed_at = now()
+     WHERE id IN (SELECT id FROM pc_trades WHERE status = 'proposed' AND expires_at <= now()
+                   ORDER BY expires_at LIMIT 200 FOR UPDATE SKIP LOCKED)
+    RETURNING id
+"""
+
+_PC_TRADE_VOID_SQL = """
+    UPDATE pc_trades t SET status = 'void', closed_at = now(), void_reason = """ + _PC_TRADE_VOID_REASON_SQL + """
+     WHERE t.id IN (SELECT t.id FROM pc_trades t WHERE """ + _PC_TRADE_DEAD_SQL + """
+                     ORDER BY t.created_at LIMIT 200 FOR UPDATE SKIP LOCKED)
+    RETURNING t.id
+"""
+
+_PC_TRADE_RETAIN_CLOSED_SQL = """
+    DELETE FROM pc_trades WHERE id IN (
+        SELECT id FROM pc_trades
+         WHERE status IN ('declined', 'cancelled', 'expired', 'void')
+           AND closed_at < now() - make_interval(days => CAST(:days AS integer))
+         LIMIT 500 FOR UPDATE SKIP LOCKED)
+    RETURNING id
+"""
+
+_PC_TRADE_RETAIN_EXECUTED_SQL = """
+    DELETE FROM pc_trades WHERE id IN (
+        SELECT id FROM pc_trades
+         WHERE status IN ('executed', 'reversed')
+           AND executed_at < now() - make_interval(days => CAST(:days AS integer))
+         LIMIT 500 FOR UPDATE SKIP LOCKED)
+    RETURNING id
+"""
+
+
+async def _pc_trade_janitor_step() -> None:
+    """3.8, one pass: expire proposals past expires_at, void the ones the
+    dead word names (void_reason its first failing term), and delete closed
+    rows after retention_closed_days and executed or reversed rows after
+    retention_executed_days, 200 / 500 at a time. Its own session and one
+    transaction (lock_timeout 2 s); skips unless the probe finds the schema
+    (partial included). Takes no identity or players lock, so it joins no
+    cycle; a row an accept holds is skipped and seen next pass. Never
+    deletes a spent-nonce tombstone or touches a print."""
+    from database import async_session
+    async with async_session() as db:
+        if await _pc_trade_schema(db) != "found":
+            return
+        await db.execute(text("SET LOCAL lock_timeout = '2s'"))
+        expired = len((await db.execute(text(_PC_TRADE_EXPIRE_SQL))).all())
+        voided = len((await db.execute(text(_PC_TRADE_VOID_SQL))).all())
+        purged = len((await db.execute(text(_PC_TRADE_RETAIN_CLOSED_SQL), {
+            "days": int(_pc.PC_TRADE["retention_closed_days"])})).all())
+        purged += len((await db.execute(text(_PC_TRADE_RETAIN_EXECUTED_SQL), {
+            "days": int(_pc.PC_TRADE["retention_executed_days"])})).all())
+        await db.commit()
+    if expired or voided or purged:
+        print(f"[PC-TRADE] janitor expired={expired} voided={voided} purged={purged}")
 
 
 # ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
