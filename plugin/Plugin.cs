@@ -2294,14 +2294,15 @@ namespace CompetitiveRounds
             AutoLogUpload.DevConsentSentinelTest();
         }
 
-        /// <summary>The 2v2 DC reporter election's self-test (round 2 finding 2).
-        /// Runs every survivor of synthetic four-seat rooms through
-        /// DcReporterElection.ShouldReport, the rule OnPlayerLeftRoom runs, and
-        /// checks that the failing states from the report (no survivor can read
-        /// the teams, and the lowest id in the room is the leaver's own teammate)
-        /// now leave a reporter the server accepts, while rooms whose teams are
-        /// readable elect exactly as before. Nothing is sent. Logs
-        /// [REPORTER-ELECTION-SENTINEL] PASS/FAIL.</summary>
+        /// <summary>The 2v2 DC reporter election's self-test (round 2 finding 2,
+        /// round 3 finding 2). Runs every survivor of synthetic four-seat rooms
+        /// through DcReporterElection.ShouldReport, the rule OnPlayerLeftRoom runs,
+        /// and checks that the failing states from both reviews (no survivor can
+        /// read the teams; a readable but wrong `t_id`; in each, the lowest id in
+        /// the room is the leaver's own teammate) leave a reporter the server
+        /// accepts, as does every state of a four-seat room in its sweep, and that
+        /// rooms whose teams are readable and true elect exactly two seats.
+        /// Nothing is sent. Logs [REPORTER-ELECTION-SENTINEL] PASS/FAIL.</summary>
         internal static void DevReporterElectionSentinelTest()
         {
             try
@@ -4257,18 +4258,22 @@ namespace CompetitiveRounds
                 int dcTeam = TeamIdOf(p);
                 int myTeam = TeamIdOf(PhotonNetwork.LocalPlayer);
 
-                // The rule, its three reasons to report and its bound live in
+                // The rule, its two reasons to report and its bound live in
                 // DcReporterElection.ShouldReport, the same code its sentinel runs
-                // (round 2 finding 2). An earlier version STOOD DOWN when it looked like
-                // the DC'd player's teammate. That could reach zero reporters, which is
-                // the one outcome worse than the bug being fixed: `t_id` is advertised
-                // per seat, and a leaver whose advertised team does not match its real
-                // one flips the real non-DC survivors into standing down while the one
-                // seat still willing to report is the one the server refuses (r2 HIGH).
-                // So the room-wide rule stays as a floor, the team rule can only ADD a
-                // report, and a seat that cannot read the teams reports as well.
-                // Duplicates are cheap: the first accepted report settles the series
-                // and the rest no-op.
+                // (round 2 finding 2; round 3 finding 2). An earlier version STOOD DOWN
+                // when it looked like the DC'd player's teammate. That could reach zero
+                // reporters, which is the one outcome worse than the bug being fixed:
+                // `t_id` is advertised per seat, and a leaver whose advertised team does
+                // not match its real one flips the real non-DC survivors into standing
+                // down while the one seat still willing to report is the one the server
+                // refuses (r2 HIGH). Round 2 kept the room-wide lowest id as the floor,
+                // but that is ONE seat and the server refuses it whenever it is the
+                // leaver's teammate, so a wrong but readable `t_id` could still leave
+                // nobody it accepts. The floor is now the TWO lowest ids among the
+                // survivors, whatever any `t_id` says: of the three survivors the
+                // server refuses exactly one. The team rule can only ADD a report, and a
+                // seat that cannot read the teams reports as well. Duplicates are cheap:
+                // the first accepted report settles the series and the rest no-op.
                 var census = new List<DcReporterElection.Peer>();
                 foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
                 {
@@ -4279,15 +4284,15 @@ namespace CompetitiveRounds
                         ppSid = pp.CustomProperties["u_id"]?.ToString();
                     census.Add(new DcReporterElection.Peer(ppSid, TeamIdOf(pp)));
                 }
-                bool lowestOverall, teamsKnown;
+                bool onFloor, teamsKnown;
                 if (!DcReporterElection.ShouldReport(myVal, myTeam, dcTeam, census,
-                        out lowestOverall, out teamsKnown)) return;
+                        out onFloor, out teamsKnown)) return;
                 if (!teamsKnown)
                     Plugin.Log.LogInfo($"[2v2-DC] reporting with the teams unreadable (my t_id={myTeam}, "
                         + $"leaver t_id={dcTeam}); the server accepts only the team that stayed");
-                else if (!lowestOverall)
+                else if (!onFloor)
                     Plugin.Log.LogInfo("[2v2-DC] reporting as the non-disconnected team's lowest id "
-                        + "(another seat holds the room-wide election)");
+                        + "(the two lowest ids in the room report as well)");
 
                 // The in-game score rides along for the server's log and the forfeit
                 // row's history only. Whether the abandoned game saw real play is

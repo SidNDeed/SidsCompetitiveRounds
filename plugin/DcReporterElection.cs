@@ -5,16 +5,17 @@ using System.Globalization;
 namespace CompetitiveRounds
 {
     /// <summary>Which surviving seat reports a mid-series 2v2 disconnect (bugs
-    /// #384/#385; v1.41.0 beta review round 2, finding 2). Plugin's
-    /// OnPlayerLeftRoom reads the room and asks ShouldReport; nothing here
-    /// touches Photon or Unity, so the rule the room runs is the rule the
-    /// sentinel below exercises, and both also run outside the game.
+    /// #384/#385; v1.41.0 beta review round 2, finding 2, and round 3, finding
+    /// 2). Plugin's OnPlayerLeftRoom reads the room and asks ShouldReport;
+    /// nothing here touches Photon or Unity, so the rule the room runs is the
+    /// rule the sentinel below exercises, and both also run outside the game.
     ///
     /// The server accepts a DC report only from a member of the team that did
-    /// NOT lose a player (team/series/{id}/report-dc, the F6 gate), and it
-    /// settles the series once: the first accepted report settles it and every
-    /// later one finds it settled. So the property that matters is "at least
-    /// one ACCEPTABLE seat reports", and an extra report costs one request and
+    /// NOT lose a player (team/series/{id}/report-dc, the F6 gate, which reads
+    /// both teams from the series row and never from a `t_id`), and it settles
+    /// the series once: the first accepted report settles it and every later
+    /// one finds it settled. So the property that matters is "at least one
+    /// ACCEPTABLE seat reports", and an extra report costs one request and
     /// changes nothing.</summary>
     internal static class DcReporterElection
     {
@@ -39,52 +40,63 @@ namespace CompetitiveRounds
             return (t == 0 || t == 1) ? t : -1;
         }
 
+        /// <summary>How many of the lowest ids among the survivors report
+        /// whatever any `t_id` says: the floor (see ShouldReport).</summary>
+        internal const int FloorSeats = 2;
+
         /// <summary>Does THIS seat report the disconnect?
         /// myVal: my own Steam id. myTeam / dcTeam: ParseTeamId of my own `t_id`
         /// and of the leaver's. peers: every OTHER surviving fighter, never the
         /// leaver and never me.
         ///
-        /// Three reasons to report, OR'd, so the election can never do worse
-        /// than the room-wide rule it grew out of:
-        ///   lowestOverall  - no peer with a parseable id is lower than mine. True
-        ///                    on at least one surviving seat whatever anyone
-        ///                    advertises.
-        ///   lowestOnMyTeam - both teams are known, I am on the team that did not
-        ///                    lose a player, and no peer KNOWN to be on my team
-        ///                    has a lower id.
-        ///   teams unknown  - I cannot read my own team or the leaver's. Then I
-        ///                    cannot tell whether the server will accept me, and
-        ///                    the room-wide floor is not enough on its own: when
-        ///                    the lowest id in the room is the DC'd player's own
-        ///                    teammate the server refuses it (400), and with the
-        ///                    teams unknown on every seat no other seat had any
-        ///                    reason to report, so nothing closed the series
-        ///                    (round 2 finding 2). A teams-unknown seat therefore
-        ///                    REPORTS: the unhandled case fails toward reporting,
-        ///                    never toward standing down. The seats the server
-        ///                    refuses cost a 400 each and change nothing.
+        /// Two reasons to report, OR'd:
+        ///   the floor      - at most one peer with a parseable id is lower than
+        ///                    mine: I am one of the TWO lowest ids among the
+        ///                    survivors. No `t_id` is read. A 2v2 leave has three
+        ///                    survivors and the server refuses exactly one of
+        ///                    them, the leaver's teammate, so two distinct
+        ///                    reporters always include one it accepts (round 3
+        ///                    finding 2). One team-blind seat is not enough: the
+        ///                    room-wide lowest id is refused whenever it is the
+        ///                    leaver's teammate, and a readable but WRONG `t_id`
+        ///                    (the leaver advertising the team that stayed, or
+        ///                    the leaver's teammate advertising it) can make both
+        ///                    seats that stayed stand down on their team claim,
+        ///                    which is how round 2's rule, whose floor was the
+        ///                    room-wide lowest id alone, could elect nobody the
+        ///                    server accepts.
+        ///   the team claim - I cannot read my own team or the leaver's (round 2
+        ///                    finding 2: that case reports rather than stands
+        ///                    down), or both are known, I am on the team that did
+        ///                    not lose a player, and no peer KNOWN to be on my
+        ///                    team has a lower id. With every `t_id` true and
+        ///                    every `u_id` readable it names a seat the floor
+        ///                    already names (the lower of the two seats that
+        ///                    stayed is at worst the second-lowest survivor), so
+        ///                    it adds a reporter only when a team or a `u_id` is
+        ///                    unreadable or a `t_id` is wrong.
         ///
-        /// Deferring to a lower peer happens only when both teams are known.
-        /// With a team unknown, my own team reads -1 and so does every peer whose
-        /// `t_id` is unreadable, and "same team" would be two unknowns agreeing.
+        /// Deferring to a lower peer happens only in the team claim, and only
+        /// when both teams are known: with a team unknown, my own team reads -1
+        /// and so does every peer whose `t_id` is unreadable, and "same team"
+        /// would be two unknowns agreeing. The floor defers to nobody.
         ///
-        /// THE BOUND, stated honestly. At least one reporter the server accepts
-        /// whenever every `t_id` in the room is either unreadable or true:
-        /// unreadable teams make every seat that meets them report, and true
-        /// teams elect the lowest seat of the team that stayed. A readable but
-        /// WRONG `t_id` (a seat advertising a team the series does not record it
-        /// on) can still leave no acceptable reporter, because no seat can tell a
-        /// wrong team from a right one. At most two reporters only while every
-        /// survivor advertises a parseable `u_id` and can read both teams: a seat
-        /// whose `u_id` is unreadable is invisible to its peers' census, so they
-        /// cannot defer to it, and a seat that cannot read the teams reports
-        /// unconditionally. In the worst case every survivor reports, and the
-        /// duplicates no-op on the server.</summary>
+        /// THE BOUND, stated honestly. At least one reporter the server accepts,
+        /// whatever any `t_id` says, whenever the census is the other survivors
+        /// of the leave (the fighters left in the room: the leaver's teammate and
+        /// the two seats that stayed). A seat counts only the peers whose `u_id`
+        /// it can read, so an unreadable `u_id` makes a seat count FEWER lower
+        /// peers: it can only add reporters, and the true two lowest always
+        /// report. A census holding a fighter that is not one of those three is
+        /// outside the floor's count, and there the team claim is what remains.
+        /// Reporters: exactly two while every `t_id` is true and every `u_id`
+        /// readable; up to every survivor otherwise. The duplicates no-op on the
+        /// server, and a refused seat costs one 400 and changes nothing.</summary>
         internal static bool ShouldReport(long myVal, int myTeam, int dcTeam,
-            IEnumerable<Peer> peers, out bool lowestOverall, out bool teamsKnown)
+            IEnumerable<Peer> peers, out bool onFloor, out bool teamsKnown)
         {
             teamsKnown = dcTeam >= 0 && myTeam >= 0;
-            lowestOverall = true;
+            int lowerPeers = 0;
             bool lowestOnMyTeam = !teamsKnown || myTeam != dcTeam;
             if (peers != null)
             {
@@ -93,17 +105,19 @@ namespace CompetitiveRounds
                     if (string.IsNullOrEmpty(pp.SteamId) || pp.SteamId.StartsWith("photon_", StringComparison.Ordinal)) continue;
                     long ppVal;
                     if (!long.TryParse(pp.SteamId, NumberStyles.Integer, CultureInfo.InvariantCulture, out ppVal) || ppVal >= myVal) continue;
-                    lowestOverall = false;
+                    lowerPeers++;
                     // Defer the TEAM claim only to a peer that also looks eligible,
-                    // and only when both teams are known (see the summary).
+                    // and only when both teams are known (see the summary). The
+                    // floor reads no team, so nothing here can talk it down.
                     if (teamsKnown && lowestOnMyTeam && pp.Team == myTeam) lowestOnMyTeam = false;
-                    if (!lowestOverall && !lowestOnMyTeam) break;
+                    if (lowerPeers >= FloorSeats && !lowestOnMyTeam) break;
                 }
             }
-            return lowestOverall || lowestOnMyTeam;
+            onFloor = lowerPeers < FloorSeats;
+            return onFloor || lowestOnMyTeam;
         }
 
-        // ── Sentinel ────────────────────────────────────────────────────────
+        // -- Sentinel --------------------------------------------------------
         //
         // Runs the election on every survivor of synthetic four-seat rooms and
         // counts the reports the server's F6 gate would ACCEPT (a reporter on the
@@ -115,16 +129,17 @@ namespace CompetitiveRounds
 
         private struct Seat
         {
-            public long Id; public int RealTeam; public object Advertised;
-            public Seat(long id, int realTeam, object advertised) { Id = id; RealTeam = realTeam; Advertised = advertised; }
+            public long Id; public int RealTeam; public object Advertised; public string Uid;
+            public Seat(long id, int realTeam, object advertised, string uid)
+            { Id = id; RealTeam = realTeam; Advertised = advertised; Uid = uid; }
         }
 
         private delegate bool Rule(long myVal, int myTeam, int dcTeam, IEnumerable<Peer> peers);
 
         private static bool CurrentRule(long myVal, int myTeam, int dcTeam, IEnumerable<Peer> peers)
         {
-            bool lowestOverall, teamsKnown;
-            return ShouldReport(myVal, myTeam, dcTeam, peers, out lowestOverall, out teamsKnown);
+            bool onFloor, teamsKnown;
+            return ShouldReport(myVal, myTeam, dcTeam, peers, out onFloor, out teamsKnown);
         }
 
         // The rule as it stood before round 2 (lane pin ef276d8), kept ONLY so the
@@ -147,28 +162,57 @@ namespace CompetitiveRounds
             return lowestOverall || lowestOnMyTeam;
         }
 
-        private static void Simulate(Seat[] room, int leaver, Rule rule, out int reporters, out int accepted)
+        // The rule as round 2 left it (lane tip b5ff8a9): its only team-blind
+        // reporter was the room-wide lowest id. Kept ONLY so the sentinel can show
+        // that round 3's failing states, a readable but wrong `t_id`, really fail
+        // under it.
+        private static bool Round2Rule(long myVal, int myTeam, int dcTeam, IEnumerable<Peer> peers)
+        {
+            bool teamsKnown = dcTeam >= 0 && myTeam >= 0;
+            bool lowestOverall = true;
+            bool lowestOnMyTeam = !teamsKnown || myTeam != dcTeam;
+            foreach (var pp in peers)
+            {
+                if (string.IsNullOrEmpty(pp.SteamId) || pp.SteamId.StartsWith("photon_", StringComparison.Ordinal)) continue;
+                long ppVal;
+                if (!long.TryParse(pp.SteamId, NumberStyles.Integer, CultureInfo.InvariantCulture, out ppVal) || ppVal >= myVal) continue;
+                lowestOverall = false;
+                if (teamsKnown && lowestOnMyTeam && pp.Team == myTeam) lowestOnMyTeam = false;
+                if (!lowestOverall && !lowestOnMyTeam) break;
+            }
+            return lowestOverall || lowestOnMyTeam;
+        }
+
+        private static void Simulate(Seat[] room, int leaver, Rule rule, List<Peer> scratch,
+            out int reporters, out int accepted)
         {
             reporters = 0; accepted = 0;
             int dcTeam = ParseTeamId(room[leaver].Advertised);
             for (int me = 0; me < room.Length; me++)
             {
                 if (me == leaver) continue;
-                var peers = new List<Peer>();
+                scratch.Clear();
                 for (int o = 0; o < room.Length; o++)
                     if (o != me && o != leaver)
-                        peers.Add(new Peer(room[o].Id.ToString(CultureInfo.InvariantCulture),
-                                           ParseTeamId(room[o].Advertised)));
-                if (!rule(room[me].Id, ParseTeamId(room[me].Advertised), dcTeam, peers)) continue;
+                        scratch.Add(new Peer(room[o].Uid, ParseTeamId(room[o].Advertised)));
+                // A seat's own id is its local Steam id; only what it ADVERTISES
+                // (its u_id) can be unreadable to the others.
+                if (!rule(room[me].Id, ParseTeamId(room[me].Advertised), dcTeam, scratch)) continue;
                 reporters++;
                 if (room[me].RealTeam != room[leaver].RealTeam) accepted++;
             }
         }
 
+        private static Seat Readable(long id, int realTeam, object advertised)
+        {
+            return new Seat(id, realTeam, advertised, id.ToString(CultureInfo.InvariantCulture));
+        }
+
         private static Seat[] Room(long a, long b, long c, long d, object ta, object tb, object tc, object td)
         {
-            // Seats 0 and 1 really play on team 0, seats 2 and 3 on team 1.
-            return new[] { new Seat(a, 0, ta), new Seat(b, 0, tb), new Seat(c, 1, tc), new Seat(d, 1, td) };
+            // Seats 0 and 1 really play on team 0, seats 2 and 3 on team 1; every
+            // u_id is readable.
+            return new[] { Readable(a, 0, ta), Readable(b, 0, tb), Readable(c, 1, tc), Readable(d, 1, td) };
         }
 
         /// <summary>Returns the log line; `pass` is its verdict.</summary>
@@ -177,8 +221,9 @@ namespace CompetitiveRounds
             pass = true;
             int checks = 0;
             string detail = "";
+            var scratch = new List<Peer>(4);
 
-            // The report's failing state: seat 3 leaves, and the lowest id in the
+            // Round 2's failing states: seat 3 leaves, and the lowest id in the
             // room is seat 2, the leaver's own teammate. Four ways for every
             // survivor to be unable to read the teams: every `t_id` missing,
             // every one unparseable, every one a stale FFA seat index, and only
@@ -194,10 +239,10 @@ namespace CompetitiveRounds
             foreach (var kv in failing)
             {
                 int r, a;
-                Simulate(kv.Value, 3, PreRound2Rule, out r, out a);
+                Simulate(kv.Value, 3, PreRound2Rule, scratch, out r, out a);
                 checks++;
                 if (a != 0) { pass = false; detail += " " + kv.Key + ":not-a-failing-state(pre accepted=" + a + ")"; }
-                Simulate(kv.Value, 3, CurrentRule, out r, out a);
+                Simulate(kv.Value, 3, CurrentRule, scratch, out r, out a);
                 checks++;
                 if (a < 1) { pass = false; detail += " " + kv.Key + ":no-accepted-reporter(reporters=" + r + ")"; }
             }
@@ -207,14 +252,43 @@ namespace CompetitiveRounds
                 for (int leaver = 0; leaver < 4; leaver++)
                 {
                     int r, a;
-                    Simulate(kv.Value, leaver, CurrentRule, out r, out a);
+                    Simulate(kv.Value, leaver, CurrentRule, scratch, out r, out a);
                     checks++;
                     if (a < 1) { pass = false; detail += " " + kv.Key + "/leaver" + leaver + ":no-accepted-reporter"; }
                 }
 
-            // Teams KNOWN on every seat: the rule is unchanged from before round 2
-            // (same reporters, same accepted count, for every leaver), there is an
-            // accepted reporter, and at most two seats report.
+            // Round 3's failing states (finding 2): a READABLE but WRONG `t_id`.
+            // Seat 3 leaves and the lowest id is seat 2, its teammate.
+            //   leaver-claims-stayed   - the review's example: the leaver advertises
+            //                            the team that stayed, so seats 0 and 1 read
+            //                            themselves as the leaver's team and stand
+            //                            down, and seat 2 reports and is refused.
+            //   teammate-claims-stayed - a non-leaver's `t_id` is wrong: seat 2
+            //                            advertises the team that stayed, and seats
+            //                            0 and 1 defer their team claim to it.
+            //   teams-crossed          - two wrong `t_id`s that still read as a
+            //                            clean 2 + 2 split (seats 0 and 2 exchanged).
+            // Each must fail under round 2's rule and pass under the current one.
+            var wrong = new KeyValuePair<string, Seat[]>[]
+            {
+                new KeyValuePair<string, Seat[]>("leaver-claims-stayed",   Room(200, 300, 100, 400, "0", "0", "1", "0")),
+                new KeyValuePair<string, Seat[]>("teammate-claims-stayed", Room(200, 300, 100, 400, "0", "0", "0", "1")),
+                new KeyValuePair<string, Seat[]>("teams-crossed",          Room(200, 300, 100, 400, "1", "0", "0", "1")),
+            };
+            foreach (var kv in wrong)
+            {
+                int r, a;
+                Simulate(kv.Value, 3, Round2Rule, scratch, out r, out a);
+                checks++;
+                if (a != 0) { pass = false; detail += " " + kv.Key + ":not-a-failing-state(round2 accepted=" + a + ")"; }
+                Simulate(kv.Value, 3, CurrentRule, scratch, out r, out a);
+                checks++;
+                if (a < 1) { pass = false; detail += " " + kv.Key + ":no-accepted-reporter(reporters=" + r + ")"; }
+            }
+
+            // Teams KNOWN and TRUE on every seat, every u_id readable: an accepted
+            // reporter and exactly two reporters (the floor; the team claim names
+            // one of the same two), for every leaver.
             var known = new KeyValuePair<string, Seat[]>[]
             {
                 new KeyValuePair<string, Seat[]>("known-lowest-on-dc-team", Room(200, 300, 100, 400, "0", "0", "1", "1")),
@@ -223,14 +297,75 @@ namespace CompetitiveRounds
             foreach (var kv in known)
                 for (int leaver = 0; leaver < 4; leaver++)
                 {
-                    int rPre, aPre, r, a;
-                    Simulate(kv.Value, leaver, PreRound2Rule, out rPre, out aPre);
-                    Simulate(kv.Value, leaver, CurrentRule, out r, out a);
+                    int r, a;
+                    Simulate(kv.Value, leaver, CurrentRule, scratch, out r, out a);
                     checks++;
-                    if (r != rPre || a != aPre) { pass = false; detail += " " + kv.Key + "/leaver" + leaver + ":changed"; }
                     if (a < 1) { pass = false; detail += " " + kv.Key + "/leaver" + leaver + ":no-accepted-reporter"; }
-                    if (r > 2) { pass = false; detail += " " + kv.Key + "/leaver" + leaver + ":reporters=" + r; }
+                    if (r != FloorSeats) { pass = false; detail += " " + kv.Key + "/leaver" + leaver + ":reporters=" + r; }
                 }
+
+            // Every state of a four-seat room: every leaver, every order of the
+            // four ids over the seats, every seat's `t_id` 0, 1 or unreadable, and
+            // every seat's `u_id` readable or not. The current rule must leave an
+            // accepted reporter in every one. Round 2's rule must miss some of the
+            // readable-u_id states, or this sweep could not tell the two apart.
+            // Wherever every `t_id` is true (or every one is exchanged, which
+            // keeps who plays with whom) and every `u_id` is readable, exactly two
+            // seats report.
+            long[] ids = { 100, 200, 300, 400 };
+            object[] adv = { "0", "1", null };
+            int states = 0, misses = 0, r2states = 0, r2misses = 0, trueStates = 0, trueNotTwo = 0;
+            var room = new Seat[4];
+            var order = new int[4];
+            for (int p0 = 0; p0 < 4; p0++)
+            for (int p1 = 0; p1 < 4; p1++)
+            for (int p2 = 0; p2 < 4; p2++)
+            {
+                if (p1 == p0 || p2 == p0 || p2 == p1) continue;
+                order[0] = p0; order[1] = p1; order[2] = p2; order[3] = 6 - p0 - p1 - p2;
+                for (int t = 0; t < 81; t++)
+                for (int unreadable = 0; unreadable < 16; unreadable++)
+                {
+                    int tt = t;
+                    bool sameTeams = true, swappedTeams = true;
+                    for (int s = 0; s < 4; s++)
+                    {
+                        object a = adv[tt % 3]; tt /= 3;
+                        int real = s < 2 ? 0 : 1;
+                        long id = ids[order[s]];
+                        string uid = ((unreadable >> s) & 1) != 0 ? null : id.ToString(CultureInfo.InvariantCulture);
+                        room[s] = new Seat(id, real, a, uid);
+                        int read = ParseTeamId(a);
+                        if (read != real) sameTeams = false;
+                        if (read != 1 - real) swappedTeams = false;
+                    }
+                    for (int leaver = 0; leaver < 4; leaver++)
+                    {
+                        int r, acc;
+                        Simulate(room, leaver, CurrentRule, scratch, out r, out acc);
+                        states++;
+                        if (acc < 1) misses++;
+                        if (unreadable == 0)
+                        {
+                            if (sameTeams || swappedTeams)
+                            {
+                                trueStates++;
+                                if (r != FloorSeats) trueNotTwo++;
+                            }
+                            int r2, acc2;
+                            Simulate(room, leaver, Round2Rule, scratch, out r2, out acc2);
+                            r2states++;
+                            if (acc2 < 1) r2misses++;
+                        }
+                    }
+                }
+            }
+            checks++;
+            if (misses != 0) { pass = false; detail += " sweep:" + misses + "-of-" + states + "-states-without-an-accepted-reporter"; }
+            checks++;
+            if (r2misses == 0) { pass = false; detail += " sweep:round2-rule-misses-none(the-sweep-proves-nothing)"; }
+            checks++;
+            if (trueStates == 0 || trueNotTwo != 0) { pass = false; detail += " sweep:true-team-states=" + trueStates + ",not-two-reporters=" + trueNotTwo; }
 
             // ParseTeamId: only 0 and 1 are teams.
             object[] unknown = { null, "", "x", "2", "-1", 5, "1.0" };
@@ -242,7 +377,9 @@ namespace CompetitiveRounds
             checks++;
             if (ParseTeamId("0") != 0 || ParseTeamId(1) != 1) { pass = false; detail += " parse:0/1"; }
 
-            return SentinelTag + " " + (pass ? "PASS" : "FAIL") + ": " + checks + " checks" + detail;
+            string sweep = " (sweep: " + states + " states, " + misses + " without an accepted reporter; round 2's rule: "
+                + r2misses + " of " + r2states + "; " + trueStates + " true-team states, " + trueNotTwo + " not two reporters)";
+            return SentinelTag + " " + (pass ? "PASS" : "FAIL") + ": " + checks + " checks" + sweep + detail;
         }
     }
 }

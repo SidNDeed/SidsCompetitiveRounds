@@ -43,6 +43,7 @@ import hmac
 import inspect
 import itertools
 import os
+import re
 import textwrap
 import urllib.parse as _urlparse
 import uuid
@@ -1277,3 +1278,124 @@ def test_the_shape_names_what_can_reach_a_record():
     assert shape(False, 2, 2) == "unclean"             # the sitting's first game
     assert shape(False, 3, 2) == "after-relock"
     assert shape(False, 3, 1) == "later"
+
+
+# -- beta round 3, finding 2: the reporter gate reads no client team ----------
+#
+# The client election now makes the two lowest ids among the survivors report
+# whatever any advertised t_id says (DcReporterElection.ShouldReport), so the
+# leaver's own teammate can be among the reporters. That is safe only because
+# the F6 gate decides both teams from the series row: which slot the leaver's
+# resolved player id and the reporter's resolved player id sit in. These pin
+# that the gate still does, unchanged, and that it refuses the teammate
+# wherever its report lands.
+
+_SERIES_SLOTS = {"t1a_id", "t1b_id", "t2a_id", "t2b_id"}
+
+
+def _team_read_issues(src):
+    """Everything in team_series_report_dc's source that would let a team come
+    from the request instead of the series row. Empty = the gate is intact."""
+    fn = ast.parse(textwrap.dedent(src)).body[0]
+    issues = []
+    params = [a.arg for a in fn.args.args + fn.args.kwonlyargs]
+    # "team" as a word of the name: reporter_steam_id is not a team.
+    issues += ["team parameter %r" % p for p in params
+               if re.search(r"(^|_)teams?(_|$)", p.lower())]
+    for target, pid in (("dc_team", "dc_pid"), ("rep_team", "rep_pid")):
+        assigns = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == target for t in n.targets)]
+        if len(assigns) != 1:
+            issues.append("%s assigned %d times" % (target, len(assigns)))
+            continue
+        value = assigns[0].value
+        names = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
+        if names != {pid, "s"}:
+            issues.append("%s reads %s" % (target, sorted(names)))
+        keys = {n.slice.value for n in ast.walk(value)
+                if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant)}
+        if keys != _SERIES_SLOTS:
+            issues.append("%s reads series keys %s" % (target, sorted(keys)))
+    for who in ("dc_player_steam_id", "reporter_steam_id"):
+        n = ast.unparse(fn).count("Player.steam_id == %s" % who)
+        if n != 1:
+            issues.append("player id resolved from %s %d times" % (who, n))
+    gates = [n for n in ast.walk(fn) if isinstance(n, ast.If)
+             and ast.unparse(n.test) == "rep_team is None or rep_team == dc_team"]
+    if len(gates) != 1 or not ast.unparse(gates[0].body[0]).startswith("raise HTTPException(400"):
+        issues.append("F6 gate found %d times" % len(gates))
+    return issues
+
+
+def test_the_reporter_gate_reads_both_teams_from_the_series_row():
+    """No team value from the request reaches the gate: dc_team and rep_team
+    are each assigned once, from the locked series row's four slots and the
+    player id resolved from the request's Steam id, and the endpoint takes no
+    team parameter. Round 3 did not touch this; the test pins that it did not
+    need to."""
+    assert _team_read_issues(inspect.getsource(main.team_series_report_dc)) == []
+
+
+@pytest.mark.parametrize("mutant", ["team-from-a-parameter", "gate-compares-a-constant",
+                                    "reporter-team-from-the-leaver"])
+def test_the_team_read_check_can_fail(mutant):
+    """The check above, run on mutated copies of the real source: each mutant
+    is flagged. The unmodified source is the test above."""
+    src = textwrap.dedent(inspect.getsource(main.team_series_report_dc))
+    swaps = {
+        "team-from-a-parameter": [
+            ("    photon_room_id: str = Query(None),\n",
+             "    photon_room_id: str = Query(None),\n    dc_team_claimed: int = Query(0),\n"),
+            ("    dc_team = 1 if dc_pid in", "    dc_team = dc_team_claimed or 1 if dc_pid in")],
+        "gate-compares-a-constant": [
+            ("if rep_team is None or rep_team == dc_team:", "if rep_team is None or rep_team == 3:")],
+        "reporter-team-from-the-leaver": [
+            ("rep_team = 1 if rep_pid in (s[\"t1a_id\"]", "rep_team = 1 if dc_pid in (s[\"t1a_id\"]")],
+    }
+    for old, new in swaps[mutant]:
+        assert src.count(old) == 1, (mutant, old)
+        src = src.replace(old, new)
+    assert _team_read_issues(src), mutant
+
+
+@needs_pg
+@pytest.mark.parametrize("order", [(3, 0, 1), (0, 3, 1), (0, 1, 3)],
+                         ids=["teammate-first", "teammate-second", "teammate-last"])
+def test_the_leavers_teammate_is_refused_wherever_its_report_lands(wired, order):
+    """The floor can put the leaver's teammate (seat 3 when seat 2 leaves)
+    among the reporters, first, second or last. While the series is open its
+    report is the F6 gate's 400; once the series is settled it is a no-op like
+    any late report. Either way it writes nothing, it never settles the
+    series, and the first report from the team that stayed settles it once."""
+    async def go():
+        async with _Lab() as lab:
+            ser = await lab.series()
+            await lab.post(ser, 0, 1, 1)
+            await lab.post(ser, 1, 1, 1)
+            seen = []
+            for seat in order:
+                before = await lab.settlement(ser)
+                try:
+                    res = await lab.report_dc(ser, reporter_seat=seat, dc_seat=2, **HIGH)
+                    what = "ignored" if res.get("ignored") is True else "settled"
+                except HTTPException as ex:
+                    what = "refused %d: %s" % (ex.status_code, ex.detail)
+                seen.append((seat, what, before, await lab.settlement(ser)))
+            return seen, await lab.settlement(ser)
+
+    seen, settled = _run(go())
+    open_ = ("active", None, None, None, 0)
+    done = ("completed", 1, None, None, 1)
+    teammate = [s for s in seen if s[0] == 3]
+    assert len(teammate) == 1, seen
+    _, what, before, after = teammate[0]
+    if order[0] == 3:
+        assert what == "refused 400: reporter must be a member of the non-DC team", seen
+        assert before == after == open_, seen
+    else:
+        assert what == "ignored", seen
+        assert before == after == done, seen
+    stayed = [s for s in seen if s[0] != 3]
+    assert [s[1] for s in stayed] == ["settled", "ignored"], seen
+    assert settled == done, settled
+    assert len(wired) == 1, wired
