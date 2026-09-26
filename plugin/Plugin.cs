@@ -173,6 +173,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestChatRevokeSentinel; // broadcast seat only -- any new value runs the consent-revoke chat-discard self-test once
         internal static ConfigEntry<string> BroadcastTestHeartbeatAbortSentinel; // broadcast seat only -- any new value runs the aborted-send heartbeat self-test once
         internal static ConfigEntry<string> BroadcastTestPresetSlotSentinel; // broadcast seat only -- any new value runs the provisional preset-slot count self-test once
+        internal static ConfigEntry<string> BroadcastTestTeamGameNumberSentinel; // broadcast seat only -- any new value runs the 2v2 game-number self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
         internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0..PortraitRender.PresetSlotCount()-1 = the saved face slot (#370 — NOT 0-9; playerFaces has ten entries but only eight are authorable). Anything outside that range resolves to -1, and is rewritten to -1 once the real slot count has been discovered — it is NOT clamped to the top slot (that silently re-rendered someone else's face onto the card).
         internal static ConfigEntry<string> BinderSort;                  // Player Cards (item 20): the binder order, stored as the BinderSortRules.Mode member NAME (never the ordinal, which changes meaning when a mode is inserted). Written by the header button alone; an unrecognised name falls back to Name.
@@ -1130,6 +1131,13 @@ namespace CompetitiveRounds
                 + " the count from the game's own portrait row and checks that a partial row's count is derived"
                 + " again rather than kept; the cached count is put back afterwards); the result is logged as"
                 + " [PRESET-SLOT-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestTeamGameNumberSentinel = Config.Bind(
+                "Broadcast", "TestTeamGameNumberSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the 2v2 game-number self-test once (synthetic"
+                + " series against a model of the server's filing rule, on trackers of its own: nothing is sent,"
+                + " and the seat's own tracker is never touched); the result is logged as"
+                + " [TEAM-GAME-NUMBER-SENTINEL] PASS/FAIL. A value present at startup never runs."
             );
             BroadcastTestChatRevokeSentinel = Config.Bind(
                 "Broadcast", "TestChatRevokeSentinel", "",
@@ -2357,6 +2365,41 @@ namespace CompetitiveRounds
             PortraitRender.DevPresetSlotSentinelTest();
         }
 
+        // v1.41.0 beta round 4 finding 1: [Broadcast] TestTeamGameNumberSentinel,
+        // the same grammar and identity gate as the levers above.
+        private static string _lastTestTeamGameNumberSentinel;
+        private void TickTestTeamGameNumberSentinel()
+        {
+            if (Plugin.BroadcastTestTeamGameNumberSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestTeamGameNumberSentinel.Value ?? "").Trim();
+            if (_lastTestTeamGameNumberSentinel == null) { _lastTestTeamGameNumberSentinel = raw; return; }
+            if (raw == _lastTestTeamGameNumberSentinel) return;
+            _lastTestTeamGameNumberSentinel = raw;
+            if (raw.Length == 0) return;
+            DevTeamGameNumberSentinelTest();
+        }
+
+        /// <summary>The 2v2 game-number self-test (round 3 finding 1, client
+        /// half, round 4). Runs TeamGameNumber.RunSentinel: synthetic series
+        /// against a model of the server's filing rule, under the Tracker the
+        /// seat runs and three kept rules this round did not build, plus direct
+        /// checks of the tracker, the bounds and both canonicals. Nothing is
+        /// sent and TeamGameNumber.Live is never touched. Logs
+        /// [TEAM-GAME-NUMBER-SENTINEL] PASS/FAIL.</summary>
+        internal static void DevTeamGameNumberSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = TeamGameNumber.RunSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"{TeamGameNumber.SentinelTag} FAIL: threw {ex.Message}");
+            }
+        }
+
         /// <summary>The 2v2 DC reporter election's self-test (round 2 finding 2,
         /// round 3 finding 2). Runs every survivor of synthetic four-seat rooms
         /// through DcReporterElection.ShouldReport, the rule OnPlayerLeftRoom runs,
@@ -3041,6 +3084,7 @@ namespace CompetitiveRounds
             try { TickTestChatRevokeSentinel(); } catch { }
             try { TickTestHeartbeatAbortSentinel(); } catch { }
             try { TickTestPresetSlotSentinel(); } catch { }
+            try { TickTestTeamGameNumberSentinel(); } catch { }
             try { TickTestPlayerCards(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }

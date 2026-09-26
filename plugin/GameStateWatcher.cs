@@ -3793,6 +3793,9 @@ namespace CompetitiveRounds
                 // Disarm catches its own failure; no-op when never armed.
                 try { EscMenuLeaveGuard.Disarm(); } catch { }
                 try { EscLeaveRow.OnRoomLeft(); } catch { }
+                // Round 4, finding 1: a frozen 2v2 game number belongs to the
+                // room it was frozen in; the next room names its own games.
+                try { TeamGameNumber.Live.Clear(); } catch { }
                 // Consume LeavingForRanked on EVERY observed room exit (lobby
                 // impl round 6): the flag's meaning is "the NEXT room exit is
                 // our deliberate leave-for-ranked". The tracking-gated scoring
@@ -5213,8 +5216,24 @@ namespace CompetitiveRounds
                 && (force || sp1 != liveSentTeamP1 || sp2 != liveSentTeamP2))
             {
                 liveSentTeamP1 = sp1; liveSentTeamP2 = sp2;
-                ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2);
+                // Round 4, finding 1: the game frozen at this game's start and
+                // the room it is played in (0 = the post goes without them).
+                string teamRoom = TeamGameRoom();
+                int teamGame = TeamGameNumber.Live.For(ApiClient.ActiveTeamSeriesId, teamRoom);
+                ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2,
+                                             teamGame, teamRoom);
             }
+        }
+
+        /// <summary>Round 4, finding 1: the room a 2v2 post names. The
+        /// existing photonRoomId (set when this room was joined), and only
+        /// while it is still the room Photon says this seat is in; "" (no
+        /// room, so no number) otherwise.</summary>
+        private static string TeamGameRoom()
+        {
+            string live = "";
+            try { live = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+            return string.Equals(photonRoomId, live, StringComparison.Ordinal) ? live : "";
         }
 
         private static void OnMatchStarted()
@@ -5258,6 +5277,24 @@ namespace CompetitiveRounds
             liveCumP1 = 0; liveCumP2 = 0;
             liveSentRankedP1 = 0; liveSentRankedP2 = 0;
             liveSentTeamP1 = 0; liveSentTeamP2 = 0;
+            // v1.41.0 beta round 4, finding 1: the game this game's 2v2 posts
+            // name, frozen HERE, at the event that resets the pair they carry
+            // (update_team_live_points: a client must take game_number from the
+            // event that resets its pair). TeamGameNumber says how it is chosen
+            // and when a post goes without it. Only a cr_ff room feeds the team
+            // channel (MaybeSendLivePoints), so only a cr_ff room freezes one.
+            try
+            {
+                var tgnProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (!PhotonNetwork.OfflineMode && tgnProps != null && tgnProps.ContainsKey("cr_ff"))
+                {
+                    string tgnLine;
+                    TeamGameNumber.Live.OnGameStart(ApiClient.ActiveTeamSeriesId, TeamGameRoom(), out tgnLine);
+                    Plugin.Log.LogInfo(tgnLine);
+                }
+                else TeamGameNumber.Live.Clear();
+            }
+            catch { }
             // Match-scoped DC latch — must reset per GAME, not only on room leave
             // (learning #27). Rematches reuse the room, so a latch set during
             // game 1 would otherwise still be true in game 2 and let a LEAVER
@@ -5568,6 +5605,16 @@ namespace CompetitiveRounds
             // correctness never depends on waiting while match state can reset.
             BroadcastGstatsImmediate();
             try { PhotonNetwork.SendAllOutgoingCommands(); } catch { }
+            // v1.41.0 beta round 4, finding 1: every seat of a cr_ff room reads
+            // the series' recorded games again after this game, so the next
+            // game's start names its game from a count that includes this one.
+            try
+            {
+                var goProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (!PhotonNetwork.OfflineMode && goProps != null && goProps.ContainsKey("cr_ff"))
+                    ApiClient.RefreshTeamGameRecord(ApiClient.ActiveTeamSeriesId);
+            }
+            catch { }
             PollOpponentFps();
 
             if (!opponentSteamIdResolved)

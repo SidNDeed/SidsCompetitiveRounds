@@ -32218,10 +32218,12 @@ async def update_team_live_points(
     post proves a crossing, attested or not, and the record rule described
     above _record_team_game_points needs a pair of two points from a seat of
     each team. A client sending them must take game_number from the same event
-    that resets its pair, so the two can never describe different games. No
-    client sends them yet. A post without them is accepted and filed as
-    before, but after the first game of a series' original sitting only the
-    posts that named their game count toward a crossing.
+    that resets its pair, so the two can never describe different games. The
+    client in this tree sends them (plugin/TeamGameNumber.cs says how it
+    numbers a game, and when a post goes without them); older clients never
+    do. A post without them is accepted and filed as before, but after the
+    first game of a series' original sitting only the posts that named their
+    game count toward a crossing.
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")

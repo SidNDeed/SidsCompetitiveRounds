@@ -1689,3 +1689,338 @@ def test_the_one_team_test_can_fail(wired, monkeypatch, mutant):
     assert game_two == (flipped, ("completed", 1, None, None, 1) if flipped
                         else ("dc_incomplete", None, 1, "dc_manual_pending", 0)), game_two
     assert lone == ("dc_incomplete", None, 1, "dc_manual_pending", 0), lone
+
+
+# -- round 4 of the beta lane: the client names its game ----------------------
+#
+# The v1.41.0 beta review, round 3, finding 1: the client sent no game number
+# and no room, so after the first game of a sitting no post counted (every
+# lead-forfeit settled as dc_incomplete), and a previous game's posts landing
+# late were kept out only because nothing counted. Round 4's client
+# (plugin/TeamGameNumber.cs, and PostTeamLivePoints in plugin/ApiClient.cs)
+# names, on every 2v2 post it can, the game frozen at that game's start and
+# the room it is played in. These tests pin what the server does with such
+# posts. The server code is the hotfix's; this round changes only the
+# endpoint's docstring, which now says a client sends the names.
+
+def _wrap_the_filing(monkeypatch, mutant=False):
+    """Replace main._record_team_game_points by a wrapper that records each
+    call and, with `mutant`, files an attested post under the game in
+    progress whatever game or sitting it names: the check that makes a
+    post's identity its own, removed. Without `mutant` it passes every call
+    through unchanged (the inert twin)."""
+    real = main._record_team_game_points
+    calls = []
+
+    async def wrapped(db, series_id, t1_points, t2_points, game, seat, attested=None):
+        calls.append(attested)
+        if mutant and attested is not None:
+            attested = game
+        return await real(db, series_id, t1_points, t2_points, game, seat, attested)
+
+    monkeypatch.setattr(main, "_record_team_game_points", wrapped)
+    return calls
+
+
+def _masks(row):
+    return None if row is None else (row["pair_seats"], row["attested_seats"])
+
+
+async def _a_one_one_naming(lab, named):
+    """Game 2 is in progress in ROOM (team 1 won game 1). A seat of each team
+    (0 and 2) posts 1-1 naming `named` = (game, room); seat 2 leaves. Returns
+    every record of games 1-3 in both rooms, and the settlement."""
+    ser = await lab.series()
+    for seat in (0, 2):
+        await lab.post(ser, seat, 1, 1, game=named[0], room=named[1])
+    rows = {}
+    for ordinal in (1, 2, 3):
+        for room in (ROOM, ROOM_NEXT):
+            rows[(ordinal, room)] = _masks(await lab.game_row(ser, ordinal, room))
+    await _two_reports(lab, ser, LOW, LOW)
+    return rows, await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("named, filed", [
+    ((1, ROOM), False),
+    ((2, ROOM), True),
+    ((3, ROOM), False),
+    ((2, ROOM_NEXT), False),
+], ids=["the-game-before", "the-game-in-progress", "the-game-after", "another-sitting"])
+def test_an_attested_post_is_filed_only_under_exactly_the_game_it_names(wired, named, filed):
+    """Round 4, 2.4. Only a post naming the game in progress, in the stored
+    sitting, is filed (in both masks) and proves the crossing. One naming the
+    game before (a late post), the game after (a number ahead of the
+    server's) or another sitting leaves no record anywhere and settles
+    nothing."""
+    async def go():
+        async with _Lab() as lab:
+            return await _a_one_one_naming(lab, named)
+
+    rows, settled = _run(go())
+    both = _bit(1, 1, 0) | _bit(1, 1, 2)
+    expected = {key: None for key in rows}
+    if filed:
+        expected[(2, ROOM)] = (both, both)
+    assert rows == expected, rows
+    assert settled == (("completed", 1, None, None, 1) if filed
+                       else ("dc_incomplete", None, 1, "dc_manual_pending", 0)), settled
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["files-whatever-it-names", "pass-through"])
+def test_the_exact_game_test_can_fail(wired, monkeypatch, mutant):
+    """Control for the test above, on its own path: with the named game and
+    sitting ignored, a 1-1 naming the game AFTER the one in progress is filed
+    under game 2 and completes the series, so the test above would fail. The
+    inert twin wraps the real filing, is reached by both posts, and changes
+    nothing."""
+    calls = _wrap_the_filing(monkeypatch, mutant == "files-whatever-it-names")
+
+    async def go():
+        async with _Lab() as lab:
+            return await _a_one_one_naming(lab, (3, ROOM))
+
+    rows, settled = _run(go())
+    assert calls == [(3, ROOM), (3, ROOM)], calls
+    both = _bit(1, 1, 0) | _bit(1, 1, 2)
+    if mutant == "files-whatever-it-names":
+        assert rows[(2, ROOM)] == (both, both), rows
+        assert settled == ("completed", 1, None, None, 1), settled
+    else:
+        assert all(v is None for v in rows.values()), rows
+        assert settled == ("dc_incomplete", None, 1, "dc_manual_pending", 0), settled
+
+
+async def _consecutive_sweeps(lab, scenario):
+    """Review round 3's own failing shape (its test_team_series_report_dc.py:867,
+    'same-sweep-before', and the ambiguity proof at :1259): game 1 goes 1-0,
+    2-0, 2-1, 2-2 from every seat and team 1 wins it; game 2 opens the same
+    way, team 1 sweeping round 1. Seat 2 leaves.
+      game-2-swept         every post names its game; game 2 reaches 2-0.
+      game-2-swept-legacy  the same posts without the names: round 3's pin.
+      game-1-resends-late  game 2 reaches only 1-0, and game 1's 1-0 and 2-0,
+                           naming game 1, land after game 1's report: the
+                           records round 3 proved identical, bit for bit, to
+                           game-2-swept when no post names its game."""
+    named = scenario != "game-2-swept-legacy"
+    one = {"game": 1, "room": ROOM} if named else {}
+    two = {"game": 2, "room": ROOM} if named else {}
+    ser = await lab.series(t1_wins=0, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (2, 0), (2, 1), (2, 2), **one)
+    await lab.win_game(ser, winner=1)
+    if scenario == "game-1-resends-late":
+        await _post_all(lab, ser, (1, 0), (2, 0), **one)
+        await _post_all(lab, ser, (1, 0), **two)
+    else:
+        await _post_all(lab, ser, (1, 0), (2, 0), **two)
+    await _two_reports(lab, ser, LOW, LOW)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("scenario, played", [
+    ("game-2-swept", True),
+    ("game-2-swept-legacy", False),
+    ("game-1-resends-late", False),
+])
+def test_consecutive_same_team_sweeps_are_told_apart_once_posts_name_their_game(
+        wired, scenario, played):
+    """Round 4, 2.4, in round 3's exact failing shape. With every post naming
+    its game, a real game 2 that swept round 1 after game 1 had also passed
+    2-0 settles as the forfeit it is, and a game 2 that reached only 1-0,
+    with game 1's own 2-0 landing late, settles the conservative way. Without
+    the names the first still settles as dc_incomplete, as round 3 pinned:
+    the pair is what tells them apart."""
+    async def go():
+        async with _Lab() as lab:
+            return await _consecutive_sweeps(lab, scenario)
+
+    settled = _run(go())
+    assert settled == (("completed", 1, None, None, 1) if played
+                       else ("dc_incomplete", None, 1, "dc_manual_pending", 0)), settled
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["files-whatever-it-names", "evidence-disabled", "pass-through"])
+def test_the_consecutive_sweeps_test_can_fail(wired, monkeypatch, mutant):
+    """Control for the test above, on its own path. With the named game
+    ignored, game 1's late 2-0 re-sends are filed under game 2 and complete
+    the series; with no post counted as evidence, the real sweep settles as
+    dc_incomplete. Either way the test above would fail. The inert twin wraps
+    the real filing and changes nothing."""
+    calls = _wrap_the_filing(monkeypatch, mutant == "files-whatever-it-names")
+    if mutant == "evidence-disabled":
+        _wrap_the_evidence(monkeypatch, lambda shape, cur, att: 0)
+
+    async def go():
+        async with _Lab() as lab:
+            return (await _consecutive_sweeps(lab, "game-2-swept"),
+                    await _consecutive_sweeps(lab, "game-1-resends-late"))
+
+    swept, resent = _run(go())
+    assert len(calls) == (16 + 8) + (16 + 8 + 4), len(calls)
+    completed = ("completed", 1, None, None, 1)
+    incomplete = ("dc_incomplete", None, 1, "dc_manual_pending", 0)
+    assert swept == (incomplete if mutant == "evidence-disabled" else completed), swept
+    assert resent == (completed if mutant == "files-whatever-it-names" else incomplete), resent
+
+
+async def _prior_game_one_ones(lab, order, game_two_crossed):
+    """Review round 3, finding 1's order case. Game 1 goes 1-0 from every
+    seat, naming game 1, and two seats of different teams (1 and 2) post a
+    1-1 naming game 1 that is still in flight while the game goes on to be
+    reported (team 1 wins it). Game 2 reaches 1-0 from every seat, naming
+    game 2, and with `game_two_crossed` also 1-1 from seats 0 and 3. Seat 2
+    leaves. `order` is when the two game-1 posts are processed:
+      before-its-report    while game 1 is in progress;
+      after-its-report     after game 1's report, before the DC reports;
+      after-the-dc-report  after the DC reports have settled the series.
+    Returns the settlement, game 1's and game 2's records when it was
+    decided, what the two posts got, and the records once they are
+    processed."""
+    ser = await lab.series(t1_wins=0, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), game=1, room=ROOM)
+    got = []
+
+    async def the_two():
+        for seat in (1, 2):
+            try:
+                got.append((await lab.post(ser, seat, 1, 1, game=1, room=ROOM))["status"])
+            except HTTPException as ex:
+                got.append(ex.status_code)
+
+    if order == "before-its-report":
+        await the_two()
+    await lab.win_game(ser, winner=1)
+    if order == "after-its-report":
+        await the_two()
+    await _post_all(lab, ser, (1, 0), game=2, room=ROOM)
+    if game_two_crossed:
+        await _post_all(lab, ser, (1, 1), seats=(0, 3), game=2, room=ROOM)
+    await _two_reports(lab, ser, LOW, LOW)
+    settled = await lab.settlement(ser)
+    decided = (_masks(await lab.game_row(ser, 1)), _masks(await lab.game_row(ser, 2)))
+    if order == "after-the-dc-report":
+        await the_two()
+    final = (_masks(await lab.game_row(ser, 1)), _masks(await lab.game_row(ser, 2)))
+    return settled, decided, got, final
+
+
+_ORDERS = ["before-its-report", "after-its-report", "after-the-dc-report"]
+
+
+@needs_pg
+@pytest.mark.parametrize("game_two_crossed", [False, True], ids=["game-2-below-two", "game-2-crossed"])
+def test_a_previous_games_named_posts_settle_the_same_whenever_they_land(wired, game_two_crossed):
+    """Round 4, 2.5. Two game-1 posts, a 1-1 from a seat of each team, name
+    game 1. Wherever they land -- before game 1's report, after it, or after
+    the DC report that settles game 2 -- game 2 settles on game 2's own posts
+    alone, and the same way: the identity a post is filed by is the one it
+    carries, never the game in progress when it is processed. Landing before
+    the report they are game 1's own and are filed there; after it they name
+    a game that is no longer in progress and are filed nowhere (accepted:
+    live points are still raised); after the DC report the series is no
+    longer active and they are refused (409). Game 2's record never holds
+    them."""
+    async def go():
+        results = {}
+        for order in _ORDERS:
+            async with _Lab() as lab:
+                results[order] = await _prior_game_one_ones(lab, order, game_two_crossed)
+        return results
+
+    results = _run(go())
+    expect = (("completed", 1, None, None, 1) if game_two_crossed
+              else ("dc_incomplete", None, 1, "dc_manual_pending", 0))
+    all_ten = sum(_bit(1, 0, k) for k in range(4))
+    game_two = all_ten | ((_bit(1, 1, 0) | _bit(1, 1, 3)) if game_two_crossed else 0)
+    late = _bit(1, 1, 1) | _bit(1, 1, 2)
+    for order, (settled, decided, got, final) in results.items():
+        assert settled == expect, (order, settled)
+        game_one = all_ten | (late if order == "before-its-report" else 0)
+        assert decided == ((game_one, game_one), (game_two, game_two)), (order, decided)
+        assert final == decided, (order, final)
+        assert got == ([409, 409] if order == "after-the-dc-report" else ["ok", "ok"]), (order, got)
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["files-whatever-it-names", "pass-through"])
+def test_the_order_test_can_fail(wired, monkeypatch, mutant):
+    """Control for the test above, on its own path: with the named game
+    ignored, the two game-1 posts landing after game 1's report are filed
+    under game 2, prove a crossing game 2 never reached, and complete the
+    series, while the same posts landing before the report leave it
+    dc_incomplete: the settlement depends on the order again, so the test
+    above would fail. The inert twin wraps the real filing and changes
+    nothing."""
+    _wrap_the_filing(monkeypatch, mutant == "files-whatever-it-names")
+
+    async def go():
+        results = {}
+        for order in ("before-its-report", "after-its-report"):
+            async with _Lab() as lab:
+                results[order] = (await _prior_game_one_ones(lab, order, False))[0]
+        return results
+
+    results = _run(go())
+    incomplete = ("dc_incomplete", None, 1, "dc_manual_pending", 0)
+    assert results["before-its-report"] == incomplete, results
+    assert results["after-its-report"] == (("completed", 1, None, None, 1)
+                                           if mutant == "files-whatever-it-names" else incomplete), results
+
+
+_PLUGIN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                           "plugin")
+
+
+def _cs_const(src, name):
+    m = re.search(r'internal const string %s\s*=\s*"([^"]*)";' % name, src)
+    assert m, name
+    return m.group(1)
+
+
+def test_the_clients_named_canonical_is_the_one_the_server_checks(monkeypatch):
+    """Round 4, 2.3: the client signs 'team-live-points-game:...' exactly as
+    update_team_live_points builds it. plugin/TeamGameNumber.cs pins one
+    example, PinExpected for its PinSeries, PinReporter and PinRoom with t1 2,
+    t2 1 and game 3 (its sentinel checks that AttestedCanonical builds it). A
+    signature over it passes the server's own check for those inputs -- the
+    call then stops at the database, None here -- and a signature over the
+    same string with the two sides swapped does not. The two query
+    parameters the client appends are the endpoint's own, in its order, and
+    PostTeamLivePoints builds its URL and both signatures from these helpers."""
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
+    src = _read(os.path.join(_PLUGIN_DIR, "TeamGameNumber.cs"))
+    series, reporter, room, expected = (_cs_const(src, n) for n in
+                                        ("PinSeries", "PinReporter", "PinRoom", "PinExpected"))
+
+    def call(message):
+        sig = hmac.new(SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+        return _run(main.update_team_live_points(
+            series_id=series, request=None, t1_points=2, t2_points=1,
+            reporter_steam_id=reporter, sig=sig, game_number=3, photon_room_id=room, db=None))
+
+    with pytest.raises(AttributeError):          # past the signature; db is None
+        call(expected)
+    swapped = expected.replace(":2:1:3:", ":1:2:3:")
+    assert swapped != expected
+    with pytest.raises(HTTPException) as ex:
+        call(swapped)
+    assert ex.value.status_code == 403, ex.value.detail
+
+    pair = re.search(r"internal static string QueryPair\(.*?\{(.*?)\n        \}", src, re.S)
+    assert pair, "QueryPair"
+    names = re.findall(r'"&(\w+)="', pair.group(1))
+    params = list(inspect.signature(main.update_team_live_points).parameters)
+    assert names == ["game_number", "photon_room_id"], names
+    assert [p for p in params if p in names] == names, params
+
+    api = _read(os.path.join(_PLUGIN_DIR, "ApiClient.cs"))
+    start = api.index("public static void PostTeamLivePoints(")
+    body = api[start:api.index("\n        }\n", start)]
+    for helper in ("TeamGameNumber.Sendable(", "TeamGameNumber.LegacyCanonical(",
+                   "TeamGameNumber.QueryPair(", "TeamGameNumber.AttestedCanonical("):
+        assert body.count(helper) == 1, helper
+    assert "team-live-points" not in body, "a canonical built outside TeamGameNumber"

@@ -2772,15 +2772,25 @@ namespace CompetitiveRounds
             // it, one missed game report left every later live-points write
             // refused and the betting window open for the rest of the sitting.
             public Func<string, string> rewriteOnRefusal; public bool rewrote;
+            // v1.41.0 beta round 4, finding 1: a 2v2 post that names its game
+            // carries the same post WITHOUT the pair here. A server that does
+            // not know the pair checks the legacy signature and refuses the
+            // named one ("HTTP 403" + "Invalid signature"); the post is then
+            // resent once in the legacy form, and onFallbackOk runs when that
+            // one is accepted (the series' later posts then go without the
+            // pair; see PostTeamLivePoints).
+            public string fallbackUrl; public bool fellBack; public Action onFallbackOk;
         }
         private static readonly Dictionary<string, LivePointRetry> livePointRetries =
             new Dictionary<string, LivePointRetry>();
         private const int LIVE_POINT_MAX_ATTEMPTS = 4;
 
         private static void SendLivePoints(string key, string url, string tag,
-                                           Func<string, string> rewriteOnRefusal = null)
+                                           Func<string, string> rewriteOnRefusal = null,
+                                           string fallbackUrl = null, Action onFallbackOk = null)
         {
-            var entry = new LivePointRetry { url = url, attempts = 0, tag = tag, rewriteOnRefusal = rewriteOnRefusal };
+            var entry = new LivePointRetry { url = url, attempts = 0, tag = tag, rewriteOnRefusal = rewriteOnRefusal,
+                                             fallbackUrl = fallbackUrl, onFallbackOk = onFallbackOk };
             livePointRetries[key] = entry;   // newest score wins outright
             SendLivePointsOnce(key, entry);
         }
@@ -2796,7 +2806,24 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     livePointRetries.Remove(key);
-                    Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} ok");
+                    Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} ok{(entry.fellBack ? " (without the pair)" : "")}");
+                    if (entry.fellBack && entry.onFallbackOk != null)
+                    {
+                        try { entry.onFallbackOk(); } catch { }
+                    }
+                    return;
+                }
+                // Round 4, finding 1: the named form refused on its signature
+                // alone is the server not knowing the pair. Resend once
+                // without it; any other refusal takes the paths below.
+                if (entry.fallbackUrl != null && !entry.fellBack && resp != null
+                    && (resp.IndexOf("HTTP 403", StringComparison.Ordinal) >= 0
+                        || resp.IndexOf("HTTP/1.1 403", StringComparison.Ordinal) >= 0)
+                    && resp.IndexOf("Invalid signature", StringComparison.Ordinal) >= 0)
+                {
+                    entry.fellBack = true; entry.url = entry.fallbackUrl; entry.attempts = 0;
+                    Plugin.Log.LogWarning($"[LIVE-POINTS] {entry.tag} refused with the pair (403) -- resending once without it");
+                    SendLivePointsOnce(key, entry);
                     return;
                 }
                 // A 409 is the server saying the write does not apply (series
@@ -2847,16 +2874,43 @@ namespace CompetitiveRounds
         /// (Sid, Aug 9: the cutoff is 2 points, never a clock). t1/t2 are in
         /// team_series' own slot order. Delivery is retried like the 1v1
         /// channel (bounded, newest-value-wins); a persistently lost report
-        /// costs cutoff precision until the 20s refresh, never gameplay.</summary>
-        public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points)
+        /// costs cutoff precision until the 20s refresh, never gameplay.
+        ///
+        /// v1.41.0 beta round 4, finding 1: gameNumber and photonRoomId are
+        /// the game this pair is the running score of, frozen at its game's
+        /// start (TeamGameNumber.Live.For), and the room it is played in.
+        /// With both, the post carries game_number and photon_room_id and
+        /// signs 'team-live-points-game:{series}:{reporter}:{t1}:{t2}:{game}:{room}',
+        /// the canonical update_team_live_points checks for them; the server
+        /// then files it only under exactly that game of that sitting. It goes
+        /// WITHOUT the pair, signing the legacy canonical, when there is no
+        /// number (0: see TeamGameNumber for when), when the number or the
+        /// room is outside what the server accepts (TeamGameNumber.Sendable),
+        /// or when this series' server has already refused the pair once
+        /// (a server that does not know it: the 403 fallback in
+        /// SendLivePointsOnce).</summary>
+        public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points,
+                                              int gameNumber = 0, string photonRoomId = null)
         {
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
-            string sig = ComputeHmacHex($"team-live-points:{seriesId}:{reporterSteamId}:{t1Points}:{t2Points}");
-            string url = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
-                         $"?t1_points={t1Points}&t2_points={t2Points}" +
-                         $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
-            SendLivePoints("2v2:" + seriesId, url,
-                $"2v2 series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {t1Points}-{t2Points}");
+            string query = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
+                           $"?t1_points={t1Points}&t2_points={t2Points}" +
+                           $"&reporter_steam_id={Escape(reporterSteamId)}";
+            string legacyUrl = query + "&sig=" + ComputeHmacHex(
+                TeamGameNumber.LegacyCanonical(seriesId, reporterSteamId, t1Points, t2Points));
+            string tag = $"2v2 series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {t1Points}-{t2Points}";
+            if (!TeamGameNumber.Sendable(gameNumber, photonRoomId)
+                || TeamGameNumber.Live.AttestationRefused(seriesId))
+            {
+                SendLivePoints("2v2:" + seriesId, legacyUrl, tag);
+                return;
+            }
+            string namedUrl = query + TeamGameNumber.QueryPair(gameNumber, UnityWebRequest.EscapeURL(photonRoomId))
+                              + "&sig=" + ComputeHmacHex(TeamGameNumber.AttestedCanonical(
+                                  seriesId, reporterSteamId, t1Points, t2Points, gameNumber, photonRoomId));
+            SendLivePoints("2v2:" + seriesId, namedUrl, tag + " game " + gameNumber,
+                fallbackUrl: legacyUrl,
+                onFallbackOk: () => TeamGameNumber.Live.NoteAttestationRefused(seriesId));
         }
 
         /// <summary>Points scored ACROSS THE FIELD in the FFA game in progress
@@ -13799,6 +13853,7 @@ namespace CompetitiveRounds
                     // LastSeriesStateForId == current id) could terminate on
                     // the PREVIOUS series' answer.
                     LastSeriesStateForId = null;
+                    LastSeriesStateRoom = null;
                     LastSeriesStateStatus = null;
                     LastSeriesStateReason = null;
                     LastSeriesStateConfirmations = 0;
@@ -14411,6 +14466,11 @@ namespace CompetitiveRounds
         // response was for) and reset by the ActiveTeamSeriesId setter, so a
         // consumer can require ForId == current before trusting the cache.
         public static string LastSeriesStateForId = null;
+        // Round 4, finding 1: the Photon room the LAST answer was both asked
+        // and received in, "" when the two differ. RefreshTeamGameRecord reads
+        // the cached confirmations only when this is the current room, so a
+        // count from an earlier sitting never stands in for this one's.
+        public static string LastSeriesStateRoom = null;
         // Throttled background poll of the team-series state — 2s while we
         // have an active or paused series, off otherwise.
         private static float teamSeriesStateTimer = 0f;
@@ -14536,12 +14596,70 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>v1.41.0 beta round 4, finding 1: after a 2v2 game over,
+        /// read the series' recorded games again, so the next game's start
+        /// (GameStateWatcher.OnMatchStarted -> TeamGameNumber.Live.OnGameStart)
+        /// names its game from a count that includes the game just played.
+        /// Every seat runs it, at +2, +5, +9, +14 and +20 s, and stops as soon
+        /// as a read shows the finished game recorded, when the active series
+        /// changes, or when a newer game over starts its own. A read that comes
+        /// too late only costs the next game its number (TeamGameNumber: a
+        /// stale count names a LOWER game, never a higher one).
+        ///
+        /// Only while the last read of THIS series, asked and answered in THIS
+        /// room, showed it active with all four seats confirmed:
+        /// team_series_state cancels an assembly that has fewer than four
+        /// confirmations once its deadline has passed (unless the game is
+        /// positively live), and these reads must never be the call that
+        /// reaches that branch. Confirmations only grow within a sitting: the
+        /// two server paths that reset them (_team_relock_existing_series and
+        /// team_lobby_start) clear the room with them, and the next sitting is
+        /// played in another room, where a read from the old one does not
+        /// pass this gate.</summary>
+        public static void RefreshTeamGameRecord(string seriesId)
+        {
+            if (string.IsNullOrEmpty(seriesId) || Plugin.Instance == null) return;
+            int gen = ++teamGameRefreshGen;
+            Plugin.Instance.StartCoroutine(TeamGameRecordRefresh(seriesId, gen));
+        }
+
+        private static int teamGameRefreshGen;
+        private static readonly float[] TeamGameRefreshWaits = { 2f, 3f, 4f, 5f, 6f };
+
+        private static System.Collections.IEnumerator TeamGameRecordRefresh(string seriesId, int gen)
+        {
+            int polled = 0;
+            foreach (float wait in TeamGameRefreshWaits)
+            {
+                yield return new WaitForSeconds(wait);
+                if (gen != teamGameRefreshGen) yield break;
+                if (!string.Equals(ActiveTeamSeriesId, seriesId, StringComparison.Ordinal)) yield break;
+                if (TeamGameNumber.Live.ReadShowsGameRecorded(seriesId)) yield break;
+                string roomNow = "";
+                try { roomNow = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+                if (!string.Equals(LastSeriesStateForId, seriesId, StringComparison.Ordinal)
+                    || roomNow.Length == 0
+                    || !string.Equals(LastSeriesStateRoom, roomNow, StringComparison.Ordinal)
+                    || LastSeriesStateStatus != "active" || LastSeriesStateConfirmations < 4)
+                {
+                    Plugin.Log.LogInfo($"[2V2-GAME] series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} "
+                        + $"no further after-game read ({polled} made): the last read of this series in this room "
+                        + "is not active with four confirmations");
+                    yield break;
+                }
+                polled++;
+                PollTeamSeriesState(seriesId, null);
+            }
+        }
+
         /// <summary>GET /team/series/{id}/state. Polled during the first 20s
         /// after ready_join to detect server-side assembly cancel.</summary>
         public static void PollTeamSeriesState(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";
+            string roomAsked = "";
+            try { roomAsked = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 if (!ok || string.IsNullOrEmpty(resp)) return;
@@ -14555,12 +14673,27 @@ namespace CompetitiveRounds
                 LastSeriesDcTeamRemaining = ExtractJsonInt(resp, "dc_team_remaining");
                 LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
                 LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
+                // Round 4, finding 1: the recorded games the next 2v2 game start
+                // names its game from (TeamGameNumber). Only an answer that
+                // carries both counts is a read: the canceled and dc_incomplete
+                // answers carry neither, and a missing field parses as 0.
+                try
+                {
+                    TeamGameNumber.Live.ObserveRead(seriesId,
+                        resp.IndexOf("\"t1_series_wins\":", StringComparison.Ordinal) >= 0
+                        && resp.IndexOf("\"t2_series_wins\":", StringComparison.Ordinal) >= 0,
+                        LastSeriesT1Wins, LastSeriesT2Wins);
+                }
+                catch { }
                 // Codex r2 f8: stamp WHICH series this answer described — the
                 // ONLY writer of this field. A late callback for a previous
                 // series overwrites the cache above, but ForId then names that
                 // previous series, so the assembly loop's ForId==current check
                 // rejects it.
                 LastSeriesStateForId = seriesId;
+                string roomNow = "";
+                try { roomNow = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+                LastSeriesStateRoom = string.Equals(roomAsked, roomNow, StringComparison.Ordinal) ? roomNow : "";
                 // Aug 8 (Sid): the frozen team-colour stamp rides this poll
                 // (empty = vanilla / pre-migration). Publish only while the
                 // response still describes the ACTIVE series — a late callback
