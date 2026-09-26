@@ -1059,6 +1059,83 @@ def test_before_migration_351_nothing_fails_and_nothing_auto_completes(wired):
     assert settled[0] == "dc_incomplete", settled
 
 
+@needs_pg
+def test_migration_352_runs_twice_over_a_351_table(wired):
+    """352 over a 351 table that already holds a row: the row keeps its bits
+    and reads attested_seats 0 (whatever it held counts as unnamed),
+    attested_max_sum is gone, the new column is bounded, and a second run of
+    352 changes nothing -- nor does 351 run again and then 352."""
+    async def state(conn):
+        cols = [r["column_name"] for r in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'team_series_games'"
+            " ORDER BY ordinal_position")]
+        cons = [(r["conname"], r["def"]) for r in await conn.fetch(
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint"
+            " WHERE conrelid = 'team_series_games'::regclass ORDER BY conname")]
+        rows = [tuple(r) for r in await conn.fetch(
+            "SELECT series_id, game_ordinal, sitting_room, pair_seats, attested_seats"
+            "  FROM team_series_games ORDER BY game_ordinal, sitting_room")]
+        return cols, cons, rows
+
+    async def go():
+        async with _Lab(with_attested_seats=False) as lab:
+            ser = await lab.series()
+            conn = await asyncpg.connect(PLAIN_DSN)
+            try:
+                await conn.execute('SET search_path TO "%s"' % lab.schema)
+                await conn.execute(
+                    "INSERT INTO team_series_games (series_id, game_ordinal,"
+                    " sitting_room, pair_seats, attested_max_sum)"
+                    " VALUES ($1, 2, $2, $3, 2)", ser["sid"], ROOM, _bit(1, 1, 0))
+                await conn.execute(_read(MIGRATION_352))
+                first = await state(conn)
+                await conn.execute(_read(MIGRATION_352))
+                again = await state(conn)
+                await conn.execute(_read(MIGRATION_351))
+                await conn.execute(_read(MIGRATION_352))
+                after_351 = await state(conn)
+                refused = []
+                for bad in ("attested_seats = 68719476736", "attested_seats = -1"):
+                    try:
+                        await conn.execute("UPDATE team_series_games SET %s" % bad)
+                    except asyncpg.CheckViolationError:
+                        refused.append(bad)
+                return ser["sid"], first, again, after_351, refused
+            finally:
+                await conn.close()
+
+    sid, first, again, after_351, refused = _run(go())
+    cols, cons, rows = first
+    assert "attested_max_sum" not in cols and "attested_seats" in cols, cols
+    assert rows == [(sid, 2, ROOM, _bit(1, 1, 0), 0)], rows
+    assert again == first and after_351 == first, (first, again, after_351)
+    assert len(refused) == 2, refused
+
+
+@needs_pg
+@pytest.mark.parametrize("with_352", [False, True], ids=["before-352", "after-352"])
+def test_before_migration_352_nothing_fails_and_nothing_auto_completes(wired, with_352):
+    """The deploy-order claim in 352's header: this API against a database
+    with 351 but not 352 records nothing and reads nothing, fails no request,
+    and the DC report settles as dc_incomplete on a game a seat of each team
+    posted 1-1 in, naming it. The twin, the same posts once 352 is applied,
+    records the game and completes the series."""
+    async def go():
+        async with _Lab(with_attested_seats=with_352) as lab:
+            ser = await lab.series()
+            posted = [await lab.post(ser, seat, 1, 1, game=2, room=ROOM)
+                      for seat in (0, 2)]
+            await _two_reports(lab, ser, LOW, LOW)
+            rows = (await lab.sql("SELECT count(*) AS n FROM team_series_games"))[0]["n"]
+            return posted, rows, await lab.settlement(ser)
+
+    posted, rows, settled = _run(go())
+    assert [p["status"] for p in posted] == ["ok", "ok"], posted
+    assert rows == (1 if with_352 else 0), rows
+    assert settled[:2] == (("completed", 1) if with_352 else ("dc_incomplete", None)), settled
+
+
 # -- the rule against an independent model of what a record can hold ---------
 #
 # The live tests above pin individual histories. These enumerate them, in
