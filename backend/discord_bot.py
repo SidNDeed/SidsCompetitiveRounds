@@ -437,7 +437,7 @@ def _mail_sent_line(info):
         return "\u2709\ufe0f Sent your reply."
     who = (info.get("sender_name") or "").strip() or "them"
     subj = (info.get("subject") or "").strip() or "(no subject)"
-    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (who, subj)
+    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (_escape_md(who), subj)
 
 
 # ── Item 5: the thread marker ──────────────────────────────────────────────
@@ -580,7 +580,7 @@ async def _ask_which_mail(message_or_ctx, body, *, discord_id, channel,
     lines = [lead, "Tap the one you meant \u2014 or use Discord\u2019s **Reply** on its DM."]
     for t in threads[:5]:
         lines.append("**%s** \u2014 *%s* \u00b7 `%s`"
-                     % ((t.get("sender_name") or "?").strip(),
+                     % (_escape_md((t.get("sender_name") or "?").strip()),
                         (t.get("subject") or "(no subject)").strip(),
                         t.get("relay_code")))
     lines.append("-# Or send `SCR-XXXXXXXXXXXX your message` at any time.")
@@ -1113,7 +1113,12 @@ def _faq_plainify(text: str, cap: int = 420) -> str:
     #47), and channel mentions are meaningless in-game."""
     t = _faq_re.sub(r"<#\d+>", "the Discord server", text)
     t = _faq_re.sub(r"<@!?\d+>", "them", t)
-    t = t.replace("**", "").replace("__", "").replace("`", "")
+    t = t.replace("**", "").replace("__", "")
+    # A player's name arrives escaped for Discord (_escape_md; round 4,
+    # finding 23), and in-game chat shows text as typed: drop the markup
+    # backticks, not an escaped one, then every escape.
+    t = _faq_re.sub(r"(?<!\\)`", "", t)
+    t = _faq_re.sub(r"\\([^0-9A-Za-z\s])", r"\1", t)
     for bad, good in (("—", "-"), ("–", "-"), ("×", "x"), ("•", "-"),
                       ("→", "->"), ("’", "'"), ("“", '"'), ("”", '"'),
                       ("·", "-"), ("✅", ""), ("❌", "")):
@@ -1167,12 +1172,12 @@ async def _faq_top_player(message):
     if not entries:
         return "Couldn't reach the leaderboard right now — try `/lb` in a minute."
     top = entries[0]
-    line = (f"Right now the top-rated player is **{top['display_name']}** at "
+    line = (f"Right now the top-rated player is **{_escape_md(top['display_name'])}** at "
             f"**{top['rating']}** ({top['wins']}W/{top['losses']}L).")
     if len(entries) >= 3:
-        line += (f"\nPodium: 🥇 {entries[0]['display_name']} ({entries[0]['rating']}) · "
-                 f"🥈 {entries[1]['display_name']} ({entries[1]['rating']}) · "
-                 f"🥉 {entries[2]['display_name']} ({entries[2]['rating']})")
+        line += (f"\nPodium: 🥇 {_escape_md(entries[0]['display_name'])} ({entries[0]['rating']}) · "
+                 f"🥈 {_escape_md(entries[1]['display_name'])} ({entries[1]['rating']}) · "
+                 f"🥉 {_escape_md(entries[2]['display_name'])} ({entries[2]['rating']})")
     line += "\nFull board: `/lb`, the #scr-leaderboard channel, or F5 → Leaderboard in-game."
     return line
 
@@ -1260,20 +1265,20 @@ async def _faq_elo_delta(message):
     if state_a == "error" or state_b == "error":
         return "Couldn't reach the player database right now — try again in a minute."
     if state_a == "unlinked":
-        return f"❌ {user_a.display_name} isn't linked yet — they need `/link` first."
+        return f"❌ {_escape_md(user_a.display_name)} isn't linked yet — they need `/link` first."
     if state_b == "unlinked":
-        return f"❌ {user_b.display_name} isn't linked yet — they need `/link` first."
+        return f"❌ {_escape_md(user_b.display_name)} isn't linked yet — they need `/link` first."
     prev = await api_get(f"/players/{link_a['steam_id']}/rating-preview"
                          f"?opponent_steam_id={link_b['steam_id']}")
     if not prev:
         return "Couldn't compute that right now — try again in a minute."
     pa, pb = prev["player"], prev["opponent"]
     prob = prev.get("win_probability", 0.5)
-    return (f"**{pa['display_name']}** ({pa['rating']:.0f}) vs **{pb['display_name']}** ({pb['rating']:.0f}) — "
-            f"if {pa['display_name']} wins the ranked series: **+{pa['win_delta']:.1f}**, "
+    return (f"**{_escape_md(pa['display_name'])}** ({pa['rating']:.0f}) vs **{_escape_md(pb['display_name'])}** ({pb['rating']:.0f}) — "
+            f"if {_escape_md(pa['display_name'])} wins the ranked series: **+{pa['win_delta']:.1f}**, "
             f"if they lose: **{pa['loss_delta']:.1f}**.\n"
-            f"{pb['display_name']}'s side: win **+{pb['win_delta']:.1f}** / loss **{pb['loss_delta']:.1f}**. "
-            f"Win probability for {pa['display_name']}: **{prob * 100:.0f}%**.\n"
+            f"{_escape_md(pb['display_name'])}'s side: win **+{pb['win_delta']:.1f}** / loss **{pb['loss_delta']:.1f}**. "
+            f"Win probability for {_escape_md(pa['display_name'])}: **{prob * 100:.0f}%**.\n"
             f"*(Glicko-2 — ratings move per completed BO3 series, and swings shrink "
             f"as your rating settles.)*\n"
             f"Also `/elo 2v2` and `/elo ffa` preview team and FFA games."
@@ -5119,7 +5124,7 @@ async def cmd_link(ctx, code: str = None):
     if not result: await ctx.send("❌ API unreachable."); return
     if "error" in result:
         await ctx.send("❌ Invalid or expired code." if result.get("status") == 404 else f"❌ {result['error']}"); return
-    await ctx.send(f"✅ Linked! **{ctx.author.display_name}** → Steam **{result.get('display_name')}** (`{result.get('steam_id')}`)")
+    await ctx.send(f"✅ Linked! **{_escape_md(ctx.author.display_name)}** → Steam **{_escape_md(result.get('display_name'))}** (`{result.get('steam_id')}`)")
     data = await api_get(f"/players/by-discord/{ctx.author.id}")
     if data and "rating" in data:
         rank = await update_member_role(ctx.author, data["rating"])
@@ -5258,14 +5263,14 @@ async def cmd_rank(ctx, member: discord.Member = None):
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
-        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {target.display_name} not linked."); return
+        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {_escape_md(target.display_name)} not linked."); return
     steam_id = link["steam_id"]
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
     rank = get_rank_name(s["rating"])
     peak = s.get("peak_rating", s["rating"])
-    embed = discord.Embed(title=f"{rank_emoji(rank)}  {s['display_name']}  —  {rank}", color=discord.Color.gold())
+    embed = discord.Embed(title=f"{rank_emoji(rank)}  {_escape_md(s['display_name'])}  —  {rank}", color=discord.Color.gold())
     embed.set_thumbnail(url=target.display_avatar.url)
 
     # Elo block
@@ -5397,12 +5402,12 @@ async def cmd_stats(ctx, member: discord.Member = None):
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
-        await ctx.send("❌ Not linked." if target == ctx.author else f"❌ {target.display_name} not linked."); return
+        await ctx.send("❌ Not linked." if target == ctx.author else f"❌ {_escape_md(target.display_name)} not linked."); return
     steam_id = link["steam_id"]
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
-    embed = discord.Embed(title=f"📋  {s['display_name']}  —  Overall Stats", color=discord.Color.blue())
+    embed = discord.Embed(title=f"📋  {_escape_md(s['display_name'])}  —  Overall Stats", color=discord.Color.blue())
     embed.set_thumbnail(url=target.display_avatar.url)
 
     # Overall record — every mode combined.
@@ -5458,10 +5463,14 @@ async def cmd_stats(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 def _escape_md(text) -> str:
-    """A player's display name made literal inside a leaderboard row's
-    **bold** markers, for every row renderer: _lb_line here and the mode
+    """A player's name made literal in Discord Markdown. First written for
+    the **bold** of every leaderboard row: _lb_line here and the mode
     boards' _lb_line_2v2, _lb_line_ffa and _lb_line_ovt (v1.41.0 beta round 3
-    finding 16). Backslash-escapes * _ ~ | and the backtick (bold, italics
+    finding 16). Since round 4 (finding 23) the other replies, DMs, posts and
+    embeds that print a player's Steam or Discord name use it as well, as
+    the census in tests/test_discord_name_markdown.py finds them; the few
+    that already used discord.utils.escape_markdown keep it.
+    Backslash-escapes * _ ~ | and the backtick (bold, italics
     and underline, strikethrough, spoiler, inline code), the backslash
     itself (a trailing one would escape the row's own closing **), and
     [ ] < > (a masked link, or a mention, emoji or timestamp tag). Discord
@@ -5479,7 +5488,13 @@ def _escape_md(text) -> str:
     "Alice\\n# 2 Fake" no longer starts a line of its own, so it can
     neither fake an extra row nor open a heading, a list or a quote."""
     one_line = re.sub(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", " ", str(text))
-    return re.sub(r"([\\*_~|`\[\]<>])", r"\\\1", one_line)
+    escaped = re.sub(r"([\\*_~|`\[\]<>])", r"\\\1", one_line)
+    # A name can open a line: a reply that starts with it, an embed field's
+    # name. There a leading # opens a heading, a leading - or + a list item or
+    # subtext, and 1. or 1) a numbered list (round 4, finding 23). A backslash
+    # keeps the marker text; Discord shows the marker alone.
+    escaped = re.sub(r"^(\s*)([#+-])", r"\1\\\2", escaped)
+    return re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
 
 
 def _lb_line(e, rank=None):
@@ -6053,7 +6068,7 @@ class ComparePaginator(discord.ui.View):
         self._update_buttons()
 
     def build_embed(self) -> discord.Embed:
-        embed = discord.Embed(title=f"⚔️ {self.name_a} vs {self.name_b}", color=0xE67E22)
+        embed = discord.Embed(title=f"⚔️ {_escape_md(self.name_a)} vs {_escape_md(self.name_b)}", color=0xE67E22)
         embed.add_field(name="📊  Overall head-to-head", value=self.rec_val[:1024], inline=False)
         if self.cards_val:
             embed.add_field(name="🃏  Most-picked cards vs each other",
@@ -6069,8 +6084,8 @@ class ComparePaginator(discord.ui.View):
             score = f"{m.get('player_rounds_won', 0)}-{m.get('opponent_rounds_won', 0)}"
             tag = "Ranked" if m.get("is_ranked") else "Casual"
             fname = f"{_match_date_str(m)} — {wl} {score} · {tag}"
-            fval = (f"{self.name_a[:14]}: {_cards_str(m.get('cards_picked'))} | "
-                    f"{self.name_b[:14]}: {_cards_str(m.get('opponent_cards_picked'))}")[:1024]
+            fval = (f"{_escape_md(self.name_a[:14])}: {_cards_str(m.get('cards_picked'))} | "
+                    f"{_escape_md(self.name_b[:14])}: {_cards_str(m.get('opponent_cards_picked'))}")[:1024]
             if len(fname) + len(fval) > budget:
                 break
             budget -= len(fname) + len(fval)
@@ -6146,11 +6161,11 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
     await _maybe_defer(ctx)
     link_a = await api_get(f"/players/by-discord/{player1.id}")
     if not link_a:
-        await ctx.send(f"❌ {player1.display_name} not linked. They need `/link` first.")
+        await ctx.send(f"❌ {_escape_md(player1.display_name)} not linked. They need `/link` first.")
         return
     link_b = await api_get(f"/players/by-discord/{player2.id}")
     if not link_b:
-        await ctx.send(f"❌ {player2.display_name} not linked. They need `/link` first.")
+        await ctx.send(f"❌ {_escape_md(player2.display_name)} not linked. They need `/link` first.")
         return
     steam_a, steam_b = link_a["steam_id"], link_b["steam_id"]
     name_a = link_a.get("display_name") or player1.display_name
@@ -6176,10 +6191,10 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
              if isinstance(m, dict) and m.get("opponent_steam_id") == steam_b]
 
     if tw + tl == 0 and sw + sl == 0 and not games:
-        await ctx.send(f"**{name_a}** and **{name_b}** haven't played each other yet.")
+        await ctx.send(f"**{_escape_md(name_a)}** and **{_escape_md(name_b)}** haven't played each other yet.")
         return
 
-    rec_val = (f"**{tw}W – {tl}L** for {name_a}\n"
+    rec_val = (f"**{tw}W – {tl}L** for {_escape_md(name_a)}\n"
                f"Ranked: **{rw}–{rl}**  ·  Casual: **{cw}–{cl}**\n"
                f"Completed series (BO3): **{sw}–{sl}**")
 
@@ -6190,8 +6205,8 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
     if h2h_cards and (h2h_cards.get("player_cards") or h2h_cards.get("opponent_cards")):
         def _fmt_top(cl):
             return ", ".join(f"{c['card_name']} ×{c['picks']}" for c in (cl or [])[:6]) or "—"
-        cards_val = (f"**{name_a[:14]}:** {_fmt_top(h2h_cards.get('player_cards'))}\n"
-                     f"**{name_b[:14]}:** {_fmt_top(h2h_cards.get('opponent_cards'))}")
+        cards_val = (f"**{_escape_md(name_a[:14])}:** {_fmt_top(h2h_cards.get('player_cards'))}\n"
+                     f"**{_escape_md(name_b[:14])}:** {_fmt_top(h2h_cards.get('opponent_cards'))}")
 
     if games:
         view = ComparePaginator(name_a, name_b, rec_val, cards_val, games)
@@ -6199,13 +6214,13 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
         view.message = msg
     else:
         # H2H counters exist but the games predate A's 2000-row history window.
-        embed = discord.Embed(title=f"⚔️ {name_a} vs {name_b}", color=0xE67E22)
+        embed = discord.Embed(title=f"⚔️ {_escape_md(name_a)} vs {_escape_md(name_b)}", color=0xE67E22)
         embed.add_field(name="📊  Overall head-to-head", value=rec_val[:1024], inline=False)
         if cards_val:
             embed.add_field(name="🃏  Most-picked cards vs each other",
                             value=cards_val[:1024], inline=False)
         embed.add_field(name="Recent games",
-                        value=f"No games between them in {name_a}'s recent history window.",
+                        value=f"No games between them in {_escape_md(name_a)}'s recent history window.",
                         inline=False)
         embed.set_footer(text="Record is lifetime")
         await ctx.send(embed=embed)
@@ -6251,7 +6266,7 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
             continue
         resolved.append((m, link["steam_id"], link.get("display_name") or m.display_name))
     if not_linked:
-        await ctx.send("❌ Not linked: " + ", ".join(not_linked) + ". They need `/link` first.")
+        await ctx.send("❌ Not linked: " + ", ".join(_escape_md(n) for n in not_linked) + ". They need `/link` first.")
         return
 
     # ── elo: the rating-history overlay line chart (moved from old /compare) ──
@@ -6285,7 +6300,7 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
                     val += " · (fewer than two rating updates — not plotted)"
             else:
                 val = "(no data)"
-            embed.add_field(name=str(p["name"])[:256], value=val, inline=True)
+            embed.add_field(name=_escape_md(str(p["name"])[:256]), value=val, inline=True)
         embed.set_image(url="attachment://graph.png")
         embed.set_footer(text=(f"x axis: {x_label} • newest {RATING_HISTORY_FETCH} rating updates per player")[:2048])
         await ctx.send(embed=embed, file=file)
@@ -6508,7 +6523,7 @@ async def _elo_2v2(ctx, you, teammate, opp1, opp2):
         lines.append(f"**{label}** — team rating **{_elo_num(team.get('rating'), signed=False)}**, "
                      f"win chance ~**{prob * 100:.0f}%**")
         for p in team.get("players") or []:
-            lines.append(f"• **{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+            lines.append(f"• **{_escape_md(p.get('display_name'))}** ({_elo_num(p.get('rating'), signed=False)}) — "
                          f"win **{_elo_num(p.get('win_delta'))}** / loss **{_elo_num(p.get('loss_delta'))}**")
         lines.append("")
     lines.append("*(Glicko-2 per completed 2v2 series, each player rated against both opponents. "
@@ -6544,7 +6559,7 @@ async def _elo_ffa(ctx, members, me, score_target=None):
     lines = [f"Field of **{len(players)}** — average rating "
              f"**{_elo_num(prev.get('field_average_rating'), signed=False)}** · first to **{prev.get('score_target')}**", ""]
     for p in players:
-        lines.append(f"**{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+        lines.append(f"**{_escape_md(p.get('display_name'))}** ({_elo_num(p.get('rating'), signed=False)}) — "
                      f"1st **{_elo_num(p.get('first_delta'))}** · last **{_elo_num(p.get('last_delta'))}**")
         row = p.get("place_deltas") or []
         if row:
@@ -7245,14 +7260,14 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
-        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {target.display_name} not linked."); return
+        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {_escape_md(target.display_name)} not linked."); return
     steam_id = link["steam_id"]
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
     hist = await api_get(f"/players/{steam_id}/matches?limit=50")
     rank = s.get("rank_name") or get_rank_name(s["rating"])
-    embed = discord.Embed(title=f"{rank_emoji(rank)}  {s['display_name']}  —  My Stats", color=0x9B59B6)
+    embed = discord.Embed(title=f"{rank_emoji(rank)}  {_escape_md(s['display_name'])}  —  My Stats", color=0x9B59B6)
     # v1.34.1: surface the Discord @display name (opt-out honored — the API
     # nulls discord_display_name when show_discord is off). No real mention.
     _dname = s.get("discord_display_name")
@@ -7353,7 +7368,7 @@ async def cmd_cards(ctx, member: discord.Member = None,
     if member is not None:
         link = await api_get(f"/players/by-discord/{member.id}")
         if not link:
-            await ctx.send(f"❌ {member.display_name} not linked.")
+            await ctx.send(f"❌ {_escape_md(member.display_name)} not linked.")
             return
         q += f"&steam_id={link['steam_id']}"
         scope = member.display_name
@@ -7374,7 +7389,7 @@ async def cmd_cards(ctx, member: discord.Member = None,
             ln += f" · {float(c.get('pass_rate') or 0) * 100:.0f}% passed"
         lines.append(ln)
     embed = discord.Embed(
-        title=f"🃏 Card Stats — {scope} ({filter})",
+        title=f"🃏 Card Stats — {_escape_md(scope)} ({filter})",
         description="\n".join(lines)[:4000],
         color=discord.Color.teal(),
     )
@@ -7810,7 +7825,7 @@ async def poll_bug_reports():
                 description=desc or "(no description)",
                 color=sev_color,
             )
-            embed.add_field(name="Reporter", value=f"`{who}` (mod v{mod})", inline=False)
+            embed.add_field(name="Reporter", value=f"{_escape_md(who)} (mod v{mod})", inline=False)
             embed.set_footer(text=f"Triage in-game (F5 -> Admin -> Bug Reports) or quote as #{bug_num}.")
             try:
                 msg = await channel.send(embed=embed)
@@ -7949,26 +7964,26 @@ async def poll_bug_report_events():
                 }.get(new_s, 0x6688AA)
                 embed = discord.Embed(
                     title=f"Bug report #{bug_num} — status change",
-                    description=(f"**{actor}** moved your report from "
+                    description=(f"**{_escape_md(actor)}** moved your report from "
                                  f"**{old_s}** → **{new_s}**."),
                     color=status_color,
                 )
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
                 if e.get("comment"):
-                    embed.add_field(name="Note from " + actor, value=e["comment"][:1024], inline=False)
+                    embed.add_field(name="Note from " + _escape_md(actor), value=e["comment"][:1024], inline=False)
             elif etype == "comment":
                 comment_text = (e.get("comment") or "").strip()
                 if not comment_text:
                     continue  # nothing to relay
                 embed = discord.Embed(
                     title=f"Bug report #{bug_num} — new comment",
-                    description=f"**{actor}** commented on your report.",
+                    description=f"**{_escape_md(actor)}** commented on your report.",
                     color=0x6688CC,
                 )
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
-                embed.add_field(name=f"{actor} says", value=comment_text[:1024], inline=False)
+                embed.add_field(name=f"{_escape_md(actor)} says", value=comment_text[:1024], inline=False)
             else:
                 # Unknown event type — nothing to send; ack so it doesn't loop.
                 seen_bug_events.add(eid)
@@ -8015,11 +8030,11 @@ async def _post_bug_event_to_thread(e):
     actor = e.get("actor_name") or "Someone"
     if e.get("event_type") == "status_change":
         new_s = (e.get("new_status") or "?").upper()
-        text_out = f"**{actor}** → **{new_s}**"
+        text_out = f"**{_escape_md(actor)}** → **{new_s}**"
         if e.get("comment"):
             text_out += f"\n{e['comment'][:1500]}"
     else:
-        text_out = f"**{actor}:** {(e.get('comment') or '')[:1800]}"
+        text_out = f"**{_escape_md(actor)}:** {(e.get('comment') or '')[:1800]}"
     try:
         if getattr(thread, "archived", False):
             await thread.edit(archived=False)
@@ -8085,7 +8100,7 @@ async def log_team_series_result(guild, s):
         rc = p.get("rating_change", 0) or 0
         # 1 decimal — sub-1.0 changes were rounding to "0" (same as bug #18, 1v1 side).
         rc_s = f"+{rc:.1f}" if rc > 0 else f"{rc:.1f}"
-        return f"**{p['name']}** {p['rating']:.0f} ({rc_s})"
+        return f"**{_escape_md(p['name'])}** {p['rating']:.0f} ({rc_s})"
 
     # Tournament marker (contract item 2). 2v2 tournaments don't exist today,
     # so this renders only if the feed ever carries the flag — free future-proofing.
@@ -8094,8 +8109,8 @@ async def log_team_series_result(guild, s):
         title=("🏆 Tournament 2v2 Series Complete" if t_flag else "⚔️ 2v2 Series Complete"),
         color=discord.Color.gold())
     _desc = (
-        f"👑 **{winners[0]['name']} + {winners[1]['name']}** "
-        f"def. **{losers[0]['name']} + {losers[1]['name']}** "
+        f"👑 **{_escape_md(winners[0]['name'])} + {_escape_md(winners[1]['name'])}** "
+        f"def. **{_escape_md(losers[0]['name'])} + {_escape_md(losers[1]['name'])}** "
         f"`{score}`"
     )
     if t_flag and t_label:
@@ -8169,11 +8184,11 @@ async def post_bet_outcomes(s):
     for b in bets:
         if b.get("won"):
             profit = (b.get("payout") or 0) - b["amount"]
-            lines.append(f"🟢 **{b['bettor_name']}** bet {b['amount']:,}g on **{b['bet_on_name']}** → won **+{profit:,}g** (x{b.get('odds_multiplier', 1.0)})")
+            lines.append(f"🟢 **{_escape_md(b['bettor_name'])}** bet {b['amount']:,}g on **{_escape_md(b['bet_on_name'])}** → won **+{profit:,}g** (x{b.get('odds_multiplier', 1.0)})")
         else:
-            lines.append(f"🔴 **{b['bettor_name']}** bet {b['amount']:,}g on **{b['bet_on_name']}** → lost")
+            lines.append(f"🔴 **{_escape_md(b['bettor_name'])}** bet {b['amount']:,}g on **{_escape_md(b['bet_on_name'])}** → lost")
     em = discord.Embed(
-        title=f"💰 Bets settled: {s['winner_name']} wins {score} vs {s['p2_name'] if p1_won else s['p1_name']}",
+        title=f"💰 Bets settled: {_escape_md(s['winner_name'])} wins {score} vs {_escape_md(s['p2_name'] if p1_won else s['p1_name'])}",
         description="\n".join(lines[:15]),
         color=0x33AA55,
     )
@@ -8199,7 +8214,7 @@ async def log_series_result(guild, s):
     embed = discord.Embed(
         title=("🏆 Tournament Series Complete" if t_flag else "⚔️ Ranked Series Complete"),
         color=(discord.Color.gold() if t_flag else discord.Color.green()))
-    _desc = f"**{s['winner_name']}** wins {score}!"
+    _desc = f"**{_escape_md(s['winner_name'])}** wins {score}!"
     if t_flag and t_label:
         _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
     embed.description = _desc
@@ -8210,9 +8225,9 @@ async def log_series_result(guild, s):
     rc2 = s["p2_rating_change"]; rc2s = f"+{rc2:.1f}" if rc2 > 0 else f"{rc2:.1f}"
     r1, r2 = get_rank_name(s["p1_rating"]), get_rank_name(s["p2_rating"])
     s1, s2 = streak_str(s.get("p1_streak",0)), streak_str(s.get("p2_streak",0))
-    embed.add_field(name=f"{rank_emoji(r1)} {s['p1_name']}" + (" 👑" if p1_won else ""),
+    embed.add_field(name=f"{rank_emoji(r1)} {_escape_md(s['p1_name'])}" + (" 👑" if p1_won else ""),
                     value=f"**{s['p1_rating']:.0f}** ({rc1s}) — {r1}\n{s1}", inline=True)
-    embed.add_field(name=f"{rank_emoji(r2)} {s['p2_name']}" + (" 👑" if not p1_won else ""),
+    embed.add_field(name=f"{rank_emoji(r2)} {_escape_md(s['p2_name'])}" + (" 👑" if not p1_won else ""),
                     value=f"**{s['p2_rating']:.0f}** ({rc2s}) — {r2}\n{s2}", inline=True)
     # Room rules batch: only the non-defaults, so a vanilla series posts as
     # it always has.
@@ -9277,8 +9292,8 @@ def _modcase_render(status, body, spec, actor_name):
         detail = detail.get("error") or ""
     detail = str(detail or "")[:180]
     if status == 200 and body.get("status") == "ok":
-        return (f"\N{WHITE HEAVY CHECK MARK} **{spec['label']}** applied by {actor_name} "
-                f"to **{body.get('subject_name') or '?'}** (`{body.get('subject_steam_id') or '?'}`)"
+        return (f"\N{WHITE HEAVY CHECK MARK} **{spec['label']}** applied by {_escape_md(actor_name)} "
+                f"to **{_escape_md(body.get('subject_name') or '?')}** (`{body.get('subject_steam_id') or '?'}`)"
                 f" — case `{spec['case_id'][:8]}` {body.get('resolution') or ''}".rstrip())
     if status == 200 and body.get("status") == "already_resolved":
         return (f"\N{INFORMATION SOURCE} This case was already **{body.get('case_status')}**"
@@ -11301,11 +11316,11 @@ async def poll_tournaments():
                         sp1n = m.get("p1_name") or "opponent"
                         sp2n = m.get("p2_name") or "opponent"
                         await _dm_user(sp1d,
-                                       f"🕐 **Next up: vs {sp2n}** (round {rd}). Your match starts {when} — "
+                                       f"🕐 **Next up: vs {_escape_md(sp2n)}** (round {rd}). Your match starts {when} — "
                                        f"short breather, no rush. Want to play right away? You BOTH press "
                                        f"**Play Now** in F5 → Tournaments and it starts immediately.")
                         await _dm_user(sp2d,
-                                       f"🕐 **Next up: vs {sp1n}** (round {rd}). Your match starts {when} — "
+                                       f"🕐 **Next up: vs {_escape_md(sp1n)}** (round {rd}). Your match starts {when} — "
                                        f"short breather, no rush. Want to play right away? You BOTH press "
                                        f"**Play Now** in F5 → Tournaments and it starts immediately.")
                     continue
@@ -11400,7 +11415,7 @@ async def poll_tournaments():
                 prize_txt = ("(cancelled)" if tier == "none"
                              else f"prizes{_roles_txt} (amounts unavailable from this API version)")
             await _announce_in_channel(
-                f"**Tournament complete.**  1st: **{winner}** · 2nd: {runner} · 3rd: {third}  ({prize_txt})"
+                f"**Tournament complete.**  1st: **{_escape_md(winner)}** · 2nd: {_escape_md(runner)} · 3rd: {_escape_md(third)}  ({prize_txt})"
             )
 
 
@@ -11455,12 +11470,12 @@ async def opp_online(ctx):
             if member:
                 break
         if member is None:
-            await ctx.reply(f"{opp_name}: Discord presence unknown (not in guild cache).", ephemeral=True)
+            await ctx.reply(f"{_escape_md(opp_name)}: Discord presence unknown (not in guild cache).", ephemeral=True)
             return
         status = str(member.status)  # online|idle|dnd|offline
         icon = {"online": "🟢", "idle": "🟡", "dnd": "🔴"}.get(status, "⚫")
         label = {"online": "online", "idle": "idle", "dnd": "do not disturb"}.get(status, "offline")
-        await ctx.reply(f"{icon} **{opp_name}** is currently **{label}** in Discord.", ephemeral=True)
+        await ctx.reply(f"{icon} **{_escape_md(opp_name)}** is currently **{label}** in Discord.", ephemeral=True)
     except Exception as e:
         await ctx.reply(f"Couldn't resolve presence: {e}", ephemeral=True)
 
@@ -11477,12 +11492,12 @@ async def dm_opponent(ctx, *, message: str):
         await ctx.reply(f"Rate limit: {_DM_OPPONENT_LIMIT} messages per {_DM_OPPONENT_WINDOW_SECS}s. Wait a moment.", ephemeral=True)
         return
     sender = getattr(ctx.author, "global_name", None) or ctx.author.name
-    body = f"**[Tournament Relay from {sender}]** {message[:1500]}"
+    body = f"**[Tournament Relay from {_escape_md(sender)}]** {message[:1500]}"
     ok = await _dm_user(opp_id, body)
     if ok:
-        await ctx.reply(f"Relayed to {opp_name}.", ephemeral=True)
+        await ctx.reply(f"Relayed to {_escape_md(opp_name)}.", ephemeral=True)
     else:
-        await ctx.reply(f"Couldn't DM {opp_name} — they may have DMs closed.", ephemeral=True)
+        await ctx.reply(f"Couldn't DM {_escape_md(opp_name)} — they may have DMs closed.", ephemeral=True)
 
 
 @tasks.loop(hours=1)
@@ -11524,10 +11539,10 @@ async def nag_pending_async_matches():
             p1n = m.get("p1_name") or "opponent"
             p2n = m.get("p2_name") or "opponent"
             dl_str = _fmt_pt_rel(m.get("deadline_at"))
-            await _dm_user(p1d, f"**Async match still pending**: vs **{p2n}**. Deadline: {dl_str}. "
+            await _dm_user(p1d, f"**Async match still pending**: vs **{_escape_md(p2n)}**. Deadline: {dl_str}. "
                                  f"Use `/dm-opponent` to agree a time, then just play a private "
                                  f"lobby together — it records automatically.")
-            await _dm_user(p2d, f"**Async match still pending**: vs **{p1n}**. Deadline: {dl_str}. "
+            await _dm_user(p2d, f"**Async match still pending**: vs **{_escape_md(p1n)}**. Deadline: {dl_str}. "
                                  f"Use `/dm-opponent` to agree a time, then just play a private "
                                  f"lobby together — it records automatically.")
             nagged += 1
@@ -12992,7 +13007,7 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
                   ("🥉", name_for.get(t.get("third_place_signup_id")))]
         for medal, nm in podium:
             if nm:
-                lines.append(f"{medal} **{nm}**" if medal == "🥇" else f"{medal} {nm}")
+                lines.append(f"{medal} **{_escape_md(nm)}**" if medal == "🥇" else f"{medal} {_escape_md(nm)}")
     else:
         lines.append(f"**Status: {status}**")
     # Prize line (item 2, July 17 round 2): prizes scale with player count —
@@ -13021,7 +13036,7 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
                 bits += " ✓"
             if s.get("forfeited"):
                 bits += " ✗ forfeited"
-            roster.append(f"• {nm}{bits}")
+            roster.append(f"• {_escape_md(nm)}{bits}")
         shown = roster[:24]
         if len(roster) > 24:
             shown.append(f"…and {len(roster) - 24} more")
@@ -13369,10 +13384,10 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
     if err:
         await _bet_reply(interaction, f"❌ {err}")
         return
-    vs_part = f" (vs {vs_name}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
+    vs_part = f" (vs {_escape_md(vs_name)}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
     _tour = f" — 🏆 {tour_tag}" if tour_tag else ""
     await _bet_reply(interaction,
-        f"✅ Bet placed: **{amount:,}g** on **{side_name}**{vs_part}{_tour}.",)
+        f"✅ Bet placed: **{amount:,}g** on **{_escape_md(side_name)}**{vs_part}{_tour}.",)
 
 
 def _discord_bet_error(result) -> str | None:
@@ -13513,14 +13528,14 @@ def _format_live_bet_embed(s: dict) -> discord.Embed:
         kind_label = f" [{tournament_kind.title()}]" if tournament_kind else ""
         base = t_label if t_label else f"Tournament{kind_label}"
         if phase == "pre_match":
-            title = f"🏆 {base} PRE-MATCH: {p1n} ({p1r}) vs {p2n} ({p2r})"
+            title = f"🏆 {base} PRE-MATCH: {_escape_md(p1n)} ({p1r}) vs {_escape_md(p2n)} ({p2r})"
         else:
-            title = f"🏆 {base}: {p1n} ({p1r}) vs {p2n} ({p2r})"
+            title = f"🏆 {base}: {_escape_md(p1n)} ({p1r}) vs {_escape_md(p2n)} ({p2r})"
     else:
-        title = f"🎮 {p1n} ({p1r}) vs {p2n} ({p2r})"
+        title = f"🎮 {_escape_md(p1n)} ({p1r}) vs {_escape_md(p2n)} ({p2r})"
     desc_lines = [
         f"Series: **{p1w} - {p2w}**",
-        f"Odds: **{p1o}x** {p1n} / **{p2o}x** {p2n}",
+        f"Odds: **{p1o}x** {_escape_md(p1n)} / **{p2o}x** {_escape_md(p2n)}",
     ]
     if locked:
         if reason == "game_in_progress":
@@ -13646,8 +13661,8 @@ async def _place_discord_team_bet(interaction: discord.Interaction,
     # Name the MATCHUP, not just the side — the same reason the 1v1 path does
     # (bug #53): a player can be in more than one live series.
     await _bet_reply(interaction,
-        f"✅ Bet placed: **{amount:,}g** on **{side_name}** "
-        f"(vs {vs_name}, 2v2 series `{parent.series_id[:8]}`).",)
+        f"✅ Bet placed: **{amount:,}g** on **{_escape_md(side_name)}** "
+        f"(vs {_escape_md(vs_name)}, 2v2 series `{parent.series_id[:8]}`).",)
 
 
 def _format_team_live_bet_embed(s: dict) -> discord.Embed:
@@ -13664,10 +13679,10 @@ def _format_team_live_bet_embed(s: dict) -> discord.Embed:
     t1w = s.get("t1_wins", 0); t2w = s.get("t2_wins", 0)
     locked = s.get("bets_locked", False)
     reason = s.get("lock_reason")
-    title = f"👥 2v2: {t1a}+{t1b} vs {t2a}+{t2b}"
+    title = f"👥 2v2: {_escape_md(t1a)}+{_escape_md(t1b)} vs {_escape_md(t2a)}+{_escape_md(t2b)}"
     desc_lines = [
-        f"Team 1: **{t1a}** ({t1ar}) + **{t1b}** ({t1br})",
-        f"Team 2: **{t2a}** ({t2ar}) + **{t2b}** ({t2br})",
+        f"Team 1: **{_escape_md(t1a)}** ({t1ar}) + **{_escape_md(t1b)}** ({t1br})",
+        f"Team 2: **{_escape_md(t2a)}** ({t2ar}) + **{_escape_md(t2b)}** ({t2br})",
         f"Series: **{t1w} - {t2w}**",
         f"Odds: **{t1o}x** Team 1 / **{t2o}x** Team 2",
         ("_Bet in-game via the F5 → Leaderboard panel._" if locked else
@@ -13781,7 +13796,7 @@ class FfaBetModal(discord.ui.Modal):
             return
         game_part = f" (game {int(self.game_number)})" if self.game_number else ""
         await _bet_reply(interaction,
-            f"✅ Bet placed: **{amount:,}g** on **{self.name}**{game_part} "
+            f"✅ Bet placed: **{amount:,}g** on **{_escape_md(self.name)}**{game_part} "
             f"in FFA lobby `{str(self.lobby_id)[:8]}`.",)
 
 

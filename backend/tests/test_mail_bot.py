@@ -27,7 +27,8 @@ TEXT = open(SRC, encoding="utf-8").read()
 TREE = ast.parse(TEXT)
 
 WANT_FUNC = {"_modcase_uuid_ok", "_modcase_parse", "_modcase_custom_id", "_modcase_parse_custom_id",
-             "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction"}
+             "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction",
+             "_escape_md"}   # _modcase_render escapes the names it prints (round 4, finding 23)
 WANT_ASSIGN = {"MODCASE_MARKER", "_MODCASE_BUTTONS", "_channel_post_sent", "_TDLC_ANSWERS"}
 
 
@@ -216,7 +217,7 @@ def _bot_ns(api, bot, session=_NO_SESSION_GIVEN, out=None):
         session = _Session(200, {})
     out = out if out is not None else []
     ns = {"discord": FAKE_DISCORD, "aiohttp": FAKE_AIOHTTP, "bot": bot, "api_get": api.get, "api_post": api.post,
-          "http_session": session, "API_SECRET_KEY": "internal-key", "API_BASE_URL": "http://api:8000",
+          "http_session": session, "API_SECRET_KEY": "internal-key", "API_BASE_URL": "http://api:8000", "re": re,
           "print": lambda *a, **k: out.append(" ".join(str(x) for x in a))}
     exec(compile(ast.Module(body=_lift(), type_ignores=[]), SRC, "exec"), ns)
     return ns
