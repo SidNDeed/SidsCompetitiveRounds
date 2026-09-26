@@ -396,6 +396,41 @@ def test_turning_the_setting_off_stops_a_transfer_already_running():
             "the retry the player is entitled to" % after)
 
 
+def test_an_aborted_send_takes_back_its_heartbeat_mark():
+    """Round 3 finding 20. A send this client aborts itself (abortIf) was
+    never a question put to the server, so it must leave ApiLooksDown as it
+    found it. The abort used to call NoteResult(false, 0), which records
+    nothing; the false outage came from the attempt mark the send had
+    already set. The abort now puts that mark back through
+    WithdrawApiAttempt, guarded so that a LATER attempt keeps its own mark.
+    A shape pin only: the in-game [HEARTBEAT-ABORT-SENTINEL] and the
+    round-3 harness run the abort itself.
+
+    MUTATION: put NoteResult(false, 0) back in place of the withdrawal, or
+    drop the serial guard. Must fail."""
+    src = API_CLIENT.read_text(encoding="utf-8")
+    raw = " ".join(code_of(
+        src, "private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,").split())
+    assert raw.count("var attemptMark = MarkApiAttempt();") == 1, (
+        "the cancellable send no longer keeps the mark it replaced: " + raw[:300])
+    assert "NoteAttempt()" not in raw, (
+        "the send marks an attempt it cannot take back: " + raw[:300])
+    assert raw.count("if (aborted)") == 1, raw[:300]
+    abort = raw.split("if (aborted)", 1)[1]
+    abort = abort[:abort.index("yield break;")]
+    assert abort.count("WithdrawApiAttempt(attemptMark);") == 1, (
+        "the abort does not take back its attempt mark: " + abort)
+    assert "NoteResult(" not in abort, (
+        "the abort reports a result the server never gave: " + abort)
+    withdraw = " ".join(code_of(
+        src, "private static void WithdrawApiAttempt(ApiAttemptMark mark)").split())
+    assert "if (mark.Serial == _apiAttemptSerial) LastApiAttemptAt = mark.Before;" in withdraw, (
+        "the withdrawal can erase a later attempt's mark: " + withdraw)
+    note = " ".join(code_of(src, "private static void NoteAttempt()").split())
+    assert "_apiAttemptSerial++" in note, (
+        "an attempt no longer moves the serial the withdrawal is guarded by: " + note)
+
+
 def test_the_bare_name_pass_does_not_eat_identifiers():
     """`_`, `.` and `-` join identifiers, so an account name that is also an
     ordinary word must not rewrite `cr_admin_ready` or `map-test-3`.

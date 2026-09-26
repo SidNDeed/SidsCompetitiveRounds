@@ -21369,11 +21369,118 @@ namespace CompetitiveRounds
         public static float LastApiSuccessAt = -999f;
         public static float LastApiAttemptAt = -999f;
         public static bool LastResponseWasMaintenance = false;
-        private static void NoteAttempt() { LastApiAttemptAt = Time.unscaledTime; }
+        private static int _apiAttemptSerial;
+        private static void NoteAttempt() { LastApiAttemptAt = Time.unscaledTime; _apiAttemptSerial++; }
         private static void NoteResult(bool success, long httpCode)
         {
             if (success) { LastApiSuccessAt = Time.unscaledTime; LastResponseWasMaintenance = false; }
             else if (httpCode == 503) { LastResponseWasMaintenance = true; }
+        }
+
+        // A request this client aborts itself (PostRequestRaw's abortIf: the
+        // automatic log upload when the player withdraws consent or turns the
+        // setting off) was never a question put to the server, so it must not
+        // be counted as one (v1.41.0 beta round 3, finding 20). What counted
+        // it was NoteAttempt: ApiLooksDown weighs the attempt mark against the
+        // last success, so an aborted send inside a quiet spell read as an
+        // outage. The abort's NoteResult(false, 0) never wrote anything --
+        // NoteResult records a success or a 503 and nothing else. So a send
+        // keeps the mark it replaced, and an abort puts that mark back, but
+        // only while no later attempt has been made: a later request is its
+        // own question to the server and keeps its own mark.
+        private struct ApiAttemptMark { public int Serial; public float Before; }
+        private static ApiAttemptMark MarkApiAttempt()
+        {
+            var mark = new ApiAttemptMark { Before = LastApiAttemptAt };
+            NoteAttempt();
+            mark.Serial = _apiAttemptSerial;
+            return mark;
+        }
+        private static void WithdrawApiAttempt(ApiAttemptMark mark)
+        {
+            if (mark.Serial == _apiAttemptSerial) LastApiAttemptAt = mark.Before;
+        }
+
+        /// <summary>Round 3 finding 20's in-game check, run by the [Broadcast]
+        /// TestHeartbeatAbortSentinel lever. Drives the REAL PostRequestRaw
+        /// abort branch at a loopback discard address with an abortIf that is
+        /// true at its first poll, so the send and its abort both complete
+        /// inside one MoveNext and nothing reaches any server, then checks
+        /// that the heartbeat reads as it did before the send. Every field it
+        /// touches is put back.</summary>
+        internal static string RunHeartbeatAbortSentinel(out bool pass)
+        {
+            const string tag = "[HEARTBEAT-ABORT-SENTINEL]";
+            float savedAttempt = LastApiAttemptAt, savedSuccess = LastApiSuccessAt;
+            int savedSerial = _apiAttemptSerial;
+            bool savedLatch = _nextRequestCarriesAdminCredential;
+            var failures = new List<string>();
+            int checks = 0;
+            try
+            {
+                float now = Time.unscaledTime;
+                // A quiet spell: the last success a minute ago, no attempt since.
+                LastApiSuccessAt = now - 60f;
+                LastApiAttemptAt = -999f;
+
+                // Control: in this state an unanswered attempt DOES read as down.
+                var control = MarkApiAttempt();
+                checks++;
+                if (!ApiLooksDown) failures.Add("control: an unanswered attempt did not read as down");
+                WithdrawApiAttempt(control);
+
+                // The real abort branch.
+                string answer = null;
+                IEnumerator send = PostRequestRaw("http://127.0.0.1:9/heartbeat-abort-sentinel",
+                                                  Encoding.UTF8.GetBytes("{}"),
+                                                  (ok, reply) => { answer = reply; },
+                                                  null, () => true);
+                for (int step = 0; step < 4 && send.MoveNext(); step++) { }
+                checks++;
+                if (answer != RequestCancelledMarker)
+                    failures.Add("the abort branch did not run (answer: " + (answer ?? "none") + ")");
+                checks++;
+                if (ApiLooksDown) failures.Add("an aborted send left the heartbeat reading down");
+                checks++;
+                if (LastApiAttemptAt != -999f) failures.Add("an aborted send left its attempt mark");
+
+                // A later genuine attempt keeps its own mark.
+                var earlier = MarkApiAttempt();
+                NoteAttempt();
+                WithdrawApiAttempt(earlier);
+                checks++;
+                if (!ApiLooksDown) failures.Add("withdrawing an earlier send erased a later attempt's mark");
+            }
+            catch (Exception ex)
+            {
+                failures.Add("threw " + ex.GetType().Name + ": " + ex.Message);
+            }
+            finally
+            {
+                LastApiAttemptAt = savedAttempt;
+                LastApiSuccessAt = savedSuccess;
+                _apiAttemptSerial = savedSerial;
+                _nextRequestCarriesAdminCredential = savedLatch;
+            }
+            pass = failures.Count == 0;
+            return pass
+                ? tag + " PASS: " + checks + " checks (an aborted send leaves the heartbeat as it"
+                  + " found it; an unanswered attempt still reads down, and a later one keeps its mark)"
+                : tag + " FAIL: " + string.Join("; ", failures.ToArray());
+        }
+
+        internal static void DevHeartbeatAbortSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = RunHeartbeatAbortSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[HEARTBEAT-ABORT-SENTINEL] FAIL: threw " + ex.Message);
+            }
         }
         /// <summary>True when we've recently TRIED to talk to the API and the most recent attempt
         /// hasn't succeeded — distinct from "haven't tried in a while".</summary>
@@ -21563,7 +21670,7 @@ namespace CompetitiveRounds
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
-            NoteAttempt();
+            var attemptMark = MarkApiAttempt();
             using (var request = new UnityWebRequest(url, "POST"))
             {
                 if (bodyRaw != null && bodyRaw.Length > 0)
@@ -21601,7 +21708,10 @@ namespace CompetitiveRounds
                     if (aborted)
                     {
                         try { request.Abort(); } catch { }
-                        NoteResult(false, 0);
+                        // Neutral to the heartbeat (finding 20): take back
+                        // this send's attempt mark rather than report a
+                        // result the server never gave.
+                        WithdrawApiAttempt(attemptMark);
                         callback(false, RequestCancelledMarker);
                         yield break;
                     }

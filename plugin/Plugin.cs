@@ -171,6 +171,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestReporterElectionSentinel; // broadcast seat only — any new value runs the 2v2 DC reporter-election self-test once
         internal static ConfigEntry<string> BroadcastTestAutoLogConsentSentinel; // broadcast seat only — any new value runs the automatic-log consent-abort self-test once
         internal static ConfigEntry<string> BroadcastTestChatRevokeSentinel; // broadcast seat only -- any new value runs the consent-revoke chat-discard self-test once
+        internal static ConfigEntry<string> BroadcastTestHeartbeatAbortSentinel; // broadcast seat only -- any new value runs the aborted-send heartbeat self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
         internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0..PortraitRender.PresetSlotCount()-1 = the saved face slot (#370 — NOT 0-9; playerFaces has ten entries but only eight are authorable). Anything outside that range resolves to -1, and is rewritten to -1 once the real slot count has been discovered — it is NOT clamped to the top slot (that silently re-rendered someone else's face onto the card).
         internal static ConfigEntry<string> BinderSort;                  // Player Cards (item 20): the binder order, stored as the BinderSortRules.Mode member NAME (never the ordinal, which changes meaning when a mode is inserted). Written by the header button alone; an unrecognised name falls back to Name.
@@ -1114,6 +1115,13 @@ namespace CompetitiveRounds
             BroadcastTestReporterElectionSentinel = Config.Bind(
                 "Broadcast", "TestReporterElectionSentinel", "",
                 "Broadcast seat only: set to any NEW value to run the 2v2 disconnect reporter-election self-test once (synthetic rooms only, nothing is sent); the result is logged as [REPORTER-ELECTION-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestHeartbeatAbortSentinel = Config.Bind(
+                "Broadcast", "TestHeartbeatAbortSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the aborted-send heartbeat self-test once (one"
+                + " request to a loopback discard address, aborted before it can be answered; the heartbeat fields"
+                + " are put back afterwards); the result is logged as [HEARTBEAT-ABORT-SENTINEL] PASS/FAIL. A value"
+                + " present at startup never runs."
             );
             BroadcastTestChatRevokeSentinel = Config.Bind(
                 "Broadcast", "TestChatRevokeSentinel", "",
@@ -2313,6 +2321,20 @@ namespace CompetitiveRounds
             CompetitiveUI.DevChatRevokeSentinelTest();
         }
 
+        // v1.41.0 beta round 3 finding 20: [Broadcast] TestHeartbeatAbortSentinel,
+        // the same grammar and identity gate as the levers above.
+        private static string _lastTestHeartbeatAbortSentinel;
+        private void TickTestHeartbeatAbortSentinel()
+        {
+            if (Plugin.BroadcastTestHeartbeatAbortSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestHeartbeatAbortSentinel.Value ?? "").Trim();
+            if (_lastTestHeartbeatAbortSentinel == null) { _lastTestHeartbeatAbortSentinel = raw; return; }
+            if (raw == _lastTestHeartbeatAbortSentinel) return;
+            _lastTestHeartbeatAbortSentinel = raw;
+            if (raw.Length == 0) return;
+            ApiClient.DevHeartbeatAbortSentinelTest();
+        }
+
         /// <summary>The 2v2 DC reporter election's self-test (round 2 finding 2,
         /// round 3 finding 2). Runs every survivor of synthetic four-seat rooms
         /// through DcReporterElection.ShouldReport, the rule OnPlayerLeftRoom runs,
@@ -2995,6 +3017,7 @@ namespace CompetitiveRounds
             try { TickTestReporterElectionSentinel(); } catch { }
             try { TickTestAutoLogConsentSentinel(); } catch { }
             try { TickTestChatRevokeSentinel(); } catch { }
+            try { TickTestHeartbeatAbortSentinel(); } catch { }
             try { TickTestPlayerCards(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
