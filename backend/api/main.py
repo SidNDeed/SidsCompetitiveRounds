@@ -28951,10 +28951,12 @@ async def internal_pc_packs(
 ):
     """The bot's /pack: the linked player's opened packs, newest first, as
     summary rows - pack_id, status, source, kind, opened_at and the slot
-    rarities from the stored roster (null when the roster cannot be read) -
-    keyset-paged on (opened_at, id) like /pc/packs, `limit` at a time. No
-    summary row reads a print. With `index` (step 1 of the bot's /pack N: the
-    pack index - 1 places down that same order, reached by OFFSET inside the
+    rarities from the stored roster - keyset-paged on (opened_at, id) like
+    /pc/packs, `limit` at a time. No summary row reads a print. A stored
+    roster that cannot be read is a 500 with one log line on a summary page
+    as on the one-pack answer (S4), never a row without its rarities. With
+    `index` (step 1 of the bot's /pack N: the pack index - 1 places down
+    that same order, reached by OFFSET inside the
     one statement, never by walking the pages before it) or `pack_id` (the
     pre-send re-read) the answer is that one pack and its `prints` from
     _pc_roster_prints. `pack_id` answers 404 unless it is this player's opened
@@ -29010,6 +29012,12 @@ async def internal_pc_packs(
             except ValueError:
                 raw = None
         roster = _pc_roster_slots(raw)
+        if roster is None and pack_id is None and index is None:
+            # S4: a summary row's unreadable roster is the same 500 and log line
+            # as the one-pack answer's (R1 LOW Finding 2), never a row without
+            # rarities. The one-pack answer raises it in _pc_roster_prints below.
+            print(f"[PC-REVEAL] roster_invalid pack={r['id']} mode=summary")
+            raise HTTPException(status_code=500, detail={"error": "roster_invalid"})
         packs.append({"pack_id": str(r["id"]), "status": r["status"], "source": r["source"],
                       "kind": r["kind"], "opened_at": _pc_iso(r["opened_at"]),
                       "rarities": [e["rarity"] for e in roster] if roster is not None else None})

@@ -2513,4 +2513,50 @@ def test_f1_index_answers_one_pack_and_takes_no_cursor_and_no_pack_id(monkeypatc
     live(monkeypatch, tmp_path, body)
 
 
+# -- round 2, R1 LOW Finding 2: a summary row's unreadable roster is a 500 -------------------
+
+async def _f2_drop_slot_5(env, pack):
+    """The stored roster stops naming slot 5 while that slot's print stays
+    live: a roster that does not name slots 1-5 (S4)."""
+    stored = await env.val(f"SELECT result::text FROM {SCHEMA}.pc_packs WHERE id = CAST(:p AS uuid)", {"p": pack})
+    doc = json.loads(stored)
+    doc["prints"] = [p for p in doc["prints"] if p.get("slot") != 5]
+    await env.ex(f"UPDATE {SCHEMA}.pc_packs SET result = CAST(:r AS jsonb) WHERE id = CAST(:p AS uuid)",
+                 {"r": json.dumps(doc), "p": pack})
+
+
+def test_f2_a_summary_page_holding_an_unreadable_roster_is_a_500(monkeypatch, tmp_path, capsys):
+    """R1 LOW Finding 2. S4 makes a pack whose stored roster is absent,
+    unparseable or not naming slots 1-5 a 500 with a structured log line;
+    the summary page answered that row 200 with its rarities null and logged
+    nothing. The summary page covering such a pack answers 500
+    roster_invalid and logs exactly one line, naming the pack."""
+    async def body(env):
+        owner, _subs, pack = await five(env)
+        await _f2_drop_slot_5(env, pack)
+        capsys.readouterr()
+        r = await env.packs_json(owner.discord)
+        out = capsys.readouterr().out
+        assert r.status_code == 500 and r.json()["detail"] == {"error": "roster_invalid"}, (r.status_code,
+                                                                                           r.text[:200])
+        assert out.count("[PC-REVEAL] roster_invalid") == 1, out[-600:]
+        assert out.count(f"[PC-REVEAL] roster_invalid pack={pack} mode=summary") == 1, out[-600:]
+    live(monkeypatch, tmp_path, body)
+
+
+def test_c_f2_a_readable_roster_still_answers_its_rarities(monkeypatch, tmp_path):
+    """Control for Finding 2: an intact pack's summary row still answers 200
+    with its five rarities, in slot order, as its stored roster names them."""
+    async def body(env):
+        owner, _subs, pack = await five(env)
+        stored = json.loads(await env.val(
+            f"SELECT result::text FROM {SCHEMA}.pc_packs WHERE id = CAST(:p AS uuid)", {"p": pack}))
+        want = [p["rarity"] for p in sorted(stored["prints"], key=lambda p: p["slot"])]
+        r = await env.packs_json(owner.discord)
+        assert r.status_code == 200, (r.status_code, r.text[:200])
+        rows = r.json()["packs"]
+        assert [p["pack_id"] for p in rows] == [pack] and rows[0]["rarities"] == want and len(want) == 5, rows
+    live(monkeypatch, tmp_path, body)
+
+
 # -- end of part 3 --
