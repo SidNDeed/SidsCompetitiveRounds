@@ -215,6 +215,34 @@ _RELAY_ROW_FROM = (
 _REPLY_BY_CODE_SQL = ("SELECT d.mail_id" + _RELAY_ROW_FROM +
                       "   AND d.relay_code = :c LIMIT 2")
 
+# A code the resolver cannot answer is not always a code that was never this
+# player's (v1.41.0 beta round 3, finding 11). Migration 330 keeps a relay
+# row when its mail is purged -- mail_id SET NULL, relay_code kept -- so that
+# a reply quoting the code can be told "this code was yours and its mail is
+# gone" rather than "this code is not yours"; the route still said the
+# second, because _RELAY_ROW_FROM joins the mail and the row drops out. This
+# is asked only after the resolver has found nothing, and it is keyed like
+# the unique index, on the name and the player (relay_code, steam_id) --
+# never on mail_id, the pointer that goes NULL. "Gone" means gone from THIS
+# player's mailbox: the mail purged, or their own copy deleted, by them or by
+# retention. The purge cannot come before that (it waits for every live
+# delivered copy), and a reply in game to a deleted copy is refused as
+# not_found too, so the answer is the one the game gives.
+#
+# No DM-state predicate (undeliverable, cancelled_at, delivered_at). The
+# answer is a statement about the MAIL and is true whatever became of the
+# DM; the DM's state decides only whether the player can be holding the code
+# at all.
+_RELAY_GONE_SQL = (
+    "SELECT 1 FROM pending_dms d"
+    " WHERE d.steam_id = :s AND d.relay_code = :c"
+    "   AND (d.mail_id IS NULL"
+    "        OR EXISTS (SELECT 1 FROM mail_recipients r"
+    "                    WHERE r.message_id = d.mail_id"
+    "                      AND r.recipient_id = CAST(:pid AS uuid)"
+    "                      AND r.deleted_at IS NOT NULL))"
+    " LIMIT 1")
+
 # The listing the refusal offers. This is PRESENTATION order, not identity:
 # the player names the thread by tapping it, so ordering decides only what is
 # shown first and can never decide what is answered.
@@ -426,10 +454,19 @@ async def mail_reply_from_discord(
                              {"c": code, "s": me["steam_id"],
                               "pid": str(me["id"])})).mappings().all()
     if len(rows) != 1:
-        # Zero is a code that names no thread of this player's. Two is
-        # unreachable while idx_pending_dms_relay_code exists, and is
-        # refused rather than resolved so that it stays unreachable instead
-        # of silently becoming "pick one".
+        # Zero is a code that names no thread of this player's that can still
+        # be answered. Two is unreachable while idx_pending_dms_relay_code
+        # exists, and is refused rather than resolved so that it stays
+        # unreachable instead of silently becoming "pick one".
+        if not rows and (await db.execute(
+                text(_RELAY_GONE_SQL),
+                {"c": code, "s": me["steam_id"], "pid": str(me["id"])},
+        )).first() is not None:
+            # The code WAS this player's and its mail is gone (finding 11;
+            # _RELAY_GONE_SQL says why): the answer a reply in game to that
+            # mail gets, which the bot words as "it was deleted" and not as
+            # "doesn't match any mail sent to you".
+            raise HTTPException(status_code=404, detail="not_found")
         raise HTTPException(status_code=404, detail="unknown_code")
     mail_id = str(rows[0]["mail_id"])
 

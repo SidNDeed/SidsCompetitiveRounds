@@ -103,7 +103,7 @@ needs_pg = pytest.mark.skipif(
 # Exactly this many tests in this module need the DSN. Pinned from OUT here
 # so that moving one behind the gate is a deliberate edit and not a silent
 # "1 skipped" that still reads as a clean run.
-LIVE_TESTS = 17
+LIVE_TESTS = 18
 
 
 def _read(path):
@@ -2083,6 +2083,35 @@ def test_a_code_that_does_not_resolve_to_exactly_one_thread_is_refused(rows, det
 
 
 
+def test_a_code_whose_mail_is_gone_is_told_so_and_nothing_else_is():
+    """Round 3 finding 11, the route's branch (the live test further down
+    runs it against the real schema). With no thread to answer, the route
+    asks whether the code was this player's and its mail is gone, and says
+    not_found -- the bot's "it was deleted" -- instead of unknown_code, the
+    bot's "doesn't match any mail sent to you". It asks with the player's
+    own steam id, and never on the two-row path, which is refused as
+    unknown_code so that it stays unreachable.
+
+    MUTATION: drop the question, or ask it on two rows as well. Must fail."""
+    req = mail_discord._ReplyFromDiscord(
+        discord_id="d1", relay_code=CODE_OK, body="yes", source_message_id="77")
+    db = _FakeDb([[PLAYER_ROW], [], [{"gone": 1}]])
+    with pytest.raises(HTTPException) as err:
+        _reply_route(db, req)
+    assert (err.value.status_code, err.value.detail) == (404, "not_found"), (
+        err.value.detail)
+    assert db.sql[2] == mail_discord._RELAY_GONE_SQL, db.sql
+    assert db.params[2] == {"c": CODE_OK, "s": PLAYER_ROW["steam_id"],
+                            "pid": str(PLAYER_ROW["id"])}, db.params[2]
+    two = _FakeDb([[PLAYER_ROW], [{"mail_id": MAIL}, {"mail_id": MAIL}],
+                   [{"gone": 1}]])
+    with pytest.raises(HTTPException) as err:
+        _reply_route(two, req)
+    assert err.value.detail == "unknown_code", err.value.detail
+    assert len(two.sql) == 2, (
+        "the two-row path asked whether the mail was gone: %s" % two.sql)
+
+
 def test_the_confirmation_read_cannot_fail_a_reply_that_already_committed():
     """The read runs AFTER the reply committed. Letting a transient failure
     there become a 500 tells the player their reply did not send, and the
@@ -2984,6 +3013,98 @@ def test_a_dm_that_went_out_before_the_relay_was_turned_off_still_answers():
     assert state["refused relay"] == (True, True, True), (
         "a DM Discord refused lost its withdrawal: %s" % (state,))
     assert both == 0, "a delivered row is still cancelled: %s" % (state,)
+
+
+@needs_pg
+def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypatch):
+    """Round 3 finding 11, through the real route and the real schema.
+
+    Migration 330 keeps a relay row when its mail is purged -- mail_id SET
+    NULL, relay_code kept -- so that a reply quoting the code can be told
+    the truth: this code was yours and its mail is gone. The resolver joins
+    the mail, so the row dropped out, and the route answered unknown_code,
+    which the bot words as "doesn't match any mail sent to you". The thread
+    dies here in production's order: relayed, sent and acked, answerable;
+    the player's copy deleted (the in-game delete's two statements); the
+    mail purged, which leaves the tombstone. A code that was never this
+    player's stays unknown_code in every state."""
+    import asyncpg
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    monkeypatch.setenv("API_SECRET_KEY", "the-key")
+    sa_dsn = "postgresql+asyncpg://" + DSN.split("://", 1)[1]
+
+    async def _core(_db, _me, **kw):
+        return {"id": REPLY_ID, "accepted": True}
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        engine = create_async_engine(sa_dsn, poolclass=NullPool)
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        prev = mail_discord._BOUND.get("reply_core")
+        mail_discord._BOUND["reply_core"] = _core
+
+        async def reply(did, code):
+            req = mail_discord._ReplyFromDiscord(
+                discord_id=did, relay_code=code, body="yes",
+                source_message_id="77")
+            async with sm() as db:
+                try:
+                    out = await mail_discord.mail_reply_from_discord(
+                        req, "the-key", db)
+                except HTTPException as ex:
+                    return "%d %s" % (ex.status_code, ex.detail)
+            return "accepted" if out.get("accepted") else repr(out)
+
+        try:
+            await _race_world(conn)
+            await conn.execute(_asyncpg_sql(), "the DM body", MAIL, _code(), SENDER_SID)
+            polled = await _claim(conn)
+            if [r["content"] for r in polled] != ["the DM body"]:
+                return {"poll": [r["content"] for r in polled]}, None
+            await conn.execute(_pg(main._PENDING_DM_ACK_SQL, "und", "ids"),
+                               False, [str(polled[0]["dm_id"])])
+            code = await conn.fetchval(
+                "SELECT relay_code FROM pending_dms WHERE mail_id = $1", MAIL)
+            seen = {"live": await reply("d1", code),
+                    "live, not theirs": await reply("d2", code)}
+            # The in-game delete of the player's copy: both of its statements.
+            await conn.execute(
+                "UPDATE mail_recipients SET deleted_at = COALESCE(deleted_at, NOW())"
+                " WHERE message_id = $1 AND recipient_id = $2"
+                "   AND delivery = 'delivered'", MAIL, RACED_PID)
+            await conn.execute(
+                _pg(main._MAIL_CANCEL_PENDING_DM_SQL, "mid", "sid"), MAIL, "1")
+            seen["copy deleted"] = await reply("d1", code)
+            # The retention sweep's purge; 330's ON DELETE SET NULL does the rest.
+            await conn.execute("DELETE FROM mail_messages WHERE id = $1", MAIL)
+            tomb = await conn.fetchrow(
+                "SELECT mail_id, delivered_at IS NOT NULL AS sent, cancelled_at"
+                "  FROM pending_dms WHERE relay_code = $1 AND steam_id = '1'", code)
+            seen["purged"] = await reply("d1", code)
+            seen["purged, not theirs"] = await reply("d2", code)
+            seen["never minted"] = await reply("d1", _code())
+            return seen, tomb
+        finally:
+            mail_discord._BOUND["reply_core"] = prev
+            await engine.dispose()
+            await conn.execute("DROP TABLE IF EXISTS " + ", ".join(_RACE_TABLES))
+            await conn.close()
+
+    seen, tomb = _live(run)
+    # The thread really died in production's order: sent and acked, then a
+    # tombstone that still carries its name.
+    assert tomb is not None and tomb["mail_id"] is None and tomb["sent"], (seen, tomb)
+    assert tomb["cancelled_at"] is None, tomb
+    assert seen == {
+        "live": "accepted",
+        "live, not theirs": "404 unknown_code",
+        "copy deleted": "404 not_found",
+        "purged": "404 not_found",
+        "purged, not theirs": "404 unknown_code",
+        "never minted": "404 unknown_code",
+    }, seen
 
 
 # -- Round 3 finding 19: a send in flight and the relay-off that races it --
