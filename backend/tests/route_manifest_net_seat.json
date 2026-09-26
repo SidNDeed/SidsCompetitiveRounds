@@ -3179,7 +3179,7 @@
           ],
           "main",
           "internal_pc_packs",
-          "1801cb026c05041f037e25b5f8f0d831946caa6c"
+          "79b2bb2e960919d4b52f9d263bedebbb0b91ebc7"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
