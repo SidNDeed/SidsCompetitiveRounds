@@ -1231,7 +1231,7 @@
           ],
           "main",
           "update_team_live_points",
-          "d1f50955392e13bda1337d310d99f946847f1d1d"
+          "61d4a97ad0a996428704a7dd3057a474737fde45"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "8c42aa1025d289920825726a11fc352d9b825342"
+          "57dc0ded20a166a9ce5bbade8fc82ff73d7d48d4"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -2083,7 +2083,7 @@
           ],
           "main",
           "ack_pending_dms",
-          "efc59a950396483b045f317d129a824cbdb58d17"
+          "7ad3e0f979276a361c59298a8d738b2dbcc3e591"
         ],
         [
           "/api/v1/internal/rank-role-colors",
@@ -3017,7 +3017,7 @@
           ],
           "main",
           "mail_settings_put",
-          "c7c0691938536ec59c884c618c90f7d867725f33"
+          "f2f6a3677ac26be53e238ebfb921acd4dc5201c7"
         ],
         [
           "/api/v1/mail/settings",
@@ -3335,7 +3335,7 @@
           ],
           "mail_discord",
           "mail_relay_pref",
-          "47a842e533507876a61426f3d08b96d600a21d8b"
+          "f33650cd8f4dde5042abbe2c2b489b4a63df11cd"
         ],
         [
           "/api/v1/internal/mail/relay-threads",
@@ -3353,7 +3353,7 @@
           ],
           "mail_discord",
           "mail_reply_from_discord",
-          "272872fecad0e971b8b343cc7f441fb5bbacd9ed"
+          "3db15af754c7e1bddbc51a61a71b13e2cc71e19b"
         ],
         [
           "/api/v1/logs/auto",
