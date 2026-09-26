@@ -269,7 +269,10 @@ ROWS = [
       [E(B, "_PC_VIEW_MEMBERS", '_PC_VIEW_MEMBERS = ("actor_ref", "owner_ref", "settings_rev")',
          '_PC_VIEW_MEMBERS = ("actor_ref", "settings_rev")')]),
     V("14k", "test_the_binder_page_orders_a_tie_by_print_id", _TIE_KEY),
-    V("14l", "test_a_tie_does_not_flip_the_binder_digest_or_the_binding", _TIE_KEY),
+    V("14l", "test_a_tie_does_not_flip_the_binder_digest_or_the_binding", _TIE_KEY,
+      unmutated=["test_c14l_with_the_key_the_same_heap_flip_still_attaches_and_keeps_one_digest"],
+      note="the control is stated with the key present in both places: under the mutation the same"
+           " heap flip reorders the page by construction"),
     V("14m", "test_the_binder_json_carries_a_tile_decision_for_every_entry",
       [E(M, "internal_pc_binder", "    for r in rows:\n        d = _pc_print_dict(r, ctx)",
          '    for r in rows:\n        r = {**dict(r), "subject_id_ok": False}\n        d = _pc_print_dict(r, ctx)')],

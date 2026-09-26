@@ -853,7 +853,8 @@ async def tied_pair(env):
 
 
 async def touch(env, print_id):
-    """A no-op UPDATE of a mutable column: a new tuple at the heap's tail."""
+    """A no-op UPDATE of a mutable column: a new version of the row, and no
+    logical change. Where the version lands is the server's choice (heap_to)."""
     await env.ex(f"UPDATE {SCHEMA}.pc_prints SET owner_player_id = owner_player_id WHERE id = CAST(:p AS uuid)",
                  {"p": print_id})
 
@@ -864,11 +865,28 @@ async def heap_order(env, owner):
         " AND discarded_at IS NULL ORDER BY ctid", {"o": owner.id})]
 
 
+async def heap_to(env, owner, want, tries=32):
+    """Bring the owner's two live prints to the physical order `want` with
+    no-op UPDATEs only, so no logical state changes. The rows expect one no-op
+    UPDATE of the print that should read last to land at the heap's tail, but
+    PostgreSQL gives an updated tuple the lowest free line pointer when its
+    page has one, and that can sit below the other print (build notes,
+    FINDING 8). So the print that should read last is updated first, then the
+    two alternate, until the heap reads `want` - bounded, and a failure names
+    the order the heap read."""
+    got = None
+    for n in range(tries):
+        await touch(env, want[1] if n % 2 == 0 else want[0])
+        got = await heap_order(env, owner)
+        if got == want:
+            return n + 1
+    raise AssertionError(f"the heap reads {got}, not {want}, after {tries} no-op UPDATEs")
+
+
 def test_the_binder_page_orders_a_tie_by_print_id(monkeypatch, tmp_path):
     async def body(env):
         owner, lo, hi = await tied_pair(env)
-        await touch(env, lo)
-        assert await heap_order(env, owner) == [hi, lo], "the fixture did not reverse the heap order"
+        await heap_to(env, owner, [hi, lo])
         ids = [p["print_id"] for p in (await binder_prints(env, owner))["prints"]]
         assert ids[0] == lo and ids[1] == hi, ids
     live(monkeypatch, tmp_path, body)
@@ -877,8 +895,7 @@ def test_the_binder_page_orders_a_tie_by_print_id(monkeypatch, tmp_path):
 def test_c14k_the_key_order_survives_the_other_heap_order(monkeypatch, tmp_path):
     async def body(env):
         owner, lo, hi = await tied_pair(env)
-        await touch(env, hi)
-        assert await heap_order(env, owner) == [lo, hi]
+        await heap_to(env, owner, [lo, hi])
         ids = [p["print_id"] for p in (await binder_prints(env, owner))["prints"]]
         assert ids == [lo, hi], ids
     live(monkeypatch, tmp_path, body)

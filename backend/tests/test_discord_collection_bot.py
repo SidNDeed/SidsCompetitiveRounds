@@ -857,7 +857,8 @@ async def tied_pair(env):
 
 
 async def touch(env, print_id):
-    """A no-op UPDATE of a mutable column: a new tuple at the heap's tail."""
+    """A no-op UPDATE of a mutable column: a new version of the row, and no
+    logical change. Where the version lands is the server's choice (heap_to)."""
     await env.ex(f"UPDATE {SCHEMA}.pc_prints SET owner_player_id = owner_player_id WHERE id = CAST(:p AS uuid)",
                  {"p": print_id})
 
@@ -866,6 +867,24 @@ async def heap_order(env, owner):
     return [r["id"] for r in await env.rows(
         f"SELECT id::text AS id FROM {SCHEMA}.pc_prints WHERE owner_player_id = CAST(:o AS uuid)"
         " AND discarded_at IS NULL ORDER BY ctid", {"o": owner.id})]
+
+
+async def heap_to(env, owner, want, tries=32):
+    """Bring the owner's two live prints to the physical order `want` with
+    no-op UPDATEs only, so no logical state changes. The rows expect one no-op
+    UPDATE of the print that should read last to land at the heap's tail, but
+    PostgreSQL gives an updated tuple the lowest free line pointer when its
+    page has one, and that can sit below the other print (build notes,
+    FINDING 8). So the print that should read last is updated first, then the
+    two alternate, until the heap reads `want` - bounded, and a failure names
+    the order the heap read."""
+    got = None
+    for n in range(tries):
+        await touch(env, want[1] if n % 2 == 0 else want[0])
+        got = await heap_order(env, owner)
+        if got == want:
+            return n + 1
+    raise AssertionError(f"the heap reads {got}, not {want}, after {tries} no-op UPDATEs")
 
 
 def _drop_binder_composites(env):
@@ -892,11 +911,9 @@ async def _binder_pass(env, owner):
 def test_a_tie_does_not_flip_the_binder_digest_or_the_binding(monkeypatch, tmp_path):
     async def body(env):
         owner, lo, hi = await tied_pair(env)
-        await touch(env, lo)
-        assert await heap_order(env, owner) == [hi, lo]
+        await heap_to(env, owner, [hi, lo])
         seq1, rev1, _ = await _binder_pass(env, owner)
-        await touch(env, hi)
-        assert await heap_order(env, owner) == [lo, hi]
+        await heap_to(env, owner, [lo, hi])
         _drop_binder_composites(env)
         seq2, rev2, _ = await _binder_pass(env, owner)
         print(f"ROW14L pass1 {seq1} rev {rev1}; pass2 {seq2} rev {rev2}")
@@ -906,11 +923,14 @@ def test_a_tie_does_not_flip_the_binder_digest_or_the_binding(monkeypatch, tmp_p
 
 
 def test_c14l_with_the_key_the_same_heap_flip_still_attaches_and_keeps_one_digest(monkeypatch, tmp_path):
+    """Stated with the key present in both places, i.e. over the UNMUTATED
+    tree (build notes, FINDING 8): the heap flip is asserted, so under the
+    row's mutation this reads the flipped order by construction."""
     async def body(env):
         owner, lo, hi = await tied_pair(env)
-        await touch(env, hi)
+        await heap_to(env, owner, [lo, hi])
         seq1, rev1, _ = await _binder_pass(env, owner)
-        await touch(env, lo)
+        await heap_to(env, owner, [hi, lo])
         _drop_binder_composites(env)
         seq2, rev2, _ = await _binder_pass(env, owner)
         assert seq1 == seq2 == [lo, hi] and rev1 == rev2
