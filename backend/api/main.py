@@ -3860,7 +3860,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:42670 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:43026 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3926,7 +3926,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:42482 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:42838 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -3996,7 +3996,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:42385 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:42741 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6319,6 +6319,9 @@ _FFA_HOLD_FENCES = 1
 # route carry it; a box on the build before round 2 answers without the key.
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
+# Its sibling _LEAD_FORFEIT_PERGAME (the /health `lead_forfeit_pergame` word)
+# is DERIVED from the two 2v2 per-game wirings rather than written here, so
+# it is defined after team_series_report_dc, whose reader call it reads.
 # TICKET-REDACTION, reported on /health as `ticket_redaction`. A marker whose
 # only purpose is to be probed (#306): nothing reads it and no behaviour
 # depends on it. 1 = this build applies log_redaction's credential rule (the
@@ -6346,6 +6349,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
@@ -6358,6 +6362,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
+                              lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word())
 
 
@@ -31369,6 +31374,8 @@ async def update_team_live_points(
     t2_points: int = Query(..., ge=0, le=10),
     reporter_steam_id: str = Query(...),
     sig: str = Query(...),
+    game_number: int = Query(None, ge=1, le=99),
+    photon_room_id: str = Query(None, max_length=128),
     db: AsyncSession = Depends(get_db),
 ):
     """2v2 game-1 points, so betting locks at 2 exactly as 1v1 does.
@@ -31377,12 +31384,46 @@ async def update_team_live_points(
     Slot order is team_series' own (t1a/t1b vs t2a/t2b) — the reporter maps
     its in-game side to that order before signing, the same contract the
     match report already uses.
+
+    Clients post here in EVERY game of a series, not only game 1, and each
+    accepted post also sets its seat's pair in the current game's record in
+    team_series_games: the per-game record the DC report's lead-forfeit rule
+    reads. See _record_team_game_points below.
+
+    OPTIONAL, both or neither: game_number, the series' 1-based number of the
+    game whose running score the pair is, and photon_room_id, the room that
+    game is played in. A post that sends them signs
+    'team-live-points-game:{series_id}:{reporter_steam_id}:{t1}:{t2}:{game_number}:{photon_room_id}'
+    instead. It is then filed only under exactly that game of the stored
+    sitting. The names give the pair its game and nothing more: no single
+    post proves a crossing, attested or not, and the record rule described
+    above _record_team_game_points needs a pair of two points from a seat of
+    each team. A client sending them must take game_number from the same event
+    that resets its pair, so the two can never describe different games. No
+    client sends them yet. A post without them is accepted and filed as
+    before, but after the first game of a series' original sitting only the
+    posts that named their game count toward a crossing.
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
+    # Called directly rather than through FastAPI, the two optional parameters
+    # arrive as their Query() markers; only real values are values.
+    if not isinstance(game_number, int):
+        game_number = None
+    if not isinstance(photon_room_id, str):
+        photon_room_id = None
+    _names_game = game_number is not None or photon_room_id is not None
+    if _names_game and (game_number is None or not (photon_room_id or "").strip()):
+        raise HTTPException(status_code=400,
+                            detail="game_number and photon_room_id are sent together")
+    _canonical = (
+        f"team-live-points-game:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}"
+        f":{game_number}:{photon_room_id}"
+        if _names_game else
+        f"team-live-points:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}")
     expected = hmac.new(
         MATCH_HMAC_SECRET.encode(),
-        f"team-live-points:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}".encode(),
+        _canonical.encode(),
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
@@ -31416,7 +31457,10 @@ async def update_team_live_points(
                live_t2_points = GREATEST(COALESCE(live_t2_points, 0), :t2)
          WHERE id = :sid AND status = 'active' AND invalidated_at IS NULL
            AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)
-        RETURNING live_t1_points, live_t2_points
+        RETURNING live_t1_points, live_t2_points,
+                  t1_series_wins, t2_series_wins, photon_room_id,
+                  CASE WHEN t1a_id = :pid THEN 0 WHEN t1b_id = :pid THEN 1
+                       WHEN t2a_id = :pid THEN 2 ELSE 3 END AS reporter_seat
     """), {"t1": t1_points, "t2": t2_points, "sid": sid, "pid": reporter.id})).first()
     if pts is None:
         await db.rollback()
@@ -31427,6 +31471,15 @@ async def update_team_live_points(
     # it). Attesting before it would record a seat for a series it may not be in.
     await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
                                    (t1_points or 0) + (t2_points or 0))
+    # The per-game record the DC report's lead-forfeit rule reads. Same
+    # transaction, after the UPDATE above has established membership and
+    # locked the series row: the game this post is filed under is named from
+    # the row that lock pins, by the helper the DC report names its game with.
+    # Savepointed inside: a failure to record costs this post nothing.
+    _game = _team_game_identity(pts.t1_series_wins, pts.t2_series_wins, pts.photon_room_id)
+    _slot = int(pts.reporter_seat)
+    _attested = (game_number, photon_room_id.strip()) if _names_game else None
+    await _record_team_game_points(db, sid, t1_points, t2_points, _game, _slot, _attested)
     await db.commit()
     return {
         "status": "ok",
@@ -31434,6 +31487,267 @@ async def update_team_live_points(
         "live_t2_points": pts[1],
         "bets_locked": (pts[0] + pts[1]) >= 2,
     }
+
+
+# -- The 2v2 per-game record: did THIS game see real play? -------------------
+#
+# team_series_report_dc settles a mid-series leave one of two ways: the whole
+# series completes to the team that stayed, with ratings and gold, or it goes
+# to dc_incomplete for an admin. It auto-completes only when the team that
+# stayed was already a game up AND the abandoned game saw real play, two
+# points between the teams. That second half used to be read from the DC
+# report's query string: one survivor's snapshot, outside the DC signature,
+# so two honest survivors holding different snapshots of one game got
+# different settlements depending on whose report took the series lock first.
+# It is now read from team_series_games (migrations 348, 351 and 352),
+# written by the live-points POST above while the game is played. The DC
+# report reads it after it has locked the series row; the snapshot it carries
+# is only logged.
+#
+# WHICH GAME. A game is named by _team_game_identity: the series, the games
+# recorded on it plus one, and the sitting's room (team_series.photon_room_id),
+# all read from the series row under its lock -- by the POST from its own
+# UPDATE's RETURNING, by the DC report from its FOR NO KEY UPDATE read. A
+# relock clears the room and the next sitting is issued a new one, so a game
+# number replayed in a new sitting is a different record, and a post processed
+# while no room is stored is filed nowhere. Nothing in this rule reads a time.
+#
+# What that name cannot tell is which game a POST describes. Nothing in a
+# legacy post (every client today) names its game, and the production client
+# never withdraws one (plugin/ApiClient.cs at TAG v1.40.3, SendLivePoints and
+# SendLivePointsOnce): it dispatches a post at every change of its pair and
+# at every 20-second refresh, whatever is already in flight, and a newer pair
+# stops only the older one's RETRIES; a request already sent runs until it
+# completes or times out. So a post that left a client during game N can be
+# processed after game N's report carrying any pair game N passed through,
+# first-round pairs included, and it is filed under game N+1, where it can be
+# byte-identical to a post from game N+1. Nothing in the client bounds how
+# many such posts there are; only time does, and this rule reads no time. So
+# a post may also carry game_number and photon_room_id, signed with its pair.
+# Such an ATTESTED post is filed only under exactly the game and sitting it
+# names. The names give its pair an identity and nothing more.
+#
+# WHICH POSTS COUNT (_team_game_evidence). In the first game of the series'
+# original sitting no earlier post of the series exists, so every post filed
+# there is that game's own (or the next game's, landing before this game's
+# report, which exists only once this game is over) and all of them count.
+# In any later game a post that names no game may be the game before's, and
+# in the first game of a relocked sitting it may be the dead sitting's: there
+# only the posts that named the game count. A lead-forfeit is only ever asked
+# about a later game (the team that stayed must already be a game up), so
+# until a seat of each team sends the names, every lead-forfeit settles as
+# dc_incomplete, the outcome an admin can still change.
+#
+# BOTH TEAMS. Each accepted post sets one bit: which seat posted which pair
+# (each side capped at 2, as the client caps it). An attested post sets the
+# same bit in a second mask. A crossing is proven only by a pair of two
+# points or more among the counted posts, from a seat of EACH team (seats
+# 0,1 = team 1, 2,3 = team 2). One team's evidence proves nothing, however
+# many of its seats posted it, attested or not.
+#
+# What this does NOT change: a live-points post is accepted on the shared mod
+# secret and the series membership of the seat it names in a query parameter,
+# and neither check reads what was played, exactly as neither did for the old
+# query-string snapshot. This record removes the disagreement between honest
+# seats and the dependence on when a post arrived. It does not authenticate
+# the points. The two-team rule requires two accepted posts naming seats of
+# different teams; neither check binds a post to the session of the player
+# whose seat it names, so the rule counts seats named by accepted posts, not
+# distinct players.
+
+
+def _team_game_identity(t1_series_wins, t2_series_wins, photon_room_id):
+    """The game in progress on a series as (ordinal, sitting room): the games
+    recorded plus one, and the room the series row stores. Both callers pass
+    values read from the series row under its lock. '' = no room is stored
+    (between a relock and the next sitting's room): nothing is filed or read."""
+    return (int(t1_series_wins or 0) + int(t2_series_wins or 0) + 1,
+            (photon_room_id or "").strip())
+
+
+def _team_game_same_sitting(claimed: str, stored: str) -> bool:
+    """An attested post's room against the stored one, with the suffix
+    tolerance of the report-room grammar that team_series_report_dc applies."""
+    return bool(stored) and (claimed == stored or claimed.startswith(stored + "_"))
+
+
+# A pair (t1, t2), each side capped at 2, is pair index 3 * t1 + t2, and seat
+# k (0..3 = t1a, t1b, t2a, t2b) posting pair p is bit 4 * p + k of pair_seats
+# (and of attested_seats, for the posts that named their game).
+def _team_game_two_points_bits(team_seats) -> int:
+    """Every bit of a seat in `team_seats` posting a pair of two points or
+    more (t1 + t2 >= 2, each side capped at 2)."""
+    return sum(1 << (4 * (3 * t1 + t2) + seat)
+               for t1 in range(3) for t2 in range(3) if t1 + t2 >= 2
+               for seat in team_seats)
+
+
+# Team 1's (t1a, t1b) and team 2's (t2a, t2b) bits of a pair of two points or
+# more.
+_TEAM_GAME_TWO_POINTS = (_team_game_two_points_bits((0, 1)),
+                         _team_game_two_points_bits((2, 3)))
+
+
+def _team_game_both_teams_reached_two(seats: int) -> bool:
+    """Whether the bits in `seats` hold a pair of two points or more from a
+    seat of EACH team: what a crossing needs. One team's bits, from however
+    many of its seats, never prove one."""
+    return all(seats & team for team in _TEAM_GAME_TWO_POINTS)
+
+
+def _team_game_shape(original: bool, ordinal: int, first_ordinal) -> str:
+    """What can have reached the record of game `ordinal` besides its own
+    posts. It decides which posts _team_game_evidence counts, and names the
+    record in the DC report's log.
+
+    `original` = the series was never relocked and has no record in another
+    room; `first_ordinal` = the lowest game on record in the current room.
+      "first"         game 1 of the original sitting: nothing, no game came
+                      before it.
+      "second"        game 2 of the original sitting: game 1's late posts.
+      "later"         a later game: the game before's late posts.
+      "after-relock"  the game after a relocked sitting's first: that first
+                      game's late posts.
+      "unclean"       the first game of a relocked sitting: anything posted in
+                      the dead sitting."""
+    if original:
+        return "first" if ordinal <= 1 else "second" if ordinal == 2 else "later"
+    if first_ordinal is None or first_ordinal >= ordinal:
+        return "unclean"
+    return "after-relock" if first_ordinal == ordinal - 1 else "later"
+
+
+def _team_game_evidence(shape: str, cur_seats: int, attested_seats: int) -> int:
+    """The bits of the game's record that count toward a crossing: every
+    post's (`cur_seats`) in the first game of the original sitting, where no
+    earlier post of the series exists; in every other shape only the posts
+    that named exactly this game and sitting (`attested_seats`), because a
+    post that names no game may be a late post of the game before, or of a
+    dead sitting, and nothing but time bounds how many there are (the comment
+    above _team_game_identity)."""
+    return cur_seats if shape == "first" else attested_seats
+
+
+_TEAM_GAME_POINTS_UPSERT_SQL = (
+    "INSERT INTO team_series_games"
+    "  (series_id, game_ordinal, sitting_room, pair_seats, attested_seats)"
+    " VALUES (:sid, CAST(:ord AS integer), CAST(:room AS text),"
+    "         CAST(:bits AS bigint), CAST(:att AS bigint))"
+    " ON CONFLICT (series_id, game_ordinal, sitting_room) DO UPDATE"
+    "    SET pair_seats = team_series_games.pair_seats | EXCLUDED.pair_seats,"
+    "        attested_seats = team_series_games.attested_seats | EXCLUDED.attested_seats,"
+    "        last_posted_at = NOW()")
+
+# One row: the current game's bits, from every post and from the posts that
+# named it (both in the current sitting), the lowest game on record in this
+# sitting, and whether the series has had another sitting (a relock stamp,
+# read as a boolean, or a record in another room). Rows written before
+# migration 351 carry sitting_room '' and are never read; rows written before
+# migration 352 hold attested_seats 0.
+_TEAM_GAME_CROSSED_SQL = (
+    "SELECT COALESCE(BIT_OR(g.pair_seats)"
+    "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_seats,"
+    "       COALESCE(BIT_OR(g.attested_seats)"
+    "                FILTER (WHERE g.game_ordinal = CAST(:ord AS integer)), 0) AS cur_attested,"
+    "       MIN(g.game_ordinal) AS first_ordinal,"
+    "       (SELECT ts.relocked_at IS NOT NULL FROM team_series ts"
+    "         WHERE ts.id = :sid) AS relocked,"
+    "       EXISTS (SELECT 1 FROM team_series_games o"
+    "                WHERE o.series_id = :sid"
+    "                  AND o.sitting_room NOT IN (CAST(:room AS text), '')) AS other_room"
+    "  FROM team_series_games g"
+    " WHERE g.series_id = :sid AND g.sitting_room = CAST(:room AS text)")
+
+
+async def _record_team_game_points(db, series_id, t1_points, t2_points, game, seat,
+                                   attested=None) -> bool:
+    """Set this post's bit, its seat and its capped pair, in the record of
+    `game`: the game in progress as _team_game_identity names it from the
+    series row the caller's UPDATE has locked. `seat` is the reporter's slot,
+    0..3 = t1a, t1b, t2a, t2b.
+
+    `attested` is (game_number, room) when the post named its game. It is then
+    filed only when that is exactly `game` in the stored sitting, and its bit
+    is also set in attested_seats; a post naming any other game or sitting is
+    not filed at all.
+
+    Only ever raises: both masks are only OR-ed, so no later post clears
+    anything. Returns whether a row was written. Never raises. The isolation
+    is a SAVEPOINT, not a bare try/except, because under asyncpg a caught
+    statement error still aborts the whole transaction (#235) and would take
+    the points write with it. Before migrations 348, 351 and 352 are applied
+    this records nothing, and the DC report then treats every game as not
+    played: the conservative settlement."""
+    ordinal, room = game
+    if not room:
+        return False
+    if attested is not None:
+        named_game, named_room = attested
+        if named_game != ordinal or not _team_game_same_sitting(named_room, room):
+            print(f"[TEAM-GAME-POINTS] series={series_id} attested post names game "
+                  f"{named_game} or another sitting; game {ordinal} is in progress. "
+                  f"Not filed.")
+            return False
+    t1, t2 = min(int(t1_points or 0), 2), min(int(t2_points or 0), 2)
+    bit = 1 << (4 * (3 * t1 + t2) + int(seat))
+    try:
+        async with db.begin_nested():
+            await db.execute(text(_TEAM_GAME_POINTS_UPSERT_SQL), {
+                "sid": series_id, "ord": ordinal, "room": room,
+                "bits": bit, "att": bit if attested is not None else 0})
+        return True
+    except Exception as ex:
+        print(f"[TEAM-GAME-POINTS] series={series_id} not recorded: {type(ex).__name__}")
+        return False
+
+
+async def _team_game_crossed_two(db, series_id, series_row, reported_points=None) -> bool:
+    """Whether the game in progress on this series saw real play, by the
+    server's own record: a pair of two points or more from a seat of each
+    team (_team_game_both_teams_reached_two) among the posts that count for
+    this game (_team_game_evidence) -- every post in the first game of the
+    original sitting, only the posts that named exactly this game and sitting
+    in any other. The caller holds the series row lock and passes the row it
+    read under that lock, so the game is named by the same helper, from the
+    same locked state, that the posts were filed by.
+
+    `reported_points` is the DC report's own snapshot. It is LOGGED when it
+    disagrees with the record and never read by the answer: that disagreement
+    is exactly what this record takes out of the settlement.
+
+    False when no room is stored, when the record cannot be read (before
+    migration 348, 351 or 352, or any statement error inside the savepoint),
+    and when the counted posts do not show two points from both teams (in
+    any game but the first of the original sitting, only the posts that
+    named it are counted). Every one of those settles as dc_incomplete, the
+    outcome an admin can still change. Never raises."""
+    ordinal, room = _team_game_identity(series_row["t1_series_wins"],
+                                        series_row["t2_series_wins"],
+                                        series_row["photon_room_id"])
+    if not room:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: no sitting room is "
+              f"stored; treated as not played")
+        return False
+    try:
+        async with db.begin_nested():
+            rec = (await db.execute(text(_TEAM_GAME_CROSSED_SQL), {
+                "sid": series_id, "ord": ordinal, "room": room})).mappings().first()
+    except Exception as ex:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: per-game record "
+              f"unreadable ({type(ex).__name__}); treated as not played")
+        return False
+    original = not rec["relocked"] and not rec["other_room"]
+    shape = _team_game_shape(original, ordinal, rec["first_ordinal"])
+    evidence = _team_game_evidence(shape, int(rec["cur_seats"] or 0),
+                                   int(rec["cur_attested"] or 0))
+    crossed = _team_game_both_teams_reached_two(evidence)
+    basis = "the record (%s, %s)" % (
+        shape, "every post" if shape == "first" else "posts naming the game")
+    if reported_points is not None and (int(reported_points) >= 2) != crossed:
+        print(f"[TEAM-DC] series={series_id} game {ordinal}: {basis} says "
+              f"{'played' if crossed else 'not played'}; the report's snapshot "
+              f"said {int(reported_points)} point(s). The record decides.")
+    return crossed
 
 
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
@@ -40958,7 +41272,9 @@ async def team_series_report_dc(
     db: AsyncSession = Depends(get_db),
 ):
     """Mid-series disconnect report. Two outcomes: (1) lead-forfeit — if the
-    non-DC team was already up a game AND the abandoned game had >=2 total
+    non-DC team was already up a game AND the server's own per-game record
+    (team_series_games, raised by the live-points POST during play; never the
+    report's point snapshot) shows the abandoned game reached >=2 total
     points, the whole series completes to them with full ratings/economy;
     (2) otherwise the series flips to status='dc_incomplete'
     (invalidation_reason='dc_manual_pending') for manual admin resolution —
@@ -41094,7 +41410,8 @@ async def team_series_report_dc(
     # restart DC (little or no play) or an even series is NOT auto-decided — it drops
     # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
     # that breaks and needs a restart never auto-penalizes anyone.
-    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:
+    if ((other_team_existing_wins or 0) >= 1
+            and await _team_game_crossed_two(db, sid_uuid, s, total_points)):
         # Record a synthetic forfeit game for history parity.
         await db.execute(
             text("""INSERT INTO team_matches
@@ -41137,6 +41454,45 @@ async def team_series_report_dc(
         "dc_team_remaining": other_team,
         "reason": "awaiting_admin_resolution",
     }
+
+
+# -- The 2v2 lead-forfeit build marker (/health `lead_forfeit_pergame`) ----
+# team_series_report_dc completes a series to the team that stayed only when
+# that team was already a game up AND the abandoned game saw real play. This
+# build decides the second half from the server's own per-game record,
+# team_series_games (migrations 348, 351 and 352): update_team_live_points raises
+# it during play through _record_team_game_points, and the DC report reads it
+# through _team_game_crossed_two instead of the point snapshot in its own
+# query string. The batch adds no route and no key to any GET answer both
+# builds serve -- the record is written and read only by signed POSTs -- so this
+# word is what tells the new build from the old one. The release train
+# asserts it on both roles and reads any value but the expected one as the
+# old build; nothing else reads it (#306). It is a statement about the code
+# only: whether migrations 348, 351 and 352 have been applied is proven by
+# their own checks, and until all three are, every DC report settles as
+# dc_incomplete.
+#
+# DERIVED, never written down (#342): 1 when update_team_live_points'
+# compiled code loads _record_team_game_points AND team_series_report_dc's
+# loads _team_game_crossed_two, else 0. Both are read from the endpoints'
+# code objects (co_names), not from their source text, so a comment, or a
+# string that quotes either helper's name, cannot move the value, and an
+# endpoint that stops loading its helper reads 0.
+def _lead_forfeit_loaded_name(code, name: str) -> str:
+    """`name` when it is one of the names `code` loads (co_names), else ''."""
+    return name if name in code.co_names else ""
+
+
+def _lead_forfeit_pergame_marker(writer: str, reader: str) -> int:
+    """1 when both names were found among the endpoints' loaded names, else 0."""
+    return int(bool(writer) and bool(reader))
+
+
+_LEAD_FORFEIT_PERGAME = _lead_forfeit_pergame_marker(
+    _lead_forfeit_loaded_name(update_team_live_points.__code__,
+                              "_record_team_game_points"),
+    _lead_forfeit_loaded_name(team_series_report_dc.__code__,
+                              "_team_game_crossed_two"))
 
 
 # ── 2v2 series continuation (recording-gap fix) ─────────────────────────────
