@@ -25073,6 +25073,358 @@ _PC_LIVE_POOL_CHECK_SQL = """
      WHERE p.id = CAST(:pid AS uuid) AND """ + _PC_POOL_MEMBER_SQL + """
 """
 
+
+# -- Player Cards trading (migration 353): the shared words --------------
+# Cards for cards between two players and nothing else: no gold, shards,
+# packs, events or rating move in a trade. Every tunable is
+# player_cards.PC_TRADE. The five player routes, the two admin routes, the
+# janitor step and the touches in the existing writers (settings, /pc/me,
+# the own binder, the discard, the data deletion, /health) share the words
+# below, so no reader decides "may this player trade" or "is this trade
+# dead" in a way another reader does not.
+
+# The seven objects the trade code names: the three tables, the
+# one-open-proposal-per-pair index and the three columns. ONE catalog
+# statement, run in a savepoint by _pc_trade_schema (#235).
+_PC_TRADE_SCHEMA_PROBE_SQL = """
+    SELECT to_regclass('pc_trades') IS NOT NULL AS trades,
+           to_regclass('pc_trade_holds') IS NOT NULL AS holds,
+           to_regclass('pc_trade_spent_nonces') IS NOT NULL AS spent_nonces,
+           to_regclass('pc_trades_one_open_per_pair') IS NOT NULL AS pair_index,
+           EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('players')
+                      AND a.attname = 'pc_trades_open' AND a.attnum > 0 AND NOT a.attisdropped) AS switch_column,
+           EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('players')
+                      AND a.attname = 'pc_trades_generation' AND a.attnum > 0 AND NOT a.attisdropped) AS generation_column,
+           EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('pc_prints')
+                      AND a.attname = 'acquired_by_trade' AND a.attnum > 0 AND NOT a.attisdropped) AS flag_column
+"""
+
+# The discard's legacy branch reads the flag column's own existence, never
+# the cached word (3.9): present, the flag governs whatever the word said.
+_PC_TRADE_FLAG_COLUMN_SQL = """
+    SELECT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('pc_prints')
+                      AND a.attname = 'acquired_by_trade' AND a.attnum > 0 AND NOT a.attisdropped)
+"""
+
+# A FOUND schema is cached for the life of the process: the migration is
+# additive and nothing this release ships drops it. missing, partial and
+# unknown are never cached -- every consult repeats the probe on the
+# consulting request's own connection until it finds the schema.
+_PC_TRADE_SCHEMA_FOUND = False
+
+
+async def _pc_trade_schema(db: AsyncSession) -> str:
+    """The trading schema's state: 'found' (all seven objects), 'missing'
+    (a probe that ran to completion found none of them -- the never-installed
+    reading, the only one a legacy branch may act on), 'partial' (some but not
+    all) or 'unknown' (no found schema cached and this probe raised instead
+    of completing). Never raises. The probe runs in a savepoint: under
+    asyncpg a caught statement error otherwise aborts the caller's
+    transaction (#235)."""
+    global _PC_TRADE_SCHEMA_FOUND
+    if _PC_TRADE_SCHEMA_FOUND:
+        return "found"
+    try:
+        async with db.begin_nested():
+            row = (await db.execute(text(_PC_TRADE_SCHEMA_PROBE_SQL))).one()
+    except Exception as e:
+        print(f"[PC-TRADE] schema probe did not complete: {type(e).__name__}: {e}")
+        return "unknown"
+    present = sum(1 for v in row if v is True)
+    if present == len(row):
+        _PC_TRADE_SCHEMA_FOUND = True
+        return "found"
+    return "missing" if present == 0 else "partial"
+
+
+# The two literals the /health word is DERIVED from (8.3, #306): the
+# accept's claim (A7) and its move (A11), quoted from the design. The routes
+# execute exactly these strings.
+_PC_TRADE_CLAIM_SQL = """
+    UPDATE pc_trades SET status = 'executing', closed_by = CAST(:actor AS uuid), close_nonce = CAST(:nonce AS text)
+     WHERE id = CAST(:t AS uuid) AND status = 'proposed'
+       AND expires_at > clock_timestamp() AND digest = CAST(:digest AS text)
+    RETURNING id
+"""
+
+_PC_TRADE_MOVE_SQL = """
+    UPDATE pc_prints SET owner_player_id = CAST(:to AS uuid), acquired_by_trade = true
+     WHERE id = ANY(CAST(:ids AS uuid[]))
+       AND owner_player_id = CAST(:from AS uuid) AND discarded_at IS NULL
+    RETURNING id
+"""
+
+
+def _pc_trade_derive(claim_sql: str, move_sql: str) -> bool:
+    """True when the claim's WHERE binds status = 'proposed' and
+    expires_at > clock_timestamp(), and the move's WHERE binds
+    owner_player_id to a parameter and discarded_at IS NULL while its SET
+    sets acquired_by_trade = true. Read from the literals the routes run,
+    whitespace-normalised, so a comment beside either cannot move it; a
+    build whose move lost its owner predicate reports 'broken'."""
+    def flat(sql):
+        return " ".join((sql or "").split()).lower()
+    claim_where = flat(claim_sql).partition(" where ")[2]
+    move_head, _sep, move_where = flat(move_sql).partition(" where ")
+    move_set = move_head.partition(" set ")[2]
+    return bool(
+        _re.search(r"\bstatus = 'proposed'", claim_where)
+        and _re.search(r"\bexpires_at > clock_timestamp\(\)", claim_where)
+        and _re.search(r"\bowner_player_id = (?:cast\( ?)?:\w+", move_where)
+        and _re.search(r"\bdiscarded_at is null\b", move_where)
+        and _re.search(r"\bacquired_by_trade = true\b", move_set))
+
+
+_PC_TRADE_DERIVED = _pc_trade_derive(_PC_TRADE_CLAIM_SQL, _PC_TRADE_MOVE_SQL)
+
+
+def _pc_trade_word_of(state: str) -> str:
+    """The /health word `pc_trading` for a schema state: 'broken' when the
+    derivation fails (a test pins that the build never ships it), 'ready'
+    or 'off' (the kill switch) when the schema is found, else
+    'schema_missing', 'partial' or 'unknown'."""
+    if not _PC_TRADE_DERIVED:
+        return "broken"
+    if state == "found":
+        return "ready" if _pc.PC_TRADE["enabled"] else "off"
+    return {"missing": "schema_missing", "partial": "partial"}.get(state, "unknown")
+
+
+async def _pc_trading_word(db: AsyncSession) -> str:
+    """The probing form: the connected arm of /health and every trade route."""
+    return _pc_trade_word_of(await _pc_trade_schema(db))
+
+
+def _pc_trading_word_cached() -> str:
+    """The cache-only form, for /health's degraded arm, which has no working
+    connection: 'broken', the word of a found schema cached by this process,
+    or else 'unknown'. It never probes."""
+    return _pc_trade_word_of("found" if _PC_TRADE_SCHEMA_FOUND else "unknown")
+
+
+# The history floor (2.7): at least min_ranked_series completed, not
+# invalidated ranked series naming the player -- the truthful record the
+# snapshot counts. Alias p.
+_PC_TRADE_HISTORY_SQL = """(SELECT count(*) FROM (SELECT 1 FROM ranked_series rs
+                     WHERE (rs.player1_id = p.id OR rs.player2_id = p.id)
+                       AND rs.status = 'completed' AND rs.invalidated_at IS NULL
+                     LIMIT CAST(:min_series AS integer)) h) >= CAST(:min_series AS integer)"""
+
+# The trader word (2.7), alias p: a player who may trade now -- a pool
+# member (live, public SteamID64, has run the mod, not banned), trading
+# switched on, the mod first seen at least min_mod_age_days ago, and the
+# history floor. Binds :min_age and :min_series.
+_PC_TRADER_OK_SQL = "(" + _PC_POOL_MEMBER_SQL + """
+           AND p.pc_trades_open
+           AND p.mod_seen_at <= now() - make_interval(days => CAST(:min_age AS integer))
+           AND """ + _PC_TRADE_HISTORY_SQL + ")"
+
+# One party read: the trader word itself (the gate) and each of its terms
+# (which only choose the refusal code; a test pins that the terms and the
+# word agree on one fixture set), the consent generation and the binder.
+_PC_TRADE_PARTY_SQL = """
+    SELECT p.id, p.steam_id,
+           (p.deleted_at IS NULL) AS live,
+           """ + _PC_POOL_STEAM_ID_SQL + """ AS public_id,
+           (p.mod_seen_at IS NOT NULL) AS has_mod,
+           NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS not_banned,
+           p.pc_trades_open AS switch_on,
+           p.pc_trades_generation AS generation,
+           p.pc_collection_public AS binder_public,
+           COALESCE(p.mod_seen_at <= now() - make_interval(days => CAST(:min_age AS integer)), false) AS old_enough,
+           COALESCE(""" + _PC_TRADE_HISTORY_SQL + """, false) AS has_history,
+           COALESCE(""" + _PC_TRADER_OK_SQL + """, false) AS trader_ok
+      FROM players p
+     WHERE p.id = ANY(CAST(:ids AS uuid[]))
+"""
+
+# The counterparty of a trade row t, from the proposer's side.
+_PC_TRADE_OTHER_SQL = "(CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)"
+
+# The dead word (2.7), alias t: a proposed trade that can never execute as
+# stored. ONE ordered term list builds both the word and the janitor's
+# void_reason (the first failing term, in the order of 2.7), so the two
+# cannot disagree. Codes are stored from the PROPOSER's side:
+# trading_closed / not_eligible are the proposer's switch or generation /
+# deletion or ban, counterparty_closed / counterparty_unavailable the other
+# party's; a read translates them to its viewer's side.
+_PC_TRADE_DEAD_TERMS = (
+    ("print_gone", """EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
+                    WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
+                                       WHERE pr.id = n.print_id AND pr.discarded_at IS NULL))"""),
+    ("not_owned", """EXISTS (SELECT 1 FROM pc_prints pr
+                    WHERE (pr.id = ANY(t.a_prints) AND pr.owner_player_id <> t.pair_lo)
+                       OR (pr.id = ANY(t.b_prints) AND pr.owner_player_id <> t.pair_hi))"""),
+    ("subject_unavailable", """EXISTS (SELECT 1 FROM pc_prints pr
+                      JOIN pc_cards c ON c.id = pr.card_id
+                      JOIN players s ON s.id = c.subject_player_id
+                    WHERE pr.id = ANY(t.a_prints || t.b_prints)
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL))"""),
+    ("trading_closed", """EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
+                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation))"""),
+    ("counterparty_closed", """EXISTS (SELECT 1 FROM players p WHERE p.id = """ + _PC_TRADE_OTHER_SQL + """
+                    AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation))"""),
+    ("not_eligible", """EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
+                    AND (p.deleted_at IS NOT NULL
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))"""),
+    ("counterparty_unavailable", """EXISTS (SELECT 1 FROM players p WHERE p.id = """ + _PC_TRADE_OTHER_SQL + """
+                    AND (p.deleted_at IS NOT NULL
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))"""),
+)
+_PC_TRADE_DEAD_SQL = ("(t.status = 'proposed' AND ("
+                      + "\n      OR ".join(term for _code, term in _PC_TRADE_DEAD_TERMS) + "))")
+_PC_TRADE_VOID_REASON_SQL = ("(CASE "
+                             + "\n      ".join(f"WHEN {term} THEN '{code}'" for code, term in _PC_TRADE_DEAD_TERMS)
+                             + " END)")
+
+# A stored (proposer-side) void code as the RECEIVER reads it.
+_PC_TRADE_REASON_FOR_RECEIVER = {
+    "trading_closed": "counterparty_closed", "counterparty_closed": "trading_closed",
+    "not_eligible": "counterparty_unavailable", "counterparty_unavailable": "not_eligible",
+}
+
+# The grammar of the signed term's fields (3.2): each excludes ':'.
+_PC_TRADE_NONCE_RE = _re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_PC_TRADE_STEAM_RE = _re.compile(r"^[0-9]{17}$")
+_PC_TRADE_DIGEST_RE = _re.compile(r"^[0-9a-f]{64}$")
+
+
+def _pc_trade_uuid(value: str) -> str | None:
+    """The canonical lowercase 8-4-4-4-12 text of a UUID given in exactly
+    that form, else None (a trade id is signed as text, so only one spelling
+    of it may exist)."""
+    try:
+        canon = str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return canon if canon == value else None
+
+
+def _pc_trade_side(value: str) -> list | None:
+    """A comma-separated side of 1..prints_per_side_max print ids,
+    canonicalised; None on any malformed id, an empty or oversized side, or a
+    duplicate (a side names each print once)."""
+    parts = [p.strip() for p in str(value or "").split(",")]
+    if not parts or any(not p for p in parts) or len(parts) > int(_pc.PC_TRADE["prints_per_side_max"]):
+        return None
+    try:
+        ids = [str(uuid.UUID(p)) for p in parts]
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if len(set(ids)) != len(ids):
+        return None
+    return sorted(ids)
+
+
+def _pc_trade_refusal(code: str, status: int = 409, *, permanent: bool = False,
+                      state: str | None = None, retry_after: int | None = None) -> HTTPException:
+    """Every trade conflict answers {"error", "permanent", "state",
+    "retry_after"} (3.13); grammar is 422, the schema and the switch 503."""
+    return HTTPException(status_code=status, detail={
+        "error": code, "permanent": bool(permanent), "state": state,
+        "retry_after": (int(retry_after) if retry_after is not None else None)})
+
+
+def _pc_trade_timed_out(e) -> bool:
+    """A lock_timeout (55P03) or statement_timeout (57014) anywhere in the
+    exception's chain."""
+    cur, seen = e, set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if state:
+            return str(state) in ("55P03", "57014")
+        cur = getattr(cur, "orig", None) or cur.__cause__ or cur.__context__
+    return False
+
+
+async def _pc_trade_guarded(db: AsyncSession, work):
+    """Run one trade transaction (`work`, an awaitable). Every refusal rolls
+    the transaction back before it answers, and a lock or statement timeout
+    answers 409 busy with nothing written (3.3)."""
+    try:
+        return await work
+    except HTTPException:
+        await db.rollback()
+        raise
+    except DBAPIError as e:
+        await db.rollback()
+        if _pc_trade_timed_out(e):
+            raise _pc_trade_refusal("busy", retry_after=3) from None
+        raise
+
+
+async def _pc_trade_timeouts(db: AsyncSession) -> None:
+    """PT / AT / DT (F6): the transaction's first statements, before L0, so
+    every lock the trade waits on is bounded (3 s per acquisition)."""
+    await db.execute(text("SET LOCAL lock_timeout = '3s'"))
+    await db.execute(text("SET LOCAL statement_timeout = '5s'"))
+
+
+async def _pc_trade_try_identities(db: AsyncSession, steam_ids, actor: str | None = None) -> bool:
+    """L1: the identity key of every named identity but the actor's (L0
+    holds that one), SHARED and NON-blocking (#612), ascending steam id.
+    False at the first refusal; the caller answers 409 busy with nothing
+    written. The same call form as the pack open's subject hold."""
+    for sid in sorted({str(s) for s in steam_ids if s} - {str(actor)}):
+        got = (await db.execute(text("SELECT pg_try_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                                {"sid": sid})).scalar_one()
+        if not got:
+            return False
+    return True
+
+
+async def _pc_trade_lock_players(db: AsyncSession, pids) -> None:
+    """L3: the pair's players rows, ascending id, FOR NO KEY UPDATE -- the
+    weakest mode that conflicts with itself (#202), on rows that exist
+    before any trade does (#203)."""
+    for pid in sorted({str(p) for p in pids}):
+        await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"),
+                         {"pid": pid})
+
+
+async def _pc_trade_lock_prints(db: AsyncSession, print_ids) -> dict:
+    """L4: the named prints, ascending id, FOR NO KEY UPDATE OF pr, each read
+    with its owner, its liveness and its subject's ban. A print that no
+    longer exists is absent from the answer."""
+    rows = {}
+    for print_id in sorted({str(p) for p in print_ids}):
+        row = (await db.execute(text("""
+            SELECT pr.id, pr.owner_player_id, pr.discarded_at, s.steam_id AS subject_steam_id,
+                   EXISTS (SELECT 1 FROM player_bans b
+                            WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+              FROM pc_prints pr
+              JOIN pc_cards c ON c.id = pr.card_id
+              JOIN players s ON s.id = c.subject_player_id
+             WHERE pr.id = CAST(:print AS uuid)
+               FOR NO KEY UPDATE OF pr
+        """), {"print": print_id})).mappings().first()
+        if row is not None:
+            rows[print_id] = row
+    return rows
+
+
+async def _pc_trade_subjects(db: AsyncSession, print_ids) -> list:
+    """P7 / A5: one plain read of the named prints' subjects, the keys L1
+    needs (a card's subject never changes: pc_cards_immutable)."""
+    return [r[0] for r in (await db.execute(text("""
+        SELECT DISTINCT s.steam_id
+          FROM pc_prints pr
+          JOIN pc_cards c ON c.id = pr.card_id
+          JOIN players s ON s.id = c.subject_player_id
+         WHERE pr.id = ANY(CAST(:ids AS uuid[]))
+    """), {"ids": sorted({str(p) for p in print_ids})})).all()]
+
+
+async def _pc_trade_parties(db: AsyncSession, pids) -> dict:
+    """The party read (_PC_TRADE_PARTY_SQL) of each named player, by id."""
+    rows = (await db.execute(text(_PC_TRADE_PARTY_SQL), {
+        "ids": sorted({str(p) for p in pids}),
+        "min_age": int(_pc.PC_TRADE["min_mod_age_days"]),
+        "min_series": int(_pc.PC_TRADE["min_ranked_series"])})).mappings().all()
+    return {str(r["id"]): r for r in rows}
+
+
 # The rolled subject's identity lock in its SHARED, non-blocking form (#612),
 # taken before the live re-check and held to the open's commit. The data
 # deletion endpoint holds the same lock EXCLUSIVE while it removes every

@@ -318,10 +318,15 @@ def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
     assert len(re.findall(r'(?:WHERE|AND) (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 5
     for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', inspect.getsource(fn))) == 1, fn.__name__
+    # Card trading (migration 353) reads the word a sixth time: the trader word
+    # opens with it, so a trade party is a pool member by the same fragment,
+    # composed once into _PC_TRADER_OK_SQL and nowhere else.
+    assert main._PC_TRADER_OK_SQL.startswith("(" + fragment)
+    assert len(re.findall(r'\(" \+ _PC_POOL_MEMBER_SQL', src)) == 1
     # ...and the identifier appears nowhere else but its definition and the one
-    # docstring that names it, so a sixth reader cannot reach the word by any
+    # docstring that names it, so a seventh reader cannot reach the word by any
     # other spelling without failing here (comments are stripped by _main_code).
-    assert src.count("_PC_POOL_MEMBER_SQL") == 7
+    assert src.count("_PC_POOL_MEMBER_SQL") == 8
     assert src.count("_PC_POOL_MEMBER_SQL = ") == 1
     assert "_PC_POOL_MEMBER_SQL admits" in inspect.getdoc(main._pc_take_snapshot)
     # the snapshot's WHERE is the fragment alone: no second membership predicate beside it
@@ -730,7 +735,16 @@ def test_no_update_of_pc_prints_touches_a_frozen_column():
     allowed = {"discarded_at", "discard_shards", "owner_player_id"}
     for clause in updates:
         cols = {part.split("=")[0].strip() for part in clause.split(",")}
+        # acquired_by_trade (migration 353) is set by a trade's move and by
+        # nothing else, always to true beside an owner change -- the rule the
+        # re-created pc_prints_immutable enforces -- and that move is one
+        # literal, the one the accept and the reversal both run
+        if "acquired_by_trade" in cols:
+            assert clause == "owner_player_id = CAST(:to AS uuid), acquired_by_trade = true", clause
+            cols = cols - {"acquired_by_trade"}
         assert cols <= allowed, clause
+    assert sum("acquired_by_trade" in clause for clause in updates) == 1
+    assert "acquired_by_trade = true" in " ".join(main._PC_TRADE_MOVE_SQL.split())
     assert "DELETE FROM pc_prints WHERE owner_player_id = :pid" in code   # delete-my-data, the only other writer
 
 
