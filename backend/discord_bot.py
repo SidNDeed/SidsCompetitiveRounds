@@ -5457,6 +5457,22 @@ async def cmd_stats(ctx, member: discord.Member = None):
     embed.set_footer(text=f"Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
 
+def _escape_md(text) -> str:
+    """A player's display name made literal inside a leaderboard row's
+    **bold** markers, for every row renderer: _lb_line here and the mode
+    boards' _lb_line_2v2, _lb_line_ffa and _lb_line_ovt (v1.41.0 beta round 3
+    finding 16). Backslash-escapes * _ ~ | and the backtick (bold, italics
+    and underline, strikethrough, spoiler, inline code), the backslash
+    itself (a trailing one would escape the row's own closing **), and
+    [ ] < > (a masked link, or a mention, emoji or timestamp tag). Discord
+    shows a backslash before any of these as the character alone.
+
+    TRUNCATE FIRST, then escape -- never the other way round. Cutting an
+    escaped name can strand a lone backslash at its end, and that escapes
+    the row's closing ** instead."""
+    return re.sub(r"([\\*_~|`\[\]<>])", r"\\\1", str(text))
+
+
 def _lb_line(e, rank=None):
     """One short leaderboard row. Kept terse — a 50-row page must fit inside
     Discord's 6000-chars-across-all-embeds message budget.
@@ -5472,7 +5488,7 @@ def _lb_line(e, rank=None):
     if rank is None:
         rank = e["rank"]
     emoji = rank_emoji(get_rank_name(e["rating"]))
-    name = str(e["display_name"])[:24]
+    name = _escape_md(str(e["display_name"])[:24])
     return f"`#{rank:>3}` {emoji} **{name}** — {e['rating']} ({e['wins']}W/{e['losses']}L)"
 
 
@@ -8646,7 +8662,7 @@ def _lb_line_2v2(e, rank=None):
     a column of zeros."""
     if rank is None:
         rank = e["rank"]
-    name = str(e["display_name"])[:24]
+    name = _escape_md(str(e["display_name"])[:24])
     return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — {e['rating']} "
             f"({e['series_wins']}W/{e['series_losses']}L)")
 
@@ -8657,7 +8673,7 @@ def _lb_line_ffa(e, rank=None):
     two numbers an FFA player is read on besides the rating."""
     if rank is None:
         rank = e["rank"]
-    name = str(e["display_name"])[:24]
+    name = _escape_md(str(e["display_name"])[:24])
     return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — {e['rating']} "
             f"({e['games_played']}g, {e['wins']}× 1st, avg {float(e['avg_placement']):.1f})")
 
@@ -8687,7 +8703,7 @@ def _lb_line_ovt(e, rank=None):
     in-game. test_win_rate_unit_is_per_endpoint pins both halves."""
     if rank is None:
         rank = e["rank"]
-    name = str(e["display_name"])[:24]
+    name = _escape_md(str(e["display_name"])[:24])
     return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — "
             f"{e['wins']}W/{e['losses']}L "
             f"({e['games_played']} games, {round(float(e['win_rate']))}%)")

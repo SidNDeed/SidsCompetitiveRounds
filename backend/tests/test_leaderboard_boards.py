@@ -31,7 +31,7 @@ SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 TEXT = open(SRC, encoding="utf-8").read()
 TREE = ast.parse(TEXT)
 
-WANT_FUNC = {"rank_emoji", "get_rank_name", "_lb_line", "_split_lb_descriptions",
+WANT_FUNC = {"rank_emoji", "get_rank_name", "_escape_md", "_lb_line", "_split_lb_descriptions",
              "_build_board_embeds", "_board_medal", "_lb_line_2v2", "_lb_line_ffa", "_lb_line_ovt",
              "_enabled_boards", "_render_board", "_adopt_board_messages", "_boards_are_anchored",
              "_repost_board_set", "publish_boards", "publish_lb_loop"}
@@ -238,7 +238,7 @@ def _bot_ns(api, bot, boards_raw="1v1,2v2,ffa", out=None):
     are real process state and must never be shared between ticks of
     different tests."""
     out = out if out is not None else []
-    ns = {"discord": FAKE_DISCORD, "os": os, "bot": bot, "api_get": api.get,
+    ns = {"discord": FAKE_DISCORD, "os": os, "re": re, "bot": bot, "api_get": api.get,
           "datetime": _dt.datetime, "timezone": _dt.timezone,
           "LEADERBOARD_CHANNEL_ID": CID, "LB_ACTIVE_DAYS": 90,
           "LEADERBOARD_BOARDS_RAW": boards_raw,
@@ -386,6 +386,62 @@ def test_renderer_reads_only_fields_its_endpoint_returns(ns, renderer, rows, mod
     missing = watched.read - set(model.model_fields)
     assert not missing, f"{renderer} reads {missing}, which {model.__name__} does not return"
     assert row["display_name"] in line and line.startswith("`#  1`")
+
+
+# -- a display name is literal inside every board row (round 3 finding 16) --
+
+# Every character the rows must make literal, and no digit and no "!": the
+# negative control escapes "!" as well, which must leave these rows alone.
+_MD_NAME = "a*b_c`d~e|f\\g[h]<i>j"
+_MD_LITERAL = frozenset("\\*_~|`[]<>")
+_MD_ROWS = {"_lb_line": _rows_1v1, "_lb_line_2v2": _rows_2v2,
+            "_lb_line_ffa": _rows_ffa, "_lb_line_ovt": _rows_ovt}
+
+
+def _expected_md(name):
+    """The name as a row must show it: cut to 24 characters FIRST, then each
+    significant character preceded by one backslash. Written out here, not
+    taken from the bot's helper, so the helper does not grade itself."""
+    return "".join("\\" + ch if ch in _MD_LITERAL else ch for ch in name[:24])
+
+
+def _bold_segment(line):
+    """The text between a row's opening ** and the first ** after it that no
+    backslash escapes -- where Discord closes the bold."""
+    start = line.index("**") + 2
+    i = start
+    while i < len(line) - 1:
+        if line[i] == "\\":
+            i += 2
+            continue
+        if line.startswith("**", i):
+            return line[start:i]
+        i += 1
+    raise AssertionError("the row's bold never closes: " + line)
+
+
+@pytest.mark.parametrize("renderer", sorted(_MD_ROWS))
+@pytest.mark.parametrize("name", [_MD_NAME, "x" * 23 + "*tail", "y" * 23 + "\\tail"],
+                         ids=["every-significant-character", "cut-at-a-star", "cut-at-a-backslash"])
+def test_a_display_name_is_literal_inside_every_board_row(ns, renderer, name):
+    """A display name went into `**...**` as typed, so a name carrying * _ `
+    ~ | could close the bold early, open italics, code or a spoiler, or bleed
+    into the next row. All four renderers now escape through ONE helper,
+    after the 24-character cut: the two cut cases put a * or a backslash
+    exactly at character 24, where escaping first and cutting second strands
+    a lone backslash that swallows the closing **. Controls: the escape
+    skipped at one renderer reds that renderer's cases only."""
+    row = _MD_ROWS[renderer](1)[0]
+    row["display_name"] = name
+    line = ns[renderer](row, 1)
+    assert _bold_segment(line) == _expected_md(name), (renderer, line)
+
+
+@pytest.mark.parametrize("renderer", sorted(_MD_ROWS))
+def test_a_plain_display_name_renders_unchanged(ns, renderer):
+    row = _MD_ROWS[renderer](1)[0]
+    row["display_name"] = "Plain Name"
+    assert "**Plain Name**" in ns[renderer](row, 1)
 
 
 def _renderer_source(ns, name):
