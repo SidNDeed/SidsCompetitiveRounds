@@ -38,6 +38,16 @@ proves what those calls DO, per site, on the design's frozen bar
       and grace controls are read per sitting in the lobby-keyed test below
       (design 12.3 steps 2 and 4).
 
+Beside the four sites: the FFA lobby-keyed test (design 12.3 steps 1-8 --
+two games of one sitting credit once, a new lobby credits again), and three
+of Codex round 2's LOW residual sentences (design 12.6) made tests: R1 for
+FFA under the lobby key (a fault in game 1 of a sitting, recovered by game
+2), R3 (the 1v1 credit stands when the rating pass fails or skips, and
+causes nothing else) and Q-G (the resent deciding 1v1 report answers 500
+through main.app and writes nothing -- behaviour documented as it stands,
+not changed here). R2, R4, R5 and R6 are recorded with their falsifiers in
+the lane's build notes; R5's per-mode coverage is test_title_ladders.py's.
+
 Every H3 and H8 case also records each call main.py makes to the hook, the
 real hook still doing the work (the hook_calls fixture), and asserts it: a
 must-not-count line must never REACH the hook (design 4.1), a counted one
@@ -93,7 +103,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
@@ -1570,3 +1580,216 @@ def test_pg_without_the_savepoint_the_same_fault_costs_the_completion(opened, mo
     assert lost, ("without the savepoint the completion survived the fault -- then the "
                   "savepoint would not be what protects it", mode, econ)
     assert run["after"] == run["seeded"], run["after"]
+
+
+# -- LOW residual sentences made tests (design V3 section 12.6) ---------------
+
+def test_pg_r1_a_fault_in_game_one_is_recovered_by_game_two(opened, monkeypatch):
+    """LOW-R1 (design V3 section 12.6): "Injecting a SQL failure inside each
+    hook savepoint must leave the normal completion, rating and gold
+    committed while writing no credit and logging `[LADDER-CREDIT]`; any
+    effect on those states or a nonparticipant ladder falsifies
+    containment." B6's H5 test drives it at every site; this is the FFA
+    case under the lobby key, judged as 12.6's closing paragraph says: on
+    the game it hits. A failing SQL statement is injected into the hook's
+    call in game 1 of a two-game sitting, and only there. After game 1 the
+    game is committed exactly as a clean twin's game 1 is -- the same
+    answer, match row, ratings, XP, gold and items -- no credit exists, no
+    ladder moved (the bystander's included) and one dropped line names the
+    lobby. Game 2 of the same sitting, unfaulted, rates the same four and
+    writes each one's credit under the same lobby key: +1 each, once, and
+    the GET reads it."""
+    _require_live_pg()
+    four = [P1, P2, P3, P4]
+
+    async def _sitting(two_games):
+        async with _case() as (schema, sm):
+            ids = await _seed(sm)
+            seeded, _ = await _look(schema)
+            lobby = await _ffa_lobby(sm, ids)
+            g1 = await _submit(sm, main.submit_ffa_match,
+                               _report_ffa(lobby, "ffa_lhX_r1", _ffa_game(), P1))
+            after1, econ1 = await _look(schema)
+            out = dict(lobby=str(lobby), seeded=seeded, g1=g1, after1=after1, econ1=econ1)
+            if two_games:
+                g2 = await _submit(sm, main.submit_ffa_match,
+                                   _report_ffa(lobby, "ffa_lhY_r2", _ffa_game(), P1))
+                after2, _ = await _look(schema)
+                out.update(g2=g2, after2=after2, got2=await _get_ladders(schema, four))
+            return out
+
+    clean = _run(_sitting(False))
+    wrote = _faulting_hook(monkeypatch, only_first=True)
+    run = _run(_sitting(True))
+    assert wrote == [4], ("the fault did not land after the real hook wrote four credits",
+                          wrote)
+    assert run["g1"][1] is None, run["g1"]
+    assert _answer_digest([run["g1"]]) == _answer_digest([clean["g1"]])
+    assert run["econ1"] == clean["econ1"], (
+        "R1: the fault changed game 1's result, rating, XP, gold or items")
+    assert run["after1"] == run["seeded"], (
+        "R1: game 1's fault left ladder state behind", run["after1"])
+    dropped = _dropped(run["g1"][2], "ffa")
+    assert len(dropped) == 1 and run["lobby"] in dropped[0], run["g1"][2]
+    assert run["g2"][1] is None and not _dropped(run["g2"][2], "ffa"), run["g2"]
+    ok, want = _plus_one(run["seeded"], run["after2"], four)
+    assert ok, ("R1: game 2 did not write the sitting's credit", run["after2"]["progress"],
+                want)
+    assert _credited(run["after2"], run["lobby"], "ffa", four), run["after2"]["credits"]
+    assert len(run["after2"]["credits"]) == 4, run["after2"]["credits"]
+    for s in four:
+        status, body = run["got2"][s]
+        assert status == 200 and _worn_games(body) == (WEAR[s][0], WEAR[s][1] + 1), (
+            s, run["got2"][s])
+
+
+async def _r3_run(how, tag):
+    """A 1v1 series to completion with the rating pass forced one way: game
+    1 on the case's own sessions, the deciding report on a session whose
+    commit, for `how` == "skip", invalidates the series from another
+    connection as soon as the completion is on disk -- a reversal landing in
+    the one gap between the completion's commit and the rating pass."""
+    async with _case() as (schema, sm):
+        ids = await _seed(sm)
+        seeded, _ = await _look(schema)
+        g1 = await _submit(sm, main.submit_match, _report_1v1("ranked_lh%s_000001_r1" % tag))
+        assert g1[1] is None and g1[0].series_status == "active", g1
+        _mid, mid_econ = await _look(schema)
+        reversed_ = []
+
+        class _ReverseBetween(AsyncSession):
+            async def commit(self):
+                await super().commit()
+                if reversed_:
+                    return
+                conn = await harness.connect_bound(DSN, schema)
+                try:
+                    done = await conn.execute(
+                        "UPDATE ranked_series SET invalidated_at = NOW() "
+                        " WHERE status = 'completed' AND invalidated_at IS NULL")
+                finally:
+                    await conn.close()
+                if done == "UPDATE 1":
+                    reversed_.append(True)
+        engine = harness.bound_engine(DSN, schema) if how == "skip" else None
+        deciding = sm if engine is None else async_sessionmaker(
+            engine, expire_on_commit=False, class_=_ReverseBetween)
+        try:
+            g2 = await _submit(deciding, main.submit_match,
+                               _report_1v1("ranked_lh%s_000002_r2" % tag))
+        finally:
+            if engine is not None:
+                await engine.dispose()
+        after, econ = await _look(schema)
+        return dict(seeded=seeded, mid_econ=mid_econ, g2=g2, after=after, econ=econ,
+                    reversed=bool(reversed_), ref=str(await _ranked_series_id(sm, ids)))
+
+
+@pytest.mark.parametrize("how", ["fail", "skip"])
+def test_pg_r3_the_1v1_credit_stands_when_the_rating_pass_does_not_run(opened, monkeypatch,
+                                                                       how):
+    """LOW-R3 (design V3 section 12.6): "Forcing the 1v1 T2 pass to fail or
+    take the skip at `backend/api/main.py:8338-8350` leaves the T1 credit
+    committed without a rating update; the credit must not cause a match,
+    gold or unrelated-ladder mutation." (The line numbers are the base
+    tree's.) The 1v1 rating pass is the second transaction,
+    after the completion's commit. Forced to FAIL (the rating calculation
+    raises) or to take its SKIP (the series is invalidated between the two
+    transactions -- what the pass's authoritative re-read exists to catch),
+    the credit committed with the completion stands: both players +1, keyed
+    by the series, and nobody else's ladder moves -- while the ratings stay
+    where game 1 left them and no rating history is written. And the credit
+    causes nothing else: the same run with the hook made a no-op answers the
+    same and commits the same matches, series, XP, gold, items and ratings."""
+    _require_live_pg()
+    if how == "fail":
+        def _refuse(*a, **k):
+            raise RuntimeError("ladder hooks: rating pass refused")
+        monkeypatch.setattr(main, "calculate_new_rating", _refuse)
+    live = _run(_r3_run(how, "R"))
+
+    async def _no_hook(db, player_ids, *, mode, reference_id):
+        return []
+    monkeypatch.setattr(tl, HOOK, _no_hook)
+    inert = _run(_r3_run(how, "R"))
+
+    forced = {"fail": "Series Glicko update error",
+              "skip": "was invalidated/changed between the match commit and the rating pass"}
+    for label, run in (("hook live", live), ("hook no-op", inert)):
+        assert run["g2"][1] is None and run["g2"][0].series_status == "completed", (
+            label, run["g2"])
+        assert any(forced[how] in ln for ln in run["g2"][2]), (
+            "the rating pass did not take the forced path", label, how, run["g2"][2])
+        assert run["reversed"] == (how == "skip"), (label, run["reversed"])
+    ok, want = _plus_one(live["seeded"], live["after"], [P1, P2])
+    assert ok, ("R3: the committed credit did not stand", live["after"]["progress"], want)
+    assert _credited(live["after"], live["ref"], "1v1", [P1, P2]), live["after"]["credits"]
+    assert len(live["after"]["credits"]) == 2, live["after"]["credits"]
+    for table in ("glicko_ratings", "glicko_ratings_2v2", "glicko_ratings_ffa"):
+        assert live["econ"][table] == live["mid_econ"][table], ("R3: a rating moved", table)
+    assert live["econ"]["rating_history"] == 0, live["econ"]["rating_history"]
+    assert inert["after"] == inert["seeded"], inert["after"]
+    assert live["econ"] == inert["econ"], (
+        "R3: the credit changed a match, series, XP, gold, item or rating")
+    assert _answer_digest([live["g2"]]) == _answer_digest([inert["g2"]])
+
+
+@contextlib.asynccontextmanager
+async def _app(schema):
+    """An httpx client on main.app, every request on a session of its own
+    bound to `schema`; an exception the app does not handle comes back as
+    the 500 a player's client would get, not raised into the test."""
+    engine = harness.bound_engine(DSN, schema)
+    session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def _db():
+        async with session() as db:
+            yield db
+    main.app.dependency_overrides[database.get_db] = _db
+    try:
+        transport = httpx.ASGITransport(app=main.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://ladder.test",
+                headers={"X-Mod-Version": main.MIN_MOD_VERSION_EFFECTIVE}) as client:
+            yield client
+    finally:
+        main.app.dependency_overrides.pop(database.get_db, None)
+        await engine.dispose()
+
+
+def test_pg_qg_the_resent_1v1_report_answers_500_and_writes_nothing(opened):
+    """LOW-Q-G (design V3 section 12.6): "Resending the same 1v1 report
+    currently returns HTTP 500 at `backend/api/main.py:7669`; it must write
+    no second result, rating, gold or ladder credit." (The line number is
+    the base tree's.) Documented as it stands and NOT changed in this
+    lane: through main.app, the series' two reports answer 200 and complete
+    it, crediting both players once; the deciding report sent again answers
+    HTTP 500 -- its match insert's flush meets unique_match before any
+    series logic -- and writes no second result, rating, gold or ladder
+    credit."""
+    _require_live_pg()
+
+    async def _go():
+        async with _case() as (schema, sm):
+            ids = await _seed(sm)
+            async with _app(schema) as client:
+                first = await client.post(
+                    "/api/v1/matches",
+                    json=_report_1v1("ranked_lhZ_000001_r1").model_dump(mode="json"))
+                assert first.status_code == 200, (first.status_code, first.text)
+                assert first.json()["series_status"] == "active", first.text
+                deciding = _report_1v1("ranked_lhZ_000002_r2").model_dump(mode="json")
+                second = await client.post("/api/v1/matches", json=deciding)
+                assert second.status_code == 200, (second.status_code, second.text)
+                assert second.json()["series_status"] == "completed", second.text
+                done, econ = await _look(schema)
+                ref = str(await _ranked_series_id(sm, ids))
+                assert _credited(done, ref, "1v1", [P1, P2]), done["credits"]
+                assert len(done["credits"]) == 2, done["credits"]
+                again = await client.post("/api/v1/matches", json=deciding)
+                assert again.status_code == 500, (again.status_code, again.text)
+            after, econ2 = await _look(schema)
+            assert len(econ2["matches"]) == 2, econ2["matches"]
+            assert after == done and econ2 == econ, (
+                "Q-G: the resent deciding report wrote something")
+    _run(_go())
