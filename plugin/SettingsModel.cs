@@ -131,8 +131,9 @@ namespace CompetitiveRounds
         /// 6.3's input table: Enter or Space activate an ACTION row or open a
         /// DROPDOWN; a DESTRUCTIVE row takes Enter only, at the arm and at the
         /// confirm, so Space - which the page otherwise treats like Enter -
-        /// can never arm or confirm a deletion. Every other kind is stepped
-        /// or toggled with Left and Right, never activated.
+        /// can never arm or confirm a deletion. Every other kind, a
+        /// DISCLOSURE included, is stepped or toggled with Left and Right,
+        /// never activated.
         /// </summary>
         internal static bool ActivationAccepts(string kind, SettingsActivation source)
         {
@@ -140,7 +141,6 @@ namespace CompetitiveRounds
             {
                 case "ACTION":
                 case "DROPDOWN":
-                case "DISCLOSURE":
                     return true;
                 case "DESTRUCTIVE":
                     return source == SettingsActivation.Enter;

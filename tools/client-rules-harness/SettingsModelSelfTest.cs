@@ -29,6 +29,9 @@ namespace CompetitiveRounds
     ///         only, Space and Enter each reach the row as themselves, and
     ///         the keys route to the page action the table names. The same
     ///         dispatch drives the built page in the in-game harness.
+    ///
+    ///   L3    a disclosure is stepped with Left and Right and never
+    ///         activated by Enter or Space.
     /// </summary>
     internal static class SettingsModelCases
     {
@@ -151,6 +154,12 @@ namespace CompetitiveRounds
                     if (SettingsModel.ActivationAccepts(kind, src)) inert.Add(kind + "/" + src);
             Check(r, "M1 Enter and Space never activate a switch, a segmented row or a slider",
                   inert.Count == 0, "accepted={" + string.Join(",", inert) + "}");
+            // -- L3 (design 6.3): a disclosure steps with Left and Right only ---
+            var disclosure = new List<string>();
+            foreach (var src in new[] { enter, space })
+                if (SettingsModel.ActivationAccepts("DISCLOSURE", src)) disclosure.Add("DISCLOSURE/" + src);
+            Check(r, "L3 Enter and Space never toggle a disclosure row",
+                  disclosure.Count == 0, "accepted={" + string.Join(",", disclosure) + "}");
             Keys(r, "M1 the Space key reaches the row as Space, never as Enter",
                  SettingsModel.SettingsKey.Space, 0, "activate:Space");
             Keys(r, "M1 the Enter key reaches the row as Enter", SettingsModel.SettingsKey.Enter, 0, "activate:Enter");

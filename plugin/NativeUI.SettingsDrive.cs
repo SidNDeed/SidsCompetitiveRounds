@@ -41,7 +41,7 @@ namespace CompetitiveRounds
         internal static bool SettingsTestRunning => SettingsDriveRunning || SettingsSelfTestRunning;
 
         /// <summary>The scenarios, in the order "5:drive" runs them.</summary>
-        private static readonly string[] SettingsDriveScenarios = { "m1" };
+        private static readonly string[] SettingsDriveScenarios = { "m1", "l3" };
 
         private static void DrvOk(string m) { drvPass++; Plugin.Log.LogInfo("[SETTINGS-DRIVE] PASS " + m); }
         private static void DrvBad(string m) { drvFail++; Plugin.Log.LogWarning("[SETTINGS-DRIVE] FAIL " + m); }
@@ -134,6 +134,7 @@ namespace CompetitiveRounds
             switch (id)
             {
                 case "m1": return DriveM1();
+                case "l3": return DriveL3();
             }
             return DriveNothing();
         }
@@ -237,6 +238,75 @@ namespace CompetitiveRounds
             else
                 DrvBad("M1 control: Enter on the row armed 1.2 s: " + calls2 + " confirmation call(s), armed=" + deleteArmed);
             DrvDisarm();
+        }
+
+        /// <summary>LOW-3 (design 6.3): a disclosure steps with Left and Right
+        /// only; Enter and Space never toggle it, while they still open a
+        /// DROPDOWN and activate an ACTION row.</summary>
+        private static IEnumerator DriveL3()
+        {
+            SettingsRowRec perfH;
+            if (!settingsByKey.TryGetValue("SPerfH", out perfH) || perfH.Toggle == null)
+            {
+                DrvBad("L3 the Performance disclosure SPerfH was not built");
+                yield break;
+            }
+            bool orig = _perfSectionOpen;
+            SettingsSelectKey("SPerfH");
+            yield return 0.6f;
+            if (!DrvFocusIs("SPerfH", "L3")) yield break;
+            yield return DrvPress(SettingsModel.SettingsKey.Enter, 0.6f);
+            bool afterEnter = _perfSectionOpen;
+            SettingsSelectKey("SPerfH");
+            yield return 0.3f;
+            yield return DrvPress(SettingsModel.SettingsKey.Space, 0.6f);
+            bool afterSpace = _perfSectionOpen;
+            if (afterEnter == orig && afterSpace == orig)
+                DrvOk("L3 Enter and Space on the Performance disclosure: it stays " + (orig ? "expanded" : "collapsed"));
+            else
+                DrvBad("L3 Enter or Space toggled the Performance disclosure: " + (orig ? "expanded" : "collapsed")
+                    + ", after Enter " + (afterEnter ? "expanded" : "collapsed") + ", after Space " + (afterSpace ? "expanded" : "collapsed"));
+
+            // The control: Left collapses it and Right expands it.
+            SettingsSelectKey("SPerfH");
+            yield return 0.3f;
+            yield return DrvPress(SettingsModel.SettingsKey.Left, 0.6f);
+            bool afterLeft = _perfSectionOpen;
+            SettingsSelectKey("SPerfH");
+            yield return 0.3f;
+            yield return DrvPress(SettingsModel.SettingsKey.Right, 0.6f);
+            bool afterRight = _perfSectionOpen;
+            if (!afterLeft && afterRight) DrvOk("L3 control: Left collapses the Performance disclosure and Right expands it");
+            else DrvBad("L3 control: after Left " + (afterLeft ? "expanded" : "collapsed") + ", after Right "
+                + (afterRight ? "expanded" : "collapsed") + " (want collapsed, then expanded)");
+            if (_perfSectionOpen != orig) perfH.Toggle();
+            yield return 0.3f;
+
+            // The control: Enter and Space still open a DROPDOWN...
+            foreach (var k in new[] { SettingsModel.SettingsKey.Enter, SettingsModel.SettingsKey.Space })
+            {
+                SettingsSelectKey("SDateFmt");
+                yield return 0.6f;
+                if (!DrvFocusIs("SDateFmt", "L3")) yield break;
+                yield return DrvPress(k, 0.6f);
+                bool open = CompetitiveUI.ArtistPromptOpen;
+                if (open) DrvOk("L3 control: " + k + " opens the SDateFmt dropdown");
+                else DrvBad("L3 control: " + k + " did not open the SDateFmt dropdown");
+                if (open) { try { CompetitiveUI.ConsumePromptEscape(); } catch { } }
+                yield return 0.6f;
+            }
+
+            // ...and activate an ACTION row (SInfoOpen opens the Info tab).
+            foreach (var k in new[] { SettingsModel.SettingsKey.Enter, SettingsModel.SettingsKey.Space })
+            {
+                SettingsSelectKey("SInfoOpen");
+                yield return 0.6f;
+                if (!DrvFocusIs("SInfoOpen", "L3")) yield break;
+                yield return DrvPress(k, 0.6f);
+                if (currentTab == TAB_INFO) DrvOk("L3 control: " + k + " on the SInfoOpen action opens the Info tab");
+                else DrvBad("L3 control: " + k + " on the SInfoOpen action left the page on tab " + currentTab);
+                yield return DrvOpenSettings();
+            }
         }
     }
 }

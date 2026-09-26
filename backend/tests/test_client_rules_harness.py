@@ -268,7 +268,7 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The count on the commit that added the suite, not a floor far below
     # it (#342). Raise it when cases are added.
-    assert run >= 37, "the SettingsModel suite shrank to %d cases" % run
+    assert run >= 38, "the SettingsModel suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -297,6 +297,8 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
     "M1 Enter opens a dropdown",
     "M1 Space opens a dropdown",
     "M1 Enter and Space never activate a switch, a segmented row or a slider",
+    # L3 (design 6.3): a disclosure steps with Left/Right, never Enter/Space
+    "L3 Enter and Space never toggle a disclosure row",
     "M1 the Space key reaches the row as Space, never as Enter",
     "M1 the Enter key reaches the row as Enter",
     "Tab moves to the next sub-tab and wraps",

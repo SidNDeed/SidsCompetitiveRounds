@@ -1543,12 +1543,10 @@ namespace CompetitiveRounds
                 case SettingsKind.Dropdown:
                     SettingsOpenDropdown(rec);
                     break;
-                case SettingsKind.Disclosure:
-                    if (rec.Toggle != null) rec.Toggle();
-                    break;
                 case SettingsKind.Destructive:
                     SettingsActivateDelete(rec);
                     break;
+                // DISCLOSURE: Left and Right only (SettingsStep), never Enter or Space.
             }
             settingsPaneDirty = true;
         }
