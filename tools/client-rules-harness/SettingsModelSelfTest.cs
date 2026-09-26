@@ -32,6 +32,12 @@ namespace CompetitiveRounds
     ///
     ///   L3    a disclosure is stepped with Left and Right and never
     ///         activated by Enter or Space.
+    ///
+    ///   L2    the controller's route (W7's source half): the shoulders move
+    ///         between the sub-tabs and the activate button activates the
+    ///         focused row, held to the Enter-only rule on a destructive row.
+    ///         No pad exists on the build seat, so the hardware half of W7
+    ///         stays a witness.
     /// </summary>
     internal static class SettingsModelCases
     {
@@ -160,6 +166,24 @@ namespace CompetitiveRounds
                 if (SettingsModel.ActivationAccepts("DISCLOSURE", src)) disclosure.Add("DISCLOSURE/" + src);
             Check(r, "L3 Enter and Space never toggle a disclosure row",
                   disclosure.Count == 0, "accepted={" + string.Join(",", disclosure) + "}");
+            // -- L2 (design 6.3, W7's source route): the controller's buttons -----
+            string pad = Dispatch(SettingsModel.PadKey(false, true, false), 3) + "|"
+                       + Dispatch(SettingsModel.PadKey(true, false, false), 3) + "|"
+                       + Dispatch(SettingsModel.PadKey(false, false, true), 3) + "|"
+                       + Dispatch(SettingsModel.PadKey(false, false, false), 3);
+            Check(r, "L2 the shoulders move the sub-tab and the activate button activates the focused row",
+                  pad == "switch:4|switch:2|activate:Pad|", pad);
+            string wrap = Dispatch(SettingsModel.PadKey(false, true, false), 6) + "|" + Dispatch(SettingsModel.PadKey(true, false, false), 0);
+            Check(r, "L2 the shoulders wrap at both ends of the bar", wrap == "switch:0|switch:6", wrap);
+            var pads = SettingsModel.SettingsActivation.Pad;
+            Accepts(r, "L2 the activate button never arms or confirms a destructive row", "DESTRUCTIVE", pads, false);
+            Accepts(r, "L2 the activate button activates an action row", "ACTION", pads, true);
+            Accepts(r, "L2 the activate button opens a dropdown", "DROPDOWN", pads, true);
+            var padInert = new List<string>();
+            foreach (var kind in new[] { "SWITCH", "SEGMENTED", "SLIDER", "DISCLOSURE" })
+                if (SettingsModel.ActivationAccepts(kind, pads)) padInert.Add(kind);
+            Check(r, "L2 the activate button never activates a switch, a segmented row, a slider or a disclosure",
+                  padInert.Count == 0, "accepted={" + string.Join(",", padInert) + "}");
             Keys(r, "M1 the Space key reaches the row as Space, never as Enter",
                  SettingsModel.SettingsKey.Space, 0, "activate:Space");
             Keys(r, "M1 the Enter key reaches the row as Enter", SettingsModel.SettingsKey.Enter, 0, "activate:Enter");

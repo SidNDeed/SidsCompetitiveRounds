@@ -30,6 +30,12 @@ namespace CompetitiveRounds
         private static SettingsModel.SettingsKey settingsDriveKey = SettingsModel.SettingsKey.None;
         private static bool settingsDriveKeyTaken;
 
+        /// <summary>The controller button the harness has pressed (a joystick
+        /// button number), handed to the page's pad poll on its next frame;
+        /// -1 when none is pending.</summary>
+        private static int settingsDrivePad = -1;
+        private static bool settingsDrivePadTaken;
+
         /// <summary>Confirmations the delete row reached while a settings test
         /// ran. Each one would otherwise have been a deletion request.</summary>
         internal static int settingsDeleteStubCalls;
@@ -41,7 +47,7 @@ namespace CompetitiveRounds
         internal static bool SettingsTestRunning => SettingsDriveRunning || SettingsSelfTestRunning;
 
         /// <summary>The scenarios, in the order "5:drive" runs them.</summary>
-        private static readonly string[] SettingsDriveScenarios = { "m1", "l3" };
+        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2" };
 
         private static void DrvOk(string m) { drvPass++; Plugin.Log.LogInfo("[SETTINGS-DRIVE] PASS " + m); }
         private static void DrvBad(string m) { drvFail++; Plugin.Log.LogWarning("[SETTINGS-DRIVE] FAIL " + m); }
@@ -71,6 +77,7 @@ namespace CompetitiveRounds
             drvFail = 0;
             drvSavedTab = settingsSubTab;
             settingsDriveKey = SettingsModel.SettingsKey.None;
+            settingsDrivePad = -1;
             Plugin.Log.LogInfo("[SETTINGS-DRIVE] START " + drvIds + " screen " + Screen.width + "x" + Screen.height + " locale " + I18n.Locale);
             settingsDriveWaitUntil = 0f;
             drvStack.Push(DriveRun(list));
@@ -109,6 +116,7 @@ namespace CompetitiveRounds
         {
             drvStack.Clear();
             settingsDriveKey = SettingsModel.SettingsKey.None;
+            settingsDrivePad = -1;
             try
             {
                 if (isOpen && pageBuilt && currentTab == TAB_SETTINGS)
@@ -135,6 +143,7 @@ namespace CompetitiveRounds
             {
                 case "m1": return DriveM1();
                 case "l3": return DriveL3();
+                case "l2": return DriveL2();
             }
             return DriveNothing();
         }
@@ -149,6 +158,32 @@ namespace CompetitiveRounds
             settingsDriveKey = SettingsModel.SettingsKey.None;
             settingsDriveKeyTaken = true;
             return true;
+        }
+
+        /// <summary>The pending harness pad button, taken once by the page's
+        /// pad poll; -1 when none.</summary>
+        private static int SettingsTakeDrivePad()
+        {
+            int b = settingsDrivePad;
+            if (b < 0) return -1;
+            settingsDrivePad = -1;
+            settingsDrivePadTaken = true;
+            return b;
+        }
+
+        /// <summary>Press one controller button, exactly like DrvPress.</summary>
+        private static IEnumerator DrvPad(int button, float settle)
+        {
+            settingsDrivePadTaken = false;
+            settingsDrivePad = button;
+            float until = Time.unscaledTime + 3f;
+            while (!settingsDrivePadTaken && Time.unscaledTime < until) yield return 0f;
+            if (!settingsDrivePadTaken)
+            {
+                settingsDrivePad = -1;
+                DrvNote(drvCurrent + ": the page's pad poll did not take button " + button + " within 3 s");
+            }
+            yield return settle;
         }
 
         /// <summary>Press one key and wait for the page's poll to take it
@@ -307,6 +342,67 @@ namespace CompetitiveRounds
                 else DrvBad("L3 control: " + k + " on the SInfoOpen action left the page on tab " + currentTab);
                 yield return DrvOpenSettings();
             }
+        }
+
+        /// <summary>LOW-2 (design 6.3, W7's source route): the controller's
+        /// shoulders move between the sub-tabs and its activate button
+        /// activates an ACTION row and opens a DROPDOWN, but neither arms nor
+        /// confirms the delete row. Pressed through the page's own pad poll;
+        /// no controller is attached, which is why W7 itself stays open.</summary>
+        private static IEnumerator DriveL2()
+        {
+            SettingsSwitchSubTab(3);
+            yield return 0.6f;
+            yield return DrvPad(SettingsModel.PadNextTabButton, 0.6f);
+            int afterNext = settingsSubTab;
+            yield return DrvPad(SettingsModel.PadPrevTabButton, 0.6f);
+            int afterPrev = settingsSubTab;
+            if (afterNext == 4 && afterPrev == 3) DrvOk("L2 the right shoulder moves sub-tab 3 -> 4 and the left shoulder back 4 -> 3");
+            else DrvBad("L2 shoulders: from sub-tab 3 the right shoulder reached " + afterNext + " and the left shoulder " + afterPrev + " (want 4, then 3)");
+
+            SettingsSelectKey("SInfoOpen");
+            yield return 0.6f;
+            if (DrvFocusIs("SInfoOpen", "L2"))
+            {
+                yield return DrvPad(SettingsModel.PadActivateButton, 0.6f);
+                if (currentTab == TAB_INFO) DrvOk("L2 the activate button on the SInfoOpen action opens the Info tab");
+                else DrvBad("L2 the activate button on the SInfoOpen action left the page on tab " + currentTab);
+                yield return DrvOpenSettings();
+            }
+
+            SettingsSelectKey("SDateFmt");
+            yield return 0.6f;
+            if (DrvFocusIs("SDateFmt", "L2"))
+            {
+                yield return DrvPad(SettingsModel.PadActivateButton, 0.6f);
+                bool open = CompetitiveUI.ArtistPromptOpen;
+                if (open) DrvOk("L2 the activate button opens the SDateFmt dropdown");
+                else DrvBad("L2 the activate button did not open the SDateFmt dropdown");
+                if (open) { try { CompetitiveUI.ConsumePromptEscape(); } catch { } }
+                yield return 0.6f;
+            }
+
+            // The delete row: the activate button is held to Enter-only.
+            DrvDisarm();
+            SettingsSelectKey("SDR");
+            yield return 0.6f;
+            if (!DrvFocusIs("SDR", "L2")) yield break;
+            yield return DrvPad(SettingsModel.PadActivateButton, 1.2f);
+            if (!deleteArmed) DrvOk("L2 the activate button on the disarmed delete row: still not armed");
+            else DrvBad("L2 the activate button ARMED the delete row");
+            DrvDisarm();
+            yield return 0.6f;
+            yield return DrvPress(SettingsModel.SettingsKey.Enter, 1.2f);
+            if (!deleteArmed) DrvBad("L2 precondition: Enter did not arm the delete row");
+            else
+            {
+                int before = settingsDeleteStubCalls;
+                yield return DrvPad(SettingsModel.PadActivateButton, 0.6f);
+                int calls = settingsDeleteStubCalls - before;
+                if (calls == 0 && deleteArmed) DrvOk("L2 the activate button on the row armed 1.2 s: 0 confirmation calls, still armed");
+                else DrvBad("L2 the activate button on the armed delete row: " + calls + " confirmation call(s), armed=" + deleteArmed);
+            }
+            DrvDisarm();
         }
     }
 }

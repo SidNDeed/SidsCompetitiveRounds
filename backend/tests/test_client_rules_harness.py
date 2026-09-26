@@ -268,7 +268,7 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The count on the commit that added the suite, not a floor far below
     # it (#342). Raise it when cases are added.
-    assert run >= 38, "the SettingsModel suite shrank to %d cases" % run
+    assert run >= 44, "the SettingsModel suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -299,6 +299,13 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
     "M1 Enter and Space never activate a switch, a segmented row or a slider",
     # L3 (design 6.3): a disclosure steps with Left/Right, never Enter/Space
     "L3 Enter and Space never toggle a disclosure row",
+    # L2 (design 6.3, W7's source route): the controller's buttons
+    "L2 the shoulders move the sub-tab and the activate button activates the focused row",
+    "L2 the shoulders wrap at both ends of the bar",
+    "L2 the activate button never arms or confirms a destructive row",
+    "L2 the activate button activates an action row",
+    "L2 the activate button opens a dropdown",
+    "L2 the activate button never activates a switch, a segmented row, a slider or a disclosure",
     "M1 the Space key reaches the row as Space, never as Enter",
     "M1 the Enter key reaches the row as Enter",
     "Tab moves to the next sub-tab and wraps",

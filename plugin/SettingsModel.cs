@@ -119,11 +119,11 @@ namespace CompetitiveRounds
         /// of these each frame and hands it to <see cref="DispatchKey"/>; the
         /// driven-input harness hands it the same values with no keyboard, so
         /// a scripted key takes exactly the path a pressed one does.</summary>
-        internal enum SettingsKey { None, Tab, ShiftTab, Up, Down, Left, Right, Enter, Space, Pin }
+        internal enum SettingsKey { None, Tab, ShiftTab, Up, Down, Left, Right, Enter, Space, Pin, PadActivate }
 
         /// <summary>Where a row activation came from. The source is kept to
         /// the end because the rule differs by source (design 6.3).</summary>
-        internal enum SettingsActivation { Enter, Space }
+        internal enum SettingsActivation { Enter, Space, Pad }
 
         /// <summary>
         /// Whether a focused row of this kind (the descriptor's kind word, for
@@ -131,9 +131,10 @@ namespace CompetitiveRounds
         /// 6.3's input table: Enter or Space activate an ACTION row or open a
         /// DROPDOWN; a DESTRUCTIVE row takes Enter only, at the arm and at the
         /// confirm, so Space - which the page otherwise treats like Enter -
-        /// can never arm or confirm a deletion. Every other kind, a
-        /// DISCLOSURE included, is stepped or toggled with Left and Right,
-        /// never activated.
+        /// can never arm or confirm a deletion, and neither can a controller's
+        /// activate button, which is held to the same Enter-only rule. Every
+        /// other kind, a DISCLOSURE included, is stepped or toggled with Left
+        /// and Right, never activated.
         /// </summary>
         internal static bool ActivationAccepts(string kind, SettingsActivation source)
         {
@@ -152,10 +153,10 @@ namespace CompetitiveRounds
         /// <summary>
         /// Route one key to the page's action for it: Tab and Shift+Tab move
         /// between the sub-tabs (wrapping), Up and Down move the row focus,
-        /// Left and Right step the focused row, Enter and Space activate it -
-        /// each keeping its own source, never merged - and Pin pins the help
-        /// pane. The page passes its own methods; the harness passes
-        /// recorders.
+        /// Left and Right step the focused row, Enter, Space and the pad's
+        /// activate button activate it - each keeping its own source, never
+        /// merged - and Pin pins the help pane. The page passes its own
+        /// methods; the harness passes recorders.
         /// </summary>
         internal static void DispatchKey(SettingsKey key, int subTab, int tabs,
                                          Action<int> switchSubTab, Action<int> moveFocus, Action<int> step,
@@ -172,8 +173,31 @@ namespace CompetitiveRounds
                 case SettingsKey.Right: step(1); break;
                 case SettingsKey.Enter: activate(SettingsActivation.Enter); break;
                 case SettingsKey.Space: activate(SettingsActivation.Space); break;
+                case SettingsKey.PadActivate: activate(SettingsActivation.Pad); break;
                 case SettingsKey.Pin: togglePin(); break;
             }
+        }
+
+        /// <summary>The controller buttons the page reads (Unity joystick
+        /// button numbers on a standard pad): the shoulders and the bottom face
+        /// button. The Submit axis is not used - vanilla binds it to Space.</summary>
+        internal const int PadPrevTabButton = 4, PadNextTabButton = 5, PadActivateButton = 0;
+
+        /// <summary>
+        /// A controller's route onto the keyboard's (design 6.3, witness W7):
+        /// the left shoulder moves to the previous sub-tab like Shift+Tab, the
+        /// right shoulder to the next like Tab, and the activate button
+        /// activates the focused row as a pad press, which ActivationAccepts
+        /// holds to the Enter-only rule on a destructive row. Row focus and
+        /// value steps come from the stick axes. One button per frame, in that
+        /// order; no button pressed is no key.
+        /// </summary>
+        internal static SettingsKey PadKey(bool prevTabDown, bool nextTabDown, bool activateDown)
+        {
+            if (prevTabDown) return SettingsKey.ShiftTab;
+            if (nextTabDown) return SettingsKey.Tab;
+            if (activateDown) return SettingsKey.PadActivate;
+            return SettingsKey.None;
         }
     }
 }

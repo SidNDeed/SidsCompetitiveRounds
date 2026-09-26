@@ -1393,8 +1393,31 @@ namespace CompetitiveRounds
             }
             SettingsDispatchKey(SettingsReadKey());
             SettingsPollAxes();
+            SettingsPollPad();
             if (settingsPaneDirty) SettingsRenderPane();
         }
+
+        /// <summary>The controller's buttons (SettingsModel.PadKey): the
+        /// shoulders move between the sub-tabs and the bottom face button
+        /// activates the focused row as a pad press. Read through Unity's
+        /// joystick button codes; a button the driven-input harness pressed
+        /// counts as held down this frame. Whether a real pad reaches these
+        /// codes on this build is witness W7.</summary>
+        private static void SettingsPollPad()
+        {
+            int driven = SettingsTakeDrivePad();
+            bool prev, next, act;
+            try
+            {
+                prev = driven == SettingsModel.PadPrevTabButton || Input.GetKeyDown(SettingsPadCode(SettingsModel.PadPrevTabButton));
+                next = driven == SettingsModel.PadNextTabButton || Input.GetKeyDown(SettingsPadCode(SettingsModel.PadNextTabButton));
+                act = driven == SettingsModel.PadActivateButton || Input.GetKeyDown(SettingsPadCode(SettingsModel.PadActivateButton));
+            }
+            catch { return; }
+            SettingsDispatchKey(SettingsModel.PadKey(prev, next, act));
+        }
+
+        private static KeyCode SettingsPadCode(int button) { return (KeyCode)((int)KeyCode.JoystickButton0 + button); }
 
         /// <summary>This frame's key, one per frame in the order the page
         /// has always read them; a key the driven-input harness pressed is
