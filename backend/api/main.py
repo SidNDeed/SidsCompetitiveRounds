@@ -25222,10 +25222,13 @@ _PC_TRADER_OK_SQL = "(" + _PC_POOL_MEMBER_SQL + """
 # One party read: the trader word itself (the gate) and each of its terms
 # (which only choose the refusal code; a test pins that the terms and the
 # word agree on one fixture set), the consent generation and the binder.
+# The id term is no column here: the pool's id clause is spelled inside
+# the pool word and nowhere else (a test counts its spellings), so the
+# refusal reads the same rule from steam_id through
+# steamid64.is_individual_id, and the word decides.
 _PC_TRADE_PARTY_SQL = """
     SELECT p.id, p.steam_id,
            (p.deleted_at IS NULL) AS live,
-           """ + _PC_POOL_STEAM_ID_SQL + """ AS public_id,
            (p.mod_seen_at IS NOT NULL) AS has_mod,
            NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS not_banned,
            p.pc_trades_open AS switch_on,
