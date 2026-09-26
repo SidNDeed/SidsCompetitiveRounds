@@ -28809,6 +28809,99 @@ def _pc_reveal_pace(player_ref: str, kind: str) -> None:
             del _pc_reveal_windows[key]
 
 
+try:
+    import pc_strip as _pcstrip   # Pillow, as pc_face: without it the renderer gate already answers 503
+except Exception as _pcstrip_ex:
+    _pcstrip = None
+    print(f"[PC-REVEAL] compositor unavailable: {_pcstrip_ex}")
+
+# ONE cap for every composite path, server fuse and bot fetch alike.
+_PC_COMPOSITE_MAX_BYTES = 8 << 20
+# The cold composite's server ceiling: past it the answer is 503
+# composite_timeout, retryable (the bot's per-call timeout is 35 s).
+_PC_COMPOSITE_CEILING_S = 30
+_PC_COMPOSITE_SLOTS = 2
+_PC_COMPOSITE_QUEUE_DEPTH = 8
+
+
+class _PcCompositeGate:
+    """Admission for cold composites, SEPARATE from anything the face routes
+    wait on: `slots` compose at once, up to `depth` more wait, and a request
+    beyond that is refused at once - 503 composite_busy, retry in five
+    seconds - rather than queued without bound."""
+
+    def __init__(self, slots: int, depth: int):
+        self._sem = asyncio.Semaphore(slots)
+        self._depth = depth
+        self._waiting = 0
+
+    @asynccontextmanager
+    async def admit(self):
+        if self._sem.locked() and self._waiting >= self._depth:
+            raise HTTPException(status_code=503, detail={"error": "composite_busy", "retry_after": 5},
+                                headers={"Retry-After": "5"})
+        self._waiting += 1
+        try:
+            await self._sem.acquire()
+        finally:
+            self._waiting -= 1
+        try:
+            yield
+        finally:
+            self._sem.release()
+
+
+_pc_composite_gate = _PcCompositeGate(_PC_COMPOSITE_SLOTS, _PC_COMPOSITE_QUEUE_DEPTH)
+
+
+async def _pc_composite_cold(db: AsyncSession, key: str, cells, ctx: dict, cols: int, rows: int) -> bytes:
+    """The cold half of _pc_composite_bytes, inside the composite gate: every
+    face tile FIRST, one at a time through _pc_render_face (the face cache,
+    else one render on the two-worker pool), and only then the composite's
+    own render - so a composite never waits on the pool from inside a pool
+    job. A portrait released mid-render refuses the whole composite (503
+    portrait_pending) and publishes nothing; any other failure propagates."""
+    async with _pc_composite_gate.admit():
+        data = _pc_face_cache.read(key)
+        if data is not None:
+            return data
+        tiles = []
+        for tile, row, discarded in cells:
+            if tile == "face":
+                _rev, face = await _pc_render_face(db, row, ctx, "tile")
+                tiles.append(("face", face, discarded))
+            else:
+                tiles.append(("back", None, False))
+        try:
+            return await _pc_face_cache.get_or_render(
+                key, _functools.partial(_pcstrip.compose_composite, tiles, cols, rows, _PC_COMPOSITE_MAX_BYTES))
+        except _pcstrip.StripCompositeTooLarge as ex:
+            print(f"[PC-REVEAL] composite_too_large key={key} bytes={ex}")
+            raise HTTPException(status_code=500, detail={"error": "composite_too_large"})
+
+
+async def _pc_composite_bytes(db: AsyncSession, key: str, cells, ctx: dict, cols: int, rows: int) -> bytes:
+    """A composite's PNG bytes: the cached file under `key`, else one cold
+    composite (_pc_composite_cold) under the _PC_COMPOSITE_CEILING_S ceiling -
+    503 composite_timeout past it, and the tiles it finished stay in the face
+    cache for the retry. `cells` is the paste order, (tile, row, discarded)
+    per cell. A body over _PC_COMPOSITE_MAX_BYTES is a 500 with a log line,
+    never a truncated picture."""
+    data = _pc_face_cache.read(key)
+    if data is None:
+        try:
+            data = await asyncio.wait_for(_pc_composite_cold(db, key, cells, ctx, cols, rows),
+                                          timeout=_PC_COMPOSITE_CEILING_S)
+        except asyncio.TimeoutError:
+            print(f"[PC-REVEAL] composite_timeout key={key} ceiling_s={_PC_COMPOSITE_CEILING_S}")
+            raise HTTPException(status_code=503, detail={"error": "composite_timeout", "retry_after": 5},
+                                headers={"Retry-After": "5"})
+    if len(data) > _PC_COMPOSITE_MAX_BYTES:
+        print(f"[PC-REVEAL] composite_too_large key={key} bytes={len(data)}")
+        raise HTTPException(status_code=500, detail={"error": "composite_too_large"})
+    return data
+
+
 @app.get("/api/v1/internal/pc/packs", tags=["Internal"])
 async def internal_pc_packs(
     discord_id: str = Query(..., max_length=32),
