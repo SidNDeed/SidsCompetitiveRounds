@@ -365,15 +365,16 @@ async def _insert(db, table, values):
 
 
 async def _seed(sm, wear=None, plain=(OUTSIDER,)):
-    """The players, each wearing the first rung of a line they own, at a
-    recorded count. Returns {steam: player id}."""
+    """The players, created through main.get_or_create_player as a first
+    report or registration creates them -- the player row AND its initial
+    1v1 rating row, without which submit_match's rating pass has nothing to
+    update and skips -- each in `wear` wearing the first rung of a line it
+    owns, at a recorded count. Returns {steam: player id}."""
     wear = WEAR if wear is None else wear
     ids = {}
     async with sm() as db:
         for steam in list(wear) + [s for s in plain if s not in wear]:
-            ids[steam] = (await db.execute(text(
-                "INSERT INTO players (steam_id, display_name) VALUES (:s, :n) RETURNING id"),
-                {"s": steam, "n": "Ladder " + steam[-3:]})).scalar_one()
+            ids[steam] = (await main.get_or_create_player(db, steam, "Ladder " + steam[-3:])).id
         for steam, (line, games) in wear.items():
             item = (await db.execute(text("SELECT id FROM shop_items WHERE sku = :s"),
                                      {"s": _entry_sku(line)})).scalar_one()
@@ -735,6 +736,9 @@ def test_pg_1v1_credits_once_per_series_and_reads_back(opened, hook_calls):
             assert ok, ("H3/H6: after the completion", done["progress"], want)
             assert _credited(done, ref, "1v1", [P1, P2]), done["credits"]
             assert len(done["credits"]) == 2, done["credits"]
+            rated = {r[0]: r[1] for r in econ["glicko_ratings"]}
+            assert econ["rating_history"] == 2 and rated[P1] > rated[P2], (
+                "the series' rating pass did not run", econ["rating_history"], rated)
             p1_line = WEAR[P1][0]
             top = tl.rungs_at_tier(p1_line, 2)[0]["sku"]
             assert done["worn"][P1] == top and (P1, top) in done["rungs"], (
@@ -1479,11 +1483,23 @@ def test_pg_a_database_fault_in_the_hook_costs_the_completion_nothing(opened, mo
         "H5: the fault changed the completion's result, rating, XP, gold or items")
     ok, _want = _plus_one(clean["seeded"], clean["after"], clean["who"])
     assert ok and len(clean["after"]["credits"]) == len(clean["who"]), clean["after"]
+    table = RATING_TABLE[mode]
+    assert clean["econ"][table] != clean["econ0"][table], (
+        "the clean completion rated nobody, so the comparison could not see a "
+        "rating the fault lost", mode, table)
     assert faulted["after"] == faulted["seeded"], (
         "H5: the faulted completion left ladder state behind", faulted["after"])
     dropped = _dropped(faulted["lines"], mode)
     assert len(dropped) == 1 and faulted["ref"] in dropped[0], faulted["lines"]
     assert not _dropped(clean["lines"], mode), clean["lines"]
+
+
+RATING_TABLE = {
+    "1v1": "glicko_ratings",
+    "2v2": "glicko_ratings_2v2",
+    "2v2-settled": "glicko_ratings_2v2",
+    "ffa": "glicko_ratings_ffa",
+}
 
 
 _SITE_FUNCTION = {
