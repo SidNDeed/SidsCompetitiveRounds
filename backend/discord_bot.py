@@ -8894,6 +8894,510 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
         await ctx.send("❌ That card isn't available right now — try again in a moment.")
 
 
+def _pc_reveal_hex32(ref):
+    """A uuid as the reveal manifests write it: 32 lower-case hex digits."""
+    return str(ref or "").replace("-", "").lower()
+
+
+# -- Player Cards: the Discord reveal (/pack, /binder) -----------------------
+# One message: the text list and, when every check below holds, ONE picture of
+# the whole pack or binder page - one attachment, so the picture goes out
+# whole or not at all. Per invocation:
+#   1. the JSON read: the list, each entry's tile decision, the actor/owner.
+#      It renders nothing - no name or caption fragment from it reaches Discord;
+#   2. the picture, a byte GET carrying a manifest - only when some entry is a
+#      face; retried only on a code in _PC_COMPOSITE_RETRYABLE;
+#   3. one subject-only lease per distinct face subject (_pc_leases), taken
+#      AFTER the picture so the 57 s a lease authorises starts as late as
+#      possible; the leased set must be exactly step 1's face subjects;
+#   4. the manifest must equal the list, entry by entry, in list order;
+#   5. every lease re-validated, together, inside the tightest one's time;
+#   6. the RE-READ - always, and last before anything posts: a moved view
+#      (actor, owner, consent revision, or the binder's print list) posts
+#      nothing but one line; a moved drawn member drops the picture; the post
+#      is rendered from this read alone;
+#   7. one send inside min(20 s, 57 s - elapsed since the first acquire), then
+#      every lease released, sent or not.
+# Any failed step drops the picture and the list still posts from the re-read.
+_PC_COMPOSITE_MAX_BYTES = 8 * 1024 * 1024   # the api's own composite cap: one number on both sides
+_PC_COMPOSITE_RETRIES = 2                   # retries after the first byte GET: three GETs at most
+_PC_COMPOSITE_WAIT_CAP_S = 5                # each retry waits the answer's retry_after, at most this
+# A lease authorises a send until 57 s after it was written (the api's 60 s
+# lease less the reserve _pc_lease keeps), and the send itself gets 20 s.
+_PC_REVEAL_SPAN_S = 57.0
+_PC_REVEAL_SEND_S = 20.0
+# What the picture draws: a move between steps 1 and 6 drops the picture.
+_PC_DRAWN_MEMBERS = ("subject_name", "print_id", "subject_player_id", "edition_id", "rarity", "foil",
+                     "signed", "slot", "gone", "tile", "reason", "face_rev", "discarded")
+# Who the answer is about and whether it may be shown: a move posts nothing.
+_PC_VIEW_MEMBERS = ("actor_ref", "owner_ref", "settings_rev")
+_PC_REVEAL_BACK_REASONS = ("no_steam_id", "print_gone", "subject_banned")
+_PC_REVEAL_COOLDOWN_S = 5.0   # per Discord user, UX only: the api's pacing is the authority
+_pc_reveal_last = {}
+_PC_REVEAL_NOTES = {
+    "unavailable": "The picture is not available for this {what} right now.",
+    "busy": "The picture queue is busy - the picture is left out this time.",
+    "renderer": "Card pictures cannot be drawn on the server right now.",
+    "pacing": "One moment - too many pictures were asked for in the last minute.",
+    "too_large": "The picture is too large for this channel.",
+    "unreachable": "The card service did not answer for the picture.",
+}
+
+
+def _pc_reveal_cooldown(ctx):
+    """False when this Discord user started a reveal under five seconds ago -
+    a double-click reads as "one moment" rather than as the api's 429."""
+    now = time.monotonic()
+    key = getattr(ctx.author, "id", None)
+    last = _pc_reveal_last.get(key)
+    if last is not None and now - last < _PC_REVEAL_COOLDOWN_S:
+        return False
+    if len(_pc_reveal_last) > 4096:
+        _pc_reveal_last.clear()
+    _pc_reveal_last[key] = now
+    return True
+
+
+async def _pc_reveal_say(ctx, text, ephemeral=False):
+    """One line, no mentions; ephemeral only on the slash form's private answer."""
+    kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
+    if ephemeral:
+        kwargs["ephemeral"] = True
+    await ctx.send(text, **kwargs)
+
+
+def _pc_reveal_prints(answer, kind):
+    """The entry list of a reveal answer, in the order the route returned it,
+    or None when the answer does not have the reveal's shape."""
+    if not isinstance(answer, dict):
+        return None
+    if kind == "pack":
+        packs = answer.get("packs")
+        if not (isinstance(packs, list) and len(packs) == 1 and isinstance(packs[0], dict)):
+            return None
+        prints = packs[0].get("prints")
+    else:
+        prints = answer.get("prints")
+    if not isinstance(prints, list) or not all(isinstance(p, dict) for p in prints):
+        return None
+    return prints
+
+
+def _pc_reveal_view(answer):
+    return tuple(answer.get(m) for m in _PC_VIEW_MEMBERS)
+
+
+def _pc_reveal_drawn(prints):
+    return [tuple(p.get(m) for m in _PC_DRAWN_MEMBERS) for p in prints]
+
+
+def _pc_reveal_moved(before, after):
+    """The drawn members that differ between two entry lists. Position is the
+    list index, so a different length moves everything ("count")."""
+    if len(before) != len(after):
+        return ["count"]
+    return [m for i, m in enumerate(_PC_DRAWN_MEMBERS) if any(b[i] != a[i] for b, a in zip(before, after))]
+
+
+def _pc_reveal_manifest(meta, kind):
+    """The image route's manifest header as tuples, or None when it is absent
+    or malformed. Strip: (slot, print32, subject32, tile, word, state); grid:
+    (pos, print32, subject32, tile, word) - `word` is a face's face_rev or a
+    back's reason."""
+    raw = (meta or {}).get("x-strip-slots" if kind == "pack" else "x-grid-slots")
+    if not isinstance(raw, str) or not raw:
+        return None
+    width = 6 if kind == "pack" else 5
+    out = []
+    for item in raw.split(","):
+        parts = item.split(":")
+        if len(parts) != width or not re.fullmatch("[0-9]{1,3}", parts[0]):
+            return None
+        out.append((int(parts[0]),) + tuple(parts[1:]))
+    return out
+
+
+def _pc_reveal_expected(prints, kind):
+    """What the manifest must say, built from step 1's list in list order: the
+    strip leads with the print's pack slot, the grid with its 1-based
+    position in the list."""
+    out = []
+    for i, p in enumerate(prints):
+        word = p.get("face_rev") if p.get("tile") == "face" else p.get("reason")
+        ids = (_pc_reveal_hex32(p.get("print_id")), _pc_reveal_hex32(p.get("subject_player_id")))
+        if kind == "pack":
+            state = "gone" if p.get("gone") else ("discarded" if p.get("discarded") else "live")
+            out.append((p.get("slot"),) + ids + (p.get("tile"), word, state))
+        else:
+            out.append((i + 1,) + ids + (p.get("tile"), word))
+    return out
+
+
+def _pc_reveal_check(kind, first, prints, meta):
+    """Step 4: None when the picture's manifest matches the list it would be
+    posted under, else the name of the first assertion that failed."""
+    manifest = _pc_reveal_manifest(meta, kind)
+    if manifest is None:
+        return "manifest"
+    if len(manifest) != len(prints):
+        return "count"
+    for got, want in zip(manifest, _pc_reveal_expected(prints, kind)):
+        if got[0] != want[0]:
+            return "slot" if kind == "pack" else "position"
+        if (got[1], got[2]) != (want[1], want[2]):
+            return "ids"
+        if got[3] != want[3]:
+            return "tile"
+        if got[4] != want[4]:
+            return "face_rev" if want[3] == "face" else "reason"
+        if kind == "pack" and got[5] != want[5]:
+            return "state"
+    if kind == "pack":
+        if meta.get("x-strip-actor") != first.get("actor_ref"):
+            return "actor"
+    else:
+        if meta.get("x-grid-owner") != first.get("owner_ref"):
+            return "owner"
+        if str(meta.get("x-grid-consent-rev")) != str(first.get("settings_rev")):
+            return "consent_rev"
+    for got in manifest:
+        if got[3] == "back" and got[4] not in _PC_REVEAL_BACK_REASONS:
+            return "back_reason"
+    return None
+
+
+async def _pc_reveal_bytes(path, params):
+    """Step 2: (png|None, meta, note). A 503 whose code is in
+    _PC_COMPOSITE_RETRYABLE waits its retry_after (at most five seconds) and
+    is asked again, at most _PC_COMPOSITE_RETRIES times; every other answer is
+    final. `note` names why the picture is missing."""
+    attempt = 0
+    while True:
+        st, data, meta = await _pc_api_bytes(path, params=params, timeout=35.0, max_bytes=_PC_COMPOSITE_MAX_BYTES)
+        if st == 200 and data is not None:
+            return data, meta, None
+        code = meta.get("error")
+        if st == 503 and code in _PC_COMPOSITE_RETRYABLE and attempt < _PC_COMPOSITE_RETRIES:
+            attempt += 1
+            await asyncio.sleep(min(_PC_COMPOSITE_WAIT_CAP_S, meta.get("retry_after", _PC_COMPOSITE_WAIT_CAP_S)))
+            continue
+        break
+    print(f"[PC-REVEAL] picture dropped: {path.split('?')[0]} -> HTTP {st} {code or '-'} after {attempt + 1} GET(s)")
+    if st == 503 and code in _PC_COMPOSITE_RETRYABLE:
+        return None, meta, "busy"
+    if st == 503 and code:
+        return None, meta, "renderer"
+    if st == 429:
+        return None, meta, "pacing"
+    if st == 0:
+        return None, meta, "unreachable"
+    return None, meta, "unavailable"
+
+
+async def _pc_reveal_revalidate(leases):
+    """Step 5: True only when every lease still answers live - asked together,
+    each at 3 s, inside the tightest lease's remaining time."""
+    if not leases:
+        return False
+    tightest = min(_pc_lease_left(deadline) for _lease_id, deadline in leases.values())
+    if tightest <= 0:
+        return False
+    try:
+        answers = await asyncio.wait_for(
+            asyncio.gather(*(_pc_lease_live(lease_id, timeout=3.0) for lease_id, _deadline in leases.values())),
+            timeout=min(3.0, tightest))
+    except Exception:
+        return False
+    return all(answers)
+
+
+def _pc_reveal_compose(head, lines, note, what):
+    tail = ("\n" + _PC_REVEAL_NOTES[note].format(what=what)) if note else ""
+    room = 2000 - len(head) - len(tail) - 1
+    return head + "\n" + _pc_fit_field(lines, cap=max(1, room)) + tail
+
+
+def _pc_reveal_pack_text(answer, index, note):
+    """The /pack post, rendered from the re-read alone: the pack line, then one
+    line per slot - slot number, rarity, name, marks, NEW or duplicate. A slot
+    whose print is gone reads the roster's rarity and the neutral label the
+    api supplies for it."""
+    pack = answer["packs"][0]
+    head = f"**Pack {int(index)}** - {_pc_name(pack.get('source'))}, opened {_pc_when(pack.get('opened_at'))}"
+    lines = []
+    for p in pack.get("prints") or []:
+        if p.get("gone"):
+            lines.append(f"{p.get('slot')}. {_PC_RARITY_EMOJI.get(p.get('rarity'), '')} **{_pc_name(p.get('subject_name'))}**")
+            continue
+        line = f"{p.get('slot')}. {_pc_print_line(p)}"
+        dup = p.get("dup_at_pull")
+        if isinstance(dup, int) and not isinstance(dup, bool):
+            line += " - NEW" if dup == 0 else f" - duplicate, copy {dup + 1}"
+        if p.get("discarded"):
+            line += " (discarded)"
+        lines.append(line)
+    return _pc_reveal_compose(head, lines, note, "pack")
+
+
+def _pc_reveal_binder_text(answer, note):
+    """The /binder post, rendered from the re-read alone: the owner, the page,
+    the collection-wide count and rarity totals (the shard balance on the
+    owner's own answer only), then one line per print."""
+    counts = answer.get("by_rarity") or {}
+    page, pages = int(answer.get("page") or 1), int(answer.get("pages") or 1)
+    head = (f"**{_pc_name(answer.get('owner_name'))}** - binder page {page} of {pages}"
+            f" - {int(answer.get('count') or 0)} prints")
+    if "shards" in answer:
+        head += f" - {int(answer.get('shards') or 0)} shards"
+    head += "\n" + " ".join(f"{_PC_RARITY_EMOJI.get(r, '')} {int(counts.get(r, 0) or 0)}"
+                            for r in ("legendary", "epic", "rare", "uncommon", "common"))
+    if int(counts.get("other", 0) or 0):
+        head += f" other {int(counts.get('other'))}"
+    lines = [f"{i}. {_pc_print_line(p)}" for i, p in enumerate(answer.get("prints") or [], start=1)]
+    if not lines:
+        if int(answer.get("count") or 0):
+            lines = [f"Page {page} is past the end: this binder has {pages} page{'s' if pages != 1 else ''}."]
+        else:
+            lines = ["No prints yet."]
+    return _pc_reveal_compose(head, lines, note, "page")
+
+
+async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params, render, ephemeral):
+    """Steps 2-7 for one reveal whose step 1 answered `first`. `reread` is
+    step 6, an awaitable factory answering (status, body); `render(answer,
+    note)` builds the post from the re-read's answer alone. Returns "posted",
+    or why nothing but one line may be posted: "private" (the re-read
+    answered 403), "unreachable" (0), "pacing" (429) or "moved"."""
+    prints = _pc_reveal_prints(first, kind) or []
+    before_view, before_drawn = _pc_reveal_view(first), _pc_reveal_drawn(prints)
+    image, meta, note, leases, started = None, {}, None, {}, None
+    try:
+        faces = {str(p.get("subject_player_id")) for p in prints if p.get("tile") == "face"}
+        if faces:
+            image, meta, note = await _pc_reveal_bytes(image_path, image_params)
+        if image is not None:
+            started = time.monotonic()
+            leased, _undeliverable, _past_deadline = await _pc_leases(faces)
+            if leased is not None and set(leased) == faces:
+                leases = leased
+            else:
+                if leased:
+                    await _pc_lease_release_all([lease_id for lease_id, _deadline in leased.values()])
+                print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: leases"
+                      f" (leased {len(leased or {})} of {len(faces)} subjects)")
+                image, note = None, "unavailable"
+        if image is not None:
+            failed = _pc_reveal_check(kind, first, prints, meta)
+            if failed:
+                print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: manifest assertion {failed}")
+                image, note = None, "unavailable"
+        if image is not None and not await _pc_reveal_revalidate(leases):
+            print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: a lease no longer authorises the send")
+            image, note = None, "unavailable"
+        st, again = await reread()
+        again_prints = _pc_reveal_prints(again, kind) if st == 200 else None
+        if again_prints is None:
+            print(f"[PC-REVEAL] {kind} ref={ref} not posted: the re-read answered HTTP {st}")
+            return {403: "private", 0: "unreachable", 429: "pacing"}.get(st, "moved")
+        moved_view = [m for m, b, a in zip(_PC_VIEW_MEMBERS, before_view, _pc_reveal_view(again)) if b != a]
+        if kind == "binder" and [p.get("print_id") for p in prints] != [p.get("print_id") for p in again_prints]:
+            moved_view.append("print_ids")
+        if moved_view:
+            print(f"[PC-REVEAL] {kind} ref={ref} not posted: the view moved ({', '.join(moved_view)})")
+            return "moved"
+        moved = _pc_reveal_moved(before_drawn, _pc_reveal_drawn(again_prints))
+        if moved and image is not None:
+            vanished = any(a.get("gone") and not b.get("gone") for b, a in zip(prints, again_prints))
+            print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: {'print_gone' if vanished else 'drawn_moved'}"
+                  f" (moved: {', '.join(moved)})")
+            image, note = None, "unavailable"
+        budget = _PC_REVEAL_SEND_S
+        if image is not None:
+            budget = min(_PC_REVEAL_SEND_S, _PC_REVEAL_SPAN_S - (time.monotonic() - started))
+            if budget <= 0:
+                print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: no lease time left for the send")
+                image, note, budget = None, "unavailable", _PC_REVEAL_SEND_S
+        kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
+        if ephemeral:
+            kwargs["ephemeral"] = True
+        if image is not None:
+            try:
+                await asyncio.wait_for(ctx.send(render(again, None), file=discord.File(io.BytesIO(image),
+                                                filename=f"{kind}.png"), **kwargs), timeout=budget)
+                return "posted"
+            except discord.HTTPException as e:
+                if getattr(e, "status", None) != 413:
+                    raise
+                print(f"[PC-REVEAL] {kind} ref={ref} picture refused by Discord: too large")
+                note = "too_large"
+        await asyncio.wait_for(ctx.send(render(again, note), **kwargs), timeout=_PC_REVEAL_SEND_S)
+        return "posted"
+    finally:
+        await _pc_lease_release_all([lease_id for lease_id, _deadline in leases.values()])
+
+
+def _pc_reveal_refusal(ctx, status, body, what, target=None):
+    """The one line for a refused reveal read."""
+    d = _pc_detail(body)
+    if status == 404 and d.get("error") == "not_linked":
+        return _pc_not_linked(ctx, target or ctx.author)
+    if status == 429:
+        return "One moment - too many card requests in the last minute."
+    if status == 503 and d.get("error"):
+        return "Card pictures cannot be drawn on the server right now - try again later."
+    if status == 0:
+        return "The card service did not answer - try again in a moment."
+    if status == 404 and what == "pack":
+        return "That pack is no longer yours to show."
+    return f"Couldn't fetch that {what} right now."
+
+
+def _pc_reveal_unposted(outcome, what, target=None):
+    """The one line for a reveal whose re-read refused the post."""
+    if outcome == "private" and target is not None:
+        return f"{discord.utils.escape_markdown(target.display_name)}'s binder is private."
+    if outcome == "unreachable":
+        return "The card service did not answer - nothing was posted. Try again in a moment."
+    if outcome == "pacing":
+        return "One moment - too many card requests in the last minute; nothing was posted."
+    if what == "pack":
+        return "That pack is no longer yours to show - nothing was posted."
+    return "That binder page changed while it was being read - nothing was posted. Try again."
+
+
+async def _pc_reveal_pack(ctx, index, private):
+    """/pack [index] [private]: one of the caller's opened packs, 1 the latest."""
+    if private and getattr(ctx, "interaction", None) is None:
+        # A prefix command cannot answer privately, and a picture posted in a
+        # channel cannot be withdrawn: refuse before any read at all.
+        await _pc_reveal_say(ctx, "`private` needs the slash form (`/pack private:True`): a prefix command"
+                                  " cannot answer privately, so nothing was shown.")
+        return
+    ephemeral = bool(private)
+    if not _pc_reveal_cooldown(ctx):
+        await _pc_reveal_say(ctx, "One moment - your last reveal is still on its way.", ephemeral)
+        return
+    if ephemeral:
+        try:
+            await ctx.defer(ephemeral=True)
+        except Exception:
+            pass
+    else:
+        await _maybe_defer(ctx)
+    if index < 1:
+        await _pc_reveal_say(ctx, "Pack numbers start at 1 (your latest pack).", ephemeral)
+        return
+    me, locale = str(ctx.author.id), _pc_locale_of(ctx)
+    # The pack at `index`: summary pages, newest first, ten at a time.
+    pack_id, before, seen = None, None, 0
+    while pack_id is None:
+        params = {"discord_id": me, "limit": 10, "locale": locale}
+        if before:
+            params["before"] = before
+        status, body = await _pc_api("GET", "/internal/pc/packs", params=params)
+        if status != 200 or not isinstance(body, dict):
+            await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, body, "pack"), ephemeral)
+            return
+        rows, total = body.get("packs") or [], int(body.get("total") or 0)
+        if total == 0:
+            await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims today's free pack, and it opens"
+                                      " in the mod.", ephemeral)
+            return
+        if index > total:
+            await _pc_reveal_say(ctx, f"You have {total} opened pack{'s' if total != 1 else ''}:"
+                                      f" `/pack` goes from 1 (the latest) to {total}.", ephemeral)
+            return
+        if index <= seen + len(rows):
+            pack_id = str(rows[index - seen - 1].get("pack_id"))
+            break
+        seen += len(rows)
+        before = body.get("next_before")
+        if not rows or not before:
+            await _pc_reveal_say(ctx, "That pack could not be found - try again in a moment.", ephemeral)
+            return
+    # Step 1: that one pack, its slots from the stored roster.
+    params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
+    status, first = await _pc_api("GET", "/internal/pc/packs", params=params)
+    if status != 200 or _pc_reveal_prints(first, "pack") is None:
+        await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "pack"), ephemeral)
+        return
+
+    async def _reread():
+        return await _pc_api("GET", "/internal/pc/packs", params=params, timeout=5.0)
+
+    outcome = await _pc_reveal_run(ctx, "pack", pack_id, first, _reread,
+                                   f"/internal/pc/packs/{pack_id}/strip/{str(first.get('locale') or locale)}.png",
+                                   {"discord_id": me}, lambda answer, note: _pc_reveal_pack_text(answer, index, note),
+                                   ephemeral)
+    if outcome != "posted":
+        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
+
+
+async def _pc_reveal_binder(ctx, member, page):
+    """/binder [member] [page]: one page of a binder, ten prints a page."""
+    target = member or ctx.author
+    if not _pc_reveal_cooldown(ctx):
+        await _pc_reveal_say(ctx, "One moment - your last reveal is still on its way.")
+        return
+    await _maybe_defer(ctx)
+    if page < 1 or page > 50:
+        await _pc_reveal_say(ctx, "Binder pages run from 1 to 50.")
+        return
+    locale = _pc_locale_of(ctx)
+    params = {"discord_id": str(target.id), "viewer_discord_id": str(ctx.author.id), "page": int(page),
+              "locale": locale}
+    # Step 1.
+    status, first = await _pc_api("GET", "/internal/pc/binder", params=params)
+    if status != 200 or _pc_reveal_prints(first, "binder") is None:
+        if status == 403 and _pc_detail(first).get("error") == "private":
+            await _pc_reveal_say(ctx, _pc_reveal_unposted("private", "binder", target))
+        else:
+            await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "binder", target))
+        return
+    owner_ref = str(first.get("owner_ref"))
+
+    async def _reread():
+        return await _pc_api("GET", "/internal/pc/binder", params=params, timeout=5.0)
+
+    outcome = await _pc_reveal_run(ctx, "binder", owner_ref, first, _reread,
+                                   f"/internal/pc/binder/{owner_ref}/page/{int(page)}/{locale}.png",
+                                   {"viewer_discord_id": str(ctx.author.id)}, _pc_reveal_binder_text, False)
+    if outcome != "posted":
+        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "binder", target))
+
+
+@bot.hybrid_command(name="pack", description="One of your opened Player Cards packs: five cards in one picture")
+@app_commands.describe(index="Which pack: 1 is your latest, 2 the one before it",
+                       private="Only you see the answer (slash command only)")
+async def cmd_pc_pack(ctx, index: int = 1, private: bool = False):
+    """Five cards of one opened pack, left to right in slot order, over the
+    list of them. The picture goes out whole or not at all."""
+    try:
+        await _pc_reveal_pack(ctx, index, private)
+    except Exception as e:
+        print(f"[PC-REVEAL] pack failed: {type(e).__name__}: {e}")
+        try:
+            await _pc_reveal_say(ctx, "Couldn't show that pack right now.",
+                                 bool(private) and getattr(ctx, "interaction", None) is not None)
+        except Exception:
+            pass
+
+
+@bot.hybrid_command(name="binder", description="A Player Cards binder page: ten cards in one picture")
+@app_commands.describe(member="Whose binder (defaults to yours)", page="Which page (ten cards a page)")
+async def cmd_pc_binder(ctx, member: discord.Member = None, page: int = 1):
+    """One binder page as a picture, over its text list. Someone else's only
+    while they keep it public."""
+    try:
+        await _pc_reveal_binder(ctx, member, page)
+    except Exception as e:
+        print(f"[PC-REVEAL] binder failed: {type(e).__name__}: {e}")
+        try:
+            await _pc_reveal_say(ctx, "Couldn't show that binder right now.")
+        except Exception:
+            pass
+
+
 _pc_events_sent = {}   # event id -> True once posted (a failed ack never re-posts; bounded below)
 _pc_face_tries = {}    # first event id of a print group -> ticks spent waiting for its picture
 _PC_FACE_TRIES = 3     # ~90 s at this loop's 30 s period, then the line posts without one
