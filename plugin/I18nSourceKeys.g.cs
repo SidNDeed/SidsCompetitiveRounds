@@ -2947,7 +2947,7 @@ namespace CompetitiveRounds
             "private",
             "pts",
             "ranked 1v1 series vs anyone in the selection, minimum 5 series",
-            "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off",
+            "ranked is disabled until you grant it; revoking it again turns ranked back off",
             "ranked or casual",
             "rare",
             "rating updates ->",

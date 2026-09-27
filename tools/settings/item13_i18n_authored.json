@@ -43,7 +43,7 @@
     {
       "class": "reason",
       "key": "SCT",
-      "text": "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off"
+      "text": "ranked is disabled until you grant it; revoking it again turns ranked back off"
     },
     {
       "class": "reason",

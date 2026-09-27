@@ -48,7 +48,7 @@
     {
       "class": "reason",
       "key": "SCT",
-      "text": "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off"
+      "text": "ranked is disabled until you grant it; revoking it again turns ranked back off"
     },
     {
       "class": "reason",
@@ -1197,7 +1197,7 @@
       "home_label": "Privacy & account",
       "i18n_literals": {
         "option_words": [],
-        "reason": "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off",
+        "reason": "ranked is disabled until you grant it; revoking it again turns ranked back off",
         "state_words": [
           "Granted",
           "Not granted"
@@ -1209,7 +1209,7 @@
         "pin",
         "lane"
       ],
-      "reason": "ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off",
+      "reason": "ranked is disabled until you grant it; revoking it again turns ranked back off",
       "recommendation": {
         "kind": "painted_after_change",
         "new_i18n_key": false,

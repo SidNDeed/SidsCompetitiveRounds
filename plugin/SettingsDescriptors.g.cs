@@ -99,7 +99,7 @@ namespace CompetitiveRounds
                 case "SAutoLog": return I18n.Tr("sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report");
                 case "SBlkDbg": return I18n.Tr("a debugging overlay, not a HUD");
                 case "SBloom": return I18n.Tr("painted-in glow stays whatever you pick");
-                case "SCT": return I18n.Tr("ranked is disabled until you grant it (RankedDisabledByConsent, Plugin.cs:529); revoking it again turns ranked back off");
+                case "SCT": return I18n.Tr("ranked is disabled until you grant it; revoking it again turns ranked back off");
                 case "SChatTtl": return I18n.Tr("the shipped default; 0 is a mode rather than a short timer, because chat then never appears in game");
                 case "SChromAb": return I18n.Tr("off is crisper and slightly faster");
                 case "SCursor": return I18n.Tr("it combines with an equipped cursor colour");
