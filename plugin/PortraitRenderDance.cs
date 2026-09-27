@@ -434,14 +434,17 @@ namespace CompetitiveRounds
         private static RenderTexture DanceTarget(int edge, int depth, int aa)
         {
             var rt = new RenderTexture(edge, edge, depth);
+            _danceTargets.Add(rt);
+            // Registered as it is made (finding S2F12), so nothing that runs
+            // below can leave a target DanceReleaseTargets does not know.
             if (aa > 1) rt.antiAliasing = aa;
             rt.Create();
-            _danceTargets.Add(rt);
             return rt;
         }
 
-        /// <summary>Every target the dance job made, released (Teardown calls
-        /// this too, so a job that never unwound leaves nothing allocated).</summary>
+        /// <summary>Every target the dance job made, released. Teardown is its
+        /// one caller, so ForceAbort's teardown of a job that never unwound
+        /// releases them too.</summary>
         private static void DanceReleaseTargets()
         {
             foreach (var rt in _danceTargets)
