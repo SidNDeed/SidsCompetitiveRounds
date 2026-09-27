@@ -5701,6 +5701,14 @@ _RATE_LIMIT_BYPASS = frozenset({
 })
 
 
+def _rl_client_address(request) -> str:
+    """The client address this limiter keys its buckets on -- the one uvicorn
+    reports (see above) -- and the address a motion derivation is admitted
+    under (dance cards S4.6, section 12 H1): ONE definition, so the job queue
+    and the rate buckets can never disagree about who an address is."""
+    return request.client.host if request.client else "unknown"
+
+
 @app.middleware("http")
 async def rate_limit_gate(request: Request, call_next):
     path = request.url.path
@@ -5739,7 +5747,7 @@ async def rate_limit_gate(request: Request, call_next):
                 return JSONResponse(status_code=413, content={"error": "payload_too_large"})
         except ValueError:
             pass
-    ip = request.client.host if request.client else "unknown"
+    ip = _rl_client_address(request)
     now = _rl_time.monotonic()
     latch = None
     if path == _RL_PC_MOTION_READ_PATH or path.startswith(_RL_PC_MOTION_READ_PATH + "/"):
@@ -26907,6 +26915,13 @@ from fastapi.responses import Response as _PcResponse
 PC_FACE_CACHE_DIR = os.getenv("PC_FACE_CACHE_DIR", "/var/cache/pc-faces")
 _pc_face_cache = _pcp.FaceCache(PC_FACE_CACHE_DIR)
 _pc_back_cache = {"bytes": None}
+# Dance cards (design S4.6-S4.7): derived motion lives under its OWN root
+# beside the face cache's (the deploy adds its volume), in its own class; the
+# scheduler admits derivations per trusted client address (H1). Both live in
+# this process: the api runs one worker.
+PC_MOTION_CACHE_DIR = os.getenv("PC_MOTION_CACHE_DIR", "/var/cache/pc-motion")
+_pc_motion_cache = _pcm.MotionCache(PC_MOTION_CACHE_DIR) if _pcm is not None else None
+_pc_motion_jobs = _pcm.MotionScheduler() if _pcm is not None else None
 
 
 def _pc_renderer_fp():
@@ -28072,6 +28087,17 @@ async def _pc_face_cache_expire_loop() -> None:
             raise
         except Exception as ex:
             print(f"[PC-FACE] cache expiry error: {type(ex).__name__}: {ex}")
+        # Dance cards (S4.7): the motion cache ages on the same clock, by the
+        # same limits, on both roles.
+        if _pc_motion_cache is not None:
+            try:
+                n = await asyncio.to_thread(_pc_motion_cache.expire)
+                if n:
+                    print(f"[PC-MOTION] cache expiry removed {n} file(s)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                print(f"[PC-MOTION] cache expiry error: {type(ex).__name__}")
         await asyncio.sleep(_PC_FACE_EXPIRE_EVERY_S)
 
 # A print is deliverable under a lease only while it exists, is not discarded,
@@ -29099,6 +29125,178 @@ async def pc_face_png(print_id: str, rev: str, locale: str, size: str, db: Async
     if data is None:
         raise HTTPException(status_code=404, detail="Not found")
     return _pc_png_response(data, "public, max-age=31536000, immutable")
+
+
+# -- Dance cards: the motion reads (design S4.8-S4.10, S5.2; section 12 H1, L5) --
+def _pc_print_motion_select(with_bytes: bool) -> str:
+    """_PC_PRINT_FACE_SELECT with the motion columns of the print's SUBJECT --
+    the player its card depicts, never the print's owner (S4.8 step 3, T29).
+    The face select's subject fragment is replaced by the servable columns
+    that extend it, so every face column stays and the subject is resolved
+    once. `with_bytes` adds the stored container, for a job start (L5)."""
+    frag = _pc_portrait_resolve_cols("s")
+    if _PC_PRINT_FACE_SELECT.count(frag) != 1:
+        raise RuntimeError("the print face select no longer names its subject columns exactly once")
+    # the subject's Steam id, read for `_auto_owned` (S4.9) and never emitted:
+    # the motion answers carry print ids and revisions only
+    cols = _pc_motion_servable_cols("s") + ", s.steam_id AS subject_sid"
+    if with_bytes:
+        cols += ", s_m.bytes AS m_bytes"
+    return _PC_PRINT_FACE_SELECT.replace(frag, cols, 1) + _pc_motion_servable_joins("s")
+
+
+_PC_PRINT_MOTION_SELECT = _pc_print_motion_select(False)
+_PC_PRINT_MOTION_BYTES_SELECT = _pc_print_motion_select(True)
+_PC_MOTION_WAIT_S = 20.0          # S4.8 step 5: a request awaits its job this long, then 503 motion_pending
+_PC_MOTION_RETRY_S = 10
+_PC_MOTION_READ_MAX_IDS = 11      # S5.2: ten visible tiles plus the popup's print
+
+
+def _pc_motion_rev_of(row, ctx):
+    """(spec, face_rev, motion_rev) of one print row in the context's locale.
+    motion_rev is None unless S4.9 holds for the print's SUBJECT and this box
+    can key a face. A discarded print never plays (S5.5): its motion_rev is
+    None too, so the read answers `-` and the atlas 404s."""
+    spec, _kind, _phash, face_rev = _pc_face_inputs(row, ctx)
+    if row["discarded_at"] is not None or not _pcm.servable(row, row["subject_sid"], _auto_owned):
+        return spec, face_rev, None
+    return spec, face_rev, _pcm.motion_rev(_pcm.motion_fingerprint(ctx["renderer_fp"]), face_rev, row["m_hash"])
+
+
+def _pc_motion_expect(row) -> tuple:
+    """What a job must find again when it starts (L5): the subject, the
+    motion, the still and the still's descriptor the scheduling read saw."""
+    return (str(row["subject_player_id"]), row["m_hash"], row["m_static"], row["m_descriptor"])
+
+
+def _pc_motion_sessions():
+    """The session factory a motion job opens its own session from: the
+    request that scheduled the job may be gone by the time the job starts."""
+    from database import async_session
+    return async_session
+
+
+async def _pc_motion_atlas_job(print_id: str, rev: str, locale: str, expect: tuple):
+    """The print atlas job (S4.4), run by the motion scheduler when it STARTS.
+    L5: the row is read again, container bytes included, and the job goes on
+    only while S4.9 still holds, motion_rev still recomputes to the one it
+    was scheduled under, and the subject, motion hash, still hash and still
+    descriptor are the ones the scheduling request read. Anything else
+    publishes nothing: the waiting request answers 404 and the viewer keeps
+    the static face. Returns ("done", card published, tile published) or
+    ("stale", why)."""
+    async with _pc_motion_sessions()() as db:
+        row = (await db.execute(text(_PC_PRINT_MOTION_BYTES_SELECT + " WHERE pr.id = CAST(:id AS uuid)"),
+                                {"id": print_id})).mappings().first()
+        if row is None:
+            return ("stale", "row")
+        ctx = await _pc_face_ctx(db, locale)
+    spec, _face_rev, now_rev = _pc_motion_rev_of(row, ctx)
+    if now_rev is None or now_rev != rev or _pc_motion_expect(row) != expect or row["m_bytes"] is None:
+        return ("stale", "moved")
+    deadline = time.monotonic() + _pcm.JOB_DEADLINE_S       # the job's own clock starts when it does
+    card, tile = await _pcm.in_motion_pool(_functools.partial(
+        _pcm.derive_atlases, spec, ctx["labels"], bytes(row["m_bytes"]), deadline=deadline))
+    for size, data in (("card", card), ("tile", tile)):
+        key = _pcm.atlas_key(print_id, rev, locale, size)
+        if data is None:
+            _pcm.TOO_LARGE.add(key)
+        else:
+            await _pcm.in_motion_pool(_pc_motion_cache.publish, key, data)
+    return ("done", card is not None, tile is not None)
+
+
+@app.get("/api/v1/pc-face/motion", tags=["Player Cards"])
+async def pc_face_motion_read(
+    ids: str = Query(..., max_length=_PC_MOTION_READ_MAX_IDS * 37),
+    locale: str = Query("en", max_length=32),
+    db: AsyncSession = Depends(get_db),
+):
+    """The per-visit motion read (design S5.2): up to eleven print ids, one
+    answer, never cached. Each id answers `<pid>:<face_rev>:<motion_rev>:
+    <frames>:<ms>` when S4.9 holds for the print's SUBJECT, else `<pid>:-`,
+    in request order; a discarded print, an unknown id and a box that cannot
+    key a face answer `-` too. The face_rev is `_pc_face_inputs`'s, as the
+    collection answer's is, so the client plays a clip only over the still
+    it was derived against. More than eleven ids, or any id that is not a
+    print id: 422."""
+    parts = ids.split(",")
+    if not 1 <= len(parts) <= _PC_MOTION_READ_MAX_IDS or not all(_pcp.print_id_ok(p) for p in parts):
+        raise HTTPException(status_code=422, detail={"error": "motion_ids"})
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    rows = (await db.execute(text(_PC_PRINT_MOTION_SELECT + " WHERE pr.id = ANY(CAST(:ids AS uuid[]))"),
+                             {"ids": sorted(set(parts))})).mappings().all()
+    ctx = await _pc_face_ctx(db, loc)
+    by_id = {str(r["print_id"]): r for r in rows}
+    out = []
+    for pid in parts:
+        row = by_id.get(pid)
+        face_rev = rev = None
+        if row is not None:
+            _spec, face_rev, rev = _pc_motion_rev_of(row, ctx)
+        if rev is None or face_rev is None:
+            out.append(pid + ":-")
+        else:
+            out.append(f"{pid}:{face_rev}:{rev}:{int(row['m_frames'])}:{int(row['m_ms'])}")
+    return JSONResponse({"m": "|".join(out)}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png", tags=["Player Cards"])
+async def pc_face_motion_atlas(request: Request, print_id: str, motion_rev: str, locale: str, size: str,
+                               db: AsyncSession = Depends(get_db)):
+    """The print atlas (design S4.8): public, read-only, every 200 immutable.
+    Shape first (404, no read); the renderer gate; ONE row read of the
+    print's subject, never its bytes; S4.9 false or a recomputed motion_rev
+    that differs: 404. Only then the motion cache, else the print job --
+    scheduled or joined, admitted under the limiter's own client address
+    (H1) -- awaited for at most 20 s (503 motion_pending; the job goes on). A
+    key whose encoded atlas was over its cap answers 404 motion_too_large; a
+    key whose job failed answers 503 for ten minutes, from memory (S4.10)."""
+    face_key = _pcp.face_key(print_id, motion_rev, locale, size)
+    if face_key is None or (locale != "en" and locale not in _pc_served_locales()):
+        raise HTTPException(status_code=404, detail="Not found")
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    row = (await db.execute(text(_PC_PRINT_MOTION_SELECT + " WHERE pr.id = CAST(:id AS uuid)"),
+                            {"id": print_id})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    ctx = await _pc_face_ctx(db, locale)
+    _spec, _face_rev, rev = _pc_motion_rev_of(row, ctx)
+    if rev is None or rev != motion_rev:
+        raise HTTPException(status_code=404, detail="Not found")
+    expect = _pc_motion_expect(row)
+    await db.rollback()           # the reads are done: no connection is held across a wait
+    key = _pcm.atlas_key(print_id, motion_rev, locale, size)
+    if key in _pcm.TOO_LARGE:
+        raise HTTPException(status_code=404, detail={"error": "motion_too_large"})
+    data = await asyncio.to_thread(_pc_motion_cache.read, key)
+    if data is not None:
+        return _pc_png_response(data, "public, max-age=31536000, immutable")
+    job = _pcm.job_key(print_id, motion_rev, locale)
+    left = _pc_motion_jobs.failed_for(job)
+    if left:
+        raise _pc_motion_refusal(503, {"error": "motion_failed", "retry_after": int(left) + 1})
+    try:
+        fut = _pc_motion_jobs.submit(job, _rl_client_address(request), _functools.partial(
+            _pc_motion_atlas_job, print_id, motion_rev, locale, expect))
+    except _pcm.MotionBusy:
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "retry_after": _PC_MOTION_RETRY_S})
+    outcome = await _pcm.await_job(fut, _PC_MOTION_WAIT_S)
+    if outcome is None:
+        raise _pc_motion_refusal(503, {"error": "motion_pending", "retry_after": _PC_MOTION_RETRY_S})
+    data = await asyncio.to_thread(_pc_motion_cache.read, key)
+    if data is not None:
+        return _pc_png_response(data, "public, max-age=31536000, immutable")
+    if key in _pcm.TOO_LARGE:
+        raise HTTPException(status_code=404, detail={"error": "motion_too_large"})
+    if outcome[0] == "failed":
+        raise _pc_motion_refusal(503, {"error": "motion_failed", "retry_after": int(_pcm.FAILED_HOLD_S)})
+    raise HTTPException(status_code=404, detail="Not found")
 
 
 @app.get("/api/v1/internal/pc/face/print/{print_id}/{locale}", tags=["Internal"])

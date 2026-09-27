@@ -229,7 +229,8 @@ def test_every_route_is_charged_to_the_bucket_its_family_names(gate):
             else:
                 assert bucket in ("g", "s", "f"), (path, bucket)
     # the recovery must see the family at all, or every assertion above is vacuous
-    assert family >= 10 and upload >= 1 and motion_upload == 1, (family, upload, motion_upload)
+    assert family >= 10 and upload >= 1 and motion_upload == 1 and motion_read == 2, (
+        family, upload, motion_upload, motion_read)
     assert with_body == {UPLOAD, MOTION_UPLOAD}, with_body
     # a path that only starts with an upload's is family traffic, whatever it carries
     for near in (UPLOAD + "s", UPLOAD + "-status", UPLOAD + "/x1",
