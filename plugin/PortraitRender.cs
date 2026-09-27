@@ -728,9 +728,9 @@ namespace CompetitiveRounds
 
             // The server's cap, checked here rather than after a capture that
             // would only earn a 422 and leave the previous face in place.
-            if (System.Text.Encoding.UTF8.GetByteCount(inp.descriptor) > 320)
+            if (System.Text.Encoding.UTF8.GetByteCount(inp.descriptor) > DESCRIPTOR_MAX_BYTES)
             {
-                inp.refusal = "the descriptor exceeds 320 bytes";
+                inp.refusal = "the descriptor exceeds " + DESCRIPTOR_MAX_BYTES + " bytes";
                 inp.descriptor = null;
             }
             return inp;
@@ -761,6 +761,34 @@ namespace CompetitiveRounds
             var inp = Capture(preset);
             if (inp.refusal != null) { LastResult = "no picture: " + inp.refusal; return null; }
             return inp.descriptor;
+        }
+
+        /// <summary>The server's descriptor cap (pc_portrait.DESCRIPTOR_MAX_BYTES):
+        /// 384 on both sides from the dance cards release on, which leaves room
+        /// for the dance suffix (design S2.8).</summary>
+        internal const int DESCRIPTOR_MAX_BYTES = 384;
+
+        /// <summary>A dancer's still descriptor (dance cards design S2.8, S1.4
+        /// step 9): the base descriptor with the anchored suffix
+        /// `|dance=SKU|ar=MOTION_RECIPE`, or null when the sku is not one the
+        /// grammar accepts or the result exceeds the cap. Only the dance job
+        /// appends it, and only for the dance `/pc/me` names as selected; every
+        /// other descriptor -- a non-dancer's, one for an older server, one from a
+        /// seat that cannot dance -- is the base one, unchanged.</summary>
+        internal static string DanceDescriptor(string descriptor, string danceSku)
+        {
+            if (string.IsNullOrEmpty(descriptor) || !DanceSkuOk(danceSku)) return null;
+            string d = descriptor + "|dance=" + danceSku + "|ar=" + DanceEmotes.MOTION_RECIPE.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return System.Text.Encoding.UTF8.GetByteCount(d) > DESCRIPTOR_MAX_BYTES ? null : d;
+        }
+
+        /// <summary>The grammar's dance group: `dance_` and then 1 to 24 of a-z.</summary>
+        private static bool DanceSkuOk(string sku)
+        {
+            if (sku == null || sku.Length < 7 || sku.Length > 30 || !sku.StartsWith("dance_", StringComparison.Ordinal)) return false;
+            for (int i = 6; i < sku.Length; i++)
+                if (sku[i] < 'a' || sku[i] > 'z') return false;
+            return true;
         }
 
         private static string Off(Vector2 v) => R(v.x) + "," + R(v.y);

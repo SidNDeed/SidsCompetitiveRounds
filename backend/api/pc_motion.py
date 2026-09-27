@@ -24,6 +24,7 @@ import warnings as _warnings
 from PIL import Image as _Image, ImageChops as _ImageChops
 
 import pc_face as _face
+import pc_portrait as _pcm_portrait
 
 # -- the table (S2.4) --------------------------------------------------------
 # The capture recipe this build derives and accepts. A header naming another
@@ -366,3 +367,41 @@ async def await_decode(job):
 async def decode_in_pool(admission, player_key, token, header, frames, deadline_s=DECODE_DEADLINE_S):
     """Phase B on the one decode worker (submit, then await shielded)."""
     return await await_decode(submit_decode(admission, player_key, token, header, frames, deadline_s))
+
+
+# -- ownership, the selection and the servable predicate (S2.6 step 6, S4.9) --
+# Each term has ONE spelling, used by every surface that asks it: the motion
+# upload, the selection route, /pc/me, the atlas route, the per-visit read and
+# the bot's GIF route. The rows come from main's `_pc_motion_servable_cols`
+# (or, for the upload and the selection, from statements that name the same
+# columns). The shop-owner exemption is main's `_auto_owned`, passed in as
+# `auto_owned`: this module cannot import main, and a second spelling of the
+# exemption here is the defect `_auto_owned`'s docstring records (#279, #341).
+
+def owns_dance(row, steam_id, auto_owned):
+    """A player_items row for the subject and the item (`dance_bought`), or
+    the exemption for the item's sku."""
+    return bool(row.get("dance_bought")) or bool(auto_owned(steam_id, row.get("dance_sku")))
+
+
+def dance_held(row, steam_id, auto_owned):
+    """S4.9's selection terms: the selected item is a ready dance the subject
+    owns. /pc/me's `pc_dance_sku` is non-empty exactly when this holds (S2.9)."""
+    return (row.get("active_dance_id") is not None and row.get("dance_kind") == "dance"
+            and bool(row.get("dance_ready")) and owns_dance(row, steam_id, auto_owned))
+
+
+def servable(row, steam_id, auto_owned):
+    """S4.9: a motion row exists for the subject; the subject is neither
+    deleted nor banned and its still's kind is `game` (pc_portrait.portrait_for,
+    the face readers' own resolution); the S3.4 binding holds -- the motion's
+    still hash and descriptor equal the subject's current ones; the selection
+    is the motion's item; and `dance_held`."""
+    if row is None or not row.get("m_hash"):
+        return False
+    kind, still = _pcm_portrait.portrait_for(row)
+    if kind != "game" or row.get("m_static") != still or row.get("m_descriptor") != row.get("portrait_descriptor"):
+        return False
+    if row.get("m_item") is None or row.get("m_item") != row.get("active_dance_id"):
+        return False
+    return dance_held(row, steam_id, auto_owned)

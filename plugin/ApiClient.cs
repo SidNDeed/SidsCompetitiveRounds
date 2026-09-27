@@ -3737,6 +3737,16 @@ namespace CompetitiveRounds
             // its inputs, and an admin lock's end. (No source since 2026-09-13:
             // the picture is the character once sent, the Steam picture before.)
             public string portrait_hash, portrait_descriptor, portrait_locked_until;
+            // Dance cards (design S2.9, S5.8): the server's selection and motion
+            // state, three flat top-level keys. `dance_supported` is false when
+            // the answer carries no `pc_dance_sku` key -- an older server, or one
+            // whose motion module is not loaded -- and then the selection is
+            // none, the Settings row hides and no suffix is ever appended.
+            // `pc_motion` is "<motion_hash>:<static_hash>:<recipe>" of a
+            // servable stored motion, else empty.
+            public bool dance_supported;
+            public string pc_dance_sku = "", pc_motion = "";
+            public long pc_dance_item;
             public List<PcUnopened> unopened = new List<PcUnopened>();
         }
         public class PcPackAnswer
@@ -4276,6 +4286,14 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(raw) || raw == "null") return fallback;
             return PcInt(raw);
         }
+        /// <summary>A 64-bit id (a shop item's `BigInteger` key), 0 when absent
+        /// or unreadable.</summary>
+        internal static long PcLong(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return 0L;
+            long v;
+            return long.TryParse(PcStr(raw), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : 0L;
+        }
         internal static float PcFloat(string raw)
         {
             if (string.IsNullOrEmpty(raw) || raw == "null") return 0f;
@@ -4359,6 +4377,13 @@ namespace CompetitiveRounds
             me.portrait_hash = PcHas(json, "portrait_hash") ? PcStr(PcTopLevel(json, "portrait_hash")) : null;
             me.portrait_descriptor = PcHas(json, "portrait_descriptor") ? PcStr(PcTopLevel(json, "portrait_descriptor")) : null;
             me.portrait_locked_until = PcHas(json, "portrait_locked_until") ? PcStr(PcTopLevel(json, "portrait_locked_until")) : null;
+            me.dance_supported = PcHas(json, "pc_dance_sku");
+            if (me.dance_supported)
+            {
+                me.pc_dance_sku = PcStr(PcTopLevel(json, "pc_dance_sku")) ?? "";
+                me.pc_dance_item = PcLong(PcTopLevel(json, "pc_dance_item"));
+                me.pc_motion = PcStr(PcTopLevel(json, "pc_motion")) ?? "";
+            }
             string daily = PcTopLevel(json, "daily") ?? "";
             me.daily_claimed = PcBool(PcTopLevel(daily, "claimed"));
             me.daily_pack_id = PcStr(PcTopLevel(daily, "pack_id"));

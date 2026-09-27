@@ -26423,6 +26423,10 @@ async def pc_me(
                       "reference_id": u["reference_id"], "created_at": _pc_iso(u["created_at"])} for u in unopened],
         "pool": ({"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
                   "member_count": int(snap["member_count"])} if snap else None),
+        # Dance cards (design S2.9): three flat keys, unique at the top level.
+        # Absent when the motion module is not loaded, exactly as from an
+        # older server: the client then selects nothing and appends no suffix.
+        **(await _pc_motion_me(db, pid, steam_id) if _pcm is not None else {}),
     }
 
 
@@ -28274,7 +28278,9 @@ async def pc_portrait_upload(
                EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
                p.pc_game_portrait_locked_until,
                p.active_player_color_id, p.active_player_effect_id,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+               (SELECT si.sku FROM shop_items si
+                 WHERE si.id = p.active_dance_id AND si.kind = 'dance') AS dance_sku
           FROM players p WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
            FOR NO KEY UPDATE
     """), {"pid": pid})).mappings().first()
@@ -28312,6 +28318,21 @@ async def pc_portrait_upload(
     if (color_sku or "") != parts["color"] or (effect_sku or "") != parts["effect"]:
         await db.rollback()   # the client re-checks after its next stats answer
         raise HTTPException(status_code=422, detail={"error": "descriptor_mismatch"})
+    # Dance cards (design S2.8), against the same LOCKED row. A present suffix
+    # must name a capture recipe this server derives, and the dance the player
+    # has selected; an ABSENT suffix is accepted whatever the selection -- an
+    # older client's still, which replaces the stored one and so unbinds any
+    # motion (S3.4). The suffix only describes the still: it grants nothing.
+    if parts.get("dance") is not None:
+        if _pcm is None:
+            await db.rollback()   # the recipe table is unavailable: judge it later
+            raise HTTPException(status_code=503, detail="motion_unavailable")
+        if not _pcm.recipe_known(int(parts["ar"])):
+            await db.rollback()
+            raise HTTPException(status_code=422, detail={"error": "descriptor_invalid"})
+        if parts["dance"] != row["dance_sku"]:
+            await db.rollback()
+            raise HTTPException(status_code=422, detail={"error": "descriptor_mismatch"})
     used = (await db.execute(text("""
         INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
         ON CONFLICT DO NOTHING RETURNING nonce
@@ -28397,6 +28418,52 @@ _PC_MOTION_UPSERT_SQL = """
 """
 
 
+def _pc_motion_servable_cols(alias: str) -> str:
+    """The columns `pc_motion.servable` and `pc_motion.dance_held` read, for
+    the players row aliased `alias` -- ONE definition for every reader (/pc/me;
+    the atlas route, the per-visit read and the bot's GIF route), so no reader
+    decides servability from a column another reader does not select (#341).
+    It extends `_pc_portrait_resolve_cols`, the subject columns every face
+    reader already shares. Join with `_pc_motion_servable_joins(alias)`."""
+    return _pc_portrait_resolve_cols(alias) + f""",
+               {alias}.pc_game_portrait_descriptor AS portrait_descriptor,
+               {alias}.active_dance_id,
+               {alias}_d.sku AS dance_sku, {alias}_d.kind AS dance_kind, {alias}_d.catalog_ready AS dance_ready,
+               EXISTS (SELECT 1 FROM player_items {alias}_pi
+                        WHERE {alias}_pi.player_id = {alias}.id
+                          AND {alias}_pi.item_id = {alias}.active_dance_id) AS dance_bought,
+               {alias}_m.motion_hash AS m_hash, {alias}_m.static_hash AS m_static,
+               {alias}_m.static_descriptor AS m_descriptor, {alias}_m.dance_item_id AS m_item,
+               {alias}_m.motion_recipe AS m_recipe, {alias}_m.frame_count AS m_frames,
+               {alias}_m.frame_ms AS m_ms, {alias}_m.byte_len AS m_len
+"""
+
+
+def _pc_motion_servable_joins(alias: str) -> str:
+    return f"""
+      LEFT JOIN shop_items {alias}_d ON {alias}_d.id = {alias}.active_dance_id
+      LEFT JOIN pc_motions {alias}_m ON {alias}_m.player_id = {alias}.id
+"""
+
+
+async def _pc_motion_me(db: AsyncSession, pid: str, steam_id: str) -> dict:
+    """/pc/me's dance cards keys (design S2.9): `pc_dance_sku` and
+    `pc_dance_item` name the selection when `dance_held` (a ready dance the
+    player owns), else "" and 0; `pc_motion` is "<motion_hash>:<static_hash>:
+    <recipe>" when the stored motion is servable (S4.9), else "" -- the client
+    compares it with the still it would capture now (S1.2)."""
+    row = (await db.execute(text(
+        "SELECT " + _pc_motion_servable_cols("p") + " FROM players p" + _pc_motion_servable_joins("p")
+        + " WHERE p.id = CAST(:pid AS uuid)"), {"pid": pid})).mappings().first()
+    held = row is not None and _pcm.dance_held(row, steam_id, _auto_owned)
+    return {
+        "pc_dance_sku": row["dance_sku"] if held else "",
+        "pc_dance_item": int(row["active_dance_id"]) if held else 0,
+        "pc_motion": (f"{row['m_hash']}:{row['m_static']}:{row['m_recipe']}"
+                      if held and _pcm.servable(row, steam_id, _auto_owned) else ""),
+    }
+
+
 def _pc_motion_check(row, steam_id, header, descriptor):
     """S2.6 steps 3-6 against a LOCKED row, in order: (status, detail) of the
     first refusal, or None. Phase A and phase C both call this one function,
@@ -28415,7 +28482,7 @@ def _pc_motion_check(row, steam_id, header, descriptor):
     if row["dance_kind"] != "dance" or row["dance_sku"] != header["dance"]:
         return 409, {"error": "dance_not_selected"}
     # 6. ownership: ready, and bought or covered by the one exemption predicate.
-    if not (row["dance_ready"] and (row["dance_bought"] or _auto_owned(steam_id, row["dance_sku"]))):
+    if not (row["dance_ready"] and _pcm.owns_dance(row, steam_id, _auto_owned)):
         return 403, {"error": "dance_not_owned"}
     return None
 

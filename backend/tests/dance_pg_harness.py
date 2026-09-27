@@ -28,6 +28,7 @@ import types
 import uuid
 
 import pytest
+from PIL import Image, ImageDraw
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -276,6 +277,62 @@ async def upload(lane, steam, secret, body, *, descriptor=DESC, nonce_value=None
             return 200, answer
         except main.HTTPException as ex:
             return ex.status_code, ex.detail
+
+
+def still_png(tag):
+    """A 1180-square RGBA still the real writer accepts: transparent but for
+    one opaque disc (about 10 % coverage) whose colour and place follow `tag`,
+    so two tags give two canonical hashes."""
+    seed = int(hashlib.sha256(str(tag).encode()).hexdigest()[:8], 16)
+    img = Image.new("RGBA", (1180, 1180), (0, 0, 0, 0))
+    cx, cy = 400 + seed % 380, 400 + (seed >> 9) % 380
+    colour = (seed & 255, (seed >> 8) & 255, (seed >> 16) & 255, 255)
+    ImageDraw.Draw(img).ellipse((cx - 210, cy - 210, cx + 210, cy + 210), fill=colour)
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+async def still_upload(lane, steam, secret, body, descriptor=DESC, *, nonce_value=None, sig=None):
+    """One call of the still writer (POST /api/v1/pc/portrait) on its own
+    session: (status, answer)."""
+    n = nonce_value or nonce()
+    if sig is None:
+        sig = sign(secret, main._pcp.canon_portrait(steam, n, hashlib.sha256(body).hexdigest(), descriptor))
+    req = Req(body, {"content-type": "image/png", "content-length": str(len(body))}, path="/api/v1/pc/portrait")
+    async with lane.sm() as db:
+        try:
+            return 200, await main.pc_portrait_upload(req, steam_id=steam, sig=sig, nonce=n,
+                                                      descriptor=descriptor, db=db)
+        except main.HTTPException as ex:
+            return ex.status_code, ex.detail
+
+
+async def pc_me(lane, steam, secret):
+    """The owner's GET /api/v1/pc/me answer, from main.pc_me itself."""
+    sig = sign(secret, main._pc.canon_read(steam, "me", "-"))
+    async with lane.sm() as db:
+        return await main.pc_me(Req(path="/api/v1/pc/me"), steam_id=steam, sig=sig, db=db)
+
+
+async def put_motion(lane, pid, still, *, descriptor=DESC, dance="dance_bounce", recipe=1, tag="m"):
+    """A stored motion row written directly, for tests about what READS the
+    row (it is never decoded): bound to `still` and `descriptor`, for `dance`.
+    Returns its motion_hash."""
+    h = hashlib.sha256(("motion:" + pid + ":" + tag).encode()).hexdigest()
+    period, count = pcm.table_row(recipe, dance) or (50, 80)
+    blob = b"motion:" + h.encode()
+    async with lane.sm() as db:
+        await db.execute(text("DELETE FROM pc_motions WHERE player_id = CAST(:pid AS uuid)"), {"pid": pid})
+        await db.execute(text(
+            "INSERT INTO pc_motions (player_id, motion_hash, source_sha256, bytes, byte_len, dance_item_id, "
+            "motion_recipe, frame_count, frame_ms, static_hash, static_descriptor) VALUES (CAST(:pid AS uuid), "
+            "CAST(:h AS text), CAST(:h AS text), CAST(:b AS bytea), CAST(:n AS integer), CAST(:item AS bigint), "
+            "CAST(:r AS smallint), CAST(:c AS smallint), CAST(:ms AS smallint), CAST(:sh AS text), CAST(:sd AS text))"),
+            {"pid": pid, "h": h, "b": blob, "n": len(blob), "item": lane.items[dance], "r": recipe,
+             "c": count, "ms": period, "sh": still, "sd": descriptor})
+        await db.commit()
+    return h
 
 
 # Waiting locks of THIS database's backends only: the instance is shared.

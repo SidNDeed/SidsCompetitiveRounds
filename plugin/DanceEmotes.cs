@@ -111,6 +111,12 @@ namespace CompetitiveRounds
             new DanceDef("dance_floss",      "The Floss",      5.0f),
         };
 
+        /// <summary>The motion capture recipe (dance cards design S2.4): the
+        /// server's pc_motion.MOTION_RECIPE, and the `ar` of a dancer's still
+        /// descriptor (S2.8). A change to the capture table below, or to how a
+        /// frame is captured, is a bump on both sides.</summary>
+        internal const int MOTION_RECIPE = 1;
+
         /// <summary>The Player Card capture table (dance cards design S2.4,
         /// MOTION_RECIPE 1), by the same index as Defs: the frame period in
         /// milliseconds. Frames = Duration x 1000 / period (CaptureFrames):
