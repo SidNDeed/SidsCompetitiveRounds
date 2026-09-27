@@ -700,7 +700,7 @@
           ],
           "main",
           "pc_me",
-          "a44ba251f5ca06715224a2fa486642eae0a16d4d"
+          "3538e45097918b285d27ded09c8bb5daa0195ba4"
         ],
         [
           "/api/v1/pc/packs/open",
@@ -943,7 +943,7 @@
           ],
           "main",
           "delete_player_data",
-          "19c44de3f7244e18bb495f525b484fc99f566a13"
+          "e9bc2a4fcd2cde2b92fce07dbcdcaa9a8a205075"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "f210ef183fa3005f673c0847da2e542d29fd5ac3"
+          "8990ba373a4b021009bf0dc56ef5f96b52c5a3ce"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3098,7 +3098,7 @@
           ],
           "main",
           "admin_pc_portrait_clear",
-          "05e5cb58f190dbfedb3cd36f826871cf7c0fb352"
+          "d21f7d0b284c086f7f99b86028f38c3700820766"
         ],
         [
           "/api/v1/internal/pc/face/back",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "pc_portrait_upload",
-          "8e9f9a4dfb45229426377c3bea0c495f784bee78"
+          "7f6b5340d436ba03dcf8a571d45af8dc7246d135"
         ],
         [
           "/api/v1/pc/portrait/motion",
@@ -3179,7 +3179,7 @@
           ],
           "main",
           "pc_motion_upload",
-          "unpinned"
+          "22e1cc98e7d069c86c2b6bf3ed4c96f3447e4171"
         ],
         [
           "/api/v1/pc/dance",
@@ -3188,7 +3188,7 @@
           ],
           "main",
           "pc_dance_select",
-          "unpinned"
+          "61f6181b5d6fc81dc5895eff0aade4eaf1e164cf"
         ],
         [
           "/api/v1/pc-face/motion",
@@ -3197,7 +3197,7 @@
           ],
           "main",
           "pc_face_motion_read",
-          "unpinned"
+          "b054de672967d435e8579c380a9cc528cf82c816"
         ],
         [
           "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
@@ -3206,7 +3206,7 @@
           ],
           "main",
           "pc_face_motion_atlas",
-          "unpinned"
+          "755fb49d08db1bb66307e36e1c896d39129c6f30"
         ]
       ]
     },
@@ -3377,7 +3377,7 @@
       [
         "main",
         "rate_limit_gate",
-        "b08dbe739f954dd241d945a205255f7e5b7c8a55"
+        "f065649e5f96c29aed9efc3c51174e4d4fa4c0be"
       ],
       [
         "main",
@@ -3401,7 +3401,7 @@
       [
         "main",
         "lifespan",
-        "f628f6ec7c1d70c8eb13db252a46eba481b1898d"
+        "7dcd0685c14bcf1889e91ebd5b269fc6f0c1403e"
       ]
     ]
   },
