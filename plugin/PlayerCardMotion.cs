@@ -487,9 +487,26 @@ namespace CompetitiveRounds
                 if (a.State == AtlasState.Uploading && (next == null || (pinned.Contains(a.Key) && !pinned.Contains(next.Key)))) next = a;
             }
             foreach (var a in scratchAtlas) FailDecoded(a, "decode refused");
-            if (next == null || !frameGate.TryTake(Time.frameCount)) return;
-            try { UploadBand(next); }
-            catch (Exception ex) { FailDecoded(next, "band upload threw " + ex.Message); }
+            // Finding S2F10: the FrameGate is the only limit on uploads per Unity
+            // frame. It is asked again after every band, so a gate that admits two
+            // (T50's mutant, max=2) really puts two bands in one frame; with the
+            // product's Max = 1 the second ask is refused, as the single call was.
+            while (next != null && frameGate.TryTake(Time.frameCount))
+            {
+                try { UploadBand(next); }
+                catch (Exception ex) { FailDecoded(next, "band upload threw " + ex.Message); }
+                next = NextUploading();
+            }
+        }
+
+        /// <summary>The atlas whose band goes up next: an Uploading one, a
+        /// pinned one first (UploadBands' own rule).</summary>
+        private static Atlas NextUploading()
+        {
+            Atlas next = null;
+            foreach (var a in atlases.Values)
+                if (a.State == AtlasState.Uploading && (next == null || (pinned.Contains(a.Key) && !pinned.Contains(next.Key)))) next = a;
+            return next;
         }
 
         private static void UploadBand(Atlas a)

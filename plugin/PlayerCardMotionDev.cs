@@ -264,6 +264,8 @@ namespace CompetitiveRounds
 
         private static string DevF(double v) { return v.ToString("F2", CultureInfo.InvariantCulture); }
 
+        private static string DevF3(double v) { return v.ToString("F3", CultureInfo.InvariantCulture); }
+
         private static void DevStats(List<double> xs, out double max, out double p95)
         {
             max = 0; p95 = 0;
@@ -332,8 +334,12 @@ namespace CompetitiveRounds
         // -- T41: the clip length at a low frame rate ------------------------------
 
         /// <summary>t41[,fps=10][,mutant]: with the frame rate capped, the clip
-        /// of the first tile ends at t0 + N x period within one frame. Mutant:
-        /// the index counted in ticks.</summary>
+        /// of the first tile -- a clip of this visit, seen PLAYING -- ends at
+        /// t0 + N x period within the frames the seat actually ran (finding
+        /// S2F9). An arm whose seen frame rate stays above 1.5x the cap fails:
+        /// the cap never held (the broadcast seat's frame-rate director
+        /// re-asserts its own cap over this one). Mutant: the index counted in
+        /// ticks.</summary>
         private static IEnumerator DevT41(int run, Dictionary<string, string> o)
         {
             DevEnsureSeed(o, 20, DevInt(o, "frames", 120));
@@ -345,26 +351,50 @@ namespace CompetitiveRounds
             {
                 yield return null;
                 PlayerCardsUI.DevMotionAct("close", 0);
+                // Finding S2F9: the previous visit's clips go first. Read straight
+                // after TabEntered, before the next tick's Sync cleared them, the
+                // first tile's DONE clip of the LAST visit ended the wait below at
+                // once and its old t0 was measured (unity_frames=0 in every arm).
+                Clear();
+                yield return null;
                 PlayerCardsUI.DevMotionAct("tab", 0);
+                double tabAt = Time.unscaledTime;
                 string pid = PlayerCardsUI.DevMotionFirstPrint();
                 MotionClips.Clip c = null;
                 float until = Time.unscaledTime + 60f;
                 while (Time.unscaledTime < until && run == devRun && (c == null || c.State == ClipState.None)) { if (pid != null) clips.TryGet(pid, out c); yield return null; }
                 if (c == null || run != devRun) { Plugin.Log.LogInfo("[MOTION-T41] result=FAIL reason=no-clip"); yield break; }
+                if (c.State != ClipState.Playing || c.T0 < tabAt)
+                {
+                    Plugin.Log.LogInfo("[MOTION-T41] result=FAIL reason=stale-clip state=" + c.State + " t0_after_visit_s=" + DevF3(c.T0 - tabAt));
+                    yield break;
+                }
                 double t0 = c.T0, expect = t0 + c.Frames * c.Ms / 1000.0, done = -1;
                 int frames0 = Time.frameCount;
+                double start = Time.unscaledTime, prev1 = start, prev2 = start;
                 until = Time.unscaledTime + 60f;
                 while (Time.unscaledTime < until && run == devRun)
                 {
-                    if (c.State == ClipState.Done) { done = Time.unscaledTime; break; }
+                    double nowT = Time.unscaledTime;
+                    if (c.State == ClipState.Done) { done = nowT; break; }
+                    prev2 = prev1; prev1 = nowT;
                     yield return null;
                 }
+                int unityFrames = Time.frameCount - frames0;
+                double span = (done < 0 ? Time.unscaledTime : done) - start;
+                double seenFps = span > 0 ? unityFrames / span : 0;
+                bool capHeld = seenFps <= fps * 1.5;
                 double err = done < 0 ? double.PositiveInfinity : done - expect;
-                double frame = 1.0 / fps;
-                // the coroutine sees DONE on the frame after the tick that set it
-                bool pass = done >= 0 && err >= -frame && err <= 2 * frame + 0.02;
+                // The first tick at or after `expect` (real time) sets DONE and
+                // this loop sees it in that frame or the next, so the error is
+                // under the last two frame intervals the seat actually ran -- not
+                // 1/fps: a seat that renders slower than the cap still ends the
+                // clip on time, and one that renders faster never held the cap.
+                double bound = done < 0 ? 0 : done - prev2;
+                bool pass = capHeld && done >= 0 && err >= -0.002 && err < bound + 0.002;
                 Plugin.Log.LogInfo("[MOTION-T41] fps=" + fps + " mutant=" + DevFrameByTicks + " frames=" + c.Frames + " ms=" + c.Ms + " expect_s=" + DevF(expect - t0)
-                    + " observed_s=" + (done < 0 ? "none" : DevF(done - t0)) + " err_s=" + (done < 0 ? "inf" : DevF(err)) + " unity_frames=" + (Time.frameCount - frames0)
+                    + " observed_s=" + (done < 0 ? "none" : DevF3(done - t0)) + " err_s=" + (done < 0 ? "inf" : DevF3(err)) + " bound_s=" + DevF3(bound)
+                    + " unity_frames=" + unityFrames + " seen_fps=" + DevF(seenFps) + " cap_held=" + capHeld
                     + " result=" + (pass ? "PASS" : "FAIL"));
             }
             finally
@@ -556,7 +586,11 @@ namespace CompetitiveRounds
             foreach (double t in devReadTimes) if (t > first && t < first + PlayerCardMotionCore.COOLDOWN_429_S) inWindow++;
             while (Time.unscaledTime < first + PlayerCardMotionCore.COOLDOWN_429_S + 1.0 && run == devRun) yield return null;
             int before = devReads;
-            PlayerCardsUI.DevMotionAct("next", 0);
+            // Finding S2F11: a real page change. After the five alternations the
+            // binder sits on its second page -- with the 20 seeded prints the
+            // last one, where "next" is clamped, moves no visit and reads
+            // nothing (reads_after=0 in every arm).
+            PlayerCardsUI.DevMotionAct(visits % 2 == 0 ? "next" : "prev", 0);
             until = Time.unscaledTime + 5f;
             while (Time.unscaledTime < until && run == devRun && devReads == before) yield return null;
             int after = devReads - before;
