@@ -2469,6 +2469,32 @@ namespace CompetitiveRounds
             DrvNote("resolution " + w + "x" + h + (mode == FullScreenMode.Windowed ? "" : " " + mode) + " asked: " + DrvScreenState());
         }
 
+        /// <summary>Round-3 L2: a windowed w x h, or - when the display is
+        /// narrower than w - the largest surface of the SAME aspect the
+        /// display holds (its width, the height scaled with it), with a line
+        /// naming both. The page's canvas matches WIDTH, so that surface has
+        /// the logical canvas w x h would give (810 at 21:9, 540 at 32:9):
+        /// the geometry these scenarios measure. Needed because an exclusive
+        /// full-screen surface, once left, puts the display back in its
+        /// stored mode, which can be narrower than the desktop was. While a
+        /// full-screen surface is up the display reports ITS mode, so that
+        /// surface is left first (windowed 1920x1080, the restore size) and
+        /// the display is read after.</summary>
+        private static IEnumerator DrvResolutionAspect(int w, int h)
+        {
+            if (Screen.fullScreenMode != FullScreenMode.Windowed) yield return DrvResolution(1920, 1080);
+            int dw = Screen.currentResolution.width, dh = Screen.currentResolution.height;
+            if (dw <= 0 || dw >= w)
+            {
+                yield return DrvResolution(w, h);
+                yield break;
+            }
+            int fh = (int)Math.Round((double)h * dw / w);
+            DrvNote(w + "x" + h + " does not fit the " + dw + "x" + dh + " display: the same aspect is asked at " + dw + "x" + fh
+                + " (the canvas matches width, so its logical canvas is the one " + w + "x" + h + " gives)");
+            yield return DrvResolution(dw, fh);
+        }
+
         /// <summary>What the game reports: its surface, the display's mode,
         /// and the page's canvas scale and logical height.</summary>
         private static string DrvScreenState()
@@ -2920,14 +2946,15 @@ namespace CompetitiveRounds
             else DrvBad(tag + "rows past the viewport's width: " + DrvList(bad));
         }
 
-        /// <summary>W3b: the seven sub-tabs at 2560x1080 (21:9) with the three
-        /// optional rows active - section 3.1's 506 px worst case - each
-        /// unscrolled, with A5a, A5b and A8 measured.</summary>
+        /// <summary>W3b: the seven sub-tabs at 2560x1080 (21:9), or the largest
+        /// 21:9 surface a narrower display holds (the same 810 px logical
+        /// canvas), with the three optional rows active - section 3.1's 506 px
+        /// worst case - each unscrolled, with A5a, A5b and A8 measured.</summary>
         private static IEnumerator DriveW3b()
         {
             DrvParkPointer();
             bool perf0 = _perfSectionOpen;
-            yield return DrvResolution(2560, 1080);
+            yield return DrvResolutionAspect(2560, 1080);
             yield return DrvForceRows(true);
             SettingsExpandTab(SettingsModel.SubTabIndex("perf"));
             for (int t = 0; t < SETTINGS_TABS; t++)
@@ -2960,10 +2987,11 @@ namespace CompetitiveRounds
         /// -screen-width 5120 -screen-height 1440), then SetResolution in
         /// Windowed, FullScreenWindow and ExclusiveFullScreen. Reached by any
         /// of them, W3c runs there. Reached by none, the bound is logged with
-        /// the display's own mode list, and the same checks run at 2560x720
-        /// (the same 32:9 aspect and 540 px logical canvas) as a SUBSTITUTE,
-        /// every line tagged W3c-sub and every capture w3csub-, never filed
-        /// as W3c. A5b's control: exactly five observations, named.
+        /// the display's own mode list, and the same checks run at 2560x720,
+        /// or the largest 32:9 surface a narrower display holds (the same
+        /// aspect and 540 px logical canvas), as a SUBSTITUTE, every line
+        /// tagged W3c-sub and every capture w3csub-, never filed as W3c.
+        /// A5b's control: exactly five observations, named.
         /// Performance is captured unscrolled and after a scroll to the end.</summary>
         private static IEnumerator DriveW3c()
         {
@@ -2985,8 +3013,8 @@ namespace CompetitiveRounds
             if (!reached)
             {
                 DrvNote("W3c NOT REACHED: no method gave a " + w + "x" + h + " surface (" + DrvDisplayModes(w, h)
-                    + "); the bound is a residual, and the 2560x720 run below is a SUBSTITUTE, tagged W3c-sub, never W3c");
-                yield return DrvResolution(2560, 720);
+                    + "); the bound is a residual, and the 32:9 run below (2560x720, or the largest 32:9 surface the display holds) is a SUBSTITUTE, tagged W3c-sub, never W3c");
+                yield return DrvResolutionAspect(2560, 720);
             }
             yield return DrvForceRows(true);
             SettingsExpandTab(SettingsModel.SubTabIndex("perf"));
@@ -3071,14 +3099,16 @@ namespace CompetitiveRounds
             return l;
         }
 
-        /// <summary>W10: Chat & mail at 2560x1080 with the three optional rows
-        /// active and twelve blocked senders: the hint active, no clipped row,
-        /// and the twelfth sender inside the viewport after a scroll to the end.</summary>
+        /// <summary>W10: Chat & mail at 2560x1080, or the largest 21:9 surface a
+        /// narrower display holds (the same 810 px logical canvas), with the
+        /// three optional rows active and twelve blocked senders: the hint
+        /// active, no clipped row, and the twelfth sender inside the viewport
+        /// after a scroll to the end.</summary>
         private static IEnumerator DriveW10()
         {
             DrvParkPointer();
             int cm = SettingsModel.SubTabIndex("chatmail");
-            yield return DrvResolution(2560, 1080);
+            yield return DrvResolutionAspect(2560, 1080);
             yield return DrvForceRows(true);
             yield return DrvShowTab(cm);
             yield return DrvFakeBlocks(12);
@@ -3144,8 +3174,8 @@ namespace CompetitiveRounds
         private static IEnumerator DriveW9b()
         {
             DrvParkPointer();
-            yield return DrvResolution(2560, 1080);
-            yield return DrvShootPicker("w9b-dropdown-2560x1080");
+            yield return DrvResolutionAspect(2560, 1080);
+            yield return DrvShootPicker("w9b-dropdown-" + Screen.width + "x" + Screen.height);
             yield return DrvResolutionRestore("W9b");
         }
 
