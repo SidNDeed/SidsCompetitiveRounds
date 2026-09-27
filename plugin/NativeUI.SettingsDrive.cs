@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -48,7 +49,7 @@ namespace CompetitiveRounds
         internal static bool SettingsTestRunning => SettingsDriveRunning || SettingsSelfTestRunning;
 
         /// <summary>The scenarios, in the order "5:drive" runs them.</summary>
-        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2", "l11", "r4" };
+        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2", "l11", "r4", "t5d" };
 
         private static void DrvOk(string m) { drvPass++; Plugin.Log.LogInfo("[SETTINGS-DRIVE] PASS " + m); }
         private static void DrvBad(string m) { drvFail++; Plugin.Log.LogWarning("[SETTINGS-DRIVE] FAIL " + m); }
@@ -147,6 +148,7 @@ namespace CompetitiveRounds
                 case "l2": return DriveL2();
                 case "l11": return DriveL11();
                 case "r4": return DriveR4();
+                case "t5d": return DriveT5d();
             }
             return DriveNothing();
         }
@@ -525,6 +527,80 @@ namespace CompetitiveRounds
                 MailClient.DiscordLinked = linked0;
                 rec.GetBool = get0;
                 dirty = true;
+            }
+        }
+
+        /// <summary>Round-2 LOW-16 (design T5-d): a click on a segmented
+        /// SIgChat option republishes this seat's chat-mute marker IN THE
+        /// SAME CALL STACK, never only through the 2 s reconciler in
+        /// CompetitiveUI.Tick. The design reads cr_cmute there; no same-stack
+        /// read of it exists (this seat has no online room, and in one PUN
+        /// applies a player property to the seat that set it only on the
+        /// server's echo, learning #428), so the read is of the publisher's
+        /// own invocation record, written at its entry: how many times it ran
+        /// and the marker value it computed. The reconciler's clock is read
+        /// on both sides of the click, so a reconciler tick in between would
+        /// show. Each click goes through the option's own click handler, every
+        /// click changes the mode, and the mode the scenario found is put back
+        /// by the last click. 2.5 s after each click the record is read again:
+        /// a publish the reconciler makes then is a repair, never the pass.</summary>
+        private static IEnumerator DriveT5d()
+        {
+            SettingsRowRec rec;
+            if (!settingsByKey.TryGetValue("SIgChat", out rec) || rec.Opts == null || rec.Ids == null
+                || rec.Opts.Length != rec.Ids.Length)
+            {
+                DrvBad("T5-d the SIgChat row was not built");
+                yield break;
+            }
+            var clock = typeof(CompetitiveUI).GetField("chatMutePublishTickAt", BindingFlags.NonPublic | BindingFlags.Static);
+            if (clock == null)
+            {
+                DrvBad("T5-d the reconciler clock CompetitiveUI.chatMutePublishTickAt was not found");
+                yield break;
+            }
+            SettingsSwitchSubTab(rec.Tab);
+            yield return 0.6f;
+            var start = CompetitiveUI.CurrentChatOverlayMode();
+            var order = new List<CompetitiveUI.ChatOverlayMode>();
+            if (start != CompetitiveUI.ChatOverlayMode.Muted) order.Add(CompetitiveUI.ChatOverlayMode.Muted);
+            foreach (var m in new[] { CompetitiveUI.ChatOverlayMode.Normal, CompetitiveUI.ChatOverlayMode.Pinned })
+                if (m != start) order.Add(m);
+            order.Add(start);
+            DrvNote("T5-d the mode found: " + start + "; " + order.Count + " clicks, each a change, the last back to it");
+            foreach (var target in order)
+            {
+                int i = Array.IndexOf(rec.Ids, target.ToString());
+                ClickHandler ch = i >= 0 && rec.Opts[i] != null ? rec.Opts[i].GetComponent<ClickHandler>() : null;
+                if (ch == null || ch.onClick == null)
+                {
+                    DrvBad("T5-d the SIgChat option " + target + " has no click handler");
+                    yield break;
+                }
+                var from = CompetitiveUI.CurrentChatOverlayMode();
+                int want = target == CompetitiveUI.ChatOverlayMode.Muted ? 1 : 0;
+                // One call stack: clock, record, the click, record, clock.
+                float t0 = (float)clock.GetValue(null);
+                int c0 = CompetitiveUI.chatMutePublishCalls, w0 = CompetitiveUI.chatMutePublishLastWant;
+                ch.onClick();
+                int c1 = CompetitiveUI.chatMutePublishCalls, w1 = CompetitiveUI.chatMutePublishLastWant;
+                float t1 = (float)clock.GetValue(null);
+                var now = CompetitiveUI.CurrentChatOverlayMode();
+                string step = "T5-d " + from + " -> " + target + ": ";
+                string seen = "in the click's call stack the publisher ran " + (c1 - c0) + " time(s) and recorded marker "
+                    + w1 + " (" + w0 + " before the click); the reconciler clock " + (t1 == t0 ? "did not move" : "MOVED");
+                if (now != target) DrvBad(step + "the click did not reach the writer (the mode is " + now + ")");
+                else if (t1 != t0) DrvBad(step + seen + " - a reconciler tick ran inside the click");
+                else if (c1 - c0 == 1 && w1 == want) DrvOk(step + seen + " = 1 run, marker " + want);
+                else DrvBad(step + seen + ", want 1 run and marker " + want);
+                yield return 2.5f;
+                float t2 = (float)clock.GetValue(null);
+                int c2 = CompetitiveUI.chatMutePublishCalls, w2 = CompetitiveUI.chatMutePublishLastWant;
+                string after = c1 != c0 ? ""
+                    : w1 != want && w2 == want ? " - the reconciler repaired the missing publish, which is NOT a pass"
+                    : " - only the reconciler published, which is NOT a pass";
+                DrvNote(step + "2.5 s later the reconciler clock " + (t2 != t1 ? "moved" : "did not move") + ", "
+                    + (c2 - c1) + " more publisher run(s), recorded marker " + w2 + after);
             }
         }
 
