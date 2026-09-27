@@ -8410,8 +8410,8 @@ namespace CompetitiveRounds
                 "  • Each match you play: rounds won, points, duration, cards picked, cards offered, opponent\n" +
                 "  • Your Glicko-2 rating history\n\n" +
                 "What you can do later:\n" +
-                "  • Revoke consent anytime (F5 → Settings → Revoke). Reporting stops.\n" +
-                "  • Delete your data (F5 → Settings → Delete my data). Steam ID, display name, and Discord link " +
+                "  • Revoke consent anytime with the Data & Privacy switch (F5 → Settings → Privacy & account). Reporting stops.\n" +
+                "  • Delete your data with the Delete My Data button (F5 → Settings → Privacy & account). Steam ID, display name, and Discord link " +
                 "are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. " +
                 "Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\n" +
                 "Choose Allow to use the leaderboard. Choose Decline to run the mod fully offline.");

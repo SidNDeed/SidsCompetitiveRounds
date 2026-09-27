@@ -6814,7 +6814,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
                 sb.Append("\n"+I18n.Tr("<color=#99AAEE>Recently online</color>")+"\n");
                 if(rec==null||rec.Count==0)sb.Append("<color=#888><i>-</i></color>\n");
                 else foreach(var p in rec)sb.Append($"{HomeSan(p.name)}{HomeTitleSpan(p)}  <color=#8FA3B8>{p.rating}</color>  <color=#777>{FmtAgo(p.minutesAgo)}</color>\n");
-                sb.Append("\n"+I18n.Tr("<color=#666><i>Hide yourself here: Settings -> Appear offline.</i></color>"));
+                sb.Append("\n"+I18n.Tr("<color=#666><i>Hide yourself here: Settings -> Privacy & account -> Appear offline.</i></color>"));
                 UIFactory.SetTextRaw(txtHomeOnline,sb.ToString());
             }
             /* Latest releases (GitHub). */
