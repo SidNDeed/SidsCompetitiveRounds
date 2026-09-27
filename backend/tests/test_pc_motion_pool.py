@@ -11,6 +11,7 @@ instance main wires) are in the live route tests.
 import asyncio
 import collections
 import os
+import re
 import shutil
 import sys
 import threading
@@ -96,6 +97,39 @@ def test_motion_cache_separate(tmp_path):
     static2._scan()
     assert static2._sizes == before
     assert pc_face.renderer_fingerprint() == fp_before
+
+
+def test_motion_cache_root_survives_an_api_rebuild():
+    """S4.7 in the api container (sitting 2 finding S2F2): the motion cache's
+    own root, beside the face cache's, must be what the container gets and
+    must outlive the container. docker-compose.yml passes PC_MOTION_CACHE_DIR
+    to the api with the code's own default and mounts a named volume, declared
+    at the top level, at that path -- the face cache's arrangement -- so an
+    api rebuild neither empties the cache nor sends every viewed print back
+    through the single motion worker. Mutations: the mapping removed, the
+    mount removed, the volume undeclared, the mapping pointed at the face
+    cache's root. Control: the shipped file."""
+    with open(os.path.join(API, "main.py"), encoding="utf-8") as fh:
+        main_src = fh.read()
+    with open(os.path.join(HERE, "..", "docker-compose.yml"), encoding="utf-8") as fh:
+        compose = fh.read()
+
+    def code_default(key):
+        found = re.findall(r'os\.getenv\(\s*"%s"\s*,\s*"([^"]+)"\s*\)' % key, main_src)
+        assert len(found) == 1, (key, found)
+        return found[0]
+
+    root, face_root = code_default("PC_MOTION_CACHE_DIR"), code_default("PC_FACE_CACHE_DIR")
+    assert root != face_root
+    api = compose[compose.index("  api:"):compose.index("  bot:")]
+    mapped = re.findall(r"^ {6}PC_MOTION_CACHE_DIR: *\$\{PC_MOTION_CACHE_DIR:-([^}]*)\} *$", api, re.M)
+    assert mapped == [root], mapped
+    mounts = re.findall(r"^ {6}- *([A-Za-z0-9][A-Za-z0-9_.-]*):(/[^\s:]*) *$", api, re.M)
+    at_root = [name for name, path in mounts if path == root]
+    assert len(at_root) == 1, mounts
+    assert (at_root[0], face_root) not in mounts and ("pc-faces", face_root) in mounts
+    top = compose[compose.index("\nvolumes:"):]
+    assert re.search(r"^  %s: *$" % re.escape(at_root[0]), top, re.M), (at_root, top)
 
 
 # -- T26: the motion worker never holds a static render --------------------------------
