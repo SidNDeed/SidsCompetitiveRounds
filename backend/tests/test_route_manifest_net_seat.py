@@ -850,9 +850,9 @@ def test_the_helper_closure_stays_affordable():
     indexed bindings, with the walk itself taking 0.1 s once the index is built
     (~5.3 s, once per process). The bounds below sat above those with room, so
     this fails on a walk that has gone wrong rather than on ordinary growth;
-    the worst-route bounds, and once the all-tier p90 bound, have since moved
-    for measured growth in bindings routes really run, each move recorded
-    with its measurement at its assertion.
+    the worst-route bounds, and once each of the two p90 bounds, have since
+    moved for measured growth in bindings routes really run, each move
+    recorded with its measurement at its assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -879,7 +879,24 @@ def test_the_helper_closure_stays_affordable():
     # alone: measured 20 / 55 / 198 with data-into-data expansion, against
     # 16 / 48 / 191 before it.
     assert code_median <= 24, f"median code closure {code_median} of {total}"
-    assert code_p90 <= 75, f"p90 code closure {code_p90} of {total}"
+    # Card trading LAND (2026-09-27): measured 21 / 76 / 326 of 2654 indexed
+    # bindings over 372 routes at the merge of main 9a1dd9d into the trading
+    # lane, against 21 / 73 / 326 over the lane tip 93227a8 (372 routes) and
+    # 21 / 69 / 326 over main 9a1dd9d (365 routes), the same walk with the
+    # same route seeds over each tree's own backend/api. Neither side passes
+    # 75; the composition does. The ladder hook gives two routes at the
+    # lane's p90 rank the eight title_ladders bindings a rated completion
+    # really runs (POST /api/v1/team/series/{series_id}/report-dc 72 -> 80,
+    # POST /api/v1/admin/team/series/{series_id}/resolve 74 -> 82), both rise
+    # past the rank, and the 90th percentile becomes the next route up, GET
+    # /api/v1/admin/quarantine/triage/{mode}/{group_id} at 76, unchanged
+    # itself. On main alone the rank sits lower (69); the five player trade
+    # routes above it are what put it in this band.
+    #
+    # The bound moves to 80 -- ~5% over the measurement, the headroom the
+    # other moves in this test gave -- for that reason and no other; the
+    # median and worst bounds stay.
+    assert code_p90 <= 80, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
