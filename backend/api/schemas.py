@@ -928,9 +928,9 @@ class HealthResponse(BaseModel):
     # and writes (main._team_dc_fallback_probe). 1 when a probe naming every
     # dc_fallback_* column the deferral's SQL names runs, 0 when it fails for
     # a missing column or table. The column list is DERIVED from that SQL
-    # when main is imported, never written down (#342). The one word here that
-    # asks the database: the connected arm probes, the degraded arm answers the
-    # last probe's value (0 before any). The release train's discriminator for
+    # when main is imported, never written down (#342). It asks the
+    # database: the connected arm probes, the degraded arm answers the last
+    # probe's value (0 before any). The release train's discriminator for
     # the migration as the api sees it, on both roles (the standby's schema
     # arrives by replication); read by nothing else (#306). Declared without a
     # default, so building the answer without it raises instead of silently

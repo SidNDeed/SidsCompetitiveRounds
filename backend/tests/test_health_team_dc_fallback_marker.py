@@ -10,8 +10,8 @@ the answering box's database, 0 when it fails because a column or the table is
 missing. It is absent on any build before the batch, which is how the train
 reads the old build.
 
-Unlike its siblings this word asks the DATABASE, so what is proven here is
-different in kind:
+Unlike the code-constant siblings this word asks the DATABASE, so what is
+proven here is different in kind:
 
   * the probe's columns are DERIVED from the four functions' compiled SQL,
     and they are exactly the columns the migration adds; an AST census over

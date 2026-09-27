@@ -6766,8 +6766,8 @@ _RJ_TRIAGE_MARKER = 2
 # Its sibling _LEAD_FORFEIT_PERGAME (the /health `lead_forfeit_pergame` word)
 # is DERIVED from the two 2v2 per-game wirings rather than written here, so
 # it is defined after team_series_report_dc, whose reader call it reads.
-# Its sibling _TEAM_DC_FALLBACK_LAST (the /health `team_dc_fallback` word) is
-# the one word on this route that asks the DATABASE: whether this box's
+# Its sibling _TEAM_DC_FALLBACK_LAST (the /health `team_dc_fallback` word)
+# asks the DATABASE, as `pc_trading` also does: whether this box's
 # team_series has the columns the 2v2 disconnect deferral reads and writes
 # (migration 356). The connected arm probes and the degraded arm reads back
 # the last probe's answer. The probe's column list is DERIVED from the four
@@ -6814,9 +6814,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
-        # team_dc_fallback is the one word here that needs the database, so
-        # this arm answers what the last probe on this worker found: 0 before
-        # the first one, which the release train reads as not proven.
+        # team_dc_fallback needs the database, so this arm answers the last
+        # probe on this worker (0 before the first, which the release train
+        # reads as not proven); pc_trading answers its own cache-only form.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
@@ -44555,11 +44555,11 @@ _LEAD_FORFEIT_PERGAME = _lead_forfeit_pergame_marker(
 # This word says whether the database THIS box is connected to has them: 1
 # when a probe naming every such column runs, 0 when it fails because a
 # column or the table is missing. It is the release train's discriminator for
-# the migration as the api sees it, and nothing else reads it (#306). It is
-# the one word on this route that runs a statement -- every sibling is
-# computed without the database -- so it describes the database the answering
-# box uses, not the code alone; the code half is told by the status route,
-# which a build before this one does not carry at all.
+# the migration as the api sees it, and nothing else reads it (#306). It
+# runs a statement on this route, as `pc_trading` also does, so it
+# describes the database the answering box uses, not the code alone; the
+# code half is told by the status route, which a build before this one
+# does not carry at all.
 #
 # DERIVED, never written down (#342): the probe names every dc_fallback_*
 # identifier that a SQL statement among these four functions' compiled string
