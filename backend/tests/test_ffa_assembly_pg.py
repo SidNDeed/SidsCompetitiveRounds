@@ -4204,6 +4204,18 @@ def test_s57_the_g3_server_gate(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def _write_facts(facts):
+    """A structural case's trace for cf_controls.py's twin comparison
+    (cf_controls.trace_file's name): the facts it asserts on."""
+    d = os.environ.get("CF_TRACE_DIR")
+    if not d:
+        return
+    node = os.environ.get("PYTEST_CURRENT_TEST", "case").split(" ")[0].rsplit("/", 1)[-1]
+    path = os.path.join(d, _re.sub(r"[^A-Za-z0-9_.-]", "_", node) + ".json")
+    with open(path, "w", encoding="ascii", newline="\n") as fh:
+        fh.write(_json.dumps(facts, sort_keys=True, indent=1))
+
+
 _CSPROJ = os.path.join(HERE, "..", "..", "plugin", "CompetitiveRounds.csproj")
 _SQL_DIR = os.path.join(HERE, "..", "sql")
 
@@ -4219,6 +4231,9 @@ def test_s58_the_g3_fence():
     paths = [getattr(r, "path", "") for r in main.app.routes]
     g3_config = bool(_re.search(r"'\$\(Configuration\)'\s*==\s*'G3'", csproj)) and \
         "SCR_G3" in csproj
+    _write_facts({"production": bool(main.ADM_PRODUCTION_ENABLED), "g3_config": g3_config,
+                  "clause": "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" in src,
+                  "route": "/api/v1/admin/ffa-g3-seats" in paths})
     if not main.ADM_PRODUCTION_ENABLED:
         assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \
             in src, "S58 clause"
@@ -5192,6 +5207,7 @@ def test_the_census_fresh_literal_is_the_constant():
     four literal intervals must equal ASM_CENSUS_FRESH_S."""
     found = _re.findall(r"census_at >= NOW\(\) - interval '(\d+) seconds'",
                         main._FFA_CLOSE_RECORD_SET)
+    _write_facts({"found": found, "constant": main.ASM_CENSUS_FRESH_S})
     assert len(found) == 4 and all(int(x) == main.ASM_CENSUS_FRESH_S for x in found), \
         ("census literal", found)
 

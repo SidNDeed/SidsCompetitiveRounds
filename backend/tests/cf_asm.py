@@ -62,8 +62,15 @@ def fixture_uuid(kind, key):
 # long ago: the region volumes (a 600 s cache) and the service-account
 # UUIDs (an hourly cache) each issue their query only when cold. A name
 # that reads as a constant (upper case, a number) is configuration, not
-# state, and is left alone.
-_STATE_RE = re.compile(r"(?i)cache|seen|last|mono|prune")
+# state, and is left alone. "state" covers the janitor arms' cadence
+# dicts: the mail retention arm runs when time.monotonic() passes
+# _MAIL_RETENTION_STATE["next"], so without it the arm ran in whichever
+# case reached the janitor first in a process, and S36's statements
+# depended on which rows shared the process. The rule adds exactly five
+# names over the old one: that dict, _PC_STEAM_RENDER_STATE,
+# _PC_STEAM_SWEEP_STATE, _triage_gc_state (a balanced depth counter) and
+# the constant _ASM_SQLSTATE_STAGE, whose restore changes nothing.
+_STATE_RE = re.compile(r"(?i)cache|seen|last|mono|prune|state")
 _MAIN_STATE = {}
 for _name, _val in list(vars(main).items()):
     if _name.startswith("__") or not _STATE_RE.search(_name):
@@ -232,7 +239,10 @@ class Answer:
         self.body = body
 
     def __getitem__(self, k):
-        return self.body[k]
+        # A body that is not a dict or a list (an error's detail string)
+        # has no fields: None, so the test's own named assertion fails on
+        # it instead of a TypeError inside the subscript.
+        return self.body[k] if isinstance(self.body, (dict, list)) else None
 
     def get(self, k, d=None):
         return self.body.get(k, d) if isinstance(self.body, dict) else d
@@ -755,10 +765,24 @@ _ROOM_RE = re.compile(r"\bffa_[0-9a-f]{12}\b")
 _REAL_CLOCK_INTS = set()
 # Answer fields computed from the route's monotonic clock at build time: two
 # runs of the same code differ by scheduling, so a twin compares presence.
-_REAL_CLOCK_MASK = {"server_age_ms", "admit_left_ms", "dissolve_after_ms"}
+# xp_gained and gold_gained are the report's pay, metered by the pace
+# ceiling against elapsed = clock_timestamp() - the lobby's anchor (the
+# report handler's economy meter): a real-clock value against a fixture
+# lobby created in the past, so the same code pays 11 or 12 by scheduling.
+_REAL_CLOCK_MASK = {"server_age_ms", "admit_left_ms", "dissolve_after_ms",
+                    "xp_gained", "gold_gained"}
 # The erasure's random placeholder name (deleted_ + 8 hex): named by first
 # appearance, like a UUID.
 _PLACEHOLDER_RE = re.compile(r"\bdeleted_[0-9a-f]{8}\b")
+# A timestamp a route formats into a string (an answer's expires_at, a
+# log line's expires=) is SQL NOW() plus an interval, a real-clock value:
+# compared by presence, like every datetime.
+_ISO_TS_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?")
+# The deadline and slow-commit lines print the route's real elapsed time
+# (_asm_elapsed_ms against the wall clock), which scheduling moves: the
+# number compares by presence; the route, the stage and the line stay.
+_ELAPSED_RE = re.compile(r"(?<![0-9A-Za-z_])(ms|pre_ms)=\d+")
+_ELAPSED_LINE_RE = re.compile(r"^\[FFA-ASM\] lobby \S+ (?:deadline|slow_commit) route=")
 
 
 def _line_template(ln):
@@ -817,7 +841,8 @@ def normalise(obj, seed=()):
             return "ts"
         if isinstance(o, str):
             sd = dict(seeded)
-            return _PLACEHOLDER_RE.sub("deleted_?", _UUID_RE.sub(lambda m: sd.get(m.group(0), "U?"), o))
+            return _ISO_TS_RE.sub("ts", _PLACEHOLDER_RE.sub(
+                "deleted_?", _UUID_RE.sub(lambda m: sd.get(m.group(0), "U?"), o)))
         if key in _REAL_CLOCK_MASK or key in _REAL_CLOCK_INTS:
             return "rt"
         if isinstance(o, (bytes, bytearray, _decimal.Decimal, float)):
@@ -842,6 +867,9 @@ def normalise(obj, seed=()):
             s = _ID8_RE.sub(lambda m: "%s %s" % (m.group(1), id8name(m.group(2))), s)
             s = _ROOM_RE.sub("ffa_ROOM", s)
             s = _PLACEHOLDER_RE.sub(lambda m: "deleted_" + uname("ph:" + m.group(0)), s)
+            s = _ISO_TS_RE.sub("ts", s)
+            if _ELAPSED_LINE_RE.match(s):
+                s = _ELAPSED_RE.sub(lambda m: m.group(1) + "=rt", s)
             return s
         if key in _REAL_CLOCK_MASK and isinstance(o, int):
             return "rt"
