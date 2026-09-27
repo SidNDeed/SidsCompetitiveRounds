@@ -711,20 +711,139 @@ namespace CompetitiveRounds
             return "colour #" + hex;
         }
 
-        /// <summary>Round-2 LOW-16 (design T5-d): a click on a segmented
-        /// SIgChat option republishes this seat's chat-mute marker IN THE
-        /// SAME CALL STACK, never only through the 2 s reconciler in
-        /// CompetitiveUI.Tick. The design reads cr_cmute there; no same-stack
-        /// read of it exists (this seat has no online room, and in one PUN
-        /// applies a player property to the seat that set it only on the
-        /// server's echo, learning #428), so the read is of the publisher's
-        /// own invocation record, written at its entry: how many times it ran
-        /// and the marker value it computed. The reconciler's clock is read
-        /// on both sides of the click, so a reconciler tick in between would
-        /// show. Each click goes through the option's own click handler, every
-        /// click changes the mode, and the mode the scenario found is put back
-        /// by the last click. 2.5 s after each click the record is read again:
-        /// a publish the reconciler makes then is a repair, never the pass.</summary>
+        /// <summary>Round-3 L5 (design T5-d): a stub seat for a same-stack
+        /// read of cr_cmute. In a room PUN applies a player property to the
+        /// seat that set it only on the server's echo (learning #428), and
+        /// the publisher returns in offline mode, so neither gives a
+        /// same-stack read. For ONE synchronous call this makes
+        /// PhotonNetwork.InRoom true - the client's state FIELD set to
+        /// Joined, never its State setter, whose StateChanged event would run
+        /// - and PhotonNetwork.LocalPlayer a local Player the test created
+        /// with no room reference, so the publisher's own
+        /// local.SetCustomProperties(h) takes PUN's branch for a local player
+        /// with no room: it merges the table into that player's
+        /// CustomProperties and sends nothing. The test reads cr_cmute from
+        /// that table. Both are put back in a finally before the call
+        /// returns, so no frame - no PUN dispatch, no game tick - ever sees
+        /// them. Refused while the seat is in a real room or in offline
+        /// mode.</summary>
+        private static FieldInfo drvSeatState;
+        private static MethodInfo drvSeatSetLocal;
+        private static ConstructorInfo drvSeatPlayer;
+
+        private static string DrvStubSeatReady()
+        {
+            try
+            {
+                if (Photon.Pun.PhotonNetwork.NetworkingClient == null) return "PhotonNetwork.NetworkingClient is null";
+                if (Photon.Pun.PhotonNetwork.OfflineMode) return "the seat is in offline mode";
+                if (Photon.Pun.PhotonNetwork.InRoom) return "the seat is in a room";
+                var lbc = typeof(Photon.Realtime.LoadBalancingClient);
+                drvSeatState = lbc.GetField("state", BindingFlags.NonPublic | BindingFlags.Instance);
+                var lp = lbc.GetProperty("LocalPlayer", BindingFlags.Public | BindingFlags.Instance);
+                drvSeatSetLocal = lp != null ? lp.GetSetMethod(true) : null;
+                drvSeatPlayer = typeof(Photon.Realtime.Player).GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null,
+                    new[] { typeof(string), typeof(int), typeof(bool) }, null);
+                if (drvSeatState == null || drvSeatState.FieldType != typeof(Photon.Realtime.ClientState)) return "LoadBalancingClient.state was not found";
+                if (drvSeatSetLocal == null) return "the LoadBalancingClient.LocalPlayer setter was not found";
+                if (drvSeatPlayer == null) return "the Player(string, int, bool) constructor was not found";
+                return null;
+            }
+            catch (Exception e) { return "the stub seat could not be prepared (" + e.GetType().Name + ")"; }
+        }
+
+        /// <summary>A local Player with no room, its cr_cmute planted: a boxed
+        /// value the caller keeps, so "untouched" is reference identity.</summary>
+        private static Photon.Realtime.Player DrvStubPlayer(object planted)
+        {
+            var p = (Photon.Realtime.Player)drvSeatPlayer.Invoke(new object[] { "item13-t5d-stub", 1, true });
+            if (planted != null) p.CustomProperties[CompetitiveUI.CHAT_MUTE_PROP] = planted;
+            return p;
+        }
+
+        private static object DrvCmute(Photon.Realtime.Player p)
+        {
+            object v = null;
+            if (p != null && p.CustomProperties != null) p.CustomProperties.TryGetValue(CompetitiveUI.CHAT_MUTE_PROP, out v);
+            return v;
+        }
+
+        private static int DrvMarker(CompetitiveUI.ChatOverlayMode m) { return m == CompetitiveUI.ChatOverlayMode.Muted ? 1 : 0; }
+
+        private static string DrvShow(object v)
+        {
+            if (v == null) return "absent";
+            if (v is int) return ((int)v).ToString(CultureInfo.InvariantCulture);
+            return v.GetType().Name + " " + v;
+        }
+
+        /// <summary>act() in ONE call with the stub seat in place: InRoom true
+        /// when joined, LocalPlayer the given player (null allowed). Returns
+        /// what the call threw to its caller ("" for nothing); firstChance
+        /// counts the exceptions raised on this thread inside it, caught or
+        /// not (meaningful only when DriveT5d's probe counted its one).</summary>
+        private static string DrvWithStubSeat(bool joined, Photon.Realtime.Player player, Action act, out int firstChance)
+        {
+            var nc = Photon.Pun.PhotonNetwork.NetworkingClient;
+            object state0 = drvSeatState.GetValue(nc);
+            var local0 = nc.LocalPlayer;
+            int n = 0, tid = System.Threading.Thread.CurrentThread.ManagedThreadId;
+            EventHandler<System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs> fc = (s, e) =>
+            {
+                if (System.Threading.Thread.CurrentThread.ManagedThreadId == tid) n++;
+            };
+            string threw = "";
+            AppDomain.CurrentDomain.FirstChanceException += fc;
+            try
+            {
+                if (joined) drvSeatState.SetValue(nc, Photon.Realtime.ClientState.Joined);
+                drvSeatSetLocal.Invoke(nc, new object[] { player });
+                act();
+            }
+            catch (Exception e) { threw = e.GetType().Name; }
+            finally
+            {
+                AppDomain.CurrentDomain.FirstChanceException -= fc;
+                try { drvSeatState.SetValue(nc, state0); } catch { }
+                try { drvSeatSetLocal.Invoke(nc, new object[] { local0 }); } catch { }
+            }
+            firstChance = n;
+            if (!Equals(drvSeatState.GetValue(nc), state0) || !ReferenceEquals(nc.LocalPlayer, local0))
+                threw += (threw.Length > 0 ? "; " : "") + "the seat was NOT put back";
+            return threw;
+        }
+
+        private static string DrvThrew(string threw, int fc, bool fcLive)
+        {
+            string s = threw.Length > 0 ? "; the call THREW " + threw : "; the call threw nothing";
+            if (fcLive) s += ", " + fc + " exception(s) raised inside it";
+            return s;
+        }
+
+        private static ClickHandler DrvChatOption(SettingsRowRec rec, CompetitiveUI.ChatOverlayMode m)
+        {
+            int i = Array.IndexOf(rec.Ids, m.ToString());
+            ClickHandler ch = i >= 0 && rec.Opts[i] != null ? rec.Opts[i].GetComponent<ClickHandler>() : null;
+            return ch != null && ch.onClick != null ? ch : null;
+        }
+
+        /// <summary>Round-3 L5 (design T5-d): a click on a segmented SIgChat
+        /// option republishes this seat's chat-mute marker IN THE SAME CALL
+        /// STACK, never only through the 2 s reconciler in CompetitiveUI.Tick.
+        /// Each click runs with the stub seat in place (DrvWithStubSeat), its
+        /// cr_cmute planted at the marker of the mode the click leaves, and
+        /// the property is read from the stub player's own table the moment
+        /// the click returns: it must carry the new marker, and where the
+        /// marker does not change the publisher must leave the planted value
+        /// untouched (the same object). The reconciler's clock is read on both
+        /// sides of the click. 2.5 s after each click the reconciler's publish
+        /// (its body, run under the same stub) shows whether anything was
+        /// left to repair: a repair is never the pass. Then each early return
+        /// - an unchanged mode (a click on the lit option), no room (InRoom
+        /// false) and no local player (LocalPlayer null) - leaves the property
+        /// untouched, and no click throws. The mode found is put back by the
+        /// last click, and the seat's own player property is checked
+        /// untouched.</summary>
         private static IEnumerator DriveT5d()
         {
             SettingsRowRec rec;
@@ -740,6 +859,26 @@ namespace CompetitiveRounds
                 DrvBad("T5-d the reconciler clock CompetitiveUI.chatMutePublishTickAt was not found");
                 yield break;
             }
+            string why = DrvStubSeatReady();
+            if (why != null)
+            {
+                DrvBad("T5-d no stub seat: " + why);
+                yield break;
+            }
+            // The first-chance count means something only if this runtime
+            // raises the event: a probe whose only purpose is to be counted.
+            int probe;
+            string probeThrew = DrvWithStubSeat(false, null, () =>
+            {
+                try { throw new InvalidOperationException("item13 t5d first-chance probe"); }
+                catch (InvalidOperationException) { }
+            }, out probe);
+            bool fcLive = probe == 1 && probeThrew.Length == 0;
+            DrvNote("T5-d first-chance probe: one exception thrown and caught inside a stub-seat call counted " + probe
+                + (fcLive ? "; every click below also counts the exceptions raised inside it, caught or not"
+                          : "; this runtime raises no first-chance events, so a click shows only what it threw to its caller"));
+            var real = Photon.Pun.PhotonNetwork.LocalPlayer;
+            object real0 = DrvCmute(real);
             SettingsSwitchSubTab(rec.Tab);
             yield return 0.6f;
             var start = CompetitiveUI.CurrentChatOverlayMode();
@@ -748,41 +887,93 @@ namespace CompetitiveRounds
             foreach (var m in new[] { CompetitiveUI.ChatOverlayMode.Normal, CompetitiveUI.ChatOverlayMode.Pinned })
                 if (m != start) order.Add(m);
             order.Add(start);
-            DrvNote("T5-d the mode found: " + start + "; " + order.Count + " clicks, each a change, the last back to it");
+            DrvNote("T5-d the mode found: " + start + "; " + order.Count + " clicks, each a change, the last back to it; then the three early returns");
             foreach (var target in order)
             {
-                int i = Array.IndexOf(rec.Ids, target.ToString());
-                ClickHandler ch = i >= 0 && rec.Opts[i] != null ? rec.Opts[i].GetComponent<ClickHandler>() : null;
-                if (ch == null || ch.onClick == null)
+                ClickHandler ch = DrvChatOption(rec, target);
+                if (ch == null)
                 {
                     DrvBad("T5-d the SIgChat option " + target + " has no click handler");
                     yield break;
                 }
                 var from = CompetitiveUI.CurrentChatOverlayMode();
-                int want = target == CompetitiveUI.ChatOverlayMode.Muted ? 1 : 0;
-                // One call stack: clock, record, the click, record, clock.
+                int prev = DrvMarker(from), want = DrvMarker(target);
+                object planted = prev;
+                var seat = DrvStubPlayer(planted);
+                int fc;
+                // One call stack: clock, the click on the stub seat, clock, read.
                 float t0 = (float)clock.GetValue(null);
-                int c0 = CompetitiveUI.chatMutePublishCalls, w0 = CompetitiveUI.chatMutePublishLastWant;
-                ch.onClick();
-                int c1 = CompetitiveUI.chatMutePublishCalls, w1 = CompetitiveUI.chatMutePublishLastWant;
+                string threw = DrvWithStubSeat(true, seat, () => ch.onClick(), out fc);
                 float t1 = (float)clock.GetValue(null);
+                object got = DrvCmute(seat);
                 var now = CompetitiveUI.CurrentChatOverlayMode();
                 string step = "T5-d " + from + " -> " + target + ": ";
-                string seen = "in the click's call stack the publisher ran " + (c1 - c0) + " time(s) and recorded marker "
-                    + w1 + " (" + w0 + " before the click); the reconciler clock " + (t1 == t0 ? "did not move" : "MOVED");
+                string seen = "cr_cmute read from the stub seat when the click returned: " + DrvShow(got) + " (planted " + prev
+                    + (ReferenceEquals(got, planted) ? ", the same object" : "") + "); the reconciler clock "
+                    + (t1 == t0 ? "did not move" : "MOVED") + DrvThrew(threw, fc, fcLive);
                 if (now != target) DrvBad(step + "the click did not reach the writer (the mode is " + now + ")");
                 else if (t1 != t0) DrvBad(step + seen + " - a reconciler tick ran inside the click");
-                else if (c1 - c0 == 1 && w1 == want) DrvOk(step + seen + " = 1 run, marker " + want);
-                else DrvBad(step + seen + ", want 1 run and marker " + want);
+                else if (threw.Length > 0 || (fcLive && fc != 0)) DrvBad(step + seen + " - the click threw");
+                else if (prev != want && got is int && (int)got == want)
+                    DrvOk(step + seen + " = the new marker " + want + ", published in the click's call stack");
+                else if (prev == want && ReferenceEquals(got, planted))
+                    DrvOk(step + seen + " - the marker does not change (" + want + ") and the publisher's unchanged-value return left it untouched");
+                else DrvBad(step + seen + ", want " + (prev == want ? "the planted " + prev + " untouched" : "the new marker " + want));
                 yield return 2.5f;
-                float t2 = (float)clock.GetValue(null);
-                int c2 = CompetitiveUI.chatMutePublishCalls, w2 = CompetitiveUI.chatMutePublishLastWant;
-                string after = c1 != c0 ? ""
-                    : w1 != want && w2 == want ? " - the reconciler repaired the missing publish, which is NOT a pass"
-                    : " - only the reconciler published, which is NOT a pass";
-                DrvNote(step + "2.5 s later the reconciler clock " + (t2 != t1 ? "moved" : "did not move") + ", "
-                    + (c2 - c1) + " more publisher run(s), recorded marker " + w2 + after);
+                object before = DrvCmute(seat);
+                int fc2;
+                string threw2 = DrvWithStubSeat(true, seat, () => CompetitiveUI.PublishChatMuteState(), out fc2);
+                object after = DrvCmute(seat);
+                string what = ReferenceEquals(before, after) ? " - nothing to repair"
+                    : after is int && (int)after == want ? " - it REPAIRED a publish the click did not make, which is NOT a pass"
+                    : "";
+                DrvNote(step + "2.5 s later the reconciler's publish (its body, run under the same stub seat) found " + DrvShow(before)
+                    + " and left " + DrvShow(after) + what + DrvThrew(threw2, fc2, fcLive));
             }
+            // The early returns: none may publish or throw.
+            var cur = CompetitiveUI.CurrentChatOverlayMode();
+            yield return DrvT5dEarly("unchanged mode (a click on the lit option " + cur + ")", rec, cur, true, true, fcLive);
+            var away = cur != CompetitiveUI.ChatOverlayMode.Muted ? CompetitiveUI.ChatOverlayMode.Muted : CompetitiveUI.ChatOverlayMode.Normal;
+            yield return DrvT5dEarly("no room (InRoom false)", rec, away, false, true, fcLive);
+            yield return DrvT5dEarly("no local player (LocalPlayer null)", rec, start, true, false, fcLive);
+            object real1 = DrvCmute(Photon.Pun.PhotonNetwork.LocalPlayer);
+            if (ReferenceEquals(Photon.Pun.PhotonNetwork.LocalPlayer, real) && ReferenceEquals(real1, real0))
+                DrvOk("T5-d the seat's own local player is in place and its cr_cmute untouched (" + DrvShow(real0) + ")");
+            else DrvBad("T5-d the seat's own local player " + (ReferenceEquals(Photon.Pun.PhotonNetwork.LocalPlayer, real) ? "is in place" : "was NOT put back")
+                + "; its cr_cmute " + DrvShow(real0) + " -> " + DrvShow(real1));
+            if (CompetitiveUI.CurrentChatOverlayMode() != start) DrvBad("T5-d the mode found (" + start + ") was not put back: " + CompetitiveUI.CurrentChatOverlayMode());
+        }
+
+        /// <summary>One early return of the chat-mute publish (T5-d): a click on
+        /// target with the stub seat in the given state. The planted value
+        /// must be the same object when the click returns, and the click must
+        /// not throw; with no local player there is no table to plant, so the
+        /// click is judged by what it threw (and the seat's own player by
+        /// DriveT5d's last check).</summary>
+        private static IEnumerator DrvT5dEarly(string what, SettingsRowRec rec, CompetitiveUI.ChatOverlayMode target, bool joined,
+            bool withPlayer, bool fcLive)
+        {
+            ClickHandler ch = DrvChatOption(rec, target);
+            if (ch == null)
+            {
+                DrvBad("T5-d early return, " + what + ": the SIgChat option " + target + " has no click handler");
+                yield break;
+            }
+            var from = CompetitiveUI.CurrentChatOverlayMode();
+            object planted = DrvMarker(from);
+            var seat = withPlayer ? DrvStubPlayer(planted) : null;
+            int fc;
+            string threw = DrvWithStubSeat(joined, seat, () => ch.onClick(), out fc);
+            object got = DrvCmute(seat);
+            var now = CompetitiveUI.CurrentChatOverlayMode();
+            string step = "T5-d early return, " + what + ", " + from + " -> " + target + ": ";
+            string seen = (withPlayer ? "cr_cmute " + DrvShow(got) + " (planted " + DrvShow(planted) + (ReferenceEquals(got, planted) ? ", the same object" : "") + ")"
+                : "no local player, so no table") + DrvThrew(threw, fc, fcLive);
+            if (now != target) DrvBad(step + "the mode is " + now + " after the click, want " + target);
+            else if (threw.Length > 0 || (fcLive && fc != 0)) DrvBad(step + seen + " - the click threw");
+            else if (withPlayer && !ReferenceEquals(got, planted)) DrvBad(step + seen + " - the property was written");
+            else DrvOk(step + seen + " - nothing published, nothing thrown");
+            yield return 0.4f;
         }
 
         // ---------------------------------------------------------------
@@ -1761,10 +1952,23 @@ namespace CompetitiveRounds
                 string hiddenWhy = confirmShown ? null : DrvWhyHidden(setResetConfirmBtn) + "; at the arm click " + (confirmAtArm ? "shown" : "hidden")
                     + "; open " + isOpen + ", built " + pageBuilt + ", tab " + currentTab + ", sub-tab " + settingsSubTab
                     + ", armed now " + settingsResetArmed + ", builds since " + (settingsBuildGen - g0);
-                int pub0 = CompetitiveUI.chatMutePublishCalls;
-                bool confirmClicked = DrvClick(setResetConfirmBtn);
+                // Round-3 L5: the chatmail tab's SIgChat write is read on the
+                // stub seat (DriveT5d) - cr_cmute planted at the marker of the
+                // mode Confirm leaves, read the moment Confirm returns.
+                Photon.Realtime.Player seat = null;
+                object seatPlanted = null;
+                string seatWhy = home == "chatmail" ? DrvStubSeatReady() : "not this tab", seatThrew = "";
+                int seatFc = 0;
+                bool confirmClicked = false;
+                if (home == "chatmail" && seatWhy == null)
+                {
+                    seatPlanted = DrvMarker(CompetitiveUI.CurrentChatOverlayMode());
+                    seat = DrvStubPlayer(seatPlanted);
+                    seatThrew = DrvWithStubSeat(true, seat, () => { confirmClicked = DrvClick(setResetConfirmBtn); }, out seatFc);
+                }
+                else confirmClicked = DrvClick(setResetConfirmBtn);
                 var mode = MusicEngine.Mode;
-                int pubRuns = CompetitiveUI.chatMutePublishCalls - pub0, pubWant = CompetitiveUI.chatMutePublishLastWant;
+                object seatGot = DrvCmute(seat);
                 var gates = new List<string>();
                 foreach (var id in DrvPerfIds) gates.Add(id + "=" + (PerfGate.Check(DrvPerfEntry(id)) ? "on" : "off"));
                 yield return DrvSettle(1.0f);
@@ -1812,8 +2016,13 @@ namespace CompetitiveRounds
                 switch (home)
                 {
                     case "chatmail":
-                        if (pubRuns >= 1 && pubWant == 0) DrvOk(tag + "the SIgChat write published marker 0 in Confirm's own call stack (" + pubRuns + " run)");
-                        else DrvBad(tag + "the chat-mute publisher ran " + pubRuns + " time(s) in Confirm's call stack, marker " + pubWant + "; want at least 1 run, marker 0");
+                        if (seatWhy != null) DrvBad(tag + "no stub seat for the cr_cmute read: " + seatWhy);
+                        else if (!(seatPlanted is int) || (int)seatPlanted != 1)
+                            DrvBad(tag + "the chat mode before Confirm carried marker " + DrvShow(seatPlanted) + ", want 1 (Muted, set by hand above), so the read cannot show a publish");
+                        else if (seatThrew.Length > 0) DrvBad(tag + "Confirm THREW " + seatThrew + " with the stub seat in place");
+                        else if (seatGot is int && (int)seatGot == 0)
+                            DrvOk(tag + "the SIgChat write published cr_cmute 0 in Confirm's own call stack: the stub seat's property 1 -> 0");
+                        else DrvBad(tag + "the stub seat's cr_cmute when Confirm returned is " + DrvShow(seatGot) + ", want 0 (planted 1)");
                         break;
                     case "sound":
                         if (mode == MusicEngine.MusicMode.Vanilla) DrvOk(tag + "the music engine is in " + mode + " in Confirm's own call stack (SMenuMus vanilla)");

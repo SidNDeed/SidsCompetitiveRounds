@@ -4324,17 +4324,6 @@ namespace CompetitiveRounds
         // meaning, so eventual consistency is fine and it does not need the
         // pre-join staging discipline (#287) that cr_pois2 / cr_grow2 do.
         internal const string CHAT_MUTE_PROP = "cr_cmute";
-
-        /// <summary>Item 13 round 2 (design T5-d): the publisher's invocation
-        /// record - how many times PublishChatMuteState ran and the marker
-        /// value it computed on its latest run - written at its entry, before
-        /// its room check. A settings test reads it in the call stack of the
-        /// click that changed the mode. It is not the marker: in a room, PUN
-        /// applies a player property to the seat that set it only on the
-        /// server's echo (learning #428), so no same-stack read of cr_cmute
-        /// exists, and outside an online room nothing is published.</summary>
-        internal static int chatMutePublishCalls;
-        internal static int chatMutePublishLastWant = -1;
         private static string chatMuteLine = "";
         private static float chatMuteLineCachedAt = -999f;
         // The room the cached line describes. Part of the cache KEY, not a
@@ -4355,8 +4344,6 @@ namespace CompetitiveRounds
         /// call from anywhere; a no-op outside an online room.</summary>
         public static void PublishChatMuteState()
         {
-            chatMutePublishCalls++;
-            try { chatMutePublishLastWant = ChatMuted ? 1 : 0; } catch { }
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
