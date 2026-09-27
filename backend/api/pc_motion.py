@@ -656,3 +656,345 @@ def derive_preview_gif(spec, labels, still, container, *, deadline=None, clock=_
     return gif_ladder(
         lambda: _gif_at("card", spec, labels, still, container, deadline, clock, render),
         lambda: _gif_at("tile", spec, labels, still, container, deadline, clock, render))
+
+
+# -- the pool, admission and the cache (S4.6, S4.7; H1, L8) ---------------------
+import collections as _pcm_collections
+
+# ONE worker for every motion derivation: separate from pc_portrait's two
+# static render workers and from the decode pool above, so animation work
+# never holds a static face or a charged upload behind it (S4.6, E4.9).
+MOTION_POOL = _futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pc-motion")
+JOBS_MAX = 16                        # pending or running, every address together
+JOBS_PER_ADDRESS = 2                 # pending or running, per trusted client address (H1)
+FAILED_HOLD_S = 600.0                # a key whose job failed answers 503 this long; memory only
+MOTION_CACHE_CAP_BYTES = 1 << 30     # the motion cache's cap per box (S4.7)
+
+
+class MotionBusy(Exception):
+    """Admission refused (S4.6, H1): the answer is 503 motion_busy at once and
+    nothing was enqueued."""
+
+
+class MotionScheduler:
+    """S4.6 admission, amended by H1, on the event loop.
+
+    A job is keyed by its cache key and by the limiter's trusted client
+    address of the request that caused it (request.client.host, the rate
+    gate's own identity). Admission: a key already in flight is JOINED --
+    same future, no permit taken; otherwise the job needs a free slot under
+    BOTH caps -- at most JOBS_MAX pending-or-running in all, at most
+    JOBS_PER_ADDRESS per address -- or the caller gets MotionBusy and nothing
+    is enqueued. The address's permit is held until the job itself exits (a
+    request that stops waiting releases nothing). Jobs wait in one queue per
+    address; the single pump serves the addresses round-robin, putting an
+    address that still has work BEHIND every address already waiting, so a
+    refilling address can never overtake one that was waiting (H1).
+
+    `run` is an async callable; its return value is the future's result. An
+    exception (the deadline, a render error) marks the key failed for
+    FAILED_HOLD_S -- in memory only, never under an immutable URL -- and the
+    future's result is ("failed", name)."""
+
+    def __init__(self, jobs_max=JOBS_MAX, per_address=JOBS_PER_ADDRESS, clock=_time.monotonic):
+        self.jobs_max = int(jobs_max)
+        self.per_address = int(per_address)
+        self.clock = clock
+        self._inflight = {}                       # key -> future
+        self._held = {}                           # address -> permits held
+        self._queues = {}                         # address -> deque of (key, run, future)
+        self._ring = _pcm_collections.deque()     # addresses with a waiting job, in serving order
+        self._total = 0
+        self._failed = {}                         # key -> clock value its 503 ends at
+        self._pump = None
+        self.started = []                         # (key, address) in start order, the last 64
+
+    def held(self, address):
+        return self._held.get(address, 0)
+
+    def total(self):
+        return self._total
+
+    def failed_for(self, key):
+        """Seconds key still answers 503 after its job failed, else 0."""
+        until = self._failed.get(key)
+        if until is None:
+            return 0.0
+        left = until - self.clock()
+        if left <= 0:
+            self._failed.pop(key, None)
+            return 0.0
+        return left
+
+    def submit(self, key, address, run):
+        fut = self._inflight.get(key)
+        if fut is not None:
+            return fut                            # single flight: a join takes no permit
+        if self._total >= self.jobs_max or self._held.get(address, 0) >= self.per_address:
+            raise MotionBusy()
+        loop = _asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._inflight[key] = fut
+        self._held[address] = self._held.get(address, 0) + 1
+        self._total += 1
+        queue = self._queues.get(address)
+        if queue is None:
+            queue = self._queues[address] = _pcm_collections.deque()
+            self._ring.append(address)
+        queue.append((key, run, fut))
+        if self._pump is None or self._pump.done():
+            self._pump = loop.create_task(self._drain())
+        return fut
+
+    async def _drain(self):
+        while self._ring:
+            address = self._ring.popleft()
+            queue = self._queues[address]
+            key, run, fut = queue.popleft()
+            if queue:
+                self._ring.append(address)        # behind every address already waiting (H1)
+            else:
+                del self._queues[address]
+            self.started.append((key, address))
+            del self.started[:-64]
+            try:
+                outcome = await run()
+            except _asyncio.CancelledError:
+                self._finish(address, key, fut, ("failed", "cancelled"))
+                raise
+            except Exception as ex:
+                now = self.clock()
+                if len(self._failed) >= 1024:
+                    self._failed = {k: t for k, t in self._failed.items() if t > now}
+                self._failed[key] = now + FAILED_HOLD_S
+                outcome = ("failed", type(ex).__name__)
+            self._finish(address, key, fut, outcome)
+
+    def _finish(self, address, key, fut, outcome):
+        self._inflight.pop(key, None)
+        self._total -= 1
+        left = self._held.get(address, 0) - 1
+        if left > 0:
+            self._held[address] = left
+        else:
+            self._held.pop(address, None)
+        if not fut.done():
+            fut.set_result(outcome)
+
+
+async def await_job(fut, timeout):
+    """A job's outcome, or None when it is not done within `timeout` seconds.
+    The wait is shielded: a request that stops waiting never cancels the
+    shared job, and the job keeps its address permit until it exits (H1)."""
+    try:
+        return await _asyncio.wait_for(_asyncio.shield(fut), timeout)
+    except _asyncio.TimeoutError:
+        return None
+
+
+async def in_motion_pool(fn, *args):
+    """fn(*args) on the ONE motion worker."""
+    return await _asyncio.get_running_loop().run_in_executor(MOTION_POOL, fn, *args)
+
+
+class KeyMemo:
+    """A bounded in-memory set of keys, oldest out first. TOO_LARGE holds
+    the atlas keys whose encoded output was over its cap: that is
+    deterministic from the rev in the key (S4.4), so the key answers 404
+    motion_too_large without deriving again -- from memory only, never a
+    cached file under an immutable URL (S4.10)."""
+
+    def __init__(self, cap=4096):
+        self.cap = int(cap)
+        self._keys = _pcm_collections.OrderedDict()
+        self._lock = _threading.Lock()
+
+    def add(self, key):
+        with self._lock:
+            self._keys[key] = True
+            self._keys.move_to_end(key)
+            while len(self._keys) > self.cap:
+                self._keys.popitem(last=False)
+
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._keys
+
+
+TOO_LARGE = KeyMemo()
+
+
+# Cache keys (S4.7): the atlas route's shape, validated before any read or
+# render; any other shape is a 404 with no cache entry (S4.8 step 1).
+def atlas_key(print_id, rev, locale, size):
+    key = _pcm_portrait.face_key(print_id, rev, locale, size)
+    return None if key is None else "atlas/" + key
+
+
+def job_key(print_id, rev, locale):
+    """The single-flight key of one print atlas job: both sizes."""
+    return "atlas/%s/%s/%s" % (print_id, rev, locale)
+
+
+class MotionCache:
+    """Derived motion files on local disk under its own root (S4.7): a 1 GiB
+    LRU by bytes, the face cache's 7-day age and 1-hour temporary limits,
+    atomic publishes (a temporary, then a rename), and a scan that admits
+    `.png` AND `.gif`. Its own class and NOT the face cache's: that scan is
+    `.png`-only, and pc_face.py -- whose bytes are renderer_fp -- is never
+    edited (S4.1). A cached file is never the authority: every motion route
+    reads the row first (S4.8)."""
+
+    SUFFIXES = (".png", ".gif")
+
+    def __init__(self, root, cap_bytes=MOTION_CACHE_CAP_BYTES):
+        self.root = root
+        self.cap = int(cap_bytes)
+        self._lock = _threading.Lock()
+        self._sizes = {}          # key -> bytes
+        self._clock = 0
+        self._atime = {}          # key -> tick
+        self._seen = {}           # key -> wall clock of the last publish or read
+        self._scanned = False
+        self.evicted = 0          # files the cap removed (T62 reads it)
+
+    def _scan(self):
+        if self._scanned:
+            return
+        self._scanned = True
+        if not _pcm_os.path.isdir(self.root):
+            _pcm_os.makedirs(self.root, exist_ok=True)
+            return
+        for dirpath, _dirs, files in _pcm_os.walk(self.root):
+            for f in files:
+                if not f.endswith(self.SUFFIXES):
+                    continue
+                p = _pcm_os.path.join(dirpath, f)
+                key = _pcm_os.path.relpath(p, self.root).replace(_pcm_os.sep, "/")
+                try:
+                    self._sizes[key] = _pcm_os.path.getsize(p)
+                    self._seen.setdefault(key, _pcm_os.path.getmtime(p))
+                    self._clock += 1
+                    self._atime[key] = self._clock
+                except OSError:
+                    pass
+
+    def path(self, key):
+        return _pcm_os.path.join(self.root, *key.split("/"))
+
+    def keys(self):
+        with self._lock:
+            self._scan()
+            return set(self._sizes)
+
+    def bytes_held(self):
+        with self._lock:
+            self._scan()
+            return sum(self._sizes.values())
+
+    def read(self, key):
+        """Cached bytes or None (touches recency)."""
+        with self._lock:
+            self._scan()
+        try:
+            with open(self.path(key), "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
+        with self._lock:
+            if key in self._sizes:
+                self._clock += 1
+                self._atime[key] = self._clock
+                self._seen[key] = _time.time()
+                self._sizes[key] = len(data)
+        return data
+
+    def publish(self, key, data):
+        """Atomic: a temporary of the whole bytes, then a rename under the
+        lock, so no partial atlas or GIF is ever read."""
+        with self._lock:
+            self._scan()
+        p = self.path(key)
+        _pcm_os.makedirs(_pcm_os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp-%d" % _threading.get_ident()
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            with self._lock:
+                _pcm_os.replace(tmp, p)
+                self._clock += 1
+                self._atime[key] = self._clock
+                self._seen[key] = _time.time()
+                self._sizes[key] = len(data)
+                self._evict_locked()
+        finally:
+            try:
+                _pcm_os.remove(tmp)
+            except OSError:
+                pass
+
+    def _evict_locked(self):
+        total = sum(self._sizes.values())
+        if total <= self.cap:
+            return
+        for key in sorted(self._atime, key=self._atime.get):
+            if total <= self.cap:
+                break
+            if not self._unlink_locked(key):
+                continue
+            total -= self._sizes.pop(key, 0)
+            self._atime.pop(key, None)
+            self._seen.pop(key, None)
+            self.evicted += 1
+
+    def _unlink_locked(self, key):
+        try:
+            _pcm_os.remove(self.path(key))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        return True
+
+    def forget(self, key):
+        with self._lock:
+            if self._unlink_locked(key):
+                self._sizes.pop(key, None)
+                self._atime.pop(key, None)
+                self._seen.pop(key, None)
+
+    def _sweep_temporaries_locked(self, now, max_age_s):
+        gone = 0
+        for dirpath, _dirs, files in _pcm_os.walk(self.root):
+            for f in files:
+                if ".tmp-" not in f:
+                    continue
+                p = _pcm_os.path.join(dirpath, f)
+                try:
+                    if now - _pcm_os.path.getmtime(p) > max_age_s:
+                        _pcm_os.remove(p)
+                        gone += 1
+                except OSError:
+                    pass
+        return gone
+
+    def expire(self, max_age_s=None, now=None, tmp_max_age_s=None):
+        """Entries neither published nor read for the face cache's 7 days go,
+        and publish temporaries older than its hour (S4.7). Returns how many
+        files went."""
+        max_age_s = _pcm_portrait.FACE_CACHE_MAX_AGE_S if max_age_s is None else max_age_s
+        tmp_max_age_s = _pcm_portrait.FACE_CACHE_TMP_MAX_AGE_S if tmp_max_age_s is None else tmp_max_age_s
+        now = _time.time() if now is None else now
+        with self._lock:
+            self._scan()
+            stale = [k for k, t in self._seen.items() if now - t > max_age_s]
+            gone = 0
+            for key in stale:
+                if not self._unlink_locked(key):
+                    continue
+                self._sizes.pop(key, None)
+                self._atime.pop(key, None)
+                self._seen.pop(key, None)
+                gone += 1
+            gone += self._sweep_temporaries_locked(now, tmp_max_age_s)
+        return gone
