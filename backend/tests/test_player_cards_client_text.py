@@ -295,6 +295,38 @@ def test_the_compose_freezes_and_the_busy_retry_is_fenced_while_an_attempt_is_pe
     assert "string key = PcTradeRules.TermsKey(composeTo, give, get);" in src
 
 
+def test_the_trades_cache_takes_an_answer_only_through_the_ordering_fence():
+    """Card trading round 2, TC-L1. Both trades reads take a dispatch number
+    when they are SENT (after the throttle and in-flight returns, which send
+    nothing), and each cache slot is written only when
+    PcTradeRules.TradeCacheFence (executed by the rules harness) takes the
+    answer, so a late full answer cannot put a newer summary back. An answer
+    kept out moves no FetchedAt stamp, and one kept-out full answer is asked
+    again, never a chain of them."""
+    api = API.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    summary = _span(api, "public static void PcTradeSummary(", end)
+    full = _span(api, "public static void PcTrades(string steamId, bool force, Action<bool, string> callback)", end)
+    dispatch = "int order = pcTradeFence.Dispatch();"
+    assert summary.index("pcTradeSummaryInFlight = true;") < summary.index(dispatch)
+    assert full.index("pcTradesInFlight = true;") < full.index(dispatch)
+    assert ("if (pcTradeFence.TakeSummary(order)) { CachedPcTradeSummary = s; "
+            "PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }") in summary
+    fenced = _span(full, "if (pcTradeFence.TakeFull(order))", "keptOut = true;")
+    for write in ("CachedPcTrades = f;", "PcTradesFetchedAt = Time.realtimeSinceStartup;",
+                  "CachedPcTradeSummary = f;", "PcTradeSummaryFetchedAt = PcTradesFetchedAt;"):
+        assert write in fenced, write
+    # the two slots are written nowhere else but the clear
+    assert api.count("CachedPcTradeSummary = ") == 3 and api.count("CachedPcTrades = ") == 2
+    assert "CachedPcTradeSummary = null; CachedPcTrades = null;" in api
+    clear = _span(api, "private static void ClearPcTradeCaches()", end)
+    assert "pcTradeFence.Clear(); pcTradesStaleReask = false;" in clear
+    # one re-ask per kept-out answer: the re-ask's own answer is marked
+    assert "bool reask = pcTradesStaleReask; pcTradesStaleReask = false;" in full
+    assert "if (again || (keptOut && !reask))" in full
+    assert "pcTradesStaleReask = keptOut && !reask;" in full
+
+
 def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():
     """The three repairs behind the 2026-09-12 binder screenshot, each on its
     own so deleting any one of them fails here: the face slot asks for no

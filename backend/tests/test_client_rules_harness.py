@@ -430,9 +430,9 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[pctrade\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The count at the last commit that added cases (round 2, TC-M1): a floor
+    # The count at the last commit that added cases (round 2, TC-L1): a floor
     # far below it would be a gate that cannot fail (#342).
-    assert run >= 25, "the PcTradeRules suite shrank to %d cases" % run
+    assert run >= 28, "the PcTradeRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -462,6 +462,10 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     "busy retry: an unchanged compose is sent, and only once",
     "busy retry: an identity edge drops any retry; an action retry has no compose fence",
     "the terms key sorts each side and keeps the target and the sides apart",
+    # the trades cache's ordering fence (round 2, TC-L1)
+    "cache fence: a late full answer does not overwrite a newer summary (the round-1 scenario)",
+    "cache fence: every landing order of four reads ends on the newest and never goes back",
+    "cache fence: a newer full answer is taken, answers in order are all taken, and a clear forgets",
 ])
 def test_the_pc_trade_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "pctrade")

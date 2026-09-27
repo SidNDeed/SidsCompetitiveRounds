@@ -4249,6 +4249,13 @@ namespace CompetitiveRounds
         public static float PcTradeSummaryFetchedAt = -1f, PcTradesFetchedAt = -1f;
         private static bool pcTradeSummaryInFlight, pcTradesInFlight, pcTradesForceAgain, pcCollOfInFlight;
         private static float pcTradeSummaryAttemptAt = -100f, pcTradesAttemptAt = -100f;
+        // TC-L1: the ordering fence over the two slots. Every trades read takes
+        // a dispatch number when it is SENT, and a slot never takes an answer
+        // sent before the one it holds (PcTradeRules.TradeCacheFence). A full
+        // answer the fence keeps out is asked again once; the re-ask's own
+        // answer is never re-asked, so the fence cannot start a chain of reads.
+        private static readonly PcTradeRules.TradeCacheFence pcTradeFence = new PcTradeRules.TradeCacheFence();
+        private static bool pcTradesStaleReask;
 
         /// <summary>Called at both Player Cards cache-clearing edges (identity
         /// change, consent revoke), after the epoch has advanced.</summary>
@@ -4259,6 +4266,7 @@ namespace CompetitiveRounds
             PcTradeSummaryFetchedAt = -1f; PcTradesFetchedAt = -1f;
             pcTradeSummaryAttemptAt = -100f; pcTradesAttemptAt = -100f;
             pcTradesForceAgain = false;
+            pcTradeFence.Clear(); pcTradesStaleReask = false;
         }
 
         /// <summary>GET /pc/trades?view=summary, HMAC over
@@ -4270,6 +4278,7 @@ namespace CompetitiveRounds
             if (!force && Time.realtimeSinceStartup - pcTradeSummaryAttemptAt < 10f) { callback?.Invoke(CachedPcTradeSummary != null, null); return; }
             if (pcTradeSummaryInFlight) { callback?.Invoke(false, "in-flight"); return; }
             pcTradeSummaryInFlight = true; pcTradeSummaryAttemptAt = Time.realtimeSinceStartup;
+            int order = pcTradeFence.Dispatch();
             string url = PcUrl("trades", steamId, PcTradeRules.CanonRead(steamId, "trades", "summary"), "view=summary");
             int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
@@ -4284,7 +4293,11 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     var s = ParsePcTradeSummary(resp);
-                    if (s != null) { CachedPcTradeSummary = s; PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }
+                    if (s != null)
+                    {
+                        if (pcTradeFence.TakeSummary(order)) { CachedPcTradeSummary = s; PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }
+                        else Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=summary sent=" + order + " held=" + pcTradeFence.Summary);
+                    }
                     else { PcTradeSummaryError = "parse"; ok = false; resp = "parse"; }
                 }
                 else { PcTradeSummaryError = resp; Plugin.Log.LogInfo($"[PC] trade summary failed: {PcShort(resp)}"); }
@@ -4309,6 +4322,8 @@ namespace CompetitiveRounds
                 return;
             }
             pcTradesInFlight = true; pcTradesAttemptAt = Time.realtimeSinceStartup;
+            int order = pcTradeFence.Dispatch();
+            bool reask = pcTradesStaleReask; pcTradesStaleReask = false;
             string url = PcUrl("trades", steamId, PcTradeRules.CanonRead(steamId, "trades", "full"), "view=full");
             int epoch = _pcCacheEpoch;
             // The offers' prints carry faces keyed by the locale the read was
@@ -4332,23 +4347,38 @@ namespace CompetitiveRounds
                     PcTrades(who, true, callback);
                     return;
                 }
-                if (again)
-                {
-                    pcTradesAttemptAt = -100f;
-                    try { Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who)); } catch { }
-                }
+                bool keptOut = false;
                 if (ok)
                 {
                     var f = ParsePcTradeFull(resp);
                     if (f != null)
                     {
-                        CachedPcTrades = f; PcTradesFetchedAt = Time.realtimeSinceStartup; PcTradesError = null;
-                        // the full read carries every summary field: the summary cache follows it
-                        CachedPcTradeSummary = f; PcTradeSummaryFetchedAt = PcTradesFetchedAt; PcTradeSummaryError = null;
+                        if (pcTradeFence.TakeFull(order))
+                        {
+                            CachedPcTrades = f; PcTradesFetchedAt = Time.realtimeSinceStartup; PcTradesError = null;
+                            // the full read carries every summary field: the summary cache follows it
+                            CachedPcTradeSummary = f; PcTradeSummaryFetchedAt = PcTradesFetchedAt; PcTradeSummaryError = null;
+                        }
+                        else
+                        {
+                            // a newer answer is already held: taking this one would put the cache back
+                            keptOut = true;
+                            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=full sent=" + order + " held=" + pcTradeFence.Summary + (reask ? " reask=1" : ""));
+                        }
                     }
                     else { PcTradesError = "parse"; ok = false; resp = "parse"; }
                 }
                 else { PcTradesError = resp; Plugin.Log.LogInfo($"[PC] trades read failed: {PcShort(resp)}"); }
+                // A forced read that came in while this one was out, or ONE re-ask
+                // after an answer the fence kept out (the full slot is then older
+                // than the summary): re-issued next frame, once this answer has
+                // committed.
+                if (again || (keptOut && !reask))
+                {
+                    pcTradesAttemptAt = -100f;
+                    pcTradesStaleReask = keptOut && !reask;
+                    try { Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who)); } catch { }
+                }
                 try { NativeUI.MarkDirty(); } catch { }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trades callback threw: {cex.Message}"); }
             }, detailedErrors: true, sessionAware: true));

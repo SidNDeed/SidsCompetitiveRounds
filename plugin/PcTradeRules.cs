@@ -270,6 +270,60 @@ namespace CompetitiveRounds
             return armedTradeId != null && armedTradeId == tradeId && now - armedAt <= ArmWindowSeconds;
         }
 
+        // -- the shared trades cache's ordering fence (TC-L1) --------------------
+
+        /// <summary>The summary and full reads share one cache: a full answer
+        /// carries every summary field, so it refreshes the summary slot too.
+        /// Each read takes a dispatch number when it is SENT, and a slot never
+        /// takes an answer sent before the answer it already holds, so a late
+        /// full answer cannot overwrite a newer summary (a closed trade shown
+        /// open again). Ordered by dispatch, not by the server_now both views
+        /// carry: a fence keyed on the server's clock refuses every answer for
+        /// as long as the clock that set the slot runs ahead of the one
+        /// answering now (a step back, or two boxes answering), while the next
+        /// read sent always outranks everything held, so this fence never
+        /// freezes the cache (#276). ApiClient writes a slot only when Take*
+        /// says so, and an answer kept out moves no FetchedAt stamp.</summary>
+        internal sealed class TradeCacheFence
+        {
+            private int sent;
+
+            /// <summary>The dispatch number of the answer the summary slot holds (0: none).</summary>
+            internal int Summary { get; private set; }
+
+            /// <summary>The dispatch number of the answer the full slot holds (0: none).</summary>
+            internal int Full { get; private set; }
+
+            /// <summary>A read being sent takes the next number.</summary>
+            internal int Dispatch() { return ++sent; }
+
+            /// <summary>Newer (or the same) dispatch wins.</summary>
+            internal static bool NotOlder(int incoming, int held) { return incoming >= held; }
+
+            /// <summary>A summary answer writes the summary slot only.</summary>
+            internal bool TakeSummary(int order)
+            {
+                if (!NotOlder(order, Summary)) return false;
+                Summary = order;
+                return true;
+            }
+
+            /// <summary>A full answer writes BOTH slots, so it must be no older than either.</summary>
+            internal bool TakeFull(int order)
+            {
+                if (!NotOlder(order, Summary) || !NotOlder(order, Full)) return false;
+                Summary = order;
+                Full = order;
+                return true;
+            }
+
+            /// <summary>The caches were emptied (an identity edge, a consent
+            /// revoke): nothing is held. An answer sent before the edge never
+            /// reaches the fence - ApiClient's epoch check drops it first - and
+            /// the numbers keep counting.</summary>
+            internal void Clear() { Summary = 0; Full = 0; }
+        }
+
         // -- new proposals (V8 6.4) --------------------------------------------
 
         /// <summary>The received ids absent from the previous summary, in the
@@ -560,7 +614,88 @@ namespace CompetitiveRounds
                       order && sorted && sides && target,
                       "order=" + order + " sorted=" + sorted + " sides=" + sides + " target=" + target);
             }
+            // 14. The trades cache's ordering fence (TC-L1). Each read takes its
+            //     dispatch number when it is sent; the slots are modelled as the
+            //     answer each holds, written exactly as ApiClient writes them (a
+            //     full answer writes both).
+            {
+                // the round-1 report's scenario: full A is sent, the trade closes,
+                // summary B is sent; B lands first, then A lands late
+                var f = new TradeCacheFence();
+                int a = f.Dispatch(), b = f.Dispatch();
+                string summary = null, full = null;
+                if (f.TakeSummary(b)) summary = "closed";
+                bool tookA = f.TakeFull(a);
+                if (tookA) { full = "open"; summary = "open"; }
+                Check(r, "cache fence: a late full answer does not overwrite a newer summary (the round-1 scenario)",
+                      !tookA && summary == "closed" && full == null,
+                      "took_late_full=" + tookA + " summary=" + (summary ?? "-") + " full=" + (full ?? "-"));
+                // every landing order of four reads, S1 F2 S3 F4, with the trade
+                // open in the first two and closed in the last two: the summary
+                // slot ends on the newest answer, no slot goes back to an older
+                // answer, and once the trade shows closed it never shows open
+                int orders = 0, bad = 0;
+                foreach (var landing in Permutations(new[] { 1, 2, 3, 4 }))
+                {
+                    orders++;
+                    var g = new TradeCacheFence();
+                    for (int i = 0; i < 4; i++) g.Dispatch();
+                    int sumHeld = 0, fullHeld = 0;
+                    bool closedShown = false, ok = true;
+                    foreach (int n in landing)
+                    {
+                        bool isFull = n % 2 == 0;
+                        if (!(isFull ? g.TakeFull(n) : g.TakeSummary(n))) continue;
+                        if (n < sumHeld || (isFull && n < fullHeld)) ok = false;
+                        sumHeld = n;
+                        if (isFull) fullHeld = n;
+                        bool open = n <= 2;
+                        if (open && closedShown) ok = false;
+                        if (!open) closedShown = true;
+                    }
+                    if (sumHeld != 4) ok = false;
+                    if (!ok) bad++;
+                }
+                Check(r, "cache fence: every landing order of four reads ends on the newest and never goes back",
+                      orders == 24 && bad == 0, "orders=" + orders + " bad=" + bad);
+                // the controls: a full answer genuinely newer than the summary is
+                // taken (the fence orders answers, it does not refuse full reads),
+                // answers that land in the order they were sent are all taken, and
+                // a clear forgets what was held while the numbers keep counting
+                var h = new TradeCacheFence();
+                int s1 = h.Dispatch(), f2 = h.Dispatch();
+                bool newer = h.TakeSummary(s1) && h.TakeFull(f2) && h.Summary == f2 && h.Full == f2;
+                var k = new TradeCacheFence();
+                int f1 = k.Dispatch();
+                bool first = k.TakeFull(f1);
+                int s2 = k.Dispatch();
+                bool second = k.TakeSummary(s2);
+                bool inOrder = first && second && k.Summary == s2 && k.Full == f1;
+                k.Clear();
+                bool cleared = k.Summary == 0 && k.Full == 0 && k.Dispatch() == 3;
+                Check(r, "cache fence: a newer full answer is taken, answers in order are all taken, and a clear forgets",
+                      newer && inOrder && cleared, "newer=" + newer + " in_order=" + inOrder + " cleared=" + cleared);
+            }
             return r;
+        }
+
+        /// <summary>Every ordering of `items` (the cache fence's landing orders).</summary>
+        private static List<int[]> Permutations(int[] items)
+        {
+            var outp = new List<int[]>();
+            Permute((int[])items.Clone(), 0, outp);
+            return outp;
+        }
+
+        private static void Permute(int[] a, int k, List<int[]> outp)
+        {
+            if (k == a.Length) { outp.Add((int[])a.Clone()); return; }
+            for (int i = k; i < a.Length; i++)
+            {
+                int t = a[k]; a[k] = a[i]; a[i] = t;
+                Permute(a, k + 1, outp);
+                t = a[k]; a[k] = a[i]; a[i] = t;
+            }
         }
 
         private static void Check(SelfTestResult r, string name, bool ok, string got)
