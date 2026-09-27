@@ -4010,6 +4010,145 @@ namespace CompetitiveRounds
             }));
         }
 
+        // -- Dance cards (design S2.6, S2.10, S4.8, S5.2) -------------------------
+        /// <summary>The one content type the motion writer accepts, compared by
+        /// equality after trimming and lower-casing (finding M2).</summary>
+        public const string PC_MOTION_CONTENT_TYPE = "application/x-scr-motion";
+        public const int PC_MOTION_CARD_MAX_BYTES = 12 * 1024 * 1024;   // design S4.5: the card atlas cap
+        public const int PC_MOTION_TILE_MAX_BYTES = 6 * 1024 * 1024;    // and the tile atlas cap
+
+        /// <summary>The motion writer (S2.6): the container rides as the raw
+        /// body; the signed line carries the body's own SHA-256 and the still
+        /// descriptor the motion binds to, the same descriptor the still went up
+        /// with. Only the dance capture calls it, after the still's 200.</summary>
+        public static void PcMotionUpload(string steamId, string nonce, string descriptor, byte[] container, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null || container == null || container.Length == 0) { callback?.Invoke(false, "not ready"); return; }
+            string sha;
+            using (var h = SHA256.Create()) sha = BitConverter.ToString(h.ComputeHash(container)).Replace("-", "").ToLowerInvariant();
+            string url = PcUrl("portrait/motion", steamId, $"pcmotion:{steamId}:{nonce}:{sha}:{descriptor}",
+                $"nonce={nonce}&descriptor={UnityWebRequest.EscapeURL(descriptor)}");
+            Plugin.Instance.StartCoroutine(PostBytes(url, container, PC_MOTION_CONTENT_TYPE, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] motion upload bytes={container.Length} ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] motion callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>The dance the player's card performs (S2.10): `itemId` is the
+        /// shop item's id, 0 for none. On success the cached /pc/me takes the
+        /// answered item at once; the caller re-reads /pc/me for the sku and the
+        /// motion state.</summary>
+        public static void PcDanceSelect(string steamId, string nonce, long itemId, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null || string.IsNullOrEmpty(steamId) || steamId == "unknown" || itemId < 0) { callback?.Invoke(false, "not ready"); return; }
+            string item = itemId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string url = PcUrl("dance", steamId, $"pcdance:{steamId}:{nonce}:{item}", $"nonce={nonce}&item_id={item}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] dance select item={item} ok={ok} resp={PcShort(resp)}");
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                {
+                    string raw = PcTopLevel(resp, "item_id");
+                    if (raw != null) CachedPcMe.pc_dance_item = PcLong(raw);
+                }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] dance select callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>The per-visit motion read (S5.2): up to eleven print ids in
+        /// one request, answered `{"m":"pid:face_rev:motion_rev:frames:ms|pid:-"}`.
+        /// Public and never cached; the failure text keeps its "HTTP code:" prefix
+        /// and body (PcHttpCode, PcErrorCode, PcRetryAfterRaw read it).</summary>
+        public static void PcMotionRead(IList<string> ids, string locale, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null || ids == null || ids.Count == 0) { callback?.Invoke(false, null); return; }
+            string url = $"{baseUrl}/api/v1/pc-face/motion?ids={string.Join(",", ids)}&locale={Escape(string.IsNullOrEmpty(locale) ? "en" : locale)}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] motion read callback threw: {cex.Message}"); }
+            }, detailedErrors: true));
+        }
+
+        /// <summary>The atlas route of one print (S4.8): immutable per (print,
+        /// motion_rev, locale, size), size "card" or "tile".</summary>
+        public static string PcMotionAtlasUrl(string printId, string motionRev, string locale, string size)
+            => $"{baseUrl}/api/v1/pc-face/motion/{printId}/{motionRev}/{(string.IsNullOrEmpty(locale) ? "en" : locale)}/{size}.png";
+
+        /// <summary>GET an atlas: the byte cap enforced on the way in, and on 200
+        /// an exact Content-Length and the PNG signature, else no bytes. A
+        /// refusal hands back its status and its body ("HTTP code: body"), so
+        /// the caller can read `error` and `retry_after` (503 motion_pending /
+        /// motion_busy / motion_failed, 404 motion_too_large).</summary>
+        public static void FetchMotionAtlas(string url, int cap, Action<bool, byte[], long, string> callback)
+        {
+            if (Plugin.Instance == null) { callback?.Invoke(false, null, 0, null); return; }
+            Plugin.Instance.StartCoroutine(GetMotionAtlas(url, cap, callback));
+        }
+
+        private static IEnumerator GetMotionAtlas(string url, int cap, Action<bool, byte[], long, string> callback)
+        {
+            if (ConsentBlocksRequest(url)) { callback(false, null, 0, "no-consent"); yield break; }
+            NoteAttempt();
+            using (var request = UnityWebRequest.Get(url))
+            {
+                var handler = new CappedDownload(cap);
+                request.downloadHandler = handler;
+                StampVersionHeader(request);
+                request.timeout = 30;
+                yield return request.SendWebRequest();
+
+                if (HandleVersionGate(request)) { callback(false, null, 426, "outdated"); yield break; }
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                byte[] data = null;
+                string err = null;
+                if (handler.Refused) { success = false; err = "over the " + cap + "-byte cap"; }
+                else if (success)
+                {
+                    try
+                    {
+                        data = handler.Taken();
+                        long declared = -1;
+                        string cl = request.GetResponseHeader("Content-Length");
+                        if (string.IsNullOrEmpty(cl) || !long.TryParse(cl.Trim(), out declared)) declared = -1;
+                        bool png = data != null && data.Length >= 8
+                                   && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47
+                                   && data[4] == 0x0D && data[5] == 0x0A && data[6] == 0x1A && data[7] == 0x0A;
+                        if (data == null || data.Length == 0 || data.Length > cap || declared != data.Length || !png) { success = false; data = null; err = "not an exact PNG answer"; }
+                    }
+                    catch { success = false; data = null; err = "unreadable answer"; }
+                }
+                else
+                {
+                    string body = null;
+                    try { var b = handler.Taken(); if (b != null) body = Encoding.UTF8.GetString(b, 0, Math.Min(b.Length, 512)); } catch { }
+                    err = request.responseCode > 0 ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}" : request.error;
+                }
+                callback(success, data, request.responseCode, err);
+            }
+        }
+
+        /// <summary>`retry_after` of a refusal, top-level or inside the detail
+        /// object, uncapped (a day cap's wait runs to midnight); -1 when absent.</summary>
+        public static int PcRetryAfterRaw(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return -1;
+            int b = resp.IndexOf('{');
+            if (b < 0) return -1;
+            string body = resp.Substring(b);
+            string raw = PcTopLevel(body, "retry_after");
+            if (raw == null)
+            {
+                string detail = PcTopLevel(body, "detail");
+                if (detail != null && detail.StartsWith("{", StringComparison.Ordinal)) raw = PcTopLevel(detail, "retry_after");
+            }
+            if (raw == null || raw == "null") return -1;
+            int v = PcIntOr(raw, -1);
+            return v > 0 ? v : -1;
+        }
+
         /// <summary>GET a small PNG: an exact Content-Length, the byte cap and the
         /// PNG signature are all required, else (false, null).</summary>
         /// <summary>A face request answered 404: the print id, face revision
@@ -4152,6 +4291,10 @@ namespace CompetitiveRounds
             using (var request = new UnityWebRequest(url, "POST"))
             {
                 request.uploadHandler = new UploadHandlerRaw(body);
+                // The handler's own type as well as the header: the motion writer
+                // compares the type by equality (M2), so nothing may fall back to
+                // the handler's default application/octet-stream.
+                request.uploadHandler.contentType = contentType;
                 request.downloadHandler = new DownloadHandlerBuffer();
                 request.SetRequestHeader("Content-Type", contentType);
                 StampVersionHeader(request);

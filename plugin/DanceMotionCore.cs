@@ -496,6 +496,71 @@ namespace CompetitiveRounds
             int s = a.RetryAfter > 0 ? a.RetryAfter + 1 : WAIT_MAX_S;
             return Math.Max(1, Math.Min(WAIT_MAX_S, s));
         }
+
+        // -- when a motion is needed (S1.2) ----------------------------------------
+
+        /// <summary>What the per-visit picture check does about the dance
+        /// (S1.2). None: the server has no dance cards, nothing is selected, or
+        /// the selection is not a dance this client lists as owned -- the
+        /// still-only path with the base descriptor, as before this release.
+        /// Current: the stored motion is bound to the stored still, at this
+        /// recipe, and the stored still's descriptor is the one the client
+        /// would build now -- nothing to do. Needed: the dance job (the still
+        /// and the motion from one camera). Fallback: a motion is needed but
+        /// the job cannot run on this seat now (no AsyncGPUReadback, no baked
+        /// grade table, a hold) or its key is remembered -- the still-only path
+        /// keeps the still current, with no suffix.</summary>
+        internal enum Need { None, Current, Needed, Fallback }
+
+        internal static Need Decide(bool supported, string selectedSku, bool ownedHere, string pcMotion,
+                                    string portraitHash, string portraitDescriptor, string danceDescriptor,
+                                    int recipe, bool canDance, bool remembered)
+        {
+            if (!supported || string.IsNullOrEmpty(selectedSku) || !ownedHere) return Need.None;
+            if (danceDescriptor == null) return Need.Fallback;
+            if (MotionCurrent(pcMotion, portraitHash, portraitDescriptor, danceDescriptor, recipe)) return Need.Current;
+            if (!canDance || remembered) return Need.Fallback;
+            return Need.Needed;
+        }
+
+        /// <summary>`pc_motion` ("motion_hash:static_hash:recipe", S2.9) names a
+        /// motion bound to the stored still at `recipe`, and the stored still's
+        /// descriptor is `danceDescriptor` -- S1.2's four "differs" terms all
+        /// false.</summary>
+        internal static bool MotionCurrent(string pcMotion, string portraitHash, string portraitDescriptor, string danceDescriptor, int recipe)
+        {
+            if (string.IsNullOrEmpty(pcMotion) || string.IsNullOrEmpty(portraitHash) || danceDescriptor == null) return false;
+            var f = pcMotion.Split(':');
+            int r;
+            if (f.Length != 3 || !HexHashOk(f[0]) || !HexHashOk(f[1])) return false;
+            if (!int.TryParse(f[2], NumberStyles.None, CultureInfo.InvariantCulture, out r)) return false;
+            return f[1] == portraitHash && r == recipe && portraitDescriptor == danceDescriptor;
+        }
+
+        /// <summary>The still-only path's "picture current" (S1.2): a stored
+        /// still under the base descriptor, or -- on the fallback, where a
+        /// dance is selected -- under the same inputs with that dance's suffix:
+        /// a dancer still whose motion is missing or was refused is the same
+        /// pixels, and replacing it would only spend a pacing slot. With no
+        /// selection `danceDescriptor` is null, so a suffixed still is replaced
+        /// by a base one (the server accepts an absent suffix whatever the
+        /// selection, S2.8).</summary>
+        internal static bool StillCurrent(string portraitHash, string portraitDescriptor, string baseDescriptor, string danceDescriptor)
+        {
+            if (string.IsNullOrEmpty(portraitHash) || baseDescriptor == null) return false;
+            return portraitDescriptor == baseDescriptor || (danceDescriptor != null && portraitDescriptor == danceDescriptor);
+        }
+
+        /// <summary>The key a failed or refused dance job is remembered under
+        /// for the process (S1.2): the identity and the dance descriptor -- the
+        /// capture's own inputs, the dance and the recipe -- and nothing that
+        /// moves on its own (the tab visit, the UI epoch), so a remembered key
+        /// is not captured again until an input changes or the process
+        /// restarts.</summary>
+        internal static string RememberKey(string steamId, string danceDescriptor)
+        {
+            return (steamId ?? "") + "|" + (danceDescriptor ?? "");
+        }
     }
 
     /// <summary>What the upload job needs from the world: the two writers, a

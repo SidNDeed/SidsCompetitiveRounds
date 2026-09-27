@@ -218,6 +218,7 @@ namespace CompetitiveRounds
             string verb = spec.Split(',')[0].Trim().ToLowerInvariant();
             if (verb == "gradebake") { Plugin.Instance.StartCoroutine(GradeBakeRun(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET))); return; }
             if (verb == "gradeswatch") { Plugin.Instance.StartCoroutine(GradeSwatchRun(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET))); return; }
+            if (verb == "dance") { DanceDevRun(spec); return; }   // dance cards: the capture in local mode and its VM tests (PortraitRenderDanceDev.cs)
             Plugin.Instance.StartCoroutine(Run(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET)));
         }
 
@@ -396,6 +397,9 @@ namespace CompetitiveRounds
             _renderClaim.Clear();
             _cleanupOwed = false;
             try { Application.logMessageReceived -= OnLog; } catch { }
+            // A dance job that never unwound left its pose set: cleared before
+            // the rig goes (design S1.3), with its remembered deltas undone (L1).
+            try { var pp = DanceEmotes.PortraitPose; DanceEmotes.PortraitPose = null; if (pp.HasValue && pp.Value.RigRoot != null) DanceEmotes.RestorePortraitRig(pp.Value.RigRoot); } catch { }
             try { Teardown(new StringBuilder()); } catch { }
             try { DestroyGradeObjects(); } catch { }
             try { Plugin.Log.LogInfo("[PORTRAIT] force-abort: " + why); } catch { }
@@ -462,7 +466,10 @@ namespace CompetitiveRounds
                 // that matures while a render or an upload is busy, or that
                 // Start refuses (a match, no prefab or identity yet), stays
                 // armed and is tried again five seconds later.
-                if (Rendering || UploadInFlight || !Start(_refreshWhy ?? "preset", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }
+                // A dancer's refresh goes through the dance decision (RefreshStart,
+                // PortraitRenderDance.cs): a base still sent over a bound motion
+                // would unbind it.
+                if (Rendering || UploadInFlight || !RefreshStart(_refreshWhy ?? "preset")) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }
                 _refreshAt = -1f;
                 return;
             }
@@ -479,6 +486,10 @@ namespace CompetitiveRounds
             // spin; the next visit (or a preset change) tries again, which is
             // what makes "art not loaded yet" self-correcting.
             if (want == null) return;
+            // Dance cards (design S1.2): a selected, owned dance decides here --
+            // the dance job, a current dance picture, or a Fallback whose still
+            // is current; otherwise the product path below, as before.
+            if (DanceVisit(me, want)) return;
             if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want)
             {
                 LastResult = "picture current";
@@ -2906,6 +2917,29 @@ namespace CompetitiveRounds
         private static bool ComputeBounds(StringBuilder rep, GameObject clone, float pad, out Bounds fit)
         {
             fit = new Bounds(PARK, Vector3.one);
+            Bounds use;
+            if (!SolidBounds(rep, clone, out use)) return false;
+            fit = SquareFit(use, pad);
+            rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(fit.size.x.ToString("F2")).Append('\n');
+            return true;
+        }
+
+        /// <summary>The square frame around `use`, padded: its side is the
+        /// longer of use's two sizes (at least 0.5) times `pad`.</summary>
+        private static Bounds SquareFit(Bounds use, float pad)
+        {
+            float side = Mathf.Max(use.size.x, use.size.y, 0.5f) * pad;
+            return new Bounds(new Vector3(use.center.x, use.center.y, PARK.z), new Vector3(side, side, 1f));
+        }
+
+        /// <summary>The bounds the frame is fitted to, unsquared: the solid
+        /// renderers (body, limbs, gun, orb) and the reserved gun box, or every
+        /// renderer when there is no solid one. False when there are none. The
+        /// dance capture unites these over every pose (design S1.4 step 4)
+        /// before squaring once.</summary>
+        private static bool SolidBounds(StringBuilder rep, GameObject clone, out Bounds use)
+        {
+            use = new Bounds(PARK, Vector3.one);
             try
             {
                 bool anyA = false, anyB = false;
@@ -2941,10 +2975,7 @@ namespace CompetitiveRounds
                 // Frame on the SOLID renderers (body, limbs, gun, orb): particle systems report
                 // emitter-sized bounds (±6 units here) that would shrink the character to a
                 // third of the frame. The aura may bleed past the edge; the body may not.
-                var use = anyA ? a : b;
-                float side = Mathf.Max(use.size.x, use.size.y, 0.5f) * pad;
-                fit = new Bounds(new Vector3(use.center.x, use.center.y, PARK.z), new Vector3(side, side, 1f));
-                rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(side.ToString("F2")).Append('\n');
+                use = anyA ? a : b;
                 return true;
             }
             catch (Exception ex) { rep.Append("bounds threw: ").Append(ex.Message).Append('\n'); return false; }
@@ -3091,24 +3122,32 @@ namespace CompetitiveRounds
             {
                 texB = Grab(cam, Color.black, size);
                 texW = Grab(cam, Color.white, size);
-                var b = texB.GetPixels32(); var w = texW.GetPixels32();
-                var o = new Color32[b.Length];
-                int nLit = 0, nPartial = 0;
-                for (int i = 0; i < b.Length; i++)
-                {
-                    int d = (w[i].r - b[i].r) + (w[i].g - b[i].g) + (w[i].b - b[i].b);
-                    int a = 255 - d / 3;                       // 255 where opaque, 0 where only the clear colour shows
-                    if (a < 0) a = 0; else if (a > 255) a = 255;
-                    if (a == 0) { o[i] = new Color32(0, 0, 0, 0); continue; }
-                    o[i] = new Color32(Un(b[i].r, a), Un(b[i].g, a), Un(b[i].b, a), (byte)a);
-                    if (a > PROBE_FLOOR) nLit++;
-                    if (a < 250) nPartial++;
-                }
-                lit = (float)nLit / Mathf.Max(1, b.Length);
-                partial = (float)nPartial / Mathf.Max(1, b.Length);
-                return o;
+                return MatteOfPasses(texB.GetPixels32(), texW.GetPixels32(), out lit, out partial);
             }
             finally { foreach (var t in new[] { texB, texW }) if (t != null) UnityEngine.Object.Destroy(t); }
+        }
+
+        /// <summary>The #630 difference matte of one black and one white pass,
+        /// as straight RGBA. MattePixels' arithmetic, split out so the dance
+        /// capture's calibration can hold DanceMotionCore.Matte (the frames'
+        /// byte matte) to it on the same pass pair.</summary>
+        private static Color32[] MatteOfPasses(Color32[] b, Color32[] w, out float lit, out float partial)
+        {
+            var o = new Color32[b.Length];
+            int nLit = 0, nPartial = 0;
+            for (int i = 0; i < b.Length; i++)
+            {
+                int d = (w[i].r - b[i].r) + (w[i].g - b[i].g) + (w[i].b - b[i].b);
+                int a = 255 - d / 3;                       // 255 where opaque, 0 where only the clear colour shows
+                if (a < 0) a = 0; else if (a > 255) a = 255;
+                if (a == 0) { o[i] = new Color32(0, 0, 0, 0); continue; }
+                o[i] = new Color32(Un(b[i].r, a), Un(b[i].g, a), Un(b[i].b, a), (byte)a);
+                if (a > PROBE_FLOOR) nLit++;
+                if (a < 250) nPartial++;
+            }
+            lit = (float)nLit / Mathf.Max(1, b.Length);
+            partial = (float)nPartial / Mathf.Max(1, b.Length);
+            return o;
         }
 
         /// <summary>First 6 bytes of the PNG's SHA-256 in hex (the upload
@@ -3233,6 +3272,7 @@ namespace CompetitiveRounds
             _root = null;
             _legs.Clear(); _groundTop = float.NaN; _pinned.Clear(); _leftOut.Clear();
             try { StopLightProbe(); } catch { }
+            try { DanceReleaseTargets(); } catch { }   // the dance job's frame, still and ring targets (PortraitRenderDance.cs)
         }
 
         private static GameObject[] SafeRoots()

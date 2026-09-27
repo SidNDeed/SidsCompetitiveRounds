@@ -693,9 +693,29 @@ namespace CompetitiveRounds
                 pp = cur.Value;
                 Transform root = pp.RigRoot;
                 if (root == null || c == null) return false;
+                if (DevT38MatchByName)
+                {
+                    // T38's mutant arm only (the portrait lever's t38 verb sets it
+                    // and clears it in the same call): the rig matched by NAME.
+                    string rn = root.name;
+                    for (var t = c.transform; t != null; t = t.parent) if (t.name == rn) return true;
+                    return false;
+                }
                 return c.transform.IsChildOf(root);
             }
             catch { return false; }
+        }
+
+        /// <summary>T38's mutant arm (design S8: "match the rig by name"), set
+        /// only inside the portrait lever's t38 harness call. False everywhere
+        /// else, so PortraitComponent matches by reference.</summary>
+        internal static bool DevT38MatchByName;
+
+        /// <summary>TryGetPose for the T38 harness (dev lever only): the exact
+        /// function both frame patches call.</summary>
+        internal static bool DevTryGetPose(Component c, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
+        {
+            return TryGetPose(c, out body, out bodyRotDeg, out armL, out armR);
         }
 
         /// <summary>The ONE wrapper over Evaluate (design S1.3): the pose for
