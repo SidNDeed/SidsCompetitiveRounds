@@ -852,8 +852,9 @@ def test_the_helper_closure_stays_affordable():
     this fails on a walk that has gone wrong rather than on ordinary growth;
     the worst-route bounds, and the two p90 bounds (on the card trading lane
     and, independently and to the same values, at the Discord collection
-    landing), have since moved for measured growth in bindings routes really
-    run, each move recorded with its measurement at its assertion.
+    landing, then at the merge of the two), have since moved for measured
+    growth in bindings routes really run, each move recorded with its
+    measurement at its assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -932,7 +933,28 @@ def test_the_helper_closure_stays_affordable():
     # The two moves above were made independently, one on each side of the
     # merge of main 36e8493 into the card trading lane (2026-09-27), and both
     # chose 80.
-    assert code_p90 <= 80, f"p90 code closure {code_p90} of {total}"
+    #
+    # Card trading LAND, second merge (2026-09-27): measured 22 / 82 / 326
+    # of 2716 indexed bindings over 376 routes at the merge of main 36e8493
+    # into the trading lane (9a5b081), against 21 / 76 / 326 over the lane
+    # tip a666517 (372 routes) and over main 36e8493 (369 routes), the same
+    # walk with the same route seeds over each tree's own backend/api.
+    # Neither side passes 80; the composition does, by rank alone. The p90
+    # is the value at sorted position int(0.9 * n), the 38th route from the
+    # top at n = 376. Each side adds routes far above it -- the lane its five
+    # player trade routes (132 to 158), main its four collection routes (117
+    # to 280) -- and each side alone keeps 76 at its rank (37 and 36 routes
+    # above 76); the merged tree carries all nine, 38 routes sit above 80,
+    # and the 38th from the top is POST
+    # /api/v1/admin/team/series/{series_id}/resolve at 82, 82 on both sides
+    # too. No count is the merge's own: every route measures what it
+    # measures on the side that has it (the six that differ from main are
+    # the lane's trading reads, at their lane counts).
+    #
+    # The bound moves to 86 -- ~5% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median (22) and
+    # worst bounds stay.
+    assert code_p90 <= 86, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1018,7 +1040,19 @@ def test_the_helper_closure_stays_affordable():
     # The two moves above were made independently, one on each side of the
     # merge of main 36e8493 into the card trading lane (2026-09-27), and both
     # chose 160.
-    assert all_p90 <= 160, f"p90 closure {all_p90} of {total}"
+    #
+    # Card trading LAND, second merge (2026-09-27): measured 75 / 164 / 459
+    # over the same 376 routes of the merge 9a5b081, against 75 / 153 / 459
+    # over the lane tip a666517 and 73 / 151 / 457 over main 36e8493. The
+    # same rank effect as the code p90: 38 routes sit above 160 on the
+    # merged tree, nine of them the two sides' new routes, and the 38th from
+    # the top is POST /api/v1/team/series/{series_id}/report-dc at 164 (162
+    # on main; the +2 is models.deferred and models.text, the two import
+    # bindings F63's Player mapping added, which every route reaching the
+    # model reaches). The bound moves to 174, ~6% over the measurement; the
+    # median and worst bounds stay (the worst route, POST
+    # /api/v1/pc/packs/open, measures 459 against 460).
+    assert all_p90 <= 174, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
