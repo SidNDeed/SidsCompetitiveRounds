@@ -55,11 +55,12 @@ namespace CompetitiveRounds
 
         /// <summary>Scenarios that run only when named: design T7-b's two
         /// launches ("t7b", then "t7r-&lt;picked&gt;-&lt;previous&gt;-&lt;found&gt;"),
-        /// the probe of T7-b's premise ("ppwt", then "ppwr") and the witness
+        /// the probe of T7-b's premise ("ppwt", then "ppwr"), the witness
         /// captures of design section 11 (they change the resolution or the
-        /// language, and each capture needs the runner watching).</summary>
+        /// language, and each capture needs the runner watching) and LOW-6's
+        /// live config session ("l6", which closes the page).</summary>
         private static readonly string[] SettingsDriveNamed =
-            { "t7b", "ppwt", "ppwr", "w1", "w2", "w3", "w3b", "w3c", "w4", "w5", "w6", "w9", "w9b", "w10" };
+            { "t7b", "ppwt", "ppwr", "w1", "w2", "w3", "w3b", "w3c", "w4", "w5", "w6", "w9", "w9b", "w10", "l6" };
 
         private static bool SettingsDriveNamedOnly(string id)
         {
@@ -198,6 +199,7 @@ namespace CompetitiveRounds
                 case "w9": return DriveW9();
                 case "w9b": return DriveW9b();
                 case "w10": return DriveW10();
+                case "l6": return DriveL6();
             }
             if (id.StartsWith("t7r-", StringComparison.Ordinal)) return DriveT7r(id.Substring(4));
             return DriveNothing();
@@ -2058,6 +2060,29 @@ namespace CompetitiveRounds
             yield return 0.3f;
             string after = DrvPrefRead("cr_cursor_shape");
             DrvNote("T7-b put back: cr_cursor_shape holds " + (after == null ? "nothing" : "'" + after + "'"));
+        }
+
+        /// <summary>Round-2 LOW-6 (design section 8 item 4): the session of
+        /// the live config byte-compare - open the settings page, open every
+        /// sub-tab through its own button, then close the page. Only the
+        /// sub-tab buttons are clicked (the remembered sub-tab is a field in
+        /// memory); the runner compares the config files this session leaves
+        /// with the ones the build before item 13 left.</summary>
+        private static IEnumerator DriveL6()
+        {
+            yield return DrvOpenSettings();
+            yield return DrvSettle(0.6f);
+            for (int t = 0; t < SETTINGS_TABS; t++)
+            {
+                if (settingsSubBtns[t] == null || !DrvClick(settingsSubBtns[t])) { DrvBad("L6 sub-tab " + t + " could not be clicked"); continue; }
+                yield return 0.8f;
+                if (settingsSubTab == t) DrvOk("L6 opened sub-tab " + t + " (" + SettingsModel.SubTabHomes[t] + ") through its button");
+                else DrvBad("L6 the click on sub-tab " + t + " left sub-tab " + settingsSubTab + " open");
+            }
+            Close();
+            yield return 1f;
+            if (!isOpen) DrvOk("L6 the page is closed");
+            else DrvBad("L6 the page is still open");
         }
 
         private const string DrvProbeKey = "cr_item13_ppwt";
