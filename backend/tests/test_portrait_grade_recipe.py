@@ -64,6 +64,9 @@ RENDER_CS = PLUGIN / "PortraitRender.cs"
 EFFECT_CS = PLUGIN / "PlayerEffectCosmetic.cs"
 COLOR_CS = PLUGIN / "PlayerColorCosmetic.cs"
 PLUGIN_CS = PLUGIN / "Plugin.cs"
+# Dance cards: the dance job's two parts of the renderer (partial_render_problems)
+DANCE_CS = PLUGIN / "PortraitRenderDance.cs"
+DANCE_DEV_CS = PLUGIN / "PortraitRenderDanceDev.cs"
 
 # The readers are pure functions of their text, and these checks read the same
 # few files, and each negative control's copy of one, many times over: a text's
@@ -1522,6 +1525,19 @@ APPLY_OR_DEFER = "private static bool ApplyOrDefer(Transform playerRoot, int act
 APPLY_WHEN_ACTIVE = "private static IEnumerator ApplyWhenActive(Transform playerRoot, int actor, string sku, string colorHex, int gen)"
 DROP_PENDING = "private static void DropPending(int actor, int gen)"
 PENDING_APPLY = "private struct PendingApply"
+# dance cards: the dance job's methods that reach the renderer's state
+START_DANCE = "private static bool StartDance(string why, string sku, int idx, DanceOpts opt)"
+DANCE_RUN = "private static IEnumerator DanceRun(string why, string sku, int idx, int gen, DanceOpts opt, DanceClock clock)"
+DANCE_AFTER_YIELD = "private static string DanceAfterYield(int gen, string key, float tRig, DanceOpts opt, int yields, ref bool stale, ref bool remember)"
+DANCE_GATE_SIG = "private static string DanceGate(int gen, string key, float tRig, DanceOpts opt, int yields, ref bool stale, ref bool remember)"
+DANCE_TARGET = "private static RenderTexture DanceTarget(int edge, int depth, int aa)"
+DANCE_RELEASE_TARGETS = "private static void DanceReleaseTargets()"
+DANCE_UPLOAD = "private static void DanceUpload(string key, string rkey, string sku, string danceDesc, byte[] still, List<byte[]> pngs, int ms, string why)"
+DANCE_UPLOAD_STILL = "public void UploadStill(string descriptor, byte[] png, Action<DanceMotionCore.Answer> done)"
+DANCE_UPLOAD_MOTION = "public void UploadMotion(string descriptor, byte[] container, Action<DanceMotionCore.Answer> done)"
+DANCE_PORT_AFTER = "public void After(int seconds, Action then)"
+DANCE_FINISHED = "private static void DanceFinished(DanceUploadJob job, string key, string rkey, string danceDesc, int ugen, string why)"
+DANCE_DEV_T38 = "private static void DanceDevT38(bool mutant)"
 
 
 def _masked_norm(source, signature: str) -> str:
@@ -1550,7 +1566,8 @@ def _return_terms(block: str) -> list:
 def _sources() -> dict:
     return {"render": RENDER_CS.read_text(encoding="utf-8"), "grade": GRADE_CS.read_text(encoding="utf-8"),
             "color": COLOR_CS.read_text(encoding="utf-8"), "effect": EFFECT_CS.read_text(encoding="utf-8"),
-            "plugin": PLUGIN_CS.read_text(encoding="utf-8")}
+            "plugin": PLUGIN_CS.read_text(encoding="utf-8"),
+            "dance": DANCE_CS.read_text(encoding="utf-8"), "dancedev": DANCE_DEV_CS.read_text(encoding="utf-8")}
 
 
 def body_problems(sources: dict, bodies: dict) -> list:
@@ -1608,6 +1625,11 @@ def test_upload_is_gated_on_the_baked_table():
     # negative control: the gate asked only on some uploads
     some = _mut(block, "if (!GradeBaked)", "if (why != \"retry\") if (!GradeBaked)")
     assert any("is not a statement of a list" in x for x in exits_before(some, "!GradeBaked", "return;", UPLOAD_CALL))
+    # dance cards: the dance job's upload is gated the same way, before its job starts
+    dance = cs_block(DANCE_CS, DANCE_UPLOAD)
+    assert exits_before(dance, "!GradeBaked", "return;", "job.Start();") == []
+    some = _mut(dance, "if (!GradeBaked)", "if (why != \"retry\") if (!GradeBaked)")
+    assert any("is not a statement of a list" in x for x in exits_before(some, "!GradeBaked", "return;", "job.Start();"))
 
 
 LOAD_GRADE_MEMO = "if (_gradeLut != null) return;"
@@ -1648,7 +1670,9 @@ GRADE_STATE_MENTIONS = {
                     ("grade", "private static string GradeTag() { LoadGrade(); return _gradeState; }")],
     "GradeTable": [("grade", "private static byte[] GradeTable { get { LoadGrade(); return _gradeLut; } }"),
                    ("grade", "t = (byte[])GradeTable.Clone();"),
-                   ("render", "matte = MatteBytes(cam, DEFAULT_SIZE, GradeTable, out lit, out partial, out px);")],
+                   ("render", "matte = MatteBytes(cam, DEFAULT_SIZE, GradeTable, out lit, out partial, out px);"),
+                   # dance cards: the frame ring's table, which the ring reads with LutSample only
+                   ("dance", "ring = new DanceRing(++_danceGen, n) { Table = GradeTable, Clock = clock };")],
     "s_lutLo": [("grade", "private static readonly byte[] s_lutLo = BuildLutLo();")]
                + [("grade", "int o = ((s_lutLo[r] * LUT_N + s_lutLo[g]) * LUT_N + s_lutLo[b]) * 3;")] * 3,
     "s_lutW": [("grade", "private static readonly short[] s_lutW = BuildLutW();")]
@@ -1743,10 +1767,12 @@ def test_load_grade_keeps_every_acceptance_term_before_the_baked_flag():
         wrote = _mut(block, "            _gradeBaked = t != null;\n", "            " + other + "\n            _gradeBaked = t != null;\n")
         assert any("the table is mentioned by" in x and other in x for x in load_grade_problems(wrote)), other
     # the mentions of the grade's settled state and of the lookup's arrays:
-    # exactly GRADE_STATE_MENTIONS in the two files, and none outside a comment
-    # in any other plugin file
-    sources = {"render": RENDER_CS.read_text(encoding="utf-8"), "grade": GRADE_CS.read_text(encoding="utf-8")}
-    others = {p.name: p.read_text(encoding="utf-8") for p in sorted(PLUGIN.glob("*.cs")) if p.name not in (RENDER_CS.name, GRADE_CS.name)}
+    # exactly GRADE_STATE_MENTIONS in the three files (dance cards: the frame
+    # ring's table), and none outside a comment in any other plugin file
+    sources = {"render": RENDER_CS.read_text(encoding="utf-8"), "grade": GRADE_CS.read_text(encoding="utf-8"),
+               "dance": DANCE_CS.read_text(encoding="utf-8")}
+    others = {p.name: p.read_text(encoding="utf-8") for p in sorted(PLUGIN.glob("*.cs"))
+              if p.name not in (RENDER_CS.name, GRADE_CS.name, DANCE_CS.name)}
     assert mention_problems(GRADE_STATE_MENTIONS, sources, others) == []
     # negative controls: the table replaced after the settle, inside LoadGrade;
     # the flag or-ed in a getter; the state's initialiser changed; the table
@@ -1754,7 +1780,8 @@ def test_load_grade_keeps_every_acceptance_term_before_the_baked_flag():
     # table written in place in GradeTag; the dev table no longer a copy; a
     # lookup weight written by a method of its own; the flag and the state set
     # by a deconstruction from the other file
-    grade, render = sources["grade"], sources["render"]
+    grade, render, dance = sources["grade"], sources["render"], sources["dance"]
+    stray_table = "\n    internal static class StrayTable { static void W() { PortraitRender.GradeTable[0] ^= 1; } }\n"
     stray = "\n    internal static class StrayGrade { static void Reset() { Refill(ref PortraitRender._gradeLut); PortraitRender._gradeState += \"x\"; } }\n"
     bake = "\n    internal static class StrayBake { static void Set() { (PortraitRender._gradeBaked, PortraitRender._gradeState) = (true, \"\"); } }\n"
     controls = (
@@ -1771,7 +1798,15 @@ def test_load_grade_keeps_every_acceptance_term_before_the_baked_flag():
                                           "        private static readonly short[] s_lutW = BuildLutW();\n"
                                           "        private static void StrayWeight() { s_lutW[255] = 256; }\n")}, "s_lutW"),
         ({"render": render + bake, "grade": grade}, "_gradeBaked"),
+        # dance cards: a second mention of the table from the dance file (a
+        # write through it), and the ring handed something else
+        ({"render": render, "grade": grade, "dance": dance + stray_table}, "GradeTable"),
+        ({"render": render, "grade": grade, "dance": _mut(dance, "Table = GradeTable, Clock = clock", "Table = null, Clock = clock")},
+         "GradeTable"),
     )
+    # every control reads the dance file too, so each fails by its own
+    # mutation and not by the ring's mention missing from its sources
+    controls = tuple((dict(srcs, dance=srcs.get("dance", dance)), name) for srcs, name in controls)
     for srcs, name in controls:
         assert any(x.startswith(name + " is mentioned by") for x in mention_problems(GRADE_STATE_MENTIONS, srcs, {})), name
     # negative control: the table looked up by name from another plugin file;
@@ -3110,6 +3145,7 @@ DEV_RUN_STATEMENTS = [
     "string verb = spec.Split(',')[0].Trim().ToLowerInvariant();",
     'if (verb == "gradebake") { Plugin.Instance.StartCoroutine(GradeBakeRun(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET))); return; }',
     'if (verb == "gradeswatch") { Plugin.Instance.StartCoroutine(GradeSwatchRun(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET))); return; }',
+    'if (verb == "dance") { DanceDevRun(spec); return; }',   # dance cards: the capture lever (PortraitRenderDanceDev.cs)
     "Plugin.Instance.StartCoroutine(Run(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET)));",
 ]
 
@@ -3121,19 +3157,22 @@ def dev_run_problems(dev: str) -> list:
 
 def test_every_lever_is_refused_at_dispatch():
     dev = cs_block(RENDER_CS, DEV_RUN)
-    assert dominating_exit(dev, "blocked != null", "return;", ("StartProduct(", "StartCoroutine(")) == []
+    assert dominating_exit(dev, "blocked != null", "return;", ("StartProduct(", "StartCoroutine(", "DanceDevRun(")) == []
     m = mask_code(dev)
     guard = find_guards(dev, "blocked != null")[0]
     before = [s for s in statements(m, 1, len(m) - 1) if s[1] <= guard[0]]
     assert _norm(m[before[-1][0]:before[-1][1]]) == "string blocked = DevLeverBlocked(0);"
     assert len(re.findall(r"\bStartCoroutine\(", m)) == 3 and len(re.findall(r"\bStartProduct\(", m)) == 2
+    assert len(re.findall(r"\bDanceDevRun\(", m)) == 1   # dance cards
     assert dev_run_problems(dev) == []
     # negative controls: a run started with generation 0 beside the claim taken
     # for it (N01), no scene hook (N04, GL2), a grade run started with a claim
     # of its own, the preview verb started as an upload
     controls = (
         ("Plugin.Instance.StartCoroutine(Run(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET)));",
-         "_renderClaim.Take(Plugin.Instance, DEV_BUDGET); Plugin.Instance.StartCoroutine(Run(spec, 0));", "DevRun: statement 12"),
+         "_renderClaim.Take(Plugin.Instance, DEV_BUDGET); Plugin.Instance.StartCoroutine(Run(spec, 0));", "DevRun: statement 13"),
+        # dance cards: the dance lever falling through into a second start
+        ('if (verb == "dance") { DanceDevRun(spec); return; }', 'if (verb == "dance") { DanceDevRun(spec); }', "DevRun: statement 12"),
         ('            spec = (spec ?? "").Trim();\n            EnsureSceneHook();\n', '            spec = (spec ?? "").Trim();\n', "DevRun: statement 1"),
         ("StartCoroutine(GradeSwatchRun(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET)));",
          "StartCoroutine(GradeSwatchRun(spec, StartGrade()));", "DevRun: statement 11"),
@@ -3157,6 +3196,57 @@ def test_every_lever_coroutine_asks_the_predicate_after_every_yield(source, sign
     assert any("not a fenced exit" in x for x in fence_problems(other, "DevLeverBlocked(gen)"))
 
 
+# Dance cards (S1.1): the dance job's gate, asked after every yield of DanceRun
+DANCE_GATE = "DanceAfterYield(gen, key, tRig, opt, yields, ref stale, ref remember)"
+DANCE_AFTER_YIELD_STATEMENTS = [
+    "_renderClaim.Beat(gen, RENDER_BUDGET);",
+    "if (opt.gateStartOnly) return null;",
+    "return DanceGate(gen, key, tRig, opt, yields, ref stale, ref remember);",
+]
+DANCE_GATE_FIRST = ["string b = DevLeverBlocked(gen);", "if (b != null) return b;"]
+DANCE_BUMP = r"\byields\s*\+\+\s*;"
+
+
+def dance_fence_problems(run: str, after_yield: str, gate: str) -> list:
+    """After every yield of DanceRun, the yield counter's bump and then an exit
+    fenced on DanceAfterYield: this module's fence reader, once each bump is
+    shown to be the statement right after its yield and taken out.
+    DanceAfterYield beats the run's claim and asks DanceGate, whose first term
+    is DevLeverBlocked(gen) (`gateStartOnly` is T37's mutant arm, a field only
+    the dev lever sets)."""
+    m = mask_code(run)
+    problems = []
+    yields = [y.start() for y in re.finditer(r"\byield\s+return\b", m)]
+    bumps = [b.start() for b in re.finditer(DANCE_BUMP, m)]
+    if len(bumps) != len(yields):
+        problems.append(f"DanceRun: {len(yields)} yields and {len(bumps)} counter bumps")
+    for y in yields:
+        s = next_statement(m, next_statement(m, y)[1])
+        if s is None or s[0] not in bumps:
+            problems.append(f"yield at {y}: the counter bump is not the statement after it")
+    problems += fence_problems(re.sub(DANCE_BUMP, "", run), DANCE_GATE)
+    am = mask_code(after_yield)
+    problems += list_problems("DanceAfterYield", _texts(strip_comments_only(after_yield), inner(am, body_span(am))),
+                              DANCE_AFTER_YIELD_STATEMENTS)
+    gm = mask_code(gate)
+    problems += list_problems("DanceGate", _texts(strip_comments_only(gate), inner(gm, body_span(gm)))[:2], DANCE_GATE_FIRST)
+    return problems
+
+
+def test_the_dance_run_asks_its_gate_after_every_yield():
+    run, after, gate = cs_block(DANCE_CS, DANCE_RUN), cs_block(DANCE_CS, DANCE_AFTER_YIELD), cs_block(DANCE_CS, DANCE_GATE_SIG)
+    assert len(re.findall(r"\byield\s+return\b", mask_code(run))) == 13
+    assert dance_fence_problems(run, after, gate) == []
+    # negative controls: one gate's result discarded, one bump gone, the
+    # claim's beat gone, the predicate asked after the product terms
+    fenced = "if ((fail = " + DANCE_GATE + ") != null) yield break;"
+    assert any("not a fenced exit" in x for x in dance_fence_problems(_mut(run, fenced, DANCE_GATE + ";", 1), after, gate))
+    assert any("counter bump" in x for x in dance_fence_problems(_mut(run, "yields++;", "", 1), after, gate))
+    assert any("DanceAfterYield: statement 0" in x for x in dance_fence_problems(run, _mut(after, "_renderClaim.Beat(gen, RENDER_BUDGET);", ""), gate))
+    assert any("DanceGate: statement 0" in x for x in dance_fence_problems(
+        run, after, _mut(gate, "string b = DevLeverBlocked(gen);\n            if (b != null) return b;\n", "")))
+
+
 # ── the real source: force-abort and the claim ──────────────────────────────
 
 # The mechanisms every release rests on, whole: a change to any of them is a
@@ -3174,6 +3264,8 @@ MECHANISM_BODIES = {
         "internal void Clear() { _host = null; _until = -1f; } }"),
     ("render", FORCE_ABORT): (
         "{ _renderClaim.Clear(); _cleanupOwed = false; try { Application.logMessageReceived -= OnLog; } catch { } "
+        "try { var pp = DanceEmotes.PortraitPose; DanceEmotes.PortraitPose = null; "
+        "if (pp.HasValue && pp.Value.RigRoot != null) DanceEmotes.RestorePortraitRig(pp.Value.RigRoot); } catch { } "
         "try { Teardown(new StringBuilder()); } catch { } try { DestroyGradeObjects(); } catch { } "
         'try { Plugin.Log.LogInfo("[PORTRAIT] force-abort: " + why); } catch { } }'),
     ("render", ON_HOST_DESTROYED): (
@@ -3266,6 +3358,38 @@ LIFECYCLE_COUNTS = {
     ("render", r"\bnew\s+Material\s*\("): {SWAP_UNLIT: 1},
     ("render", r"\bInstantiate\s*[<(]"): {BUILD_RIG: 1},
 }
+# Dance cards: the dance job's two files are parts of the renderer too
+# (partial_render_problems), so every pattern above is counted in each of them
+# as well: a pattern this table names nothing for in a dance file occurs
+# nowhere in that file. The job's target list is counted like the renderer's
+# carrier lists.
+DANCE_TARGETS_WRITE = r"\b_danceTargets\s*\.\s*(?!Contains\b|Count\b)\w+"
+DANCE_LIFECYCLE_HITS = {
+    ("dance", r"\b_cleanupOwed\s*=\s*true\s*;"): {DANCE_RUN: 1},
+    ("dance", r"\b_cleanupOwed\s*=\s*false\s*;"): {DANCE_RUN: 1},
+    ("dance", r"\b_cleanupOwed\s*=(?!=)"): {DANCE_RUN: 2},
+    ("dance", r"\blogMessageReceived\s*\+="): {DANCE_RUN: 1},
+    ("dance", r"\blogMessageReceived\s*-="): {DANCE_RUN: 2},
+    ("dance", r"\blogMessageReceived\b"): {DANCE_RUN: 3},
+    ("dance", r"\b_renderClaim\s*\.\s*Take\s*\("): {START_DANCE: 1},
+    ("dance", r"\b_renderClaim\s*\.\s*Drop\s*\("): {DANCE_RUN: 1},
+    ("dance", r"\b_renderClaim\s*\.\s*(?:Take|Clear)\s*\("): {START_DANCE: 1},
+    ("dance", r"\b_uploadClaim\s*\.\s*Take\s*\("): {DANCE_UPLOAD: 1},
+    ("dance", r"\b_uploadClaim\s*\.\s*Drop\s*\("): {DANCE_FINISHED: 1},
+    ("dance", r"\b_uploadClaim\b"): {DANCE_UPLOAD: 1, DANCE_UPLOAD_STILL: 1, DANCE_UPLOAD_MOTION: 1, DANCE_PORT_AFTER: 1, DANCE_FINISHED: 1},
+    ("dance", r"\bEnsureSceneHook\s*\(\s*\)\s*;"): {START_DANCE: 1},
+    ("dance", r"\b_clone\s*=(?!=)"): {DANCE_RUN: 1},
+    ("dance", r"\b_root\s*=(?!=)"): {DANCE_RUN: 1},
+    ("dance", r"\bnew\s+RenderTexture\s*\("): {DANCE_TARGET: 1},
+    ("dance", DANCE_TARGETS_WRITE): {DANCE_TARGET: 1, DANCE_RELEASE_TARGETS: 1},
+    ("dancedev", r"\bnew\s+GameObject\s*\("): {DANCE_DEV_T38: 4},
+}
+LIFECYCLE_COUNTS[("render", DANCE_TARGETS_WRITE)] = {}
+LIFECYCLE_COUNTS[("grade", DANCE_TARGETS_WRITE)] = {}
+for _pattern in sorted({p for _, p in LIFECYCLE_COUNTS}):
+    for _part in ("dance", "dancedev"):
+        LIFECYCLE_COUNTS[(_part, _pattern)] = DANCE_LIFECYCLE_HITS.get((_part, _pattern), {})
+assert set(DANCE_LIFECYCLE_HITS) <= set(LIFECYCLE_COUNTS), sorted(set(DANCE_LIFECYCLE_HITS) - set(LIFECYCLE_COUNTS))
 PARTIAL_RENDER = r"\bpartial\s+class\s+PortraitRender\b"
 
 
@@ -3289,8 +3413,9 @@ def lifecycle_count_problems(sources: dict) -> list:
 
 
 def partial_render_problems(files: dict) -> list:
-    """No plugin file but the renderer's two declares a part of the renderer,
-    so the counts above cover every method that can reach its state."""
+    """No plugin file but the renderer's four (its own two and, dance cards,
+    the dance job's two) declares a part of the renderer, so the counts above
+    cover every method that can reach its state."""
     return [f"{name} declares a part of PortraitRender" for name, text in files.items()
             if "PortraitRender" in text and re.search(PARTIAL_RENDER, mask_code(text))]
 
@@ -3316,8 +3441,18 @@ LIFECYCLE_RUNS = (
     ("MakeGround registers the ground as it makes it", "render", MAKE_GROUND, False, ['_ground = new GameObject("CR_PortraitGround");']),
     ("MakeCamera registers the camera as it makes it", "render", MAKE_CAMERA, False, ['_camGO = new GameObject("CR_PortraitCam");']),
     ("MakeCamera registers the render texture as it makes it", "render", MAKE_CAMERA, False, ["_rt = new RenderTexture(size, size, 24);"]),
+    # dance cards: the dance job owes its cleanup and registers its clone as
+    # Run does, and registers each target as it makes it (finding S2F12)
+    ("DanceRun owes its cleanup as it hooks the log", "dance", DANCE_RUN, True,
+     ["_cleanupOwed = true;", "Application.logMessageReceived -= OnLog;", "Application.logMessageReceived += OnLog;"]),
+    ("DanceRun registers its clone as it unparents it", "dance", DANCE_RUN, False,
+     ["clone.transform.SetParent(null, true);", "_clone = clone;", "rigRoot = clone.transform;", "UnityEngine.Object.Destroy(_root);", "_root = null;"]),
+    ("DanceTarget registers every target as it makes it", "dance", DANCE_TARGET, True,
+     ["var rt = new RenderTexture(edge, edge, depth);", "_danceTargets.Add(rt);"]),
 )
 UPLOAD_DROP_FIRST = "(ok, resp) => { _uploadClaim.Drop(ugen);"
+# dance cards: the dance upload's end drops its claim before anything else
+DANCE_FINISHED_DROP_FIRST = "_uploadClaim.Drop(ugen);"
 
 
 def lifecycle_run_problems(sources: dict) -> list:
@@ -3326,6 +3461,10 @@ def lifecycle_run_problems(sources: dict) -> list:
         problems += run_problems(label, cs_block(sources[key], sig), want, top=top)
     if UPLOAD_DROP_FIRST not in _norm(_masked_block(sources["render"], UPLOAD)):
         problems.append("Upload's callback does not drop its claim before anything else")
+    fin = cs_block(sources["dance"], DANCE_FINISHED)
+    fm = mask_code(fin)
+    if _texts(strip_comments_only(fin), inner(fm, body_span(fm)))[:1] != [_norm(DANCE_FINISHED_DROP_FIRST)]:
+        problems.append("DanceFinished does not drop the upload claim before anything else")
     return problems
 
 
@@ -3348,8 +3487,16 @@ def test_the_host_and_a_scene_unload_force_abort_everything():
                 reader(text, "void M()")
     assert lifecycle_count_problems(sources) == []
     assert lifecycle_run_problems(sources) == []
-    others = {p.name: p.read_text(encoding="utf-8") for p in sorted(PLUGIN.glob("*.cs")) if p.name not in (RENDER_CS.name, GRADE_CS.name)}
+    others = {p.name: p.read_text(encoding="utf-8") for p in sorted(PLUGIN.glob("*.cs"))
+              if p.name not in (RENDER_CS.name, GRADE_CS.name, DANCE_CS.name, DANCE_DEV_CS.name)}
     assert len(others) > 50 and partial_render_problems(others) == []
+    # dance cards: the two dance files excluded above are parts of the
+    # renderer, so every pattern of the counts is counted in each of them
+    assert sorted(partial_render_problems({DANCE_CS.name: sources["dance"], DANCE_DEV_CS.name: sources["dancedev"]})) == [
+        f"{DANCE_CS.name} declares a part of PortraitRender", f"{DANCE_DEV_CS.name} declares a part of PortraitRender"]
+    patterns = {p for _, p in LIFECYCLE_COUNTS}
+    for part in ("dance", "dancedev"):
+        assert {p for k, p in LIFECYCLE_COUNTS if k == part} == patterns, part
     claim = blocks[("render", CLAIM)]
     assert sorted(_return_terms(cs_block(claim, "internal bool Held {"))) == sorted(["_host != null", "Time.realtimeSinceStartup <= _until"])
     assert sorted(_return_terms(cs_block(claim, "internal bool HeldBy(MonoBehaviour host)"))) == sorted(
@@ -3376,6 +3523,8 @@ def test_the_host_and_a_scene_unload_force_abort_everything():
         ("render", ENSURE_SCENE_HOOK, "if (_sceneHooked) return;", "if (!_sceneHooked) return;"),
         ("render", FORCE_ABORT, "try { DestroyGradeObjects(); } catch { }", "try { if (!_renderClaim.Held) DestroyGradeObjects(); } catch { }"),
         ("render", FORCE_ABORT, "try { Teardown(new StringBuilder()); } catch { }", "try { if (_clone != null) Teardown(new StringBuilder()); } catch { }"),
+        # dance cards: a force-abort that leaves a dance pose set
+        ("render", FORCE_ABORT, "DanceEmotes.PortraitPose = null; if (pp.HasValue", "if (pp.HasValue"),
         ("render", ON_HOST_DESTROYED, "if (_renderClaim.HeldBy(host) || (_cleanupOwed && !_renderClaim.Held))", "if (_renderClaim.HeldBy(host))"),
         ("render", ON_SCENE_UNLOADED, "if (RigLost() || (_cleanupOwed && !_renderClaim.Held))", "if (RigLost())"),
         ("grade", DESTROY_GRADE_OBJECTS, "                    UnityEngine.Object.Destroy(o);\n", ""),
@@ -3418,6 +3567,15 @@ def test_the_host_and_a_scene_unload_force_abort_everything():
         ("render", "            _renderClaim.Clear();\n", "            _renderClaim.Clear();\n            _ground = null;\n", "_ground"),
         ("render", '            _camGO = new GameObject("CR_PortraitCam");', '            _camGO = new GameObject("CR_PortraitCam"); _camGO = new GameObject("CR_PortraitCam");', MAKE_CAMERA),
         ("render", "            _renderClaim.Clear();\n", '            _renderClaim.Clear();\n            new GameObject("CR_Stray");\n', "in the file"),
+        # dance cards: a second claim taken by StartDance, a cleanup forgiven
+        # outside DanceRun, a dev object made outside T38, a target never
+        # registered, the upload claim taken a second time
+        ("dance", "            int gen = _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);\n",
+         "            int gen = _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);\n            _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);\n", START_DANCE),
+        ("dance", "            _danceTargets.Clear();\n", "            _danceTargets.Clear();\n            _cleanupOwed = false;\n", "in the file"),
+        ("dancedev", "            Directory.CreateDirectory(d);\n", '            Directory.CreateDirectory(d);\n            new GameObject("CR_Stray");\n', "in the file"),
+        ("dance", "            _danceTargets.Add(rt);\n", "", DANCE_TARGET),
+        ("dance", '            LastResult = "uploading";\n', '            LastResult = "uploading";\n            _uploadClaim.Take(Plugin.Instance, UPLOAD_BUDGET);\n', DANCE_UPLOAD),
     )
     for key, old, new, want in count_controls:
         mutated = dict(sources, **{key: _mut(sources[key], old, new)})
@@ -3454,6 +3612,23 @@ def test_the_host_and_a_scene_unload_force_abort_everything():
     )
     for render, want in run_controls:
         assert any(want in x for x in lifecycle_run_problems(dict(sources, render=render))), want
+    # dance cards: the dance run's clone registered one statement late, its log
+    # hooked before the cleanup is owed, a target registered after it is made
+    # (the order before S2F12), the dance upload's end reading its answer
+    # before it drops its claim
+    dance_controls = (
+        (_mut(sources["dance"], "                _clone = clone;\n                rigRoot = clone.transform;\n",
+              "                rigRoot = clone.transform;\n                _clone = clone;\n"), "DanceRun registers its clone"),
+        (_mut(sources["dance"], "            _cleanupOwed = true;\n            Application.logMessageReceived -= OnLog;\n            Application.logMessageReceived += OnLog;\n",
+              "            Application.logMessageReceived -= OnLog;\n            Application.logMessageReceived += OnLog;\n            _cleanupOwed = true;\n"),
+         "DanceRun owes its cleanup"),
+        (_mut(_mut(sources["dance"], "            _danceTargets.Add(rt);\n", ""), "            rt.Create();\n", "            rt.Create();\n            _danceTargets.Add(rt);\n"),
+         "DanceTarget registers every target"),
+        (_mut(sources["dance"], "            _uploadClaim.Drop(ugen);\n            var a = job.LastAnswer;\n",
+              "            var a = job.LastAnswer;\n            _uploadClaim.Drop(ugen);\n"), "DanceFinished does not drop"),
+    )
+    for dance, want in dance_controls:
+        assert any(want in x for x in lifecycle_run_problems(dict(sources, dance=dance))), want
 
 
 # ── the real source: what a grade lever makes ───────────────────────────────
@@ -3674,6 +3849,7 @@ TEARDOWN_STATEMENTS = [
     "_pinned.Clear();",
     "_leftOut.Clear();",
     "try { StopLightProbe(); } catch { }",
+    "try { DanceReleaseTargets(); } catch { }",   # dance cards: the dance job's targets
 ]
 
 
@@ -3701,6 +3877,10 @@ def test_teardown_releases_everything_unconditionally():
     assert teardown_problems(_mut(block, "try { PlayerColorCosmetic.RevertPlayer(PORTRAIT_ACTOR); }",
                                   "try { if (_colorApplied) PlayerColorCosmetic.RevertPlayer(PORTRAIT_ACTOR); }")) != []
     assert any("statement 16" in x for x in teardown_problems(_mut(block, "            _clone = null;\n", "            if (_clone != null) _clone = null;\n")))
+    # dance cards: the dance targets never released, or released under a flag
+    assert any("Teardown: 24 statements, want 25" in x for x in teardown_problems(_mut(block, "try { DanceReleaseTargets(); } catch { }", "")))
+    assert any("statement 24" in x for x in teardown_problems(
+        _mut(block, "try { DanceReleaseTargets(); } catch { }", "try { if (_clone != null) DanceReleaseTargets(); } catch { }")))
 
 
 FINALLY_GUARDED = {
@@ -3708,6 +3888,7 @@ FINALLY_GUARDED = {
     RUN: (RENDER_CS, ("_cleanupOwed = false;", "Application.logMessageReceived -= OnLog;", "Teardown(rep);")),
     GRADE_BAKE_RUN: (GRADE_CS, ("_cleanupOwed = false;", "DestroyGradeObjects();")),
     GRADE_SWATCH_RUN: (GRADE_CS, ("_cleanupOwed = false;", "DestroyGradeObjects();")),
+    DANCE_RUN: (DANCE_CS, ("_cleanupOwed = false;", "Application.logMessageReceived -= OnLog;", "Teardown(rep);")),   # dance cards
 }
 SUCCESSOR_GUARD = "if (!_renderClaim.HeldByOther(gen))"
 
