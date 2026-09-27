@@ -1087,7 +1087,7 @@
           "Reduced",
           "Off"
         ],
-        "canonical_source": "Plugin.cs:10015-10019 BloomStrengthSetting.Level",
+        "canonical_source": "Plugin.cs:10464-10468 BloomStrengthSetting.Level",
         "expression": "\"Full\"",
         "independent_of_painted": true,
         "kind": "canonical_id",
@@ -1802,7 +1802,7 @@
           "DMY",
           "YMD"
         ],
-        "canonical_source": "NativeUI.cs:14323 picker ids, Plugin.cs:128",
+        "canonical_source": "NativeUI.cs:14400 picker ids, Plugin.cs:133",
         "expression": "\"MDY\"",
         "independent_of_painted": true,
         "kind": "canonical_id",
@@ -2363,7 +2363,7 @@
           "Pinned",
           "Muted"
         ],
-        "canonical_source": "CompetitiveUI.cs:3915 enum ChatOverlayMode",
+        "canonical_source": "CompetitiveUI.cs:4243 enum ChatOverlayMode",
         "expression": "CompetitiveUI.ChatOverlayMode.Normal",
         "independent_of_painted": true,
         "kind": "enum_member",
@@ -2774,7 +2774,7 @@
           "uk",
           "sv"
         ],
-        "canonical_source": "NativeUI.cs:14287 picker ids",
+        "canonical_source": "NativeUI.cs:14391 picker ids",
         "expression": "I18n.SuggestFromOs()",
         "independent_of_painted": true,
         "kind": "delegate",
@@ -3013,7 +3013,7 @@
           "played",
           "nobody"
         ],
-        "canonical_source": "MailClient.cs:598 MAIL_FROM_VALUES",
+        "canonical_source": "MailClient.cs:626 MAIL_FROM_VALUES",
         "expression": "\"everyone\"",
         "independent_of_painted": true,
         "kind": "canonical_id",
@@ -3172,7 +3172,7 @@
           "custom",
           "silent"
         ],
-        "canonical_source": "NativeUI.cs:14651-14657 NormalizeMenuMusicMode",
+        "canonical_source": "NativeUI.cs:14717-14723 NormalizeMenuMusicMode",
         "expression": "\"vanilla\"",
         "independent_of_painted": true,
         "kind": "canonical_id",
@@ -4945,7 +4945,7 @@
           "Reduced",
           "Off"
         ],
-        "canonical_source": "PerfPatches.cs:565-568 ScreenshakerDisablePatch.Level",
+        "canonical_source": "PerfPatches.cs:637-640 ScreenshakerDisablePatch.Level",
         "expression": "\"Full\"",
         "independent_of_painted": true,
         "kind": "canonical_id",
