@@ -1756,6 +1756,18 @@ row("S58", "test_s58_the_g3_fence", [
       E(MAIN, _G3_INS, '        "INSERT INTO ffa_g3_enrolment (player_id, added_at, expires_at)"\n'),
       note="the clause and every ffa_g3_seats query gone, the route path still registered"),
     M("route_deleted_before_it", "S58 route", E(MAIN, _G3_ROUTE, "")),
+    M("configuration_kept_after_release", "S58 production configuration",
+      E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
+      E(MAIN, _G3_DOC, '    holds an unexpired G3 enrolment. A member with no queue row, or\n'),
+      E(MAIN, _G3_Q, '        "SELECT q.player_id, q.caps, FALSE AS enrolled"\n'
+                     '        "  FROM ffa_queue q"\n'
+                     '        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()\n'),
+      E(MAIN, _G3_INS, '        "INSERT INTO ffa_g3_enrolment (player_id, added_at, expires_at)"\n'),
+      E(MAIN, _G3_ROUTE, ""),
+      E("backend/sql/355_ffa_assembly.sql", "\nCOMMIT;\n",
+        "\nCOMMIT;\n-- planted by the S58 control: the release's DROP TABLE IF EXISTS ffa_g3_seats;\n"),
+      note="K46's post-release mutant, paired with S58 (V11:2944): the production release with no"
+           " ffa_g3_seats query, no route and a drop, and the csproj's G3 configuration kept"),
 ], T("assertions_reordered",
      E(TST, _S58_ASSERTS,
        '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n'

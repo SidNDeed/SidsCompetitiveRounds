@@ -37,6 +37,8 @@ FA = "plugin/FfaAssembly.cs"
 FLE = "plugin/FfaLateEntry.cs"
 FLR = "plugin/FfaLateRules.cs"
 FM = "plugin/FfaMode.cs"
+FMS = "plugin/FfaMapScale.cs"
+FCS = "plugin/FfaCardSequence.cs"
 GSW = "plugin/GameStateWatcher.cs"
 RA = "plugin/RoomActors.cs"
 SP = "plugin/SpectatorPatches.cs"
@@ -84,6 +86,9 @@ NODE = {
     "k42": "test_k42_per_site_views_and_fence",
     "k42clean": "test_k42_census_clean",
     "k42red": "test_k42_census_red_pairs",
+    "k42key": "test_k42_view_key_and_gate",
+    "k42fc": "test_k42_fixture_c_late_join_reads",
+    "k42ff": "test_k42_fixture_f_held_config",
     "k44": "test_k44_digest",
     "k45": "test_k45_harness_and_boundary_model",
     "k47": "test_k47_gated_roster_freeze",
@@ -1035,6 +1040,9 @@ row("K38", N("k38"), [
     M("third_load_stays", "K38 third load exit", D(FLE, _LGU, 'FfaAssembly.Exit("join_timeout");')),
     M("third_load_plain_leave", "K38 third load exit",
       R(FLE, _LGU, 'FfaAssembly.Exit("join_timeout");', 'ApiClient.FfaLeaveQueue(label: "join_timeout");')),
+    M("late_entry_no_actor", "K38 late entry actor",
+      R(FA, ("internal static Answer ParseAnswer(",), "if (actor > 0)", "if (true)"),
+      note="a statement's late entry with no actor is listed (I2 writer 6)"),
 ], T("proposal_fields_local",
      R(FLE, _OP, "var p = new FfaLateRules.Proposal { Lobby8 = S(a, 0), N = N(a, 1, -1), Chain = S(a, 2),",
        "string lobby8 = S(a, 0), chain = S(a, 2);\n^var p = new FfaLateRules.Proposal\n^{\n^^Lobby8 = lobby8, N = N(a, 1, -1), Chain = chain,"),
@@ -1182,10 +1190,64 @@ _READS_NEW = "\n".join([
 row("K42c", N("k42red", "k42clean"), [
     M("alias_needs_current_room", "K42 census alias",
       A(CEN, (), 'rx = needs.get(ckey) or (VIEW if cls == "V" else FENCE)',
-        'if key[3] in ("RoomPlayers", "GetPlayer") and "CurrentRoom" not in ctx[key[0]][0][max(0, o - 40):o]:\n^    continue')),
+        r'if key[3] in ("RoomPlayers", "GetPlayer") and not re.search(r"CurrentRoom\??\s*$", ctx[key[0]][0][max(0, o - 40):o]):'
+        "\n^    continue"),
+      note="V8's copy: a Players or GetPlayer read counts only on the literal CurrentRoom receiver"),
     M("member_read_dominates", "K42 census branch",
       B(CEN, (), "for at in (o, o + 1):", "if hit(clean[lo:hi]):\n^    return True")),
 ], T("reads_body_name", R(CEN, (), _READS_OLD, _READS_NEW)), extra=XT)
+
+
+# The view's key, the gate and fixtures (c) and (f) of V11:2940, as structure
+# (fixture (b) is K40's relay mutant and twin; (a), (d) and (e) run in the
+# late-rules harness).
+_OWN = ("internal static int OwnerOf(",)
+_GR = ("internal static bool GatedRunning",)
+_LFG = ("public static void LatchForGame(", "if (gatedFighter)")
+_SPC = ("FfaMode.SetPendingConfig(c.Target, c.Candidates > 0 ? c.Candidates : 5, c.Picks > 0 ? c.Picks : 1, "
+        "c.Cap > 0 ? c.Cap : 5, c.Same, c.Ranked, c.Sudden);")
+row("K42v", N("k42key", "k42fc", "k42ff"), [
+    M("view_keyed_on_slot", "K42 view key", R(FLE, _OWN, "p.data.view.OwnerActorNr : -1", "p.playerID + 1 : -1"),
+      note="the body's slot (its PlayerID) in place of its current owner actor"),
+    M("view_keyed_on_steam", "K42 view key",
+      R(FLE, _OWN, "p.data.view.OwnerActorNr : -1", "RoomActors.ActorOfSteam(RoomActors.SteamIdOf(p.data.view.Owner)) : -1"),
+      note="the actor that holds the body's Steam id in place of its current owner actor"),
+    M("gated_running_short_start", "K42 gated running",
+      R(FLE, _GR, "return FfaAssembly.SittingStarted();",
+        "return FfaAssembly.SittingStarted() && FfaAssembly.ShortStartedIn(FfaAssembly.CurrentRoomName());"),
+      note="V5's condition: the view gates a short-started sitting only"),
+    M("count_property_read", "K42 fixture c count",
+      D(FMS, ("private static int ReadPublishedCount(",), "if (gatedRoom) return FfaLateEntry.ConsumeLoadCount();"),
+      nodes=N("k42fc"), note="a gated room's load reads the count property"),
+    M("scale_any_sender", "K42 fixture c scale sender",
+      R(FLE, ("private static void OnScale(",), "e.Sender, MasterActor(), latch, keptSender",
+        "e.Sender, e.Sender, latch, keptSender"),
+      nodes=N("k42fc"), note="EVT_SCALE recorded from a sender that is not the current master"),
+    M("scale_sender_clause_dropped", "K42 fixture c scale sender",
+      D(FLR, ("internal static string ScaleRecordDecision(",),
+        'if (from != dispatchMaster && from != latchMaster) return "sender";'),
+      nodes=N("k42fc"), note="the record decision's sender test gone"),
+    M("seed_property_read", "K42 fixture c seed",
+      R(FCS, _LFG, 'seed = DeriveSeed(room?.Name ?? "", game, myHash);', "seed = uint.Parse(raw.Split(':')[1]);"),
+      nodes=N("k42fc"), note="a gated fighter reads the seed property"),
+    M("config_latched_from_room", "K42 fixture c config",
+      R(FM, ("public static void OnGameStart(",),
+        'if (!RoomActors.LocalIsSpectator && FfaAssembly.SittingGated()) FfaAssembly.ApplyLockConfig("start");',
+        'if (false) FfaAssembly.ApplyLockConfig("start");'),
+      nodes=N("k42fc"), note="a gated fighter latches the config from the room"),
+    M("config_pending_only", "K42 fixture f held config",
+      R(FA, ("internal static bool ApplyLockConfig(",), "var c = LockConfig;", "var c = (LockCfg)null;"),
+      nodes=N("k42ff"), note="no held config is read: only the pending slot, which the room exit resets"),
+], T("gated_local_and_config_fields",
+     R(FLE, ("internal static bool IsQuarantinedActor(",), "try { return GatedRunning && !IsKeptActor(actor); }",
+       "try\n^{\n^^bool gated = GatedRunning;\n^^return gated && !IsKeptActor(actor);\n^}"),
+     R(FA, ("internal static bool ApplyLockConfig(",), _SPC,
+       "int target = c.Target;\n^int candidates = c.Candidates > 0 ? c.Candidates : 5;\n^int picks = c.Picks > 0 ? c.Picks : 1;"
+       "\n^int cap = c.Cap > 0 ? c.Cap : 5;\n^FfaMode.SetPendingConfig(target, candidates, picks, cap, c.Same, c.Ranked, c.Sudden);"),
+     note="GatedRunning into a local declared immediately before its use; LockConfig copied into the pending"
+          " config field by field (V11's twins; the third, one struct for count, game and sender, is the"
+          " build's own form: ScaleRecord)"),
+    extra=XT)
 
 
 # ---------------------------------------------------------------- K44, K45

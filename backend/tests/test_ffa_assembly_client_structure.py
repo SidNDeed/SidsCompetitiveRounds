@@ -1546,7 +1546,8 @@ def test_k38_master_boundary():
     AckComplete within the ack window; the stamp just before the call-in; the
     ack only from a grant holder to the proposer; late requests of kind l,
     listed, roster-matched, answered only when the record lists them;
-    late_closed after two waits."""
+    late_closed after two waits; a statement's late entry is listed only
+    with an actor (I2 writer 6)."""
     fm = src("FfaMode.cs")
     sites = []
     for mm in re.finditer(r"if \(FfaLateEntry\.MasterMaySend\(\)\) yield return FfaLateEntry\.MasterBoundary\(\);",
@@ -1577,6 +1578,8 @@ def test_k38_master_boundary():
         "listed": "FfaLateRules.ListedIn(actor, Record" in k,
         "closed_after_two": bool(re.search(r"if \(waits >= 2\)\s*\{\s*SendSnapshot\(actor, kv\.Value, true\);", k)),
         "third_load_exit": 'FfaAssembly.Exit("join_timeout");' in kept(block("FfaLateEntry.cs", "void LateGiveUp(")),
+        "late_actor": bool(re.search(r'int actor = ExtractJsonInt\(e, "actor", 0\);\s*if \(actor > 0\)\s*a\.Late\.Add\(',
+                                     kept(block("FfaAssembly.cs", "internal static Answer ParseAnswer(")))),
     }
     trace(facts)
     assert sites == [True, True], ("K38 call sites", sites)
@@ -1587,6 +1590,7 @@ def test_k38_master_boundary():
         and facts["refusal_returns"], ("K38 ack", facts)
     assert facts["late_kind_l"] and facts["listed"] and facts["closed_after_two"], ("K38 late request", facts)
     assert facts["third_load_exit"], ("K38 third load exit", facts)
+    assert facts["late_actor"], ("K38 late entry actor", facts["late_actor"])
 
 
 # ================================================================ K39, K40 (report)
@@ -1885,6 +1889,101 @@ def test_k42_census_red_pairs():
     assert res["branch"] == [1, 1, ["NOVIEW"]], ("K42 census branch", res["branch"])
     twins = {k: v for k, v in res.items() if "twin" in k}
     assert all(v == [0, 0, []] for v in twins.values()), ("K42 census twins", twins)
+
+
+# ================================================================ K42 (the view's key, the gate, fixtures c and f)
+
+def test_k42_view_key_and_gate():
+    """K42: the view keys a body by its current owner actor - OwnerOf reads
+    data.view.OwnerActorNr, and both IsQuarantined overloads and KeptPlayers
+    key through it - never by its Steam id or slot (a same-identity return
+    would then play); GatedRunning reads only SittingStarted(), which reads
+    only CurrentGate(), the current room's GateOf (V9, N2): no short-start
+    flag and no grant (V5's short-start condition admitted an ungranted body
+    in a full-granted or fallback room)."""
+    oo = kept(block("FfaLateEntry.cs", "internal static int OwnerOf("))
+    iq = norm(kept(block("FfaLateEntry.cs", "internal static bool IsQuarantined(Player p)")))
+    iqs = norm(kept(block("FfaLateEntry.cs", "internal static bool IsQuarantined(params Player[] bodies)")))
+    kp = norm(kept(block("FfaLateEntry.cs", "internal static List<Player> KeptPlayers(")))
+    gr = block("FfaLateEntry.cs", "internal static bool GatedRunning")
+    ss = norm(kept(block("FfaAssembly.cs", "internal static bool SittingStarted(")))
+    cg = norm(kept(block("FfaAssembly.cs", "internal static FfaLateRules.Gate CurrentGate(")))
+    facts = {
+        "owner": "p.data.view.OwnerActorNr : -1" in norm(oo)
+        and not re.search(r"playerID|SteamId|ActorOfSteam|[Ss]lot", oo),
+        "keyed": ["int a = OwnerOf(p);" in t and bool(re.search(r"IsQuarantinedActor\(a\)|!IsKeptActor\(a\)", t))
+                  for t in (iq, iqs, kp)],
+        "gated_calls": re.findall(r"[A-Za-z_][\w.]*(?=\s*\()", masked(gr)),
+        "gated_names": sorted(set(re.findall(r"Short\w*|Grant\w*|Latch\w*|Restart\w*", kept(gr)))),
+        "started": ss == "{ return CurrentGate() == FfaLateRules.Gate.Started; }",
+        "current": "string room = CurrentRoomName();" in cg and "_gateNow = GateOf(room);" in cg,
+    }
+    trace(facts)
+    assert facts["owner"] and facts["keyed"] == [True, True, True], ("K42 view key", facts)
+    assert facts["gated_calls"] == ["FfaAssembly.SittingStarted"] and not facts["gated_names"] \
+        and facts["started"] and facts["current"], ("K42 gated running", facts)
+
+
+def test_k42_fixture_c_late_join_reads():
+    """K42 fixture (c), a late join after an unkept master published (V7-F4),
+    as structure: in a gated room the load consumes its EVT_SCALE record and
+    never reads the count property; EVT_SCALE is recorded only from the
+    current master at the dispatch or the point's LatchMaster (V9, N3; V10,
+    N7); a gated fighter derives the seed itself and only compares the
+    property (seq_mismatch); a gated fighter applies its lock's config at the
+    start, and only a spectator or an ungated seat latches it from the room
+    (V9, N4)."""
+    rp = block("FfaMapScale.cs", "private static int ReadPublishedCount(")
+    osc = norm(kept(block("FfaLateEntry.cs", "private static void OnScale(")))
+    srd = norm(kept(block("FfaLateRules.cs", "internal static string ScaleRecordDecision(")))
+    lfg = block("FfaCardSequence.cs", "public static void LatchForGame(")
+    gb = kept(block("FfaCardSequence.cs", "public static void LatchForGame(", "if (gatedFighter)"))
+    ogs = norm(kept(block("FfaMode.cs", "public static void OnGameStart(")))
+    slc = block("FfaMode.cs", "private static void SpectatorLatchConfigOnce(")
+    gated_ret = first(rp, r"if \(gatedRoom\) return FfaLateEntry\.ConsumeLoadCount\(\);")
+    prop = first(rp, r"CustomProperties")
+    facts = {
+        "count": "bool gatedRoom = FfaAssembly.SittingGated();" in norm(kept(rp)) and 0 <= gated_ret < prop,
+        "scale_sender": "FfaLateRules.ScaleRecordDecision(l8, Lobby8, e.Sender, MasterActor(), latch, keptSender)"
+        in osc and "_latchMaster.TryGetValue(Key(game, k), out latch)" in osc
+        and 'if (from != dispatchMaster && from != latchMaster) return "sender";' in srd,
+        "seed": "gatedFighter = FfaAssembly.SittingGated() && !RoomActors.LocalIsSpectator;" in norm(kept(lfg))
+        and 'seed = DeriveSeed(room?.Name ?? "", game, myHash);' in norm(gb)
+        and "CompareSeedProp(raw, game, seed, myHash);" in norm(gb)
+        and not re.search(r"raw\.Split|Parse\(", gb),
+        "config": 'if (!RoomActors.LocalIsSpectator && FfaAssembly.SittingGated()) FfaAssembly.ApplyLockConfig("start"); '
+                  "else LatchConfigFromRoom();" in ogs
+        and calls(src("FfaMode.cs"), "LatchConfigFromRoom") == 3 and calls(slc, "LatchConfigFromRoom") == 1,
+    }
+    trace(facts)
+    assert facts["count"], ("K42 fixture c count", gated_ret, prop)
+    assert facts["scale_sender"], ("K42 fixture c scale sender", facts)
+    assert facts["seed"], ("K42 fixture c seed", facts)
+    assert facts["config"], ("K42 fixture c config", facts)
+
+
+def test_k42_fixture_f_held_config():
+    """K42 fixture (f), the held config (V9, N4), as structure: the lock
+    routine captures the lock's config in LockConfig (a reform's lock
+    included, through Move's re-arm); ApplyLockConfig reads LockConfig,
+    applies it only in its own room (cfg_missing otherwise) and sets the
+    pending config from it, at exactly the arrival, the barrier and the
+    start, so the pending slot, which the old room's exit resets, never
+    carries the config across a room change."""
+    olp = norm(kept(block("FfaAssembly.cs", "internal static bool OnLockPayload(")))
+    ac = kept(block("FfaAssembly.cs", "internal static bool ApplyLockConfig("))
+    sites = sorted(re.findall(r'ApplyLockConfig\("(\w+)"\)', kept(src("FfaAssembly.cs")) + kept(src("FfaMode.cs"))))
+    facts = {
+        "captured": bool(re.search(r'LockConfig = new LockCfg \{ Lobby = lobby, Room = room, '
+                                   r'Target = ExtractJsonInt\(m, "score_target", 0\), '
+                                   r'Candidates = ExtractJsonInt\(m, "card_candidates", 0\),', olp)),
+        "held": "var c = LockConfig;" in norm(ac) and "c.Room != room" in norm(ac) and "cfg_missing" in ac,
+        "applied": "FfaMode.SetPendingConfig(" in ac and "c.Target" in ac,
+        "sites": sites,
+    }
+    trace(facts)
+    assert facts["captured"] and facts["held"] and facts["applied"] \
+        and sites == ["arrived", "barrier", "start"], ("K42 fixture f held config", facts)
 
 
 # ================================================================ K44 (digest)
