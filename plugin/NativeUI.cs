@@ -7765,15 +7765,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         suggested ? new Color(0.22f, 0.40f, 0.22f, 0.95f) : C_BTN,
                         () =>
                         {
-                            Plugin.ModLanguage.Value = code;
-                            I18n.SetLocale(code);
                             try { UnityEngine.Object.Destroy(langPromptGO); } catch { }
                             langPromptGO = null;
-                            // Hot-switch through the public page path (§2.3).
-                            Close();
-                            if (pageGO != null) UnityEngine.Object.Destroy(pageGO);
-                            pageBuilt = false;
-                            Open();
+                            // Round-2 L1: the language row's one writer stores the choice,
+                            // switches the locale and rebuilds the page by the public path
+                            // (localization design section 2.3), landing on the same tab.
+                            SetModLanguage(code);
                         }, sizeDelta: new Vector2(500, 40));
                     UIFactory.AddLE(b, prefH: 40, minH: 40, flexH: 0);
                 };
@@ -14008,7 +14005,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Ping/region toggled");
-                    Plugin.ShowRegionPing.Value = !Plugin.ShowRegionPing.Value;
+                    if (Plugin.ShowRegionPing != null) SetShowRegionPing(!Plugin.ShowRegionPing.Value);
                     dirty = true;
                 });
             pingToggleTxt = UIFactory.GetButtonText(pingToggleBtn);
@@ -14019,7 +14016,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Lag notices toggled");
-                    if (Plugin.LagNoticesEnabled != null) Plugin.LagNoticesEnabled.Value = !Plugin.LagNoticesEnabled.Value;
+                    if (Plugin.LagNoticesEnabled != null) LagNotices.SetEnabled(!Plugin.LagNoticesEnabled.Value);
                     dirty = true;
                 });
             lagNoticesToggleTxt = UIFactory.GetButtonText(lagNoticesToggleBtn);
@@ -14028,7 +14025,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Input overlay toggled");
-                    Plugin.ShowInputOverlay.Value = !Plugin.ShowInputOverlay.Value;
+                    if (Plugin.ShowInputOverlay != null) SetShowInputOverlay(!Plugin.ShowInputOverlay.Value);
                     dirty = true;
                 });
             inputOverlayToggleTxt = UIFactory.GetButtonText(inputOverlayToggleBtn);
@@ -14037,7 +14034,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Block debug overlay toggled");
-                    Plugin.ShowBlockDebug.Value = !Plugin.ShowBlockDebug.Value;
+                    if (Plugin.ShowBlockDebug != null) SetShowBlockDebug(!Plugin.ShowBlockDebug.Value);
                     dirty = true;
                 });
             blockDbgToggleTxt = UIFactory.GetButtonText(blockDbgToggleBtn);
@@ -14146,7 +14143,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Notifications toggled");
-                    Plugin.ShowNotifications.Value = !Plugin.ShowNotifications.Value;
+                    if (Plugin.ShowNotifications != null) SetShowNotifications(!Plugin.ShowNotifications.Value);
                     dirty = true;
                 });
             notifToggleTxt = UIFactory.GetButtonText(notifToggleBtn);
@@ -14161,7 +14158,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Background mute toggled");
-                    Plugin.MuteAudioInBackground.Value = !Plugin.MuteAudioInBackground.Value;
+                    if (Plugin.MuteAudioInBackground != null) SetMuteAudioInBackground(!Plugin.MuteAudioInBackground.Value);
                     dirty = true;
                 });
             muteBgToggleTxt = UIFactory.GetButtonText(muteBgToggleBtn);
@@ -14185,7 +14182,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Music credit toast toggled");
-                    if (Plugin.MusicCreditToast != null) Plugin.MusicCreditToast.Value = !Plugin.MusicCreditToast.Value;
+                    if (Plugin.MusicCreditToast != null) SetMusicCreditToast(!Plugin.MusicCreditToast.Value);
                     dirty = true;
                 });
             musicCreditToggleTxt = UIFactory.GetButtonText(musicCreditToggleBtn);
@@ -14196,16 +14193,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Trails toggled");
-                    Plugin.ShowTrails.Value = !Plugin.ShowTrails.Value;
-                    // Live effect mid-match: ON -> re-attach for everyone, OFF -> detach.
-                    if (Plugin.ShowTrails.Value)
-                    {
-                        if (GameStateWatcher.IsInMatch) TrailCosmetic.OnMatchStart();
-                    }
-                    else
-                    {
-                        TrailCosmetic.OnMatchEnd();
-                    }
+                    if (Plugin.ShowTrails != null) TrailCosmetic.SetShowTrails(!Plugin.ShowTrails.Value);
                     dirty = true;
                 });
             trailToggleTxt = UIFactory.GetButtonText(trailToggleBtn);
@@ -14214,9 +14202,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Custom player colors toggled");
-                    Plugin.ShowPlayerColors.Value = !Plugin.ShowPlayerColors.Value;
-                    try { PlayerColorCosmetic.OnShowPlayerColorsToggled(); } catch { }
-                    try { PlayerEffectCosmetic.OnShowPlayerColorsToggled(); } catch { }
+                    if (Plugin.ShowPlayerColors != null) PlayerColorCosmetic.SetShowPlayerColors(!Plugin.ShowPlayerColors.Value);
                     dirty = true;
                 });
             playerColorToggleTxt = UIFactory.GetButtonText(playerColorToggleBtn);
@@ -14225,9 +14211,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Animated cosmetics toggled");
-                    Plugin.AnimatedCosmetics.Value = !Plugin.AnimatedCosmetics.Value;
-                    try { PlayerEffectCosmetic.OnAnimatedCosmeticsToggled(); } catch { }
-                    try { MapSkinEffects.OnAnimatedCosmeticsToggled(); } catch { }
+                    if (Plugin.AnimatedCosmetics != null) PlayerEffectCosmetic.SetAnimatedCosmetics(!Plugin.AnimatedCosmetics.Value);
                     dirty = true;
                 });
             animCosToggleTxt = UIFactory.GetButtonText(animCosToggleBtn);
@@ -14259,8 +14243,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Chromatic aberration toggled");
-                    Plugin.ChromaticAberrationEnabled.Value = !Plugin.ChromaticAberrationEnabled.Value;
-                    try { MapPhysicalColorPatch.ChromaticAberrationSetting.Apply(); } catch { }
+                    if (Plugin.ChromaticAberrationEnabled != null) MapPhysicalColorPatch.ChromaticAberrationSetting.Set(!Plugin.ChromaticAberrationEnabled.Value);
                     dirty = true;
                 });
             chromAbToggleTxt = UIFactory.GetButtonText(chromAbToggleBtn);
@@ -14269,21 +14252,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Map lighting toggled");
-                    Plugin.MapLightingEnabled.Value = !Plugin.MapLightingEnabled.Value;
-                    // Re-tint the live skin too, not just the backdrop: which side carries
-                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
-                    // leaves the wall/art surfaces holding the WRONG correction until the
-                    // next map load - uncorrected after enable, doubly corrected after
-                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
-                    try
-                    {
-                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
-                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
-                        var liveSku = MapColorState.CurrentSku;
-                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
-                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
-                    }
-                    catch { }
+                    if (Plugin.MapLightingEnabled != null) MapPhysicalColorPatch.RenderPerfSettings.SetLighting(!Plugin.MapLightingEnabled.Value);
                     dirty = true;
                 });
             mapLightingToggleTxt = UIFactory.GetButtonText(mapLightingToggleBtn);
@@ -14292,21 +14261,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Map shadows toggled");
-                    Plugin.MapShadowsEnabled.Value = !Plugin.MapShadowsEnabled.Value;
-                    // Re-tint the live skin too, not just the backdrop: which side carries
-                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
-                    // leaves the wall/art surfaces holding the WRONG correction until the
-                    // next map load - uncorrected after enable, doubly corrected after
-                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
-                    try
-                    {
-                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
-                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
-                        var liveSku = MapColorState.CurrentSku;
-                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
-                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
-                    }
-                    catch { }
+                    if (Plugin.MapShadowsEnabled != null) MapPhysicalColorPatch.RenderPerfSettings.SetShadows(!Plugin.MapShadowsEnabled.Value);
                     dirty = true;
                 });
             mapShadowsToggleTxt = UIFactory.GetButtonText(mapShadowsToggleBtn);
@@ -14323,7 +14278,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] FPS toggled");
-                    Plugin.ShowFps.Value = !Plugin.ShowFps.Value;
+                    if (Plugin.ShowFps != null) SetShowFps(!Plugin.ShowFps.Value);
                     dirty = true;
                 });
             fpsToggleTxt = UIFactory.GetButtonText(fpsToggleBtn);
@@ -14332,7 +14287,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Unfocused FPS cap toggled");
-                    Plugin.CapFpsUnfocused.Value = !Plugin.CapFpsUnfocused.Value;
+                    if (Plugin.CapFpsUnfocused != null) SetCapFpsUnfocused(!Plugin.CapFpsUnfocused.Value);
                     dirty = true;
                 });
             fpsCapToggleTxt = UIFactory.GetButtonText(fpsCapToggleBtn);
@@ -14341,7 +14296,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Deep idle toggled");
-                    Plugin.DeepIdleUnfocused.Value = !Plugin.DeepIdleUnfocused.Value;
+                    if (Plugin.DeepIdleUnfocused != null) SetDeepIdleUnfocused(!Plugin.DeepIdleUnfocused.Value);
                     dirty = true;
                 });
             deepIdleToggleTxt = UIFactory.GetButtonText(deepIdleToggleBtn);
@@ -14375,37 +14330,37 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             perfMasterBtn = AddPerfRow("Master", I18n.Tr("Performance master switch \u2014 flips ALL the patches below at once."),
                 () => Plugin.PerfOptimizations != null && Plugin.PerfOptimizations.Value,
-                () => { if (Plugin.PerfOptimizations != null) { Plugin.PerfOptimizations.Value = !Plugin.PerfOptimizations.Value; dirty = true; } });
+                () => { if (Plugin.PerfOptimizations != null) { PerfPatches.SetPatch("Master", !Plugin.PerfOptimizations.Value); dirty = true; } });
             perfMasterTxt = UIFactory.GetButtonText(perfMasterBtn);
             perfStunBtn = AddPerfRow("Stun", I18n.Tr("StunPlayer null-guard \u2014 stops NRE spam when a player is destroyed mid-stun."),
                 () => Plugin.PerfStunPlayerNullGuard != null && Plugin.PerfStunPlayerNullGuard.Value,
-                () => { if (Plugin.PerfStunPlayerNullGuard != null) { Plugin.PerfStunPlayerNullGuard.Value = !Plugin.PerfStunPlayerNullGuard.Value; dirty = true; } });
+                () => { if (Plugin.PerfStunPlayerNullGuard != null) { PerfPatches.SetPatch("Stun", !Plugin.PerfStunPlayerNullGuard.Value); dirty = true; } });
             perfStunTxt = UIFactory.GetButtonText(perfStunBtn);
             perfBulletsBtn = AddPerfRow("OOB", I18n.Tr("Despawn off-screen bullets \u2014 host clears bullets that exit the camera viewport."),
                 () => Plugin.PerfDespawnOffscreenBullets != null && Plugin.PerfDespawnOffscreenBullets.Value,
-                () => { if (Plugin.PerfDespawnOffscreenBullets != null) { Plugin.PerfDespawnOffscreenBullets.Value = !Plugin.PerfDespawnOffscreenBullets.Value; dirty = true; } });
+                () => { if (Plugin.PerfDespawnOffscreenBullets != null) { PerfPatches.SetPatch("OOB", !Plugin.PerfDespawnOffscreenBullets.Value); dirty = true; } });
             perfBulletsTxt = UIFactory.GetButtonText(perfBulletsBtn);
             perfHitSndBtn = AddPerfRow("HitSnd", I18n.Tr("Swallow RayHitBulletSound NREs from destroyed parents."),
                 () => Plugin.PerfSwallowHitSoundNREs != null && Plugin.PerfSwallowHitSoundNREs.Value,
-                () => { if (Plugin.PerfSwallowHitSoundNREs != null) { Plugin.PerfSwallowHitSoundNREs.Value = !Plugin.PerfSwallowHitSoundNREs.Value; dirty = true; } });
+                () => { if (Plugin.PerfSwallowHitSoundNREs != null) { PerfPatches.SetPatch("HitSnd", !Plugin.PerfSwallowHitSoundNREs.Value); dirty = true; } });
             perfHitSndTxt = UIFactory.GetButtonText(perfHitSndBtn);
             // ("ColorGh" + "Tag" rows removed v1.28.2 - their patches were
             // old-game ports whose targets no longer exist; see PerfPatches.cs)
             perfEdgeBnBtn = AddPerfRow("EdgeBn", I18n.Tr("Swallow ScreenEdgeBounce NREs from destroyed bullets."),
                 () => Plugin.PerfSwallowEdgeBounceNREs != null && Plugin.PerfSwallowEdgeBounceNREs.Value,
-                () => { if (Plugin.PerfSwallowEdgeBounceNREs != null) { Plugin.PerfSwallowEdgeBounceNREs.Value = !Plugin.PerfSwallowEdgeBounceNREs.Value; dirty = true; } });
+                () => { if (Plugin.PerfSwallowEdgeBounceNREs != null) { PerfPatches.SetPatch("EdgeBn", !Plugin.PerfSwallowEdgeBounceNREs.Value); dirty = true; } });
             perfEdgeBnTxt = UIFactory.GetButtonText(perfEdgeBnBtn);
             perfMenuBtn = AddPerfRow("Menu", I18n.Tr("Skip MenuControllerHandler.Update during an active match."),
                 () => Plugin.PerfSkipMenuUpdateInMatch != null && Plugin.PerfSkipMenuUpdateInMatch.Value,
-                () => { if (Plugin.PerfSkipMenuUpdateInMatch != null) { Plugin.PerfSkipMenuUpdateInMatch.Value = !Plugin.PerfSkipMenuUpdateInMatch.Value; dirty = true; } });
+                () => { if (Plugin.PerfSkipMenuUpdateInMatch != null) { PerfPatches.SetPatch("Menu", !Plugin.PerfSkipMenuUpdateInMatch.Value); dirty = true; } });
             perfMenuTxt = UIFactory.GetButtonText(perfMenuBtn);
             perfBulletCapBtn = AddPerfRow("BulletCap", I18n.Tr("Cap bullet-hit particles at 2/frame \u2014 biggest user-visible win on heavy firefights."),
                 () => Plugin.PerfBulletHitParticleCap != null && Plugin.PerfBulletHitParticleCap.Value,
-                () => { if (Plugin.PerfBulletHitParticleCap != null) { Plugin.PerfBulletHitParticleCap.Value = !Plugin.PerfBulletHitParticleCap.Value; dirty = true; } });
+                () => { if (Plugin.PerfBulletHitParticleCap != null) { PerfPatches.SetPatch("BulletCap", !Plugin.PerfBulletHitParticleCap.Value); dirty = true; } });
             perfBulletCapTxt = UIFactory.GetButtonText(perfBulletCapBtn);
             perfPoolBtn = AddPerfRow("PoolInit", I18n.Tr("Clamp ObjectPool init-spawn to 4 in-match \u2014 reduces frame stutter from new pool allocation."),
                 () => Plugin.PerfClampObjectPoolInit != null && Plugin.PerfClampObjectPoolInit.Value,
-                () => { if (Plugin.PerfClampObjectPoolInit != null) { Plugin.PerfClampObjectPoolInit.Value = !Plugin.PerfClampObjectPoolInit.Value; dirty = true; } });
+                () => { if (Plugin.PerfClampObjectPoolInit != null) { PerfPatches.SetPatch("PoolInit", !Plugin.PerfClampObjectPoolInit.Value); dirty = true; } });
             perfPoolTxt = UIFactory.GetButtonText(perfPoolBtn);
             // "CardPickPart" row removed v1.28.3 - pausing the pick-phase skin
             // particles made the picker's body invisible (bug #29).
@@ -14451,9 +14406,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Show inactive players on boards toggled");
-                    if (Plugin.ShowInactiveOnBoards != null) Plugin.ShowInactiveOnBoards.Value = !Plugin.ShowInactiveOnBoards.Value;
-                    lbTabRefreshAt = 0f; ffaLbRefreshAt = 0f; ovtTabRefreshAt = 0f;
-                    ApiClient.FetchTeamLeaderboard(200, ApiClient.CachedTeamLeaderboardSort ?? "rating");
+                    if (Plugin.ShowInactiveOnBoards != null) SetShowInactiveOnBoards(!Plugin.ShowInactiveOnBoards.Value);
                     dirty = true;
                 });
             inactiveBoardsToggleTxt = UIFactory.GetButtonText(inactiveBoardsToggleBtn);
@@ -14624,7 +14577,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 {
                     Plugin.Log.LogInfo("[SETTINGS] automatic log upload toggled");
                     if (Plugin.AutoLogUploadEnabled != null)
-                        Plugin.AutoLogUploadEnabled.Value = !Plugin.AutoLogUploadEnabled.Value;
+                        AutoLogUpload.SetEnabled(!Plugin.AutoLogUploadEnabled.Value);
                     dirty = true;
                 });
             autoLogToggleTxt = UIFactory.GetButtonText(autoLogToggleBtn);
@@ -14670,8 +14623,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         Plugin.Log.LogInfo($"[PRIVACY] Delete result: ok={ok} msg={msg}");
                         if (ok)
                         {
-                            Plugin.DataConsent.Value = "denied";
-                            ApiClient.OnConsentChanged();
+                            ConsentSetting.Set(false);   // round-2 L1: the consent row's one writer
                             if (txtDeleteStatus != null)
                                 UIFactory.SetText(txtDeleteStatus, "<color=#88FF88>Profile anonymized. Data reporting is now off; past matches stay.</color>");
                         }
@@ -14779,10 +14731,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return NormalizeMenuMusicMode(Plugin.MenuMusicMode != null ? Plugin.MenuMusicMode.Value : null);
         }
 
-        // Item 13 (design section 2.1): the value-taking named writers the
-        // per-tab reset calls with each row's recommended value
-        // (SettingsDescriptorWriters.InvokeReset). A row's own switch keeps its
-        // handler; each writer produces the same effect for a given value.
+        // Item 13 (design section 2.1): the value-taking named writers. Each is
+        // the ONE writer of its setting (round-2 L1): the row's own switch calls
+        // it with the flipped value and the per-tab reset with the recommended
+        // one (SettingsDescriptorWriters.InvokeReset), so the two cannot drift.
         internal static void SetShowRegionPing(bool on) { if (Plugin.ShowRegionPing == null) return; Plugin.ShowRegionPing.Value = on; dirty = true; }
         internal static void SetShowInputOverlay(bool on) { if (Plugin.ShowInputOverlay == null) return; Plugin.ShowInputOverlay.Value = on; dirty = true; }
         internal static void SetShowBlockDebug(bool on) { if (Plugin.ShowBlockDebug == null) return; Plugin.ShowBlockDebug.Value = on; dirty = true; }

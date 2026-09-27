@@ -8443,15 +8443,13 @@ namespace CompetitiveRounds
             string declineLabel = I18n.Tr("Decline (offline mode)");
             if (GUI.Button(new Rect(x + 50, y + h - 56, 260, 38), allowLabel))
             {
-                Plugin.DataConsent.Value = "granted";
+                ConsentSetting.Set(true);   // round-2 L1: the consent row's one writer
                 Plugin.Log.LogInfo("[CONSENT] User granted data reporting");
-                ApiClient.OnConsentChanged();
             }
             if (GUI.Button(new Rect(x + w - 310, y + h - 56, 260, 38), declineLabel))
             {
-                Plugin.DataConsent.Value = "denied";
+                ConsentSetting.Set(false);   // round-2 L1: the consent row's one writer
                 Plugin.Log.LogInfo("[CONSENT] User declined data reporting");
-                ApiClient.OnConsentChanged();
             }
 
             // Eat mouse / keyboard so the click doesn't pass through to the menu underneath
