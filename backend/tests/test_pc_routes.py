@@ -341,8 +341,9 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
     """Since 2026-09-13 neither setting can withdraw a picture, so the writer
     has no exclusive-lock half and no lease wait: actor, row lock, the CAS
     write, commit. A key that could move the resolution would need the old
-    None writer back (r18 H2), which is why the SQL is pinned to the two
-    announce columns and the surface to the two keys. The route BODY takes
+    None writer back (r18 H2), which is why the SQL is pinned to the
+    announce columns and card trading's switch (migration 353, which moves
+    no picture either) and the surface to those three keys. The route BODY takes
     no advisory lock; the SHARED identity hold every player route takes
     inside `_pc_verified_actor` (c3) is kept on purpose, so a settings
     write of a player mid-deletion waits for that deletion instead of
@@ -357,7 +358,8 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
     for absent in ("pg_advisory_xact_lock", "_pc_lease_wait", "_pc_lock_portrait_blobs",
                    "_pc_release_portrait_blob", "none_write", "_pc_setting_revokes_picture"):
         assert absent not in src, absent
-    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce")
+    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce",
+                                                                      "trades_open")
     for key, sql in main._PC_SETTINGS_SQL.items():
         flat = " ".join(sql.split())
         assert ("WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer) "
@@ -368,8 +370,10 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
 
 def test_the_settings_surface_is_exactly_the_two_announce_keys():
     # a key added here without a decision about the picture would silently
-    # ride the lock-free writer above
-    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce"}
+    # ride the lock-free writer above. trades_open (migration 353) is card
+    # trading's consent switch: decided in the trading design, it moves no
+    # picture and takes no card out of a binder.
+    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce", "trades_open"}
 
 
 def test_a_ban_deletes_the_subjects_leases_under_the_identity_lock():

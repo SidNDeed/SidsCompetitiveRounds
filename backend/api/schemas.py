@@ -817,6 +817,13 @@ class HealthResponse(BaseModel):
     # §8) -- probed by the release train on both roles and read by nothing
     # else. Absent on a build older than v4.13.
     pc_fold: str | None = None
+    # pc_trading: the card-trading word (main._pc_trading_word, migration
+    # 353): ready | off | schema_missing | partial | unknown | broken --
+    # DERIVED from the accept's claim and move literals and the schema
+    # probe, never a constant (#306). The connected arm probes; the
+    # degraded arm reads only this process's cache (broken, the word of a
+    # found schema, else unknown). Absent on a build before trading.
+    pc_trading: str | None = None
     # ffa_hold_fences: which generation of the FFA readmission-hold fences this
     # build carries (main._FFA_HOLD_FENCES; 1 = migration 325's held_until /
     # held_lobby honoured by the janitor lapse sweep, the poll's 3-hour sweep
