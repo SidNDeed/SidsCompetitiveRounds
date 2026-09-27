@@ -74,7 +74,7 @@ namespace CompetitiveRounds
             new SettingsDescriptor("SPerf_PoolInit", "SWITCH", "perf", true, true, "SPerf_PoolInit", "SPerf_PoolInit_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPerf_Stun", "SWITCH", "perf", true, true, "SPerf_Stun", "SPerf_Stun_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPing", "SWITCH", "ingame", true, true, "SPing", "SPing_q", "painted_literal", "ON"),
-            new SettingsDescriptor("SPortal", "ACTION", "langmenus", false, false, "SPortal", "SPortal_q", "when_to_press", "when you want the web leaderboard"),
+            new SettingsDescriptor("SPortal", "ACTION", "langmenus", false, false, "SPortal", "SPortal_q", "when_to_press", "when you want to help translate the mod"),
             new SettingsDescriptor("SPrefSC", "SWITCH", "ingame", false, true, "SPrefSC", "SPrefSC_q", "painted_literal", "OFF"),
             new SettingsDescriptor("SShad", "SWITCH", "visuals", true, true, "SShad", "SShad_q", "painted_literal", "ON"),
             new SettingsDescriptor("SShake", "SEGMENTED", "visuals", true, true, "SShake", "SShake_q", "painted_runtime", null),
@@ -180,7 +180,7 @@ namespace CompetitiveRounds
                 case "SInfoOpen": return I18n.Tr("before asking in Discord");
                 case "SMailBlocked": return I18n.Tr("when you want to unblock someone");
                 case "SPerfH": return I18n.Tr("when the count beside it is not 7/7");
-                case "SPortal": return I18n.Tr("when you want the web leaderboard");
+                case "SPortal": return I18n.Tr("when you want to help translate the mod");
                 default: return null;
             }
         }

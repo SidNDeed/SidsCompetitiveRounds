@@ -338,7 +338,7 @@
     {
       "class": "when_to_press",
       "key": "SPortal",
-      "text": "when you want the web leaderboard"
+      "text": "when you want to help translate the mod"
     },
     {
       "class": "reason",
@@ -4634,7 +4634,7 @@
         "option_words": [],
         "reason": "it opens a browser; nothing in game changes",
         "state_words": [],
-        "when_to_press": "when you want the web leaderboard"
+        "when_to_press": "when you want to help translate the mod"
       },
       "key": "SPortal",
       "kind": "ACTION",
@@ -4647,7 +4647,7 @@
         "kind": "when_to_press",
         "new_i18n_key": true,
         "painter": null,
-        "value": "when you want the web leaderboard"
+        "value": "when you want to help translate the mod"
       },
       "reset_call": {
         "args": [],

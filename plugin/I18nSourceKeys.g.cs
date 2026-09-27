@@ -3024,7 +3024,7 @@ namespace CompetitiveRounds
             "watching",
             "when the count beside it is not 7/7",
             "when the game thinks you are still queued",
-            "when you want the web leaderboard",
+            "when you want to help translate the mod",
             "when you want to unblock someone",
             "whenever you armed it by accident",
             "window over - cooldown keeps counting from the press",
