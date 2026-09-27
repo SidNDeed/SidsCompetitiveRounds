@@ -5,8 +5,10 @@ Every assertion here has a mutation that must turn it red and a control that
 stays green on correct code (#391); the mutation runs are recorded in the
 lane's dance-cards-server-*.log files, not in this file.
 """
+import asyncio
 import os
 import re
+import threading
 import time
 
 import pytest
@@ -299,3 +301,32 @@ def test_decode_admission_one_per_player_and_three_in_all():
     assert admission.try_claim("d") is not None
     admission.release("b", object())          # a stale token releases nothing
     assert admission.held() == 3
+
+
+def test_decode_claim_is_released_when_the_waiter_goes():
+    """A request that stops waiting (its client went away) while its decode
+    is still QUEUED behind another must not strand the claim phase A took:
+    the job still runs and releases it. A stranded claim would refuse that
+    player, and hold one of the three slots, until the process restarts."""
+    admission = pcm.DecodeAdmission()
+    header, frames = pcm.parse_container(fx.container("dance_bounce", fx.smooth_frames(80)))
+    gate = threading.Event()
+
+    async def scenario():
+        blocker = pcm.DECODE_POOL.submit(gate.wait, 30)     # the one worker, busy
+        token = admission.try_claim("p1")
+        waiter = asyncio.ensure_future(pcm.decode_in_pool(admission, "p1", token, header, frames))
+        await asyncio.sleep(0.2)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        queued = admission.held()
+        gate.set()
+        await asyncio.wrap_future(blocker)
+        for _ in range(400):
+            if admission.held() == 0:
+                break
+            await asyncio.sleep(0.05)
+        return queued, admission.held()
+    queued, after = asyncio.run(scenario())
+    assert (queued, after) == (1, 0)

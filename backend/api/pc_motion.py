@@ -7,18 +7,23 @@ an edit there would re-key every static face URL in the fleet (S4.1). This
 module reuses its PNG walk, its IHDR reader, its portrait background and its
 pinned encoder, read-only.
 """
-import asyncio
-import concurrent.futures
-import hashlib
-import io
-import re
-import threading
-import time
-import warnings
+# Every import is bound under a private name: the route manifest gate folds a
+# module-level name of ANY api module into the fingerprint of every route that
+# references that name, so a public `time` or `re` here would move every route
+# in main.py that uses its own `time` or `re` (backend/tests/
+# test_route_manifest_net_seat.py, _walk_bindings).
+import asyncio as _asyncio
+import concurrent.futures as _futures
+import hashlib as _hashlib
+import io as _pcm_io                  # not _io / _re: main.py binds both
+import re as _pcm_re
+import threading as _threading
+import time as _time
+import warnings as _warnings
 
-from PIL import Image, ImageChops
+from PIL import Image as _Image, ImageChops as _ImageChops
 
-import pc_face as _pcf
+import pc_face as _face
 
 # -- the table (S2.4) --------------------------------------------------------
 # The capture recipe this build derives and accepts. A header naming another
@@ -60,7 +65,7 @@ FRAME_EDGE = 590
 MOTION_DAY_CAP = 8                   # charged decode attempts per player per UTC day (S2.6 step 9)
 MOTION_CAPACITY_BYTES = 1 << 30      # every stored source together (S2.6 phase C, S10 Q7)
 
-_HEADER_RE = re.compile(
+_HEADER_RE = _pcm_re.compile(
     r"dance=(?P<dance>dance_[a-z]{1,24});recipe=(?P<recipe>[1-9][0-9]{0,2});"
     r"frames=(?P<frames>[1-9][0-9]{0,2});ms=(?P<ms>[1-9][0-9]{0,3});"
     r"static=(?P<static>[0-9a-f]{64})")
@@ -151,7 +156,7 @@ def parse_container(body):
 
 
 # -- content checks (S2.5) ----------------------------------------------------
-COVERAGE_MIN, COVERAGE_MAX = 0.02, 0.60
+MOTION_COVERAGE_MIN, MOTION_COVERAGE_MAX = 0.02, 0.60
 EDGE_MARGIN = 2                      # the band of pixels along each edge that must stay clear
 FLASH_DY = 0.05                      # a pixel is "changed" when |dY| exceeds this
 FLASH_CHANGED_MAX = 0.35             # a pair is refused above this changed fraction
@@ -183,21 +188,21 @@ def check_frame(png, index):
     RGBA frame with every alpha-zero pixel (0,0,0,0)); else MotionRefusal 422
     motion_frame_invalid / motion_coverage / motion_edge with the index."""
     try:
-        chunks = _pcf.png_chunks(png)            # <= 4096 chunks, CRCs, IEND last, nothing after
+        chunks = _face.png_chunks(png)            # <= 4096 chunks, CRCs, IEND last, nothing after
     except ValueError:
         raise _frame_refusal("motion_frame_invalid", index) from None
     if any(kind in _FORBIDDEN_CHUNKS for kind, _size in chunks):
         raise _frame_refusal("motion_frame_invalid", index)
     try:
-        ihdr = _pcf.png_ihdr(png)
+        ihdr = _face.png_ihdr(png)
     except ValueError:
         raise _frame_refusal("motion_frame_invalid", index) from None
     if tuple(ihdr) != _FRAME_IHDR:
         raise _frame_refusal("motion_frame_invalid", index)
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(bytes(png))) as source:
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", _Image.DecompressionBombWarning)
+            with _Image.open(_pcm_io.BytesIO(bytes(png))) as source:
                 if (source.format or "").upper() != "PNG" or source.size != (FRAME_EDGE, FRAME_EDGE):
                     raise ValueError("decode")
                 if getattr(source, "n_frames", 1) != 1:
@@ -205,12 +210,12 @@ def check_frame(png, index):
                 source.load()
                 if source.mode != "RGBA":
                     raise ValueError("mode")
-                frame = Image.frombytes("RGBA", source.size, source.tobytes())
+                frame = _Image.frombytes("RGBA", source.size, source.tobytes())
     except Exception:
         raise _frame_refusal("motion_frame_invalid", index) from None
     alpha = frame.getchannel("A")
     coverage = 1.0 - alpha.histogram()[0] / float(FRAME_EDGE * FRAME_EDGE)
-    if not COVERAGE_MIN <= coverage <= COVERAGE_MAX:
+    if not MOTION_COVERAGE_MIN <= coverage <= MOTION_COVERAGE_MAX:
         raise _frame_refusal("motion_coverage", index)
     for box in _edge_boxes():
         if alpha.crop(box).getextrema()[1] > 0:
@@ -218,7 +223,7 @@ def check_frame(png, index):
     hidden = alpha.point(lambda value: 255 if value == 0 else 0)
     frame.paste((0, 0, 0, 0), (0, 0, FRAME_EDGE, FRAME_EDGE), hidden)
     try:
-        canonical = _pcf._encode_rgba(frame)
+        canonical = _face._encode_rgba(frame)
     except Exception:
         raise _frame_refusal("motion_frame_invalid", index) from None
     if len(canonical) > FRAME_MAX_BYTES:
@@ -229,13 +234,13 @@ def check_frame(png, index):
 def luma(frame):
     """The frame composited over the portrait background, as 8-bit Rec. 709
     luma: what the pairwise flash check compares."""
-    over = Image.alpha_composite(Image.new("RGBA", frame.size, _pcf._portrait_bg()), frame)
+    over = _Image.alpha_composite(_Image.new("RGBA", frame.size, _face._portrait_bg()), frame)
     return over.convert("RGB").convert("L", _LUMA709)
 
 
 def flash_pair(y_a, y_b):
     """(changed fraction, mean |dY|) of two luma images."""
-    hist = ImageChops.difference(y_a, y_b).histogram()
+    hist = _ImageChops.difference(y_a, y_b).histogram()
     n = float(y_a.size[0] * y_a.size[1])
     changed = sum(hist[_CHANGED_STEPS:]) / n
     mean = sum(i * c for i, c in enumerate(hist)) / (n * 255.0)
@@ -246,7 +251,7 @@ def flash_refused(changed, mean):
     return changed > FLASH_CHANGED_MAX or mean > FLASH_MEAN_MAX
 
 
-def decode_frames(header, frames, deadline_s=DECODE_DEADLINE_S, clock=time.monotonic):
+def decode_frames(header, frames, deadline_s=DECODE_DEADLINE_S, clock=_time.monotonic):
     """Phase B (S2.5): every frame's checks, then its pair with the previous
     frame, in order; the loop wrap (N-1, 0) last. Returns (canonical
     container, motion_hash, stats). The deadline is checked AFTER every
@@ -286,7 +291,7 @@ def decode_frames(header, frames, deadline_s=DECODE_DEADLINE_S, clock=time.monot
     container = build_container(header["text"], canonical)
     if len(container) > MOTION_MAX_BYTES:
         raise MotionRefusal(413, "motion_too_large")
-    return container, hashlib.sha256(container).hexdigest(), {
+    return container, _hashlib.sha256(container).hexdigest(), {
         "frames": n, "bytes": len(container), "secs": round(clock() - t0, 3),
         "step_max": round(step_max, 4), "worst_changed": round(worst[0], 4)}
 
@@ -294,7 +299,7 @@ def decode_frames(header, frames, deadline_s=DECODE_DEADLINE_S, clock=time.monot
 # -- the decode pool and its admission (S2.5, S2.6 step 11) ---------------------
 # ONE worker, separate from pc_portrait.POOL (the two static render workers):
 # a motion decode must never hold a static face's worker.
-DECODE_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pc-motion-decode")
+DECODE_POOL = _futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pc-motion-decode")
 DECODE_WAITING = 2                   # at most this many claims waiting behind the one running
 
 
@@ -306,7 +311,7 @@ class DecodeAdmission:
     pool), never by a request that stopped waiting."""
 
     def __init__(self, capacity=1 + DECODE_WAITING):
-        self._lock = threading.Lock()
+        self._lock = _threading.Lock()
         self._held = {}
         self.capacity = int(capacity)
 
@@ -339,8 +344,25 @@ def _decode_guarded(admission, player_key, token, header, frames, deadline_s):
         admission.release(player_key, token)
 
 
+def submit_decode(admission, player_key, token, header, frames, deadline_s=DECODE_DEADLINE_S):
+    """Queue phase B on the one decode worker; the claim travels with the job.
+
+    The worker releases the claim when the decode ends. A job cancelled before
+    it ever ran releases it from the done-callback instead, so no path can
+    strand a claim: a stranded claim would refuse that player, and hold one of
+    the three slots, until the process restarts."""
+    job = DECODE_POOL.submit(_decode_guarded, admission, player_key, token, header, frames, deadline_s)
+    job.add_done_callback(lambda f: admission.release(player_key, token) if f.cancelled() else None)
+    return job
+
+
+async def await_decode(job):
+    """Await a submitted decode, shielded: a request that stops waiting (its
+    client went away) never cancels the queued job, which still runs and
+    releases its own claim."""
+    return await _asyncio.shield(_asyncio.wrap_future(job))
+
+
 async def decode_in_pool(admission, player_key, token, header, frames, deadline_s=DECODE_DEADLINE_S):
-    """Phase B on the one decode worker. The claim travels with the job."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(DECODE_POOL, _decode_guarded, admission, player_key,
-                                      token, header, frames, deadline_s)
+    """Phase B on the one decode worker (submit, then await shielded)."""
+    return await await_decode(submit_decode(admission, player_key, token, header, frames, deadline_s))

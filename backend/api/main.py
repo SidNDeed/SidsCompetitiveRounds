@@ -24955,6 +24955,11 @@ try:
 except Exception as _pcf_ex:  # Pillow / regex / fonts missing: face routes answer 503, everything else boots
     _pcf = None
     print(f"[PC-FACE] renderer unavailable: {_pcf_ex}")
+try:
+    import pc_motion as _pcm   # the dance cards (imports pc_face): absent -> every motion route answers 503
+except Exception as _pcm_ex:
+    _pcm = None
+    print(f"[PC-MOTION] unavailable: {_pcm_ex}")
 
 _PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "rank on the board as shown"
 
@@ -28286,6 +28291,261 @@ async def pc_portrait_upload(
           f"coverage={info['coverage']:.3f} replaced={bool(old and old != portrait_hash)}")
     return {"applied": True, "portrait_hash": portrait_hash, "portrait_descriptor": descriptor,
             "portrait_at": _pc_iso(at)}
+
+
+# -- Dance cards: the motion upload (design S2.6) ------------------------------
+# One bounded animation source per player, bound to the still it was captured
+# with. Three phases, so that every per-player check and every charge happens
+# BEFORE a pixel is decoded and no lock is held while frames decode: phase A
+# (one short transaction) checks, charges and claims a decode slot; phase B
+# decodes in pc_motion's own one-worker pool with no transaction open; phase C
+# (one transaction) re-reads the row, re-checks and stores. Lock order: I -> R
+# in phase A, I -> R -> M (capacity) in phase C; only phase C takes M, always
+# after its own I and R, and its SUM reads other players' rows unlocked.
+_PC_MOTION_ROW_SQL = """
+    SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
+           EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
+           p.pc_game_portrait_locked_until,
+           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+           p.active_dance_id, di.sku AS dance_sku, di.kind AS dance_kind, di.catalog_ready AS dance_ready,
+           EXISTS (SELECT 1 FROM player_items pi
+                    WHERE pi.player_id = p.id AND pi.item_id = p.active_dance_id) AS dance_bought,
+           EXTRACT(EPOCH FROM (now() - p.pc_motion_at)) AS motion_since,
+           p.pc_motion_day, p.pc_motion_day_count,
+           (now() AT TIME ZONE 'UTC')::date AS today_utc,
+           EXTRACT(EPOCH FROM ((date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day')
+                               - (now() AT TIME ZONE 'UTC'))) AS to_midnight,
+           m.source_sha256 AS m_source, m.motion_hash AS m_hash, m.static_hash AS m_static,
+           m.static_descriptor AS m_descriptor
+      FROM players p
+      LEFT JOIN shop_items di ON di.id = p.active_dance_id
+      LEFT JOIN pc_motions m ON m.player_id = p.id
+     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
+"""
+# Phase A and the selection route update `players` later in their own
+# transaction: FOR NO KEY UPDATE. Phase C never writes `players` (it upserts
+# pc_motions and sums for the capacity), so it takes the weakest lock that
+# still conflicts with a later writer's NO KEY UPDATE: FOR SHARE (M4, #202).
+_PC_MOTION_LOCK_A = " FOR NO KEY UPDATE OF p"
+_PC_MOTION_LOCK_C = " FOR SHARE OF p"
+
+_PC_MOTION_UPSERT_SQL = """
+    INSERT INTO pc_motions (player_id, motion_hash, source_sha256, bytes, byte_len, dance_item_id,
+                            motion_recipe, frame_count, frame_ms, static_hash, static_descriptor)
+    VALUES (CAST(:pid AS uuid), CAST(:h AS text), CAST(:src AS text), CAST(:b AS bytea),
+            CAST(:len AS integer), CAST(:item AS bigint), CAST(:recipe AS smallint), CAST(:n AS smallint),
+            CAST(:ms AS smallint), CAST(:sh AS text), CAST(:sd AS text))
+    ON CONFLICT (player_id) DO UPDATE SET motion_hash = EXCLUDED.motion_hash,
+      source_sha256 = EXCLUDED.source_sha256, bytes = EXCLUDED.bytes,
+      byte_len = EXCLUDED.byte_len, dance_item_id = EXCLUDED.dance_item_id,
+      motion_recipe = EXCLUDED.motion_recipe, frame_count = EXCLUDED.frame_count,
+      frame_ms = EXCLUDED.frame_ms, static_hash = EXCLUDED.static_hash,
+      static_descriptor = EXCLUDED.static_descriptor, stored_at = now()
+"""
+
+
+def _pc_motion_check(row, steam_id, header, descriptor):
+    """S2.6 steps 3-6 against a LOCKED row, in order: (status, detail) of the
+    first refusal, or None. Phase A and phase C both call this one function,
+    so the re-check after the decode (#208) cannot drift from the check
+    before it."""
+    if row is None or row["banned"]:
+        return 403, {"error": "portrait_refused"}
+    if row["lock_left"] is not None and float(row["lock_left"]) > 0:
+        return 403, {"error": "portrait_locked", "locked_until": _pc_iso(row["pc_game_portrait_locked_until"])}
+    # 4. binding: the still is the player's own game picture, and the request
+    #    names exactly its descriptor and the header exactly its hash.
+    if (not row["pc_game_portrait_hash"] or row["pc_game_portrait_descriptor"] != descriptor
+            or row["pc_game_portrait_hash"] != header["static"]):
+        return 409, {"error": "motion_unbound"}
+    # 5. selection: the header's dance is the dance the player selected.
+    if row["dance_kind"] != "dance" or row["dance_sku"] != header["dance"]:
+        return 409, {"error": "dance_not_selected"}
+    # 6. ownership: ready, and bought or covered by the one exemption predicate.
+    if not (row["dance_ready"] and (row["dance_bought"] or _auto_owned(steam_id, row["dance_sku"]))):
+        return 403, {"error": "dance_not_owned"}
+    return None
+
+
+async def _pc_motion_same(db: AsyncSession, pid: str, row, descriptor: str) -> dict:
+    """The stored motion already holds these frames for this still (S2.6 step
+    7, and phase C's same). Nothing is charged by it. L3: the still's
+    descriptor can change while its hash does not (the still writer stores
+    the new descriptor under the same hash), which would leave the motion's
+    binding false forever; so a descriptor-only difference is repaired on the
+    motion row here, in the same transaction, instead of answered unrepaired."""
+    if row["m_descriptor"] == descriptor:
+        await db.rollback()
+        return {"applied": False, "reason": "same", "motion_hash": row["m_hash"]}
+    await db.execute(text(
+        "UPDATE pc_motions SET static_descriptor = CAST(:d AS text) WHERE player_id = CAST(:pid AS uuid)"),
+        {"d": descriptor, "pid": pid})
+    await db.commit()
+    return {"applied": False, "reason": "same", "motion_hash": row["m_hash"], "rebound": True}
+
+
+async def _pc_motion_capacity_used(db: AsyncSession, pid: str) -> int:
+    """Bytes every OTHER player's stored motion holds (S2.6 phase C), read
+    under the capacity lock and without row locks."""
+    return int((await db.execute(text(
+        "SELECT COALESCE(SUM(byte_len), 0) FROM pc_motions WHERE player_id <> CAST(:pid AS uuid)"),
+        {"pid": pid})).scalar_one())
+
+
+def _pc_motion_refusal(status: int, detail: dict):
+    headers = None
+    if status == 503 and isinstance(detail, dict) and detail.get("retry_after"):
+        headers = {"Retry-After": str(int(detail["retry_after"]))}
+    return HTTPException(status_code=status, detail=detail, headers=headers)
+
+
+@app.post("/api/v1/pc/portrait/motion", tags=["Player Cards"])
+async def pc_motion_upload(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    descriptor: str = Query(..., min_length=8, max_length=_pcp.DESCRIPTOR_MAX_BYTES),
+    db: AsyncSession = Depends(get_db),
+):
+    """The motion writer (dance cards design S2): the owner's client uploads
+    ONE container of canonical-sized dance frames (application/x-scr-motion),
+    signed over pcmotion:{steam}:{nonce}:{body_sha256}:{descriptor} where the
+    server hashes the received body ITSELF. Transport and container before any
+    lock (411 / 413 / 415 / 400 / 422); phase A (identity lock, actor gate,
+    row FOR NO KEY UPDATE, refused / locked, binding, selection, ownership,
+    same, pacing, day cap, nonce, decode admission, charge, COMMIT); phase B
+    (the frame checks in the decode pool, no transaction; a refusal keeps the
+    charge); phase C (identity lock, actor gate, row FOR SHARE, steps 3-6
+    again, same, capacity, upsert, COMMIT)."""
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    cl = request.headers.get("content-length")
+    if cl is None or "chunked" in (request.headers.get("transfer-encoding") or "").lower():
+        raise HTTPException(status_code=411, detail="length_required")
+    try:
+        declared = int(cl)
+    except ValueError:
+        raise HTTPException(status_code=411, detail="length_required")
+    if declared > _pcm.MOTION_MAX_BYTES:
+        # Before the body is read (S2.2): a declared length over the cap costs
+        # the server nothing but this comparison.
+        raise HTTPException(status_code=413, detail={"error": "motion_too_large"})
+    if not _pcm.content_type_ok(request.headers.get("content-type")):
+        # M2: equality with the one type, never the still writer's prefix test.
+        raise HTTPException(status_code=415, detail=_pcm.MOTION_CONTENT_TYPE + " required")
+    body = await request.body()
+    if len(body) != declared:
+        raise HTTPException(status_code=400, detail="length_mismatch")
+    try:
+        header, frames = _pcm.parse_container(body)
+    except _pcm.MotionRefusal as r:
+        raise HTTPException(status_code=r.status, detail=r.detail)
+    if _pcp.descriptor_parse(descriptor) is None:
+        raise HTTPException(status_code=422, detail={"error": "descriptor_invalid"})
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    canon = _pcm.canon_motion(steam_id, nonce, body_sha256, descriptor)
+    del body
+
+    # -- phase A: one short transaction ------------------------------------
+    # 1. identity lock I EXCLUSIVE, then the actor gate -- whose FIRST check
+    #    is the 503 of an unconfigured HMAC key (M3), so that answer comes
+    #    before any nonce, slot or charge.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+    # 2. the row, R
+    row = (await db.execute(text(_PC_MOTION_ROW_SQL + _PC_MOTION_LOCK_A), {"pid": pid})).mappings().first()
+    # 3-6. refused / locked, binding, selection, ownership
+    refusal = _pc_motion_check(row, steam_id, header, descriptor)
+    if refusal is not None:
+        await db.rollback()
+        raise _pc_motion_refusal(*refusal)
+    # 7. same: before pacing, as the still does; nothing charged
+    if row["m_source"] == body_sha256 and row["m_static"] == header["static"]:
+        return await _pc_motion_same(db, pid, row, descriptor)
+    # 8. pacing
+    since = row["motion_since"]
+    if since is not None and float(since) < _pcp.PACING_SECONDS:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "retry_after", "retry_after": max(1, int(_pcp.PACING_SECONDS - float(since)) + 1)})
+    # 9. the day cap (409s, never 429s: no application refusal feeds the edge's jail)
+    today = row["today_utc"]
+    if row["pc_motion_day"] == today and int(row["pc_motion_day_count"] or 0) >= _pcm.MOTION_DAY_CAP:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "daily_cap", "retry_after": max(1, int(float(row["to_midnight"])) + 1)})
+    # 10. the single-use nonce (shared with the still writer's table)
+    used = (await db.execute(text("""
+        INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
+        ON CONFLICT DO NOTHING RETURNING nonce
+    """), {"pid": pid, "nonce": nonce})).scalar_one_or_none()
+    if used is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "nonce_replayed"})
+    # 11. admission: a non-blocking claim; none free rolls back everything,
+    #     so nothing is charged and the nonce stays unused.
+    token = _pcm.DECODE_ADMISSION.try_claim(pid)
+    if token is None:
+        await db.rollback()
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "reason": "admission", "retry_after": 30})
+    # 12. the charge, as a delta, then COMMIT; the claim goes to the pool with
+    #     the job, and is released here only if the job never got there.
+    submitted = False
+    try:
+        charged = (await db.execute(text("""
+            UPDATE players SET pc_motion_at = now(),
+                   pc_motion_day_count = CASE WHEN pc_motion_day = CAST(:today AS date)
+                                              THEN pc_motion_day_count + 1 ELSE 1 END,
+                   pc_motion_day = CAST(:today AS date)
+             WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL
+            RETURNING pc_motion_day_count
+        """), {"pid": pid, "today": today})).scalar_one_or_none()
+        if charged is None:
+            await db.rollback()
+            raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
+        await db.commit()
+        job = _pcm.submit_decode(_pcm.DECODE_ADMISSION, pid, token, header, frames)
+        submitted = True
+    finally:
+        if not submitted:
+            _pcm.DECODE_ADMISSION.release(pid, token)
+    del frames
+
+    # -- phase B: the frame checks, no transaction open --------------------
+    try:
+        canonical, motion_hash, stats = await _pcm.await_decode(job)
+    except _pcm.MotionRefusal as r:
+        print(f"[PC-MOTION] player={steam_id} refused in decode (charged): {r.status} {r.detail}")
+        raise _pc_motion_refusal(r.status, r.detail)
+    except Exception as ex:  # noqa: BLE001 -- any other decode failure is the conservative 503
+        print(f"[PC-MOTION] player={steam_id} decode failed (charged): {type(ex).__name__}")
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "reason": "error", "retry_after": 30})
+
+    # -- phase C: one transaction ------------------------------------------
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    await _pc_verified_actor(request, steam_id, sig, canon, db)   # the nonce is not re-checked
+    row = (await db.execute(text(_PC_MOTION_ROW_SQL + _PC_MOTION_LOCK_C), {"pid": pid})).mappings().first()
+    refusal = _pc_motion_check(row, steam_id, header, descriptor)
+    if refusal is not None:
+        await db.rollback()
+        raise _pc_motion_refusal(*refusal)
+    if row["m_hash"] == motion_hash and row["m_static"] == header["static"]:
+        return await _pc_motion_same(db, pid, row, descriptor)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_motion_capacity'))"))
+    if await _pc_motion_capacity_used(db, pid) + len(canonical) > _pcm.MOTION_CAPACITY_BYTES:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "motion_capacity"})
+    await db.execute(text(_PC_MOTION_UPSERT_SQL), {
+        "pid": pid, "h": motion_hash, "src": body_sha256, "b": canonical, "len": len(canonical),
+        "item": int(row["active_dance_id"]), "recipe": int(header["recipe"]), "n": int(header["frames"]),
+        "ms": int(header["ms"]), "sh": header["static"], "sd": descriptor})
+    await db.commit()
+    print(f"[PC-MOTION] player={steam_id} applied hash={motion_hash[:12]} dance={header['dance']} "
+          f"bytes={len(canonical)} frames={stats['frames']} secs={stats['secs']} step_max={stats['step_max']}")
+    return {"applied": True, "motion_hash": motion_hash}
 
 
 @app.post("/api/v1/admin/pc/portrait/clear", tags=["Admin"])
