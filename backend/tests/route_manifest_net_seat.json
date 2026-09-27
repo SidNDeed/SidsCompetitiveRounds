@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "eeeee1a66318965dc7da1c44baa66e1c7a8334cf"
+          "383c879e3bea76bfaf4a3bc41ed97b9dceba8614"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1258,7 +1258,7 @@
           ],
           "main",
           "team_series_state",
-          "515cad0b84d26672d3db5c46de6a691f4c675752"
+          "080679eebc288dedc4215a53f5bf76fe206a06bd"
         ]
       ]
     },
