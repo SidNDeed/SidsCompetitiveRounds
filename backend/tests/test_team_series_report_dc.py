@@ -3157,9 +3157,10 @@ async def _f28(lab, report):
     result is still on its way. Seat 0 (team 1) misses game 2's end and game
     3's start; seat 2 leaves game 3 at 0-0, and seat 0's OnPlayerLeftRoom
     builds its report before its next poll. `report` is the token that report
-    names: None, a round-6 client's (its read-time check finds no reading
-    that still shows game 2: TeamGameNumber.cs, F28-REVIEWER), or T2, the
-    round-5 client's."""
+    names: None, a round-6 or a round-7 client's (round 6: its read-time
+    check finds no reading that still shows game 2; round 7: the game's own
+    game over already ended the token on seat 0: TeamGameNumber.cs,
+    F28-REVIEWER), or T2, the round-5 client's."""
     ser = await lab.series(t1_wins=1, t2_wins=0)
     await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=T2)
     await lab.report_dc(ser, reporter_seat=0, dc_seat=2, token=report, **ZERO)
@@ -3194,6 +3195,59 @@ def test_the_f28_report_test_can_fail(wired, monkeypatch, mutant):
     async def go():
         async with _Lab() as lab:
             return await _f28(lab, T2 if mutant == "round-5-client" else None)
+
+    assert _run(go()) == (INCOMPLETE if mutant == "pass-through" else COMPLETED)
+    assert len(wired) == (0 if mutant == "pass-through" else 1), wired
+
+
+async def _f30(lab, report):
+    """The F30 reviewer's scenario, round 6's residual shape. Team 1 leads
+    1-0 and game 2 crosses under T2 (every seat posts 1-0 and 1-1 naming
+    game 2, carrying it) while its result is still on its way. Seat 0 (team
+    1) sees nothing of game 2's end or game 3's start (no game over, no game
+    start, no poll tick), and the host publishes nothing, so the room still
+    holds T2. Seat 2 leaves in game 3 after team 1 won its first round, and
+    seat 0's report reads a score that follows its last reading inside one
+    game; its snapshot is its watcher's last poll (game 2's one point each),
+    which the route stores and logs but never settles on. `report` is the
+    token that report names: None, the round-7 client's (the game's own game
+    over and game 3's start ended the token on seat 0: TeamGameNumber.cs,
+    F30-REVIEWER), or T2, the round-6 client's (its time bridge carried T2
+    across the boundary)."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=T2)
+    await lab.report_dc(ser, reporter_seat=0, dc_seat=2, token=report, t1_total=1, t2_total=1)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+def test_the_f30_residual_report_carries_no_token_and_settles_nothing(wired):
+    """F30, the server's half (brief 3.2: no new server behavior): in round
+    6's residual shape the fixed client's report names no token, and the
+    server gives it what it gives every tokenless report: dc_incomplete,
+    nothing completed, no result, rating or gold moved."""
+    async def go():
+        async with _Lab() as lab:
+            return await _f30(lab, None)
+
+    assert _run(go()) == INCOMPLETE
+    assert wired == [], wired
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["round-6-client", "token-layer-off", "pass-through"])
+def test_the_f30_residual_test_can_fail(wired, monkeypatch, mutant):
+    """Controls: the round-6 client's report, naming the token its time
+    bridge carried past game 2's end, completes game 3's leave from game 2's
+    crossing (the server cannot tell it from a genuine game-2 leave, so the
+    fix is the client's); with the token rule off, the tokenless report
+    completes it too; the inert twin changes nothing."""
+    if mutant == "token-layer-off":
+        _token_layer_off(monkeypatch)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _f30(lab, T2 if mutant == "round-6-client" else None)
 
     assert _run(go()) == (INCOMPLETE if mutant == "pass-through" else COMPLETED)
     assert len(wired) == (0 if mutant == "pass-through" else 1), wired
@@ -3277,7 +3331,9 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     end with the whole token, and the token with its ordinal or its epoch
     altered after signing, or sent as its nonce alone, is not accepted. The
     report's token is read as the report is built (F28): TeamTokenForReport
-    passes this seat's reading of the score to TokenFor."""
+    passes this seat's reading of the score to TokenFor, and (round 7, F30)
+    whether the game's lifecycle hooks are attached, where round 6 passed a
+    clock."""
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
     src = _read(os.path.join(_PLUGIN_DIR, "TeamGameNumber.cs"))
     series, reporter, room, token, dc_player, post_pin, dc_pin = (_cs_const(src, n) for n in (
@@ -3341,11 +3397,11 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     body = watcher[start:watcher.index("\n        }\n", start)]
     assert body.count("TeamGameNumber.Live.TokenFor(") == 1, "MaybeSendLivePoints"
     assert "teamGame, teamRoom, teamToken);" in body, "MaybeSendLivePoints"
-    assert "ReadLiveScore(), TokenClock());" in body, "MaybeSendLivePoints"
+    assert "ReadLiveScore(), TeamGameLifecycle.HooksLive);" in body, "MaybeSendLivePoints"
     start = watcher.index("internal static string TeamTokenForReport(")
     body = watcher[start:watcher.index("\n        }\n", start)]
     assert body.count("TeamGameNumber.Live.TokenFor(") == 1, "TeamTokenForReport"
-    assert "ReadLiveScore()," in body and "TokenClock(), out why);" in body, "TeamTokenForReport"
+    assert "ReadLiveScore()," in body and "TeamGameLifecycle.HooksLive, out why);" in body, "TeamTokenForReport"
     plugin = _read(os.path.join(_PLUGIN_DIR, "Plugin.cs"))
     assert plugin.count("ApiClient.ReportTeamSeriesDc(") == 1
     assert ("string dcToken = GameStateWatcher.TeamTokenForReport(seriesId, out dcTokenWhy);"
