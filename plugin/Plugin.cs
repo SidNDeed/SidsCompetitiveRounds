@@ -284,12 +284,18 @@ namespace CompetitiveRounds
         /// (tournament dispatch, FFA lobby, an older server). Re-staging the
         /// SAME room (the tournament region resolve) keeps whatever rules were
         /// staged with it; a different room starts from "defaults expected".</summary>
-        public static void SetPendingRoom(string roomName, string region = null)
+        public static void SetPendingRoom(string roomName, string region = null, bool gated = false)
         {
             bool sameRoom = roomName != null && string.Equals(roomName, pendingRankedRoom, StringComparison.Ordinal);
             SetPendingRoom(roomName, region,
                            sameRoom ? RoomRules.PendingProp : null,
                            sameRoom ? RoomRules.PendingSrc : null);
+            // V11 D3: JoinGate is true only while the pending room was set by a
+            // gated FFA lock. The four-argument form clears it for every other
+            // caller, and ClearPendingRoom clears it with the room.
+            if (gated && !string.IsNullOrEmpty(roomName)
+                && string.Equals(pendingRankedRoom, roomName, StringComparison.Ordinal))
+                QueueRoomJoiner.JoinGate = true;
         }
 
         /// <summary>Room rules (01-room-rules §5.1): the rules the server issued
@@ -307,8 +313,10 @@ namespace CompetitiveRounds
             if (BroadcastMode.FenceBlocksFighterPath("pending-fighter-room")) return;
             pendingRankedRoom = roomName;
             pendingRankedRegion = region;
+            QueueRoomJoiner.JoinGate = false;
             RoomRules.StagePending(rulesProp, rulesSrc);
             Log.LogInfo($"[QUEUE] Pending ranked room set: {roomName} (region: {region ?? "auto"}, rules: {rulesProp ?? "default"}{(rulesSrc != null ? " src=" + rulesSrc : "")})");
+            JoinTimeline.Step("pending_set");
         }
 
         public static void ClearPendingRoom()
@@ -316,6 +324,7 @@ namespace CompetitiveRounds
             pendingRankedRoom = null;
             pendingRankedRegion = null;
             pendingRoomLeaving = false;
+            QueueRoomJoiner.JoinGate = false;
             RoomRules.ClearPending();
         }
 
@@ -1178,6 +1187,11 @@ namespace CompetitiveRounds
             // Spectator snapshot protocol: subscribe the Photon event handler
             // before any room can be joined (same reasoning as PoisonSync).
             try { SpectatorSync.Hook(); } catch { }
+            // Connect-failure (V11): the timeline banner, the late entry's
+            // event handler and the assembly's attach verdicts, after patching.
+            JoinTimeline.PrintBanner();
+            try { FfaLateEntry.Hook(); } catch (Exception ex) { Log.LogWarning("[FFA-LATE] hook: " + ex.Message); }
+            try { FfaAssembly.Init(); } catch (Exception ex) { Log.LogWarning("[FFA-ASM] init: " + ex.Message); }
 
             // Create persistent object with maximum protection
             if (!spawned)
@@ -1237,6 +1251,20 @@ namespace CompetitiveRounds
         // clean state recovers it without the player touching anything.
         private int joinAttempts = 0;
 
+        // V11 D3: true only while the pending room was set by a gated FFA lock
+        // (SetPendingRoom's gated flag); cleared with the pending room. Every
+        // other mode and every ungated room keeps today's joiner line for line.
+        internal static bool JoinGate;
+        internal static QueueRoomJoiner Instance;
+        // V11 D3: the realtime attempt clock beside the scaled stateTimer; every
+        // reset point sets both.
+        private float stateStartedRt;
+        private float Elapsed => JoinGate ? Time.realtimeSinceStartup - stateStartedRt : stateTimer;
+        internal string StateName => state.ToString();
+        internal int AttemptOrdinal => joinAttempts + 1;
+        private Photon.Realtime.ClientState _cstateLast;
+        private bool _cstateSeen;
+
         // ── Tournament (sct-) region gate ────────────────────────────────
         // Server-issued tournament rooms are the one case where "no region"
         // must NOT mean "use whatever the player last picked" — see
@@ -1263,21 +1291,77 @@ namespace CompetitiveRounds
         private void Awake()
         {
             Plugin.Log.LogInfo("[QUEUE-JOINER] Awake, DontDestroyOnLoad set");
+            Instance = this;
+            JoinTimeline.AttemptOrdinal = () => Instance != null ? Instance.AttemptOrdinal : 1;
+        }
+
+        /// <summary>V11 D3: ends the current attempt now, only under JoinGate;
+        /// the existing timeout branch runs on the next frame and retries once,
+        /// then gives up.</summary>
+        internal void EndAttemptNow(string why)
+        {
+            if (!JoinGate) return;
+            stateStartedRt = Time.realtimeSinceStartup - 1000f;
+            Plugin.Log.LogWarning("[QUEUE-JOINER] attempt ended now (" + why + ")");
+        }
+
+        /// <summary>V11 I1 cstate: the client state's transitions while a join
+        /// runs, compared once per frame.</summary>
+        private void CstateTick()
+        {
+            try
+            {
+                var cs = PhotonNetwork.NetworkClientState;
+                if (_cstateSeen && cs == _cstateLast) return;
+                string from = _cstateSeen ? _cstateLast.ToString() : "-";
+                _cstateLast = cs;
+                _cstateSeen = true;
+                string cause = "-";
+                try { cause = PhotonNetwork.NetworkingClient != null ? PhotonNetwork.NetworkingClient.DisconnectedCause.ToString() : "-"; } catch { }
+                JoinTimeline.Step("cstate", "from=" + from + " to=" + cs + " cause=" + cause);
+            }
+            catch { }
+        }
+
+        private static string NormRegion(string r)
+        {
+            return (r ?? "").Replace("/*", "").Trim().ToLowerInvariant();
+        }
+
+        /// <summary>V11 D3: the region check before the join is issued. It logs
+        /// in every mode; it ends the attempt (and the join is not issued) only
+        /// under JoinGate and while the server advertises join_region_guard.</summary>
+        private bool RegionCheck()
+        {
+            string want = NormRegion(targetRegion);
+            string live = NormRegion(ApiClient.LiveOnlineRegion());
+            bool match = want.Length == 0 || want == live;
+            bool end = !match && JoinGate && ApiClient.ServerJoinRegionGuard;
+            if (!match)
+                Plugin.Log.LogWarning("[QUEUE-JOINER] region check: live=" + (live.Length == 0 ? "-" : live)
+                                      + " want=" + want + " act=" + (end ? "end" : "log"));
+            JoinTimeline.Step("region_check", match ? "ok" : "mismatch act=" + (end ? "end" : "log"));
+            if (!end) return true;
+            EndAttemptNow("region");
+            return false;
         }
 
         private void Update()
         {
+            FfaAssembly.Tick();
             string pendingRoom = Plugin.PendingRankedRoom;
             if (string.IsNullOrEmpty(pendingRoom))
             {
                 joinInitiated = false;
                 state = JoinState.Idle;
-                stateTimer = 0f;
+                stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
                 joinAttempts = 0;
                 return;
             }
 
             stateTimer += Time.deltaTime;
+            // V11 I1: the client state's transitions while a join runs.
+            if (state != JoinState.Idle) CstateTick();
 
             // Pending-room replacement fence (lobby impl round 3 find C2): a
             // NEW pending room while this run is bound to the old one means
@@ -1300,7 +1384,7 @@ namespace CompetitiveRounds
                 }
                 joinInitiated = false;
                 state = JoinState.Idle;
-                stateTimer = 0f;
+                stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
                 joinAttempts = 0;
                 targetRoom = null;
                 targetRegion = null;
@@ -1314,7 +1398,7 @@ namespace CompetitiveRounds
             // initiated the leave on line where state became LeavingRoom) and stale
             // targetRoom / targetRegion behind. Subsequent matches in the same session
             // could then suppress legitimate DC-win counting. Clear everything.
-            if (state != JoinState.Idle && stateTimer > 30f)
+            if (state != JoinState.Idle && Elapsed > 30f)
             {
                 joinAttempts++;
                 if (joinAttempts <= 1)
@@ -1323,6 +1407,8 @@ namespace CompetitiveRounds
                     // The pending room is still set, so the Idle branch below
                     // re-initiates leave/connect/join on the next frame.
                     Plugin.Log.LogWarning($"[QUEUE-JOINER] Join attempt {joinAttempts} timed out (state={state}, target='{targetRoom}') — retrying once");
+                    JoinTimeline.Step("attempt_timeout", "elapsed=" + Elapsed.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)
+                                      + " clock=" + (JoinGate ? "rt" : "scaled"));
                     // Keep LeavingForRanked while the deliberate leave is
                     // still in flight (round-5: an early clear here let the
                     // watcher score our own hung exit as a DC). The join-
@@ -1330,7 +1416,7 @@ namespace CompetitiveRounds
                     bool leaveStillInFlight = state == JoinState.LeavingRoom;
                     joinInitiated = false;
                     state = JoinState.Idle;
-                    stateTimer = 0f;
+                    stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
                     if (!leaveStillInFlight)
                     {
                         try { GameStateWatcher.LeavingForRanked = false; } catch { }
@@ -1339,6 +1425,15 @@ namespace CompetitiveRounds
                     return;
                 }
                 Plugin.Log.LogWarning($"[QUEUE-JOINER] Timed out waiting for room join after {joinAttempts} attempts (state={state}, target='{targetRoom}'), resetting all queue state");
+                // V11 I1/I2: give_up, its failed receipt under JoinGate, and
+                // the timeline's disarm.
+                bool gatedGiveUp = JoinGate;
+                JoinTimeline.Step("give_up");
+                if (gatedGiveUp)
+                {
+                    try { FfaAssembly.PostFailed("join", int.MinValue); } catch { }
+                }
+                JoinTimeline.Disarm("give_up");
                 // 1v2: a failed join must dissolve the lock server-side, or the
                 // three 'ready_join' rows + the 'active' series persist as a
                 // husk that re-feeds this dead room on every future Join click.
@@ -1351,7 +1446,7 @@ namespace CompetitiveRounds
                 Plugin.ClearPendingRoom();
                 joinInitiated = false;
                 state = JoinState.Idle;
-                stateTimer = 0f;
+                stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
                 joinAttempts = 0;
                 targetRoom = null;
                 targetRegion = null;
@@ -1382,8 +1477,13 @@ namespace CompetitiveRounds
                     // reason — a failed join is a plausible neighbour of a
                     // transport failure, and it must not inherit one.
                     try { TransportExit.ClearCause(); } catch { }
-                    try { ApiClient.FfaLeaveQueue(); } catch { }
-                    CompetitiveUI.ShowNotificationCritical("Couldn't join the FFA match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
+                    try { ApiClient.FfaLeaveQueue(label: "join_gave_up"); } catch { }
+                    // V11 D3 (D-Q6): under JoinGate the others may start short
+                    // or re-form without this seat, so today's text is untrue.
+                    if (gatedGiveUp)
+                        CompetitiveUI.ShowNotificationCritical("You could not connect in time. No penalty. Queue again when ready.", new Color(1f, 0.4f, 0.4f), 8f);
+                    else
+                        CompetitiveUI.ShowNotificationCritical("Couldn't join the FFA match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 else
                 {
@@ -1437,8 +1537,10 @@ namespace CompetitiveRounds
                         catch { }
                         PhotonNetwork.LeaveRoom();
                         Plugin.Log.LogInfo("[QUEUE-JOINER] Leaving current room before ranked join...");
+                        JoinTimeline.Step("leave_room", "from=" + JoinTimeline.Nonce(currentRoom));
                         state = JoinState.LeavingRoom;
-                        stateTimer = 0f;
+                        if (JoinGate) FfaAssembly.PostAttempt(joinAttempts + 1, "leave");
+                        stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
                         return;
                     }
 
@@ -1456,6 +1558,7 @@ namespace CompetitiveRounds
                     if (!PhotonNetwork.InRoom)
                     {
                         Plugin.Log.LogInfo("[QUEUE-JOINER] Left room, starting NCH connect...");
+                        JoinTimeline.Step("left_room");
                         // Small delay to let Photon settle
                         StartNCHConnect();
                     }
@@ -1732,8 +1835,10 @@ namespace CompetitiveRounds
                 }));
 
                 Plugin.Log.LogInfo($"[QUEUE-JOINER] Started NCH connection sequence for room: {targetRoom}");
+                JoinTimeline.Step("nch_start", "force=" + (string.IsNullOrEmpty(RegionSelector.region) ? "-" : RegionSelector.region));
                 state = JoinState.Connecting;
-                stateTimer = 0f;
+                if (JoinGate) FfaAssembly.PostAttempt(joinAttempts + 1, "connect");
+                stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
             }
             catch (Exception ex)
             {
@@ -1757,6 +1862,7 @@ namespace CompetitiveRounds
         private System.Collections.IEnumerator JoinWhenMasterReady(string capturedRoom, int gen)
         {
             int waitedFrames = 0;
+            string exitKind = "pending_changed";
             while (true)
             {
                 // Order matters: a pending-room change falls through to
@@ -1775,12 +1881,16 @@ namespace CompetitiveRounds
                             && !PhotonNetwork.OfflineMode;
                 }
                 catch { }
-                if (ready) break;
+                if (ready) { exitKind = "ready"; break; }
                 if (waitedFrames == 0)
+                {
                     Plugin.Log.LogWarning($"[QUEUE-JOINER] connected callback fired with state={st} offline={PhotonNetwork.OfflineMode} — holding JoinOrCreate until ConnectedToMasterServer");
+                    JoinTimeline.Step("master_hold", "state=" + st);
+                }
                 waitedFrames++;
                 yield return null;
             }
+            JoinTimeline.Step("master_ready", "frames=" + waitedFrames.ToString(System.Globalization.CultureInfo.InvariantCulture) + " exit=" + exitKind);
             if (waitedFrames > 0)
                 Plugin.Log.LogInfo($"[QUEUE-JOINER] master server ready after {waitedFrames} frames — issuing the join");
             IssueJoinOrCreate(capturedRoom);
@@ -1815,6 +1925,9 @@ namespace CompetitiveRounds
                     }
                     return;
                 }
+                // V11 D3: the region check, logged in every mode; it ends the
+                // attempt only under JoinGate and the server's guard flag.
+                if (!RegionCheck()) return;
                 Plugin.Log.LogInfo($"[QUEUE-JOINER] Connected! JoinOrCreate: {capturedRoom}");
                 // 2v2 rooms have a `team_` prefix (set by /team/queue/ready
                 // server-side). Bump MaxPlayers to 4 and stamp `cr_ff`, the
@@ -1881,14 +1994,34 @@ namespace CompetitiveRounds
                     CustomRoomPropertiesForLobby = new string[] { "C2" }
                 };
                 var lobby = new Photon.Realtime.TypedLobby("RoomCodeLobby", Photon.Realtime.LobbyType.SqlLobby);
+                // V11 item 6: a re-form's pre-join properties, set here,
+                // immediately before JoinOrCreateRoom and outside any room (#287).
+                if (isFfa && FfaAssembly.PrejoinAtJoin && FfaAssembly.StagedPrejoin != null && !PhotonNetwork.InRoom)
+                {
+                    FfaAssembly.PrejoinAtJoin = false;
+                    try { PhotonNetwork.LocalPlayer?.SetCustomProperties(FfaAssembly.StagedPrejoin); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] staged pre-join SetCustomProperties: {ex.Message}"); }
+                }
+                JoinTimeline.Step("join_issued", "max=" + roomOptions.MaxPlayers.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 bool accepted = PhotonNetwork.JoinOrCreateRoom(capturedRoom, roomOptions, lobby);
+                JoinTimeline.Step("join_result", accepted ? "ok" : "false offline=" + (PhotonNetwork.OfflineMode ? "true" : "false"));
                 // Sept 6 (A2, third line): two attempts that fail identically
                 // must be visible as such — vanilla logs the failure text, this
                 // logs which attempt and from which client state.
                 if (accepted)
+                {
                     Plugin.Log.LogInfo($"[QUEUE-JOINER] JoinOrCreateRoom({capturedRoom}) accepted (state={PhotonNetwork.NetworkClientState})");
+                }
                 else
+                {
                     Plugin.Log.LogWarning($"[QUEUE-JOINER] JoinOrCreateRoom({capturedRoom}) returned false (state={PhotonNetwork.NetworkClientState}, offline={PhotonNetwork.OfflineMode})");
+                    // V11 D3/I2: under JoinGate the failure ends the attempt now.
+                    if (JoinGate)
+                    {
+                        try { FfaAssembly.PostFailed("join", int.MinValue); } catch { }
+                        EndAttemptNow("join_false");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -1899,6 +2032,7 @@ namespace CompetitiveRounds
         private void OnJoinedRankedRoom(string roomName)
         {
             Plugin.Log.LogInfo($"[QUEUE] In ranked room: {roomName}!");
+            JoinTimeline.Step("in_ranked_room", "via=" + (state == JoinState.Idle ? "idle" : "joining"));
             // Room rules (§5.2): compare the room's stamped rules with the
             // issued expectation BEFORE the pending tuple is cleared. A
             // mismatch is terminal for this seat: leave now (the joiner's own
@@ -1914,7 +2048,7 @@ namespace CompetitiveRounds
                 Plugin.ClearPendingRoom();
                 joinInitiated = false;
                 state = JoinState.Idle;
-                stateTimer = 0f;
+                stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
                 joinAttempts = 0;
                 try { GameStateWatcher.LeavingForRanked = false; } catch { }
                 try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
@@ -1923,7 +2057,7 @@ namespace CompetitiveRounds
             Plugin.ClearPendingRoom();
             joinInitiated = false;
             state = JoinState.Idle;
-            stateTimer = 0f;
+            stateTimer = 0f; stateStartedRt = Time.realtimeSinceStartup;
             joinAttempts = 0;
             // The leave-for-ranked is COMPLETE once we're in the target room —
             // consume the flag here too (lobby impl round 5: an exit path that
@@ -1965,8 +2099,23 @@ namespace CompetitiveRounds
             // menu while the room sits empty from their perspective. Auto-fire
             // CreatePlayer ourselves (which routes through the CreatePlayer
             // override and uses the server-issued slot).
+            // V11 item 1: a gated room's arrival (the identity check, the
+            // arrived POST, the assembly loop). In an admission room the spawn
+            // waits for the server's permission; in a fallback room it runs as
+            // today.
+            bool gatedRoom = FfaAssembly.IsGatedRoom(roomName);
+            if (gatedRoom)
+            {
+                try { FfaAssembly.OnArrived(roomName); }
+                catch (Exception ex) { Plugin.Log.LogWarning("[FFA-ASM] arrival: " + ex.Message); }
+            }
             if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0 || Plugin.PendingFfaSlot >= 0)
-                StartCoroutine(Auto2v2SpawnCoroutine());
+            {
+                if (gatedRoom && FfaAssembly.IsAdmissionRoom(roomName))
+                    StartCoroutine(FfaAssembly.GatedSpawn(Auto2v2SpawnCoroutine));
+                else
+                    StartCoroutine(Auto2v2SpawnCoroutine());
+            }
         }
 
         private System.Collections.IEnumerator Auto2v2SpawnCoroutine()
@@ -1974,6 +2123,7 @@ namespace CompetitiveRounds
             // Wait briefly for scene + PlayerAssigner to spin up. The scene
             // reload to "Main" happens around the same time as the Photon room
             // join, so PlayerAssigner.instance is usually null for ~1 second.
+            float spawnStartRt = Time.realtimeSinceStartup;
             float deadline = Time.realtimeSinceStartup + 12f;
             int tickLogCount = 0;
             while (Time.realtimeSinceStartup < deadline)
@@ -2004,6 +2154,7 @@ namespace CompetitiveRounds
                     catch (Exception ex) { Plugin.Log.LogError($"[2v2] Auto-spawn CreatePlayer failed: {ex.Message}"); }
                     if (ok)
                     {
+                        JoinTimeline.Step("spawned", "after_ms=" + ((int)((Time.realtimeSinceStartup - spawnStartRt) * 1000f)).ToString(System.Globalization.CultureInfo.InvariantCulture));
                         // Tell server we spawned, so it can detect when fewer than
                         // 4 of 4 confirm within the assembly deadline and cancel.
                         try
@@ -2028,7 +2179,15 @@ namespace CompetitiveRounds
                 yield return new WaitForSeconds(0.5f);
             }
             if (PlayerAssigner.instance == null || !PlayerAssigner.instance.hasCreatedLocalPlayer)
+            {
                 Plugin.Log.LogWarning("[2v2] Auto-spawn timed out — PlayerAssigner never initialized or local player never spawned");
+                JoinTimeline.Step("spawn_timeout", "after_ms=" + ((int)((Time.realtimeSinceStartup - spawnStartRt) * 1000f)).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                // V11 I2: failed phase=spawn, telemetry only (the body rule decides).
+                if (FfaAssembly.IsGatedRoom(FfaAssembly.CurrentRoomName()))
+                {
+                    try { FfaAssembly.PostFailed("spawn", int.MinValue); } catch { }
+                }
+            }
         }
     }
 
@@ -3944,7 +4103,7 @@ namespace CompetitiveRounds
             // departure is suppressed everywhere (design-review blocker 2).
             try
             {
-                if (Photon.Pun.PhotonNetwork.IsMasterClient && !entrantIsSpectator && RoomActors.IsRejected(p))
+                if (FfaLateEntry.MasterMaySend() && !entrantIsSpectator && RoomActors.IsRejected(p))
                 {
                     // BEST-EFFORT ONLY (r9 find 1): cooperative — the target
                     // complies only if ITS EnableCloseConnection is true (our
@@ -4169,6 +4328,10 @@ namespace CompetitiveRounds
             // so any unconsumed map-scale publish ticket dies here — before
             // the spectator-transfer block below, which can return early.
             try { FfaMapScale.OnMasterClientSwitched(); } catch { }
+            // V11 item 13: the switch's telemetry (EVT_MASTER), then the
+            // authority fence. A fenced master hands the role on itself, so
+            // the spectator hand-off below runs only when the fence did not.
+            try { FfaLateEntry.OnMasterSwitched(newMasterClient); } catch { }
             // Master authority must never rest on a spectator (design §3.6):
             // simulation ownership on a client with no characters and no
             // stake. Photon assigns the LOWEST ActorNumber, and spectators
@@ -4178,7 +4341,9 @@ namespace CompetitiveRounds
             // own client, targeted at the lowest fighter.
             try
             {
-                if (newMasterClient != null && newMasterClient.IsLocal
+                // FenceMaster() runs first at every switch (it catches its own
+                // faults); true means it handed the role on itself.
+                if (!FfaLateEntry.FenceMaster() && newMasterClient != null && newMasterClient.IsLocal
                     && SpectatorSession.IsLocalSpectator)
                 {
                     var fighters = RoomActors.ActiveFighters();
@@ -4310,6 +4475,15 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // V11 I1: joined_room, for every join.
+            try
+            {
+                var jr = PhotonNetwork.CurrentRoom;
+                JoinTimeline.Step("joined_room", "actors=" + (jr != null ? jr.PlayerCount : 0) + "/" + (jr != null ? jr.MaxPlayers : 0)
+                                  + " master=" + (PhotonNetwork.IsMasterClient ? "true" : "false")
+                                  + " actor=" + (PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : 0));
+            }
+            catch { }
             // Bug 392: a new room starts with no inherited transport state.
             // The cause store has its own validity window, but a window is a
             // soft bound and a room edge is a hard one — without this, a
@@ -4884,6 +5058,22 @@ namespace CompetitiveRounds
             catch { }
             int wanted = Diag2v2.PlayersNeeded();
             Plugin.Log.LogWarning($"[2v2] Force-StartGame timed out — never reached {wanted} spawned players (present={present})");
+            // V11 item 3: while the assembly's suppression lease holds, the
+            // one-shot toast is owed (shown when the lease ends), never dropped.
+            bool owe = FfaAssembly.SuppressGuardToast;
+            JoinTimeline.Step("guard_timeout", "present=" + present + " wanted=" + wanted + " toast=" + (owe ? "owed" : "shown"));
+            if (owe)
+            {
+                FfaAssembly.OweGuardToast(present, wanted);
+                yield break;
+            }
+            ShowGuardToast(present, wanted);
+        }
+
+        /// <summary>The guard's one-shot toast; V11 item 3 also shows it when
+        /// an owed toast's suppression lease ends (FfaAssembly).</summary>
+        internal static void ShowGuardToast(int present, int wanted)
+        {
             try
             {
                 // Critical: terminal one-shot instruction — this coroutine
@@ -4903,6 +5093,12 @@ namespace CompetitiveRounds
             try { SpectatorJoiner.OnJoinRoomFailed(returnCode, message); } catch { }
             if (Diag2v2.PendingSlot() < 0) return;
             Plugin.Log.LogWarning($"[2v2-DIAG] JoinRoomFailed: code={returnCode} msg={message}");
+            JoinTimeline.Step("join_failed", "code=" + returnCode);
+            if (QueueRoomJoiner.JoinGate)
+            {
+                try { FfaAssembly.PostFailed("join", returnCode); } catch { }
+                try { QueueRoomJoiner.Instance?.EndAttemptNow("join_failed"); } catch { }
+            }
         }
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
@@ -5052,7 +5248,10 @@ namespace CompetitiveRounds
             {
                 var nch = NetworkConnectionHandler.instance;
                 if (nch != null && nch.m_restarting) return;
-                Plugin.Log.LogWarning($"[NCH-DIAG] NetworkRestart() entered {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}");
+                string restartStack = Diag2v2.ShortStack();
+                Plugin.Log.LogWarning($"[NCH-DIAG] NetworkRestart() entered {Diag2v2.DescribeRoom()} stack={restartStack}");
+                int cut = restartStack.IndexOf(" <- ", StringComparison.Ordinal);
+                JoinTimeline.Step("restart", "caller=" + (cut >= 0 ? restartStack.Substring(0, cut) : restartStack));
             }
             catch { }
         }

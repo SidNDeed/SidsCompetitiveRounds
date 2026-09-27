@@ -653,19 +653,19 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(MapManager), "LoadNextLevel")]
     internal static class Spectator_NoMapAuthority_Load_Patch
     {
-        private static bool Prefix() { return !SpectatorPatchSupport.Suppress; }
+        private static bool Prefix() { return !SpectatorPatchSupport.Suppress && !FfaLateEntry.MasterFenced(); }
     }
 
     [HarmonyPatch(typeof(MapManager), "CallInNewMapAndMovePlayers")]
     internal static class Spectator_NoMapAuthority_CallIn_Patch
     {
-        private static bool Prefix() { return !SpectatorPatchSupport.Suppress; }
+        private static bool Prefix() { return !SpectatorPatchSupport.Suppress && !FfaLateEntry.MasterFenced(); }
     }
 
     [HarmonyPatch(typeof(MapManager), "CallInNewMap")]
     internal static class Spectator_NoMapAuthority_CallInBare_Patch
     {
-        private static bool Prefix() { return !SpectatorPatchSupport.Suppress; }
+        private static bool Prefix() { return !SpectatorPatchSupport.Suppress && !FfaLateEntry.MasterFenced(); }
     }
 
     // ── Leave handling ───────────────────────────────────────────────────
@@ -774,6 +774,8 @@ namespace CompetitiveRounds
             {
                 if (SpectatorPatchSupport.Suppress)
                     SpectatorSync.OnCallInObserved(mapID);
+                else
+                    FfaLateEntry.OnCallInObserved(mapID);   // V11 item 5: the fighter branch
             }
             catch { }
         }
@@ -829,7 +831,7 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogWarning($"[SPECTATE] rejecting Player registration from " +
                     $"{(spectatorOwned ? "spectator" : "unauthorized")} actor {owner.ActorNumber}");
                 try { player.gameObject.SetActive(false); } catch { }
-                if (PhotonNetwork.IsMasterClient && unauthorized)
+                if (FfaLateEntry.MasterMaySend() && unauthorized)
                 {
                     RoomActors.CooperativeClose(owner);   // best-effort (r9 find 1)
                 }

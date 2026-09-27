@@ -190,17 +190,49 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
+                if (!FfaLateEntry.MasterMaySend() || PhotonNetwork.CurrentRoom == null) return;
                 if (!RuleOn()) return;
                 string room = PhotonNetwork.CurrentRoom.Name ?? "";
                 uint poolHash = ComputePoolHash();
                 if (poolHash == 0) return;
-                uint seed = Fnv1a(room + ":" + game) ^ (poolHash * 2654435761u);
+                uint seed = DeriveSeed(room, game, poolHash);
                 var h = new ExitGames.Client.Photon.Hashtable();
                 h[SeqProp] = game + ":" + seed + ":" + poolHash;
                 PhotonNetwork.CurrentRoom.SetCustomProperties(h);
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[FFA-SEQ] publish: " + ex.Message); }
+        }
+
+        /// <summary>The per-game seed: the room name, the game number and a
+        /// pool hash. MasterPublishSeed publishes it; since V11 item 13
+        /// (V8, V7-F4) a gated fighter derives it itself.</summary>
+        internal static uint DeriveSeed(string room, int game, uint poolHash)
+        {
+            return Fnv1a(room + ":" + game) ^ (poolHash * 2654435761u);
+        }
+
+        /// <summary>V11 item 13 (V8, V7-F4): a gated fighter only compares
+        /// the room property with the seed it derived. A property for this
+        /// game that is malformed or differs in seed or pool hash prints
+        /// seq_mismatch (armed or not) and changes nothing; an absent one,
+        /// or one for another game, is not yet published and is not
+        /// compared.</summary>
+        private static void CompareSeedProp(string raw, int game, uint derived, uint myHash)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(raw)) return;
+                var parts = raw.Split(':');
+                int propGame = -1; uint propSeed = 0, propHash = 0;
+                bool ok = parts.Length == 3
+                          && int.TryParse(parts[0], out propGame)
+                          && uint.TryParse(parts[1], out propSeed)
+                          && uint.TryParse(parts[2], out propHash);
+                if (ok && propGame != game) return;
+                if (ok && propSeed == derived && propHash == myHash) return;
+                JoinTimeline.Step("seq_mismatch", "game=" + game);
+            }
+            catch { }
         }
 
         /// <summary>Latch ONCE per game, at the FIRST pick phase (the prop has
@@ -255,43 +287,73 @@ namespace CompetitiveRounds
                 var room = PhotonNetwork.CurrentRoom;
                 var raw = room?.CustomProperties != null && room.CustomProperties.ContainsKey(SeqProp)
                     ? room.CustomProperties[SeqProp] as string : null;
-                if (string.IsNullOrEmpty(raw))
+                uint seed;
+                bool gatedFighter = false;
+                try { gatedFighter = FfaAssembly.SittingGated() && !RoomActors.LocalIsSpectator; } catch { }
+                if (gatedFighter)
                 {
-                    // Seed prop is master-published at game start — same
-                    // eventual consistency, same (shared) pending budget.
-                    if (pending()) return;
-                    latchFallback("seed prop absent after 8s");
-                    return;
+                    // V11 item 13 (V8, V7-F4): a gated fighter derives the
+                    // seed itself, MasterPublishSeed's derivation over its
+                    // own pool hash (every fighter's advert matched it, cap
+                    // 1), and only compares the room property, which
+                    // carries no sender a reader can check: a disagreement
+                    // prints seq_mismatch and changes nothing.
+                    if (!SnapshotPool())
+                    {
+                        if (pending()) return;
+                        latchFallback("card pool unavailable after 8s");
+                        return;
+                    }
+                    uint myHash = ComputePoolHash();
+                    if (myHash == 0)
+                    {
+                        if (pending()) return;
+                        latchFallback("pool hash unavailable after 8s");
+                        return;
+                    }
+                    seed = DeriveSeed(room?.Name ?? "", game, myHash);
+                    CompareSeedProp(raw, game, seed, myHash);
                 }
-                var parts = raw.Split(':');
-                int propGame; uint seed, propHash;
-                if (parts.Length != 3
-                    || !int.TryParse(parts[0], out propGame) || !uint.TryParse(parts[1], out seed)
-                    || !uint.TryParse(parts[2], out propHash))
-                { latchFallback("malformed seed prop: " + raw); return; }
-                if (propGame != game)
+                else
                 {
-                    // A PREVIOUS game's seed is a stale cache, not a verdict
-                    // (wave-2 verification): the master's publish for THIS
-                    // game is en route — pend, don't latch.
-                    if (pending()) return;
-                    latchFallback($"seed prop stuck on game {propGame} (local {game}) after 8s");
-                    return;
-                }
-                if (!SnapshotPool())
-                {
-                    // Pool not readable yet (CardChoice not initialised) —
-                    // same transient class as prop propagation.
-                    if (pending()) return;
-                    latchFallback("card pool unavailable after 8s");
-                    return;
-                }
-                uint localHash = ComputePoolHash();
-                if (localHash != propHash)
-                {
-                    _pool = null;
-                    latchFallback($"pool hash mismatch (mine {localHash}, master {propHash}) — mixed modlist?");
-                    return;
+                    if (string.IsNullOrEmpty(raw))
+                    {
+                        // Seed prop is master-published at game start — same
+                        // eventual consistency, same (shared) pending budget.
+                        if (pending()) return;
+                        latchFallback("seed prop absent after 8s");
+                        return;
+                    }
+                    var parts = raw.Split(':');
+                    int propGame; uint propHash;
+                    if (parts.Length != 3
+                        || !int.TryParse(parts[0], out propGame) || !uint.TryParse(parts[1], out seed)
+                        || !uint.TryParse(parts[2], out propHash))
+                    { latchFallback("malformed seed prop: " + raw); return; }
+                    if (propGame != game)
+                    {
+                        // A PREVIOUS game's seed is a stale cache, not a verdict
+                        // (wave-2 verification): the master's publish for THIS
+                        // game is en route — pend, don't latch.
+                        if (pending()) return;
+                        latchFallback($"seed prop stuck on game {propGame} (local {game}) after 8s");
+                        return;
+                    }
+                    if (!SnapshotPool())
+                    {
+                        // Pool not readable yet (CardChoice not initialised) —
+                        // same transient class as prop propagation.
+                        if (pending()) return;
+                        latchFallback("card pool unavailable after 8s");
+                        return;
+                    }
+                    uint localHash = ComputePoolHash();
+                    if (localHash != propHash)
+                    {
+                        _pool = null;
+                        latchFallback($"pool hash mismatch (mine {localHash}, master {propHash}) — mixed modlist?");
+                        return;
+                    }
                 }
                 _latchPendingSince = -1f;
                 _latchedGame = game;
