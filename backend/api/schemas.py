@@ -910,6 +910,17 @@ class HealthResponse(BaseModel):
     # it raises instead of silently leaving the key out. Absent on any build
     # before that batch, which is how the train reads the old build.
     ladder_hook: int
+    # pc_motion: how many of the dance-card motion routes are registered on
+    # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
+    # per-visit motion read, the atlas and the selection -- 4 on this build,
+    # 5 once the bot's GIF route is built. DERIVED from app.routes on every
+    # request, never written down, so a build that lost a route's
+    # registration reads fewer (#306/#342). The build discriminator for the
+    # dance-cards batch, equal on both boxes by construction and read by
+    # nothing else. Declared without a default, so building the answer
+    # without it raises instead of silently leaving the key out. Absent on
+    # any build before that batch, which is how the old build reads.
+    pc_motion: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

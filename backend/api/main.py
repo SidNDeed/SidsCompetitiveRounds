@@ -6413,7 +6413,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
-                              pc_card_themes=_pc_card_themes_word())
+                              pc_card_themes=_pc_card_themes_word(),
+                              pc_motion=_pc_motion_health_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -6427,7 +6428,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
-                              pc_card_themes=_pc_card_themes_word())
+                              pc_card_themes=_pc_card_themes_word(),
+                              pc_motion=_pc_motion_health_word())
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -54585,6 +54587,29 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
 _LADDER_HOOK_SITES = (submit_match, submit_team_match,
                       _complete_team_series_with_ratings, submit_ffa_match)
 _LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
+
+
+# Dance cards (design S11.3): `pc_motion` on /health is how many of the
+# motion routes are REGISTERED on this app when /health is asked -- the
+# motion upload (S2.1), the per-visit motion read (S5.2), the atlas (S4.8)
+# and the selection (S2.10). The bot's GIF route (S6.2) is not built on this
+# branch; it joins the tuple when it is, and the word then reads 5. The key
+# is absent on any build before the batch and reads 4 on this one -- the
+# build discriminator S11.3 gives the release train -- and a build that
+# lost a route's registration reads fewer. DERIVED on every call, never
+# written down (#306, #342): a handler that is defined but not registered
+# does not count, and a comment or a docstring cannot move it. The tuple
+# holds the handlers themselves, so it is bound here, after the last of them.
+_PC_MOTION_ROUTES = (pc_motion_upload, pc_face_motion_read, pc_face_motion_atlas, pc_dance_select)
+
+
+def _pc_motion_health_word() -> int:
+    """How many of _PC_MOTION_ROUTES are the endpoint of a route registered
+    on the app now; both health_check arms call it on every request. The
+    endpoints are compared by identity, so a route whose endpoint cannot be
+    hashed cannot make /health raise."""
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return sum(1 for fn in _PC_MOTION_ROUTES if id(fn) in registered)
 
 
 @app.get("/api/v1/team/players/{steam_id}/team-stats", response_model=TeamStatsResponse, tags=["Team Matches"])
