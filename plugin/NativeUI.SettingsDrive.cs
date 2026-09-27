@@ -2406,17 +2406,46 @@ namespace CompetitiveRounds
             return d;
         }
 
-        /// <summary>The config file before and after a witness run: identical
-        /// bytes, or else the stored entries compared one by one and every
-        /// difference named - an entry whose stored line changed (by name,
-        /// never its value) and an entry laid out differently. True when the
-        /// bytes match, or when every stored entry matches and the byte
-        /// difference is accounted for by entries laid out differently.</summary>
-        private static bool DrvCfgRestored(string tag, byte[] raw0, byte[] raw1)
+        /// <summary>"[Section] Key" of every entry bound in this process, in
+        /// bind order: the config file's own entry table. BepInEx writes an
+        /// entry no code has bound yet bare (its value kept from the file,
+        /// no description) after the bound ones, and the first Bind of an
+        /// entry saves the whole file again with that entry's description
+        /// (ConfigFile.Bind calls Save when SaveOnConfigSet is set).</summary>
+        private static List<string> DrvCfgBound()
         {
-            if (raw0 == null || raw1 == null) { DrvNote(tag + " the config file could not be read"); return false; }
+            var l = new List<string>();
+            try
+            {
+                var cf = Plugin.ConfigFileForLevers;
+                if (cf != null) foreach (var d in cf.Keys) l.Add("[" + d.Section + "] " + d.Key);
+            }
+            catch { }
+            return l;
+        }
+
+        /// <summary>The config file before and after a witness run, both read
+        /// IN THIS PROCESS: 0 when the bytes are identical; 1 when they differ
+        /// only where an entry was first bound during the run (a lazy Bind
+        /// saved the file with the entry's description: BepInEx's own write,
+        /// no stored value changed); 2 for any other difference. Every
+        /// difference is named (an entry by name, never its value), with the
+        /// entries first bound during the run. Round-3 L3: only identical
+        /// bytes are a restore. The contract is the raw byte comparison of
+        /// the file AT REST - before the launch and after the process has
+        /// quit - which the runner makes; a 1 here is reported to it, never
+        /// passed.</summary>
+        private static int DrvCfgRestored(string tag, byte[] raw0, byte[] raw1, List<string> bound0)
+        {
+            if (raw0 == null || raw1 == null) { DrvNote(tag + " the config file could not be read"); return 2; }
             string h0 = DrvHex(raw0), h1 = DrvHex(raw1);
-            if (h0 == h1) { DrvNote(tag + " config file byte-identical, sha256 " + h1); return true; }
+            var bound1 = DrvCfgBound();
+            var firstBound = new List<string>();
+            var was = new HashSet<string>(bound0 ?? new List<string>(), StringComparer.Ordinal);
+            foreach (var k in bound1) if (!was.Contains(k)) firstBound.Add(k);
+            string binds = "entries bound in this process: " + (bound0 != null ? bound0.Count : 0) + " at the start, " + bound1.Count
+                + " now; first bound during the run: " + DrvList(firstBound);
+            if (h0 == h1) { DrvNote(tag + " in this process: config file byte-identical, sha256 " + h1 + "; " + binds); return 0; }
             var e0 = DrvCfgEntries(raw0);
             var e1 = DrvCfgEntries(raw1);
             var s0 = new HashSet<string>(e0);
@@ -2427,20 +2456,38 @@ namespace CompetitiveRounds
             var l0 = DrvCfgLayout(raw0);
             var l1 = DrvCfgLayout(raw1);
             var moved = new List<string>();
+            var movedOther = new List<string>();
+            var fb = new HashSet<string>(firstBound, StringComparer.Ordinal);
             foreach (var kv in l0)
             {
                 string other;
                 if (l1.TryGetValue(kv.Key, out other) && other != kv.Value && !changed.Contains(kv.Key))
+                {
                     moved.Add(kv.Key + " (" + kv.Value + " -> " + other + ")");
+                    if (!fb.Contains(kv.Key)) movedOther.Add(kv.Key);
+                }
             }
             moved.Sort(StringComparer.Ordinal);
             string eh0 = DrvHex(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", e0.ToArray())));
             string eh1 = DrvHex(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", e1.ToArray())));
-            DrvNote(tag + " config file bytes differ (sha256 " + h0 + " -> " + h1 + "): " + e0.Count + " -> " + e1.Count
+            DrvNote(tag + " in this process: config file bytes differ (sha256 " + h0 + " -> " + h1 + "): " + e0.Count + " -> " + e1.Count
                 + " stored entries (entries sha256 " + eh0 + " -> " + eh1 + "); " + changed.Count + " stored entr" + (changed.Count == 1 ? "y" : "ies")
                 + " differ" + (changed.Count > 0 ? " (" + string.Join(", ", new List<string>(changed).ToArray()) + ")" : "")
-                + "; " + moved.Count + " laid out differently" + (moved.Count > 0 ? ": " + string.Join("; ", moved.ToArray()) : ""));
-            return changed.Count == 0 && eh0 == eh1 && moved.Count > 0;
+                + "; " + moved.Count + " laid out differently" + (moved.Count > 0 ? ": " + string.Join("; ", moved.ToArray()) : "")
+                + "; of those, not first bound during the run: " + DrvList(movedOther) + "; " + binds);
+            return changed.Count == 0 && eh0 == eh1 && moved.Count > 0 && movedOther.Count == 0 ? 1 : 2;
+        }
+
+        /// <summary>The config half of a witness restore (W2, W3), read in this
+        /// process: a PASS only for identical bytes; a lazy first bind is
+        /// reported for the runner's at-rest byte comparison, never passed;
+        /// any other difference fails.</summary>
+        private static void DrvCfgVerdict(string tag, int r)
+        {
+            if (r == 0) DrvOk(tag + " restore, config file: byte-identical in this process");
+            else if (r == 1) DrvNote(tag + " restore, config file: NOT a byte restore in this process - the bytes differ only where an entry was first bound during the run (above);"
+                + " the verdict is the runner's raw byte comparison of the file at rest, before the launch and after the quit");
+            else DrvBad(tag + " restore, config file: NOT restored (see the line above)");
         }
 
         /// <summary>The PlayerPrefs a witness run can move, by name: PlayerPrefs
@@ -2500,16 +2547,33 @@ namespace CompetitiveRounds
             yield return DrvShootTabs("w1");
         }
 
+        /// <summary>W2's and W3's restore of the language and the named
+        /// PlayerPrefs (the config file is DrvCfgVerdict's).</summary>
+        private static void DrvLangPrefsVerdict(string tag, string lang0, string pp0)
+        {
+            string lang1 = Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "?";
+            string pp1 = DrvPrefHash();
+            if (lang1 == lang0) DrvOk(tag + " restore, language: back on '" + lang1 + "'");
+            else DrvBad(tag + " restore, language: '" + lang1 + "', want '" + lang0 + "'");
+            if (pp1 == pp0) DrvOk(tag + " restore, PlayerPrefs: sha256 " + pp1 + " matches the value before the switches");
+            else DrvBad(tag + " restore, PlayerPrefs: sha256 " + pp0 + " -> " + pp1);
+        }
+
         /// <summary>W2: the seven sub-tabs in es, ru, uk and sv; the cfg and
         /// the named PlayerPrefs hashed before the first switch and after the
-        /// return to the starting language must match.</summary>
+        /// return to the starting language must match - the cfg as raw bytes
+        /// (design residual 5's byte comparison): in this process, and at
+        /// rest by the runner, before the launch and after the quit.</summary>
         private static IEnumerator DriveW2()
         {
             DrvParkPointer();
             string lang0 = Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "";
+            yield return DrvPrimeBinds("W2");
             byte[] raw0 = DrvCfgBytes();
+            var bound0 = DrvCfgBound();
             string cfg0 = raw0 != null ? DrvHex(raw0) : "unreadable", pp0 = DrvPrefHash();
             DrvNote("W2 before the switches: language '" + lang0 + "', cfg sha256 " + cfg0 + ", PlayerPrefs sha256 " + pp0);
+            yield return DrvStoreSnapshot("w2-before");
             foreach (var loc in DrvLocales)
             {
                 yield return DrvLanguage(loc);
@@ -2517,14 +2581,39 @@ namespace CompetitiveRounds
             }
             yield return DrvLanguage(lang0);
             yield return 1.0f;
-            byte[] raw1 = DrvCfgBytes();
-            string pp1 = DrvPrefHash();
-            bool cfgBack = DrvCfgRestored("W2", raw0, raw1);
-            if (cfgBack && pp1 == pp0)
-                DrvOk("W2 restore: back on '" + (Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "?") + "'; the config file as above; PlayerPrefs sha256 "
-                    + pp1 + " matches the value before the switches");
-            else DrvBad("W2 restore: the config file " + (cfgBack ? "is restored" : "is NOT restored (see the line above)")
-                + "; PlayerPrefs sha256 " + pp0 + " -> " + pp1);
+            DrvCfgVerdict("W2", DrvCfgRestored("W2", raw0, DrvCfgBytes(), bound0));
+            DrvLangPrefsVerdict("W2", lang0, pp0);
+            yield return DrvStoreSnapshot("w2-after");
+        }
+
+        /// <summary>Round-3 L3: every sub-tab shown once, in the starting
+        /// language, before a witness takes its "before" copy of the config
+        /// file, so an entry that is bound lazily the first time its row or
+        /// its page runs (a first Bind saves the whole file, the entry now
+        /// with its description) has been bound on BOTH sides of the
+        /// comparison. The entries this binds are named.</summary>
+        private static IEnumerator DrvPrimeBinds(string tag)
+        {
+            var b0 = DrvCfgBound();
+            int t0 = settingsSubTab;
+            for (int t = 0; t < SETTINGS_TABS; t++) yield return DrvShowTab(t);
+            yield return DrvShowTab(t0);
+            yield return 0.5f;
+            var b1 = DrvCfgBound();
+            var was = new HashSet<string>(b0, StringComparer.Ordinal);
+            var first = new List<string>();
+            foreach (var k in b1) if (!was.Contains(k)) first.Add(k);
+            DrvNote(tag + " before its first copy of the config file: every sub-tab shown once; entries first bound by that: "
+                + DrvList(first) + " (" + b1.Count + " bound in this process)");
+        }
+
+        /// <summary>Round-3 L3: a point where the runner snapshots the config
+        /// file and the whole PlayerPrefs store (the registry key the game
+        /// writes) while this process runs; the harness waits for it.</summary>
+        private static IEnumerator DrvStoreSnapshot(string name)
+        {
+            DrvNote("SNAPSHOT " + name + " - the runner snapshots the config file and the PlayerPrefs store now");
+            yield return 3.0f;
         }
 
         private static string DrvR(float f) { return (Mathf.Round(f * 10f) / 10f).ToString("0.0", CultureInfo.InvariantCulture); }
@@ -2557,8 +2646,11 @@ namespace CompetitiveRounds
         {
             DrvParkPointer();
             string lang0 = Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "";
+            yield return DrvPrimeBinds("W3");
             byte[] raw0 = DrvCfgBytes();
+            var bound0 = DrvCfgBound();
             string pp0 = DrvPrefHash();
+            yield return DrvStoreSnapshot("w3-before");
             yield return DrvLanguage("ru");
             var at1080 = new List<string>[SETTINGS_TABS];
             for (int t = 0; t < SETTINGS_TABS; t++)
@@ -2590,10 +2682,9 @@ namespace CompetitiveRounds
             yield return DrvResolutionRestore("W3");
             yield return DrvLanguage(lang0);
             yield return 1.0f;
-            bool cfgBack = DrvCfgRestored("W3", raw0, DrvCfgBytes());
-            string pp1 = DrvPrefHash();
-            if (cfgBack && pp1 == pp0) DrvOk("W3 restore: the language back on '" + lang0 + "'; the config file as above; PlayerPrefs sha256 " + pp1 + " as at the start");
-            else DrvBad("W3 restore: the config file " + (cfgBack ? "is restored" : "is NOT restored (see the line above)") + "; PlayerPrefs sha256 " + pp0 + " -> " + pp1);
+            DrvCfgVerdict("W3", DrvCfgRestored("W3", raw0, DrvCfgBytes(), bound0));
+            DrvLangPrefsVerdict("W3", lang0, pp0);
+            yield return DrvStoreSnapshot("w3-after");
         }
 
         /// <summary>A1's horizontal leg for every row of the active sub-tab,
