@@ -364,18 +364,28 @@ def _rank_fallback_color(name: str) -> str:
 
 # 5-minute cache over rank_role_colors so per-row leaderboard lookups don't
 # hammer the table. Refreshed lazily; bot pushes invalidate it directly.
-_rank_colors_cache: dict = {"at": 0.0, "map": {}}
+_rank_colors_cache: dict = {"at": 0.0, "ok": False, "map": {}}
 
 
 async def _rank_colors(db: AsyncSession) -> dict:
     now = time.monotonic()
-    if now - _rank_colors_cache["at"] > 300:
+    if not _rank_colors_cache["ok"] or now - _rank_colors_cache["at"] > 300:
         try:
-            rows = (await db.execute(select(RankRoleColor))).scalars().all()
+            # Savepoint: this swallows its own error and serves the stale map,
+            # but its callers carry on issuing SQL on the same session -
+            # unguarded, a failed refresh aborted the TRANSACTION and the
+            # caller's next statement failed instead (the Discord reveal's row
+            # read among them, through _pc_face_ctx).
+            async with db.begin_nested():
+                rows = (await db.execute(select(RankRoleColor))).scalars().all()
             _rank_colors_cache["map"] = {r.name: r.color_hex for r in rows}
+            # Stamped on SUCCESS only, so a failure retries on the next call
+            # instead of being cached for 300 s. A cold failure does not raise:
+            # an empty map costs a rank title its colour, and nothing else.
+            _rank_colors_cache["ok"] = True
+            _rank_colors_cache["at"] = now
         except Exception as ex:
             print(f"[RANK] color cache refresh failed: {ex}")
-        _rank_colors_cache["at"] = now
     return _rank_colors_cache["map"]
 
 
@@ -3860,7 +3870,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:43049 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:43655 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3926,7 +3936,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:42861 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:43467 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -3996,7 +4006,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:42764 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:43370 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6334,6 +6344,8 @@ _RJ_TRIAGE_MARKER = 2
 # Both arms of the route carry it; a box on the build before answers without
 # the key. Raise it when a later change to the rule must be proven deployed.
 _TICKET_REDACTION_MARKER = 1
+# Release-train verification plumbing, not a design mechanism: the Discord collection lane's one addition.
+_DISCORD_COLLECTION_MARKER = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6349,6 +6361,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
+                              discord_collection=_DISCORD_COLLECTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
@@ -6363,6 +6376,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ticket_redaction=_TICKET_REDACTION_MARKER,
+                              discord_collection=_DISCORD_COLLECTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
@@ -25154,6 +25168,35 @@ _PC_PRINT_FACE_SELECT = """
 """
 
 
+# The Discord reveal's row statement (the /pack strip and the /binder grid):
+# _PC_PRINT_FACE_SELECT WRAPPED, never edited, with the subject's SteamID64
+# rule as a COLUMN, so a slot whose subject has no SteamID64 is named (it draws
+# the card back) instead of silently missing from the answer. `s2` is the
+# subject's players row, joined outside the wrap; the rule is steamid64's, the
+# idiom _PC_FACE_SUBJECT_ID_SQL and _PC_LEASE_SUBJECT_ID_OK already use.
+_PC_COMPOSITE_SUBJECT_ID_SQL = _sid64.individual_id_sql("s2.steam_id")
+
+
+def _pc_composite_row_sql(where: str) -> str:
+    """The composite row statement, assembled by CONCATENATION ONLY. It is
+    never formatted: individual_id_sql emits a literal `{17}` (steamid64.py),
+    so str.format() over this text reads that as a positional field and
+    raises IndexError before any SQL is sent.
+
+    `where` carries the inner predicate and NOTHING ELSE. This builder states
+    no ordering and no page: the two pack routes send its output as it
+    stands (a strip's order is its stored roster's, not a statement's), and
+    the two binder routes wrap it as the `live` CTE of one statement whose
+    `page` CTE carries the ORDER BY and the LIMIT/OFFSET and whose final
+    SELECT restates the same six-term key at depth zero. There is no `order`
+    and no extra-columns parameter, and none is to be added: a page stated
+    inside the wrap would make the binder's collection-wide count count the
+    page."""
+    return ("SELECT q.*, " + _PC_COMPOSITE_SUBJECT_ID_SQL + " AS subject_id_ok "
+            + " FROM ( " + _PC_PRINT_FACE_SELECT + " " + where + " ) q "
+            + " JOIN players s2 ON s2.id = q.subject_player_id ")
+
+
 async def _pc_verified_actor(request, steam_id: str, sig: str, canon: str, db: AsyncSession):
     """The acting player for a mutation or a private read: mod HMAC over the
     canonical string (503 unconfigured, 403 invalid), a STRICT verified Steam
@@ -25318,6 +25361,110 @@ def _pc_pack_dup_at_pull(stored: dict, print_id: str):
             value = slot.get("dup_at_pull")
             return None if value is None else int(value)
     return None
+
+
+# The pack slots a Discord reveal strip draws, in paste order. The open writes
+# a pack's stored answer once, one roster entry per slot, and the strip is five
+# tiles wide: a roster that does not name exactly these is refused.
+_PC_ROSTER_SLOTS = (1, 2, 3, 4, 5)
+
+
+def _pc_composite_tile(row) -> tuple:
+    """(tile, reason) for one LIVE row of _pc_composite_row_sql: the ordered
+    decision, first match wins.
+
+    Rule 1: the subject's id is not a SteamID64 -> the card back, reason
+    no_steam_id, whatever else holds (migration 320 retired those prints, so
+    a discarded row arrives here with it; a face would need a delivery lease
+    the acquire refuses for that subject). Rule 4: the subject is banned ->
+    the back, reason subject_banned: the delivery layer withholds a banned
+    subject's face outright (internal_pc_lease_check), so the reveal does not
+    send the plated face either. Otherwise the face, which the compositor
+    stamps when the print is discarded. Rule 3, a roster slot with no live
+    row, has no row to decide from: _pc_roster_prints answers it."""
+    if not row["subject_id_ok"]:
+        return "back", "no_steam_id"
+    if row["subject_banned"]:
+        return "back", "subject_banned"
+    return "face", None
+
+
+def _pc_roster_slots(stored):
+    """The stored roster of a pack answer as one entry per slot, in slot
+    order, or None when it is absent, unparseable, or does not name each of
+    _PC_ROSTER_SLOTS exactly once with a canonical print id and subject id.
+    Each entry carries what a gone slot is answered from: print_id,
+    subject_player_id, slot, rarity, foil, signed."""
+    prints = stored.get("prints") if isinstance(stored, dict) else None
+    if not isinstance(prints, list):
+        return None
+    entries = []
+    for p in prints:
+        if not isinstance(p, dict):
+            return None
+        print_id, subject, slot, rarity = (p.get("print_id"), p.get("subject_player_id"),
+                                           p.get("slot"), p.get("rarity"))
+        if not (isinstance(print_id, str) and _pcp.print_id_ok(print_id)
+                and isinstance(subject, str) and _pcp.print_id_ok(subject)):
+            return None
+        if isinstance(slot, bool) or not isinstance(slot, int) or not isinstance(rarity, str):
+            return None
+        entries.append({"print_id": print_id, "subject_player_id": subject, "slot": slot,
+                        "rarity": rarity, "foil": bool(p.get("foil")), "signed": bool(p.get("signed"))})
+    entries.sort(key=lambda e: e["slot"])
+    if tuple(e["slot"] for e in entries) != _PC_ROSTER_SLOTS:
+        return None
+    if len({e["print_id"] for e in entries}) != len(entries):
+        return None
+    return entries
+
+
+async def _pc_roster_prints(db: AsyncSession, pack_id: str, ctx: dict):
+    """(entries, live) for one opened pack of the Discord reveal: `entries`
+    enumerates its STORED ROSTER in slot order, and `live` maps each print id
+    to the row it was decided from. Both halves of a reveal - the packs JSON
+    and the strip image - read the pack through this one helper.
+
+    A roster entry with a live row answers the ordinary print shape
+    (_pc_print_dict) plus `dup_at_pull` from the roster and the route-local
+    `gone`, `tile`, `reason` and `subject_id_ok`. An entry with no live row -
+    a subject's delete-my-data removes their prints wherever they are held
+    and leaves the holder's pack row - answers from the roster alone: drawn
+    as the back (reason print_gone) under the neutral label, and no players
+    row is read for it. A roster that is absent, unparseable or does not name
+    slots 1-5, or a live row the roster does not name, is a 500 with a log
+    line: the stored answer and the table then disagree in a way no deletion
+    explains."""
+    stored = await _pc_pack_result(db, pack_id)
+    rows = (await db.execute(text(_pc_composite_row_sql("WHERE pr.pack_id = CAST(:pack AS uuid)")),
+                             {"pack": pack_id})).mappings().all()
+    live = {str(r["print_id"]): r for r in rows}
+    roster = _pc_roster_slots(stored)
+    if roster is None:
+        print(f"[PC-REVEAL] roster_invalid pack={pack_id} live_rows={len(live)}")
+        raise HTTPException(status_code=500, detail={"error": "roster_invalid"})
+    unnamed = sorted(set(live) - {e["print_id"] for e in roster})
+    if unnamed:
+        print(f"[PC-REVEAL] roster_mismatch pack={pack_id} unnamed_rows={len(unnamed)}")
+        raise HTTPException(status_code=500, detail={"error": "roster_mismatch"})
+    entries = []
+    for e in roster:
+        row = live.get(e["print_id"])
+        if row is None:
+            entries.append({"print_id": e["print_id"], "subject_player_id": e["subject_player_id"],
+                            "slot": e["slot"], "rarity": e["rarity"], "foil": e["foil"],
+                            "signed": e["signed"], "gone": True, "tile": "back", "reason": "print_gone",
+                            "subject_name": _pc_neutral_name(ctx), "face_rev": None})
+            continue
+        d = _pc_print_dict(row, ctx)
+        dup = _pc_pack_dup_at_pull(stored, d["print_id"])
+        if dup is not None:
+            d["dup_at_pull"] = dup
+        tile, reason = _pc_composite_tile(row)
+        d.update({"gone": False, "tile": tile, "reason": reason,
+                  "subject_id_ok": bool(row["subject_id_ok"])})
+        entries.append(d)
+    return entries, live
 
 
 async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
@@ -28640,6 +28787,465 @@ async def internal_pc_face_back(x_internal_key: str | None = Header(None, alias=
         except OSError:
             _pc_back_cache["bytes"] = await _pcp.in_pool(_pcf.render_back)
     return _pc_png_response(_pc_back_cache["bytes"], "private, max-age=86400")
+
+
+# -- Player Cards: the Discord reveal (/pack, /binder) ------------------------
+# Four read-only internal routes for the bot: an opened pack's history and one
+# pack's five slots as one strip image; a binder page as JSON and as one 5 x 2
+# grid image. An image route answers its manifest (X-Strip-Slots /
+# X-Grid-Slots) from the row read that keyed the image, on a cache hit as on a
+# cold render, so the bot can bind the picture to the list it types. Nothing
+# here writes a row, schedules a pre-render or primes a Steam picture. The bot
+# calls its own box's api, so the primary answers these routes; they deploy to
+# both boxes all the same.
+
+# Pacing lives in the handlers - the internal prefix is exempt from the IP
+# limiter - keyed on the resolved players.id: a Discord id resets on a rebind,
+# and every bot request shares one address.
+_PC_REVEAL_WINDOW_S = 60
+_PC_COMPOSITE_PER_PLAYER = 6
+_PC_COMPOSITE_GLOBAL = 30
+_PC_REVEAL_JSON_PER_PLAYER = 20
+_pc_reveal_clock = time.monotonic
+_pc_reveal_windows: dict = {}
+
+
+def _pc_reveal_pace(player_ref: str, kind: str) -> None:
+    """Admit one reveal request, or refuse it with 429 too_many.
+
+    A sliding window of _PC_REVEAL_WINDOW_S seconds. `json` (the two JSON
+    routes) allows _PC_REVEAL_JSON_PER_PLAYER per player; `composite` (the two
+    image routes) allows _PC_COMPOSITE_PER_PLAYER per player and
+    _PC_COMPOSITE_GLOBAL for the whole process. An admitted request is counted
+    in every window it was checked against; a refused one is counted in none,
+    so refusals do not lengthen the wait. `retry_after` is the whole seconds
+    until the oldest counted request leaves the fullest window."""
+    now = _pc_reveal_clock()
+    if kind == "composite":
+        checks = ((("composite", player_ref), _PC_COMPOSITE_PER_PLAYER),
+                  (("composite", None), _PC_COMPOSITE_GLOBAL))
+    else:
+        checks = ((("json", player_ref), _PC_REVEAL_JSON_PER_PLAYER),)
+    wait = 0.0
+    for key, allowance in checks:
+        window = _pc_reveal_windows.get(key)
+        while window and now - window[0] >= _PC_REVEAL_WINDOW_S:
+            window.popleft()
+        if window is not None and len(window) >= allowance:
+            wait = max(wait, _PC_REVEAL_WINDOW_S - (now - window[0]))
+    if wait > 0:
+        retry = max(1, math.ceil(wait))
+        raise HTTPException(status_code=429, detail={"error": "too_many", "retry_after": retry},
+                            headers={"Retry-After": str(retry)})
+    for key, _allowance in checks:
+        _pc_reveal_windows.setdefault(key, collections_mod.deque()).append(now)
+    if len(_pc_reveal_windows) > 4096:
+        # Bounded state: a window whose newest entry has aged out holds nothing.
+        for key in [k for k, w in _pc_reveal_windows.items() if not w or now - w[-1] >= _PC_REVEAL_WINDOW_S]:
+            del _pc_reveal_windows[key]
+
+
+try:
+    import pc_strip as _pcstrip   # Pillow, as pc_face: without it the renderer gate already answers 503
+except Exception as _pcstrip_ex:
+    _pcstrip = None
+    print(f"[PC-REVEAL] compositor unavailable: {_pcstrip_ex}")
+
+# ONE cap for every composite path, server fuse and bot fetch alike.
+_PC_COMPOSITE_MAX_BYTES = 8 << 20
+# The cold composite's server ceiling: past it the answer is 503
+# composite_timeout, retryable (the bot's per-call timeout is 35 s).
+_PC_COMPOSITE_CEILING_S = 30
+_PC_COMPOSITE_SLOTS = 2
+_PC_COMPOSITE_QUEUE_DEPTH = 8
+
+
+class _PcCompositeGate:
+    """Admission for cold composites, SEPARATE from anything the face routes
+    wait on: `slots` compose at once, up to `depth` more wait, and a request
+    beyond that is refused at once - 503 composite_busy, retry in five
+    seconds - rather than queued without bound."""
+
+    def __init__(self, slots: int, depth: int):
+        self._sem = asyncio.Semaphore(slots)
+        self._depth = depth
+        self._waiting = 0
+
+    @asynccontextmanager
+    async def admit(self):
+        if self._sem.locked() and self._waiting >= self._depth:
+            raise HTTPException(status_code=503, detail={"error": "composite_busy", "retry_after": 5},
+                                headers={"Retry-After": "5"})
+        self._waiting += 1
+        try:
+            await self._sem.acquire()
+        finally:
+            self._waiting -= 1
+        try:
+            yield
+        finally:
+            self._sem.release()
+
+
+_pc_composite_gate = _PcCompositeGate(_PC_COMPOSITE_SLOTS, _PC_COMPOSITE_QUEUE_DEPTH)
+
+
+async def _pc_composite_cold(db: AsyncSession, key: str, cells, ctx: dict, cols: int, rows: int) -> bytes:
+    """The cold half of _pc_composite_bytes, inside the composite gate: every
+    face tile FIRST, one at a time through _pc_render_face (the face cache,
+    else one render on the two-worker pool), and only then the composite's
+    own render - so a composite never waits on the pool from inside a pool
+    job. A portrait released mid-render refuses the whole composite (503
+    portrait_pending) and publishes nothing; any other failure propagates."""
+    async with _pc_composite_gate.admit():
+        data = _pc_face_cache.read(key)
+        if data is not None:
+            return data
+        tiles = []
+        for tile, row, discarded in cells:
+            if tile == "face":
+                _rev, face = await _pc_render_face(db, row, ctx, "tile")
+                tiles.append(("face", face, discarded))
+            else:
+                tiles.append(("back", None, False))
+        try:
+            return await _pc_face_cache.get_or_render(
+                key, _functools.partial(_pcstrip.compose_composite, tiles, cols, rows, _PC_COMPOSITE_MAX_BYTES))
+        except _pcstrip.StripCompositeTooLarge as ex:
+            print(f"[PC-REVEAL] composite_too_large key={key} bytes={ex}")
+            raise HTTPException(status_code=500, detail={"error": "composite_too_large"})
+
+
+async def _pc_composite_bytes(db: AsyncSession, key: str, cells, ctx: dict, cols: int, rows: int) -> bytes:
+    """A composite's PNG bytes: the cached file under `key`, else one cold
+    composite (_pc_composite_cold) under the _PC_COMPOSITE_CEILING_S ceiling -
+    503 composite_timeout past it, and the tiles it finished stay in the face
+    cache for the retry. `cells` is the paste order, (tile, row, discarded)
+    per cell. A body over _PC_COMPOSITE_MAX_BYTES is a 500 with a log line,
+    never a truncated picture."""
+    data = _pc_face_cache.read(key)
+    if data is None:
+        try:
+            data = await asyncio.wait_for(_pc_composite_cold(db, key, cells, ctx, cols, rows),
+                                          timeout=_PC_COMPOSITE_CEILING_S)
+        except asyncio.TimeoutError:
+            print(f"[PC-REVEAL] composite_timeout key={key} ceiling_s={_PC_COMPOSITE_CEILING_S}")
+            raise HTTPException(status_code=503, detail={"error": "composite_timeout", "retry_after": 5},
+                                headers={"Retry-After": "5"})
+    if len(data) > _PC_COMPOSITE_MAX_BYTES:
+        print(f"[PC-REVEAL] composite_too_large key={key} bytes={len(data)}")
+        raise HTTPException(status_code=500, detail={"error": "composite_too_large"})
+    return data
+
+
+@app.get("/api/v1/internal/pc/packs", tags=["Internal"])
+async def internal_pc_packs(
+    discord_id: str = Query(..., max_length=32),
+    pack_id: str | None = Query(None, max_length=36),
+    before: str | None = Query(None, max_length=36),
+    index: int | None = Query(None, ge=1, le=2147483647),
+    limit: int = Query(5, ge=1, le=10),
+    locale: str | None = Query(None, max_length=16),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /pack: the linked player's opened packs, newest first, as
+    summary rows - pack_id, status, source, kind, opened_at and the slot
+    rarities from the stored roster - keyset-paged on (opened_at, id) like
+    /pc/packs, `limit` at a time. No summary row reads a print. A stored
+    roster that cannot be read is a 500 with one log line on a summary page
+    as on the one-pack answer (S4), never a row without its rarities. With
+    `index` (step 1 of the bot's /pack N: the pack index - 1 places down
+    that same order, reached by OFFSET inside the
+    one statement, never by walking the pages before it) or `pack_id` (the
+    pre-send re-read) the answer is that one pack and its `prints` from
+    _pc_roster_prints. `pack_id` answers 404 unless it is this player's opened
+    pack; an `index` past the last pack answers no pack, beside the `total`
+    that says how many there are. `index` takes neither `pack_id` nor
+    `before`. `actor_ref` is the resolved players.id, compared by the bot
+    across its reads. The renderer gate comes first, as on the strip route: this
+    answer keys every face it lists (face_rev), and a box that cannot key a
+    face answers the reason instead of a list without keys."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    actor = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[actor.id])
+    pid = str(actor.id)
+    cursor = (before or "").strip()
+    if pack_id is not None and not _pcp.print_id_ok(pack_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    if cursor:
+        try:
+            _ = uuid.UUID(cursor)
+        except Exception:
+            raise HTTPException(status_code=422, detail="bad cursor")
+    if index is not None and (cursor or pack_id is not None):
+        raise HTTPException(status_code=422, detail="index takes no cursor and no pack_id")
+    _pc_reveal_pace(pid, "json")
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    rows = (await db.execute(text("""
+        SELECT id, status, source, kind, opened_at, result,
+               (SELECT COUNT(*) FROM pc_packs t
+                 WHERE t.player_id = CAST(:pid AS uuid) AND t.status = 'done') AS total
+          FROM pc_packs
+         WHERE player_id = CAST(:pid AS uuid) AND status = 'done'
+           AND (CAST(:pack AS uuid) IS NULL OR id = CAST(:pack AS uuid))
+           AND (CAST(:before AS uuid) IS NULL
+                OR (opened_at, id) < (SELECT c.opened_at, c.id FROM pc_packs c
+                                       WHERE c.id = CAST(:before AS uuid)
+                                         AND c.player_id = CAST(:pid AS uuid)))
+         ORDER BY opened_at DESC, id DESC
+         LIMIT CAST(:lim AS integer) OFFSET CAST(:skip AS integer)
+    """), {"pid": pid, "pack": pack_id, "before": cursor or None,
+           "lim": 1 if index is not None else int(limit) + 1,
+           "skip": index - 1 if index is not None else 0})).mappings().all()
+    if pack_id is not None and not rows:
+        raise HTTPException(status_code=404, detail="Not found")
+    more = index is None and len(rows) > int(limit)
+    rows = rows[:int(limit)]
+    packs = []
+    for r in rows:
+        raw = r["result"]
+        if isinstance(raw, (str, bytes, bytearray)):
+            try:
+                raw = _json.loads(raw)
+            except ValueError:
+                raw = None
+        roster = _pc_roster_slots(raw)
+        if roster is None and pack_id is None and index is None:
+            # S4: a summary row's unreadable roster is the same 500 and log line
+            # as the one-pack answer's (R1 LOW Finding 2), never a row without
+            # rarities. The one-pack answer raises it in _pc_roster_prints below.
+            print(f"[PC-REVEAL] roster_invalid pack={r['id']} mode=summary")
+            raise HTTPException(status_code=500, detail={"error": "roster_invalid"})
+        packs.append({"pack_id": str(r["id"]), "status": r["status"], "source": r["source"],
+                      "kind": r["kind"], "opened_at": _pc_iso(r["opened_at"]),
+                      "rarities": [e["rarity"] for e in roster] if roster is not None else None})
+    if index is not None and rows:
+        # `index` found the pack; from here it is answered exactly as the
+        # `pack_id` filter answers it.
+        pack_id = str(rows[0]["id"])
+    if pack_id is not None:
+        ctx = await _pc_face_ctx(db, loc)
+        packs[0]["prints"], _live = await _pc_roster_prints(db, pack_id, ctx)
+    # rows and total from one statement's snapshot, as /pc/packs does; an
+    # empty page has no row to carry it.
+    total = rows[0]["total"] if rows else (await db.execute(text(
+        "SELECT COUNT(*) FROM pc_packs WHERE player_id = CAST(:pid AS uuid) AND status = 'done'"),
+        {"pid": pid})).scalar_one()
+    return {"packs": packs, "total": int(total or 0), "locale": loc,
+            "next_before": (packs[-1]["pack_id"] if more and packs else None), "actor_ref": pid}
+
+
+@app.get("/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png", tags=["Internal"])
+async def internal_pc_pack_strip(
+    pack_id: str, locale: str,
+    discord_id: str = Query(..., max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The /pack picture: one opened pack's five slots in one row, slot 1 on
+    the left, each the print's face at tile size or the card back (the
+    ordered rules of _pc_composite_tile; a roster slot with no live row is
+    the back). Answered only for the pack's own player: a pack id that is not
+    canonical, not this player's, or not opened is 404, never 403. The
+    manifest (X-Strip-Slots), the digest (X-Strip-Rev) and the actor
+    (X-Strip-Actor) come from the row read that keyed the picture."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(pack_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    actor = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[actor.id])
+    owned = (await db.execute(text("""
+        SELECT id FROM pc_packs
+         WHERE id = CAST(:pack AS uuid)
+           AND player_id = CAST(:pid AS uuid)
+           AND status = 'done'
+    """), {"pack": pack_id, "pid": str(actor.id)})).scalar_one_or_none()
+    if owned is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    _pc_reveal_pace(str(actor.id), "composite")
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, _pc_served_locales()))
+    entries, live = await _pc_roster_prints(db, pack_id, ctx)
+    tokens, manifest, cells = [], [], []
+    for e in entries:
+        state = "gone" if e["gone"] else ("discarded" if e["discarded"] else "live")
+        word = e["face_rev"] if e["tile"] == "face" else e["reason"]
+        tokens.append(_pcstrip.strip_slot_token(e["slot"], e["print_id"], e["tile"], word, state))
+        manifest.append(_pcstrip.strip_manifest_entry(e["slot"], e["print_id"], e["subject_player_id"],
+                                                      e["tile"], word, state))
+        cells.append((e["tile"], live.get(e["print_id"]), state == "discarded"))
+    digest = _pcstrip.composite_digest(ctx["locale"], ctx["renderer_fp"], _pcstrip.STRIP_COLS, 1, tokens)
+    key = _pcp.composite_strip_key(pack_id, digest, ctx["locale"])
+    if key is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    data = await _pc_composite_bytes(db, key, cells, ctx, _pcstrip.STRIP_COLS, 1)
+    resp = _pc_png_response(data, "private, max-age=60")
+    resp.headers["X-Strip-Rev"] = digest
+    resp.headers["X-Strip-Slots"] = ",".join(manifest)
+    resp.headers["X-Strip-Actor"] = str(actor.id)
+    return resp
+
+
+_PC_BINDER_PAGE_SIZE = 10
+_PC_BINDER_PAGE_CAP = 50
+
+
+def _pc_binder_page_sql() -> str:
+    """The binder page statement - ONE statement, both binder routes.
+
+    `live` is the owner's live prints through _pc_composite_row_sql,
+    MATERIALIZED because it is read twice; `meta` is the collection-wide
+    total with one count per player_cards.RARITIES member (bound :r0 ...
+    in the tuple's order) and n_other for any other value, so the rarity
+    counts always sum to the total; `page` is one page of `live`; and
+    `meta LEFT JOIN page` makes the metadata row exist on an empty page as on
+    a full one. The order is the six-term key ending in print_id (unique, so
+    the page is a total order and a tie cannot flip between reads), stated
+    in `page` AND restated at depth zero, because a LEFT JOIN does not
+    promise to keep a CTE's row order and the JSON half and the image half
+    are two executions of this text. Assembled by concatenation, never
+    str.format (the wrap carries a literal brace); the SQL carries no comment
+    (text() would read a colon inside one as a bind)."""
+    live = _pc_composite_row_sql("WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL")
+    per_rarity = "".join(", count(*) FILTER (WHERE rarity = CAST(:r" + str(i) + " AS text)) AS n_r" + str(i)
+                         for i in range(len(_pc.RARITIES)))
+    return ("WITH live AS MATERIALIZED ( " + live + " ), "
+            + "meta AS ( SELECT count(*) AS live_total" + per_rarity
+            + ", count(*) FILTER (WHERE rarity <> ALL(CAST(:rall AS text[]))) AS n_other FROM live ), "
+            + "page AS ( SELECT * FROM live "
+            + "ORDER BY CASE rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END, signed DESC, foil DESC, pool_rank, minted_at, print_id "
+            + "LIMIT CAST(:limit AS integer) OFFSET CAST(:offset AS integer) ) "
+            + "SELECT m.*, p.* FROM meta m LEFT JOIN page p ON true "
+            + "ORDER BY CASE p.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END, p.signed DESC, p.foil DESC, p.pool_rank, p.minted_at, p.print_id")
+
+
+async def _pc_binder_page(db: AsyncSession, owner_ref: str, page: int):
+    """(meta, rows) of one binder page, from _pc_binder_page_sql: `meta` holds
+    the collection-wide `count`, `by_rarity` (the RARITIES keys plus `other`,
+    always present) and `pages` (at most _PC_BINDER_PAGE_CAP); `rows` are the
+    page's rows in the statement's order - none past the last page. The
+    rarity counts must sum to the count (a 500 and a log line otherwise), and
+    a non-zero `other` is logged: an unknown rarity is a fact about the data
+    that should reach a log rather than be absorbed."""
+    binds = {"owner": owner_ref, "rall": list(_pc.RARITIES), "limit": _PC_BINDER_PAGE_SIZE,
+             "offset": (int(page) - 1) * _PC_BINDER_PAGE_SIZE}
+    binds.update({"r" + str(i): rarity for i, rarity in enumerate(_pc.RARITIES)})
+    result = (await db.execute(text(_pc_binder_page_sql()), binds)).mappings().all()
+    head = result[0]
+    count = int(head["live_total"])
+    by_rarity = {rarity: int(head["n_r" + str(i)]) for i, rarity in enumerate(_pc.RARITIES)}
+    by_rarity["other"] = int(head["n_other"])
+    if sum(by_rarity.values()) != count:
+        print(f"[PC-BINDER] rarity_sum owner={owner_ref} count={count} sum={sum(by_rarity.values())}")
+        raise HTTPException(status_code=500, detail={"error": "binder_count_mismatch"})
+    if by_rarity["other"]:
+        print(f"[PC-BINDER] unknown_rarity owner={owner_ref} count={by_rarity['other']}")
+    pages = min(_PC_BINDER_PAGE_CAP, max(1, math.ceil(count / _PC_BINDER_PAGE_SIZE)))
+    rows = [r for r in result if r["print_id"] is not None]
+    return {"count": count, "by_rarity": by_rarity, "pages": pages}, rows
+
+
+@app.get("/api/v1/internal/pc/binder", tags=["Internal"])
+async def internal_pc_binder(
+    discord_id: str = Query(..., max_length=32),
+    viewer_discord_id: str | None = Query(None, max_length=32),
+    page: int = Query(1, ge=1, le=50),
+    locale: str | None = Query(None, max_length=16),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /binder [@member]: one page of the owner's live prints, ten
+    at a time in the binder order, each with its tile decision, and the
+    collection-wide count, rarity totals and page count from the SAME
+    statement. Consent as /internal/pc/collection: someone else's binder only
+    while it is public (403 private), the shard balance to its owner only.
+    `owner_ref` and `settings_rev` identify the answer for the bot's pre-send
+    re-read."""
+    _require_internal_key(x_internal_key)
+    owner = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[owner.id])
+    is_owner = viewer_discord_id is not None and str(viewer_discord_id) == str(owner.discord_id)
+    if not is_owner and not bool(getattr(owner, "pc_collection_public", True)):
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    pid = str(owner.id)
+    _pc_reveal_pace(pid, "json")
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, _pc_served_locales()))
+    meta, rows = await _pc_binder_page(db, pid, page)
+    prints = []
+    for r in rows:
+        d = _pc_print_dict(r, ctx)
+        tile, reason = _pc_composite_tile(r)
+        d.update({"gone": False, "tile": tile, "reason": reason, "subject_id_ok": bool(r["subject_id_ok"])})
+        prints.append(d)
+    answer = {"owner_name": _pcp.public_render_name(owner.display_name) or _pc_neutral_name(),
+              "owner_ref": pid, "settings_rev": int(getattr(owner, "pc_settings_revision", 0) or 0),
+              "count": meta["count"], "by_rarity": meta["by_rarity"], "page": int(page),
+              "pages": meta["pages"], "prints": prints}
+    if is_owner:
+        # The shard balance is the owner's alone, as on /internal/pc/collection.
+        answer["shards"] = int(getattr(owner, "pc_shards", 0) or 0)
+    return answer
+
+
+@app.get("/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png", tags=["Internal"])
+async def internal_pc_binder_page(
+    owner_ref: str, page: str, locale: str,
+    viewer_discord_id: str | None = Query(None, max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The /binder picture: one binder page as a 5 x 2 grid in the binder
+    order, each print's face at tile size or the card back
+    (_pc_composite_tile). Consent is re-derived here, because this route
+    resolves the owner by players.id and not by Discord id: `owner_ref`
+    canonical and a live players row, else 404; the viewer is the owner only
+    when both Discord ids are present and equal; someone else's binder only
+    while it is public (403 private). A page outside 1-50, or past the last
+    print, is 404. The manifest (X-Grid-Slots), the digest (X-Grid-Rev), the
+    owner (X-Grid-Owner) and the consent revision (X-Grid-Consent-Rev) come
+    from the row read that keyed the picture."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(owner_ref) or not (_re.fullmatch("[0-9]{1,2}", page) and 1 <= int(page) <= _PC_BINDER_PAGE_CAP):
+        raise HTTPException(status_code=404, detail="Not found")
+    owner = (await db.execute(select(Player).where(
+        Player.id == uuid.UUID(owner_ref), Player.deleted_at.is_(None)))).scalar_one_or_none()
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    await _assert_no_service_subject(db, affected_player_ids=[owner.id])
+    is_owner = (viewer_discord_id is not None
+                and owner.discord_id is not None
+                and str(viewer_discord_id) == str(owner.discord_id))
+    if not (is_owner or bool(getattr(owner, "pc_collection_public", True))):
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    pid = str(owner.id)
+    _pc_reveal_pace(pid, "composite")
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, _pc_served_locales()))
+    _meta, rows = await _pc_binder_page(db, pid, int(page))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Not found")
+    tokens, manifest, cells = [], [], []
+    for pos, r in enumerate(rows, start=1):
+        d = _pc_print_dict(r, ctx)
+        tile, reason = _pc_composite_tile(r)
+        word = d["face_rev"] if tile == "face" else reason
+        tokens.append(_pcstrip.grid_slot_token(pos, d["print_id"], tile, word))
+        manifest.append(_pcstrip.grid_manifest_entry(pos, d["print_id"], d["subject_player_id"], tile, word))
+        cells.append((tile, r, False))
+    digest = _pcstrip.composite_digest(ctx["locale"], ctx["renderer_fp"], _pcstrip.STRIP_COLS,
+                                       _pcstrip.STRIP_GRID_ROWS, tokens)
+    key = _pcp.composite_binder_key(pid, int(page), digest, ctx["locale"])
+    if key is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    data = await _pc_composite_bytes(db, key, cells, ctx, _pcstrip.STRIP_COLS, _pcstrip.STRIP_GRID_ROWS)
+    resp = _pc_png_response(data, "private, max-age=60")
+    resp.headers["X-Grid-Rev"] = digest
+    resp.headers["X-Grid-Slots"] = ",".join(manifest)
+    resp.headers["X-Grid-Owner"] = pid
+    resp.headers["X-Grid-Consent-Rev"] = str(int(getattr(owner, "pc_settings_revision", 0) or 0))
+    return resp
 
 
 # ── Player Cards: earned packs (WP-D) ────────────────────────────────────────
@@ -43156,7 +43762,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:3965 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:3975 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
