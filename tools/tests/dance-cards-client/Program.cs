@@ -118,6 +118,10 @@ namespace DanceCardsClientTests
             Add("t57_l2_container_after_still", T57);
             Add("t57_still_refusal_sends_no_motion", T57StillRefusal);
             Add("upload_retries_once", UploadRetriesOnce);
+            Add("t48_decide_truth_table", DecideTruthTable);
+            Add("motion_current_terms", MotionCurrentTerms);
+            Add("still_current_rows", StillCurrentRows);
+            Add("remember_key_stable", RememberKeyStable);
             Add("frame_emit_for_server", FrameEmitForServer);
             // -- PlayerCardMotionCore -------------------------------------------
             Add("read_parse", ReadParse);
@@ -970,6 +974,64 @@ namespace DanceCardsClientTests
             b.Clear(release);
             Check(liveObjects == 0 && live.Count == 0 && b.Total == 0 && b.Count == 0, "after " + cycles + " cycles: " + liveObjects + " objects of " + live.Count + " atlases still live");
             Console.WriteLine("  t40 cycles=" + cycles + " evictions=" + b.Evictions + " max held=" + maxTotal + " live before the last clear=" + before);
+        }
+
+        // ======================================================= S1.2 decision
+
+        private const string H1 = "1111111111111111111111111111111111111111111111111111111111111111";
+        private const string H2 = "2222222222222222222222222222222222222222222222222222222222222222";
+        private const string BASE = "v1|face=a|off=0,0|color=c:ffffff|effect=|skin=0|anim=0|g=1|r=3";
+        private const string DANCE = BASE + "|dance=dance_floss|ar=1";
+
+        /// <summary>S1.2 / T48's pure half: every route of the per-visit
+        /// decision, including the remembered key (a refused or failed job is
+        /// not captured again) and the seat that cannot dance.</summary>
+        private static void DecideTruthTable()
+        {
+            string cur = H1 + ":" + H2 + ":1";
+            Func<bool, string, bool, string, string, string, string, bool, bool, DanceMotionCore.Need> d =
+                (sup, sku, owned, mot, hash, stored, dance, can, rem) => DanceMotionCore.Decide(sup, sku, owned, mot, hash, stored, dance, 1, can, rem);
+            Check(d(false, "dance_floss", true, cur, H2, DANCE, DANCE, true, false) == DanceMotionCore.Need.None, "older server: None");
+            Check(d(true, "", true, cur, H2, DANCE, DANCE, true, false) == DanceMotionCore.Need.None, "no selection: None");
+            Check(d(true, "dance_floss", false, cur, H2, DANCE, DANCE, true, false) == DanceMotionCore.Need.None, "not owned here: None");
+            Check(d(true, "dance_floss", true, cur, H2, DANCE, null, true, false) == DanceMotionCore.Need.Fallback, "no dance descriptor: Fallback");
+            Check(d(true, "dance_floss", true, cur, H2, DANCE, DANCE, true, false) == DanceMotionCore.Need.Current, "bound and current: Current");
+            Check(d(true, "dance_floss", true, cur, H2, DANCE, DANCE, false, true) == DanceMotionCore.Need.Current, "current wins over a hold or a memory");
+            Check(d(true, "dance_floss", true, "", H2, BASE, DANCE, true, false) == DanceMotionCore.Need.Needed, "no motion: Needed");
+            Check(d(true, "dance_floss", true, cur, H1, DANCE, DANCE, true, false) == DanceMotionCore.Need.Needed, "still replaced: Needed");
+            Check(d(true, "dance_floss", true, "", H2, BASE, DANCE, false, false) == DanceMotionCore.Need.Fallback, "cannot dance here: Fallback");
+            Check(d(true, "dance_floss", true, "", H2, BASE, DANCE, true, true) == DanceMotionCore.Need.Fallback, "remembered key: Fallback (T48)");
+        }
+
+        /// <summary>S1.2's four "differs" terms, each alone.</summary>
+        private static void MotionCurrentTerms()
+        {
+            string cur = H1 + ":" + H2 + ":1";
+            Check(DanceMotionCore.MotionCurrent(cur, H2, DANCE, DANCE, 1), "all terms equal: current");
+            Check(!DanceMotionCore.MotionCurrent("", H2, DANCE, DANCE, 1), "no stored motion");
+            Check(!DanceMotionCore.MotionCurrent(cur, H1, DANCE, DANCE, 1), "bound still hash differs");
+            Check(!DanceMotionCore.MotionCurrent(cur, H2, DANCE, DANCE, 2), "recipe differs");
+            Check(!DanceMotionCore.MotionCurrent(cur, H2, BASE, DANCE, 1), "stored descriptor differs");
+            Check(!DanceMotionCore.MotionCurrent(H1 + ":" + H2, H2, DANCE, DANCE, 1), "two fields");
+            Check(!DanceMotionCore.MotionCurrent("xyz:" + H2 + ":1", H2, DANCE, DANCE, 1), "not a hash");
+        }
+
+        /// <summary>The still-only path's "picture current" rows.</summary>
+        private static void StillCurrentRows()
+        {
+            Check(DanceMotionCore.StillCurrent(H2, BASE, BASE, null), "base still, no selection: current");
+            Check(DanceMotionCore.StillCurrent(H2, DANCE, BASE, DANCE), "dancer still on the fallback: current");
+            Check(!DanceMotionCore.StillCurrent(H2, DANCE, BASE, null), "suffixed still, selection cleared: replaced");
+            Check(!DanceMotionCore.StillCurrent(H2, BASE + "x", BASE, DANCE), "other inputs: replaced");
+            Check(!DanceMotionCore.StillCurrent("", BASE, BASE, null), "no stored still: replaced");
+        }
+
+        private static void RememberKeyStable()
+        {
+            string a = DanceMotionCore.RememberKey("7656", DANCE), b = DanceMotionCore.RememberKey("7656", DANCE);
+            Check(a == b, "same inputs, same key");
+            Check(a != DanceMotionCore.RememberKey("7656", BASE + "|dance=dance_robot|ar=1"), "another dance, another key");
+            Check(a != DanceMotionCore.RememberKey("7657", DANCE), "another identity, another key");
         }
 
         /// <summary>T50's calibrated arm (finding M9): a deterministic stall of
