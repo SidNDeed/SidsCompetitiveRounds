@@ -2239,19 +2239,77 @@ namespace CompetitiveRounds
         /// it (at most 8 s) and the page has settled, and say what it got.</summary>
         private static IEnumerator DrvResolution(int w, int h)
         {
-            if (Screen.width != w || Screen.height != h || Screen.fullScreenMode != FullScreenMode.Windowed)
-                Screen.SetResolution(w, h, FullScreenMode.Windowed);
+            return DrvResolutionMode(w, h, FullScreenMode.Windowed);
+        }
+
+        /// <summary>DrvResolution in a named full-screen mode (round-3 L2:
+        /// W3c asks 5120x1440 in every mode, because a windowed surface is
+        /// capped at the desktop).</summary>
+        private static IEnumerator DrvResolutionMode(int w, int h, FullScreenMode mode)
+        {
+            if (Screen.width != w || Screen.height != h || Screen.fullScreenMode != mode)
+                Screen.SetResolution(w, h, mode);
             float until = Time.unscaledTime + 8f;
-            while (Time.unscaledTime < until && (Screen.width != w || Screen.height != h)) yield return 0.2f;
+            while (Time.unscaledTime < until && (Screen.width != w || Screen.height != h || Screen.fullScreenMode != mode)) yield return 0.2f;
             yield return 1.0f;
             dirty = true;
             yield return DrvSettle(0.5f);
             SettingsForceLayout();
             SettingsUpdateHint();
             SettingsForceLayout();
-            DrvNote("resolution " + w + "x" + h + " asked: Screen " + Screen.width + "x" + Screen.height + " " + Screen.fullScreenMode
+            DrvNote("resolution " + w + "x" + h + (mode == FullScreenMode.Windowed ? "" : " " + mode) + " asked: " + DrvScreenState());
+        }
+
+        /// <summary>What the game reports: its surface, the display's mode,
+        /// and the page's canvas scale and logical height.</summary>
+        private static string DrvScreenState()
+        {
+            return "Screen " + Screen.width + "x" + Screen.height + " " + Screen.fullScreenMode
                 + ", display " + Screen.currentResolution.width + "x" + Screen.currentResolution.height
-                + ", canvas scale " + DrvNum(SettingsCanvasScale()) + ", logical canvas height " + DrvNum(SettingsCanvasHeight()));
+                + ", canvas scale " + DrvNum(SettingsCanvasScale()) + ", logical canvas height " + DrvNum(SettingsCanvasHeight());
+        }
+
+        /// <summary>The display's largest mode, how many modes it lists, and
+        /// whether one of them is w x h.</summary>
+        private static string DrvDisplayModes(int w, int h)
+        {
+            Resolution[] all;
+            try { all = Screen.resolutions; } catch { all = null; }
+            if (all == null || all.Length == 0) return "the display lists no modes";
+            Resolution big = all[0];
+            bool has = false;
+            foreach (var r in all)
+            {
+                if ((long)r.width * r.height > (long)big.width * big.height) big = r;
+                if (r.width == w && r.height == h) has = true;
+            }
+            return "the display lists " + all.Length + " mode(s), the largest " + big.width + "x" + big.height + "@"
+                + big.refreshRateRatio.value.ToString("0.##", CultureInfo.InvariantCulture)
+                + "; " + w + "x" + h + " " + (has ? "is" : "is NOT") + " among them";
+        }
+
+        /// <summary>The screen arguments this process was launched with (the
+        /// -screen-*, -window-mode and -popupwindow flags only; nothing else
+        /// on the command line is printed).</summary>
+        private static string DrvScreenArgs()
+        {
+            var l = new List<string>();
+            try
+            {
+                var a = Environment.GetCommandLineArgs();
+                for (int i = 1; i < a.Length; i++)
+                {
+                    string s = a[i] ?? "";
+                    if (s.StartsWith("-screen-", StringComparison.OrdinalIgnoreCase) || s.Equals("-window-mode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        l.Add(s);
+                        if (i + 1 < a.Length) l.Add(a[++i]);
+                    }
+                    else if (s.Equals("-popupwindow", StringComparison.OrdinalIgnoreCase)) l.Add(s);
+                }
+            }
+            catch { }
+            return l.Count == 0 ? "no screen arguments" : string.Join(" ", l.ToArray());
         }
 
         /// <summary>The restore proof: 1920x1080 windowed again, and the
@@ -2594,18 +2652,42 @@ namespace CompetitiveRounds
             dirty = true;
         }
 
-        /// <summary>W3c: 32:9 with the three optional rows active, past the
-        /// supported bound. 5120x1440 is asked first and what the display
-        /// allows is logged; the run is at 2560x720, the same 32:9 aspect and
-        /// the same 540 px logical canvas under match-width scaling. A5b's
-        /// control: exactly five observations, named. Performance is captured
-        /// unscrolled and after a scroll to the end.</summary>
+        /// <summary>W3c: 5120x1440 (32:9) with the three optional rows active,
+        /// past the supported bound (design section 11). Round-3 L2: a
+        /// windowed surface is capped at the desktop, so 5120x1440 is sought
+        /// by every method this process has, each result logged: the launch's
+        /// own screen arguments (read at entry; the runner can launch with
+        /// -screen-width 5120 -screen-height 1440), then SetResolution in
+        /// Windowed, FullScreenWindow and ExclusiveFullScreen. Reached by any
+        /// of them, W3c runs there. Reached by none, the bound is logged with
+        /// the display's own mode list, and the same checks run at 2560x720
+        /// (the same 32:9 aspect and 540 px logical canvas) as a SUBSTITUTE,
+        /// every line tagged W3c-sub and every capture w3csub-, never filed
+        /// as W3c. A5b's control: exactly five observations, named.
+        /// Performance is captured unscrolled and after a scroll to the end.</summary>
         private static IEnumerator DriveW3c()
         {
             DrvParkPointer();
             bool perf0 = _perfSectionOpen;
-            yield return DrvResolution(5120, 1440);
-            yield return DrvResolution(2560, 720);
+            const int w = 5120, h = 1440;
+            DrvNote("W3c at entry: " + DrvScreenState() + "; launched with " + DrvScreenArgs() + "; " + DrvDisplayModes(w, h));
+            bool reached = Screen.width == w && Screen.height == h;
+            if (reached) DrvNote("W3c: the launch's screen arguments gave " + w + "x" + h + "; no SetResolution call is made");
+            var modes = new[] { FullScreenMode.Windowed, FullScreenMode.FullScreenWindow, FullScreenMode.ExclusiveFullScreen };
+            for (int i = 0; i < modes.Length && !reached; i++)
+            {
+                yield return DrvResolutionMode(w, h, modes[i]);
+                reached = Screen.width == w && Screen.height == h;
+                DrvNote("W3c attempt " + (i + 1) + " of " + modes.Length + " (SetResolution " + w + "x" + h + " " + modes[i] + "): "
+                    + (reached ? "REACHED - " : "not reached - ") + DrvScreenState());
+            }
+            string tag = reached ? "W3c" : "W3c-sub", shot = reached ? "w3c-" : "w3csub-";
+            if (!reached)
+            {
+                DrvNote("W3c NOT REACHED: no method gave a " + w + "x" + h + " surface (" + DrvDisplayModes(w, h)
+                    + "); the bound is a residual, and the 2560x720 run below is a SUBSTITUTE, tagged W3c-sub, never W3c");
+                yield return DrvResolution(2560, 720);
+            }
             yield return DrvForceRows(true);
             SettingsExpandTab(SettingsModel.SubTabIndex("perf"));
             var obs = new List<string>();
@@ -2613,26 +2695,26 @@ namespace CompetitiveRounds
             for (int t = 0; t < SETTINGS_TABS; t++)
             {
                 yield return DrvShowTab(t);
-                DrvMeasureA5A8("W3c ", obs);
-                DrvNoClip("W3c " + SettingsModel.SubTabHomes[t] + ": ", null);
+                DrvMeasureA5A8(tag + " ", obs);
+                DrvNoClip(tag + " " + SettingsModel.SubTabHomes[t] + ": ", null);
                 if (t != perf) continue;
                 SettingsScrollListTo(1f);
                 yield return 0.3f;
-                yield return DrvCapture("w3c-1-perf-top");
+                yield return DrvCapture(shot + "1-perf-top");
                 SettingsScrollListTo(0f);
                 yield return 0.3f;
-                yield return DrvCapture("w3c-2-perf-end");
+                yield return DrvCapture(shot + "2-perf-end");
                 SettingsScrollListTo(1f);
             }
             var want = new List<string> { "ingame", "visuals", "perf", "langmenus", "privacy" };
             obs.Sort(StringComparer.Ordinal);
             want.Sort(StringComparer.Ordinal);
             if (string.Join(",", obs.ToArray()) == string.Join(",", want.ToArray()))
-                DrvOk("W3c A5b's control: exactly five observations at " + Screen.width + "x" + Screen.height + ": " + DrvList(obs));
-            else DrvBad("W3c A5b's control: " + obs.Count + " observation(s) " + DrvList(obs) + ", want exactly " + DrvList(want));
+                DrvOk(tag + " A5b's control: exactly five observations at " + Screen.width + "x" + Screen.height + ": " + DrvList(obs));
+            else DrvBad(tag + " A5b's control: " + obs.Count + " observation(s) " + DrvList(obs) + ", want exactly " + DrvList(want));
             DrvPerfSection(perf0);
             yield return DrvForceRows(false);
-            yield return DrvResolutionRestore("W3c");
+            yield return DrvResolutionRestore(tag);
         }
 
         // blocked senders, as the page paints a server answer (W4, W10)
