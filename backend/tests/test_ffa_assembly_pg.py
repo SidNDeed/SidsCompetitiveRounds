@@ -3367,26 +3367,36 @@ def test_s63_the_kept_epoch(monkeypatch):
             await env.census_row(lob, p, both, claim=1 + p)
         age = int(round((env.now - await env.ts(lob, 0)).total_seconds() * 1000))
         conn, tr, bpid = await _blocker(env, lob)
-        try:
-            t2 = asyncio.ensure_future(env.assembly(lob, 2, 7, [env.entry(lob, 2, 7)],
-                                                    seen_age_ms=age))
-            t4 = asyncio.ensure_future(env.assembly(lob, 4, 9, [env.entry(lob, 4, 9)],
-                                                    seen_age_ms=age))
-            waiting = 0
+
+        async def waiters(want):
             # The second request queues behind the first on the same row, so
             # its blocker is the first request: count the waiters reachable
             # from the blocker, not only its direct ones.
+            n = 0
             for _ in range(100):
-                waiting = await env.conn.fetchval(
+                n = await env.conn.fetchval(
                     "WITH RECURSIVE w(pid) AS ("
                     "  SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))"
                     "  UNION SELECT a.pid FROM pg_stat_activity a JOIN w"
                     "    ON w.pid = ANY(pg_blocking_pids(a.pid)))"
                     " SELECT count(*) FROM w", bpid)
-                if waiting >= 2:
+                if n >= want:
                     break
                 await asyncio.sleep(0.02)
-            assert waiting >= 2 and not t2.done() and not t4.done(), ("S63 iv waiting", waiting)
+            return n
+        try:
+            # Slot 2's request queues first and slot 4's behind it. A row lock
+            # is granted in queue order, so which admission numbers 1 is the
+            # same in every run (a twin compares the epoch rows byte for byte),
+            # and both requests still wait on the one lock at once.
+            t2 = asyncio.ensure_future(env.assembly(lob, 2, 7, [env.entry(lob, 2, 7)],
+                                                    seen_age_ms=age))
+            queued = await waiters(1)
+            t4 = asyncio.ensure_future(env.assembly(lob, 4, 9, [env.entry(lob, 4, 9)],
+                                                    seen_age_ms=age))
+            waiting = await waiters(2)
+            assert queued >= 1 and waiting >= 2 and not t2.done() and not t4.done(), \
+                ("S63 iv waiting", queued, waiting)
         finally:
             await tr.commit()
             await conn.close()
