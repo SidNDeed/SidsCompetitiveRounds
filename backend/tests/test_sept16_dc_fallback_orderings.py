@@ -14,7 +14,7 @@ So this file needs a throwaway cluster. Point SEPT16DC_TEST_PG_DSN at one:
     SEPT16DC_TEST_PG_DSN=postgresql+asyncpg://postgres@127.0.0.1:55432/scr_sept16dc
 
 and the file skips when it is unset, so the ordinary suite is unaffected. It
-never runs against a real deployment: it drops and recreates its own three
+never runs against a real deployment: it drops and recreates its own
 tables, and every Steam id it uses is outside the real id space.
 
 THE SCHEMA IS DELIBERATELY PRE-MIGRATION. The tables are created WITHOUT the
@@ -22,6 +22,22 @@ two marker columns, and then backend/sql/356_team_series_dc_fallback_at.sql is
 executed verbatim from disk. The harness therefore exercises the migration
 itself, and an edit to that file is carried into every scenario below rather
 than silently diverging from a copy.
+
+THE PER-GAME RECORD. Since the lead-forfeit hotfix, a real-totals report
+completes a series rated only when the server's own per-game record,
+team_series_games, shows that the game in progress was played: a pair of
+two points or more from a seat of EACH team, and in any game but the first
+of the original sitting only from the posts that named exactly that game
+and sitting (main._team_game_crossed_two). Without that record the same
+report parks the series as dc_incomplete for an admin, by design. So the
+harness also executes main's migrations 348, 351 and 352 verbatim, stores
+a sitting room on the series, and files that record through main's own
+writer, main._record_team_game_points -- the one update_team_live_points
+calls: one attested post of the pair 1-1 from a seat of each team, what
+the clients leave during play. Ordering 1 first runs its own steps with no
+record and with team 1's post alone, and asserts the hotfix's outcome
+there, so the orderings below end rated because of the record and not in
+spite of it.
 
 WHAT IS STUBBED, AND WHAT IS NOT. _complete_team_series_with_ratings is
 replaced by a recorder that performs the one write the real helper's callers
@@ -60,6 +76,14 @@ pytestmark = pytest.mark.skipif(
 
 SQL_DIR = pathlib.Path(__file__).resolve().parents[1] / "sql"
 MIGRATION = SQL_DIR / "356_team_series_dc_fallback_at.sql"
+# The lead-forfeit hotfix's per-game record: main's own migrations, executed
+# verbatim before 356 (the module docstring, THE PER-GAME RECORD).
+PERGAME_MIGRATIONS = (SQL_DIR / "348_team_series_games.sql",
+                      SQL_DIR / "351_team_series_games_identity.sql",
+                      SQL_DIR / "352_team_series_games_attested_seats.sql")
+# The sitting room every seeded series stores; its per-game record is filed
+# in it. The reports below name no room, so neither room fence refuses them.
+SITTING_ROOM = "sct-ordering0001"
 
 # Outside the real SteamID64 space, so a misconfigured DSN cannot collide with
 # production rows. T1 disconnects; T2A is the elected reporter.
@@ -69,6 +93,9 @@ SID_T2A = "90000000000000023"          # the reporter (non-DC team)
 SID_T2B = "90000000000000024"
 
 PRE_356_SCHEMA = """
+-- The per-game record (migrations 348, 351, 352, executed after this
+-- script) references team_series, so it goes first.
+DROP TABLE IF EXISTS team_series_games;
 DROP TABLE IF EXISTS team_matches;
 DROP TABLE IF EXISTS team_series;
 DROP TABLE IF EXISTS ovt_series;
@@ -260,16 +287,25 @@ def _harness_globals():
         main._service_uuid_cache_monotonic = old_svc_at
 
 
-async def _fresh_series(t2_wins: int = 1):
-    """Reset the schema, apply migration 356, seed one active series.
+async def _fresh_series(t2_wins: int = 1, played=(0, 2)):
+    """Reset the schema, apply migrations 348, 351, 352 and 356, seed one
+    active series in a stored sitting, and file its per-game record.
 
-    t2_wins=1 puts the NON-disconnecting team one game up, which is the
-    condition under which a real-totals report carrying >=2 points completes
-    the series WITH ratings. That is the outcome a fallback must never be able
-    to displace, so it is the outcome every ordering below asserts.
+    t2_wins=1 puts the NON-disconnecting team one game up, which -- with the
+    game in progress on the record as played -- is the condition under which
+    a real-totals report completes the series WITH ratings. That is the
+    outcome a fallback must never be able to displace, so it is the outcome
+    every ordering below asserts.
+
+    `played` names the seats (0..3 = t1a, t1b, t2a, t2b) whose post of the
+    game in progress is on the per-game record: the pair 1-1, naming that
+    game and sitting (attested). The default, one seat of each team, is the
+    game having been played; () and (0,) are Ordering 1's negative
+    controls, on which the same report parks the series as dc_incomplete.
     """
     await _take_clean_slate()
-    await _run_script(MIGRATION.read_text(encoding="utf-8"))
+    for migration in PERGAME_MIGRATIONS + (MIGRATION,):
+        await _run_script(migration.read_text(encoding="utf-8"))
     engine = create_async_engine(DSN, future=True)
     Session = async_sessionmaker(engine, expire_on_commit=False)
     ids = {"sid": uuid.uuid4()}
@@ -290,10 +326,19 @@ async def _fresh_series(t2_wins: int = 1):
         await s.execute(
             text("""INSERT INTO team_series
                        (id, status, t1a_id, t1b_id, t2a_id, t2b_id,
-                        t1_series_wins, t2_series_wins)
-                    VALUES (:sid, 'active', :t1a, :t1b, :t2a, :t2b, 0, :w)"""),
+                        t1_series_wins, t2_series_wins, photon_room_id)
+                    VALUES (:sid, 'active', :t1a, :t1b, :t2a, :t2b, 0, :w, :room)"""),
             {"sid": ids["sid"], "t1a": ids["t1a"], "t1b": ids["t1b"],
-             "t2a": ids["t2a"], "t2b": ids["t2b"], "w": t2_wins})
+             "t2a": ids["t2a"], "t2b": ids["t2b"], "w": t2_wins,
+             "room": SITTING_ROOM})
+        await s.commit()
+    # The game in progress, named by the helper the report's own read uses
+    # (the stored wins and room), and each played seat's attested post of it.
+    game = main._team_game_identity(0, t2_wins, SITTING_ROOM)
+    async with Session() as s:
+        for seat in played:
+            assert await main._record_team_game_points(
+                s, ids["sid"], 1, 1, game, seat, attested=game), (game, seat)
         await s.commit()
     return engine, Session, ids
 
@@ -354,7 +399,30 @@ def _drive(body):
 
 
 def test_fallback_first_then_real_totals_ends_rated():
+    async def control(played):
+        # THE NEGATIVE CONTROLS (the module docstring, THE PER-GAME RECORD):
+        # the same steps with no record, and with team 1's post alone. The
+        # fallback defers exactly as it does below; the real-totals report
+        # then parks the series for an admin and nothing is rated.
+        engine, Session, ids = await _fresh_series(played=played)
+        sid = ids["sid"]
+        try:
+            with _harness_globals() as rated:
+                out = await _fallback(Session, sid)
+                assert out["status"] == "deferred", (played, out)
+                out2 = await _real_totals(Session, sid)
+                assert out2["status"] == "dc_incomplete", (played, out2)
+                assert out2["reason"] == "awaiting_admin_resolution", (played, out2)
+                assert out2["deferred"] is False, (played, out2)
+                end = await _row(Session, sid)
+                assert end["status"] == "dc_incomplete", (played, dict(end))
+                assert not rated.calls, (played, rated.calls)
+        finally:
+            await engine.dispose()
+
     async def body():
+        await control(())
+        await control((0,))
         engine, Session, ids = await _fresh_series()
         sid = ids["sid"]
         try:
