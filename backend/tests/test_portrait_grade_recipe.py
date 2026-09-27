@@ -3144,7 +3144,7 @@ def test_every_lever_is_refused_at_dispatch():
 
 
 @pytest.mark.parametrize("source,signature,yields", [
-    (RENDER_CS, RUN, 6),
+    (RENDER_CS, RUN, 7),   # the seventh: dance cards step 0 (T45), its delegation loop fenced like the rest
     (GRADE_CS, GRADE_BAKE_RUN, 3),
     (GRADE_CS, GRADE_SWATCH_RUN, 4),
 ])

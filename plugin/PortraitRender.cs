@@ -1102,7 +1102,7 @@ namespace CompetitiveRounds
             bool ground = true, color = true, effect = true, unlit = false;
             bool rawlegs = false, nopin = false, pinall = false, swaprb = false, lightprobe = false, poseprobe = false, psinfo = false;
             float pad = 1.3f;
-            // dance cards step 0 / T45 (PortraitRenderDanceProbe.cs): the dance frames after the still
+            // dance cards step 0 / T45 (DanceProbeFrames, below): the dance frames after the still
             bool dances = false; string danceMode = "pose", l1Mode = "guarded"; List<int> danceOnly = null; int danceLag = 3, danceHold = 1;
             List<int> sweep = null; List<int> salts = null;
             string colorOverride = null, effectOverride = null, faceOverride = null, tag = "run", grade = "compiled";
@@ -1244,9 +1244,14 @@ namespace CompetitiveRounds
                 if (dances)
                 {
                     var it = DanceProbeFrames(rep, clone, cam, size, tag, danceMode, l1Mode, danceOnly, danceLag, danceHold, gen);
-                    while (it.MoveNext()) yield return it.Current;
-                    _renderClaim.Beat(gen, DEV_BUDGET);
-                    if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("aborted: ").Append(blocked).Append('\n'); yield break; }
+                    // Every frame the probe yields is fenced HERE as well, like every other
+                    // yield of this lever: its first wait has no fence of its own.
+                    while (it.MoveNext())
+                    {
+                        yield return it.Current;
+                        _renderClaim.Beat(gen, DEV_BUDGET);
+                        if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("aborted: ").Append(blocked).Append('\n'); yield break; }
+                    }
                 }
                 if (sweep != null && nopin) rep.Append("sweep: skipped (nopin leaves the particles unpinned)\n");
                 else if (sweep != null)
@@ -3290,5 +3295,236 @@ namespace CompetitiveRounds
         private static string FaceStr(PlayerFace f) => f == null ? "null"
             : "eye=" + f.eyeID + "@" + f.eyeOffset + " mouth=" + f.mouthID + "@" + f.mouthOffset
               + " detail=" + f.detailID + "@" + f.detailOffset + " detail2=" + f.detail2ID + "@" + f.detail2Offset;
+    }
+
+    /// <summary>Dance cards build step 0 (design S11.1) and VM test T45
+    /// (`body_channel_probe`), on the portrait rig. A dev option of the
+    /// `portrait:run,...` lever (Run): after the still, every dance of the
+    /// capture table is posed through DanceEmotes.PortraitPose frame by frame
+    /// (t = k * ms / 1000, never a clock), the rig is rendered after each pose
+    /// and compared with the rest render.
+    ///
+    /// Options (after `dances`): `dancemode=pose` (T45: PortraitPose set for
+    /// every frame), `dancemode=nopose` (T45's mutant: PortraitPose never
+    /// set), `dancemode=still` (T45's control: a still-only run, asserting
+    /// zero motion); `l1=guarded` (the frame's Tick is the product one) or
+    /// `l1=unguarded` (L1's mutant: Tick's pre-L1 hard restore instead);
+    /// `only=I:J:..` a subset of dance indexes; `lag=N` re-renders N frames
+    /// per dance one frame later (does one frame settle a pose?).
+    ///
+    /// Per frame, in the capture's own order (design S1.4 steps 4 and 7):
+    /// the rig's remembered deltas undone once (RestorePortraitRig, L1), the
+    /// frozen arm baseline written back, the pose set; one full frame
+    /// (Update, the Arm Postfix, LateUpdate) passes; the frame's Tick; the
+    /// targets read (L1: each must equal its baseline plus the clamped
+    /// Evaluate offset) and the rig rendered. None of it is reachable from
+    /// the product path.</summary>
+    internal static partial class PortraitRender
+    {
+        private const float DANCE_PROBE_MIN_OFFSET = 0.05f;   // world units: a pose this far off rest must show
+        // World units, the L1 equality. The rig stands at PARK (4000, 4000), where
+        // one float ulp is 2^-11 (about 4.9e-4) units, so a target written there
+        // cannot land nearer its exact value than that; 1e-3 is two ulps. The L1
+        // defects it must catch move a target by a whole offset (0.05 and up).
+        private const float DANCE_PROBE_EPS = 1e-3f;
+
+        private static Transform FindDeepNamed(Transform root, string name)
+        {
+            if (root == null) return null;
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+                if (t != null && t.name == name) return t;
+            return null;
+        }
+
+        private static void PixelDiff(Color32[] a, Color32[] b, out int exact, out int over8)
+        {
+            exact = 0; over8 = 0;
+            int n = Math.Min(a.Length, b.Length);
+            for (int i = 0; i < n; i++)
+            {
+                var x = a[i]; var y = b[i];
+                if (x.r == y.r && x.g == y.g && x.b == y.b && x.a == y.a) continue;
+                exact++;
+                if (Math.Abs(x.r - y.r) > PROBE_FLOOR || Math.Abs(x.g - y.g) > PROBE_FLOOR || Math.Abs(x.b - y.b) > PROBE_FLOOR) over8++;
+            }
+        }
+
+        private static IEnumerator DanceProbeFrames(StringBuilder rep, GameObject clone, Camera cam, int size, string tag,
+                                                    string mode, string l1, List<int> only, int lagN, int hold, int gen)
+        {
+            bool setPose = mode == "pose";
+            bool unguarded = l1 == "unguarded";
+            Transform rigRoot = clone != null ? clone.transform : null;
+            IKArmMove armL = null, armR = null;
+            if (clone != null)
+                foreach (var a in clone.GetComponentsInChildren<IKArmMove>(true))
+                {
+                    if (a == null || a.target == null) continue;
+                    if (a.target.name.IndexOf("Left", StringComparison.OrdinalIgnoreCase) >= 0) armL = a; else armR = a;
+                }
+            if (hold < 1) hold = 1;
+            rep.Append("dance probe: mode=").Append(mode).Append(" l1=").Append(l1).Append(" lag=").Append(lagN).Append(" hold=").Append(hold)
+               .Append(" body-channel=").Append(DanceEmotes.PORTRAIT_BODY_CHANNEL)
+               .Append(" armL=").Append(armL != null ? armL.target.name : "none").Append(" armR=").Append(armR != null ? armR.target.name : "none").Append('\n');
+            if (rigRoot == null || armL == null || armR == null)
+            {
+                rep.Append("dance probe: FAIL rig or arm targets not found\n");
+                Plugin.Log.LogInfo("[DANCE-T45] FAIL tag=" + tag + " reason=no-arm-targets");
+                yield break;
+            }
+            Vector3 baseL = armL.target.position, baseR = armR.target.position;
+            Transform handL = FindDeepNamed(armL.transform, "Hand"), handR = FindDeepNamed(armR.transform, "Hand");
+            Color32[] rest;
+            {
+                var restTex = Grab(cam, Color.black, size);
+                rest = restTex.GetPixels32();
+                UnityEngine.Object.Destroy(restTex);
+            }
+            rep.Append("dance probe: baseL=").Append(V(baseL - PARK)).Append(" baseR=").Append(V(baseR - PARK))
+               .Append(" handL=").Append(handL != null ? V(handL.position - PARK) : "none")
+               .Append(" handR=").Append(handR != null ? V(handR.position - PARK) : "none").Append('\n');
+
+            var tsv = new StringBuilder("dance\tk\tt\talx\taly\tarx\tary\tdLx\tdLy\tdRx\tdRy\tl1_ok\tapplied\tchanged_exact\tchanged_over8\thandLx\thandLy\thandRx\thandRy\n");
+            var lagTsv = new StringBuilder("dance\tk\tlag_changed_exact\tlag_changed_over8\n");
+            int total = 0, nonzeroFrames = 0, unmovedNonzero = 0, zeroFrames = 0, zeroChanged = 0, anyChanged = 0;
+            int l1Checked = 0, l1Fail = 0, l1Pairs = 0, appliedFrames = 0, appliedMissing = 0, lagChecks = 0, lagMoved = 0;
+            double minMoving = 1.0, maxChanged = 0.0;
+            int dancesNoMotion = 0;
+            var perDance = new StringBuilder();
+            float t0 = Time.realtimeSinceStartup;
+            string blocked;
+
+            var set = new List<int>();
+            for (int i = 0; i < DanceEmotes.Defs.Length; i++) if (only == null || only.Contains(i)) set.Add(i);
+
+            yield return new WaitForEndOfFrame();
+            try
+            {
+                foreach (int idx in set)
+                {
+                    int ms = DanceEmotes.CaptureMs[idx];
+                    int n = DanceEmotes.CaptureFrames(idx);
+                    int dMoving = 0, dUnmoved = 0; double dMax = 0.0; bool prevNonzeroOk = false;
+                    for (int k = 0; k < n; k++)
+                    {
+                        float t = k * ms / 1000f;
+                        // L1: undo the rig's remembered deltas once, then the baseline
+                        DanceEmotes.RestorePortraitRig(rigRoot);
+                        armL.target.position = baseL; armR.target.position = baseR;
+                        armL.velolcity = Vector3.zero; armR.velolcity = Vector3.zero;
+                        Vector2 body, al, ar; float rot;
+                        DanceEmotes.EvaluateClamped(idx, t, out body, out rot, out al, out ar);
+                        if (setPose) DanceEmotes.PortraitPose = new DanceEmotes.PortraitPoseSpec(rigRoot, idx, t);
+                        int applied0 = DanceEmotes.PortraitArmApplied;
+                        int applied = 0;
+                        for (int h = 0; h < hold; h++)
+                        {
+                            // hold the pose `hold` whole frames; the arm delta counted in the first
+                            yield return new WaitForEndOfFrame();
+                            _renderClaim.Beat(gen, DEV_BUDGET);
+                            if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("dance probe aborted: ").Append(blocked).Append('\n'); yield break; }
+                            if (h == 0) applied = DanceEmotes.PortraitArmApplied - applied0;
+                        }
+                        // the frame's Tick: the product one, or (L1 mutant) its pre-L1 hard restore
+                        if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else DanceEmotes.Tick();
+                        Vector3 dL = armL.target.position - baseL, dR = armR.target.position - baseR;
+                        Vector2 expL = setPose ? al : Vector2.zero, expR = setPose ? ar : Vector2.zero;
+                        bool l1ok = Mathf.Abs(dL.x - expL.x) < DANCE_PROBE_EPS && Mathf.Abs(dL.y - expL.y) < DANCE_PROBE_EPS && Mathf.Abs(dL.z) < DANCE_PROBE_EPS
+                                 && Mathf.Abs(dR.x - expR.x) < DANCE_PROBE_EPS && Mathf.Abs(dR.y - expR.y) < DANCE_PROBE_EPS && Mathf.Abs(dR.z) < DANCE_PROBE_EPS;
+                        bool nonzero = Mathf.Max(al.magnitude, ar.magnitude) >= DANCE_PROBE_MIN_OFFSET;
+                        int expectApplied = setPose ? ((al != Vector2.zero ? 1 : 0) + (ar != Vector2.zero ? 1 : 0)) : 0;
+                        if (setPose && nonzero) { if (applied == expectApplied) appliedFrames++; else appliedMissing++; }
+                        if (nonzero && setPose)
+                        {
+                            l1Checked++;
+                            if (!l1ok) l1Fail++;
+                            if (l1ok && prevNonzeroOk) l1Pairs++;
+                            prevNonzeroOk = l1ok;
+                        }
+                        else if (!l1ok) l1Fail++;
+                        var tex = Grab(cam, Color.black, size);
+                        var px = tex.GetPixels32();
+                        UnityEngine.Object.Destroy(tex);
+                        int ce, c8; PixelDiff(rest, px, out ce, out c8);
+                        double frac = (double)ce / Math.Max(1, px.Length);
+                        total++;
+                        if (ce > 0) anyChanged++;
+                        if (frac > maxChanged) maxChanged = frac;
+                        if (frac > dMax) dMax = frac;
+                        if (nonzero)
+                        {
+                            nonzeroFrames++;
+                            if (ce > 0) { dMoving++; if (frac < minMoving) minMoving = frac; }
+                            else { dUnmoved++; unmovedNonzero++; }
+                        }
+                        else { zeroFrames++; if (ce > 0) zeroChanged++; }
+                        tsv.Append(DanceEmotes.Defs[idx].Sku).Append('\t').Append(k).Append('\t').Append(t.ToString("F3"))
+                           .Append('\t').Append(al.x.ToString("F4")).Append('\t').Append(al.y.ToString("F4"))
+                           .Append('\t').Append(ar.x.ToString("F4")).Append('\t').Append(ar.y.ToString("F4"))
+                           .Append('\t').Append(dL.x.ToString("F4")).Append('\t').Append(dL.y.ToString("F4"))
+                           .Append('\t').Append(dR.x.ToString("F4")).Append('\t').Append(dR.y.ToString("F4"))
+                           .Append('\t').Append(l1ok ? 1 : 0).Append('\t').Append(applied)
+                           .Append('\t').Append(frac.ToString("F5")).Append('\t').Append(((double)c8 / Math.Max(1, px.Length)).ToString("F5"))
+                           .Append('\t').Append(handL != null ? (handL.position.x - PARK.x).ToString("F4") : "-")
+                           .Append('\t').Append(handL != null ? (handL.position.y - PARK.y).ToString("F4") : "-")
+                           .Append('\t').Append(handR != null ? (handR.position.x - PARK.x).ToString("F4") : "-")
+                           .Append('\t').Append(handR != null ? (handR.position.y - PARK.y).ToString("F4") : "-").Append('\n');
+                        if (lagN > 0 && (k == 1 || k == n / 3 || k == (2 * n) / 3))
+                        {
+                            // the same pose one more frame: does the render move again?
+                            yield return new WaitForEndOfFrame();
+                            _renderClaim.Beat(gen, DEV_BUDGET);
+                            if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("dance probe aborted: ").Append(blocked).Append('\n'); yield break; }
+                            if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else DanceEmotes.Tick();
+                            var tex2 = Grab(cam, Color.black, size);
+                            var px2 = tex2.GetPixels32();
+                            UnityEngine.Object.Destroy(tex2);
+                            int le, l8; PixelDiff(px, px2, out le, out l8);
+                            lagChecks++;
+                            if (le > 0) lagMoved++;
+                            lagTsv.Append(DanceEmotes.Defs[idx].Sku).Append('\t').Append(k).Append('\t')
+                                  .Append(((double)le / Math.Max(1, px.Length)).ToString("F5")).Append('\t')
+                                  .Append(((double)l8 / Math.Max(1, px.Length)).ToString("F5")).Append('\n');
+                        }
+                    }
+                    if (dMax <= 0.0) dancesNoMotion++;
+                    perDance.Append("dance ").Append(DanceEmotes.Defs[idx].Sku).Append(" frames=").Append(n).Append(" ms=").Append(ms)
+                            .Append(" moving=").Append(dMoving).Append(" unmoved-nonzero=").Append(dUnmoved)
+                            .Append(" max-changed=").Append(dMax.ToString("F5")).Append('\n');
+                }
+            }
+            finally
+            {
+                DanceEmotes.PortraitPose = null;
+                DanceEmotes.RestorePortraitRig(rigRoot);
+            }
+            rep.Append(perDance);
+            bool motionPass = set.Count > 0 && dancesNoMotion == 0 && unmovedNonzero == 0 && nonzeroFrames > 0;
+            bool stillPass = anyChanged == 0 && total > 0;
+            bool l1Pass = setPose && l1Fail == 0 && l1Pairs >= 1;
+            bool armRan = setPose && appliedMissing == 0 && appliedFrames > 0;
+            string line = "tag=" + tag + " mode=" + mode + " l1=" + l1 + " hold=" + hold + " dances=" + set.Count + " frames=" + total
+                        + " nonzero-frames=" + nonzeroFrames + " unmoved-nonzero=" + unmovedNonzero + " dances-without-motion=" + dancesNoMotion
+                        + " zero-frames=" + zeroFrames + " zero-frames-changed=" + zeroChanged
+                        + " min-moving-changed=" + (nonzeroFrames > 0 && minMoving < 1.0 ? minMoving.ToString("F5") : "-")
+                        + " max-changed=" + maxChanged.ToString("F5")
+                        + " l1-checked=" + l1Checked + " l1-fail=" + l1Fail + " l1-pairs=" + l1Pairs
+                        + " arm-update-frames=" + appliedFrames + " arm-update-missing=" + appliedMissing
+                        + " lag-checks=" + lagChecks + " lag-moved=" + lagMoved
+                        + " secs=" + (Time.realtimeSinceStartup - t0).ToString("F1");
+            rep.Append("dance probe: ").Append(line).Append('\n');
+            rep.Append("T45 motion assertion (every dance's rig frames change): ").Append(motionPass ? "PASS" : "FAIL").Append('\n');
+            rep.Append("T45 still-only assertion (zero motion): ").Append(stillPass ? "PASS" : "FAIL").Append('\n');
+            rep.Append("L1 assertion (successive nonzero targets equal Evaluate): ").Append(setPose ? (l1Pass ? "PASS" : "FAIL") : "n/a (no pose)").Append('\n');
+            rep.Append("IKArmMove.Update runs on the pinned rig (Arm Postfix applied every nonzero pose): ").Append(setPose ? (armRan ? "YES" : "NO") : "n/a (no pose)").Append('\n');
+            Plugin.Log.LogInfo("[DANCE-T45] motion=" + (motionPass ? "PASS" : "FAIL") + " still-only=" + (stillPass ? "PASS" : "FAIL")
+                               + " l1=" + (setPose ? (l1Pass ? "PASS" : "FAIL") : "n/a") + " arm-update=" + (setPose ? (armRan ? "YES" : "NO") : "n/a") + " " + line);
+            try
+            {
+                File.WriteAllText(Path.Combine(BepInEx.Paths.BepInExRootPath, "pc_portrait_dance_" + tag + ".tsv"), tsv.ToString());
+                File.WriteAllText(Path.Combine(BepInEx.Paths.BepInExRootPath, "pc_portrait_dance_" + tag + "_lag.tsv"), lagTsv.ToString());
+            }
+            catch (Exception ex) { rep.Append("dance probe tsv write threw: ").Append(ex.Message).Append('\n'); }
+        }
     }
 }
