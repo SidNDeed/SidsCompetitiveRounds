@@ -278,7 +278,7 @@
     {
       "class": "help_body",
       "key": "SPerfH",
-      "text": "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once."
+      "text": "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once."
     },
     {
       "class": "when_to_press",
@@ -3785,7 +3785,7 @@
         "pin": []
       },
       "help_body": {
-        "authored": "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once.",
+        "authored": "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once.",
         "description_chars": 6,
         "source": "authored"
       },
@@ -3795,7 +3795,7 @@
       "home": "perf",
       "home_label": "Performance",
       "i18n_literals": {
-        "help_body": "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once.",
+        "help_body": "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once.",
         "option_words": [],
         "reason": "it is the only place the individual patches can be seen",
         "state_words": [

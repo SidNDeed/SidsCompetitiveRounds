@@ -163,7 +163,7 @@ namespace CompetitiveRounds
                 case "SMailBlocked": return I18n.Tr("Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.");
                 case "SMailFrom": return I18n.Tr("Chooses who may start a new mail thread with you: everyone, only players you have played, or nobody. Threads you already have are unaffected, and blocked senders never reach you.");
                 case "SMailRelay": return I18n.Tr("With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox.");
-                case "SPerfH": return I18n.Tr("Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once.");
+                case "SPerfH": return I18n.Tr("Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once.");
                 default: return null;
             }
         }

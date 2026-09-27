@@ -273,7 +273,7 @@
     {
       "class": "help_body",
       "key": "SPerfH",
-      "text": "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once."
+      "text": "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once."
     },
     {
       "class": "when_to_press",

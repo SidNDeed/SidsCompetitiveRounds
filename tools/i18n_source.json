@@ -1097,8 +1097,8 @@
   "Everyone starts somewhere.",
   "Everything you leave behind turns gold.",
   "Expanded",
-  "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once.",
   "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.",
+  "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once.",
   "Expert",
   "Export Tier List",
   "Export already in progress...",
@@ -8582,12 +8582,12 @@
    "location": "SettingsRenderPane",
    "kind": "Tr"
   },
-  "Expands the eight individual performance patches. The count beside the row is how many are active, and the master switch above flips all eight at once.": {
+  "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.": {
    "surface": "SettingsDescriptors.g",
    "location": "HelpBodyTr",
    "kind": "Tr"
   },
-  "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.": {
+  "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once.": {
    "surface": "SettingsDescriptors.g",
    "location": "HelpBodyTr",
    "kind": "Tr"
