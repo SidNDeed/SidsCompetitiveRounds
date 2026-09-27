@@ -351,6 +351,71 @@ def test_the_trades_entry_edge_is_re_armed_by_the_close_and_by_every_frame_off_t
     assert "lastOnTrades" not in src and "lastTradesTickAt" not in src
 
 
+def test_every_deferred_trades_and_binder_re_read_is_bound_to_its_identity_generation():
+    """Card trading round 3, TC-M2. The trades re-ask and the binder re-read
+    are sent one frame after the answer that scheduled them. Each carries the
+    Player Cards generation captured when it was scheduled - the dispatch
+    epoch, which the epoch check above the scheduling line has just proved
+    current - and after the yield asks PcTradeRules.GenerationCurrent
+    (executed by the rules harness) before it sends anything; a mismatch drops
+    it with its decisive line. The sweep's other half: an answer from before an
+    edge releases no latch and consumes no remembered demand (both edges
+    release them), so it cannot free a read or swallow a demand that belongs
+    to the new generation."""
+    api = API.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    check = "if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))"
+    # (a) and (b): each deferred re-read checks the generation after its one
+    # yield and before its one send, and logs the drop in its own family
+    for sig, line, send in (
+            ("private static IEnumerator RefetchTradesNextFrame(string steamId, int genAtSchedule)",
+             '"[PC-TRADE-SENTINEL] stale-generation dropped kind=trades gen_at_schedule="',
+             "PcTrades(steamId, true, null);"),
+            ("private static IEnumerator RefetchCollectionNextFrame(string steamId, int genAtSchedule)",
+             '"[PC] collection deferred re-read dropped: identity changed gen_at_schedule="',
+             "FetchPcCollection(steamId, true);")):
+        co = _span(api, sig, end)
+        for piece in ("yield return null;", check, line, "yield break;", send):
+            assert co.count(piece) == 1, (sig, piece)
+        assert (co.index("yield return null;") < co.index(check) < co.index(line)
+                < co.index("yield break;") < co.index(send)), sig
+    # two definitions and two scheduling lines, nothing else
+    assert api.count("NextFrame(") == 4
+    # (c): each scheduling line passes the callback's own dispatch epoch, below
+    # the epoch check that proved it current; the latch and the remembered
+    # demand are released only below that check too
+    for sig, drop, latch, sched in (
+            ("public static void FetchPcCollection(string steamId, bool force = false, Action<bool, string> callback = null)",
+             '"[PC] collection answer dropped: identity changed"',
+             "pcCollInFlight = false;\n                bool again = pcCollForceAgain; pcCollForceAgain = false;",
+             "Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who, epoch));"),
+            ("public static void PcTrades(string steamId, bool force, Action<bool, string> callback)",
+             '"[PC] trades answer dropped: identity changed"',
+             "pcTradesInFlight = false;\n                bool again = pcTradesForceAgain; pcTradesForceAgain = false;",
+             "Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who, epoch));")):
+        body = _span(api, sig, end)
+        assert body.count(latch) == 1 and body.count(sched) == 1, sig
+        assert body.index("if (epoch != _pcCacheEpoch)") < body.index(drop) < body.index(latch) < body.index(sched), sig
+    for sig, latch in (
+            ("public static void PcTradeSummary(", "pcTradeSummaryInFlight = false;"),
+            ("public static void FetchPcCollectionOf(string steamId, string subjectSteamId, Action<bool, string> callback)",
+             "pcCollOfInFlight = false;")):
+        body = _span(api, sig, end)
+        assert body.count(latch) == 1, sig
+        assert body.index("if (epoch != _pcCacheEpoch)") < body.index(latch), sig
+    # both edges advance the generation, clear, and then release every latch
+    release = _span(api, "private static void ReleasePcReadLatches()", end)
+    for latch in ("pcTradeSummaryInFlight = false;", "pcTradesInFlight = false;", "pcCollInFlight = false;",
+                  "pcCollForceAgain = false;", "pcCollOfInFlight = false;"):
+        assert latch in release, latch
+    assert "pcTradesForceAgain = false;" in _span(api, "private static void ClearPcTradeCaches()", end)
+    assert api.count("_pcCacheEpoch++;") == 2 and api.count("ReleasePcReadLatches();") == 2
+    ident = _span(api, "internal static void OnLocalIdentityChanged()", end)
+    assert ident.index("_pcCacheEpoch++;") < ident.index("ClearPcTradeCaches();") < ident.index("ReleasePcReadLatches();")
+    assert ("                _pcCacheEpoch++;\n                CachedPcMe = null; CachedPcCollection = null;\n"
+            "                ClearPcTradeCaches();\n                ReleasePcReadLatches();\n") in api
+
+
 def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():
     """The three repairs behind the 2026-09-12 binder screenshot, each on its
     own so deleting any one of them fails here: the face slot asks for no

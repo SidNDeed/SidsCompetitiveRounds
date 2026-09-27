@@ -334,6 +334,24 @@ namespace CompetitiveRounds
             internal void Clear() { Summary = 0; Full = 0; }
         }
 
+        // -- a deferred re-read and the identity generation (TC-M2) --------------
+
+        /// <summary>A read ApiClient defers to the next frame (the trades
+        /// re-ask and the binder re-read, each scheduled by the answer that
+        /// just landed) carries the Player Cards generation that was current
+        /// when it was SCHEDULED, and after the yield it is sent only while
+        /// that generation is still the current one. An identity or consent
+        /// edge in between advances the generation: the deferred read is then
+        /// dropped whole - no request is built for the previous identity and
+        /// nothing is written - and the new identity's own reads fetch its
+        /// own data. A request carries its steam id in the URL and the signed
+        /// term, and the session token does not change at an identity edge,
+        /// so nothing downstream would refuse it.</summary>
+        internal static bool GenerationCurrent(int atSchedule, int now)
+        {
+            return atSchedule == now;
+        }
+
         // -- the Trades view's entry edge (C12, TC-L2) ----------------------------
 
         /// <summary>Entering the Trades view forces the full read (C12), and the
@@ -792,6 +810,46 @@ namespace CompetitiveRounds
                 string gap = RunEdge(new[] { EdgeStep.Tick(0f, true), EdgeStep.Tick(2f, true), EdgeStep.Tick(10f, true) });
                 Check(r, "entry edge: the five-second gap still re-arms a hide that skipped the close signal",
                       gap == "0f,10f", "reads=" + gap);
+            }
+            // 16. A deferred re-read and the identity generation (TC-M2). The
+            //     trades re-ask and the binder re-read are scheduled by the answer
+            //     that just landed and sent one frame later, carrying the
+            //     generation that was current when they were scheduled. Composed
+            //     here as ApiClient composes them: the fence, the edge's advance
+            //     and clear, then GenerationCurrent after the yield.
+            {
+                bool same = GenerationCurrent(5, 5), newer = GenerationCurrent(5, 6);
+                Check(r, "deferred re-read: the scheduling generation passes, a newer one does not",
+                      same && !newer, "same=" + same + " newer=" + newer);
+                // the round-2 report's scenario: a full read for A is kept out
+                // behind a newer summary, so its answer schedules ONE re-ask bound
+                // to A's generation; an identity edge A->B lands before the frame
+                // comes round (the generation advances, the fence clears)
+                var f = new TradeCacheFence();
+                int gen = 7;
+                int f1 = f.Dispatch(), s2 = f.Dispatch();
+                bool tookS2 = f.TakeSummary(s2);
+                bool keptF1 = !f.TakeFull(f1);
+                int atSchedule = gen;
+                gen++; f.Clear();
+                int sentForA = 0;
+                if (GenerationCurrent(atSchedule, gen)) { sentForA++; f.TakeFull(f.Dispatch()); }
+                Check(r, "deferred re-read: an identity edge before the frame drops the re-ask (the round-2 scenario)",
+                      tookS2 && keptF1 && sentForA == 0 && f.Summary == 0 && f.Full == 0,
+                      "kept_out=" + keptF1 + " sent_for_a=" + sentForA + " summary=" + f.Summary + " full=" + f.Full);
+                // the control: the same kept-out answer with no edge in between
+                // re-asks once, and the re-ask is taken (round 2's witnessed path)
+                var g = new TradeCacheFence();
+                int genNow = 7;
+                int g1 = g.Dispatch(), t2 = g.Dispatch();
+                bool took2 = g.TakeSummary(t2);
+                bool kept1 = !g.TakeFull(g1);
+                int at2 = genNow;
+                int sent = 0; bool reaskTaken = false;
+                if (GenerationCurrent(at2, genNow)) { sent++; reaskTaken = g.TakeFull(g.Dispatch()); }
+                Check(r, "deferred re-read: with no edge the kept-out answer re-asks once and the re-ask is taken",
+                      took2 && kept1 && sent == 1 && reaskTaken && g.Summary == 3 && g.Full == 3,
+                      "sent=" + sent + " reask_taken=" + reaskTaken + " summary=" + g.Summary + " full=" + g.Full);
             }
             return r;
         }

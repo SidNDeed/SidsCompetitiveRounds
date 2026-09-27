@@ -3161,6 +3161,7 @@ namespace CompetitiveRounds
             CachedPlayerStats = null;
             CachedPcMe = null; CachedPcCollection = null;
             ClearPcTradeCaches();
+            ReleasePcReadLatches();
             PcMeError = null; PcCollectionError = null;
             PcMeFetchedAt = -1f; PcMeDispatchedAt = -1f; PcCollectionFetchedAt = -1f;
             pcMeAttemptAt = -100f; pcCollAttemptAt = -100f;
@@ -4054,14 +4055,18 @@ namespace CompetitiveRounds
             string who = steamId;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
-                pcCollInFlight = false;
-                bool again = pcCollForceAgain; pcCollForceAgain = false;
+                // An answer dispatched before an identity or consent edge touches
+                // nothing: the edge released this read's latch and its remembered
+                // demand (ReleasePcReadLatches), which now belong to the new
+                // generation's reads (TC-M2 sweep).
                 if (epoch != _pcCacheEpoch)
                 {
                     Plugin.Log.LogInfo("[PC] collection answer dropped: identity changed");
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
+                pcCollInFlight = false;
+                bool again = pcCollForceAgain; pcCollForceAgain = false;
                 if (locale != I18n.Locale)
                 {
                     Plugin.Log.LogInfo("[PC] collection answer dropped: language changed while it was in flight");
@@ -4073,9 +4078,11 @@ namespace CompetitiveRounds
                 if (again)
                 {
                     // something demanded a fresh read while this one was on the
-                    // wire: let this answer land, then go again
+                    // wire: let this answer land, then go again, bound to this
+                    // answer's generation (the epoch check above proved the
+                    // dispatch epoch is still the current one; TC-M2)
                     pcCollAttemptAt = -100f;
-                    try { Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who)); } catch { }
+                    try { Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who, epoch)); } catch { }
                 }
                 if (ok)
                 {
@@ -4091,9 +4098,17 @@ namespace CompetitiveRounds
 
         private static bool pcCollForceAgain;
 
-        private static IEnumerator RefetchCollectionNextFrame(string steamId)
+        /// <summary>The next-frame binder re-read, bound to the Player Cards
+        /// generation that scheduled it (TC-M2, as RefetchTradesNextFrame):
+        /// an identity or consent edge before the frame comes round drops it.</summary>
+        private static IEnumerator RefetchCollectionNextFrame(string steamId, int genAtSchedule)
         {
             yield return null;                       // let this answer commit first
+            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))
+            {
+                Plugin.Log.LogInfo("[PC] collection deferred re-read dropped: identity changed gen_at_schedule=" + genAtSchedule + " gen_now=" + _pcCacheEpoch);
+                yield break;
+            }
             FetchPcCollection(steamId, true);
         }
 
@@ -4269,6 +4284,22 @@ namespace CompetitiveRounds
             pcTradeFence.Clear(); pcTradesStaleReask = false;
         }
 
+        /// <summary>Called at both Player Cards cache-clearing edges, right
+        /// after ClearPcTradeCaches (TC-M2 sweep). A read latch or a remembered
+        /// forced demand belongs to the generation that set it. An answer sent
+        /// before the edge is dropped by its epoch check without touching
+        /// either, so the edge releases them here: the new generation's first
+        /// reads are not refused as in-flight behind an answer that is never
+        /// taken, and a demand made after the edge is not consumed by one. The
+        /// trades read's own remembered demand is released by
+        /// ClearPcTradeCaches.</summary>
+        private static void ReleasePcReadLatches()
+        {
+            pcTradeSummaryInFlight = false; pcTradesInFlight = false;
+            pcCollInFlight = false; pcCollForceAgain = false;
+            pcCollOfInFlight = false;
+        }
+
         /// <summary>GET /pc/trades?view=summary, HMAC over
         /// pcread:{steam}:trades:summary, strict session. Throttled to one read
         /// per 10 s unless forced.</summary>
@@ -4283,13 +4314,14 @@ namespace CompetitiveRounds
             int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
-                pcTradeSummaryInFlight = false;
+                // a pre-edge answer leaves the latch alone: the edge released it (TC-M2 sweep)
                 if (epoch != _pcCacheEpoch)
                 {
                     Plugin.Log.LogInfo("[PC] trade summary answer dropped: identity changed");
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
+                pcTradeSummaryInFlight = false;
                 if (ok)
                 {
                     var s = ParsePcTradeSummary(resp);
@@ -4332,14 +4364,16 @@ namespace CompetitiveRounds
             string who = steamId;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
-                pcTradesInFlight = false;
-                bool again = pcTradesForceAgain; pcTradesForceAgain = false;
+                // a pre-edge answer leaves the latch and the remembered demand
+                // alone: the edge released both (TC-M2 sweep)
                 if (epoch != _pcCacheEpoch)
                 {
                     Plugin.Log.LogInfo("[PC] trades answer dropped: identity changed");
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
+                pcTradesInFlight = false;
+                bool again = pcTradesForceAgain; pcTradesForceAgain = false;
                 if (locale != I18n.Locale)
                 {
                     Plugin.Log.LogInfo("[PC] trades answer dropped: language changed while it was in flight");
@@ -4377,16 +4411,28 @@ namespace CompetitiveRounds
                 {
                     pcTradesAttemptAt = -100f;
                     pcTradesStaleReask = keptOut && !reask;
-                    try { Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who)); } catch { }
+                    // bound to this answer's generation: the epoch check above proved
+                    // the dispatch epoch is still the current one (TC-M2)
+                    try { Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who, epoch)); } catch { }
                 }
                 try { NativeUI.MarkDirty(); } catch { }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trades callback threw: {cex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
         }
 
-        private static IEnumerator RefetchTradesNextFrame(string steamId)
+        /// <summary>The next-frame re-ask, bound to the Player Cards generation
+        /// that scheduled it (TC-M2, PcTradeRules.GenerationCurrent): an
+        /// identity or consent edge before the frame comes round drops it, so
+        /// no read goes out for the previous identity and nothing it would
+        /// answer is written.</summary>
+        private static IEnumerator RefetchTradesNextFrame(string steamId, int genAtSchedule)
         {
             yield return null;                       // let this answer commit first
+            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))
+            {
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale-generation dropped kind=trades gen_at_schedule=" + genAtSchedule + " gen_now=" + _pcCacheEpoch);
+                yield break;
+            }
             PcTrades(steamId, true, null);
         }
 
@@ -4453,13 +4499,14 @@ namespace CompetitiveRounds
             int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
-                pcCollOfInFlight = false;
+                // a pre-edge answer leaves the latch alone: the edge released it (TC-M2 sweep)
                 if (epoch != _pcCacheEpoch)
                 {
                     Plugin.Log.LogInfo("[PC] collection-of answer dropped: identity changed");
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
+                pcCollOfInFlight = false;
                 Plugin.Log.LogInfo($"[PC] collection-of ok={ok} resp={PcShort(ok ? "(binder)" : resp)}");
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] collection-of callback threw: {cex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
@@ -21830,6 +21877,7 @@ namespace CompetitiveRounds
                 _pcCacheEpoch++;
                 CachedPcMe = null; CachedPcCollection = null;
                 ClearPcTradeCaches();
+                ReleasePcReadLatches();
                 try { PlayerCardFaces.Clear(); } catch { }
                 try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { PortraitRender.OnIdentityChanged(); } catch { }
