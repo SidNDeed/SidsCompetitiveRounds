@@ -2239,6 +2239,7 @@ namespace CompetitiveRounds
             if (raw.Length == 0) return;
             if (raw.StartsWith("portrait:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevRun(raw.Substring(9)); return; }   // portrait renderer (v22 section 5.7)
             if (raw.StartsWith("shot:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevShot(raw.Substring(5)); return; }        // window capture from this seat (#622)
+            if (raw.StartsWith("motion:", StringComparison.OrdinalIgnoreCase)) { PlayerCardMotion.DevRun(raw.Substring(7)); return; }     // dance cards playback levers (design S8)
             if (raw.StartsWith("ui:", StringComparison.OrdinalIgnoreCase))
             {
                 // open the mod page on a tab so the seat can screenshot its own UI

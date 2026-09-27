@@ -3866,6 +3866,7 @@ namespace CompetitiveRounds
                 {
                     Plugin.Log.LogInfo("[PC] collection answer dropped: language changed while it was in flight");
                     try { PlayerCardFaces.Clear(); } catch { }
+                    try { PlayerCardMotion.Clear(); } catch { }
                     pcCollAttemptAt = -100f;
                     FetchPcCollection(who, true, callback);
                     return;
@@ -20934,6 +20935,7 @@ namespace CompetitiveRounds
                 _pcCacheEpoch++;
                 CachedPcMe = null; CachedPcCollection = null;
                 try { PlayerCardFaces.Clear(); } catch { }
+                try { PlayerCardMotion.Clear(); } catch { }
                 try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { PortraitRender.OnIdentityChanged(); } catch { }
                 ChatClient.Disconnect();
