@@ -17,10 +17,12 @@ code (#342/#431/#441):
    from SettingsDescriptorWriters.InvokeReset (never listed here), with the
    same patch id where the writer takes one.
 3. Across the whole plugin tree, every direct write of a setting's entry sits
-   inside that setting's writer, or inside one of two named exceptions: the
+   inside that setting's writer, or inside one of the named exceptions: the
    one-time config migrations in the Plugin class's Awake (they run before any
-   writer's effect exists) and the heavy-font weight self-test (bug 159's
-   lever, which suspends saving and puts the value back).
+   writer's effect exists), the heavy-font weight self-test (bug 159's lever,
+   which suspends saving and puts the value back), and the settings drive
+   harness's T4 prompt route, which clears the stored language so the
+   first-run prompt shows and puts the value back afterwards.
 4. A local alias of an entry (`var e = Plugin.X;`) and a ConfigEntry
    parameter are never written through, so gate 3's by-name scan cannot be
    walked around.
@@ -94,6 +96,10 @@ EXCEPTIONS = {
     "ScreenShakeStrength": [AWAKE],
     "UiHeavyFont": [("NativeUI.cs", None, "internal static int WeightSelfTest(Action<string> log, out int fail)",
                      "bug 159's weight self-test: saving is suspended and the player's value put back")],
+    "ModLanguage": [("NativeUI.SettingsDrive.cs", None, "private static void DrvClearStoredLanguage()",
+                     "the drive harness's T4 prompt route: the stored language cleared so the first-run prompt shows"),
+                    ("NativeUI.SettingsDrive.cs", None, "private static void DrvPutBackStoredLanguage(string saved)",
+                     "the drive harness's T4 prompt route: the stored language put back as T4 found it")],
 }
 
 

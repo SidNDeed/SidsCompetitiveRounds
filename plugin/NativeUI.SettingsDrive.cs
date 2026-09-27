@@ -1174,7 +1174,7 @@ namespace CompetitiveRounds
             }
             if (Plugin.ModLanguage != null && savedLang != null && Plugin.ModLanguage.Value != savedLang)
             {
-                Plugin.ModLanguage.Value = savedLang;
+                DrvPutBackStoredLanguage(savedLang);
                 DrvNote("T4 the stored language was put back");
             }
             DrvPrefRestore(prefs0, "T4");
@@ -1187,7 +1187,7 @@ namespace CompetitiveRounds
         {
             if (Plugin.ModLanguage == null) return false;
             string code = I18n.Locale;
-            Plugin.ModLanguage.Value = I18n.LOCALE_UNSET;
+            DrvClearStoredLanguage();
             MaybeShowLanguagePrompt();
             var btn = langPromptGO != null ? SettingsFindDeep(langPromptGO.transform, "LP_" + code) : null;
             if (btn != null) return DrvClick(btn.gameObject);
@@ -1195,6 +1195,25 @@ namespace CompetitiveRounds
             try { if (langPromptGO != null) UnityEngine.Object.Destroy(langPromptGO); } catch { }
             langPromptGO = null;
             return false;
+        }
+
+        /// <summary>T4's fourth route needs the first-run state, the stored
+        /// language unset, before MaybeShowLanguagePrompt builds the prompt;
+        /// the prompt's button then stores the choice through SetModLanguage.
+        /// This clear and DrvPutBackStoredLanguage are the harness's writes of
+        /// the entry outside its writer, and the single-writer gate
+        /// (backend/tests/test_settings_single_writer.py) names both as
+        /// exceptions. Neither switches the locale or rebuilds the page.</summary>
+        private static void DrvClearStoredLanguage()
+        {
+            Plugin.ModLanguage.Value = I18n.LOCALE_UNSET;
+        }
+
+        /// <summary>Puts the stored language back as T4 found it; the locale
+        /// in use is not touched.</summary>
+        private static void DrvPutBackStoredLanguage(string saved)
+        {
+            Plugin.ModLanguage.Value = saved;
         }
 
         private static void DrvCheckA7(string tag, int want)
