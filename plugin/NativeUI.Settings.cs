@@ -102,6 +102,9 @@ namespace CompetitiveRounds
         }
 
         private const int SETTINGS_TABS = 7;
+        // The help pane's scroll content spacing: built with it, and A2b's
+        // content leg sums the children with it.
+        private const float SetDetBodySpacing = 8f;
         private static readonly Color SW_ON = new Color(0.22f, 0.55f, 0.30f, 0.95f);
         private static readonly Color SW_OFF = new Color(0.30f, 0.30f, 0.34f, 0.95f);
         // Round-2 R4: the neutral switch, for a row whose Known is false - a
@@ -292,7 +295,7 @@ namespace CompetitiveRounds
             setDetDetectedGO = ((Component)setDetDetectedTxt).gameObject;
             setDetDetectedGO.SetActive(false);
 
-            var bodySV = UIFactory.CreateScrollView("SetDetBodySV", det.transform, spacing: 8);
+            var bodySV = UIFactory.CreateScrollView("SetDetBodySV", det.transform, spacing: SetDetBodySpacing);
             UIFactory.AddLE(bodySV.scrollGO, flexH: 1);
             setDetBodyTxt = UIFactory.CreateText("SetDetBody", bodySV.content.transform, "", 15f, C_WHITE,
                 UIFactory.AlignTopLeft, sizeDelta: new Vector2(748, 20));
@@ -2296,6 +2299,16 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>A2b (design section 10): the help body's scroll content is
+        /// as tall as its children's own preferred heights at the measured
+        /// width, within 1 px. Two legs: the body is exactly as tall as its
+        /// text - never shorter (clipped) and never taller (a reserved
+        /// minimum: CreateText bakes minH = sizeDelta.y, which the pane zeroes,
+        /// learning #449) - and the content is exactly its active children's
+        /// heights plus the group's spacing. Round 1 asserted only the lower
+        /// bound, which the design's own mutation (the pane's SetMinH(0)
+        /// omitted) could never red: a one-line body is 18 px of text on a
+        /// 20 px floor (round-2 LOW-7).</summary>
         private static void SelfTestA2b(string home, List<SettingsRowRec> rows)
         {
             int b2 = 0;
@@ -2305,14 +2318,29 @@ namespace CompetitiveRounds
                 SettingsRenderPane();
                 SettingsForceLayout();
                 var brt = ((Component)setDetBodyTxt).GetComponent<RectTransform>();
+                var crt = brt.parent as RectTransform;
                 string text = UIFactory.GetTmpText(setDetBodyTxt);
                 if (string.IsNullOrEmpty(text)) { StBad("A2b " + r.Key + ": empty help body"); continue; }
                 float need = UIFactory.MeasureTextHeight(setDetBodyTxt, text, brt.rect.width);
                 float keepH = brt.rect.height;
                 if (stMutation == "a2b-short") brt.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, 10f);
+                float body = brt.rect.height, sum = 0f;
+                int n = 0;
+                if (crt != null)
+                    for (int i = 0; i < crt.childCount; i++)
+                    {
+                        var ch = crt.GetChild(i) as RectTransform;
+                        if (ch == null || !ch.gameObject.activeSelf) continue;
+                        n++;
+                        sum += ch.rect.height;
+                    }
+                float want = sum + (n > 1 ? (n - 1) * SetDetBodySpacing : 0f);
+                float content = crt != null ? crt.rect.height : -1f;
                 if (need <= 0f) StBad("A2b " + r.Key + ": measurement unavailable");
-                else if (brt.rect.height < need - 1f) StBad("A2b " + r.Key + ": body " + brt.rect.height.ToString("0", CultureInfo.InvariantCulture)
-                    + " px, text needs " + need.ToString("0", CultureInfo.InvariantCulture));
+                else if (Mathf.Abs(body - need) > 1f) StBad("A2b " + r.Key + ": body " + body.ToString("0", CultureInfo.InvariantCulture)
+                    + " px, its text " + need.ToString("0", CultureInfo.InvariantCulture) + " px (" + (body > need ? "a reserved minimum" : "clipped") + ")");
+                else if (crt == null || Mathf.Abs(content - want) > 1f) StBad("A2b " + r.Key + ": content " + content.ToString("0", CultureInfo.InvariantCulture)
+                    + " px, its " + n + " children and their spacing " + want.ToString("0", CultureInfo.InvariantCulture) + " px");
                 else b2++;
                 if (stMutation == "a2b-short") brt.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, keepH);
             }
@@ -2350,7 +2378,11 @@ namespace CompetitiveRounds
             {
                 if (content <= hWorst + 0.5f) ok("A5a " + home + ": " + nums); else bad("A5a " + home + ": " + nums);
                 if (content <= vpNoHint + 0.5f) ok("A5b " + home + ": fits the measured viewport");
-                else if (Screen.height > 0 && Screen.width / (float)Screen.height > 21f / 9f + 0.01f)
+                // The supported bound is 21:9 as design section 3.1 sizes it:
+                // 2560x1080 (64:27, the 810 px canvas), inclusive. The literal
+                // 21/9 put that case past the bound, so A5b could not fail at
+                // the aspect its own mutation names (round-2 LOW-7).
+                else if (Screen.height > 0 && Screen.width / (float)Screen.height > 64f / 27f + 0.01f)
                     note("OBSERVATION A5b " + home + ": content " + content.ToString("0", CultureInfo.InvariantCulture) + " > viewport "
                         + vpNoHint.ToString("0", CultureInfo.InvariantCulture) + " at " + Screen.width + "x" + Screen.height + " (past the supported 21:9 bound)");
                 else bad("A5b " + home + ": content exceeds the measured viewport at " + Screen.width + "x" + Screen.height + "; " + nums);
