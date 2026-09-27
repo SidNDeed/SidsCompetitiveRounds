@@ -10221,7 +10221,7 @@
   },
   "Match could not start — only {0} of {1} players connected. Leave to the menu to requeue.": {
    "surface": "Plugin",
-   "location": "Force2v2StartGameWhenReady",
+   "location": "ShowGuardToast",
    "kind": "TrF"
   },
   "Match dissolved — searching again...": {
