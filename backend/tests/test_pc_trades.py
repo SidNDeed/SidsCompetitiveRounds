@@ -2621,3 +2621,100 @@ def test_f63_an_orm_player_round_trips_on_both_schemas(env):
     out = scenario(env, body)
     assert out["named_missing"] == [] and out["named_full"] == [], out
     assert out["row"] == (True, 0) and out["mapped"] == (True, 0), out
+
+
+async def _f67_derived(ctx, name, a, b, c, frozen_print):
+    """What R15's fourth clause names, read through the lane's own helpers:
+    the re-trade freeze on a print, B's open received count (a capacity
+    count), B's executed trades of today (the per-day cap's count) and A's
+    decline cooldown toward C."""
+    maker = await ctx.session(name)
+    async with maker() as db:
+        return dict(
+            freeze=await main._pc_trade_freeze_left(db, [frozen_print]),
+            b_received=int((await main._pc_trade_open_counts(db, c.pid, b.pid))["open_received"]),
+            b_today=int((await main._pc_trade_executed_counts(db, b.pid, c.pid))["lo_today"]),
+            a_cooldown=await main._pc_trade_decline_cooldown_left(db, a.pid, c.pid))
+
+
+def test_f67_a_deletion_meets_the_r15_ruling_clause_by_clause(env):
+    """F67 (LAND; R15 decided by default 2026-09-26): A's data deletion
+    against the ruling, clause by clause. A (deleted), B (A's counterparty),
+    C (a third trader), S an ordinary card's subject; B also holds a print of
+    A's OWN card. T0: A proposed pa4 to C, C declined (A's decline cooldown
+    toward C). T3: executed, A's pa3 for B's pb2 (pa3 frozen, one executed
+    trade today for each). T1: open, A offers pa1 for B's pb1 (pa1 held, one
+    open received for B). T2: open, C offers pc1 for A's pa2 (pc1 held).
+    T4: open, B offers pb3 for C's pc2 -- no party is A.
+    (a) A's open trades go and their holds with them: no trade row names A,
+    pc1 is C's and free; T4 and its hold are untouched. (b) A's own prints
+    and shards go. (c) Prints of S held by B and C -- pa3 included, which B
+    received from A -- keep their owners; the print of A's OWN card that B
+    held goes, the pre-existing withdrawal of a deleted player's card from
+    every binder (the migration-320 line of the deletion), not this lane's.
+    (d) Capacity, cooldown and freeze derived from A's trade rows are gone:
+    the freeze on pa3, B's open received count, B's executed-today count and
+    A's cooldown toward C; a recreated account on A's steam id starts with
+    the switch on, generation 0, and proposes to C at once. The lane's own
+    two deletes are keyed to A alone: B's and C's spent-nonce rows stay, A's
+    go. (e) The wager refund is not reached from here (no lobby); the
+    deletion outside the trading block is main's, compared in
+    trading-server-land-f67.log, whose mutation legs also remove or widen
+    each of the deletion's statements this test names."""
+    async def body(ctx):
+        (a, b, c), s = await _world(ctx, 3)
+        pa1, pa2, pa3, pa4 = [await _print(ctx, a, s) for _ in range(4)]
+        pb1, pb2, pb3 = [await _print(ctx, b, s) for _ in range(3)]
+        pc1, pc2, pc3 = [await _print(ctx, c, s) for _ in range(3)]
+        pba = await _print(ctx, b, a)
+        t0 = await _trade(ctx, a, c, [pa4], [pc3], name="t0")
+        assert (await decline(ctx, "t0_decline", c, t0))[0] == 200
+        await _executed(ctx, a, b, [pa3], [pb2])
+        t1 = await _trade(ctx, a, b, [pa1], [pb1], name="t1")
+        t2 = await _trade(ctx, c, a, [pc1], [pa2], name="t2")
+        t4 = await _trade(ctx, b, c, [pb3], [pc2], name="t4")
+        await _q("UPDATE players SET pc_shards = pc_shards + 7 WHERE id = $1::uuid", a.pid)
+        before = dict(derived=await _f67_derived(ctx, "derived0", a, b, c, pa3), shards=await _shards(a),
+                      cooldown=_err(await propose(ctx, "cool", a, c, [pa4], [pc3])),
+                      holds=sorted(str(r[0]) for r in await _q("SELECT print_id FROM pc_trade_holds")))
+        ans = await delete_data(ctx, "del", a)
+        after = dict(
+            dele=ans[0],
+            naming_a=await _val("SELECT count(*) FROM pc_trades WHERE $1::uuid IN (pair_lo, pair_hi, proposer)",
+                                a.pid),
+            t1_t2=[await _status(t["trade_id"]) for t in (t1, t2)], t4=await _status(t4["trade_id"]),
+            holds=sorted(str(r[0]) for r in await _q("SELECT print_id FROM pc_trade_holds")),
+            a_prints=await _val("SELECT count(*) FROM pc_prints WHERE owner_player_id = $1::uuid", a.pid),
+            shards=await _shards(a),
+            others={name: await _owner(p) for name, p in (("pb1", pb1), ("pb3", pb3), ("pc1", pc1),
+                                                          ("pc2", pc2), ("pc3", pc3), ("pa3", pa3))},
+            own_card=await _owner(pba),
+            nonces={k: await _val("SELECT count(*) FROM pc_trade_spent_nonces WHERE proposer = $1::uuid", p.pid)
+                    for k, p in (("a", a), ("b", b), ("c", c))},
+            derived=await _f67_derived(ctx, "derived1", a, b, c, pa3))
+        a2 = await _player(ctx, a.n)
+        fresh = (await _q("SELECT pc_trades_open, pc_trades_generation FROM players WHERE id = $1::uuid",
+                          a2.pid))[0]
+        again = await propose(ctx, "again", a2, c, [await _print(ctx, a2, s)], [pc3])
+        return dict(before=before, after=after, fresh=tuple(fresh), again=again, pids=(a.pid, a2.pid),
+                    owners={"b": b.pid, "c": c.pid}, held=sorted([pa1, pc1, pb3]), kept=[pb3])
+    out = scenario(env, body)
+    before, after, own = out["before"], out["after"], out["owners"]
+    bd, ad = before["derived"], after["derived"]
+    assert bd["freeze"] and bd["b_received"] == 1 and bd["b_today"] == 1 and bd["a_cooldown"], ("before", bd)
+    assert before["cooldown"] == (409, "cooldown_declined") and before["shards"] == 7, ("before", before)
+    assert before["holds"] == out["held"], ("before: the three open trades' holds", before["holds"])
+    assert after["dele"] == 200, ("the deletion's answer", after["dele"])
+    assert after["naming_a"] == 0 and after["t1_t2"] == [None, None], (
+        "(a) A's trades", after["naming_a"], after["t1_t2"])
+    assert after["t4"] == "proposed" and after["holds"] == out["kept"], (
+        "(a) T4, naming no deleted party, and its hold", after["t4"], after["holds"])
+    assert (after["a_prints"], after["shards"]) == (0, 0), (
+        "(b) A's own prints and shards", after["a_prints"], after["shards"])
+    assert after["others"] == {"pb1": own["b"], "pb3": own["b"], "pc1": own["c"], "pc2": own["c"],
+                               "pc3": own["c"], "pa3": own["b"]}, ("(c) prints held by others", after["others"])
+    assert after["own_card"] is None, ("the migration-320 withdrawal of A's own card", after["own_card"])
+    assert after["nonces"] == {"a": 0, "b": 1, "c": 1}, ("the spent-nonce rows by proposer", after["nonces"])
+    assert ad == dict(freeze=None, b_received=0, b_today=0, a_cooldown=None), ("(d) derived state", ad)
+    assert out["pids"][0] != out["pids"][1] and out["fresh"] == (True, 0), ("(d) recreated", out["fresh"])
+    assert out["again"][0] == 200, ("(d) the recreated account proposes", out["again"])
