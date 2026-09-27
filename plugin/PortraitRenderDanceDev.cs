@@ -187,8 +187,9 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo("[DANCE-CAPTURE] " + line);
                 rep.Append("capture: ").Append(line).Append('\n');
                 rep.Append("slices all: ").Append(clock.Summary(null)).Append('\n');
-                foreach (var ph in new[] { "start", "setup", "prepass", "still", "frames", "drain" })
+                foreach (var ph in new[] { "start", "setup", "prepass", "alloc", "still", "frames", "drain" })
                     rep.Append("slices ").Append(ph).Append(": ").Append(clock.Summary(ph)).Append('\n');
+                rep.Append("slices top: ").Append(clock.Top(8)).Append(" gc=").Append(clock.Collections).Append('\n');
                 File.WriteAllText(Path.Combine(DanceCorpusDir(), opt.tag + "_" + sku + "_report.txt"), rep.ToString());
                 if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(DanceDevRoots(opt.tag, sku, rootsBefore));
             }

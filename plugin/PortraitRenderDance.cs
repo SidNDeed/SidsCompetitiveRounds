@@ -265,16 +265,56 @@ namespace CompetitiveRounds
 
         /// <summary>Main-thread milliseconds the job spent, per Unity frame:
         /// every resume of the coroutine and every readback callback, summed by
-        /// Time.frameCount. Phases name the S1.4 step a frame belongs to.</summary>
+        /// Time.frameCount. Phases name the S1.4 step a frame belongs to (the
+        /// phase current at the frame's first sample). A garbage collection
+        /// that completes inside a timed resume is counted against that frame,
+        /// so Top tells a collection's pause apart from the job's own work
+        /// (finding S2F4).</summary>
         private sealed class DanceClock
         {
             private readonly System.Diagnostics.Stopwatch _sw = new System.Diagnostics.Stopwatch();
             private readonly Dictionary<int, double> _ms = new Dictionary<int, double>();
             private readonly Dictionary<int, string> _phaseOf = new Dictionary<int, string>();
+            private readonly Dictionary<int, int> _gcOf = new Dictionary<int, int>();
+            private int _gc0;
             internal string Phase = "start";
 
-            internal void Begin() { _sw.Reset(); _sw.Start(); }
-            internal void End() { if (_sw.IsRunning) { _sw.Stop(); Add(_sw.Elapsed.TotalMilliseconds); } }
+            internal void Begin() { _gc0 = GC.CollectionCount(0); _sw.Reset(); _sw.Start(); }
+            internal void End()
+            {
+                if (!_sw.IsRunning) return;
+                _sw.Stop();
+                Add(_sw.Elapsed.TotalMilliseconds);
+                int gc = GC.CollectionCount(0) - _gc0;
+                if (gc > 0) { int f = Time.frameCount, v; _gcOf.TryGetValue(f, out v); _gcOf[f] = v + gc; }
+            }
+
+            /// <summary>Collections that completed inside timed resumes.</summary>
+            internal int Collections { get { int n = 0; foreach (var v in _gcOf.Values) n += v; return n; } }
+
+            /// <summary>The `count` costliest frames, costliest first, as
+            /// "frame:phase:ms", with ":gcN" when N collections completed inside
+            /// its timed resumes; frames are numbered from the job's first.</summary>
+            internal string Top(int count)
+            {
+                if (_ms.Count == 0) return "-";
+                int first = int.MaxValue;
+                foreach (var f in _ms.Keys) if (f < first) first = f;
+                var list = new List<KeyValuePair<int, double>>(_ms);
+                list.Sort((a, b) => b.Value.CompareTo(a.Value));
+                var sb = new StringBuilder();
+                for (int i = 0; i < list.Count && i < count; i++)
+                {
+                    int f = list[i].Key, gc; string p;
+                    _phaseOf.TryGetValue(f, out p);
+                    _gcOf.TryGetValue(f, out gc);
+                    if (sb.Length > 0) sb.Append(' ');
+                    sb.Append(f - first).Append(':').Append(p ?? "-").Append(':')
+                      .Append(list[i].Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+                    if (gc > 0) sb.Append(":gc").Append(gc);
+                }
+                return sb.ToString();
+            }
 
             internal void Add(double ms)
             {
@@ -370,6 +410,8 @@ namespace CompetitiveRounds
             // calibration: the raw copies of one pass pair, kept for the caller
             internal byte[] CalB, CalW;
             internal bool CalDone;
+            // S2F4: the slots' byte buffers, made off the main thread
+            internal bool BuffersDone;
 
             internal DanceRing(int gen, int frames) { Gen = gen; Frames = new DanceMotionCore.FrameOut[frames]; }
 
@@ -407,17 +449,32 @@ namespace CompetitiveRounds
             _danceTargets.Clear();
         }
 
-        private static DanceSlot DanceNewSlot(int edge)
+        /// <summary>Finding S2F4: every slot's three byte buffers (the two
+        /// readback copies and the worker's scratch, edge * edge * 4 each),
+        /// made on a pool thread so their page faults are not the main
+        /// thread's. Each slot's land together under the ring's lock, then
+        /// BuffersDone; a failure is the ring's Error. The render targets stay
+        /// on the main thread (Unity objects).</summary>
+        private static void DanceQueueBuffers(DanceRing ring)
         {
-            return new DanceSlot
+            var slots = new List<DanceSlot>(ring.Slots);
+            ThreadPool.QueueUserWorkItem(_ =>
             {
-                Edge = edge,
-                B = DanceTarget(edge, 0, 1),
-                W = DanceTarget(edge, 0, 1),
-                BufB = new byte[edge * edge * 4],
-                BufW = new byte[edge * edge * 4],
-                Work = new byte[edge * edge * 4],
-            };
+                try
+                {
+                    foreach (var slot in slots)
+                    {
+                        int size = slot.Edge * slot.Edge * 4;
+                        byte[] b = new byte[size], w = new byte[size], work = new byte[size];
+                        lock (ring.Sync) { slot.BufB = b; slot.BufW = w; slot.Work = work; }
+                    }
+                    lock (ring.Sync) ring.BuffersDone = true;
+                }
+                catch (Exception ex)
+                {
+                    lock (ring.Sync) { if (ring.Error == null) ring.Error = "the ring's buffers failed: " + ex.GetType().Name + ": " + ex.Message; }
+                }
+            });
         }
 
         /// <summary>The black and the white pass of the current pose into the
@@ -730,13 +787,42 @@ namespace CompetitiveRounds
                 rep.Append("dance union: ").Append(V(union.min - PARK)).Append("..").Append(V(union.max - PARK))
                    .Append(" fit side=").Append(fit.size.x.ToString("F2")).Append('\n');
 
-                // S1.4 step 5: one camera for both products
+                // S1.4 step 5: one camera for both products. Finding S2F4: made
+                // all in one frame, the targets and buffers measured 21-61 ms of
+                // main thread on the verification seat, over S1.8's 33 ms
+                // maximum. Now `_rt` is created with the camera (not on the
+                // still's first Render), every other target in a Unity frame of
+                // its own behind the after-yield gate, and the fifteen byte
+                // buffers on a pool thread (a fresh 5.6 MB array alone measured
+                // up to 26 ms there, its page faults paid by the allocating
+                // thread). The loop ends only when every target is made and the
+                // buffers are in; nothing reads a slot before that.
+                clock.Phase = "alloc";
                 var cam = MakeCamera(fit, DEFAULT_SIZE);          // the still's 1180 MSAA target is _rt
-                var msaa = DanceTarget(DANCE_EDGE, 24, 4);        // the frames' 590 MSAA target
+                _rt.Create();
+                RenderTexture msaa = null;                        // the frames' 590 MSAA target
                 ring = new DanceRing(++_danceGen, n) { Table = GradeTable, Clock = clock };
-                for (int s = 0; s < DANCE_RING_PAIRS; s++) ring.Slots.Add(DanceNewSlot(DANCE_EDGE));
-                var stillSlot = DanceNewSlot(DEFAULT_SIZE);
-                ring.Slots.Add(stillSlot);
+                for (int s = 0; s <= DANCE_RING_PAIRS; s++)
+                    ring.Slots.Add(new DanceSlot { Edge = s < DANCE_RING_PAIRS ? DANCE_EDGE : DEFAULT_SIZE });
+                DanceQueueBuffers(ring);
+                int targets = 1 + 2 * ring.Slots.Count;
+                for (int step = 0; ; step++)
+                {
+                    yield return null; yields++;
+                    if ((fail = DanceAfterYield(gen, key, tRig, opt, yields, ref stale, ref remember)) != null) yield break;
+                    string e; bool done;
+                    lock (ring.Sync) { e = ring.Error; done = ring.BuffersDone; }
+                    if (e != null) { fail = e; remember = true; yield break; }
+                    if (step == 0) msaa = DanceTarget(DANCE_EDGE, 24, 4);
+                    else if (step < targets)
+                    {
+                        var slot = ring.Slots[(step - 1) / 2];
+                        if ((step - 1) % 2 == 0) slot.B = DanceTarget(slot.Edge, 0, 1);
+                        else slot.W = DanceTarget(slot.Edge, 0, 1);
+                    }
+                    else if (done) break;
+                }
+                var stillSlot = ring.Slots[DANCE_RING_PAIRS];     // the still's pair, made last
 
                 // S1.4 step 6: the still, at rest
                 clock.Phase = "still";
@@ -753,8 +839,16 @@ namespace CompetitiveRounds
                     // the same pass pair.
                     var cal = ring.Slots[0];
                     Color32[] refB, refW;
+                    // One synchronous ReadPixels per Unity frame (S2F4): the pair's
+                    // two renders, then each reference a frame later. Nothing
+                    // renders into `cal` again before the frames' loop.
                     DanceRenderPair(ring, cam, msaa, cal, -2);
-                    refB = DanceReadPixels(cal.B); refW = DanceReadPixels(cal.W);
+                    yield return null; yields++;
+                    if ((fail = DanceAfterYield(gen, key, tRig, opt, yields, ref stale, ref remember)) != null) yield break;
+                    refB = DanceReadPixels(cal.B);
+                    yield return null; yields++;
+                    if ((fail = DanceAfterYield(gen, key, tRig, opt, yields, ref stale, ref remember)) != null) yield break;
+                    refW = DanceReadPixels(cal.W);
                     while (!ring.CalDone)
                     {
                         yield return null; yields++;
@@ -864,7 +958,8 @@ namespace CompetitiveRounds
                                    + " cover=" + (bytes > 0 ? covMin.ToString("F3") + ".." + covMax.ToString("F3") : "-")
                                    + " order=" + _danceOrientation + " yields=" + yields
                                    + " slices[all " + clock.Summary(null) + "; frames " + clock.Summary("frames") + "; setup " + clock.Summary("setup")
-                                   + "; still " + clock.Summary("still") + "; prepass " + clock.Summary("prepass") + "; drain " + clock.Summary("drain") + "]"
+                                   + "; still " + clock.Summary("still") + "; prepass " + clock.Summary("prepass") + "; alloc " + clock.Summary("alloc")
+                                   + "; drain " + clock.Summary("drain") + "] top[" + clock.Top(6) + "] gc=" + clock.Collections
                                    + " rig=" + _gunSummary + " legs=" + _legSummary + " errors=" + _errCount
                                    + " elapsed=" + (Time.realtimeSinceStartup - t0).ToString("F2") + "s"
                                    + (fail != null ? " result=" + DanceLastResult : ""));
