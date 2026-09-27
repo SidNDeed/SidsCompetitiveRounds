@@ -521,7 +521,8 @@ namespace CompetitiveRounds
         /// position, and the value word. The two unknown cases force the
         /// cached value ON, the value the round-1 switch painted green beside
         /// "checking...". Everything is put back; the relay's writer is never
-        /// called, so nothing is sent and no preference is written.</summary>
+        /// called, so nothing is sent and no preference is written. Then the
+        /// class (DrvR4Class): every switch row on the page.</summary>
         private static IEnumerator DriveR4()
         {
             SettingsRowRec rec;
@@ -581,6 +582,131 @@ namespace CompetitiveRounds
                 rec.GetBool = get0;
                 dirty = true;
             }
+            yield return DrvR4Class();
+        }
+
+        /// <summary>Round-2 R4 is a class, not the relay's line: the W1
+        /// witness of the Privacy tab showed Show Discord green beside "link
+        /// Discord first" and both Player Cards switches off beside "...".
+        /// Every switch row on the page is swept in the states of the cached
+        /// answers those switches read: as they stand; with the player stats
+        /// not answered (the property cleared, put back after unless a newer
+        /// answer landed meanwhile); and, when this account has no linked
+        /// Discord, with one linked in memory and Show Discord on, then off
+        /// (the stats object's own fields, put back after). A repaint can
+        /// start a stats fetch whose answer ends a state, so each sweep checks
+        /// its state still holds when it reads, and a phase is tried up to
+        /// three times. No row is clicked and no writer reads these fields,
+        /// so nothing is sent. This account never has a /pc/me answer (a
+        /// service account), so the Player Cards rows are swept in their
+        /// not-known state only.</summary>
+        private static IEnumerator DrvR4Class()
+        {
+            yield return DrvR4Sweep("as the cached answers stand", null);
+            var prop = typeof(ApiClient).GetProperty("CachedPlayerStats", BindingFlags.Public | BindingFlags.Static);
+            if (prop == null || !prop.CanWrite) { DrvBad("R4 class: ApiClient.CachedPlayerStats cannot be set"); yield break; }
+            if (ApiClient.CachedPlayerStats == null) { DrvNote("R4 class: the stats have not answered, so the sweep above was that state; the linked states are not reachable"); yield break; }
+            for (int attempt = 1; attempt <= 3; attempt++)
+            {
+                var st0 = ApiClient.CachedPlayerStats;
+                try
+                {
+                    try { prop.SetValue(null, null, null); } catch (Exception e) { DrvBad("R4 class: clearing the stats: " + e.Message); }
+                    yield return DrvR4Sweep("with the stats not answered", () => ApiClient.CachedPlayerStats == null);
+                }
+                finally
+                {
+                    if (ApiClient.CachedPlayerStats == null) { try { prop.SetValue(null, st0, null); } catch { } }
+                    dirty = true;
+                }
+                DrvNote("R4 class: the stats are " + (ApiClient.CachedPlayerStats == st0 ? "put back"
+                    : ApiClient.CachedPlayerStats != null ? "a newer answer (a fetch landed meanwhile)" : "STILL clear"));
+                if (drvR4Held) break;
+                if (attempt == 3) DrvBad("R4 class: the stats-not-answered state did not hold until the read in three attempts");
+                yield return 1f;
+            }
+            if (ApiClient.CachedPlayerStats == null) { DrvBad("R4 class: the stats are still clear"); yield break; }
+            if (StatsDiscordLinked()) { DrvNote("R4 class: this account has a linked Discord, so the first sweep was the linked state"); yield break; }
+            for (int k = 0; k < 2; k++)
+            {
+                string state = "with a Discord linked in memory, Show Discord " + (k == 0 ? "on" : "off");
+                for (int attempt = 1; attempt <= 3; attempt++)
+                {
+                    var st1 = ApiClient.CachedPlayerStats;
+                    if (st1 == null) { DrvBad("R4 class: the stats went away, " + state + " is not reachable"); yield break; }
+                    string user0 = st1.discord_username;
+                    bool show0 = st1.show_discord;
+                    try
+                    {
+                        st1.discord_username = "item13-witness";
+                        st1.show_discord = k == 0;
+                        yield return DrvR4Sweep(state, () => ApiClient.CachedPlayerStats == st1);
+                    }
+                    finally
+                    {
+                        st1.discord_username = user0;
+                        st1.show_discord = show0;
+                        dirty = true;
+                    }
+                    if (drvR4Held) break;
+                    if (attempt == 3) DrvBad("R4 class: " + state + " did not hold until the read in three attempts");
+                }
+            }
+            yield return 0.6f;   // the page repaints with every answer put back
+        }
+
+        private static bool drvR4Held;
+
+        /// <summary>After a repaint, every switch row's widget says what its
+        /// label's value word says: neutral (not known) beside a grey word -
+        /// "checking...", "link Discord first", "..." - on beside a green
+        /// word and off beside an orange one. The word's state is read from
+        /// its colour tag, which every locale keeps. <paramref name="held"/>,
+        /// when given, is the state's own condition, checked in the frame of
+        /// the read (drvR4Held says whether it held).</summary>
+        private static IEnumerator DrvR4Sweep(string state, Func<bool> held)
+        {
+            dirty = true;
+            yield return 0.6f;
+            drvR4Held = held == null || held();
+            if (!drvR4Held) { DrvNote("R4 class, " + state + ": the state did not hold until the read (a newer stats answer landed)"); yield break; }
+            int n = 0, agree = 0;
+            foreach (var list in settingsTabRows)
+                foreach (var rec in list)
+                {
+                    if (rec.Kind != SettingsKind.Switch || rec.Track == null || rec.Knob == null) continue;
+                    n++;
+                    string said = DrvWordState(rec.LastValue);
+                    Color track = UIFactory.GetImageColor(rec.Track);
+                    Color knob = UIFactory.GetImageColor(rec.Knob);
+                    float kx = rec.Knob.GetComponent<RectTransform>().anchoredPosition.x;
+                    string shown = DrvSameColor(track, SW_NA) && DrvSameColor(knob, SW_KNOB_NA) && Mathf.Abs(kx - 14f) < 0.5f ? "not known"
+                        : DrvSameColor(track, SW_ON) && DrvSameColor(knob, SW_KNOB) && Mathf.Abs(kx - 26f) < 0.5f ? "on"
+                        : DrvSameColor(track, SW_OFF) && DrvSameColor(knob, SW_KNOB) && Mathf.Abs(kx - 2f) < 0.5f ? "off"
+                        : "no switch state (track " + DrvColor(track) + ", knob " + DrvColor(knob) + " at x="
+                            + kx.ToString("0", CultureInfo.InvariantCulture) + ")";
+                    string line = "R4 class, " + state + ": " + rec.Key + " word '" + SettingsModel.StripTags(rec.LastValue ?? "")
+                        + "' says " + said + ", the switch shows " + shown;
+                    if (said == shown) { agree++; DrvOk(line); }
+                    else DrvBad(line);
+                }
+            if (n == 0) DrvBad("R4 class, " + state + ": no switch row was found");
+            DrvNote("R4 class, " + state + ": " + agree + " of " + n + " switch rows agree with their label");
+        }
+
+        /// <summary>The state a row's value word claims, from its colour tag:
+        /// #88FF88 on, #FF9966 off, any grey (equal channels) not known.</summary>
+        private static string DrvWordState(string v)
+        {
+            int i = v == null ? -1 : v.IndexOf("<color=#", StringComparison.OrdinalIgnoreCase);
+            int j = i < 0 ? -1 : v.IndexOf('>', i);
+            if (j < 0) return "no state colour";
+            string hex = v.Substring(i + 8, j - i - 8).ToUpperInvariant();
+            if (hex.Length == 3) hex = new string(new[] { hex[0], hex[0], hex[1], hex[1], hex[2], hex[2] });
+            if (hex == "88FF88") return "on";
+            if (hex == "FF9966") return "off";
+            if (hex.Length == 6 && hex.Substring(0, 2) == hex.Substring(2, 2) && hex.Substring(2, 2) == hex.Substring(4, 2)) return "not known";
+            return "colour #" + hex;
         }
 
         /// <summary>Round-2 LOW-16 (design T5-d): a click on a segmented

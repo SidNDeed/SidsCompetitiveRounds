@@ -2425,18 +2425,24 @@ namespace CompetitiveRounds
         // every unbanned player who has run the mod from a Steam account -- not
         // every registered player, which is what this comment said until the
         // 2026-09-16 coherence pass. ──
+        /// <summary>Round-2 R4: the two Player Cards switches are neutral until
+        /// /pc/me answers; their labels say "..." until then.</summary>
+        private static bool PcMeKnown() { return ApiClient.CachedPcMe != null; }
+
         internal static void BuildSettingsRows(Transform parent)
         {
             UIFactory.CreateText("SPcHdr", parent, "Player Cards", 15f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
             btnPublic = NativeUI.SettingsSwitch(parent, "SPcPub",
                 I18n.Tr("Lets others see which cards you hold, in the mod and in Discord."),
                 () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.collection_public,
-                () => ToggleSetting("collection_public"));
+                () => ToggleSetting("collection_public"),
+                PcMeKnown);
             btnPublicTxt = UIFactory.GetButtonText(btnPublic);
             btnAnnounce = NativeUI.SettingsSwitch(parent, "SPcAnn",
                 I18n.Tr("Rare pulls may be posted to the Discord gambler chat with your name."),
                 () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.announce,
-                () => ToggleSetting("announce"));
+                () => ToggleSetting("announce"),
+                PcMeKnown);
             btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
             btnPreset = NativeUI.SettingsDropdown(parent, "SPcPre",
                 I18n.Tr("Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show."),

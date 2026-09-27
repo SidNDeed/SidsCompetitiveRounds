@@ -14494,7 +14494,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         if (!ok) CompetitiveUI.ShowNotification("Couldn't change Show Discord on leaderboard - try again", Color.yellow, 3f);
                         dirty = true;
                     });
-                });
+                },
+                // Round-2 R4: neutral while no Discord is linked (or the stats
+                // have not answered), beside the label's "link Discord first".
+                StatsDiscordLinked);
             showDiscordTxt = UIFactory.GetButtonText(showDiscordBtn);
             // Spectator opt-out (design section 6.7). Server-authoritative: the
             // toggle blocks NEW grants immediately and the heartbeat recheck
@@ -14522,7 +14525,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         }
                         dirty = true;
                     });
-                });
+                },
+                // Round-2 R4: neutral until the stats answer, beside the
+                // label's "...".
+                () => ApiClient.CachedPlayerStats != null);
             allowSpectatorsTxt = UIFactory.GetButtonText(allowSpectatorsBtn);
             /* v1.41.0 item (a): automatic log upload. A LOCAL config toggle
              * (no server round-trip, so there is no optimistic flip to roll
@@ -14840,8 +14846,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (showDiscordTxt != null)
             {
                 var stSd = ApiClient.CachedPlayerStats;
-                bool linked = stSd != null && (!string.IsNullOrEmpty(stSd.discord_username) || !string.IsNullOrEmpty(stSd.discord_id));
-                PaintShowDiscord(showDiscordTxt, linked, linked && stSd.show_discord);
+                bool linked = StatsDiscordLinked();
+                PaintShowDiscord(showDiscordTxt, linked, linked && stSd != null && stSd.show_discord);
             }
             if (allowSpectatorsTxt != null)
             {
@@ -14982,6 +14988,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetText(t, on
                 ? "Same cards in queue games: <color=#88FF88>ON</color>"
                 : "Same cards in queue games: <color=#FF9966>OFF</color>");
+        }
+
+        /// <summary>Whether the cached stats name a linked Discord account. The
+        /// Show Discord row's label ("link Discord first") and its switch both
+        /// read this, so the two never disagree (round-2 R4).</summary>
+        private static bool StatsDiscordLinked()
+        {
+            var st = ApiClient.CachedPlayerStats;
+            return st != null && (!string.IsNullOrEmpty(st.discord_username) || !string.IsNullOrEmpty(st.discord_id));
         }
 
         private static void PaintShowDiscord(object t, bool linked, bool on)
