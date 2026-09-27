@@ -527,8 +527,50 @@ namespace CompetitiveRounds
         /// arm positions AND body tilts. Each channel is independently
         /// guarded so one failing cannot strand the other. `kv.Key != null`
         /// is the UnityEngine.Object overload: a destroyed transform reads
-        /// null and is skipped (its delta died with the object).</summary>
+        /// null and is skipped (its delta died with the object).
+        ///
+        /// Finding L1, the class and not only Tick's line: while a capture's
+        /// PortraitPose names a live rig, that rig's entries are left for the
+        /// capture's own RestorePortraitRig, and every other entry is restored
+        /// and forgotten exactly as before. Three callers can run mid-capture,
+        /// at an order Unity does not fix against the rig's frame patches --
+        /// the cancel sweep when it empties `active`, the shot cancel, and the
+        /// room exit -- and an unscoped restore there would undo the capture's
+        /// current pose before its render. With no PortraitPose, or its rig
+        /// destroyed, this is RestoreAllAppliedUnscoped.</summary>
         private static void RestoreAllApplied()
+        {
+            Transform keep = null;
+            try { var cur = PortraitPose; if (cur.HasValue && cur.Value.RigRoot != null) keep = cur.Value.RigRoot; }
+            catch { keep = null; }
+            if (keep == null || DevRestoreIgnoresPortrait) { RestoreAllAppliedUnscoped(); return; }
+            try
+            {
+                foreach (var k in new List<Transform>(armApplied.Keys))
+                {
+                    if (k != null && k.IsChildOf(keep)) continue;   // the capture's own entry
+                    if (k != null) k.position -= armApplied[k];
+                    armApplied.Remove(k);
+                }
+            }
+            catch { }
+            try
+            {
+                foreach (var k in new List<Transform>(bodyRotApplied.Keys))
+                {
+                    if (k != null && k.IsChildOf(keep)) continue;
+                    if (k != null) k.rotation = Quaternion.Euler(0f, 0f, -bodyRotApplied[k]) * k.rotation;
+                    bodyRotApplied.Remove(k);
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>The restore with no rig scope: every remembered delta
+        /// undone and forgotten (RestoreAllApplied's body before L1's class
+        /// fix). Called by RestoreAllApplied when no capture pose is live, and
+        /// by the T45 probe's L1 mutant arm.</summary>
+        private static void RestoreAllAppliedUnscoped()
         {
             try
             {
@@ -711,6 +753,12 @@ namespace CompetitiveRounds
         /// else, so PortraitComponent matches by reference.</summary>
         internal static bool DevT38MatchByName;
 
+        /// <summary>T45's `l1=roomexitmutant` arm only (the portrait lever's
+        /// probe sets it for one run and clears it in its finally): L1's class
+        /// fix switched off, so RestoreAllApplied ignores a live PortraitPose.
+        /// False everywhere else.</summary>
+        internal static bool DevRestoreIgnoresPortrait;
+
         /// <summary>TryGetPose for the T38 harness (dev lever only): the exact
         /// function both frame patches call.</summary>
         internal static bool DevTryGetPose(Component c, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
@@ -791,7 +839,7 @@ namespace CompetitiveRounds
         /// empty-active branch did before the L1 guard (a hard restore of
         /// every remembered delta), run on demand so the probe can show its
         /// assertion catches it. Never called by the product path.</summary>
-        internal static void DevUnguardedRestoreAll() { RestoreAllApplied(); }
+        internal static void DevUnguardedRestoreAll() { RestoreAllAppliedUnscoped(); }
 
         /// <summary>Active dance offsets for the player owning `anyChild`, or
         /// false. Resolves the actor via the PhotonView owner — never

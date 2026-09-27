@@ -1146,7 +1146,7 @@ namespace CompetitiveRounds
                 else if (p.StartsWith("tag=")) tag = SafeTag(p.Substring(4));
                 else if (p == "dances") dances = true;                                  // step 0 / T45: pose every dance after the still
                 else if (p == "dancemode=pose" || p == "dancemode=nopose" || p == "dancemode=still") danceMode = p.Substring(10);
-                else if (p == "l1=guarded" || p == "l1=unguarded") l1Mode = p.Substring(3);
+                else if (p == "l1=guarded" || p == "l1=unguarded" || p == "l1=roomexit" || p == "l1=roomexitmutant") l1Mode = p.Substring(3);
                 else if (p.StartsWith("only=")) danceOnly = ParseInts(p.Substring(5), 0, DanceEmotes.Defs.Length - 1, DanceEmotes.Defs.Length, rep);
                 else if (p.StartsWith("lag=") && int.TryParse(p.Substring(4), out iv)) danceLag = Mathf.Clamp(iv, 0, 3);
                 else if (p.StartsWith("hold=") && int.TryParse(p.Substring(5), out iv)) danceHold = Mathf.Clamp(iv, 1, 4);   // whole frames each pose is held before its render
@@ -3347,8 +3347,13 @@ namespace CompetitiveRounds
     /// Options (after `dances`): `dancemode=pose` (T45: PortraitPose set for
     /// every frame), `dancemode=nopose` (T45's mutant: PortraitPose never
     /// set), `dancemode=still` (T45's control: a still-only run, asserting
-    /// zero motion); `l1=guarded` (the frame's Tick is the product one) or
-    /// `l1=unguarded` (L1's mutant: Tick's pre-L1 hard restore instead);
+    /// zero motion); `l1=guarded` (the frame's Tick is the product one),
+    /// `l1=unguarded` (L1's mutant: Tick's pre-L1 hard restore instead),
+    /// `l1=roomexit` (L1's sibling sites: the product room exit,
+    /// DanceEmotes.OnRoomLeft, lands between the Arm Postfix and the render,
+    /// then the frame's Tick; the rig's pose must survive it) or
+    /// `l1=roomexitmutant` (the same with RestoreAllApplied's rig scope
+    /// switched off by DanceEmotes.DevRestoreIgnoresPortrait: must FAIL);
     /// `only=I:J:..` a subset of dance indexes; `lag=N` re-renders N frames
     /// per dance one frame later (does one frame settle a pose?).
     ///
@@ -3394,6 +3399,7 @@ namespace CompetitiveRounds
         {
             bool setPose = mode == "pose";
             bool unguarded = l1 == "unguarded";
+            bool roomExit = l1 == "roomexit" || l1 == "roomexitmutant";
             Transform rigRoot = clone != null ? clone.transform : null;
             IKArmMove armL = null, armR = null;
             if (clone != null)
@@ -3440,6 +3446,7 @@ namespace CompetitiveRounds
             yield return new WaitForEndOfFrame();
             try
             {
+                DanceEmotes.DevRestoreIgnoresPortrait = l1 == "roomexitmutant";
                 foreach (int idx in set)
                 {
                     int ms = DanceEmotes.CaptureMs[idx];
@@ -3465,8 +3472,9 @@ namespace CompetitiveRounds
                             if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("dance probe aborted: ").Append(blocked).Append('\n'); yield break; }
                             if (h == 0) applied = DanceEmotes.PortraitArmApplied - applied0;
                         }
-                        // the frame's Tick: the product one, or (L1 mutant) its pre-L1 hard restore
-                        if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else DanceEmotes.Tick();
+                        // the frame's Tick: the product one (the roomexit arms run the product room
+                        // exit first), or (L1 mutant) its pre-L1 hard restore
+                        if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else { if (roomExit) DanceEmotes.OnRoomLeft(); DanceEmotes.Tick(); }
                         Vector3 dL = armL.target.position - baseL, dR = armR.target.position - baseR;
                         Vector2 expL = setPose ? al : Vector2.zero, expR = setPose ? ar : Vector2.zero;
                         bool l1ok = Mathf.Abs(dL.x - expL.x) < DANCE_PROBE_EPS && Mathf.Abs(dL.y - expL.y) < DANCE_PROBE_EPS && Mathf.Abs(dL.z) < DANCE_PROBE_EPS
@@ -3515,7 +3523,7 @@ namespace CompetitiveRounds
                             yield return new WaitForEndOfFrame();
                             _renderClaim.Beat(gen, DEV_BUDGET);
                             if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("dance probe aborted: ").Append(blocked).Append('\n'); yield break; }
-                            if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else DanceEmotes.Tick();
+                            if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else { if (roomExit) DanceEmotes.OnRoomLeft(); DanceEmotes.Tick(); }
                             var tex2 = Grab(cam, Color.black, size);
                             var px2 = tex2.GetPixels32();
                             UnityEngine.Object.Destroy(tex2);
@@ -3535,6 +3543,7 @@ namespace CompetitiveRounds
             }
             finally
             {
+                DanceEmotes.DevRestoreIgnoresPortrait = false;
                 DanceEmotes.PortraitPose = null;
                 DanceEmotes.RestorePortraitRig(rigRoot);
             }
