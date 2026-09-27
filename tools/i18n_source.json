@@ -449,6 +449,7 @@
   "A pack is still being resolved - it will be checked again shortly",
   "A player hasn't received the new settings yet - try again in a moment.",
   "A player in this game has spectating disabled.",
+  "A player joined the match",
   "A player's mod is too old for these settings - they need to update, or turn the setting off.",
   "A quick follow-up shot (QShoot) counts as Conditional damage",
   "A radiant golden sunburst. Blindingly righteous.",
@@ -1320,6 +1321,7 @@
   "Join",
   "Join Competitive Rounds!",
   "Joined the match!",
+  "Joining the match at the next point",
   "Jump",
   "Jumping Jacks",
   "Jumps",
@@ -1630,6 +1632,8 @@
   "One copy, full flight, bars on a log scale. The mod pins every eligible Grow bullet to the same 120 FPS growth clock: about x3.1.",
   "One free pack a day (resets at midnight UTC) - also /daily in Discord",
   "One of the recipients could not be found.",
+  "One player could not connect. Re-forming the lobby with everyone still here.",
+  "One player could not connect. The match continues; they may join later.",
   "One solo player faces a duo in a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- This is a consent queue with no Elo band and no ready-up.\n- The server assigns one solo and two duo players.\n- Solo Extra Initial Pick is optional: the solo draws\n  2 cards on the opening pick. In the random queue any\n  player's opt-in turns it on; in a hosted lobby the\n  host's setting decides.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first side to win 2 games wins the series.\n- 1v2 is an UNRANKED beta. No rating is applied yet.\n- Games are recorded and will count when ranked play launches.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Base XP is 500 per game, x1.5 on a win - then a\n  difficulty multiplier scales it, capped at x4\n  (the win bonus sits on top of the cap):\n  the solo earns x1.5 (and x1.20 more when the extra\n  pick is off), a duo facing a buffed solo earns x1.10,\n  and the opponents' rating tier multiplies up to x3.\n  Facing a top-3 1v2 player adds x1.35, win or lose.\n- Series end: 40 base Gold per winner, 20 per loser,\n  scaled by the opponents' rating tier.\n- Game XP converts to Gold at 100 XP = 1 Gold, and\n  level-ups pay their usual bonus Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n- The tab has separate Solo and Duo boards.\n- You appear only on boards for roles you have played.\n<color=#7FD4FF>Rank</color> - Activity order: wins, then WR, then games.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>W-L</color> - Games won and lost in that role only.\n<color=#7FD4FF>WR</color> - Win rate for games in that role.\n- These are activity boards. They are not sorted by Gold.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving while locked with no games played cancels the\n  series; a leave mid-game leaves the result to the\n  normal match report. The beta has no leave counter.",
   "Online",
   "Only the host can change lobby settings.",
@@ -2298,6 +2302,9 @@
   "The host changed the lobby settings: {0}",
   "The host removed you from this lobby.",
   "The host reset the lobby settings to the defaults.",
+  "The match could not be confirmed with the server. Please queue again.",
+  "The match could not continue on your connection. Please queue again.",
+  "The match could not start. Please queue again.",
   "The match is already running.",
   "The message contains a word that is not allowed.",
   "The message contains characters that are not allowed.",
@@ -2337,6 +2344,7 @@
   "This account isn't registered as an artist.",
   "This account was deleted - there is no pack to recover",
   "This is so sad. Please give this man a break",
+  "This lobby closed before the match started. Nothing was counted.",
   "This lobby is no longer open - the setting was not changed.",
   "This lobby uses settings your mod version can't play - update the mod.",
   "This mod sends data to a private server run by the mod author to power the leaderboard and ranked matchmaking.\n\nWhat gets recorded if you allow:\n  • Your Steam ID and in-game display name\n  • Your Discord ID and username, ONLY if you link your Discord via the in-game link code\n  • Each match you play: rounds won, points, duration, cards picked, cards offered, opponent\n  • Your Glicko-2 rating history\n\nWhat you can do later:\n  • Revoke consent anytime (F5 → Settings → Revoke). Reporting stops.\n  • Delete your data (F5 → Settings → Delete my data). Steam ID, display name, and Discord link are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\nChoose Allow to use the leaderboard. Choose Decline to run the mod fully offline.",
@@ -2488,6 +2496,7 @@
   "Waiting for opponent...",
   "Waiting for your Steam sign-in - Player Cards need it",
   "Waiting for {0} ({1:F0})...",
+  "Waiting for {0} player(s) to connect: {1} s",
   "Warm coral-orange body color.",
   "Warm cream + tan palette.",
   "Warm desert sand tones.",
@@ -2585,7 +2594,9 @@
   "You are muted - mail is unavailable while the mute lasts.",
   "You can't kick yourself.",
   "You cannot block yourself.",
+  "You could not connect in time. No penalty. Queue again when ready.",
   "You don't own any dances yet - check the Shop's DANCES section!",
+  "You joined the match in progress. This game is unrated for you.",
   "You should join Competitive Rounds, it's a discord community",
   "You show up.",
   "You're in a live {0} game — finish or leave it first.",
@@ -2856,6 +2867,8 @@
   "{0} picked {1}",
   "{0} player online now",
   "{0} players",
+  "{0} players could not connect. Re-forming the lobby with everyone still here.",
+  "{0} players could not connect. The match continues; they may join later.",
   "{0} players online now",
   "{0} players ranked",
   "{0} ready! Joining...",
@@ -5121,6 +5134,11 @@
    "location": "RequestSpectateGrantCore",
    "kind": "Tr"
   },
+  "A player joined the match": {
+   "surface": "FfaLateEntry",
+   "location": "AfterPair",
+   "kind": "ShowNotification"
+  },
   "A player's mod is too old for these settings - they need to update, or turn the setting off.": {
    "surface": "ApiClient",
    "location": "RulesDetailText",
@@ -7193,7 +7211,7 @@
   },
   "Couldn't join the FFA match — left the queue. Please requeue.": {
    "surface": "ApiClient",
-   "location": "UpdateFfaQueuePoll",
+   "location": "ArmFfaLock",
    "kind": "ShowNotification"
   },
   "Couldn't join the FFA match — your lobby was dissolved. Please requeue.": {
@@ -9476,6 +9494,11 @@
    "location": "OnJoinedRankedRoom",
    "kind": "ShowNotification"
   },
+  "Joining the match at the next point": {
+   "surface": "FfaLateEntry",
+   "location": "AdmittedLateRun",
+   "kind": "ShowNotification"
+  },
   "Jump": {
    "surface": "TabStatsOverlay",
    "location": "EnsureLocaleStrings",
@@ -11025,6 +11048,16 @@
    "surface": "MailClient",
    "location": "ErrorDetail",
    "kind": "Tr"
+  },
+  "One player could not connect. Re-forming the lobby with everyone still here.": {
+   "surface": "ApiClient",
+   "location": "ArmFfaLock",
+   "kind": "ShowNotification"
+  },
+  "One player could not connect. The match continues; they may join later.": {
+   "surface": "FfaAssembly",
+   "location": "ShortStart",
+   "kind": "ShowNotification"
   },
   "One solo player faces a duo in a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- This is a consent queue with no Elo band and no ready-up.\n- The server assigns one solo and two duo players.\n- Solo Extra Initial Pick is optional: the solo draws\n  2 cards on the opening pick. In the random queue any\n  player's opt-in turns it on; in a hosted lobby the\n  host's setting decides.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first side to win 2 games wins the series.\n- 1v2 is an UNRANKED beta. No rating is applied yet.\n- Games are recorded and will count when ranked play launches.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Base XP is 500 per game, x1.5 on a win - then a\n  difficulty multiplier scales it, capped at x4\n  (the win bonus sits on top of the cap):\n  the solo earns x1.5 (and x1.20 more when the extra\n  pick is off), a duo facing a buffed solo earns x1.10,\n  and the opponents' rating tier multiplies up to x3.\n  Facing a top-3 1v2 player adds x1.35, win or lose.\n- Series end: 40 base Gold per winner, 20 per loser,\n  scaled by the opponents' rating tier.\n- Game XP converts to Gold at 100 XP = 1 Gold, and\n  level-ups pay their usual bonus Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n- The tab has separate Solo and Duo boards.\n- You appear only on boards for roles you have played.\n<color=#7FD4FF>Rank</color> - Activity order: wins, then WR, then games.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>W-L</color> - Games won and lost in that role only.\n<color=#7FD4FF>WR</color> - Win rate for games in that role.\n- These are activity boards. They are not sorted by Gold.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving while locked with no games played cancels the\n  series; a leave mid-game leaves the result to the\n  normal match report. The beta has no leave counter.": {
    "surface": "ModeInfoText",
@@ -14366,6 +14399,21 @@
    "location": "HandleState",
    "kind": "ShowNotification, Tr"
   },
+  "The match could not be confirmed with the server. Please queue again.": {
+   "surface": "FfaAssembly",
+   "location": "ExitToast",
+   "kind": "ShowNotificationCritical"
+  },
+  "The match could not continue on your connection. Please queue again.": {
+   "surface": "FfaAssembly",
+   "location": "ExitToast",
+   "kind": "ShowNotificationCritical"
+  },
+  "The match could not start. Please queue again.": {
+   "surface": "FfaAssembly",
+   "location": "ExitToast",
+   "kind": "ShowNotificationCritical"
+  },
   "The match is already running.": {
    "surface": "SpectatorHud",
    "location": "DrawBlackout",
@@ -14560,6 +14608,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "This lobby closed before the match started. Nothing was counted.": {
+   "surface": "FfaAssembly",
+   "location": "ExitToast, OnNotice",
+   "kind": "ShowNotification, ShowNotificationCritical"
   },
   "This lobby is no longer open - the setting was not changed.": {
    "surface": "ApiClient",
@@ -15316,6 +15369,11 @@
    "location": "RefreshQueueUI",
    "kind": "TrF"
   },
+  "Waiting for {0} player(s) to connect: {1} s": {
+   "surface": "FfaAssembly",
+   "location": "Banner",
+   "kind": "TrF"
+  },
   "Warm coral-orange body color.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -15801,10 +15859,20 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "You could not connect in time. No penalty. Queue again when ready.": {
+   "surface": "FfaAssembly, Plugin",
+   "location": "ExitToast, OnNotice, Update",
+   "kind": "ShowNotification, ShowNotificationCritical"
+  },
   "You don't own any dances yet - check the Shop's DANCES section!": {
    "surface": "CompetitiveUI",
    "location": "DrawDanceWheel",
    "kind": "Tr"
+  },
+  "You joined the match in progress. This game is unrated for you.": {
+   "surface": "FfaLateEntry",
+   "location": "OnSelfKept",
+   "kind": "ShowNotification"
   },
   "You should join Competitive Rounds, it's a discord community": {
    "surface": "QuickChat",
@@ -17156,6 +17224,16 @@
    "location": "ComposeTerminalBarLine",
    "kind": "TrF"
   },
+  "{0} players could not connect. Re-forming the lobby with everyone still here.": {
+   "surface": "ApiClient",
+   "location": "ArmFfaLock",
+   "kind": "TrF"
+  },
+  "{0} players could not connect. The match continues; they may join later.": {
+   "surface": "FfaAssembly",
+   "location": "ShortStart",
+   "kind": "TrF"
+  },
   "{0} players online now": {
    "surface": "NativeUI",
    "location": "RefreshHomeTab",
@@ -17233,7 +17311,7 @@
   },
   "{0}-player FFA starting in 5 seconds!": {
    "surface": "ApiClient",
-   "location": "UpdateFfaQueuePoll",
+   "location": "ArmFfaLock",
    "kind": "TrF"
   },
   "{0}: <color=#888>(not bound)</color>": {
