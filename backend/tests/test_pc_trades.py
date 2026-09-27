@@ -2434,3 +2434,73 @@ def test_m53_later_migrations_keep_the_traded_value(env):
         assert ans[1]["shards_gained"] == 0, (names, ans)
     else:
         assert _err(ans) == (503, "trading_unavailable"), (names, ans)
+
+
+# ------------------------------------------------------------------ the LAND
+
+async def _sql_trade(proposer, other, give, get, digest):
+    """A proposed trade written straight into the table with the stored
+    digest given -- a row the propose route never writes when `digest` is
+    not its own sides' (P3 refuses those terms), so at accept only F62's
+    recompute can tell it apart. The spent nonce and the proposer's holds
+    are written beside it, as P12 and P13 write them."""
+    lo, hi = sorted((proposer, other), key=lambda p: uuid.UUID(p.pid))
+    a_side, b_side = (give, get) if proposer is lo else (get, give)
+    nonce = _nonce()
+    tid = str(await _val("""
+        INSERT INTO pc_trades (pair_lo, pair_hi, proposer, a_prints, b_prints, digest, propose_nonce,
+                               proposer_generation, counterparty_generation, expires_at)
+        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid[], $5::uuid[], $6, $7, 0, 0,
+                now() + make_interval(hours => 48))
+        RETURNING id""", lo.pid, hi.pid, proposer.pid, sorted(a_side, key=uuid.UUID),
+        sorted(b_side, key=uuid.UUID), digest, nonce))
+    await _q("INSERT INTO pc_trade_spent_nonces (proposer, propose_nonce, trade_id) "
+             "VALUES ($1::uuid, $2, $3::uuid)", proposer.pid, nonce, tid)
+    await _q("INSERT INTO pc_trade_holds (print_id, trade_id) SELECT unnest($1::uuid[]), $2::uuid",
+             list(give), tid)
+    return {"trade_id": tid, "digest": digest}
+
+
+async def _f62_case(ctx, side, consistent):
+    """F62's fixture: the pair ordered by id, the proposer at the `side` end
+    (so both arms of the recompute's party order run), the proposer owning
+    p1 and p2 and the other party q. The row's sides say p1 for q; its
+    stored digest is that of p1 for q (`consistent`) or of p2 for q. The
+    other party accepts, signing the STORED digest, so A3 and A7 pass."""
+    traders, s = await _world(ctx)
+    lo, hi = sorted(traders, key=lambda p: uuid.UUID(p.pid))
+    a, b = (lo, hi) if side == "lo" else (hi, lo)
+    p1, p2, q = await _print(ctx, a, s), await _print(ctx, a, s), await _print(ctx, b, s)
+    t = await _sql_trade(a, b, [p1], [q], _digest(a.steam, [p1] if consistent else [p2], b.steam, [q]))
+    ans = await accept(ctx, "acc", b, t)
+    held = await _val("SELECT count(*) FROM pc_trade_holds WHERE trade_id = $1::uuid", t["trade_id"])
+    return dict(ans=ans, status=await _status(t["trade_id"]), held=held,
+                owners=[await _owner(x) for x in (p1, p2, q)], a=a.pid, b=b.pid)
+
+
+@pytest.mark.parametrize("side", ["lo", "hi"])
+def test_f62_accept_recomputes_the_locked_terms_digest(env, side):
+    """F62 (LAND): a proposed row whose stored digest is not the digest of
+    its own sides is refused at accept although the signed digest equals
+    the stored one. A10 recomputes the digest by P3's recipe from the two
+    locked party rows' steam ids and the row's sides: signed = stored =
+    recomputed, or 409 bad_terms (permanent). The claim rolls back with the
+    refusal: the row stays proposed, its hold stays, nothing moves. Without
+    the recompute this accept executes and moves p1 and q (the mutation leg
+    in trading-server-land-f62.log)."""
+    out = scenario(env, lambda ctx: _f62_case(ctx, side, consistent=False))
+    assert _err(out["ans"]) == (409, "bad_terms") and out["ans"][1]["permanent"] is True, out
+    assert (out["status"], out["held"]) == ("proposed", 1), out
+    assert out["owners"] == [out["a"], out["a"], out["b"]], out
+
+
+@pytest.mark.parametrize("side", ["lo", "hi"])
+def test_f62_control_a_consistent_sql_row_executes(env, side):
+    """F62's control: the same SQL-written row carrying its own sides'
+    digest executes through the same accept, so the recompute agrees with
+    every consistent row and the refusal above is the terms, not the
+    fixture."""
+    out = scenario(env, lambda ctx: _f62_case(ctx, side, consistent=True))
+    assert out["ans"][0] == 200, out
+    assert (out["status"], out["held"]) == ("executed", 0), out
+    assert out["owners"] == [out["b"], out["a"], out["a"]], out

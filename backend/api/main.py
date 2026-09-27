@@ -27486,13 +27486,23 @@ async def _pc_trade_accept_tx(request, db: AsyncSession, steam_id: str, sig: str
 async def _pc_trade_accept_recheck(db: AsyncSession, t, actor: str, locked: dict) -> None:
     """A10: every predicate re-read on the locked rows (#208). Any failure
     raises 409 with its code; the accept never writes a refusal (`void` has
-    one writer, the janitor)."""
+    one writer, the janitor). Once both party words hold, the terms
+    themselves (F62): the digest recomputed by P3's recipe from the two
+    locked party rows' steam ids and the row's print sides (immutable since
+    the insert, the row held by L2) must equal the stored digest, which A3
+    held equal to the signed one -- signed = stored = recomputed, or 409
+    bad_terms before A11 moves anything."""
     lo, hi, proposer = str(t["pair_lo"]), str(t["pair_hi"]), str(t["proposer"])
     parties = await _pc_trade_parties(db, [lo, hi])
     _pc_trade_raise(_pc_trade_party_refusal(parties.get(actor), own=True,
                                             stamped_generation=t["counterparty_generation"]))
     _pc_trade_raise(_pc_trade_party_refusal(parties.get(proposer), own=False,
                                             stamped_generation=t["proposer_generation"]))
+    other = hi if proposer == lo else lo
+    give, get = (t["a_prints"], t["b_prints"]) if proposer == lo else (t["b_prints"], t["a_prints"])
+    if _pc.trade_digest(_pc.trade_items(parties[proposer]["steam_id"], list(give),
+                                        parties[other]["steam_id"], list(get))) != t["digest"]:
+        raise _pc_trade_refusal("bad_terms", permanent=True)
     _pc_trade_raise(_pc_trade_prints_refusal(((t["a_prints"], lo), (t["b_prints"], hi)), locked))
     frozen = await _pc_trade_freeze_left(db, list(t["a_prints"]) + list(t["b_prints"]))
     if frozen is not None:
