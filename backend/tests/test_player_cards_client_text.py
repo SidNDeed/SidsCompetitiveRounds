@@ -245,6 +245,56 @@ def test_the_intent_and_answer_rules_are_pinned_in_the_client():
     assert '"kind|ref|pay|price|unix|owner"' in (ROOT / "plugin" / "Plugin.cs").read_text(encoding="utf-8")
 
 
+def test_the_compose_freezes_and_the_busy_retry_is_fenced_while_an_attempt_is_pending():
+    """Card trading round 2, TC-M1. The freeze: from Send's commit through
+    its answer, or through the busy retry's answer, Back, the pickers and a
+    new compose are ignored by the `if (tradeActInFlight)` rule the accept
+    and close clicks already follow. The fence: the busy retry asks
+    PcTradeRules.RetryCheck (executed by the rules harness) BEFORE it runs,
+    and a dropped proposal retry releases the attempt and shows busy. Each
+    pin is asserted inside its own method, so a gate moved or removed reds
+    it (a repair without a reverting test is decoration)."""
+    src = CLIENT.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    gate = 'if (tradeActInFlight) { FrozenInput("%s"); return; }'
+
+    def body(sig):
+        return _span(src, sig, end)
+
+    back = body("private static void OnComposeBack()")
+    assert gate % "back" in back and back.index(gate % "back") < back.index("EndCompose();")
+    pick = body("private static void ToggleComposeCard(Tile t, bool mine)")
+    assert "if (p == null || !composing" in pick
+    assert pick.index("if (p == null || !composing") < pick.index(gate % "pick") < pick.index("var side = ")
+    new = body("private static void StartCompose(string toSteamId, string name, string preselect)")
+    assert new.index(gate % "new") < new.index("EndCompose();")
+    search = body("private static void StartTradeSearch(string preselect)")
+    assert search.index(gate % "search") < search.index("CompetitiveUI.OpenPlayerSearch(")
+    # the real Back button and the lever's "back" are the one frozen handler
+    assert '"Back", 14f, C_WHITE, C_BTN, OnComposeBack, sizeDelta' in src
+    assert 'case "back": OnComposeBack(); break;' in src
+    assert "() => { EndCompose(); NativeUI.MarkDirty(); }" not in src
+    # the fence runs before the retry does
+    co = body("private static IEnumerator RetryCo(int ep, int seq, string terms, Action a, Action dropped)")
+    check = "PcTradeRules.RetryCheck(ep, uiEpoch, seq, composeSeq, terms, termsNow)"
+    assert check in co and co.index(check) < co.index("try { a(); }")
+    assert "PcTradeRules.TermsKey(composeTo, composeGive, composeGet)" in co
+    assert co.index("PcTradeRules.RetryVerdict.ComposeChanged") < co.index("try { a(); }")
+    # three retry sites: the proposal (fenced on its compose and terms), the
+    # trade actions (identity only) and the binder read (its compose only)
+    assert src.count("RetryLater(ep") == 3
+    propose = body("private static void ProposeNow(")
+    assert "RetryLater(ep, seq, PcTradeRules.TermsKey(to, give, get)," in propose
+    assert "ProposeNow(id, to, give, get, nonce, seq, true), ProposeRetryDropped);" in propose
+    act = body("private static void TradeAct(")
+    assert "RetryLater(ep, PcTradeRules.NoComposeFence, null, () => TradeAct(action, id, t, true), null);" in act
+    assert "RetryLater(ep, seq, null, () => FetchTheirBinder(id, seq), null);" in src
+    dropped = body("private static void ProposeRetryDropped()")
+    assert "tradeActInFlight = false;" in dropped and 'Say(ReasonText("busy"), C_WARN);' in dropped
+    # the nonce stays bound to the same key the retry compares
+    assert "string key = PcTradeRules.TermsKey(composeTo, give, get);" in src
+
+
 def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():
     """The three repairs behind the 2026-09-12 binder screenshot, each on its
     own so deleting any one of them fails here: the face slot asks for no

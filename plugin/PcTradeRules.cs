@@ -218,6 +218,52 @@ namespace CompetitiveRounds
             return code == "busy" && !alreadyRetried;
         }
 
+        // -- the busy retry's fence (TC-M1) --------------------------------------
+
+        /// <summary>What a busy retry does when its two seconds are up.</summary>
+        internal enum RetryVerdict { Send, IdentityChanged, ComposeChanged }
+
+        /// <summary>The compose value of a retry that belongs to no compose:
+        /// accept, decline and cancel act on a listed trade, never on the
+        /// compose's terms, so only the identity fence applies to them.</summary>
+        internal const int NoComposeFence = int.MinValue;
+
+        /// <summary>A proposal's terms as one string: the target, then each
+        /// side sorted (Ordinal). SendProposal binds the nonce to it, and a busy
+        /// retry compares the key it was armed with against the compose as it
+        /// stands when the retry is due.</summary>
+        internal static string TermsKey(string to, IEnumerable<string> give, IEnumerable<string> get)
+        {
+            var g = give != null ? new List<string>(give) : new List<string>();
+            var t = get != null ? new List<string>(get) : new List<string>();
+            g.Sort(StringComparer.Ordinal);
+            t.Sort(StringComparer.Ordinal);
+            return (to ?? "") + "|" + string.Join(",", g.ToArray()) + "|" + string.Join(",", t.ToArray());
+        }
+
+        /// <summary>The busy retry's fence, consulted BEFORE the retry is sent
+        /// (#98: a retry re-checks the precondition it was armed on before it
+        /// fires, not after). An identity edge (uiEpoch) drops every retry. A
+        /// compose retry is dropped as well when the compose it was armed on
+        /// has ended or been replaced (composeSeq: Back, a new compose, and the
+        /// EndCompose calls no click makes - the page build, the Trades view
+        /// hiding, a paused discovery) or when its terms no longer match the
+        /// compose's. The pickers are frozen while the attempt is pending, so
+        /// the terms check is the fence's second line, independent of that
+        /// freeze: terms captured at Send are never posted for a compose that
+        /// no longer holds them. `termsAtArm` null skips the terms check (a
+        /// retry that carries no terms: the binder read).</summary>
+        internal static RetryVerdict RetryCheck(int epochAtArm, int epochNow, int composeAtArm, int composeNow,
+                                                string termsAtArm, string termsNow)
+        {
+            if (epochAtArm != epochNow) return RetryVerdict.IdentityChanged;
+            if (composeAtArm == NoComposeFence) return RetryVerdict.Send;
+            if (composeAtArm != composeNow) return RetryVerdict.ComposeChanged;
+            if (termsAtArm != null && !string.Equals(termsAtArm, termsNow, StringComparison.Ordinal))
+                return RetryVerdict.ComposeChanged;
+            return RetryVerdict.Send;
+        }
+
         /// <summary>The second click confirms only on the armed row, inside the window.</summary>
         internal static bool ConfirmsArmed(string armedTradeId, float armedAt, string tradeId, float now)
         {
@@ -471,6 +517,48 @@ namespace CompetitiveRounds
                           && TimeLeftText(s) == "48h 29m" && TimeLeftText(59.0) == "0m"
                           && TimeLeftText(-5.0) == "0m" && TimeLeftText(3599.0) == "59m";
                 Check(r, "time left from the server clock", ok, "s=" + s.ToString(CultureInfo.InvariantCulture) + " text=" + TimeLeftText(s));
+            }
+            // 13. The busy retry's fence (TC-M1), consulted before the retry is
+            //     sent. The round-1 report's scenario: the first proposal answers
+            //     busy, the player acts during the two-second delay, the delay
+            //     ends. Every EndCompose bumps composeSeq and none bumps uiEpoch.
+            {
+                const int ep = 7, seq = 3;
+                string armed = TermsKey(VecS2, new[] { VecA }, new[] { VecC });
+                var back = RetryCheck(ep, ep, seq, seq + 1, armed, TermsKey(null, null, null));
+                Check(r, "busy retry: Back during the delay drops it (the round-1 scenario)",
+                      back == RetryVerdict.ComposeChanged, "verdict=" + back);
+                // a new compose over the first, to the same player with the same
+                // picks: only composeSeq tells the two apart
+                var again = RetryCheck(ep, ep, seq, seq + 2, armed, TermsKey(VecS2, new[] { VecA }, new[] { VecC }));
+                Check(r, "busy retry: a new compose with the same terms drops it",
+                      again == RetryVerdict.ComposeChanged, "verdict=" + again);
+                // print A dropped and B chosen on the same compose: only the terms tell them apart
+                var repick = RetryCheck(ep, ep, seq, seq, armed, TermsKey(VecS2, new[] { VecB }, new[] { VecC }));
+                Check(r, "busy retry: re-picked terms on the same compose drop it",
+                      repick == RetryVerdict.ComposeChanged, "verdict=" + repick);
+                // the control: nothing changed, so the retry is sent - and there is one
+                var same = RetryCheck(ep, ep, seq, seq, armed, TermsKey(VecS2, new[] { VecA }, new[] { VecC }));
+                bool once = same == RetryVerdict.Send && RetryBusy("busy", false) && !RetryBusy("busy", true);
+                Check(r, "busy retry: an unchanged compose is sent, and only once", once,
+                      "verdict=" + same + " once=" + once);
+                // an identity edge drops any retry; accept, decline and cancel have no compose fence
+                var ident = RetryCheck(ep, ep + 1, seq, seq, armed, armed);
+                var act = RetryCheck(ep, ep, NoComposeFence, seq + 5, null, "changed");
+                var actIdent = RetryCheck(ep, ep + 1, NoComposeFence, seq, null, null);
+                bool fence = ident == RetryVerdict.IdentityChanged && act == RetryVerdict.Send
+                             && actIdent == RetryVerdict.IdentityChanged;
+                Check(r, "busy retry: an identity edge drops any retry; an action retry has no compose fence", fence,
+                      "ident=" + ident + " act=" + act + " act_ident=" + actIdent);
+                // the key: each side sorted, the target named, the two sides kept apart
+                string k1 = TermsKey(VecS2, new[] { VecB, VecA }, new[] { VecC });
+                bool order = k1 == TermsKey(VecS2, new[] { VecA, VecB }, new[] { VecC });
+                bool sorted = k1 == VecS2 + "|" + VecA + "," + VecB + "|" + VecC;
+                bool sides = TermsKey(VecS2, new[] { VecC }, new[] { VecA, VecB }) != k1;
+                bool target = TermsKey(VecS1, new[] { VecA, VecB }, new[] { VecC }) != k1;
+                Check(r, "the terms key sorts each side and keeps the target and the sides apart",
+                      order && sorted && sides && target,
+                      "order=" + order + " sorted=" + sorted + " sides=" + sides + " target=" + target);
             }
             return r;
         }

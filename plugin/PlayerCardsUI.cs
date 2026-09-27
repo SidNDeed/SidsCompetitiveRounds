@@ -2545,7 +2545,7 @@ namespace CompetitiveRounds
                 case "give": DevToggle(givePickTiles, n, true); break;
                 case "get": DevToggle(getPickTiles, n, false); break;
                 case "send": SendProposal(); break;
-                case "back": EndCompose(); break;
+                case "back": OnComposeBack(); break;
                 case "accept": if (n >= 0 && n < inRows.Count && inRows[n].trade != null) OnAcceptClick(inRows[n]); break;
                 case "decline": if (n >= 0 && n < inRows.Count && inRows[n].trade != null) OnCloseClick(inRows[n], "decline"); break;
                 case "cancel": if (n >= 0 && n < sentRows.Count && sentRows[n].trade != null) OnCloseClick(sentRows[n], "cancel"); break;
@@ -3293,7 +3293,7 @@ namespace CompetitiveRounds
                     // V8 1.4: busy is retried once, after two seconds, before it is shown
                     tradeActInFlight = true; tradeActAt = Now;
                     Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] busy-retry action=" + action);
-                    RetryLater(ep, () => TradeAct(action, id, t, true));
+                    RetryLater(ep, PcTradeRules.NoComposeFence, null, () => TradeAct(action, id, t, true), null);
                     return;
                 }
                 if (ok || !KeepsNonce(code)) actNonces.Remove(action + "|" + tid);
@@ -3324,16 +3324,33 @@ namespace CompetitiveRounds
             ApiClient.FetchPcCollection(id, true);
         }
 
-        private static void RetryLater(int ep, Action a)
+        /// <summary>Runs a retry after BusyRetrySeconds (the busy retry, V8 1.4,
+        /// and the binder read's in-flight retry) behind the fence
+        /// PcTradeRules.RetryCheck decides, consulted BEFORE the retry runs
+        /// (TC-M1): an identity edge drops it silently (ResetTrades already
+        /// released the attempt), and a compose that ended, was replaced or no
+        /// longer holds the armed terms drops it through `dropped`, which
+        /// releases what the attempt still holds. `seq` is
+        /// PcTradeRules.NoComposeFence for a retry that belongs to no compose,
+        /// and `terms` is null for one that carries none.</summary>
+        private static void RetryLater(int ep, int seq, string terms, Action a, Action dropped)
         {
-            try { Plugin.Instance.StartCoroutine(RetryCo(ep, a)); }
+            try { Plugin.Instance.StartCoroutine(RetryCo(ep, seq, terms, a, dropped)); }
             catch (Exception ex) { tradeActInFlight = false; Plugin.Log.LogWarning("[PC] trade retry not scheduled: " + ex.Message); }
         }
 
-        private static IEnumerator RetryCo(int ep, Action a)
+        private static IEnumerator RetryCo(int ep, int seq, string terms, Action a, Action dropped)
         {
             yield return new WaitForSecondsRealtime(PcTradeRules.BusyRetrySeconds);
-            if (ep != uiEpoch) yield break;
+            string termsNow = terms == null ? null : PcTradeRules.TermsKey(composeTo, composeGive, composeGet);
+            var verdict = PcTradeRules.RetryCheck(ep, uiEpoch, seq, composeSeq, terms, termsNow);
+            if (verdict == PcTradeRules.RetryVerdict.IdentityChanged) yield break;
+            if (verdict == PcTradeRules.RetryVerdict.ComposeChanged)
+            {
+                try { if (dropped != null) dropped(); }
+                catch (Exception ex) { tradeActInFlight = false; Plugin.Log.LogWarning("[PC] trade retry drop threw: " + ex.Message); }
+                yield break;
+            }
             try { a(); }
             catch (Exception ex) { tradeActInFlight = false; Plugin.Log.LogWarning("[PC] trade retry threw: " + ex.Message); }
         }
@@ -3424,6 +3441,7 @@ namespace CompetitiveRounds
         /// the player's own prints, from the card view.</summary>
         private static void StartTradeSearch(string preselect)
         {
+            if (tradeActInFlight) { FrozenInput("search"); return; }
             if (!PcTradeRules.ProposeAllowed(tradeDiscovery)) { Say(TradeState(), C_WARN); return; }
             if (OwnTradingClosed()) { Say(ReasonText("trading_closed"), C_WARN); return; }
             int ep = uiEpoch;
@@ -3442,6 +3460,7 @@ namespace CompetitiveRounds
         {
             var id = LocalId();
             if (id == null || string.IsNullOrEmpty(toSteamId)) return;
+            if (tradeActInFlight) { FrozenInput("new"); return; }
             if (toSteamId == id) { Say(ReasonText("self_trade"), C_WARN); return; }
             if (!PcTradeRules.ProposeAllowed(tradeDiscovery)) { Say(TradeState(), C_WARN); return; }
             EndCompose();
@@ -3453,6 +3472,24 @@ namespace CompetitiveRounds
             if (ApiClient.CachedPcCollection == null) ApiClient.FetchPcCollection(id);
             FetchTheirBinder(id, composeSeq);
             Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] compose start preselected=" + composeGive.Count);
+            NativeUI.MarkDirty();
+        }
+
+        /// <summary>The compose is frozen while an attempt is pending (TC-M1):
+        /// from Send's own commit through its answer, or through the busy
+        /// retry's answer, Back, the pickers and a new compose are ignored -
+        /// the `if (tradeActInFlight)` rule OnAcceptClick and OnCloseClick
+        /// already follow. The refused input is logged for the witness.</summary>
+        private static void FrozenInput(string input)
+        {
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] compose frozen input=" + input);
+        }
+
+        /// <summary>The compose's Back button, and the lever's "back".</summary>
+        private static void OnComposeBack()
+        {
+            if (tradeActInFlight) { FrozenInput("back"); return; }
+            EndCompose();
             NativeUI.MarkDirty();
         }
 
@@ -3477,7 +3514,7 @@ namespace CompetitiveRounds
             ApiClient.FetchPcCollectionOf(id, to, (ok, resp) =>
             {
                 if (ep != uiEpoch || seq != composeSeq) return;
-                if (!ok && resp == "in-flight") { RetryLater(ep, () => FetchTheirBinder(id, seq)); return; }
+                if (!ok && resp == "in-flight") { RetryLater(ep, seq, null, () => FetchTheirBinder(id, seq), null); return; }
                 composeTheirsLoading = false;
                 string code = ok ? null : ApiClient.PcTradeErrorCode(resp);
                 if (ok)
@@ -3510,6 +3547,7 @@ namespace CompetitiveRounds
         {
             var p = t != null ? t.print : null;
             if (p == null || !composing || string.IsNullOrEmpty(p.print_id)) return;
+            if (tradeActInFlight) { FrozenInput("pick"); return; }
             var side = mine ? composeGive : composeGet;
             if (side.Contains(p.print_id)) side.Remove(p.print_id);
             else
@@ -3544,7 +3582,7 @@ namespace CompetitiveRounds
             UIFactory.AddHLG(hdr, spacing: 10, forceExpandH: true); UIFactory.AddLE(hdr, prefH: 28, flexH: 0);
             txtComposeHdr = UIFactory.CreateText("PcTCHdrT", hdr.transform, "", 16f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 26));
             var sp = new GameObject("PcTCSp"); sp.transform.SetParent(hdr.transform, false); sp.AddComponent<RectTransform>(); UIFactory.AddLE(sp, flexW: 1);
-            UIFactory.CreateButton("PcTCBack", hdr.transform, "Back", 14f, C_WHITE, C_BTN, () => { EndCompose(); NativeUI.MarkDirty(); }, sizeDelta: new Vector2(120, 26));
+            UIFactory.CreateButton("PcTCBack", hdr.transform, "Back", 14f, C_WHITE, C_BTN, OnComposeBack, sizeDelta: new Vector2(120, 26));
             var sv = UIFactory.CreateScrollView("PcTCSV", composeBox.transform, spacing: 6);
             UIFactory.AddLE(sv.scrollGO, flexH: 1);
             var c = sv.content.transform;
@@ -3697,7 +3735,7 @@ namespace CompetitiveRounds
             if (tradeActInFlight || composeGive.Count == 0 || composeGet.Count == 0) return;
             var give = new List<string>(composeGive); give.Sort(StringComparer.Ordinal);
             var get = new List<string>(composeGet); get.Sort(StringComparer.Ordinal);
-            string key = composeTo + "|" + string.Join(",", give.ToArray()) + "|" + string.Join(",", get.ToArray());
+            string key = PcTradeRules.TermsKey(composeTo, give, get);
             if (composeNonce == null || composeNonceKey != key) { composeNonce = NewNonce(); composeNonceKey = key; }
             ProposeNow(id, composeTo, give, get, composeNonce, composeSeq, false);
         }
@@ -3718,7 +3756,8 @@ namespace CompetitiveRounds
                 {
                     tradeActInFlight = true; tradeActAt = Now;
                     Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] busy-retry action=propose");
-                    RetryLater(ep, () => ProposeNow(id, to, give, get, nonce, seq, true));
+                    RetryLater(ep, seq, PcTradeRules.TermsKey(to, give, get),
+                               () => ProposeNow(id, to, give, get, nonce, seq, true), ProposeRetryDropped);
                     return;
                 }
                 if (ok)
@@ -3740,6 +3779,19 @@ namespace CompetitiveRounds
                 }
                 NativeUI.MarkDirty();
             });
+        }
+
+        /// <summary>A busy proposal's retry, dropped by the fence (TC-M1): the
+        /// first answer stands. Busy turned the request away before it was
+        /// read (the reason the attempt keeps its nonce), so nothing is
+        /// pending any more: the freeze is released and the busy reason is
+        /// shown, as it would have been had the retry been refused too.</summary>
+        private static void ProposeRetryDropped()
+        {
+            tradeActInFlight = false;
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] busy-retry dropped action=propose reason=compose-changed");
+            Say(ReasonText("busy"), C_WARN);
+            NativeUI.MarkDirty();
         }
 
 
