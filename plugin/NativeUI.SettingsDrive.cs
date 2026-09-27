@@ -17,8 +17,9 @@ namespace CompetitiveRounds
     /// seat's TestOpenTab lever ("5:drive" for every scenario,
     /// "5:drive:&lt;id&gt;,&lt;id&gt;" for some), one scenario at a time, each
     /// printing its own PASS or FAIL lines and putting back what it changed.
-    /// While any settings test runs, the delete row's confirmation reaches a
-    /// stub and no deletion request is ever sent.
+    /// While any settings test runs, the delete row's confirmation, the
+    /// Leave-all-queues press and the mail settings PUTs reach stubs, so no
+    /// deletion, queue or mail request is ever sent.
     /// </summary>
     public static partial class NativeUI
     {
@@ -49,7 +50,21 @@ namespace CompetitiveRounds
         internal static bool SettingsTestRunning => SettingsDriveRunning || SettingsSelfTestRunning;
 
         /// <summary>The scenarios, in the order "5:drive" runs them.</summary>
-        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2", "l11", "r4", "t5d" };
+        private static readonly string[] SettingsDriveScenarios =
+            { "m1", "l3", "l2", "l11", "r4", "t5d", "t4", "t5a", "t5b", "t5c", "t5e", "t5f", "t5g", "t5h", "t7" };
+
+        /// <summary>Scenarios that run only when named: design T7-b's two
+        /// launches ("t7b", then "t7r-&lt;picked&gt;-&lt;previous&gt;-&lt;found&gt;"),
+        /// the probe of T7-b's premise ("ppwt", then "ppwr") and the witness
+        /// captures of design section 11 (they change the resolution or the
+        /// language, and each capture needs the runner watching).</summary>
+        private static readonly string[] SettingsDriveNamed =
+            { "t7b", "ppwt", "ppwr", "w1", "w2", "w3", "w3b", "w3c", "w4", "w5", "w6", "w9", "w9b", "w10" };
+
+        private static bool SettingsDriveNamedOnly(string id)
+        {
+            return Array.IndexOf(SettingsDriveNamed, id) >= 0 || id.StartsWith("t7r-", StringComparison.Ordinal);
+        }
 
         private static void DrvOk(string m) { drvPass++; Plugin.Log.LogInfo("[SETTINGS-DRIVE] PASS " + m); }
         private static void DrvBad(string m) { drvFail++; Plugin.Log.LogWarning("[SETTINGS-DRIVE] FAIL " + m); }
@@ -66,7 +81,7 @@ namespace CompetitiveRounds
                 foreach (var s in ids.Split(','))
                 {
                     string t = s.Trim();
-                    if (Array.IndexOf(SettingsDriveScenarios, t) < 0)
+                    if (Array.IndexOf(SettingsDriveScenarios, t) < 0 && !SettingsDriveNamedOnly(t))
                     {
                         Plugin.Log.LogWarning("[SETTINGS-DRIVE] unknown scenario '" + t + "'; known: " + string.Join(",", SettingsDriveScenarios));
                         return;
@@ -80,7 +95,10 @@ namespace CompetitiveRounds
             drvSavedTab = settingsSubTab;
             settingsDriveKey = SettingsModel.SettingsKey.None;
             settingsDrivePad = -1;
-            Plugin.Log.LogInfo("[SETTINGS-DRIVE] START " + drvIds + " screen " + Screen.width + "x" + Screen.height + " locale " + I18n.Locale);
+            drvScreenPrefs0 = DrvScreenPrefs();
+            Plugin.Log.LogInfo("[SETTINGS-DRIVE] START " + drvIds + " screen " + Screen.width + "x" + Screen.height + " " + Screen.fullScreenMode
+                + " locale " + I18n.Locale + "; resolution prefs " + drvScreenPrefs0);
+            try { DrvNote("PlayerPrefs at the start: " + DrvPrefSummary(DrvPrefState())); } catch { }
             settingsDriveWaitUntil = 0f;
             drvStack.Push(DriveRun(list));
         }
@@ -92,6 +110,7 @@ namespace CompetitiveRounds
         /// reported and abandoned; its caller carries on.</summary>
         internal static void SettingsDriveTick()
         {
+            if (settingsPutStubDue.Count > 0) SettingsStubDeliver();
             if (drvStack.Count == 0 || Time.unscaledTime < settingsDriveWaitUntil) return;
             for (int guard = 0; drvStack.Count > 0 && guard < 256; guard++)
             {
@@ -119,12 +138,19 @@ namespace CompetitiveRounds
             drvStack.Clear();
             settingsDriveKey = SettingsModel.SettingsKey.None;
             settingsDrivePad = -1;
+            drvForceRows = false;
+            settingsDriveMouseSet = false;
+            DrvPutBackBlocks();
+            dirty = true;
             try
             {
                 if (isOpen && pageBuilt && currentTab == TAB_SETTINGS)
                     SettingsSwitchSubTab(Mathf.Clamp(drvSavedTab, 0, SETTINGS_TABS - 1));
             }
             catch { }
+            try { DrvNote("PlayerPrefs at the end: " + DrvPrefSummary(DrvPrefState())); } catch { }
+            DrvNote("stubs reached: delete " + settingsDeleteStubCalls + ", queue leave " + settingsEscapeStubCalls
+                + ", mail PUT " + settingsPutStubCalls);
             Plugin.Log.LogInfo("[SETTINGS-DRIVE] DONE " + drvIds + " pass=" + drvPass + " fail=" + drvFail);
         }
 
@@ -149,7 +175,31 @@ namespace CompetitiveRounds
                 case "l11": return DriveL11();
                 case "r4": return DriveR4();
                 case "t5d": return DriveT5d();
+                case "t4": return DriveT4();
+                case "t5a": return DriveT5a();
+                case "t5b": return DriveT5b();
+                case "t5c": return DriveT5c();
+                case "t5e": return DriveT5e();
+                case "t5f": return DriveT5f();
+                case "t5g": return DriveT5g();
+                case "t5h": return DriveT5h();
+                case "t7": return DriveT7();
+                case "t7b": return DriveT7b();
+                case "ppwt": return DrivePpwt();
+                case "ppwr": return DrivePpwr();
+                case "w1": return DriveW1();
+                case "w2": return DriveW2();
+                case "w3": return DriveW3();
+                case "w3b": return DriveW3b();
+                case "w3c": return DriveW3c();
+                case "w4": return DriveW4();
+                case "w5": return DriveW5();
+                case "w6": return DriveW6();
+                case "w9": return DriveW9();
+                case "w9b": return DriveW9b();
+                case "w10": return DriveW10();
             }
+            if (id.StartsWith("t7r-", StringComparison.Ordinal)) return DriveT7r(id.Substring(4));
             return DriveNothing();
         }
 
@@ -191,19 +241,22 @@ namespace CompetitiveRounds
             yield return settle;
         }
 
+        private static IEnumerator DrvPress(SettingsModel.SettingsKey k, float settle) { return DrvPress(k, settle, 3f); }
+
         /// <summary>Press one key and wait for the page's poll to take it
-        /// (at most 3 s), then settle. A key the poll never takes is
-        /// withdrawn, so it cannot land later on a different state.</summary>
-        private static IEnumerator DrvPress(SettingsModel.SettingsKey k, float settle)
+        /// (at most `take` seconds), then settle. A key the poll never takes
+        /// is withdrawn, so it cannot land later on a different state.</summary>
+        private static IEnumerator DrvPress(SettingsModel.SettingsKey k, float settle, float take)
         {
             settingsDriveKeyTaken = false;
             settingsDriveKey = k;
-            float until = Time.unscaledTime + 3f;
+            float until = Time.unscaledTime + take;
             while (!settingsDriveKeyTaken && Time.unscaledTime < until) yield return 0f;
             if (!settingsDriveKeyTaken)
             {
                 settingsDriveKey = SettingsModel.SettingsKey.None;
-                DrvNote(drvCurrent + ": the page's poll did not take " + k + " within 3 s");
+                DrvNote(drvCurrent + ": the page's poll did not take " + k + " within "
+                    + take.ToString("0.#", CultureInfo.InvariantCulture) + " s");
             }
             yield return settle;
         }
@@ -602,6 +655,2128 @@ namespace CompetitiveRounds
                 DrvNote(step + "2.5 s later the reconciler clock " + (t2 != t1 ? "moved" : "did not move") + ", "
                     + (c2 - c1) + " more publisher run(s), recorded marker " + w2 + after);
             }
+        }
+
+        // ---------------------------------------------------------------
+        // Round-2 MEDIUM-3: the design's section-10 tests that need a
+        // running client - T4, T5-a/b/c/e/f/g/h and T7 - driven here.
+        // ---------------------------------------------------------------
+
+        /// <summary>Presses of the Leave-all-queues row while a settings test
+        /// ran (design T5-a). Each would otherwise have been a request.</summary>
+        internal static int settingsEscapeStubCalls;
+
+        /// <summary>Mail settings PUTs that reached the stub while a settings
+        /// test ran (design T5-e, T7-c). Each is answered ok 1.5 s later - one
+        /// round trip - through the caller's own callback; nothing is sent.</summary>
+        internal static int settingsPutStubCalls;
+        private static readonly List<KeyValuePair<float, Action<bool, string>>> settingsPutStubDue =
+            new List<KeyValuePair<float, Action<bool, string>>>();
+
+        internal static void SettingsStubPut(string what, Action<bool, string> cb)
+        {
+            settingsPutStubCalls++;
+            Plugin.Log.LogInfo("[SETTINGS-DRIVE] mail PUT " + settingsPutStubCalls + " reached the stub (" + what + "; not sent)");
+            settingsPutStubDue.Add(new KeyValuePair<float, Action<bool, string>>(Time.unscaledTime + 1.5f, cb));
+        }
+
+        /// <summary>Answers the stubbed PUTs whose round trip is over, in order.</summary>
+        private static void SettingsStubDeliver()
+        {
+            float now = Time.unscaledTime;
+            while (settingsPutStubDue.Count > 0 && settingsPutStubDue[0].Key <= now)
+            {
+                var cb = settingsPutStubDue[0].Value;
+                settingsPutStubDue.RemoveAt(0);
+                try { if (cb != null) cb(true, "{}"); }
+                catch (Exception e) { Plugin.Log.LogWarning("[SETTINGS-DRIVE] a stub answer threw: " + e.Message); }
+            }
+        }
+
+        /// <summary>The frame the harness pressed Escape in (design T5-b).</summary>
+        private static int settingsDriveEscFrame = -1;
+
+        /// <summary>Escape as NativeUI.Tick reads it: the real key, or a press
+        /// the driven-input harness made in this frame. Tick reads it at every
+        /// point it read Input.GetKeyDown(KeyCode.Escape), so a driven press
+        /// meets the surfaces that own Escape in the same order a real one
+        /// does.</summary>
+        private static bool EscDown()
+        {
+            return settingsDriveEscFrame == Time.frameCount || Input.GetKeyDown(KeyCode.Escape);
+        }
+
+        /// <summary>One Escape press, read by the rest of this frame's Tick
+        /// (SettingsDriveTick runs first in it), then a settle.</summary>
+        private static IEnumerator DrvEscape()
+        {
+            settingsDriveEscFrame = Time.frameCount;
+            yield return 0.6f;
+        }
+
+        /// <summary>A capture point: the runner that launched the game takes a
+        /// screenshot while this state is held (12 s: the runner polls the log,
+        /// then starts its capture script). The line says whether this
+        /// seat is in a live online room, so a capture taken during a match is
+        /// known and discarded.</summary>
+        private static IEnumerator DrvCapture(string name)
+        {
+            bool room = false;
+            try { room = OverlayIdleClose.InLiveOnlineRoom; } catch { }
+            DrvNote("CAPTURE " + name + " screen " + Screen.width + "x" + Screen.height
+                + " (live online room: " + (room ? "YES - discard this capture" : "none") + ")");
+            yield return 12f;
+        }
+
+        private const BindingFlags DrvPriv = BindingFlags.NonPublic | BindingFlags.Static;
+
+        private static SettingsRowRec DrvRec(string key)
+        {
+            SettingsRowRec r;
+            return key != null && settingsByKey.TryGetValue(key, out r) ? r : null;
+        }
+
+        /// <summary>A click through the control's own click handler - the
+        /// path a mouse click takes once its hit test has passed.</summary>
+        private static bool DrvClick(GameObject go)
+        {
+            var ch = go != null ? go.GetComponent<ClickHandler>() : null;
+            if (ch == null || ch.onClick == null) return false;
+            ch.onClick();
+            return true;
+        }
+
+        /// <summary>Wait until the page is open on the settings tab with its
+        /// latest build painted and no rebuild for `quiet` seconds (at most
+        /// 15 s).</summary>
+        private static IEnumerator DrvSettle(float quiet)
+        {
+            float limit = Time.unscaledTime + 15f, since = Time.unscaledTime;
+            int gen = settingsBuildGen;
+            while (Time.unscaledTime < limit)
+            {
+                bool ready = isOpen && pageBuilt && currentTab == TAB_SETTINGS && settingsPaintedGen == settingsBuildGen;
+                if (!ready || settingsBuildGen != gen) { gen = settingsBuildGen; since = Time.unscaledTime; }
+                else if (Time.unscaledTime - since >= quiet) yield break;
+                yield return 0.1f;
+            }
+            DrvNote(drvCurrent + ": the page did not settle within 15 s");
+        }
+
+        /// <summary>Move the keyboard focus onto a row with the arrow keys,
+        /// through the page's own poll.</summary>
+        private static IEnumerator DrvArrowFocus(string key, string tag)
+        {
+            var r = DrvRec(key);
+            if (r == null) { DrvBad(tag + " the " + key + " row was not built"); yield break; }
+            if (settingsSubTab != r.Tab) { SettingsSwitchSubTab(r.Tab); yield return 0.3f; }
+            for (int guard = 0; guard < 40; guard++)
+            {
+                var list = SettingsFocusList(settingsSubTab);
+                int want = list.IndexOf(r);
+                if (want < 0) { DrvBad(tag + " " + key + " is not in its sub-tab's focus list"); yield break; }
+                int cur = Mathf.Clamp(settingsFocusRow[settingsSubTab], 0, list.Count - 1);
+                if (cur == want) yield break;
+                yield return DrvPress(want > cur ? SettingsModel.SettingsKey.Down : SettingsModel.SettingsKey.Up, 0.1f);
+            }
+        }
+
+        private static bool DrvPickerOpen()
+        {
+            var f = typeof(CompetitiveUI).GetField("artistPickerOpen", DrvPriv);
+            return f != null && (bool)f.GetValue(null);
+        }
+
+        /// <summary>The open picker's own Use / Clear branch (DrawArtistPicker):
+        /// close it, drop its callback, then hand the callback the id - what a
+        /// click on the IMGUI button does once its hit test has passed.</summary>
+        private static bool DrvPickerChoose(string id)
+        {
+            var fOpen = typeof(CompetitiveUI).GetField("artistPickerOpen", DrvPriv);
+            var fCb = typeof(CompetitiveUI).GetField("artistPickerOnPick", DrvPriv);
+            if (fOpen == null || fCb == null || !(bool)fOpen.GetValue(null)) return false;
+            var cb = fCb.GetValue(null) as Action<string>;
+            fOpen.SetValue(null, false);
+            fCb.SetValue(null, null);
+            try { if (cb != null) cb(id); }
+            catch (Exception e) { Plugin.Log.LogWarning("[SETTINGS-DRIVE] picker choice threw: " + e.Message); }
+            return true;
+        }
+
+        private static string DrvNum(float f) { return f.ToString("0.###", CultureInfo.InvariantCulture); }
+
+        /// <summary>A row's value as a string: a switch "True"/"False", a
+        /// segmented or dropdown row its id, a slider its stop's number; null
+        /// for a row that stores nothing.</summary>
+        private static string DrvValue(SettingsRowRec r)
+        {
+            if (r == null) return null;
+            try
+            {
+                switch (r.Kind)
+                {
+                    case SettingsKind.Switch: return r.GetBool != null ? (r.GetBool() ? "True" : "False") : null;
+                    case SettingsKind.Segmented:
+                    case SettingsKind.Dropdown: return r.Current != null ? r.Current() : null;
+                    case SettingsKind.Slider:
+                        if (r.Index == null || r.Stops == null || r.Stops.Length == 0) return null;
+                        return DrvNum(r.Stops[Mathf.Clamp(r.Index(), 0, r.Stops.Length - 1)]);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>A reset operand in DrvValue's form.</summary>
+        private static string DrvOperand(object o)
+        {
+            if (o == null) return null;
+            if (o is bool) return (bool)o ? "True" : "False";
+            if (o is float) return DrvNum((float)o);
+            if (o is int) return ((int)o).ToString(CultureInfo.InvariantCulture);
+            return o.ToString();
+        }
+
+        private static string[] DrvOptions(SettingsRowRec r)
+        {
+            if (r == null) return null;
+            switch (r.Kind)
+            {
+                case SettingsKind.Switch: return new[] { "True", "False" };
+                case SettingsKind.Segmented: return r.Ids;
+                case SettingsKind.Dropdown: try { return r.IdsF != null ? r.IdsF() : null; } catch { return null; }
+                case SettingsKind.Slider:
+                    if (r.Stops == null) return null;
+                    var s = new string[r.Stops.Length];
+                    for (int i = 0; i < s.Length; i++) s[i] = DrvNum(r.Stops[i]);
+                    return s;
+            }
+            return null;
+        }
+
+        /// <summary>The row's last option that differs from v.</summary>
+        private static string DrvAway(SettingsRowRec r, string v)
+        {
+            var o = DrvOptions(r);
+            if (o == null) return null;
+            for (int i = o.Length - 1; i >= 0; i--) if (o[i] != v) return o[i];
+            return null;
+        }
+
+        /// <summary>Set a row to a value through its own control: a switch's
+        /// track, a segmented option, a dropdown opened by its face and chosen
+        /// in the picker, a slider moved to the stop.</summary>
+        private static bool DrvSetValue(SettingsRowRec r, string v)
+        {
+            if (r == null || v == null) return false;
+            if (DrvValue(r) == v) return true;
+            switch (r.Kind)
+            {
+                case SettingsKind.Switch: return DrvClick(r.Track);
+                case SettingsKind.Segmented:
+                    int i = r.Ids != null ? Array.IndexOf(r.Ids, v) : -1;
+                    return i >= 0 && r.Opts != null && DrvClick(r.Opts[i]);
+                case SettingsKind.Dropdown:
+                    if (!DrvClick(r.Face) || !DrvPickerOpen()) return false;
+                    return DrvPickerChoose(v);
+                case SettingsKind.Slider:
+                    var o = DrvOptions(r);
+                    int k = o != null ? Array.IndexOf(o, v) : -1;
+                    if (k < 0) return false;
+                    SettingsSetSliderIndex(r, k);
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Every value-storing row's value, by key.</summary>
+        private static Dictionary<string, string> DrvSnapshot()
+        {
+            var d = new Dictionary<string, string>();
+            foreach (var desc in SettingsDescriptors.All)
+            {
+                string v = DrvValue(DrvRec(desc.Key));
+                if (v != null) d[desc.Key] = v;
+            }
+            return d;
+        }
+
+        private static List<string> DrvChanged(Dictionary<string, string> a, Dictionary<string, string> b)
+        {
+            var l = new List<string>();
+            foreach (var kv in b) { string v; if (!a.TryGetValue(kv.Key, out v) || v != kv.Value) l.Add(kv.Key); }
+            foreach (var kv in a) if (!b.ContainsKey(kv.Key)) l.Add(kv.Key);
+            l.Sort(StringComparer.Ordinal);
+            return l;
+        }
+
+        private static string DrvList(IEnumerable<string> l)
+        {
+            return "[" + string.Join(",", new List<string>(l).ToArray()) + "]";
+        }
+
+        // --- the PlayerPrefs a settings test can move ---------------------
+
+        private static bool DrvPrefIsInt(string k)
+        {
+            return k == "OPTION_LANGUAGE" || k.StartsWith("CR_Mail_Relay_", StringComparison.Ordinal);
+        }
+
+        private static string DrvPrefLabel(string k)
+        {
+            return k.StartsWith("CR_Mail_", StringComparison.Ordinal) ? k.Substring(0, k.LastIndexOf('_')) + "_<steamid>" : k;
+        }
+
+        private static string DrvPrefRead(string k)
+        {
+            if (!PlayerPrefs.HasKey(k)) return null;
+            return DrvPrefIsInt(k) ? PlayerPrefs.GetInt(k).ToString(CultureInfo.InvariantCulture) : PlayerPrefs.GetString(k);
+        }
+
+        /// <summary>The PlayerPrefs a settings test can move: the cursor
+        /// shape, the two mail caches and the game's language (which
+        /// I18n.SetLocale writes), as stored; null: not stored.</summary>
+        private static List<KeyValuePair<string, string>> DrvPrefState()
+        {
+            var l = new List<KeyValuePair<string, string>>();
+            foreach (var k in new[] { "cr_cursor_shape", MailClient.PrefKey("From"), MailClient.PrefKey("Relay"), "OPTION_LANGUAGE" })
+                l.Add(new KeyValuePair<string, string>(k, DrvPrefRead(k)));
+            return l;
+        }
+
+        private static string DrvPrefSummary(List<KeyValuePair<string, string>> st)
+        {
+            var parts = new List<string>();
+            foreach (var kv in st) parts.Add(DrvPrefLabel(kv.Key) + " " + (kv.Value == null ? "not stored" : "'" + kv.Value + "'"));
+            return string.Join("; ", parts.ToArray());
+        }
+
+        /// <summary>Put those PlayerPrefs back exactly as found - a key that
+        /// was not stored is removed again - and say so.</summary>
+        private static void DrvPrefRestore(List<KeyValuePair<string, string>> saved, string tag)
+        {
+            var moved = new List<string>();
+            bool ok = true;
+            foreach (var kv in saved)
+            {
+                string cur = DrvPrefRead(kv.Key);
+                if (cur == kv.Value) continue;
+                if (kv.Value == null) PlayerPrefs.DeleteKey(kv.Key);
+                else if (DrvPrefIsInt(kv.Key)) PlayerPrefs.SetInt(kv.Key, int.Parse(kv.Value, CultureInfo.InvariantCulture));
+                else PlayerPrefs.SetString(kv.Key, kv.Value);
+                moved.Add(DrvPrefLabel(kv.Key));
+                if (DrvPrefRead(kv.Key) != kv.Value) ok = false;
+            }
+            try { PlayerPrefs.Save(); } catch { }
+            string msg = tag + " PlayerPrefs as found: " + DrvPrefSummary(DrvPrefState())
+                + (moved.Count == 0 ? " (none moved)" : " (put back: " + string.Join(", ", moved.ToArray()) + ")");
+            if (ok) DrvNote(msg); else DrvBad(tag + " PlayerPrefs NOT as found: " + DrvPrefSummary(DrvPrefState()));
+        }
+
+        // --- T4: the six rebuild routes -----------------------------------
+
+        /// <summary>MEDIUM-3 / design T4: every rebuild route lands on the
+        /// remembered sub-tab (A7) with every label painted, and the tab is
+        /// then measured (A5, A8) exactly as the self-test measures a tab. The
+        /// remembered sub-tab is 4 (Performance). Each route is entered at its
+        /// own entry point: the closed page re-parented, then opened (Open's
+        /// re-parent test); the page host deactivated under the open page
+        /// (Tick's host recovery), then the page opened; a catalogue install
+        /// (RequestCatalogueRebuild); the first-run language prompt's button;
+        /// the language row's picker; the heavy-font switch, and once more to
+        /// put it back. Both language routes choose the language in use, so
+        /// the locale never changes; the stored language and the game's
+        /// language pref are put back exactly.</summary>
+        private static IEnumerator DriveT4()
+        {
+            const int want = 4;
+            string[] routes = { "open/re-parent", "host recovery", "catalogue install", "first-run language prompt",
+                                "language row", "heavy-font switch", "heavy-font switch back" };
+            var prefs0 = DrvPrefState();
+            string savedLang = Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : null;
+            for (int ri = 0; ri < routes.Length; ri++)
+            {
+                string tag = "T4 " + routes[ri] + ": ";
+                yield return DrvOpenSettings();
+                yield return DrvSettle(0.6f);
+                SettingsSwitchSubTab(want);
+                yield return 0.4f;
+                int g0 = settingsBuildGen;
+                int id0 = pageGO != null ? pageGO.GetInstanceID() : 0;
+                bool entered = true;
+                switch (ri)
+                {
+                    case 0:
+                        Close();
+                        if (pageGO != null) pageGO.transform.SetParent(null, false);
+                        DevOpenTab(TAB_SETTINGS);
+                        break;
+                    case 1:
+                        if (pageGO != null) pageGO.SetActive(false);
+                        yield return 0.5f;
+                        if (isOpen) DrvNote(tag + "the page still counted as open after its host went inactive");
+                        DevOpenTab(TAB_SETTINGS);
+                        break;
+                    case 2:
+                        RequestCatalogueRebuild();
+                        break;
+                    case 3:
+                        entered = DrvPromptRoute(tag);
+                        break;
+                    case 4:
+                        var lang = DrvRec("SLang");
+                        entered = lang != null && DrvClick(lang.Face) && DrvPickerOpen() && DrvPickerChoose(I18n.Locale);
+                        break;
+                    default:
+                        var hf = DrvRec("SHeavyFont");
+                        entered = hf != null && DrvClick(hf.Track);
+                        break;
+                }
+                if (!entered) { DrvBad(tag + "the route could not be entered"); continue; }
+                yield return DrvSettle(1.0f);
+                bool rebuilt = settingsBuildGen > g0 && pageGO != null && pageGO.GetInstanceID() != id0;
+                if (!rebuilt)
+                {
+                    DrvBad(tag + "the page was not rebuilt (build " + g0 + " -> " + settingsBuildGen + ")");
+                    continue;
+                }
+                DrvNote(tag + "a new page, build " + g0 + " -> " + settingsBuildGen);
+                DrvCheckA7(tag, want);
+                DrvMeasureA5A8(tag);
+            }
+            if (Plugin.ModLanguage != null && savedLang != null && Plugin.ModLanguage.Value != savedLang)
+            {
+                Plugin.ModLanguage.Value = savedLang;
+                DrvNote("T4 the stored language was put back");
+            }
+            DrvPrefRestore(prefs0, "T4");
+        }
+
+        /// <summary>T4's fourth route: with the stored language unset, the
+        /// first-run prompt shows; its button for the language in use is
+        /// clicked.</summary>
+        private static bool DrvPromptRoute(string tag)
+        {
+            if (Plugin.ModLanguage == null) return false;
+            string code = I18n.Locale;
+            Plugin.ModLanguage.Value = I18n.LOCALE_UNSET;
+            MaybeShowLanguagePrompt();
+            var btn = langPromptGO != null ? SettingsFindDeep(langPromptGO.transform, "LP_" + code) : null;
+            if (btn != null) return DrvClick(btn.gameObject);
+            DrvBad(tag + "the prompt showed no button for '" + code + "'");
+            try { if (langPromptGO != null) UnityEngine.Object.Destroy(langPromptGO); } catch { }
+            langPromptGO = null;
+            return false;
+        }
+
+        private static void DrvCheckA7(string tag, int want)
+        {
+            bool bodiesOk = true;
+            for (int i = 0; i < SETTINGS_TABS; i++)
+                if (settingsBodies[i] != null && settingsBodies[i].activeSelf != (i == want)) bodiesOk = false;
+            if (settingsSubTab == want && bodiesOk) DrvOk(tag + "A7 the remembered sub-tab " + want + " is the one shown (active bodies [" + SelfTestActiveBodies() + "])");
+            else DrvBad(tag + "A7 sub-tab " + settingsSubTab + ", active bodies [" + SelfTestActiveBodies() + "], want exactly body " + want);
+            var empty = new List<string>();
+            foreach (var d in SettingsDescriptors.All)
+            {
+                SettingsRowRec r;
+                if (!settingsByKey.TryGetValue(d.Key, out r) || string.IsNullOrEmpty(r.LastPainted)) empty.Add(d.Key);
+            }
+            if (empty.Count == 0) DrvOk(tag + "A7 all " + SettingsDescriptors.All.Length + " labels painted");
+            else DrvBad(tag + "A7 unpainted: " + string.Join(",", empty.ToArray()));
+        }
+
+        /// <summary>A5 and A8 on the tab on screen, measured exactly as the
+        /// self-test measures a tab (SettingsCheckA5A8 is the self-test's own
+        /// check).</summary>
+        private static void DrvMeasureA5A8(string tag, List<string> obs = null)
+        {
+            int tab = Mathf.Clamp(settingsSubTab, 0, SETTINGS_TABS - 1);
+            SettingsForceLayout();
+            SettingsUpdateHint();
+            SettingsForceLayout();
+            float tol = 1.0f * SettingsCanvasScale();
+            var rows = SettingsFocusList(tab);
+            float content = SettingsActiveContentHeight();
+            float vpNoHint = SettingsViewportNoHint();
+            bool over = content > vpNoHint + 0.5f;
+            string home = SettingsModel.SubTabHomes[tab];
+            SettingsCheckA5A8(home, rows, content, vpNoHint, over, tol,
+                m => DrvOk(tag + m), m => DrvBad(tag + m),
+                m => { DrvNote(tag + m); if (obs != null && m.StartsWith("OBSERVATION A5b ", StringComparison.Ordinal)) obs.Add(home); });
+        }
+
+        // --- T5-a: modal press-through ------------------------------------
+
+        /// <summary>MEDIUM-3 / design T5-a: with the focus arrowed onto the
+        /// Leave-all-queues row (SEBtn), open the bug report, then press
+        /// Space, Left, Right and Down - handed to the page's own poll as a
+        /// real key is. Nothing may reach the page: the poll takes no key, the
+        /// queue leave does not run (its press reaches the stub,
+        /// settingsEscapeStubCalls, so a press that got through is counted and
+        /// never sent), the focus does not move and no setting changes. Then
+        /// again with a dropdown open.</summary>
+        private static IEnumerator DriveT5a()
+        {
+            var keys = new[] { SettingsModel.SettingsKey.Space, SettingsModel.SettingsKey.Left,
+                               SettingsModel.SettingsKey.Right, SettingsModel.SettingsKey.Down };
+            for (int pass = 0; pass < 2; pass++)
+            {
+                string what = pass == 0 ? "the bug report open" : "the SDateFmt dropdown open";
+                yield return DrvArrowFocus("SEBtn", "T5-a");
+                if (!DrvFocusIs("SEBtn", "T5-a")) yield break;
+                if (pass == 0) CompetitiveUI.OpenBugReportModal();
+                else
+                {
+                    var df = DrvRec("SDateFmt");
+                    if (df != null) SettingsOpenDropdown(df);
+                    if (!DrvPickerOpen()) { DrvBad("T5-a the SDateFmt dropdown did not open"); continue; }
+                }
+                yield return 0.4f;
+                if (!CompetitiveUI.KeyboardInputOwnedByModal)
+                {
+                    DrvBad("T5-a precondition: with " + what + " no modal owns the keyboard");
+                    DrvT5aClose(pass);
+                    continue;
+                }
+                var before = DrvSnapshot();
+                int esc0 = settingsEscapeStubCalls, taken = 0;
+                foreach (var k in keys)
+                {
+                    yield return DrvPress(k, 0.2f, 0.8f);
+                    if (settingsDriveKeyTaken) taken++;
+                }
+                var f = SettingsFocusedRec();
+                string focus = f != null ? f.Key : "nothing";
+                int esc = settingsEscapeStubCalls - esc0;
+                var changed = DrvChanged(before, DrvSnapshot());
+                if (taken == 0 && esc == 0 && focus == "SEBtn" && changed.Count == 0)
+                    DrvOk("T5-a with " + what + ": the page's poll took 0 of " + keys.Length
+                        + " keys (Space, Left, Right, Down); 0 queue leaves; the focus stays on SEBtn; no setting changed");
+                else
+                    DrvBad("T5-a with " + what + ": the poll took " + taken + " of " + keys.Length + " keys; " + esc
+                        + " queue leave(s) reached the stub; the focus is on " + focus + "; changed " + DrvList(changed));
+                DrvT5aClose(pass);
+                yield return 0.5f;
+            }
+        }
+
+        private static void DrvT5aClose(int pass)
+        {
+            if (pass == 0)
+            {
+                var f = typeof(CompetitiveUI).GetField("bugModalOpen", DrvPriv);
+                if (f != null) f.SetValue(null, false);
+            }
+            else if (DrvPickerOpen()) CompetitiveUI.ConsumePromptEscape();
+        }
+
+        // --- T5-b: Escape ownership ---------------------------------------
+
+        /// <summary>MEDIUM-3 / design T5-b: with a dropdown open, Escape closes
+        /// the dropdown, writes nothing and leaves the settings page open; a
+        /// second Escape closes the page. The press is read where Tick reads
+        /// Escape (EscDown), so it meets the same owners in the same order.</summary>
+        private static IEnumerator DriveT5b()
+        {
+            var df = DrvRec("SDateFmt");
+            if (df == null) { DrvBad("T5-b the SDateFmt row was not built"); yield break; }
+            SettingsSwitchSubTab(df.Tab);
+            yield return 0.4f;
+            if (!DrvClick(df.Face) || !DrvPickerOpen()) { DrvBad("T5-b the SDateFmt dropdown did not open"); yield break; }
+            yield return 0.4f;
+            var before = DrvSnapshot();
+            yield return DrvEscape();
+            bool pickerOpen = DrvPickerOpen(), pageOpen = isOpen && currentTab == TAB_SETTINGS;
+            var changed = DrvChanged(before, DrvSnapshot());
+            if (!pickerOpen && pageOpen && changed.Count == 0)
+                DrvOk("T5-b the first Escape closed the dropdown, wrote nothing and left the settings page open");
+            else
+                DrvBad("T5-b after the first Escape: the dropdown " + (pickerOpen ? "open" : "closed") + ", the page "
+                    + (pageOpen ? "open" : "CLOSED") + ", changed " + DrvList(changed));
+            if (!pageOpen)
+            {
+                if (DrvPickerOpen()) CompetitiveUI.ConsumePromptEscape();
+                yield return DrvOpenSettings();
+                yield break;
+            }
+            yield return DrvEscape();
+            if (!isOpen) DrvOk("T5-b control: the second Escape closed the page");
+            else DrvBad("T5-b control: the second Escape left the page open");
+            yield return DrvOpenSettings();
+        }
+
+        // --- T5-c: the dropdown call contract -----------------------------
+
+        /// <summary>MEDIUM-3 / design T5-c. Stage 1: an open settings dropdown
+        /// draws no Clear button - DrawArtistPicker draws "Clear (house)" when
+        /// its showClear flag is set, and the page passes false; the state is
+        /// held at a capture point. Stage 2: a Clear - the picker's Clear
+        /// branch, the callback handed an empty id - reaches no setter,
+        /// because the page's callback drops an empty pick. The row's setter
+        /// is wrapped for the case so what it receives is recorded; the row's
+        /// value is read before and after.</summary>
+        private static IEnumerator DriveT5c()
+        {
+            var r = DrvRec("SDateFmt");
+            if (r == null) { DrvBad("T5-c the SDateFmt row was not built"); yield break; }
+            SettingsSwitchSubTab(r.Tab);
+            yield return 0.4f;
+            var pick0 = r.Pick;
+            var got = new List<string>();
+            r.Pick = id => { got.Add(id == null ? "(null)" : "'" + id + "'"); if (pick0 != null) pick0(id); };
+            try
+            {
+                string v0 = DrvValue(r);
+                if (!DrvClick(r.Face) || !DrvPickerOpen()) { DrvBad("T5-c the SDateFmt dropdown did not open"); yield break; }
+                yield return 0.3f;
+                var fClear = typeof(CompetitiveUI).GetField("artistPickerShowClear", DrvPriv);
+                bool clear = fClear != null && (bool)fClear.GetValue(null);
+                if (fClear == null) DrvBad("T5-c the picker's showClear flag was not found");
+                else if (!clear) DrvOk("T5-c stage 1: the open SDateFmt dropdown draws 2 buttons (Cancel, Use) and no Clear (house)");
+                else DrvBad("T5-c stage 1: the open SDateFmt dropdown draws 3 buttons, Clear (house) among them");
+                yield return DrvCapture("t5c-picker");
+                DrvPickerChoose("");
+                yield return 0.5f;
+                string v1 = DrvValue(r);
+                if (got.Count == 0 && v1 == v0) DrvOk("T5-c stage 2: a Clear reached no setter; the row still reads " + v0);
+                else DrvBad("T5-c stage 2: the setter received " + DrvList(got) + "; the row reads " + v1 + " (was " + v0 + ")");
+            }
+            finally
+            {
+                r.Pick = pick0;
+                if (DrvPickerOpen()) CompetitiveUI.ConsumePromptEscape();
+            }
+        }
+
+        // --- T5-e: the two server setters --------------------------------
+
+        /// <summary>MEDIUM-3 / design T5-e. Two SMailFrom picks inside one round
+        /// trip send exactly one PUT, and the value stored is the first pick;
+        /// SMailRelay with no linked Discord sends no PUT and shows the
+        /// existing notice. Every PUT reaches the stub (answered ok after one
+        /// round trip, nothing sent). The session facts the relay reads are
+        /// set for the case and put back; the mail caches are put back
+        /// exactly.</summary>
+        private static IEnumerator DriveT5e()
+        {
+            var prefs0 = DrvPrefState();
+            var mf = DrvRec("SMailFrom");
+            if (mf == null) { DrvBad("T5-e the SMailFrom row was not built"); yield break; }
+            SettingsSwitchSubTab(mf.Tab);
+            yield return 0.4f;
+            string orig = MailClient.MailFrom;
+            var others = new List<string>();
+            foreach (var v in MailClient.MAIL_FROM_VALUES) if (v != orig) others.Add(v);
+            int put0 = settingsPutStubCalls;
+            bool a = DrvSetValue(mf, others[0]);
+            yield return 0.3f;
+            bool b = DrvSetValue(DrvRec("SMailFrom"), others[1]);
+            int puts = settingsPutStubCalls - put0;
+            yield return 2.2f;
+            string stored = MailClient.MailFrom;
+            if (a && b && puts == 1 && stored == others[0])
+                DrvOk("T5-e two SMailFrom picks inside one round trip ('" + others[0] + "', then '" + others[1]
+                    + "'): 1 PUT, and the stored value is the first pick ('" + stored + "')");
+            else
+                DrvBad("T5-e two SMailFrom picks inside one round trip: " + puts + " PUT(s), stored '" + stored + "'"
+                    + (a && b ? "" : "; a pick did not go through (" + a + ", " + b + ")"));
+            if (MailClient.MailFrom != orig)
+            {
+                DrvSetValue(DrvRec("SMailFrom"), orig);
+                yield return 2.2f;
+            }
+
+            var mr = DrvRec("SMailRelay");
+            if (mr == null) { DrvBad("T5-e the SMailRelay row was not built"); DrvPrefRestore(prefs0, "T5-e"); yield break; }
+            bool seen0 = MailClient.StatusEverSeen, linked0 = MailClient.DiscordLinked, relay0 = MailClient.DiscordRelay;
+            var fNotif = typeof(CompetitiveUI).GetField("notifText", DrvPriv);
+            bool notifOn = Plugin.ShowNotifications != null && Plugin.ShowNotifications.Value;
+            string linkFirst = "Link your Discord first: Home tab -> Get Link Code, then !link YOUR_CODE in Discord.";
+            string wantNotice = I18n.Tr(linkFirst);
+            try
+            {
+                MailClient.StatusEverSeen = true;
+                MailClient.DiscordLinked = false;
+                if (fNotif != null) fNotif.SetValue(null, "");
+                int p0 = settingsPutStubCalls;
+                bool clicked = DrvClick(mr.Track);
+                int p = settingsPutStubCalls - p0;
+                string notice = fNotif != null ? (fNotif.GetValue(null) as string ?? "") : "";
+                bool said = notifOn ? notice == wantNotice : notice.Length == 0;
+                if (clicked && p == 0 && said)
+                    DrvOk("T5-e SMailRelay clicked with no linked Discord: 0 PUTs; "
+                        + (notifOn ? "the notice is the existing one: '" + notice + "'" : "notices are off (SNT), so none is shown"));
+                else
+                    DrvBad("T5-e SMailRelay clicked with no linked Discord: " + p + " PUT(s), the notice '" + notice + "'"
+                        + (clicked ? "" : " (the click did not reach the switch)"));
+            }
+            finally
+            {
+                MailClient.StatusEverSeen = seen0;
+                MailClient.DiscordLinked = linked0;
+            }
+            yield return 2.2f;
+            if (MailClient.DiscordRelay != relay0) MailClient.DiscordRelay = relay0;
+            DrvPrefRestore(prefs0, "T5-e");
+            dirty = true;
+        }
+
+        // --- T5-f: canonical writes and live effects ----------------------
+
+        private static BepInEx.Configuration.ConfigEntryBase DrvCfgEntry(string key)
+        {
+            switch (key)
+            {
+                case "SMenuMus": return Plugin.MenuMusicMode;
+                case "SBloom": return Plugin.BloomStrength;
+                case "SShake": return Plugin.ScreenShakeStrength;
+                case "SHpPrec":
+                    var m = typeof(TabStatsOverlay.HealthPrecisionSetting).GetMethod("Entry", DrvPriv);
+                    return m != null ? m.Invoke(null, null) as BepInEx.Configuration.ConfigEntryBase : null;
+            }
+            return null;
+        }
+
+        /// <summary>The entry's value as the .cfg file on disk holds it (the
+        /// config saves on every set). Only that one line is read out.</summary>
+        private static string DrvCfgOnDisk(BepInEx.Configuration.ConfigEntryBase e)
+        {
+            if (e == null) return "(no entry)";
+            try
+            {
+                string sect = null;
+                foreach (var raw in System.IO.File.ReadAllLines(e.ConfigFile.ConfigFilePath))
+                {
+                    string l = raw.Trim();
+                    if (l.StartsWith("[", StringComparison.Ordinal) && l.EndsWith("]", StringComparison.Ordinal))
+                    {
+                        sect = l.Substring(1, l.Length - 2);
+                        continue;
+                    }
+                    if (sect != e.Definition.Section || l.StartsWith("#", StringComparison.Ordinal)) continue;
+                    int eq = l.IndexOf('=');
+                    if (eq > 0 && l.Substring(0, eq).Trim() == e.Definition.Key) return l.Substring(eq + 1).Trim();
+                }
+            }
+            catch (Exception ex) { return "(unreadable: " + ex.GetType().Name + ")"; }
+            return "(no line)";
+        }
+
+        /// <summary>Every live Bloom the renderer reads (a volume's own profile
+        /// where it has one, else its shared one - never creating one): on or
+        /// off and its intensity. Empty when no volume carries a Bloom.</summary>
+        private static string DrvBloomState()
+        {
+            var parts = new List<string>();
+            try
+            {
+                foreach (var vol in UnityEngine.Object.FindObjectsOfType<UnityEngine.Rendering.PostProcessing.PostProcessVolume>())
+                {
+                    if (vol == null) continue;
+                    var p = vol.HasInstantiatedProfile() ? vol.profile : vol.sharedProfile;
+                    UnityEngine.Rendering.PostProcessing.Bloom b;
+                    if (p == null || !p.TryGetSettings(out b) || b == null) continue;
+                    parts.Add((b.active ? "on " : "off ") + b.intensity.value.ToString("0.###", CultureInfo.InvariantCulture));
+                }
+            }
+            catch (Exception e) { return "(unreadable: " + e.GetType().Name + ")"; }
+            return string.Join(" | ", parts.ToArray());
+        }
+
+        /// <summary>MEDIUM-3 / design T5-f: a segmented click on SMenuMus,
+        /// SBloom, SShake and SHpPrec leaves the canonical id in the .cfg on
+        /// disk, and the live effect has run: the music engine's mode follows
+        /// SMenuMus in the click's own call stack, and the live bloom changes
+        /// with SBloom. SShake and SHpPrec have no apply step (the level is
+        /// read where it is used), so their .cfg line is their assertion.
+        /// Each row is put back.</summary>
+        private static IEnumerator DriveT5f()
+        {
+            foreach (var key in new[] { "SMenuMus", "SBloom", "SShake", "SHpPrec" })
+            {
+                var r = DrvRec(key);
+                if (r == null || r.Kind != SettingsKind.Segmented) { DrvBad("T5-f the " + key + " row was not built as segmented"); continue; }
+                SettingsSwitchSubTab(r.Tab);
+                yield return 0.4f;
+                string orig = DrvValue(r);
+                string target = key == "SMenuMus" ? (orig == "silent" ? "vanilla" : "silent") : DrvAway(r, orig);
+                var cfg = DrvCfgEntry(key);
+                string bloom0 = key == "SBloom" ? DrvBloomState() : null;
+                var mode0 = MusicEngine.Mode;
+                bool clicked = DrvSetValue(r, target);
+                var mode = MusicEngine.Mode;
+                yield return 0.5f;
+                string disk = DrvCfgOnDisk(cfg);
+                string tag = "T5-f " + key + " " + orig + " -> " + target + ": ";
+                if (clicked && disk == target) DrvOk(tag + "the .cfg on disk holds '" + disk + "', the canonical id");
+                else DrvBad(tag + "the .cfg on disk holds '" + disk + "', want the canonical id '" + target + "'" + (clicked ? "" : " (the click did not land)"));
+                if (key == "SMenuMus")
+                {
+                    var wantMode = target == "silent" ? MusicEngine.MusicMode.MutedByChoice : MusicEngine.MusicMode.Vanilla;
+                    if (mode == wantMode) DrvOk(tag + "the music engine's mode is " + mode + " in the click's own call stack (was " + mode0 + ")");
+                    else DrvBad(tag + "the music engine's mode is " + mode + " in the click's own call stack (was " + mode0 + "), want " + wantMode);
+                }
+                else if (key == "SBloom")
+                {
+                    string bloom1 = DrvBloomState();
+                    if (string.IsNullOrEmpty(bloom0)) DrvNote(tag + "no volume in this scene carries a Bloom, so the live half is not observable here");
+                    else if (bloom1 != bloom0) DrvOk(tag + "the live bloom changed: " + bloom0 + " -> " + bloom1);
+                    else DrvBad(tag + "the live bloom did not change: " + bloom0);
+                }
+                else DrvNote(tag + "no apply step; the level is read where it is used");
+                DrvSetValue(DrvRec(key), orig);
+                yield return 0.5f;
+                string back = DrvCfgOnDisk(cfg);
+                if (back == orig) DrvNote(tag + "put back ('" + back + "' on disk)");
+                else DrvBad(tag + "not put back: the .cfg holds '" + back + "', want '" + orig + "'");
+            }
+        }
+
+        // --- T5-g: reset scope, per tab, the effect half ------------------
+
+        /// <summary>Design section 6.4's per-tab reset sets on the LANE tree,
+        /// stated here rather than read from the descriptors the reset uses.</summary>
+        private static readonly Dictionary<string, string[]> DrvLaneResetSets = new Dictionary<string, string[]>
+        {
+            { "ingame", new[] { "SBlkDbg", "SHpPrec", "SInpOv", "SLagNotice", "SPing" } },
+            { "chatmail", new[] { "SChatTtl", "SIgChat", "SNT" } },
+            { "sound", new[] { "SMenuMus", "SMusCredit", "SMuteBg" } },
+            { "visuals", new[] { "SAnimCos", "SBloom", "SChromAb", "SCursor", "SLight", "SPColor", "SShad", "SShake", "STrail" } },
+            { "perf", new[] { "SDeepIdle", "SFPS", "SFPSCap", "SPerf_BulletCap", "SPerf_EdgeBn", "SPerf_HitSnd", "SPerf_Master",
+                              "SPerf_Menu", "SPerf_OOB", "SPerf_PoolInit", "SPerf_Stun" } },
+            { "langmenus", new[] { "SHeavyFont", "SInactiveLb" } },
+            { "privacy", new string[0] },
+        };
+
+        /// <summary>Rows T5-g does not set by hand, and why: a server row with
+        /// no test stub would send a request; the relay needs a linked Discord
+        /// (T5-e covers its refusal); the consent switch changes what the mod
+        /// reports; the card preset's refresh re-renders the card portrait.</summary>
+        private static readonly string[] DrvHandSetSkip =
+            { "SPrefSC", "SAllowSpec", "SAppOff", "SPcAnn", "SPcPub", "SShowDc", "SMailRelay", "SCT", "SPcPre" };
+
+        private static readonly string[] DrvPerfIds = { "Stun", "OOB", "HitSnd", "EdgeBn", "Menu", "BulletCap", "PoolInit" };
+
+        private static BepInEx.Configuration.ConfigEntry<bool> DrvPerfEntry(string id)
+        {
+            switch (id)
+            {
+                case "Stun": return Plugin.PerfStunPlayerNullGuard;
+                case "OOB": return Plugin.PerfDespawnOffscreenBullets;
+                case "HitSnd": return Plugin.PerfSwallowHitSoundNREs;
+                case "EdgeBn": return Plugin.PerfSwallowEdgeBounceNREs;
+                case "Menu": return Plugin.PerfSkipMenuUpdateInMatch;
+                case "BulletCap": return Plugin.PerfBulletHitParticleCap;
+                case "PoolInit": return Plugin.PerfClampObjectPoolInit;
+            }
+            return null;
+        }
+
+        /// <summary>The mail status T5-g saw when it last set SMailFrom by
+        /// hand. The status poll (MailClient.DoPoll, every 60 s) stores the
+        /// server's mail_from; while a test runs the PUT reaches a stub, so
+        /// the server keeps the value as found and a poll puts it back.</summary>
+        private static object mailSetLast;
+
+        /// <summary>Whether a mail status poll has answered since `seen` was
+        /// read: each answer is a new MailClient.Last.</summary>
+        private static bool DrvMailPolledSince(object seen)
+        {
+            return !ReferenceEquals(MailClient.Last, seen);
+        }
+
+        /// <summary>Why a control is not active in the hierarchy: no control,
+        /// a destroyed one, its own flag, or the nearest inactive parent.</summary>
+        private static string DrvWhyHidden(GameObject go)
+        {
+            if ((object)go == null) return "no control";
+            if (go == null) return "the control was destroyed";
+            if (!go.activeSelf) return "the control itself is inactive";
+            var t = go.transform.parent;
+            while (t != null)
+            {
+                if (!t.gameObject.activeSelf) return "parent " + t.gameObject.name + " is inactive";
+                t = t.parent;
+            }
+            return "active in the hierarchy";
+        }
+
+        /// <summary>Set a row through its own control and wait out whatever
+        /// the write started (a page rebuild, a stubbed PUT).</summary>
+        private static IEnumerator DrvSetAndSettle(string key, string v, List<string> failed)
+        {
+            var r = DrvRec(key);
+            if (r == null || DrvValue(r) == v) yield break;
+            SettingsSwitchSubTab(r.Tab);
+            if (!DrvSetValue(r, v)) { failed.Add(key); yield break; }
+            yield return 0.35f;
+            if (key == "SLang") yield return DrvSettle(2.5f);
+            else if (key == "SHeavyFont") yield return DrvSettle(1.0f);
+            else if (key == "SMailFrom") yield return 2.0f;
+        }
+
+        /// <summary>MEDIUM-3 / design T5-g, the effect half on the built
+        /// client. Every row that can be is first set away from its
+        /// recommendation through its own control. Then, tab by tab, the
+        /// footer's Reset and Confirm are clicked and the rows whose value
+        /// changed are read back: the changed set must be exactly the tab's
+        /// set in design 6.4 (lane tree, stated above), each changed row must
+        /// hold its reset operand, and the tab's live effect must have run -
+        /// the chat-mute publish in Confirm's own call stack (Chat and mail),
+        /// the music engine's mode in it (Sound), the live bloom (Visuals),
+        /// each performance patch's gate (Performance), the page rebuilt with
+        /// the heavy font (Language and menus); Privacy's reset writes nothing.
+        /// Every row and the page's PlayerPrefs are put back afterwards.</summary>
+        private static IEnumerator DriveT5g()
+        {
+            yield return DrvSettle(0.6f);
+            var prefs0 = DrvPrefState();
+            var orig = DrvSnapshot();
+            var order = new List<string>();
+            foreach (var d in SettingsDescriptors.All)
+                if (orig.ContainsKey(d.Key) && d.Key != "SLang" && d.Key != "SHeavyFont") order.Add(d.Key);
+            order.Add("SLang");
+            order.Add("SHeavyFont");
+            var handSet = new List<string>();
+            var skipped = new List<string>();
+            var failed = new List<string>();
+            foreach (var key in order)
+            {
+                if (!orig.ContainsKey(key)) continue;
+                if (Array.IndexOf(DrvHandSetSkip, key) >= 0) { skipped.Add(key); continue; }
+                string rec = DrvOperand(SettingsDescriptorWriters.RecommendedOperand(key));
+                string away = rec != null ? DrvAway(DrvRec(key), rec) : null;
+                if (away == null) { skipped.Add(key); continue; }
+                yield return DrvSetAndSettle(key, away, failed);
+                if (key == "SMailFrom") mailSetLast = MailClient.Last;
+                handSet.Add(key);
+            }
+            yield return DrvSettle(1.0f);
+            var cur = DrvSnapshot();
+            var notAway = new List<string>();
+            foreach (var key in handSet)
+            {
+                string v;
+                if (!cur.TryGetValue(key, out v) || v == DrvOperand(SettingsDescriptorWriters.RecommendedOperand(key))) notAway.Add(key);
+            }
+            if (notAway.Contains("SMailFrom") && DrvMailPolledSince(mailSetLast))
+            {
+                notAway.Remove("SMailFrom");
+                DrvNote("T5-g SMailFrom went back to the server's value with a mail status poll that answered after it was set"
+                    + " (its PUT reached the stub, so the server still holds the value as found); it is set again before its tab's reset");
+            }
+            if (notAway.Count == 0 && failed.Count == 0)
+                DrvNote("T5-g " + handSet.Count + " rows set away from their recommendation; not set by hand: " + DrvList(skipped));
+            else DrvBad("T5-g rows not away from their recommendation: " + DrvList(notAway) + "; set failed: " + DrvList(failed));
+
+            int sum = 0;
+            for (int tab = 0; tab < SETTINGS_TABS; tab++)
+            {
+                string home = SettingsModel.SubTabHomes[tab];
+                string tag = "T5-g " + home + ": ";
+                string[] wantSet;
+                if (!DrvLaneResetSets.TryGetValue(home, out wantSet)) { DrvBad(tag + "no stated set for this sub-tab"); continue; }
+                yield return DrvOpenSettings();
+                yield return DrvSettle(1.0f);
+                SettingsSwitchSubTab(tab);
+                yield return 0.4f;
+                var drift = new List<string>();
+                foreach (var key in handSet)
+                {
+                    var hr = DrvRec(key);
+                    if (hr != null && hr.Tab == tab && DrvValue(hr) == DrvOperand(SettingsDescriptorWriters.RecommendedOperand(key))) drift.Add(key);
+                }
+                if (drift.Contains("SMailFrom") && DrvMailPolledSince(mailSetLast))
+                {
+                    drift.Remove("SMailFrom");
+                    yield return DrvSetAndSettle("SMailFrom", DrvAway(DrvRec("SMailFrom"), "everyone"), failed);
+                    mailSetLast = MailClient.Last;
+                    var mr = DrvRec("SMailFrom");
+                    if (mr != null && DrvValue(mr) != "everyone") DrvNote(tag + "SMailFrom set again before the reset ('" + DrvValue(mr) + "'): a mail status poll had put back the server's value");
+                    else drift.Add("SMailFrom");
+                    yield return DrvOpenSettings();
+                    yield return DrvSettle(1.0f);
+                    SettingsSwitchSubTab(tab);
+                    yield return 0.4f;
+                }
+                if (drift.Count > 0) DrvBad(tag + "rows set by hand are back at their recommendation before the reset: " + DrvList(drift));
+                object mail0 = MailClient.Last;
+                int put0 = settingsPutStubCalls;
+                var before = DrvSnapshot();
+                string bloom0 = home == "visuals" ? DrvBloomState() : null;
+                int g0 = settingsBuildGen;
+                bool armClicked = DrvClick(setResetBtn);
+                bool armed = settingsResetArmed;
+                bool confirmAtArm = setResetConfirmBtn != null && setResetConfirmBtn.activeInHierarchy;
+                yield return 0.3f;
+                bool confirmShown = setResetConfirmBtn != null && setResetConfirmBtn.activeInHierarchy;
+                string hiddenWhy = confirmShown ? null : DrvWhyHidden(setResetConfirmBtn) + "; at the arm click " + (confirmAtArm ? "shown" : "hidden")
+                    + "; open " + isOpen + ", built " + pageBuilt + ", tab " + currentTab + ", sub-tab " + settingsSubTab
+                    + ", armed now " + settingsResetArmed + ", builds since " + (settingsBuildGen - g0);
+                int pub0 = CompetitiveUI.chatMutePublishCalls;
+                bool confirmClicked = DrvClick(setResetConfirmBtn);
+                var mode = MusicEngine.Mode;
+                int pubRuns = CompetitiveUI.chatMutePublishCalls - pub0, pubWant = CompetitiveUI.chatMutePublishLastWant;
+                var gates = new List<string>();
+                foreach (var id in DrvPerfIds) gates.Add(id + "=" + (PerfGate.Check(DrvPerfEntry(id)) ? "on" : "off"));
+                yield return DrvSettle(1.0f);
+                var after = DrvSnapshot();
+                var written = DrvChanged(before, after);
+                int puts = settingsPutStubCalls - put0;
+                if (written.Contains("SMailFrom") && puts == 0 && DrvMailPolledSince(mail0))
+                {
+                    written.Remove("SMailFrom");
+                    DrvNote(tag + "SMailFrom moved with a mail status poll that answered inside the window, and no mail PUT was made:"
+                        + " the server's value, not a write by the reset");
+                }
+                else if (puts > 0) DrvNote(tag + "the reset made " + puts + " mail PUT(s)");
+                var want = new List<string>(wantSet);
+                want.Sort(StringComparer.Ordinal);
+                sum += written.Count;
+                if (home == "privacy")
+                {
+                    if (!armed && !confirmShown && written.Count == 0)
+                        DrvOk(tag + "Reset does not arm on Privacy (no Confirm shown) and 0 rows changed");
+                    else DrvBad(tag + "Reset armed " + armed + ", Confirm " + (confirmShown ? "shown" : "hidden") + ", changed " + DrvList(written) + ", want none");
+                    continue;
+                }
+                if (!armClicked || !armed || !confirmClicked || !confirmShown)
+                {
+                    DrvBad(tag + "the footer did not arm and confirm (Reset clicked " + armClicked + ", armed " + armed
+                        + ", Confirm shown " + confirmShown + ", clicked " + confirmClicked + ")"
+                        + (hiddenWhy != null ? "; Confirm hidden: " + hiddenWhy : ""));
+                    continue;
+                }
+                if (string.Join(",", written.ToArray()) == string.Join(",", want.ToArray()))
+                    DrvOk(tag + "the changed set is exactly the tab's " + want.Count + ": " + DrvList(written));
+                else
+                    DrvBad(tag + "changed " + DrvList(written) + ", want exactly " + DrvList(want));
+                var wrongValue = new List<string>();
+                foreach (var key in written)
+                {
+                    string op = DrvOperand(SettingsDescriptorWriters.RecommendedOperand(key));
+                    string v;
+                    if (op == null || !after.TryGetValue(key, out v) || v != op)
+                        wrongValue.Add(key + "=" + (after.ContainsKey(key) ? after[key] : "?") + " (operand " + (op ?? "none") + ")");
+                }
+                if (wrongValue.Count == 0) DrvOk(tag + "every changed row holds its reset operand");
+                else DrvBad(tag + "rows not at their operand: " + DrvList(wrongValue));
+                switch (home)
+                {
+                    case "chatmail":
+                        if (pubRuns >= 1 && pubWant == 0) DrvOk(tag + "the SIgChat write published marker 0 in Confirm's own call stack (" + pubRuns + " run)");
+                        else DrvBad(tag + "the chat-mute publisher ran " + pubRuns + " time(s) in Confirm's call stack, marker " + pubWant + "; want at least 1 run, marker 0");
+                        break;
+                    case "sound":
+                        if (mode == MusicEngine.MusicMode.Vanilla) DrvOk(tag + "the music engine is in " + mode + " in Confirm's own call stack (SMenuMus vanilla)");
+                        else DrvBad(tag + "the music engine is in " + mode + " in Confirm's call stack, want Vanilla (SMenuMus vanilla)");
+                        break;
+                    case "visuals":
+                        string bloom1 = DrvBloomState();
+                        if (string.IsNullOrEmpty(bloom0)) DrvNote(tag + "no volume in this scene carries a Bloom; the live bloom is not observable here");
+                        else if (bloom1 != bloom0) DrvOk(tag + "the live bloom was re-applied: " + bloom0 + " -> " + bloom1);
+                        else DrvBad(tag + "the live bloom did not change: " + bloom0);
+                        break;
+                    case "perf":
+                        bool gatesOk = true;
+                        foreach (var g in gates)
+                        {
+                            string id = g.Substring(0, g.IndexOf('='));
+                            if (g != id + (id == "OOB" ? "=off" : "=on")) gatesOk = false;
+                        }
+                        if (gatesOk) DrvOk(tag + "each patch's live gate after Confirm: " + DrvList(gates) + " (the master on, OOB off, the rest on)");
+                        else DrvBad(tag + "patch gates after Confirm " + DrvList(gates) + "; want the master on, OOB off, the rest on");
+                        break;
+                    case "langmenus":
+                        int rebuilds = settingsBuildGen - g0;
+                        string font = after.ContainsKey("SHeavyFont") ? after["SHeavyFont"] : "?";
+                        if (rebuilds >= 1 && font == "True") DrvOk(tag + "the heavy font is on and the page was rebuilt after the reset (" + rebuilds + " build(s))");
+                        else DrvBad(tag + "heavy font " + font + ", " + rebuilds + " rebuild(s) after the reset");
+                        break;
+                }
+            }
+            DrvNote("T5-g rows changed across the seven resets: " + sum + " (the sum of the seven sets, for information only)");
+
+            // Put every row back, the two rebuilding rows last.
+            yield return DrvOpenSettings();
+            yield return DrvSettle(0.6f);
+            var back = new List<string>();
+            foreach (var key in handSet) if (key != "SLang" && key != "SHeavyFont") back.Add(key);
+            if (handSet.Contains("SLang")) back.Add("SLang");
+            if (handSet.Contains("SHeavyFont")) back.Add("SHeavyFont");
+            var failedBack = new List<string>();
+            foreach (var key in back) yield return DrvSetAndSettle(key, orig[key], failedBack);
+            yield return DrvSettle(1.0f);
+            var fin = DrvSnapshot();
+            var notBack = new List<string>();
+            foreach (var key in handSet) { string v; if (!fin.TryGetValue(key, out v) || v != orig[key]) notBack.Add(key); }
+            if (notBack.Count == 0) DrvNote("T5-g all " + handSet.Count + " rows set by hand are back at their values as found");
+            else DrvBad("T5-g rows not put back: " + DrvList(notBack));
+            DrvPrefRestore(prefs0, "T5-g");
+        }
+
+        // --- T5-h: mechanics unchanged ------------------------------------
+
+        private static int DrvPerfRows(out int active)
+        {
+            int n = 0;
+            active = 0;
+            foreach (var kv in settingsByKey)
+            {
+                if (!kv.Key.StartsWith("SPerf_", StringComparison.Ordinal) || kv.Value.Row == null) continue;
+                n++;
+                if (kv.Value.Row.activeInHierarchy) active++;
+            }
+            return n;
+        }
+
+        /// <summary>MEDIUM-3 / design T5-h, four mechanics: the Performance
+        /// disclosure collapses and re-expands its eight rows; one SDBtn click
+        /// hides SDBtn and shows SDCBtn and SDXBtn; the delete row is the last
+        /// child of the Privacy body and its two buttons keep their two reds;
+        /// one drag of SChatTtl from stop 0 to stop 5, driven through the
+        /// slider component's own value one frame at a time, calls the row's
+        /// writer (Plugin.SetChatOverlaySeconds, the one writer of
+        /// UI/ChatOverlaySeconds) at most six times, each storing a
+        /// CHAT_TTL_CYCLE value. Everything is put back.</summary>
+        private static IEnumerator DriveT5h()
+        {
+            // (1) the disclosure
+            var ph = DrvRec("SPerfH");
+            if (ph == null || ph.Glyph == null) { DrvBad("T5-h the SPerfH row was not built"); yield break; }
+            SettingsSwitchSubTab(ph.Tab);
+            yield return 0.4f;
+            bool open0 = _perfSectionOpen;
+            if (!_perfSectionOpen) { DrvClick(DrvRec("SPerfH").Glyph); yield return 0.4f; }
+            int a0, a1, a2;
+            int n = DrvPerfRows(out a0);
+            DrvClick(DrvRec("SPerfH").Glyph);
+            yield return 0.4f;
+            DrvPerfRows(out a1);
+            DrvClick(DrvRec("SPerfH").Glyph);
+            yield return 0.4f;
+            DrvPerfRows(out a2);
+            if (n == 8 && a0 == 8 && a1 == 0 && a2 == 8)
+                DrvOk("T5-h two SPerfH clicks: 8 of 8 SPerf_* rows active -> 0 -> 8");
+            else DrvBad("T5-h two SPerfH clicks: " + n + " SPerf_* rows, active " + a0 + " -> " + a1 + " -> " + a2 + " (want 8 -> 0 -> 8)");
+            if (_perfSectionOpen != open0) { DrvClick(DrvRec("SPerfH").Glyph); yield return 0.4f; }
+
+            // (2) SDBtn hides itself and shows SDCBtn + SDXBtn
+            SettingsSwitchSubTab(SettingsModel.SubTabIndex("privacy"));
+            DrvDisarm();
+            yield return 0.6f;
+            bool clicked = DrvClick(deleteBtn);
+            yield return 0.6f;
+            bool dA = deleteBtn != null && deleteBtn.activeSelf, cA = confirmDeleteBtn != null && confirmDeleteBtn.activeSelf,
+                 xA = cancelDelBtn != null && cancelDelBtn.activeSelf;
+            if (clicked && deleteArmed && !dA && cA && xA) DrvOk("T5-h one SDBtn click: SDBtn hidden, SDCBtn and SDXBtn shown");
+            else DrvBad("T5-h one SDBtn click: armed " + deleteArmed + ", SDBtn " + (dA ? "shown" : "hidden") + ", SDCBtn "
+                + (cA ? "shown" : "hidden") + ", SDXBtn " + (xA ? "shown" : "hidden") + " (want hidden, shown, shown)");
+            DrvDisarm();
+            yield return 0.6f;
+
+            // (3) the delete row is last on Privacy, in its two reds
+            var sdr = DrvRec("SDR");
+            Transform tr = sdr != null && sdr.Row != null ? sdr.Row.transform : null;
+            string parent = tr != null && tr.parent != null ? tr.parent.name : "?";
+            int idx = tr != null ? tr.GetSiblingIndex() : -1, last = tr != null && tr.parent != null ? tr.parent.childCount - 1 : -2;
+            Color dc = UIFactory.GetImageColor(deleteBtn), cc = UIFactory.GetImageColor(confirmDeleteBtn);
+            Color wantD = new Color(0.45f, 0.18f, 0.18f, 0.9f), wantC = new Color(0.7f, 0.15f, 0.15f, 0.95f);
+            string seen = "SDR is child " + idx + " of " + (last + 1) + " under " + parent + "; SDBtn " + DrvColor(dc) + ", SDCBtn " + DrvColor(cc);
+            if (parent == "SubPrivacy" && idx == last && DrvSameColor(dc, wantD) && DrvSameColor(cc, wantC)) DrvOk("T5-h " + seen);
+            else DrvBad("T5-h " + seen + " (want the last child of SubPrivacy, " + DrvColor(wantD) + " and " + DrvColor(wantC) + ")");
+
+            // (4) one slider drag, stop 0 -> stop 5
+            var sl = DrvRec("SChatTtl");
+            Component slider = null;
+            if (sl != null && sl.Slider != null && sl.Slider.go != null)
+                foreach (var c in sl.Slider.go.GetComponents<Component>())
+                    if (c != null && c.GetType().FullName == "UnityEngine.UI.Slider") slider = c;
+            var pVal = slider != null ? slider.GetType().GetProperty("value") : null;
+            if (sl == null || pVal == null || sl.Stops == null || sl.Stops.Length != 6) { DrvBad("T5-h the SChatTtl slider was not built as six stops"); yield break; }
+            SettingsSwitchSubTab(sl.Tab);
+            yield return 0.4f;
+            int idx0 = Mathf.Clamp(sl.Index(), 0, sl.Stops.Length - 1);
+            SettingsSetSliderIndex(sl, 0);
+            yield return 0.3f;
+            var set0 = sl.SetStop;
+            int writes = 0;
+            var stored = new List<string>();
+            var outside = new List<string>();
+            sl.SetStop = x =>
+            {
+                writes++;
+                if (set0 != null) set0(x);
+                float s = Plugin.ChatOverlaySeconds != null ? Plugin.ChatOverlaySeconds.Value : -1f;
+                stored.Add(DrvNum(s));
+                if (Array.IndexOf(Plugin.CHAT_TTL_CYCLE, s) < 0) outside.Add(DrvNum(s));
+            };
+            const int frames = 40;
+            try
+            {
+                for (int fr = 1; fr <= frames; fr++)
+                {
+                    pVal.SetValue(slider, fr / (float)frames, null);
+                    yield return 0f;
+                }
+            }
+            finally { sl.SetStop = set0; }
+            int end = Mathf.Clamp(sl.Index(), 0, sl.Stops.Length - 1);
+            if (writes <= 6 && outside.Count == 0 && end == 5)
+                DrvOk("T5-h one drag of SChatTtl from stop 0 to stop 5 over " + frames + " frames: " + writes + " writer call(s), stored "
+                    + DrvList(stored) + ", each a CHAT_TTL_CYCLE value");
+            else DrvBad("T5-h one drag of SChatTtl over " + frames + " frames: " + writes + " writer call(s) (want at most 6), outside the cycle "
+                + DrvList(outside) + ", ended at stop " + end + " (want 5)");
+            SettingsSetSliderIndex(DrvRec("SChatTtl"), idx0);
+            yield return 0.3f;
+        }
+
+        // --- T7: the exact stored targets ----------------------------------
+
+        /// <summary>MEDIUM-3 / design T7 (a) and (c): after choosing Arrow in
+        /// SCursor, cr_cursor_shape reads exactly "arrow" (Shapes[1]); after
+        /// choosing Nobody in SMailFrom (its PUT answered by the stub),
+        /// CR_Mail_From_&lt;steamid&gt; reads exactly "nobody". An exact
+        /// target, never "changed": the mail case starts from "played", stored
+        /// directly, so a write that changed the value to anything else would
+        /// pass a changed-check and still fail here. Both prefs are put back
+        /// exactly.</summary>
+        private static IEnumerator DriveT7()
+        {
+            var prefs0 = DrvPrefState();
+            var cr = DrvRec("SCursor");
+            if (cr == null) { DrvBad("T7 the SCursor row was not built"); yield break; }
+            SettingsSwitchSubTab(cr.Tab);
+            yield return 0.4f;
+            if (DrvValue(cr) == "arrow") { DrvSetValue(cr, "dot"); yield return 0.4f; }
+            string p0 = DrvPrefRead("cr_cursor_shape");
+            bool picked = DrvSetValue(DrvRec("SCursor"), "arrow");
+            string pref = DrvPrefRead("cr_cursor_shape");
+            if (picked && pref == "arrow") DrvOk("T7-a SCursor -> Arrow: cr_cursor_shape reads 'arrow' exactly (Shapes[1])");
+            else DrvBad("T7-a SCursor -> Arrow: cr_cursor_shape reads " + (pref == null ? "nothing" : "'" + pref + "'") + ", want exactly 'arrow'"
+                + (pref != p0 ? " - a changed-check would have passed" : ""));
+            yield return 0.4f;
+
+            var mf = DrvRec("SMailFrom");
+            if (mf == null) { DrvBad("T7 the SMailFrom row was not built"); DrvPrefRestore(prefs0, "T7"); yield break; }
+            SettingsSwitchSubTab(mf.Tab);
+            yield return 0.4f;
+            MailClient.MailFrom = "played";
+            dirty = true;
+            yield return 0.4f;
+            bool p2 = DrvSetValue(DrvRec("SMailFrom"), "nobody");
+            yield return 2.2f;
+            string mpref = DrvPrefRead(MailClient.PrefKey("From"));
+            if (p2 && mpref == "nobody")
+                DrvOk("T7-c SMailFrom played -> Nobody, its PUT answered by the stub: CR_Mail_From_<steamid> reads 'nobody' exactly, a member of MAIL_FROM_VALUES");
+            else DrvBad("T7-c SMailFrom played -> Nobody: CR_Mail_From_<steamid> reads " + (mpref == null ? "nothing" : "'" + mpref + "'")
+                + ", want exactly 'nobody'" + (mpref != "played" ? " - a changed-check would have passed" : ""));
+            DrvPrefRestore(prefs0, "T7");
+            dirty = true;
+        }
+
+        /// <summary>Design T7 (b), the first launch. The previous value must
+        /// exist: a missing Save() leaves a stored key stale, never absent,
+        /// so when the pref holds no shape id this launch first stores 'dot'
+        /// with a saved write, as on a seat that had set a cursor shape. Then
+        /// the SCursor row picks another shape, and the runner ends the
+        /// process with no graceful quit. The second launch
+        /// ("t7r-&lt;picked&gt;-&lt;previous&gt;-&lt;found&gt;") reads the
+        /// pref the killed process left and puts back what this launch
+        /// found.</summary>
+        private static IEnumerator DriveT7b()
+        {
+            var cr = DrvRec("SCursor");
+            if (cr == null) { DrvBad("T7-b the SCursor row was not built"); yield break; }
+            SettingsSwitchSubTab(cr.Tab);
+            yield return 0.4f;
+            string found = DrvPrefRead("cr_cursor_shape");
+            string prev = found;
+            if (prev == null || Array.IndexOf(CursorColorCosmetic.Shapes, prev) < 0)
+            {
+                prev = "dot";
+                PlayerPrefs.SetString("cr_cursor_shape", prev);
+                PlayerPrefs.Save();
+                DrvNote("T7-b the pref held " + (found == null ? "nothing" : "'" + found + "'")
+                    + "; 'dot' is stored first with a saved write, as on a seat that had set a cursor shape");
+            }
+            string target = prev == "arrow" ? "crosshair" : "arrow";
+            bool picked = DrvSetValue(cr, target);
+            DrvNote("T7-b the previous value is '" + prev + "'; the SCursor row picked '" + target + "' ("
+                + (picked ? "written" : "NOT written") + "); the runner ends the process next, with no graceful quit;"
+                + " read it back with t7r-" + target + "-" + prev + "-" + (found ?? "absent"));
+        }
+
+        /// <summary>Design T7 (b), the second launch: the pref the killed
+        /// process left must hold exactly the picked shape; a pick that was
+        /// never saved leaves exactly the previous value. Then what the first
+        /// launch found is put back ("absent": not stored).</summary>
+        private static IEnumerator DriveT7r(string arg)
+        {
+            var parts = arg.Split('-');
+            string want = parts[0], prev = parts.Length > 1 ? parts[1] : "", found = parts.Length > 2 ? parts[2] : "";
+            string now = DrvPrefRead("cr_cursor_shape");
+            string seen = now == null ? "nothing" : "'" + now + "'";
+            if (now == want) DrvOk("T7-b read-back after the hard kill: cr_cursor_shape holds exactly '" + want + "', the shape picked before it");
+            else DrvBad("T7-b read-back after the hard kill: cr_cursor_shape holds " + seen + ", want exactly '" + want + "'"
+                + (now == prev ? " - exactly the previous value '" + prev + "': the pick was never saved" : ""));
+            if (found == "absent") { if (now != null) PlayerPrefs.DeleteKey("cr_cursor_shape"); }
+            else if (found.Length > 0 && now != found)
+            {
+                var cr = DrvRec("SCursor");
+                if (cr != null) { SettingsSwitchSubTab(cr.Tab); yield return 0.4f; DrvSetValue(DrvRec("SCursor"), found); }
+                if (DrvPrefRead("cr_cursor_shape") != found) PlayerPrefs.SetString("cr_cursor_shape", found);
+            }
+            try { PlayerPrefs.Save(); } catch { }
+            yield return 0.3f;
+            string after = DrvPrefRead("cr_cursor_shape");
+            DrvNote("T7-b put back: cr_cursor_shape holds " + (after == null ? "nothing" : "'" + after + "'"));
+        }
+
+        private const string DrvProbeKey = "cr_item13_ppwt";
+
+        /// <summary>Design T7 (b)'s premise, probed: one PlayerPrefs write
+        /// with no Save(), then this process ends in the same frame, so no
+        /// other code runs between the write and the end. "ppwr", in the next
+        /// launch, reads the key back and removes it. The note goes out 3 s
+        /// before the write: the log file is flushed on a timer, and a line
+        /// written in the frame of the end never reaches it.</summary>
+        private static IEnumerator DrivePpwt()
+        {
+            if (PlayerPrefs.HasKey(DrvProbeKey)) { PlayerPrefs.DeleteKey(DrvProbeKey); PlayerPrefs.Save(); yield return 0.5f; }
+            DrvNote("PPWT " + DrvProbeKey + " is " + (PlayerPrefs.HasKey(DrvProbeKey) ? "STILL stored" : "not stored")
+                + "; in 3 s this writes 'unsaved' with no Save() and ends this process in the same frame");
+            yield return 3f;
+            PlayerPrefs.SetString(DrvProbeKey, "unsaved");
+            System.Diagnostics.Process.GetCurrentProcess().Kill();
+        }
+
+        private static IEnumerator DrivePpwr()
+        {
+            string v = DrvPrefRead(DrvProbeKey);
+            DrvNote("PPWR after the same-frame end: " + DrvProbeKey + " "
+                + (v == null ? "is not stored: the unsaved write was lost" : "holds '" + v + "': the write reached the store with no Save()"));
+            PlayerPrefs.DeleteKey(DrvProbeKey);
+            PlayerPrefs.Save();
+            yield return 0.3f;
+            DrvNote("PPWR removed " + DrvProbeKey + ": " + (PlayerPrefs.HasKey(DrvProbeKey) ? "STILL stored" : "not stored"));
+        }
+
+        // --- Witness captures (design section 11; round-2 brief section 5) ---
+        //
+        // Named-only scenarios. A capture is a CAPTURE line naming the screen
+        // size; the runner takes it with the pinned screenshot runner and crops
+        // it to the game's client area. The driven pointer is parked off the
+        // list for the whole scenario, so wherever the real cursor rests it
+        // cannot pick the row the pane shows (the pane follows the pinned row,
+        // then the hovered row, then the focused row). Every scenario puts back
+        // what it moved: the resolution with the game's resolution prefs read
+        // back, the language with the cfg and PlayerPrefs hashed before and
+        // after, a stepped value through its own row.
+
+        private static readonly string[] DrvLocales = { "es", "ru", "uk", "sv" };
+        private static string drvScreenPrefs0 = "";
+        private static bool drvForceRows;
+
+        /// <summary>The driven pointer: while set, the page's hover poll reads
+        /// this screen point in place of Input.mousePosition.</summary>
+        private static bool settingsDriveMouseSet;
+        private static Vector2 settingsDriveMouse;
+
+        /// <summary>W3b, W3c, W10: the three optional rows under the title
+        /// (server status, standing alert, tournament game) held active in
+        /// place of their refreshers (RefreshCurrentTab), with witness text;
+        /// nothing is fetched for them meanwhile.</summary>
+        internal static bool SettingsWitnessRows => drvForceRows && SettingsDriveRunning;
+
+        internal static void SettingsWitnessShowRows()
+        {
+            if (srvStatusRow != null)
+            {
+                UIFactory.SetTextRaw(txtServerStatus, "<color=#FF8866>* Server reconnecting... (witness row)</color>");
+                srvStatusRow.SetActive(true);
+            }
+            if (alertBannerRow != null)
+            {
+                UIFactory.SetTextRaw(txtAlertBanner, "<color=#FF6055>* [OUTAGE] Witness alert row: a standing alert as long as the banner line carries  <color=#8899AA>- Admin 09-26 12:00 UTC</color></color>");
+                alertBannerRow.SetActive(true);
+            }
+            if (tournamentIndRow != null)
+            {
+                UIFactory.SetTextRaw(txtTournamentGame, "<color=#FFD94D>* SWISS TOURNAMENT GAME - vs opponent  (results auto-recorded)</color>");
+                tournamentIndRow.SetActive(true);
+            }
+        }
+
+        private static string DrvRowsState()
+        {
+            return "SrvRow " + (srvStatusRow != null && srvStatusRow.activeSelf ? "active" : "inactive")
+                + ", AlertRow " + (alertBannerRow != null && alertBannerRow.activeSelf ? "active" : "inactive")
+                + ", TournIndRow " + (tournamentIndRow != null && tournamentIndRow.activeSelf ? "active" : "inactive");
+        }
+
+        private static IEnumerator DrvForceRows(bool on)
+        {
+            drvForceRows = on;
+            if (on) SettingsWitnessShowRows();
+            dirty = true;
+            yield return DrvSettle(0.5f);
+            SettingsForceLayout();
+            SettingsUpdateHint();
+            SettingsForceLayout();
+            DrvNote((on ? "the three optional rows held active: " : "the optional rows back to their own refreshers: ") + DrvRowsState());
+        }
+
+        private static void DrvParkPointer()
+        {
+            settingsDriveMouse = new Vector2(2f, 2f);
+            settingsDriveMouseSet = true;
+            settingsHoverKey = null;
+            settingsPaneDirty = true;
+        }
+
+        private static void DrvPointAt(GameObject go)
+        {
+            if (go == null) return;
+            settingsDriveMouse = SettingsWorldRect(go).center;
+            settingsDriveMouseSet = true;
+        }
+
+        /// <summary>The key the pane renders: the pinned row, else the
+        /// hovered row, else the focused row (SettingsRenderPane).</summary>
+        private static string DrvPaneKey()
+        {
+            string key = settingsPinnedKey ?? settingsHoverKey;
+            if (key == null) { var f = SettingsFocusedRec(); key = f != null ? f.Key : null; }
+            return key;
+        }
+
+        private static string DrvScreenPrefs()
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var k in new[] { "Screenmanager Resolution Width", "Screenmanager Resolution Height", "Screenmanager Fullscreen mode" })
+            {
+                if (sb.Length > 0) sb.Append("; ");
+                sb.Append(k.Substring(14)).Append('=');
+                try { sb.Append(PlayerPrefs.HasKey(k) ? PlayerPrefs.GetInt(k, -1).ToString(CultureInfo.InvariantCulture) : "not stored"); }
+                catch { sb.Append("?"); }
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Ask for a windowed resolution, wait until the game reports
+        /// it (at most 8 s) and the page has settled, and say what it got.</summary>
+        private static IEnumerator DrvResolution(int w, int h)
+        {
+            if (Screen.width != w || Screen.height != h || Screen.fullScreenMode != FullScreenMode.Windowed)
+                Screen.SetResolution(w, h, FullScreenMode.Windowed);
+            float until = Time.unscaledTime + 8f;
+            while (Time.unscaledTime < until && (Screen.width != w || Screen.height != h)) yield return 0.2f;
+            yield return 1.0f;
+            dirty = true;
+            yield return DrvSettle(0.5f);
+            SettingsForceLayout();
+            SettingsUpdateHint();
+            SettingsForceLayout();
+            DrvNote("resolution " + w + "x" + h + " asked: Screen " + Screen.width + "x" + Screen.height + " " + Screen.fullScreenMode
+                + ", display " + Screen.currentResolution.width + "x" + Screen.currentResolution.height
+                + ", canvas scale " + DrvNum(SettingsCanvasScale()) + ", logical canvas height " + DrvNum(SettingsCanvasHeight()));
+        }
+
+        /// <summary>The restore proof: 1920x1080 windowed again, and the
+        /// game's own resolution prefs reading exactly as at the start.</summary>
+        private static IEnumerator DrvResolutionRestore(string tag)
+        {
+            yield return DrvResolution(1920, 1080);
+            string prefs = DrvScreenPrefs();
+            if (Screen.width == 1920 && Screen.height == 1080 && Screen.fullScreenMode == FullScreenMode.Windowed && prefs == drvScreenPrefs0)
+                DrvOk(tag + " restore: Screen 1920x1080 Windowed; the game's resolution prefs read as at the start (" + prefs + ")");
+            else DrvBad(tag + " restore: Screen " + Screen.width + "x" + Screen.height + " " + Screen.fullScreenMode
+                + ", prefs " + prefs + " (at the start: " + drvScreenPrefs0 + ")");
+        }
+
+        /// <summary>Change the mod language through the SLang row's own
+        /// dropdown, then wait for the rebuilt page.</summary>
+        private static IEnumerator DrvLanguage(string loc)
+        {
+            string now = Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "";
+            if (now == loc) yield break;
+            var r = DrvRec("SLang");
+            if (r == null) { DrvBad("the SLang row was not built"); yield break; }
+            SettingsSwitchSubTab(r.Tab);
+            yield return 0.3f;
+            if (!DrvSetValue(r, loc)) { DrvBad("the SLang dropdown did not take '" + loc + "'"); yield break; }
+            yield return DrvSettle(1.0f);
+            DrvNote("language '" + now + "' -> '" + loc + "' through the SLang dropdown; the page reads locale " + I18n.Locale);
+        }
+
+        private static string DrvHex(byte[] data)
+        {
+            byte[] h;
+            using (var sha = System.Security.Cryptography.SHA256.Create()) h = sha.ComputeHash(data);
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 8; i++) sb.Append(h[i].ToString("x2", CultureInfo.InvariantCulture));
+            return sb.ToString();
+        }
+
+        private static string DrvCfgHash()
+        {
+            try { return DrvHex(System.IO.File.ReadAllBytes(Plugin.ModLanguage.ConfigFile.ConfigFilePath)); }
+            catch (Exception e) { return "unreadable (" + e.GetType().Name + ")"; }
+        }
+
+        private static byte[] DrvCfgBytes()
+        {
+            try { return System.IO.File.ReadAllBytes(Plugin.ModLanguage.ConfigFile.ConfigFilePath); }
+            catch { return null; }
+        }
+
+        /// <summary>What the config file stores: every "[Section] Key = value"
+        /// line, sorted; comments and blank lines dropped.</summary>
+        private static List<string> DrvCfgEntries(byte[] raw)
+        {
+            var l = new List<string>();
+            if (raw == null) return l;
+            string sect = "";
+            foreach (var line0 in System.Text.Encoding.UTF8.GetString(raw).Split('\n'))
+            {
+                string line = line0.Trim().TrimStart('\uFEFF');
+                if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal)) continue;
+                if (line.StartsWith("[", StringComparison.Ordinal) && line.EndsWith("]", StringComparison.Ordinal)) { sect = line; continue; }
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                l.Add(sect + " " + line.Substring(0, eq).Trim() + " = " + line.Substring(eq + 1).Trim());
+            }
+            l.Sort(StringComparer.Ordinal);
+            return l;
+        }
+
+        /// <summary>Per "[Section] Key": its place in its section and how many
+        /// comment lines BepInEx wrote right before it. BepInEx writes an entry
+        /// no code has bound yet (its value kept from the file) with no
+        /// description, after the bound ones; a first Bind later in the run
+        /// rewrites the file with that entry's description, in bound order.</summary>
+        private static Dictionary<string, string> DrvCfgLayout(byte[] raw)
+        {
+            var d = new Dictionary<string, string>();
+            if (raw == null) return d;
+            string sect = "";
+            int n = 0, comments = 0;
+            foreach (var line0 in System.Text.Encoding.UTF8.GetString(raw).Split('\n'))
+            {
+                string line = line0.Trim().TrimStart('\uFEFF');
+                if (line.Length == 0) continue;
+                if (line.StartsWith("#", StringComparison.Ordinal)) { comments++; continue; }
+                if (line.StartsWith("[", StringComparison.Ordinal) && line.EndsWith("]", StringComparison.Ordinal)) { sect = line; n = 0; comments = 0; continue; }
+                int eq = line.IndexOf('=');
+                if (eq <= 0) { comments = 0; continue; }
+                d[sect + " " + line.Substring(0, eq).Trim()] = "#" + n + " with " + comments + " comment line(s)";
+                n++;
+                comments = 0;
+            }
+            return d;
+        }
+
+        /// <summary>The config file before and after a witness run: identical
+        /// bytes, or else the stored entries compared one by one and every
+        /// difference named - an entry whose stored line changed (by name,
+        /// never its value) and an entry laid out differently. True when the
+        /// bytes match, or when every stored entry matches and the byte
+        /// difference is accounted for by entries laid out differently.</summary>
+        private static bool DrvCfgRestored(string tag, byte[] raw0, byte[] raw1)
+        {
+            if (raw0 == null || raw1 == null) { DrvNote(tag + " the config file could not be read"); return false; }
+            string h0 = DrvHex(raw0), h1 = DrvHex(raw1);
+            if (h0 == h1) { DrvNote(tag + " config file byte-identical, sha256 " + h1); return true; }
+            var e0 = DrvCfgEntries(raw0);
+            var e1 = DrvCfgEntries(raw1);
+            var s0 = new HashSet<string>(e0);
+            var s1 = new HashSet<string>(e1);
+            var changed = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var x in e0) if (!s1.Contains(x)) changed.Add(x.Substring(0, x.IndexOf(" = ", StringComparison.Ordinal)));
+            foreach (var x in e1) if (!s0.Contains(x)) changed.Add(x.Substring(0, x.IndexOf(" = ", StringComparison.Ordinal)));
+            var l0 = DrvCfgLayout(raw0);
+            var l1 = DrvCfgLayout(raw1);
+            var moved = new List<string>();
+            foreach (var kv in l0)
+            {
+                string other;
+                if (l1.TryGetValue(kv.Key, out other) && other != kv.Value && !changed.Contains(kv.Key))
+                    moved.Add(kv.Key + " (" + kv.Value + " -> " + other + ")");
+            }
+            moved.Sort(StringComparer.Ordinal);
+            string eh0 = DrvHex(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", e0.ToArray())));
+            string eh1 = DrvHex(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", e1.ToArray())));
+            DrvNote(tag + " config file bytes differ (sha256 " + h0 + " -> " + h1 + "): " + e0.Count + " -> " + e1.Count
+                + " stored entries (entries sha256 " + eh0 + " -> " + eh1 + "); " + changed.Count + " stored entr" + (changed.Count == 1 ? "y" : "ies")
+                + " differ" + (changed.Count > 0 ? " (" + string.Join(", ", new List<string>(changed).ToArray()) + ")" : "")
+                + "; " + moved.Count + " laid out differently" + (moved.Count > 0 ? ": " + string.Join("; ", moved.ToArray()) : ""));
+            return changed.Count == 0 && eh0 == eh1 && moved.Count > 0;
+        }
+
+        /// <summary>The PlayerPrefs a witness run can move, by name: PlayerPrefs
+        /// cannot be listed from inside the game, so the hash covers these.</summary>
+        private static readonly string[] DrvWitnessPrefNames =
+            { "cr_cursor_shape", "OPTION_LANGUAGE", "selected-locale", "Screenmanager Resolution Width",
+              "Screenmanager Resolution Height", "Screenmanager Fullscreen mode" };
+
+        private static string DrvPrefHash()
+        {
+            var sb = new System.Text.StringBuilder();
+            var keys = new List<string>(DrvWitnessPrefNames) { MailClient.PrefKey("From"), MailClient.PrefKey("Relay") };
+            foreach (var k in keys)
+            {
+                sb.Append(k).Append('=');
+                try
+                {
+                    if (!PlayerPrefs.HasKey(k)) sb.Append("-");
+                    else sb.Append("i").Append(PlayerPrefs.GetInt(k, int.MinValue).ToString(CultureInfo.InvariantCulture))
+                        .Append("s").Append(PlayerPrefs.GetString(k, ""));
+                }
+                catch { sb.Append("?"); }
+                sb.Append('\n');
+            }
+            return DrvHex(System.Text.Encoding.UTF8.GetBytes(sb.ToString()));
+        }
+
+        /// <summary>One sub-tab shown from its top with its first row focused
+        /// and nothing pinned: the pane shows that row.</summary>
+        private static IEnumerator DrvShowTab(int t)
+        {
+            SettingsSwitchSubTab(t);
+            settingsFocusRow[t] = 0;
+            settingsPinnedKey = null;
+            SettingsUpdateFocusHighlight();
+            settingsPaneDirty = true;
+            SettingsRenderPane();
+            yield return DrvSettle(0.5f);
+            SettingsScrollListTo(1f);
+            yield return 0.2f;
+        }
+
+        private static IEnumerator DrvShootTabs(string prefix)
+        {
+            for (int t = 0; t < SETTINGS_TABS; t++)
+            {
+                yield return DrvShowTab(t);
+                yield return DrvCapture(prefix + "-" + (t + 1) + "-" + SettingsModel.SubTabHomes[t]);
+            }
+        }
+
+        /// <summary>W1: one shot per sub-tab, 1920x1080, en (W11 is the
+        /// Privacy shot's footer).</summary>
+        private static IEnumerator DriveW1()
+        {
+            DrvParkPointer();
+            yield return DrvShootTabs("w1");
+        }
+
+        /// <summary>W2: the seven sub-tabs in es, ru, uk and sv; the cfg and
+        /// the named PlayerPrefs hashed before the first switch and after the
+        /// return to the starting language must match.</summary>
+        private static IEnumerator DriveW2()
+        {
+            DrvParkPointer();
+            string lang0 = Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "";
+            byte[] raw0 = DrvCfgBytes();
+            string cfg0 = raw0 != null ? DrvHex(raw0) : "unreadable", pp0 = DrvPrefHash();
+            DrvNote("W2 before the switches: language '" + lang0 + "', cfg sha256 " + cfg0 + ", PlayerPrefs sha256 " + pp0);
+            foreach (var loc in DrvLocales)
+            {
+                yield return DrvLanguage(loc);
+                yield return DrvShootTabs("w2-" + loc);
+            }
+            yield return DrvLanguage(lang0);
+            yield return 1.0f;
+            byte[] raw1 = DrvCfgBytes();
+            string pp1 = DrvPrefHash();
+            bool cfgBack = DrvCfgRestored("W2", raw0, raw1);
+            if (cfgBack && pp1 == pp0)
+                DrvOk("W2 restore: back on '" + (Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "?") + "'; the config file as above; PlayerPrefs sha256 "
+                    + pp1 + " matches the value before the switches");
+            else DrvBad("W2 restore: the config file " + (cfgBack ? "is restored" : "is NOT restored (see the line above)")
+                + "; PlayerPrefs sha256 " + pp0 + " -> " + pp1);
+        }
+
+        private static string DrvR(float f) { return (Mathf.Round(f * 10f) / 10f).ToString("0.0", CultureInfo.InvariantCulture); }
+
+        /// <summary>W3: the settings panel's geometry in logical canvas units -
+        /// every active RectTransform under it, as its path and its rect in
+        /// the canvas's own space, to 0.1.</summary>
+        private static List<string> DrvLayoutRects()
+        {
+            var l = new List<string>();
+            var panel = tabPanels != null && tabPanels.Length > TAB_SETTINGS ? tabPanels[TAB_SETTINGS] : null;
+            if (panel == null || overlayCanvasGO == null) return l;
+            var root = overlayCanvasGO.transform;
+            var c = new Vector3[4];
+            foreach (var rt in panel.GetComponentsInChildren<RectTransform>(false))
+            {
+                rt.GetWorldCorners(c);
+                Vector3 a = root.InverseTransformPoint(c[0]), b = root.InverseTransformPoint(c[2]);
+                string path = rt.name;
+                for (var p = rt.parent; p != null && p != panel.transform; p = p.parent) path = p.name + "/" + path;
+                l.Add(path + " " + DrvR(a.x) + "," + DrvR(a.y) + "," + DrvR(b.x - a.x) + "," + DrvR(b.y - a.y));
+            }
+            return l;
+        }
+
+        /// <summary>W3: ru at 1920x1080, then at 1280x720 with no IMGUI surface
+        /// up; each sub-tab's layout must be identical in logical units, and
+        /// each is captured at 1280x720.</summary>
+        private static IEnumerator DriveW3()
+        {
+            DrvParkPointer();
+            string lang0 = Plugin.ModLanguage != null ? Plugin.ModLanguage.Value : "";
+            byte[] raw0 = DrvCfgBytes();
+            string pp0 = DrvPrefHash();
+            yield return DrvLanguage("ru");
+            var at1080 = new List<string>[SETTINGS_TABS];
+            for (int t = 0; t < SETTINGS_TABS; t++)
+            {
+                yield return DrvShowTab(t);
+                SettingsForceLayout();
+                at1080[t] = DrvLayoutRects();
+            }
+            yield return DrvResolution(1280, 720);
+            for (int t = 0; t < SETTINGS_TABS; t++)
+            {
+                yield return DrvShowTab(t);
+                SettingsForceLayout();
+                var now = DrvLayoutRects();
+                var diff = new List<string>();
+                for (int i = 0; i < Mathf.Max(now.Count, at1080[t].Count); i++)
+                {
+                    string x = i < at1080[t].Count ? at1080[t][i] : "(none)", y = i < now.Count ? now[i] : "(none)";
+                    if (x != y && diff.Count < 4) diff.Add(x + " | " + y);
+                }
+                string home = SettingsModel.SubTabHomes[t];
+                if (DrvPickerOpen()) DrvBad("W3 " + home + ": a dropdown is open; W3 takes the page only");
+                if (diff.Count == 0 && now.Count > 0)
+                    DrvOk("W3 " + home + ": " + now.Count + " rects at 1280x720 identical to 1920x1080 in logical units (sha256 "
+                        + DrvHex(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", now.ToArray()))) + ")");
+                else DrvBad("W3 " + home + ": " + now.Count + " rects, " + at1080[t].Count + " at 1920x1080; first differences " + DrvList(diff));
+                yield return DrvCapture("w3-" + (t + 1) + "-" + home);
+            }
+            yield return DrvResolutionRestore("W3");
+            yield return DrvLanguage(lang0);
+            yield return 1.0f;
+            bool cfgBack = DrvCfgRestored("W3", raw0, DrvCfgBytes());
+            string pp1 = DrvPrefHash();
+            if (cfgBack && pp1 == pp0) DrvOk("W3 restore: the language back on '" + lang0 + "'; the config file as above; PlayerPrefs sha256 " + pp1 + " as at the start");
+            else DrvBad("W3 restore: the config file " + (cfgBack ? "is restored" : "is NOT restored (see the line above)") + "; PlayerPrefs sha256 " + pp0 + " -> " + pp1);
+        }
+
+        /// <summary>A1's horizontal leg for every row of the active sub-tab,
+        /// named rows added (the blocked senders): each row lies inside the
+        /// list viewport's width.</summary>
+        private static void DrvNoClip(string tag, IEnumerable<GameObject> extra)
+        {
+            int tab = Mathf.Clamp(settingsSubTab, 0, SETTINGS_TABS - 1);
+            float tol = 1.0f * SettingsCanvasScale();
+            Rect vr = SettingsWorldRect(setListViewport);
+            int n = 0;
+            var bad = new List<string>();
+            var gos = new List<GameObject>();
+            foreach (var r in SettingsFocusList(tab)) if (r.Row != null) gos.Add(r.Row);
+            if (extra != null) gos.AddRange(extra);
+            foreach (var go in gos)
+            {
+                if (go == null || !go.activeInHierarchy) continue;
+                Rect rr = SettingsWorldRect(go);
+                n++;
+                if (rr.xMin < vr.xMin - tol || rr.xMax > vr.xMax + tol) bad.Add(go.name);
+            }
+            if (bad.Count == 0) DrvOk(tag + "no clipped row: " + n + " rows inside the viewport's width");
+            else DrvBad(tag + "rows past the viewport's width: " + DrvList(bad));
+        }
+
+        /// <summary>W3b: the seven sub-tabs at 2560x1080 (21:9) with the three
+        /// optional rows active - section 3.1's 506 px worst case - each
+        /// unscrolled, with A5a, A5b and A8 measured.</summary>
+        private static IEnumerator DriveW3b()
+        {
+            DrvParkPointer();
+            bool perf0 = _perfSectionOpen;
+            yield return DrvResolution(2560, 1080);
+            yield return DrvForceRows(true);
+            SettingsExpandTab(SettingsModel.SubTabIndex("perf"));
+            for (int t = 0; t < SETTINGS_TABS; t++)
+            {
+                yield return DrvShowTab(t);
+                DrvMeasureA5A8("W3b ");
+                DrvNoClip("W3b " + SettingsModel.SubTabHomes[t] + ": ", null);
+                SettingsScrollListTo(1f);
+                yield return 0.3f;
+                yield return DrvCapture("w3b-" + (t + 1) + "-" + SettingsModel.SubTabHomes[t]);
+            }
+            DrvPerfSection(perf0);
+            yield return DrvForceRows(false);
+            yield return DrvResolutionRestore("W3b");
+        }
+
+        private static void DrvPerfSection(bool open)
+        {
+            if (_perfSectionOpen == open) return;
+            _perfSectionOpen = open;
+            if (_perfSectionBody != null) _perfSectionBody.SetActive(open);
+            dirty = true;
+        }
+
+        /// <summary>W3c: 32:9 with the three optional rows active, past the
+        /// supported bound. 5120x1440 is asked first and what the display
+        /// allows is logged; the run is at 2560x720, the same 32:9 aspect and
+        /// the same 540 px logical canvas under match-width scaling. A5b's
+        /// control: exactly five observations, named. Performance is captured
+        /// unscrolled and after a scroll to the end.</summary>
+        private static IEnumerator DriveW3c()
+        {
+            DrvParkPointer();
+            bool perf0 = _perfSectionOpen;
+            yield return DrvResolution(5120, 1440);
+            yield return DrvResolution(2560, 720);
+            yield return DrvForceRows(true);
+            SettingsExpandTab(SettingsModel.SubTabIndex("perf"));
+            var obs = new List<string>();
+            int perf = SettingsModel.SubTabIndex("perf");
+            for (int t = 0; t < SETTINGS_TABS; t++)
+            {
+                yield return DrvShowTab(t);
+                DrvMeasureA5A8("W3c ", obs);
+                DrvNoClip("W3c " + SettingsModel.SubTabHomes[t] + ": ", null);
+                if (t != perf) continue;
+                SettingsScrollListTo(1f);
+                yield return 0.3f;
+                yield return DrvCapture("w3c-1-perf-top");
+                SettingsScrollListTo(0f);
+                yield return 0.3f;
+                yield return DrvCapture("w3c-2-perf-end");
+                SettingsScrollListTo(1f);
+            }
+            var want = new List<string> { "ingame", "visuals", "perf", "langmenus", "privacy" };
+            obs.Sort(StringComparer.Ordinal);
+            want.Sort(StringComparer.Ordinal);
+            if (string.Join(",", obs.ToArray()) == string.Join(",", want.ToArray()))
+                DrvOk("W3c A5b's control: exactly five observations at " + Screen.width + "x" + Screen.height + ": " + DrvList(obs));
+            else DrvBad("W3c A5b's control: " + obs.Count + " observation(s) " + DrvList(obs) + ", want exactly " + DrvList(want));
+            DrvPerfSection(perf0);
+            yield return DrvForceRows(false);
+            yield return DrvResolutionRestore("W3c");
+        }
+
+        // blocked senders, as the page paints a server answer (W4, W10)
+        private static readonly FieldInfo DrvBlocksF = typeof(MailUI).GetField("blocks", DrvPriv);
+        private static readonly FieldInfo DrvBlocksExpF = typeof(MailUI).GetField("blocksExpanded", DrvPriv);
+        private static readonly FieldInfo DrvBlocksVerF = typeof(MailUI).GetField("blocksVersion", DrvPriv);
+        private static object drvBlocksSaved;
+        private static bool drvBlocksExpSaved, drvBlocksHeld;
+
+        /// <summary>The blocked-senders list holding n placeholder entries (no
+        /// ids; nothing fetched, nothing sent), expanded; n = 0 is the empty
+        /// answer. DrvPutBackBlocks restores what was there.</summary>
+        private static IEnumerator DrvFakeBlocks(int n)
+        {
+            if (DrvBlocksF == null || DrvBlocksExpF == null || DrvBlocksVerF == null) { DrvBad("the blocked-senders fields were not found"); yield break; }
+            if (!drvBlocksHeld)
+            {
+                drvBlocksSaved = DrvBlocksF.GetValue(null);
+                drvBlocksExpSaved = (bool)DrvBlocksExpF.GetValue(null);
+                drvBlocksHeld = true;
+            }
+            var l = new List<MailClient.Block>();
+            for (int i = 1; i <= n; i++) l.Add(new MailClient.Block { name = "Blocked sender " + i });
+            DrvBlocksF.SetValue(null, l);
+            DrvBlocksExpF.SetValue(null, true);
+            DrvBlocksVerF.SetValue(null, (int)DrvBlocksVerF.GetValue(null) + 1);
+            dirty = true;
+            yield return DrvSettle(0.5f);
+            SettingsForceLayout();
+            SettingsUpdateHint();
+            SettingsForceLayout();
+        }
+
+        private static void DrvPutBackBlocks()
+        {
+            if (!drvBlocksHeld || DrvBlocksF == null) return;
+            DrvBlocksF.SetValue(null, drvBlocksSaved);
+            DrvBlocksExpF.SetValue(null, drvBlocksExpSaved);
+            DrvBlocksVerF.SetValue(null, (int)DrvBlocksVerF.GetValue(null) + 1);
+            drvBlocksHeld = false;
+            dirty = true;
+        }
+
+        private static List<GameObject> DrvBlockRows()
+        {
+            var l = new List<GameObject>();
+            var pr = pageGO != null ? pageGO.transform : null;
+            for (int i = 0; i < 64; i++)
+            {
+                var t = SettingsFindDeep(pr, "SMailBlk" + i);
+                if (t == null) break;
+                l.Add(t.gameObject);
+            }
+            return l;
+        }
+
+        /// <summary>W10: Chat & mail at 2560x1080 with the three optional rows
+        /// active and twelve blocked senders: the hint active, no clipped row,
+        /// and the twelfth sender inside the viewport after a scroll to the end.</summary>
+        private static IEnumerator DriveW10()
+        {
+            DrvParkPointer();
+            int cm = SettingsModel.SubTabIndex("chatmail");
+            yield return DrvResolution(2560, 1080);
+            yield return DrvForceRows(true);
+            yield return DrvShowTab(cm);
+            yield return DrvFakeBlocks(12);
+            var rows = DrvBlockRows();
+            bool hint = setListHint != null && setListHint.activeSelf;
+            if (hint) DrvOk("W10 chatmail: " + rows.Count + " blocked-sender rows painted; the scroll hint is active");
+            else DrvBad("W10 chatmail: " + rows.Count + " blocked-sender rows painted; the scroll hint is INACTIVE");
+            DrvMeasureA5A8("W10 ");
+            DrvNoClip("W10 chatmail: ", rows);
+            SettingsScrollListTo(1f);
+            yield return 0.3f;
+            yield return DrvCapture("w10-1-chatmail-top");
+            SettingsScrollListTo(0f);
+            SettingsForceLayout();
+            yield return 0.3f;
+            Rect vr = SettingsWorldRect(setListViewport);
+            float tol = 1.0f * SettingsCanvasScale();
+            if (rows.Count == 12 && SettingsInside(vr, SettingsWorldRect(rows[11]), tol))
+                DrvOk("W10 chatmail: after a scroll to the end the twelfth sender (SMailBlk11) lies inside the viewport");
+            else DrvBad("W10 chatmail: after a scroll to the end the twelfth sender is " + (rows.Count < 12 ? "missing" : "outside the viewport"));
+            yield return DrvCapture("w10-2-chatmail-end");
+            SettingsScrollListTo(1f);
+            DrvPutBackBlocks();
+            yield return DrvForceRows(false);
+            yield return DrvResolutionRestore("W10");
+        }
+
+        /// <summary>W9 / W9b: the SLang dropdown open, with the picker's own
+        /// geometry (DrawArtistPicker: 540 wide, 118 + list, centred, in
+        /// device pixels) checked inside the screen.</summary>
+        private static IEnumerator DrvShootPicker(string name)
+        {
+            var r = DrvRec("SLang");
+            if (r == null) { DrvBad(name + ": the SLang row was not built"); yield break; }
+            SettingsSelectKey("SLang");
+            yield return DrvSettle(0.3f);
+            if (!DrvClick(r.Face) || !DrvPickerOpen()) { DrvBad(name + ": the SLang dropdown did not open"); yield break; }
+            yield return 0.5f;
+            var fNames = typeof(CompetitiveUI).GetField("artistPickerNames", DrvPriv);
+            var names = fNames != null ? fNames.GetValue(null) as string[] : null;
+            int n = names != null ? names.Length : 0;
+            float listH = Mathf.Min(n * 32f + 4f, 330f), w = 540f, h = 118f + listH;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            string at = DrvNum(w + 16f) + "x" + DrvNum(h + 16f) + " at (" + DrvNum(x - 8f) + "," + DrvNum(y - 8f) + ")";
+            if (n > 0 && x - 8f >= 0f && y - 8f >= 0f && x + w + 8f <= Screen.width && y + h + 8f <= Screen.height)
+                DrvOk(name + ": the dropdown's " + n + " rows are drawn in " + at + ", inside the " + Screen.width + "x" + Screen.height + " screen");
+            else DrvBad(name + ": the dropdown (" + n + " rows) " + at + " is not inside the " + Screen.width + "x" + Screen.height + " screen");
+            yield return DrvCapture(name);
+            CompetitiveUI.ConsumePromptEscape();
+            yield return 0.3f;
+            if (DrvPickerOpen()) DrvBad(name + ": the dropdown did not close");
+        }
+
+        private static IEnumerator DriveW9()
+        {
+            DrvParkPointer();
+            yield return DrvShootPicker("w9-1-dropdown-1920x1080");
+            yield return DrvResolution(1280, 720);
+            yield return DrvShootPicker("w9-2-dropdown-1280x720");
+            yield return DrvResolutionRestore("W9");
+        }
+
+        private static IEnumerator DriveW9b()
+        {
+            DrvParkPointer();
+            yield return DrvResolution(2560, 1080);
+            yield return DrvShootPicker("w9b-dropdown-2560x1080");
+            yield return DrvResolutionRestore("W9b");
+        }
+
+        /// <summary>Select a row as a click on its "?" does, then shoot.</summary>
+        private static IEnumerator DrvShootRow(string key, string name)
+        {
+            var r = DrvRec(key);
+            if (r == null) { DrvBad(name + ": the " + key + " row was not built"); yield break; }
+            SettingsSelectKey(key);
+            yield return DrvSettle(0.3f);
+            SettingsEnsureVisible(DrvRec(key));
+            yield return 0.2f;
+            string pk = DrvPaneKey();
+            if (pk == key || (key.StartsWith("SD", StringComparison.Ordinal) && pk == "SDR")) DrvNote(name + ": the pane shows " + pk);
+            else DrvBad(name + ": the pane shows " + (pk ?? "nothing") + ", want " + key);
+            yield return DrvCapture(name);
+        }
+
+        /// <summary>W4: one shot per widget kind with the pane open.</summary>
+        private static IEnumerator DriveW4()
+        {
+            DrvParkPointer();
+            bool perf0 = _perfSectionOpen;
+            yield return DrvShootRow("SPing", "w4-01-switch");
+            yield return DrvShootRow("SHpPrec", "w4-02-segmented");
+
+            // the slider, mid-drag through the UI slider's own value, then at stop 0
+            var sl = DrvRec("SChatTtl");
+            Component slider = null;
+            if (sl != null && sl.Slider != null && sl.Slider.go != null)
+                foreach (var c in sl.Slider.go.GetComponents<Component>())
+                    if (c != null && c.GetType().FullName == "UnityEngine.UI.Slider") slider = c;
+            var pVal = slider != null ? slider.GetType().GetProperty("value") : null;
+            if (sl == null || pVal == null || sl.Stops == null) DrvBad("w4: the SChatTtl slider was not found");
+            else
+            {
+                int idx0 = Mathf.Clamp(sl.Index(), 0, sl.Stops.Length - 1);
+                SettingsSelectKey("SChatTtl");
+                yield return DrvSettle(0.3f);
+                for (int fr = 1; fr <= 12; fr++) { pVal.SetValue(slider, 0.1f + 0.4f * fr / 12f, null); yield return 0f; }
+                DrvNote("w4-03: the SChatTtl slider held mid-drag at value " + DrvNum((float)pVal.GetValue(slider, null)) + ", stop " + sl.Index());
+                yield return DrvCapture("w4-03-slider-middrag");
+                SettingsSetSliderIndex(DrvRec("SChatTtl"), 0);
+                yield return DrvSettle(0.3f);
+                yield return DrvCapture("w4-04-slider-stop0");
+                SettingsSetSliderIndex(DrvRec("SChatTtl"), idx0);
+                yield return DrvSettle(0.3f);
+                DrvNote("w4: SChatTtl put back at stop " + idx0 + " (" + DrvValue(DrvRec("SChatTtl")) + ")");
+            }
+
+            // a dropdown open
+            var dd = DrvRec("SDateFmt");
+            if (dd == null) DrvBad("w4: the SDateFmt row was not built");
+            else
+            {
+                SettingsSelectKey("SDateFmt");
+                yield return DrvSettle(0.3f);
+                if (!DrvClick(dd.Face) || !DrvPickerOpen()) DrvBad("w4-05: the SDateFmt dropdown did not open");
+                else
+                {
+                    yield return 0.5f;
+                    yield return DrvCapture("w4-05-dropdown-open");
+                    CompetitiveUI.ConsumePromptEscape();
+                    yield return 0.3f;
+                }
+            }
+
+            yield return DrvShootRow("SEBtn", "w4-06-action");
+
+            // the delete row armed (its confirmation would reach the stub), then disarmed
+            if (deleteBtn == null) DrvBad("w4-07: the SDBtn button was not built");
+            else
+            {
+                SettingsSelectKey("SDR");
+                yield return DrvSettle(0.3f);
+                DrvClick(deleteBtn);
+                yield return 0.4f;
+                if (deleteArmed) DrvNote("w4-07: the delete row is armed (" + settingsDeleteStubCalls + " confirmation(s) reached the stub)");
+                else DrvBad("w4-07: the SDBtn click did not arm the delete row");
+                SettingsEnsureVisible(DrvRec("SDR"));
+                yield return DrvCapture("w4-07-destructive-armed");
+                DrvDisarm();
+                yield return DrvSettle(0.3f);
+            }
+            yield return DrvShootRow("SDR", "w4-08-destructive-pane");
+            if (deleteArmed) DrvBad("w4-08: the delete row is armed; the combined pane shot wants it NOT armed");
+
+            // disclosure expanded: Performance
+            DrvPerfSection(true);
+            yield return DrvShootRow("SPerfH", "w4-09-disclosure-perf");
+            DrvPerfSection(perf0);
+
+            // disclosure expanded: blocked senders, three, then none
+            int cm = SettingsModel.SubTabIndex("chatmail");
+            yield return DrvShowTab(cm);
+            yield return DrvFakeBlocks(3);
+            yield return DrvShootRow("SMailBlocked", "w4-10-blocked-three");
+            yield return DrvFakeBlocks(0);
+            var none = pageGO != null ? SettingsFindDeep(pageGO.transform, "SMailBlockedNone") : null;
+            if (none != null && none.gameObject.activeInHierarchy) DrvNote("w4-11: SMailBlockedNone is shown");
+            else DrvBad("w4-11: SMailBlockedNone is not shown for an empty list");
+            yield return DrvShootRow("SMailBlocked", "w4-11-blocked-empty");
+            DrvPutBackBlocks();
+            yield return DrvSettle(0.3f);
+
+            // the preview: the renderer's own preview path (a render, never an upload)
+            if (PortraitRender.PreviewTex == null)
+            {
+                PortraitRender.DevRun("preview");
+                float until = Time.unscaledTime + 45f;
+                while (PortraitRender.PreviewTex == null && Time.unscaledTime < until) yield return 0.5f;
+            }
+            DrvNote("w4-12: the preview " + (PortraitRender.PreviewTex != null ? "holds a render" : "has no render") + " (renderer: " + PortraitRender.LastResult + ")");
+            yield return DrvShootRow("SPcPre", "w4-12-preview");
+        }
+
+        /// <summary>W5: the pane follows the pointer - hover one row, then a
+        /// "?" on a different one (the pointer moves onto that "?"); neither
+        /// is the focused first row.</summary>
+        private static IEnumerator DriveW5()
+        {
+            DrvParkPointer();
+            var a = DrvRec("SShad");
+            var b = DrvRec("SChromAb");
+            if (a == null || b == null || a.Row == null || b.Help == null) { DrvBad("W5 the SShad / SChromAb rows were not built"); yield break; }
+            yield return DrvShowTab(a.Tab);
+            DrvPointAt(a.Row);
+            yield return 0.5f;
+            settingsPaneDirty = true;
+            yield return 0.3f;
+            if (settingsHoverKey == a.Key && DrvPaneKey() == a.Key) DrvOk("W5 hover: the pointer over " + a.Key + " (focused " + SettingsFocusedRec().Key + "); the pane shows " + a.Key);
+            else DrvBad("W5 hover: hovered " + (settingsHoverKey ?? "nothing") + ", the pane shows " + (DrvPaneKey() ?? "nothing") + ", want " + a.Key);
+            yield return DrvCapture("w5-1-hover");
+            DrvPointAt(b.Help);
+            yield return 0.3f;
+            DrvClick(b.Help);
+            yield return 0.4f;
+            if (DrvPaneKey() == b.Key && SettingsFocusedRec() == DrvRec(b.Key)) DrvOk("W5 help: a click on " + b.Key + "'s ? moves the focus and the pane to " + b.Key);
+            else DrvBad("W5 help: the pane shows " + (DrvPaneKey() ?? "nothing") + ", want " + b.Key);
+            yield return DrvCapture("w5-2-help");
+            DrvParkPointer();
+        }
+
+        /// <summary>W6: keyboard only (the pointer parked, no click): arrow to
+        /// the third Visuals row, step a segmented control, Tab to the next
+        /// sub-tab. The stepped value is put back through its own row after.</summary>
+        private static IEnumerator DriveW6()
+        {
+            DrvParkPointer();
+            int vis = SettingsModel.SubTabIndex("visuals");
+            yield return DrvShowTab(vis);
+            yield return DrvPress(SettingsModel.SettingsKey.Down, 0.2f);
+            yield return DrvPress(SettingsModel.SettingsKey.Down, 0.3f);
+            var list = SettingsFocusList(vis);
+            var f = SettingsFocusedRec();
+            if (list.IndexOf(f) == 2) DrvOk("W6 two Down presses: the focus is on the third Visuals row, " + f.Key + " (" + f.Kind + "); the pane shows " + DrvPaneKey());
+            else DrvBad("W6 two Down presses: the focus is on " + (f != null ? f.Key : "nothing") + " (index " + list.IndexOf(f) + ")");
+            yield return DrvCapture("w6-1-third-row");
+            SettingsRowRec seg = null;
+            for (int i = Mathf.Max(0, list.IndexOf(f)); i < list.Count; i++) if (list[i].Kind == SettingsKind.Segmented) { seg = list[i]; break; }
+            if (seg == null) { DrvBad("W6 no segmented row at or below the third Visuals row"); yield break; }
+            for (int guard = 0; guard < 12 && SettingsFocusedRec() != seg; guard++) yield return DrvPress(SettingsModel.SettingsKey.Down, 0.2f);
+            string v0 = DrvValue(seg);
+            int at = seg.Ids != null ? Array.IndexOf(seg.Ids, v0) : -1;
+            var dir = seg.Ids != null && at == seg.Ids.Length - 1 ? SettingsModel.SettingsKey.Left : SettingsModel.SettingsKey.Right;
+            yield return DrvPress(dir, 0.5f);
+            string v1 = DrvValue(DrvRec(seg.Key));
+            if (v1 != null && v1 != v0) DrvOk("W6 " + dir + " on " + seg.Key + ": " + v0 + " -> " + v1);
+            else DrvBad("W6 " + dir + " on " + seg.Key + ": the value stayed " + v0);
+            yield return DrvCapture("w6-2-segmented-step");
+            yield return DrvPress(SettingsModel.SettingsKey.Tab, 0.5f);
+            if (settingsSubTab == vis + 1) DrvOk("W6 Tab: the page moved to the next sub-tab, " + SettingsModel.SubTabHomes[settingsSubTab]);
+            else DrvBad("W6 Tab: the page is on sub-tab " + settingsSubTab + ", want " + (vis + 1));
+            yield return DrvCapture("w6-3-tab-next");
+            var back = DrvRec(seg.Key);
+            if (back != null && DrvValue(back) != v0)
+            {
+                SettingsSwitchSubTab(back.Tab);
+                yield return 0.3f;
+                DrvSetValue(back, v0);
+                yield return DrvSettle(0.3f);
+            }
+            DrvNote("W6 put back: " + seg.Key + " reads " + DrvValue(DrvRec(seg.Key)) + " (was " + v0 + ")");
         }
 
         private static string DrvColor(Color c)

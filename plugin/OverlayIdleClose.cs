@@ -73,10 +73,11 @@ namespace CompetitiveRounds
             bool prompt;
             try { prompt = NativeUI.HasOpenPrompt; } catch { prompt = false; }
             if (prompt) { lastPresenceRt = now; return; }
-            // Item 13: the settings self-test (lever "5:selftest") is an
-            // operator session; closing the page under it stalls the run.
+            // Item 13: the settings self-test (lever "5:selftest") and the
+            // driven-input test (lever "5:drive") are operator sessions;
+            // closing the page under either one stalls or voids the run.
             bool selfTest;
-            try { selfTest = NativeUI.SettingsSelfTestRunning; } catch { selfTest = false; }
+            try { selfTest = NativeUI.SettingsTestRunning; } catch { selfTest = false; }
             if (selfTest) { lastPresenceRt = now; return; }
 
             float idle = now - lastPresenceRt;

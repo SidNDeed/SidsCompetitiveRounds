@@ -1117,7 +1117,9 @@ namespace CompetitiveRounds
             string hk = null;
             if (setListViewport != null)
             {
-                Vector2 mp = Input.mousePosition;
+                // The driven pointer (witness W5 and the parked pointer of every
+                // witness scenario) stands in for the mouse while a drive runs.
+                Vector2 mp = settingsDriveMouseSet && SettingsDriveRunning ? settingsDriveMouse : (Vector2)Input.mousePosition;
                 if (SettingsScreenContains(setListViewport.GetComponent<RectTransform>(), mp))
                     foreach (var r in SettingsFocusList(settingsSubTab))
                         if (r.Row != null && SettingsScreenContains(r.Row.GetComponent<RectTransform>(), mp)) { hk = r.Key; break; }
@@ -2321,6 +2323,15 @@ namespace CompetitiveRounds
 
         private static void SelfTestA5A8(string home, List<SettingsRowRec> rows, float content, float vpNoHint, bool over, float tol)
         {
+            SettingsCheckA5A8(home, rows, content, vpNoHint, over, tol, StOk, StBad, StNote);
+        }
+
+        /// <summary>A5 and A8 on one measured tab. The self-test reports
+        /// through its own lines; the driven-input harness (design T4) runs
+        /// the same check after each rebuild route.</summary>
+        private static void SettingsCheckA5A8(string home, List<SettingsRowRec> rows, float content, float vpNoHint, bool over, float tol,
+            Action<string> ok, Action<string> bad, Action<string> note)
+        {
             // A5a / A5b: unscrolled at the worst case (Chat & mail scrolls by design).
             int inactive = 0;
             var pr = pageGO != null ? pageGO.transform : null;
@@ -2334,29 +2345,29 @@ namespace CompetitiveRounds
             string nums = "content " + content.ToString("0", CultureInfo.InvariantCulture) + ", viewport " + vpNoHint.ToString("0", CultureInfo.InvariantCulture)
                 + ", H_worst " + hWorst.ToString("0", CultureInfo.InvariantCulture) + " (" + inactive + " optional rows inactive, canvas "
                 + canvasH.ToString("0", CultureInfo.InvariantCulture) + ")";
-            if (home == "chatmail") StNote("A5 chatmail: exempt, scrolls by design; " + nums);
+            if (home == "chatmail") note("A5 chatmail: exempt, scrolls by design; " + nums);
             else
             {
-                if (content <= hWorst + 0.5f) StOk("A5a " + home + ": " + nums); else StBad("A5a " + home + ": " + nums);
-                if (content <= vpNoHint + 0.5f) StOk("A5b " + home + ": fits the measured viewport");
+                if (content <= hWorst + 0.5f) ok("A5a " + home + ": " + nums); else bad("A5a " + home + ": " + nums);
+                if (content <= vpNoHint + 0.5f) ok("A5b " + home + ": fits the measured viewport");
                 else if (Screen.height > 0 && Screen.width / (float)Screen.height > 21f / 9f + 0.01f)
-                    StNote("OBSERVATION A5b " + home + ": content " + content.ToString("0", CultureInfo.InvariantCulture) + " > viewport "
+                    note("OBSERVATION A5b " + home + ": content " + content.ToString("0", CultureInfo.InvariantCulture) + " > viewport "
                         + vpNoHint.ToString("0", CultureInfo.InvariantCulture) + " at " + Screen.width + "x" + Screen.height + " (past the supported 21:9 bound)");
-                else StBad("A5b " + home + ": content exceeds the measured viewport at " + Screen.width + "x" + Screen.height + "; " + nums);
+                else bad("A5b " + home + ": content exceeds the measured viewport at " + Screen.width + "x" + Screen.height + "; " + nums);
             }
 
             // A8: hint active iff the tab overflows; the last row reachable.
             bool hint = setListHint != null && setListHint.activeSelf;
-            if (hint != over) StBad("A8 " + home + ": hint " + (hint ? "active" : "inactive") + " but content " + (over ? "overflows" : "fits"));
-            else if (!over) StOk("A8 " + home + ": fits, hint inactive");
+            if (hint != over) bad("A8 " + home + ": hint " + (hint ? "active" : "inactive") + " but content " + (over ? "overflows" : "fits"));
+            else if (!over) ok("A8 " + home + ": fits, hint inactive");
             else
             {
                 SettingsScrollListTo(0f);
                 SettingsForceLayout();
                 var last = rows.Count > 0 ? rows[rows.Count - 1] : null;
                 Rect vr = SettingsWorldRect(setListViewport);
-                if (last != null && SettingsInside(vr, SettingsWorldRect(last.Row), tol)) StOk("A8 " + home + ": overflows, hint active, last row " + last.Key + " reachable");
-                else StBad("A8 " + home + ": last row not inside the viewport after a scroll to the end");
+                if (last != null && SettingsInside(vr, SettingsWorldRect(last.Row), tol)) ok("A8 " + home + ": overflows, hint active, last row " + last.Key + " reachable");
+                else bad("A8 " + home + ": last row not inside the viewport after a scroll to the end");
                 SettingsScrollListTo(1f);
             }
         }

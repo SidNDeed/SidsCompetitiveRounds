@@ -2006,21 +2006,23 @@ namespace CompetitiveRounds
                 TeardownOverlaySurfaces();
                 return;
             }
+            // Item 13 round 2 (design T5-b): each Escape read below is EscDown() -
+            // the real key, or a press the settings driven-input harness made this frame.
             // Sept 6 item c: an open session report owns Escape — one press closes
             // the report, the next closes the page. Consumed here in Update so no
             // OnGUI consumer sees the same press (the view itself is IMGUI).
-            if(SessionReportView.Active&&Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;SessionReportView.Close();return;}
+            if(SessionReportView.Active&&EscDown()){EscConsumedFrame=Time.frameCount;SessionReportView.Close();return;}
             // Sept 7 item 1: a utility popup owns Escape — topmost surface first,
             // one per press: the mail report modal, then a confirm / recipient
             // picker, then the popup itself; the page closes on the NEXT press.
             // (Guard first: a flag with no visible popup would hold every
             // ClickHandler blocked, so it expires instead — #276/#430.)
             if(utilKind!=UtilKind.None&&(utilPopupGO==null||!utilPopupGO.activeSelf)){Plugin.Log.LogWarning("[UTIL-POPUP] flag set with no visible popup - closing");CloseUtilityPopup();}
-            if(UtilityPopupOpen&&Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;bool took=false;try{took=MailUI.ConsumeEscape();}catch{}if(!took){try{took=CompetitiveUI.ConsumePromptEscape();}catch{}}if(!took)CloseUtilityPopup();return;}
+            if(UtilityPopupOpen&&EscDown()){EscConsumedFrame=Time.frameCount;bool took=false;try{took=MailUI.ConsumeEscape();}catch{}if(!took){try{took=CompetitiveUI.ConsumePromptEscape();}catch{}}if(!took)CloseUtilityPopup();return;}
             // Item 13: an open prompt (the settings page's dropdown picker first) owns Escape before the page
             // does - topmost surface first, one per press (CompetitiveUI.ConsumePromptEscape).
-            if(Input.GetKeyDown(KeyCode.Escape)){bool tookPrompt=false;try{tookPrompt=CompetitiveUI.ConsumePromptEscape();}catch{}if(tookPrompt){EscConsumedFrame=Time.frameCount;return;}}
-            if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;/* Sept 6 item a: a PINNED profile card is the topmost surface — Escape unpins it and the page stays. */if(ProfileCard.ConsumeEscape())return;Close();return;}
+            if(EscDown()){bool tookPrompt=false;try{tookPrompt=CompetitiveUI.ConsumePromptEscape();}catch{}if(tookPrompt){EscConsumedFrame=Time.frameCount;return;}}
+            if(EscDown()){EscConsumedFrame=Time.frameCount;/* Sept 6 item a: a PINNED profile card is the topmost surface — Escape unpins it and the page stays. */if(ProfileCard.ConsumeEscape())return;Close();return;}
             try{ProfileCard.Tick();}catch(Exception ex){VanillaFixSupport.DiagLimited("ProfileCard","tick failed: "+ex.Message,5);}/* Sept 6 item a: name-hover dwell, open, follow, pin */
             // r8 find 1: a bet-row refresh deferred by the mid-click guard
             // lands here on the first fully-released frame.
@@ -9752,7 +9754,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==8){ApiClient.FetchTeamLeaderboard(200,ApiClient.CachedTeamLeaderboardSort??"rating");/* 342 review M2 + r5 L1: manual refresh on the 2v2 board (tab 8) */}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;case TAB_COLLECTION:PlayerCardsUI.Refresh();break;}if(utilKind!=UtilKind.None)RefreshUtilityPopup();/* Sept 7 item 1: a dirty repaint reaches the open popup, not only the tab beneath */}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();if(SettingsWitnessRows)SettingsWitnessShowRows();else{RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();}RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;case TAB_COLLECTION:PlayerCardsUI.Refresh();break;}if(utilKind!=UtilKind.None)RefreshUtilityPopup();/* Sept 7 item 1: a dirty repaint reaches the open popup, not only the tab beneath */}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -14114,6 +14116,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     // No ClickGuard.Claim() here - CreateButton already guards
                     // this control, and a second claim on the same key in the
                     // same frame is always rejected (learning #158).
+                    // Item 13 round 2 (design T5-a): while a settings test drives
+                    // this page the press reaches a stub and no request is sent.
+                    if (SettingsTestRunning)
+                    {
+                        settingsEscapeStubCalls++;
+                        Plugin.Log.LogInfo("[SETTINGS-DRIVE] queue-leave press reached the stub (no request sent)");
+                        dirty = true;
+                        return;
+                    }
                     ApiClient.EscapeAllQueues(null);
                     dirty = true;
                 },

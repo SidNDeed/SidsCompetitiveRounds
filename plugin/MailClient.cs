@@ -597,6 +597,9 @@ namespace CompetitiveRounds
 
         public static void PutSettings(string mailFrom, Action<bool, string> cb)
         {
+            // Item 13 round 2 (design T5-e, T7-c): while a settings test drives the
+            // page this PUT reaches a stub, answered after one round trip.
+            if (NativeUI.SettingsTestRunning) { NativeUI.SettingsStubPut("mail_from=" + mailFrom, cb); return; }
             if (!Ready(cb)) return;
             ApiClient.SessionSend("PUT", $"{Base}/api/v1/mail/settings", $"{{\"mail_from\":\"{J(mailFrom)}\"}}", cb);
         }
@@ -608,6 +611,8 @@ namespace CompetitiveRounds
         /// send a stale mail_from alongside it.</summary>
         public static void PutRelay(bool enabled, Action<bool, string> cb)
         {
+            // Item 13 round 2 (design T5-e): the same stub while a settings test runs.
+            if (NativeUI.SettingsTestRunning) { NativeUI.SettingsStubPut("discord_relay=" + (enabled ? "true" : "false"), cb); return; }
             if (!Ready(cb)) return;
             ApiClient.SessionSend("PUT", $"{Base}/api/v1/mail/settings",
                                   $"{{\"discord_relay\":{(enabled ? "true" : "false")}}}", cb);
