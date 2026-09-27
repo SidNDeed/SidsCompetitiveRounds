@@ -884,6 +884,11 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/internal/pc/face/print/{print_id}/{locale}", ("GET",)),
         ("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", ("GET",)),
         ("/api/v1/internal/pc/face/back", ("GET",)),
+        # the Discord collection reveal's reads (build notes, FINDING 9)
+        ("/api/v1/internal/pc/packs", ("GET",)),
+        ("/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png", ("GET",)),
+        ("/api/v1/internal/pc/binder", ("GET",)),
+        ("/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png", ("GET",)),
     }
 
 

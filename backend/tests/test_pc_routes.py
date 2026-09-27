@@ -521,6 +521,62 @@ def test_no_player_cards_answer_carries_a_steam_or_discord_identifier():
 # keys that end in `name` and are not a player's name
 _NOT_A_PLAYER_NAME = ("rank_name", "font_name", "file_name", "band_name")
 
+# A payload key that ends in `name`, and the value it answers on its line.
+_NAME_ANSWER = re.compile(r'"([a-z_]*name)"\s*:\s*(.+?),?\s*$')
+
+# The neutral label is not a name: `_pc_neutral_name` answers the locale's
+# `pc.unnamed` label or the built-in, never a stored name, so a value that is
+# that call and nothing else discloses nothing. The collection reveal's gone
+# roster entry answers it, as its design states (build notes, FINDING 9). Only the
+# exact call is admitted, as the whole value (R1 LOW Finding 3): the value ends
+# at the call - what follows it starts with a comma or a closing bracket - so a
+# concatenation, a fallback such as `x or _pc_neutral_name()`, a conditional or
+# a slice around the call still needs its projection. The rest of the line may
+# carry no `name` and no `**` spread: a second name key on the same line is
+# never checked by the caller, and a spread can replace the key the call answers.
+_NEUTRAL_CALL = re.compile(r"_pc_neutral_name\([a-z_]*\)")
+
+
+def _neutral_only(expr):
+    s = expr.strip()
+    m = _NEUTRAL_CALL.match(s)
+    if not m:
+        return False
+    rest = s[m.end():].lstrip()
+    return rest == "" or (rest[0] in ",)]}" and "name" not in rest and "**" not in rest)
+
+
+def test_the_neutral_exemption_admits_the_exact_call():
+    """R1 LOW Finding 3, the control: the exact call is admitted, alone or as
+    the value a key answers before the next key of its line, and so is every
+    line a Player Cards function answers it on today."""
+    for expr in ("_pc_neutral_name(ctx)", "_pc_neutral_name()", "  _pc_neutral_name(ctx)  ",
+                 '_pc_neutral_name(ctx), "face_rev": None})'):
+        assert _neutral_only(expr), expr
+    found = []
+    for _name, body in _pc_functions():
+        for line in body.splitlines():
+            m = _NAME_ANSWER.search(line)
+            if m and m.group(2).strip().startswith("_pc_neutral_name("):
+                found.append(m.group(2))
+    assert found and all(_neutral_only(e) for e in found), found
+
+
+def test_the_neutral_exemption_refuses_a_stored_name_beside_the_call():
+    """R1 LOW Finding 3: a value that is the call and something more is not
+    the call. A concatenation, a fallback, a conditional, a slice, a second
+    name key on the line and a spread after the call all still need the
+    projection, so none of them is admitted."""
+    refused = ('_pc_neutral_name(ctx) + row["subject_name"]',
+               '_pc_neutral_name(ctx) or row["owner_name"]',
+               '_pc_neutral_name(ctx) if gone else row["subject_name"]',
+               '_pc_neutral_name(ctx) if row["owner_name"] is None else row["owner_name"]',
+               '_pc_neutral_name(ctx)[:0] + row["subject_name"]',
+               '_pc_neutral_name(ctx), "owner_name": row["owner_name"]}',
+               '_pc_neutral_name(ctx), **row}')
+    admitted = [e for e in refused if _neutral_only(e)]
+    assert admitted == [], f"admitted as the neutral label: {admitted}"
+
 
 def test_the_player_cards_boundary_applies_the_coverage_projection_too():
     """`public_name` is P alone, which is correct for the global display name
@@ -547,13 +603,14 @@ def test_every_player_cards_name_answer_goes_through_the_public_projection():
         projected = set(re.findall(
             r"^\s*([a-z_]+)\s*=\s*_pcp\.public_(?:render_)?name\(", body, re.M))
         for line in body.splitlines():
-            m = re.search(r'"([a-z_]*name)"\s*:\s*(.+?),?\s*$', line)
+            m = _NAME_ANSWER.search(line)
             if not m or m.group(1) in _NOT_A_PLAYER_NAME:
                 continue
             checked += 1
             expr = m.group(2)
             ok = ("public_name" in expr or "public_render_name" in expr
-                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected))
+                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected)
+                  or _neutral_only(expr))
             assert ok, (name, line.strip())
     assert checked >= 8, checked
 

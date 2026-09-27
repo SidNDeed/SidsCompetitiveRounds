@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 373   # card trading: +7 (the five player trade routes and the two admin trade routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 377   # card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 372   # card trading: +7 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 376   # card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -850,9 +850,10 @@ def test_the_helper_closure_stays_affordable():
     indexed bindings, with the walk itself taking 0.1 s once the index is built
     (~5.3 s, once per process). The bounds below sat above those with room, so
     this fails on a walk that has gone wrong rather than on ordinary growth;
-    the worst-route bounds, and once each of the two p90 bounds, have since
-    moved for measured growth in bindings routes really run, each move
-    recorded with its measurement at its assertion.
+    the worst-route bounds, and the two p90 bounds (on the card trading lane
+    and, independently and to the same values, at the Discord collection
+    landing), have since moved for measured growth in bindings routes really
+    run, each move recorded with its measurement at its assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -879,6 +880,37 @@ def test_the_helper_closure_stays_affordable():
     # alone: measured 20 / 55 / 198 with data-into-data expansion, against
     # 16 / 48 / 191 before it.
     assert code_median <= 24, f"median code closure {code_median} of {total}"
+    # Discord collection landing (2026-09-26): the p90 moved for measured
+    # growth. The same walk with the same route seeds over each tree:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   main 9a1dd9d                          365   21 / 69 / 326
+    #   lane 5868131                          369   21 / 73 / 326
+    #   LAND-1 74af3f6 (7541261 merged)       369   21 / 73 / 326
+    #   LAND-2 852f4be through 9f52e03        369   21 / 76 / 326
+    #
+    # Main alone passes and the lane alone passes; the landed tree is the sum
+    # of the two landings. The p90 is a rank statistic -- the value at sorted
+    # position int(0.9 * n) -- and it moved while the route AT that position
+    # did not: GET /api/v1/admin/quarantine/triage/{mode}/{group_id} measures
+    # 76 on every tree above. What moved is how many routes sit above 75: 37
+    # of 369 on the landed tree, exactly the count that puts position 332 on
+    # that route (main: 33 of 365; the lane: 35 of 369). Four of the 37 are
+    # the lane's new internal routes: the collection binder (117) and its page
+    # image (280), the pack list (123) and its strip image (280), the two
+    # images reaching the card-face rendering their tiles are composited from.
+    # Two crossed 75 on main's title-ladder hook: POST
+    # /api/v1/team/series/{series_id}/report-dc 72 -> 80 and POST
+    # /api/v1/admin/team/series/{series_id}/resolve 74 -> 82, each +8 in
+    # title_ladders (record_completed_games, the three lookups it runs and the
+    # four rung tables they read) -- the ladder credit their completion paths
+    # now give. Every one is a binding its route really runs, and the median
+    # has not moved, which is where a walk gone wrong shows first (the hub
+    # case in the docstring measured median 179).
+    #
+    # The bound moves to 80, 5% over the measurement -- the ~5-6% headroom the
+    # worst bounds keep over theirs; the median and worst bounds stay.
+    #
     # Card trading LAND (2026-09-27): measured 21 / 76 / 326 of 2654 indexed
     # bindings over 372 routes at the merge of main 9a1dd9d into the trading
     # lane, against 21 / 73 / 326 over the lane tip 93227a8 (372 routes) and
@@ -896,6 +928,10 @@ def test_the_helper_closure_stays_affordable():
     # The bound moves to 80 -- ~5% over the measurement, the headroom the
     # other moves in this test gave -- for that reason and no other; the
     # median and worst bounds stay.
+    #
+    # The two moves above were made independently, one on each side of the
+    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
+    # chose 80.
     assert code_p90 <= 80, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
@@ -959,6 +995,29 @@ def test_the_helper_closure_stays_affordable():
     # reason and no other. A walk that has gone wrong still fails at the
     # median bounds first (the data-into-data hub case measured median 179),
     # and those stay, as does the worst bound.
+    #
+    # Discord collection landing (2026-09-26): the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 9a1dd9d                          365   72 / 140 / 457
+    #   lane 5868131                          369   73 / 150 / 457
+    #   LAND-1 74af3f6 (7541261 merged)       369   73 / 151 / 457
+    #   LAND-2 852f4be through 9f52e03        369   73 / 151 / 457
+    #
+    # The same rank effect as the code p90 above, and it crossed at the first
+    # landing: 37 of 369 routes sit above 150 on the landed tree (main: 33 of
+    # 365; the lane: 36 of 369), which puts position 332 on POST
+    # /api/v1/ovt/matches, 151 on every tree above. Four of the 37 are the
+    # lane's new internal routes (216, 410, 222, 409); the one that crossed on
+    # main is POST /api/v1/team/series/{series_id}/report-dc, 146 -> 153 on
+    # the lead-forfeit hotfix -- seven code bindings, _team_game_crossed_two
+    # with the four helpers and two constants beside it, the per-game
+    # evidence that route now settles from. The bound moves to 160, 6% over
+    # the measurement; the median and worst bounds stay.
+    #
+    # The two moves above were made independently, one on each side of the
+    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
+    # chose 160.
     assert all_p90 <= 160, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write

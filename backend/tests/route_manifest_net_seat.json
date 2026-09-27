@@ -2930,6 +2930,24 @@
           "6959c78dcdc235e8c5eccbb0b6f62f4d561af457"
         ],
         [
+          "/api/v1/internal/pc/binder",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_binder",
+          "141db45c435e37fc36c87fcde5f99d05e00e1d68"
+        ],
+        [
+          "/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_binder_page",
+          "11072231eb4cb11c1530131541a26003c5efbd95"
+        ],
+        [
           "/api/v1/internal/pc/card",
           [
             "GET"
@@ -3171,6 +3189,24 @@
           "main",
           "internal_pc_lease_check",
           "f5419b4e638b0dc0a7c27f27438b0f27bbda92c0"
+        ],
+        [
+          "/api/v1/internal/pc/packs",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_packs",
+          "79b2bb2e960919d4b52f9d263bedebbb0b91ebc7"
+        ],
+        [
+          "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_pack_strip",
+          "9654cc9774ad8bdb5e178aa6fb1356f30e2e2b22"
         ],
         [
           "/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png",
@@ -3591,6 +3627,10 @@
     "GET /api/v1/internal/pc/face/print/{print_id}/{locale} -> main.internal_pc_face_print",
     "GET /api/v1/internal/pc/face/preview/{player_ref}/{locale} -> main.internal_pc_face_preview",
     "GET /api/v1/internal/pc/face/back -> main.internal_pc_face_back",
+    "GET /api/v1/internal/pc/packs -> main.internal_pc_packs",
+    "GET /api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png -> main.internal_pc_pack_strip",
+    "GET /api/v1/internal/pc/binder -> main.internal_pc_binder",
+    "GET /api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png -> main.internal_pc_binder_page",
     "POST /api/v1/shop/purchase -> main.purchase_item",
     "POST /api/v1/music/rate -> main.music_rate",
     "GET /api/v1/music/ratings -> main.music_ratings_public",

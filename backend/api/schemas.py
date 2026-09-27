@@ -851,6 +851,12 @@ class HealthResponse(BaseModel):
     # (#306): the batch adds no route, so this value is what tells its build
     # from the one before it. Absent on any build before it.
     ticket_redaction: int | None = None
+    # discord_collection: release-train verification plumbing, not a design
+    # mechanism (main._DISCORD_COLLECTION_MARKER; 1 = this build serves the
+    # Discord reveal's four internal routes). A code constant, equal on both
+    # boxes by construction, probed by the release train and read by nothing
+    # else (#306). Absent on any build before it.
+    discord_collection: int | None = None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
