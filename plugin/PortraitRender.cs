@@ -1074,6 +1074,8 @@ namespace CompetitiveRounds
             bool ground = true, color = true, effect = true, unlit = false;
             bool rawlegs = false, nopin = false, pinall = false, swaprb = false, lightprobe = false, poseprobe = false, psinfo = false;
             float pad = 1.3f;
+            // dance cards step 0 / T45 (PortraitRenderDanceProbe.cs): the dance frames after the still
+            bool dances = false; string danceMode = "pose", l1Mode = "guarded"; List<int> danceOnly = null; int danceLag = 3, danceHold = 1;
             List<int> sweep = null; List<int> salts = null;
             string colorOverride = null, effectOverride = null, faceOverride = null, tag = "run", grade = "compiled";
             for (int i = 1; i < parts.Length; i++)
@@ -1103,6 +1105,12 @@ namespace CompetitiveRounds
                 else if (p.StartsWith("effect=")) effectOverride = p.Substring(7);
                 else if (p.StartsWith("face=")) faceOverride = p.Substring(5);   // e:m:d:d2[:dx:dy] item ids (+ detail offset)
                 else if (p.StartsWith("tag=")) tag = SafeTag(p.Substring(4));
+                else if (p == "dances") dances = true;                                  // step 0 / T45: pose every dance after the still
+                else if (p == "dancemode=pose" || p == "dancemode=nopose" || p == "dancemode=still") danceMode = p.Substring(10);
+                else if (p == "l1=guarded" || p == "l1=unguarded") l1Mode = p.Substring(3);
+                else if (p.StartsWith("only=")) danceOnly = ParseInts(p.Substring(5), 0, DanceEmotes.Defs.Length - 1, DanceEmotes.Defs.Length, rep);
+                else if (p.StartsWith("lag=") && int.TryParse(p.Substring(4), out iv)) danceLag = Mathf.Clamp(iv, 0, 3);
+                else if (p.StartsWith("hold=") && int.TryParse(p.Substring(5), out iv)) danceHold = Mathf.Clamp(iv, 1, 4);   // whole frames each pose is held before its render
                 else rep.Append("unknown option: ").Append(p).Append('\n');
             }
             rep.Append("portrait spike ").Append(DateTime.UtcNow.ToString("u"))
@@ -1205,6 +1213,13 @@ namespace CompetitiveRounds
                 RenderMatte(cam, size, tag, rep, devTable, gradeName);                 // _matte (ungraded, this rig's pinned pose) and _graded, from one capture
                 if (!nopin) rep.Append(ParticlePinReport());
                 rep.Append(GradeProbeLine()).Append('\n');
+                if (dances)
+                {
+                    var it = DanceProbeFrames(rep, clone, cam, size, tag, danceMode, l1Mode, danceOnly, danceLag, danceHold, gen);
+                    while (it.MoveNext()) yield return it.Current;
+                    _renderClaim.Beat(gen, DEV_BUDGET);
+                    if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("aborted: ").Append(blocked).Append('\n'); yield break; }
+                }
                 if (sweep != null && nopin) rep.Append("sweep: skipped (nopin leaves the particles unpinned)\n");
                 else if (sweep != null)
                 {

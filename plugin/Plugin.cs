@@ -2423,6 +2423,17 @@ namespace CompetitiveRounds
             if (v == "wheel") { CompetitiveUI.DevForceDanceWheel(); return; }
             if (v.StartsWith("preview:", StringComparison.Ordinal))
             { DanceEmotes.TogglePreview(v.Substring(8).Trim()); return; }
+            // Dance cards build step 0 (design S11.1): the live body-channel
+            // probe, Floss on the local sandbox body. OFFLINE ONLY (the probe
+            // refuses otherwise). "bodyprobe" or "bodyprobe:<tag>".
+            if (v == "bodyprobe" || v.StartsWith("bodyprobe:", StringComparison.Ordinal))
+            {
+                var ptag = new System.Text.StringBuilder();
+                foreach (char ch in (v.Length > 10 ? v.Substring(10) : ""))
+                    if (ptag.Length < 24 && ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) ptag.Append(ch);
+                StartCoroutine(DanceStep0Probe.BodyProbe(ptag.Length == 0 ? "live" : ptag.ToString()));
+                return;
+            }
             if (v.StartsWith("play:", StringComparison.Ordinal))
             {
                 int idx;

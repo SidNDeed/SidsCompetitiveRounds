@@ -27,8 +27,15 @@ namespace CompetitiveRounds
     /// a third channel: BODY TILT (Z rotation of the wobble transform) on
     /// the six routines where it musically fits, capped at MAX_TILT_DEG.
     ///
-    /// MECHANISM (rig-probe-proven, [RIG-DUMP] Aug 31): the visual body
-    /// hangs off PlayerWobblePosition ("WobbleObjects"), which rewrites its
+    /// MEASURED (dance cards build step 0, 2026-09-27, a live sandbox
+    /// player dancing Floss): WobbleObjects holds only the healthbar and
+    /// chat canvases; Art, Particles and Limbs are its siblings and did not
+    /// move (0.0000 units) while it moved 0.41, so the body channel below
+    /// moves those two canvases and what they hold, never the body -- the
+    /// visible live dance is the arm channel.
+    ///
+    /// MECHANISM ([RIG-DUMP] Aug 31): the body channel offsets
+    /// PlayerWobblePosition ("WobbleObjects"), which rewrites its
     /// transform POSITION absolutely every Update from the physics spring —
     /// so an additive position offset applied in a Postfix needs no
     /// persistence and self-heals the instant we stop. Its ROTATION,
@@ -103,6 +110,18 @@ namespace CompetitiveRounds
             new DanceDef("dance_robot",      "The Robot",      6.0f),
             new DanceDef("dance_floss",      "The Floss",      5.0f),
         };
+
+        /// <summary>The Player Card capture table (dance cards design S2.4,
+        /// MOTION_RECIPE 1), by the same index as Defs: the frame period in
+        /// milliseconds. Frames = Duration x 1000 / period (CaptureFrames):
+        /// 80, 80, 90, 100, 100, 110, 120, 100. The server's table in
+        /// backend/api/pc_motion.py must match row for row (test T43 reads
+        /// both); a change to either is a MOTION_RECIPE bump.</summary>
+        internal static readonly int[] CaptureMs = { 50, 50, 50, 40, 50, 50, 50, 50 };
+
+        internal static int CaptureFrames(int idx)
+            => (idx < 0 || idx >= Defs.Length || idx >= CaptureMs.Length) ? 0
+             : (int)Math.Round(Defs[idx].Duration * 1000.0 / CaptureMs[idx]);
 
         private const float MAX_OFFSET = 0.9f;          // hard clamp, world units
         private const float MAX_TILT_DEG = 30f;         // hard clamp, body Z tilt — bounded so no
@@ -286,7 +305,13 @@ namespace CompetitiveRounds
                 else
                 {
                     if (_velStrikes.Count > 0) _velStrikes.Clear();
-                    if (armApplied.Count > 0 || bodyRotApplied.Count > 0) RestoreAllApplied();
+                    // Finding L1: never while a capture's PortraitPose is set.
+                    // Its rig's deltas are the capture's own (undone by
+                    // RestorePortraitRig and by the restore-first Prefixes); a
+                    // hard restore here, at an order Unity does not fix
+                    // against IKArmMove.Update, would undo a pose between the
+                    // Postfix and the render or strand the next baseline.
+                    if (!PortraitPose.HasValue && (armApplied.Count > 0 || bodyRotApplied.Count > 0)) RestoreAllApplied();
                 }
             }
             catch { }
@@ -610,12 +635,156 @@ namespace CompetitiveRounds
             }
         }
 
+        // -- Portrait pose (dance cards, design S1.3/S1.5, finding L1) -------
+
+        /// <summary>Whether the capture animates the BODY channel on its rig
+        /// (design S1.5), set from build step 0's measurement (design S11.1;
+        /// ai-collab/v1410/DANCE-CARDS-BUILD-NOTES.md, step 0): on a fully
+        /// started live sandbox player dancing Floss, sampled every 100 ms
+        /// for the whole dance, the body channel moved WobbleObjects by up to
+        /// 0.407 units while Art, Particles, Limbs/LegStuff and Limbs/ArmStuff
+        /// moved 0.0000 -- WobbleObjects carries no renderer of the body, only
+        /// the healthbar and chat canvases -- and the arm targets moved 1.07.
+        /// Outcome: arms-only. So false: TryGetPose returns zero body offset
+        /// and tilt for every rig component, and only the arm channel moves
+        /// the captured card.</summary>
+        internal const bool PORTRAIT_BODY_CHANNEL = false;
+
+        /// <summary>The capture's own pose input: the rig it poses (by
+        /// reference), the dance index and the capture time t (seconds from
+        /// the start of the choreography, k / fps; never a clock).</summary>
+        internal struct PortraitPoseSpec
+        {
+            internal readonly Transform RigRoot;
+            internal readonly int Idx;
+            internal readonly float T;
+            internal PortraitPoseSpec(Transform rigRoot, int idx, float t) { RigRoot = rigRoot; Idx = idx; T = t; }
+        }
+
+        /// <summary>Set only by the portrait capture (and its dev probes) and
+        /// cleared by it BEFORE the rig is torn down and again in its finally
+        /// (design S1.3). While set, the two frame patches pose components
+        /// under RigRoot from it; every other component is posed exactly as
+        /// when it is null.</summary>
+        internal static PortraitPoseSpec? PortraitPose;
+
+        /// <summary>Portrait arm deltas the Arm Postfix has applied since the
+        /// process started: the positive signal that IKArmMove.Update ran on
+        /// the rig and the Postfix posed it (a capture reads it before and
+        /// after a pose frame).</summary>
+        internal static int PortraitArmApplied;
+
+        /// <summary>True when PortraitPose is set, its rig is alive (a
+        /// destroyed rig is Unity null: no portrait pose) and `c` lies under
+        /// that rig by reference (Transform.IsChildOf, never a name).</summary>
+        private static bool PortraitComponent(Component c, out PortraitPoseSpec pp)
+        {
+            pp = default(PortraitPoseSpec);
+            try
+            {
+                var cur = PortraitPose;
+                if (!cur.HasValue) return false;
+                pp = cur.Value;
+                Transform root = pp.RigRoot;
+                if (root == null || c == null) return false;
+                return c.transform.IsChildOf(root);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The ONE wrapper over Evaluate (design S1.3): the pose for
+        /// (idx, t) with the finite check and the clamps -- used by TryGetPose's
+        /// live and portrait branches and by the shop preview, so the
+        /// choreography and its bounds exist once. False for an unknown idx,
+        /// a non-finite t or a non-finite pose (outputs then zero).</summary>
+        internal static bool EvaluateClamped(int idx, float t, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
+        {
+            body = armL = armR = Vector2.zero; bodyRotDeg = 0f;
+            if (idx < 0 || idx >= Defs.Length || !IsFinite(t)) return false;
+            Evaluate(idx, t, out body, out bodyRotDeg, out armL, out armR);
+            // NaN/bounds discipline (#434): reject anything non-finite,
+            // clamp everything else.
+            if (!IsFinite(body) || !IsFinite(armL) || !IsFinite(armR) || !IsFinite(bodyRotDeg))
+            {
+                body = armL = armR = Vector2.zero; bodyRotDeg = 0f;
+                return false;
+            }
+            body = Vector2.ClampMagnitude(body, MAX_OFFSET);
+            bodyRotDeg = Mathf.Clamp(bodyRotDeg, -MAX_TILT_DEG, MAX_TILT_DEG);
+            armL = Vector2.ClampMagnitude(armL, 1.6f);
+            armR = Vector2.ClampMagnitude(armR, 1.6f);
+            return true;
+        }
+
+        /// <summary>Finding L1: inverse-apply and forget every remembered arm
+        /// delta and body tilt on one rig, exactly once -- each entry is
+        /// removed as it is undone, so a second call undoes nothing. The
+        /// capture calls it before every manual baseline restore and before
+        /// it clears PortraitPose or tears the rig down, so neither the next
+        /// Prefix nor Tick can subtract a delta from a baseline the capture
+        /// has just rewritten. Entries whose transform is destroyed are
+        /// dropped; entries outside the rig are untouched. Returns the number
+        /// of entries undone.</summary>
+        internal static int RestorePortraitRig(Transform rigRoot)
+        {
+            int n = 0;
+            try
+            {
+                var armKeys = new List<Transform>(armApplied.Keys);
+                foreach (var k in armKeys)
+                {
+                    if (k == null) { armApplied.Remove(k); continue; }
+                    if (rigRoot == null || !k.IsChildOf(rigRoot)) continue;
+                    k.position -= armApplied[k];
+                    armApplied.Remove(k);
+                    n++;
+                }
+            }
+            catch { }
+            try
+            {
+                var rotKeys = new List<Transform>(bodyRotApplied.Keys);
+                foreach (var k in rotKeys)
+                {
+                    if (k == null) { bodyRotApplied.Remove(k); continue; }
+                    if (rigRoot == null || !k.IsChildOf(rigRoot)) continue;
+                    k.rotation = Quaternion.Euler(0f, 0f, -bodyRotApplied[k]) * k.rotation;
+                    bodyRotApplied.Remove(k);
+                    n++;
+                }
+            }
+            catch { }
+            return n;
+        }
+
+        /// <summary>Remembered arm deltas and body tilts, for the capture's
+        /// self-checks and the step-0 probe (read-only).</summary>
+        internal static int AppliedEntryCount => armApplied.Count + bodyRotApplied.Count;
+
+        /// <summary>The step-0 / T45 probe's L1 mutant arm only: what Tick's
+        /// empty-active branch did before the L1 guard (a hard restore of
+        /// every remembered delta), run on demand so the probe can show its
+        /// assertion catches it. Never called by the product path.</summary>
+        internal static void DevUnguardedRestoreAll() { RestoreAllApplied(); }
+
         /// <summary>Active dance offsets for the player owning `anyChild`, or
         /// false. Resolves the actor via the PhotonView owner — never
-        /// Player.playerID, never cached across respawns (review Q3).</summary>
+        /// Player.playerID, never cached across respawns (review Q3).
+        /// Portrait pose (design S1.3): for a component under the capture's
+        /// own rig (PortraitComponent) the pose is PortraitPose's, without the
+        /// actor, `active` or card-pick-window checks, and with zero body
+        /// offset and tilt unless PORTRAIT_BODY_CHANNEL; every other
+        /// component is posed exactly as before.</summary>
         private static bool TryGetPose(Component anyChild, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
         {
             body = armL = armR = Vector2.zero; bodyRotDeg = 0f;
+            PortraitPoseSpec pp;
+            if (PortraitComponent(anyChild, out pp))
+            {
+                if (!EvaluateClamped(pp.Idx, pp.T, out body, out bodyRotDeg, out armL, out armR)) return false;
+                if (!PORTRAIT_BODY_CHANNEL) { body = Vector2.zero; bodyRotDeg = 0f; }
+                return true;
+            }
             if (active.Count == 0) return false;
             try
             {
@@ -633,15 +802,7 @@ namespace CompetitiveRounds
                 if (!active.TryGetValue(actor, out d)) return false;
                 float t = unchecked(PhotonNetwork.ServerTimestamp - d.ts) / 1000f;
                 if (t < 0f || t > Defs[d.idx].Duration) return false;
-                Evaluate(d.idx, t, out body, out bodyRotDeg, out armL, out armR);
-                // NaN/bounds discipline (#434): reject anything non-finite,
-                // clamp everything else.
-                if (!IsFinite(body) || !IsFinite(armL) || !IsFinite(armR) || !IsFinite(bodyRotDeg)) return false;
-                body = Vector2.ClampMagnitude(body, MAX_OFFSET);
-                bodyRotDeg = Mathf.Clamp(bodyRotDeg, -MAX_TILT_DEG, MAX_TILT_DEG);
-                armL = Vector2.ClampMagnitude(armL, 1.6f);
-                armR = Vector2.ClampMagnitude(armR, 1.6f);
-                return true;
+                return EvaluateClamped(d.idx, t, out body, out bodyRotDeg, out armL, out armR);
             }
             catch { return false; }
         }
@@ -708,13 +869,7 @@ namespace CompetitiveRounds
             if (idx < 0) { PreviewSku = null; return false; }   // unknown sku (version skew) — self-clear
             name = Defs[idx].Name;
             float t = (Time.unscaledTime - _previewStartedAt) % Defs[idx].Duration;
-            Evaluate(idx, t, out body, out bodyRotDeg, out armL, out armR);
-            if (!IsFinite(body) || !IsFinite(armL) || !IsFinite(armR) || !IsFinite(bodyRotDeg)) return false;
-            body = Vector2.ClampMagnitude(body, MAX_OFFSET);
-            bodyRotDeg = Mathf.Clamp(bodyRotDeg, -MAX_TILT_DEG, MAX_TILT_DEG);
-            armL = Vector2.ClampMagnitude(armL, 1.6f);
-            armR = Vector2.ClampMagnitude(armR, 1.6f);
-            return true;
+            return EvaluateClamped(idx, t, out body, out bodyRotDeg, out armL, out armR);
         }
 
         // ── Frame channels ────────────────────────────────────────────────
@@ -751,10 +906,13 @@ namespace CompetitiveRounds
 
             private static void Postfix(PlayerWobblePosition __instance)
             {
-                if (_wobbleChannelDead || active.Count == 0) return;
+                // A non-null PortraitPose also passes (design S1.3); a rig
+                // component skips the card-pick window, a live one does not.
+                if (_wobbleChannelDead || (active.Count == 0 && !PortraitPose.HasValue)) return;
                 try
                 {
-                    if (!WindowOpen()) return;
+                    PortraitPoseSpec ppUnused;
+                    if (!PortraitComponent(__instance, out ppUnused) && !WindowOpen()) return;
                     Vector2 body, al, ar; float rot;
                     if (!TryGetPose(__instance, out body, out rot, out al, out ar)) return;
                     if (body != Vector2.zero)
@@ -795,10 +953,14 @@ namespace CompetitiveRounds
 
             private static void Postfix(IKArmMove __instance)
             {
-                if (_armChannelDead || active.Count == 0) return;
+                // A non-null PortraitPose also passes (design S1.3); a rig
+                // component skips the card-pick window, a live one does not.
+                if (_armChannelDead || (active.Count == 0 && !PortraitPose.HasValue)) return;
                 try
                 {
-                    if (!WindowOpen()) return;
+                    PortraitPoseSpec ppUnused;
+                    bool portrait = PortraitComponent(__instance, out ppUnused);
+                    if (!portrait && !WindowOpen()) return;
                     var tgt = __instance != null ? __instance.target : null;
                     if (tgt == null) return;
                     Vector2 body, al, ar; float rotUnused;
@@ -809,6 +971,7 @@ namespace CompetitiveRounds
                     var d = new Vector3(off.x, off.y, 0f);
                     tgt.position += d;
                     armApplied[tgt] = d;
+                    if (portrait) PortraitArmApplied++;
                 }
                 catch { _armChannelDead = true; }
             }
