@@ -2265,3 +2265,7 @@ row("asm_pool", "test_the_assembly_pool_and_its_connect_timeout", [
       note="asyncpg's default 60 s connect timeout: the checkout fails after about 60 s"),
     M("pool_size_5", "pool arguments", E(DBPY, "ASM_POOL_SIZE = 4\n", "ASM_POOL_SIZE = 5\n")),
 ], T("args_through_dict", E(DBPY, _ASM_ARGS, "    args = dict(timeout=ASM_CONNECT_TIMEOUT_S)\n")))
+
+
+# The client rows (K, WP and N11) are registered by their own module.
+import cf_controls_client  # noqa: E402,F401
