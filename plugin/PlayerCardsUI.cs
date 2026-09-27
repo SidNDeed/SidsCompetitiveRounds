@@ -108,6 +108,13 @@ namespace CompetitiveRounds
         private static int previewShown = -1;   // PortraitRender.PreviewSerial the preview sprite was made from
         private static Sprite previewSprite;
         private static bool setInFlight; private static float setAt;
+        // the dance row (dance cards S5.8): the choice lives on the server; a
+        // click only moves the pending choice, sent after a short pause
+        private static GameObject btnDance;
+        private static object btnDanceTxt;
+        private static long danceChoice = -1;   // the shop item id a click chose, -1 when nothing is pending
+        private static float danceChoiceAt, danceSentAt;
+        private static bool danceInFlight;
         // identity fence (c4): every callback captures uiEpoch at dispatch and
         // returns when an identity edge advanced it; priceChangedAt gates a
         // repeat purchase until /pc/me has answered after a price_changed.
@@ -328,6 +335,7 @@ namespace CompetitiveRounds
             lastPack = null; lastMsg = null;
             HistoryReset();
             openInFlight = claimInFlight = recoverInFlight = discardInFlight = setInFlight = false;
+            danceChoice = -1; danceInFlight = false;   // the previous account's pending dance choice is never sent
             portraitWaitUntil = -1f; portraitWaitedAt = -100f; pendingVisit = false;
             settingsVisited = false;   // the next Settings look checks the picture again (r5 L12)
             // the previous account's character, as a Sprite over a texture
@@ -393,6 +401,7 @@ namespace CompetitiveRounds
             // return inside one throttle window never ran an off-Settings tick,
             // so the visit check stayed disarmed for the second entry.
             if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
+            if (danceChoice >= 0) { try { MaybeSendDance(); } catch (Exception ex) { danceChoice = -1; danceInFlight = false; Plugin.Log.LogWarning($"[PC] dance selection threw: {ex.Message}"); } }
             if (onTab || cardPopupTile != null) { try { PlaceTopCards(); } catch { } }   // every frame: the overlays follow the layout and the snapshots (C3)
             // Dance cards playback (design S5.7): every call, before the throttle
             // below -- the clock is real time and the overlays follow the layout.
@@ -2458,6 +2467,10 @@ namespace CompetitiveRounds
             btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
                 "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.", 18f);
             btnPresetTxt = UIFactory.GetButtonText(btnPreset);
+            btnDance = SettingsRow(parent, "SPcDnc", CycleDance,
+                "The dance your card performs: it plays once each time your card is shown in a binder or a pack, drawn from your own character on this PC. Pick one you own; None keeps your card still.", 18f);
+            btnDanceTxt = UIFactory.GetButtonText(btnDance);
+            if (btnDance.transform.parent != null) btnDance.transform.parent.gameObject.SetActive(false);   // shown once /pc/me says the server has dance cards
             // The preview in its own left-aligned row: dropped straight into
             // the settings column it was stretched to the column's width and
             // its picture centred in that ("too far to the right", Sid,
@@ -2537,7 +2550,111 @@ namespace CompetitiveRounds
                     ? "Announce my pulls: <color=#88FF88>ON</color>"
                     : "Announce my pulls: <color=#FF9966>OFF</color>");
             }
+            RefreshDanceRow(me);
             RefreshPictureRows();
+        }
+
+        // -- the dance row (dance cards design S5.8) -----------------------------------
+
+        /// <summary>The dances this player owns that this client can capture,
+        /// in the wheel's order; null while the shop list has not been read.</summary>
+        private static List<ApiClient.ShopItemData> OwnedDanceItems()
+        {
+            var items = ApiClient.CachedShopItems;
+            if (items == null) return null;
+            var list = new List<ApiClient.ShopItemData>();
+            foreach (var d in DanceEmotes.Defs)
+                foreach (var it in items)
+                    if (it != null && it.owned && it.kind == "dance" && string.Equals(it.sku, d.Sku, StringComparison.Ordinal)) { list.Add(it); break; }
+            return list;
+        }
+
+        private static string DanceItemLabel(long item, ApiClient.PcMe me)
+        {
+            if (item <= 0) return I18n.Tr("None");
+            var items = ApiClient.CachedShopItems;
+            if (items != null)
+                foreach (var it in items)
+                    if (it != null && it.id == item && !string.IsNullOrEmpty(it.name)) return I18n.Tr(it.name);
+            if (me != null && item == me.pc_dance_item && !string.IsNullOrEmpty(me.pc_dance_sku))
+                foreach (var d in DanceEmotes.Defs)
+                    if (d.Sku == me.pc_dance_sku) return I18n.Tr(d.Name);
+            return "#" + item.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Shown only when /pc/me carries the dance keys (a server with
+        /// dance cards); the label is the pending choice while one is waiting,
+        /// else the server's selection.</summary>
+        private static void RefreshDanceRow(ApiClient.PcMe me)
+        {
+            if (btnDance == null || btnDanceTxt == null) return;
+            bool show = me != null && me.dance_supported;
+            var grp = btnDance.transform.parent != null ? btnDance.transform.parent.gameObject : btnDance;
+            if (grp.activeSelf != show) grp.SetActive(show);
+            if (!show) return;
+            long item = danceChoice >= 0 ? danceChoice : me.pc_dance_item;
+            string label = DanceItemLabel(item, me) + (danceChoice >= 0 || danceInFlight ? " ..." : "");
+            UIFactory.SetTextRaw(btnDanceTxt, I18n.TrF("Dance on my card: {0}", "<color=#CCCCCC>" + label + "</color>"));
+        }
+
+        /// <summary>None -> each owned dance -> None. Only the pending choice
+        /// moves here; MaybeSendDance sends it after a 1.5 s pause, so a run of
+        /// clicks costs one selection. Nothing is written to the config: the
+        /// selection is the server's (S2.10).</summary>
+        private static void CycleDance()
+        {
+            var id = LocalId(); var me = ApiClient.CachedPcMe;
+            if (id == null || me == null || !me.dance_supported) return;
+            if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
+            var owned = OwnedDanceItems();
+            if (owned == null)
+            {
+                try { ApiClient.FetchShopItems(id); } catch { }
+                try { CompetitiveUI.ShowNotification(I18n.Tr("Loading your dances..."), C_LABEL, 2f); } catch { }
+                return;
+            }
+            long cur = danceChoice >= 0 ? danceChoice : me.pc_dance_item;
+            int at = -1;
+            for (int i = 0; i < owned.Count; i++) if (owned[i].id == cur) at = i;
+            danceChoice = at + 1 < owned.Count ? owned[at + 1].id : 0;
+            danceChoiceAt = Time.unscaledTime;
+            NativeUI.MarkDirty();
+        }
+
+        /// <summary>Called on every PlayerCardsUI tick: the pending choice goes
+        /// to the selection route once the clicks pause, then /pc/me is read
+        /// again (the sku and the motion state) and the picture is checked.</summary>
+        private static void MaybeSendDance()
+        {
+            if (danceChoice < 0) return;
+            if (danceInFlight && Time.unscaledTime - danceSentAt < 25f) return;   // past the 20 s transport timeout
+            if (Time.unscaledTime - danceChoiceAt < 1.5f) return;
+            var id = LocalId(); var me = ApiClient.CachedPcMe;
+            if (id == null || me == null || !me.dance_supported) { danceChoice = -1; danceInFlight = false; return; }
+            long item = danceChoice;
+            if (item == me.pc_dance_item) { danceChoice = -1; NativeUI.MarkDirty(); return; }   // back to where it was: nothing to send
+            danceInFlight = true; danceSentAt = Time.unscaledTime;
+            int ep = uiEpoch;
+            Plugin.Log.LogInfo($"[PC] dance selection -> item {item}");
+            ApiClient.PcDanceSelect(id, NewNonce(), item, (ok, resp) =>
+            {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                danceInFlight = false;
+                if (danceChoice == item) danceChoice = -1;   // a newer click keeps its own pending choice
+                if (!ok)
+                {
+                    try { CompetitiveUI.ShowNotification(ReasonText(ApiClient.PcErrorCode(resp)), C_WARN, 3f); } catch { }
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                ApiClient.FetchPcMe(id, true, (ok2, r2) =>
+                {
+                    if (ep != uiEpoch) return;
+                    try { PortraitRender.OnTabVisit(); } catch { }   // the picture check (S5.8): a dance picture, or the still without one
+                    NativeUI.MarkDirty();
+                });
+                NativeUI.MarkDirty();
+            });
         }
 
         /// <summary>The preset row and its preview are local (the preset is a
