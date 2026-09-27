@@ -219,6 +219,32 @@ def test_motion_flash_gate_smooth_sequence_passes():
     assert stats["worst_changed"] < pcm.FLASH_CHANGED_MAX
 
 
+def test_motion_flash_gate_corpus_control():
+    """M7's passing control on REAL captures: one legitimate capture of each
+    of the eight recipe-1 dances (the verification seat's portrait lever in
+    LOCAL mode, PC_MOTION_CORPUS_DIR/*.scrmotion) passes every content check,
+    the flash gate included, and stays green under each T6 mutant, whose red
+    comes from the term-isolating fixtures above. SKIPS, naming the variable,
+    when it is unset."""
+    root = os.environ.get("PC_MOTION_CORPUS_DIR")
+    if not root:
+        pytest.skip("PC_MOTION_CORPUS_DIR unset: the eight-capture control reads the seat's corpus")
+    table = pcm.MOTION_TABLE[pcm.MOTION_RECIPE]
+    by_dance = {}
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".scrmotion"):
+            continue
+        with open(os.path.join(root, name), "rb") as fh:
+            header, frames = pcm.parse_container(fh.read())
+        assert header["dance"] not in by_dance, "two captures of " + header["dance"]
+        by_dance[header["dance"]] = (header, frames)
+    assert sorted(by_dance) == sorted(table)
+    for dance, (header, frames) in sorted(by_dance.items()):
+        _container, _hash, stats = pcm.decode_frames(header, frames, deadline_s=600.0)
+        assert stats["frames"] == table[dance][1], (dance, stats)
+        assert stats["worst_changed"] <= pcm.FLASH_CHANGED_MAX, (dance, stats)
+
+
 # -- T46, the decode's deadline (L7) ------------------------------------------------
 def test_motion_decode_deadline_overrun_is_one_step(monkeypatch):
     """The deadline is checked after every frame: a decode whose frame 10
