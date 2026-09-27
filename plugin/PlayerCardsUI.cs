@@ -474,6 +474,7 @@ namespace CompetitiveRounds
         {
             try { HideCardPopup(); } catch { }
             pendingVisit = true; settingsVisited = false;
+            tradesEdge.OverlayClosed();   // the Trades view survives a close: the reopen is an entry (TC-L2)
         }
 
         /// <summary>The card view is a full-screen uGUI surface: it owns input
@@ -509,6 +510,7 @@ namespace CompetitiveRounds
             // return inside one throttle window never ran an off-Settings tick,
             // so the visit check stayed disarmed for the second entry.
             if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
+            tradesEdge.Frame(onTab && view == View.Trades);   // and a frame off the Trades view re-arms its entry read (TC-L2)
             if (onTab || cardPopupTile != null) { try { PlaceTopCards(); } catch { } }   // every frame: the overlays follow the layout and the snapshots (C3)
             if (Time.unscaledTime < tickAt) return;
             tickAt = Time.unscaledTime + 2f;
@@ -2601,8 +2603,8 @@ namespace CompetitiveRounds
         private static bool tradeActInFlight; private static float tradeActAt;
         private static readonly Dictionary<string, string> actNonces = new Dictionary<string, string>();
         private static bool tradeSelfChecked;
-        private static bool lastOnTrades;   // the last tick was on the Collection tab AND the Trades view
-        private static float lastTradesTickAt = -100f;   // the overlay does not tick while it is closed
+        // the Trades view's entry edge (C12, TC-L2): every entry forces the full read
+        private static readonly PcTradeRules.TradesEntryEdge tradesEdge = new PcTradeRules.TradesEntryEdge();
         private static GameObject offerBtnGO; private static string offerBtnPid; private static Action offerBtnHide;   // the card view's Offer button
         private static string tradePanelSig, tradeBadgeSig, tradesLabelPainted, collectionLabelPainted;
         private static object collectionLabelObj;
@@ -2628,7 +2630,7 @@ namespace CompetitiveRounds
             lastReceivedOpen = null; pendingNotify.Clear();
             offeredIds = new HashSet<string>(StringComparer.Ordinal);
             armedTradeId = null; tradeActInFlight = false; actNonces.Clear();
-            lastOnTrades = false; lastTradesTickAt = -100f;
+            tradesEdge.Reset();
             offerBtnGO = null; offerBtnPid = null; offerBtnHide = null;
             tradePanelSig = null; tradeBadgeSig = null; tradesLabelPainted = null; collectionLabelPainted = null;
             EndCompose();
@@ -2649,14 +2651,14 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] digest self-check " + (pass ? "PASS" : "FAIL") + " got=" + got);
             }
             ProcessTradeAnswers();
-            // entering = the Trades view became visible (the tab AND the view): that read is forced
+            // entering = the Trades view became visible (the tab AND the view):
+            // that read is forced, and owed until it is issued. The edge is
+            // re-armed by a frame off the view (MaybeTick) and by the overlay
+            // closing (OnOverlayClosed); the five-second gap stays behind them
+            // as a secondary guard (TC-L2).
             bool onTrades = onTab && view == View.Trades;
-            // the overlay does not tick while it is closed: re-opening it on the
-            // Trades view is entering the view too, so a gap forgets the last tick
-            if (Now - lastTradesTickAt > 5f) lastOnTrades = false;
-            lastTradesTickAt = Now;
-            bool entered = onTrades && !lastOnTrades;
-            lastOnTrades = onTrades;
+            float sinceTick = Now - tradesEdge.LastTickAt;
+            bool owed = tradesEdge.Tick(onTrades, Now);
             if (armedTradeId != null && Now - armedTradeAt > PcTradeRules.ArmWindowSeconds) { armedTradeId = null; NativeUI.MarkDirty(); }
             if (tradeActInFlight && Now - tradeActAt > 25f) { tradeActInFlight = false; NativeUI.MarkDirty(); }
             if (pendingNotify.Count > 0 && Now - pendingNotifyAt > NOTIFY_WAIT_S) NotifyNew(null);
@@ -2667,8 +2669,12 @@ namespace CompetitiveRounds
                 int ep = uiEpoch;
                 ApiClient.PcTradeSummary(id, false, (ok, resp) => { if (ep == uiEpoch) TradeReadLanded("summary", ok, resp); });
             }
-            if (onTrades && PcTradeRules.ReadsAllowed(tradeDiscovery) && (entered || Now >= tradesFullAt))
-                ReadTrades(id, entered);
+            if (PcTradeRules.FullReadDue(onTrades, PcTradeRules.ReadsAllowed(tradeDiscovery), owed, Now, tradesFullAt))
+            {
+                if (owed) Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] trades entered forced_read=1 since_tick_ms=" + Mathf.RoundToInt(sinceTick * 1000f));
+                ReadTrades(id, owed);
+                tradesEdge.ReadIssued();
+            }
         }
 
         private static void ReadTrades(string id, bool force)

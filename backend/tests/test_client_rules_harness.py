@@ -430,9 +430,9 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[pctrade\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The count at the last commit that added cases (round 2, TC-L1): a floor
+    # The count at the last commit that added cases (round 2, TC-L2): a floor
     # far below it would be a gate that cannot fail (#342).
-    assert run >= 28, "the PcTradeRules suite shrank to %d cases" % run
+    assert run >= 33, "the PcTradeRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -466,6 +466,12 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     "cache fence: a late full answer does not overwrite a newer summary (the round-1 scenario)",
     "cache fence: every landing order of four reads ends on the newest and never goes back",
     "cache fence: a newer full answer is taken, answers in order are all taken, and a clear forgets",
+    # the Trades view's entry edge (round 2, TC-L2)
+    "entry edge: close and reopen inside five seconds forces the read (the round-1 scenario)",
+    "entry edge: a leave and return between two ticks forces the read",
+    "entry edge: an entry the session was not ready for is served on the next tick",
+    "entry edge: staying on the view reads on entry, then on the 30 s cadence only",
+    "entry edge: the five-second gap still re-arms a hide that skipped the close signal",
 ])
 def test_the_pc_trade_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "pctrade")

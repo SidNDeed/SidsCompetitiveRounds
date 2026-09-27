@@ -327,6 +327,30 @@ def test_the_trades_cache_takes_an_answer_only_through_the_ordering_fence():
     assert "pcTradesStaleReask = keptOut && !reask;" in full
 
 
+def test_the_trades_entry_edge_is_re_armed_by_the_close_and_by_every_frame_off_the_view():
+    """Card trading round 2, TC-L2. Every entry to the Trades view forces the
+    full read (C12). The edge (PcTradeRules.TradesEntryEdge, executed by the
+    rules harness) is re-armed by the overlay closing and by a frame off the
+    view - tracked on every MaybeTick call, ahead of its two-second throttle,
+    as the Settings edge is - and the read it owes goes through
+    PcTradeRules.FullReadDue and is marked issued."""
+    src = CLIENT.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    closed = _span(src, "internal static void OnOverlayClosed()", end)
+    assert "tradesEdge.OverlayClosed();" in closed
+    tick = _span(src, "internal static void MaybeTick(bool onTab, bool onSettings)", end)
+    frame = "tradesEdge.Frame(onTab && view == View.Trades);"
+    assert frame in tick and tick.index(frame) < tick.index("if (Time.unscaledTime < tickAt) return;")
+    trades = _span(src, "private static void TickTrades(string id, bool onTab)", end)
+    assert "bool owed = tradesEdge.Tick(onTrades, Now);" in trades
+    due = "PcTradeRules.FullReadDue(onTrades, PcTradeRules.ReadsAllowed(tradeDiscovery), owed, Now, tradesFullAt)"
+    assert trades.index(due) < trades.index("ReadTrades(id, owed);") < trades.index("tradesEdge.ReadIssued();")
+    reset = _span(src, "private static void ResetTrades()", end)
+    assert "tradesEdge.Reset();" in reset
+    # the proxy's own fields are gone: the edge has one owner
+    assert "lastOnTrades" not in src and "lastTradesTickAt" not in src
+
+
 def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():
     """The three repairs behind the 2026-09-12 binder screenshot, each on its
     own so deleting any one of them fails here: the face slot asks for no

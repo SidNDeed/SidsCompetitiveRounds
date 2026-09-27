@@ -324,6 +324,67 @@ namespace CompetitiveRounds
             internal void Clear() { Summary = 0; Full = 0; }
         }
 
+        // -- the Trades view's entry edge (C12, TC-L2) ----------------------------
+
+        /// <summary>Entering the Trades view forces the full read (C12), and the
+        /// read stays owed until it is issued. The edge is re-armed by the two
+        /// direct signals that the view was left: a frame off the view (the
+        /// overlay's per-frame tick, ahead of its two-second throttle, as the
+        /// Settings edge is) and the overlay closing (the view survives a
+        /// close, so a reopen shows it again with no frame off it in between).
+        /// The old wall-clock proxy stays behind them as a secondary guard for
+        /// a hide that skips OverlayClosed; it can only ever re-arm an entry,
+        /// never suppress one.</summary>
+        internal sealed class TradesEntryEdge
+        {
+            /// <summary>The secondary guard: a tick this long after the last one forgets it.</summary>
+            internal const float GapSeconds = 5f;
+            private bool lastOn, owed;
+            private float lastTickAt = -100f;
+
+            /// <summary>When the last tick ran.</summary>
+            internal float LastTickAt { get { return lastTickAt; } }
+
+            /// <summary>Every frame: a frame off the view re-arms the edge (a
+            /// leave and return between two ticks is an entry), and an entry
+            /// whose read was not issued lapses with the visit.</summary>
+            internal void Frame(bool onTrades)
+            {
+                if (!onTrades) { lastOn = false; owed = false; }
+            }
+
+            /// <summary>The overlay closed: the next tick on the view is an entry.</summary>
+            internal void OverlayClosed() { lastOn = false; }
+
+            /// <summary>The two-second tick. True when a forced full read is owed:
+            /// this tick entered the view, or an earlier entry's read has not
+            /// been issued yet (the session was not ready, or reads were not
+            /// allowed) and the view has not been left since.</summary>
+            internal bool Tick(bool onTrades, float now)
+            {
+                if (now - lastTickAt > GapSeconds) lastOn = false;
+                lastTickAt = now;
+                if (!onTrades) owed = false;
+                else if (!lastOn) owed = true;
+                lastOn = onTrades;
+                return owed;
+            }
+
+            /// <summary>The owed read was issued.</summary>
+            internal void ReadIssued() { owed = false; }
+
+            /// <summary>An identity edge: back to the state of the first tick.</summary>
+            internal void Reset() { lastOn = false; owed = false; lastTickAt = -100f; }
+        }
+
+        /// <summary>A full read is due on this tick (C12, V8 6.4): the Trades
+        /// view is current and reads are allowed, and an entry is owed its
+        /// forced read or the 30 s cadence has come round.</summary>
+        internal static bool FullReadDue(bool onTrades, bool readsAllowed, bool owed, float now, float fullAt)
+        {
+            return onTrades && readsAllowed && (owed || now >= fullAt);
+        }
+
         // -- new proposals (V8 6.4) --------------------------------------------
 
         /// <summary>The received ids absent from the previous summary, in the
@@ -676,7 +737,79 @@ namespace CompetitiveRounds
                 Check(r, "cache fence: a newer full answer is taken, answers in order are all taken, and a clear forgets",
                       newer && inOrder && cleared, "newer=" + newer + " in_order=" + inOrder + " cleared=" + cleared);
             }
+            // 15. The Trades view's entry edge (C12, TC-L2), driven the way
+            //     MaybeTick and TickTrades drive it (RunEdge). Reads print as the
+            //     tick's time plus f (forced: an entry) or c (the 30 s cadence).
+            {
+                // the round-1 report's scenario: on the view, the overlay closed
+                // and reopened inside five seconds, the 30 s read not yet due
+                string reopen = RunEdge(new[] {
+                    EdgeStep.Tick(0f, true), EdgeStep.Tick(2f, true), EdgeStep.Tick(4f, true),
+                    EdgeStep.Close(5f), EdgeStep.Tick(6f, true) });
+                Check(r, "entry edge: close and reopen inside five seconds forces the read (the round-1 scenario)",
+                      reopen == "0f,6f", "reads=" + reopen);
+                // the view left and returned to between two ticks
+                string between = RunEdge(new[] {
+                    EdgeStep.Tick(0f, true), EdgeStep.Tick(2f, true),
+                    EdgeStep.Frame(2.5f, false), EdgeStep.Frame(3f, true), EdgeStep.Tick(4f, true) });
+                Check(r, "entry edge: a leave and return between two ticks forces the read",
+                      between == "0f,4f", "reads=" + between);
+                // an entry on a tick the session was not ready for stays owed
+                string owedRead = RunEdge(new[] {
+                    EdgeStep.Tick(0f, true), EdgeStep.Tick(2f, false),
+                    EdgeStep.Tick(4f, true, false), EdgeStep.Tick(6f, true) });
+                Check(r, "entry edge: an entry the session was not ready for is served on the next tick",
+                      owedRead == "0f,6f", "reads=" + owedRead);
+                // the controls: staying on the view reads on entry and then only on
+                // the cadence (never once per tick, never twice), and the five-second
+                // gap still re-arms a hide that skipped the close signal
+                var stay = new List<EdgeStep>();
+                for (int t = 0; t <= 62; t += 2) stay.Add(EdgeStep.Tick(t, true));
+                string steady = RunEdge(stay.ToArray());
+                Check(r, "entry edge: staying on the view reads on entry, then on the 30 s cadence only",
+                      steady == "0f,30c,60c", "reads=" + steady);
+                string gap = RunEdge(new[] { EdgeStep.Tick(0f, true), EdgeStep.Tick(2f, true), EdgeStep.Tick(10f, true) });
+                Check(r, "entry edge: the five-second gap still re-arms a hide that skipped the close signal",
+                      gap == "0f,10f", "reads=" + gap);
+            }
             return r;
+        }
+
+        /// <summary>One step of an entry-edge script: a frame, an overlay close,
+        /// or a two-second tick (which runs its own frame first, as MaybeTick
+        /// does), on a tick the session may not be ready for.</summary>
+        private struct EdgeStep
+        {
+            internal float T;
+            internal char Kind;
+            internal bool On, Ready;
+            internal static EdgeStep Frame(float t, bool on) { return new EdgeStep { T = t, Kind = 'F', On = on, Ready = true }; }
+            internal static EdgeStep Close(float t) { return new EdgeStep { T = t, Kind = 'C', On = false, Ready = true }; }
+            internal static EdgeStep Tick(float t, bool on, bool ready = true) { return new EdgeStep { T = t, Kind = 'T', On = on, Ready = ready }; }
+        }
+
+        /// <summary>Drives a fresh TradesEntryEdge through `steps` as MaybeTick
+        /// and TickTrades drive the real one: Frame on every frame, then Tick,
+        /// the session gate, FullReadDue, the read (which sets the next cadence
+        /// time) and ReadIssued. Returns the reads issued.</summary>
+        private static string RunEdge(EdgeStep[] steps)
+        {
+            var e = new TradesEntryEdge();
+            float fullAt = 0f;
+            var reads = new List<string>();
+            foreach (var s in steps)
+            {
+                if (s.Kind == 'C') { e.OverlayClosed(); continue; }
+                e.Frame(s.On);
+                if (s.Kind == 'F') continue;
+                bool owed = e.Tick(s.On, s.T);
+                if (!s.Ready) continue;
+                if (!FullReadDue(s.On, true, owed, s.T, fullAt)) continue;
+                reads.Add(s.T.ToString(CultureInfo.InvariantCulture) + (owed ? "f" : "c"));
+                fullAt = s.T + FullPollSeconds;
+                e.ReadIssued();
+            }
+            return string.Join(",", reads.ToArray());
         }
 
         /// <summary>Every ordering of `items` (the cache fence's landing orders).</summary>
