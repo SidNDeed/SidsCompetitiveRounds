@@ -851,6 +851,7 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
         ("/api/v1/pc/portrait", ("POST",)),
         ("/api/v1/pc/portrait/motion", ("POST",)),   # dance cards: the motion upload (S2.6)
+        ("/api/v1/pc/dance", ("POST",)),              # dance cards: the selection (S2.10)
     }
     admin = [r for r in main.app.routes if getattr(r, "path", "") == "/api/v1/admin/pc/snapshot"]
     assert len(admin) == 1 and "_require_admin(db, admin_steam_id, \"pc_snapshot\", \"pool\", sig)" in inspect.getsource(main.admin_pc_snapshot)

@@ -28668,6 +28668,96 @@ async def pc_motion_upload(
     return {"applied": True, "motion_hash": motion_hash}
 
 
+# -- Dance cards: the selection (design S2.10) ---------------------------------
+# L4 (section 12): ShopItem.id is a BIGINT (models.py) and nothing upstream of
+# the SQL cast checks a range, so the id is parsed here, BEFORE any statement:
+# canonical decimal (no sign, no leading zero, ASCII digits only, nothing
+# around it) in [0, 2^63 - 1], 0 meaning none. Anything else is the sender's
+# 422, never a database range error in its transaction.
+_PC_DANCE_ITEM_MAX = 9223372036854775807
+
+
+def _pc_dance_item_id(raw) -> int | None:
+    if not isinstance(raw, str) or len(raw) > 19 or _re.fullmatch(r"0|[1-9][0-9]*", raw) is None:
+        return None
+    value = int(raw)
+    return value if value <= _PC_DANCE_ITEM_MAX else None
+
+
+@app.post("/api/v1/pc/dance", tags=["Player Cards"])
+async def pc_dance_select(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    item_id: str = Query(..., max_length=32),
+    db: AsyncSession = Depends(get_db),
+):
+    """The dance the player's card performs (design S2.10), `item_id` 0 for
+    none; HMAC over pcdance:{steam}:{nonce}:{item_id}, strict session. Order:
+    the item id parsed before any SQL (L4); the identity lock EXCLUSIVE; the
+    actor gate (its 503 for an unconfigured key comes before the nonce, M3);
+    the players row FOR NO KEY UPDATE (this transaction updates it, M4); for a
+    non-zero id the item is a dance (else 422 item_invalid), ready (else 403
+    dance_not_ready) and owned -- bought, or the one exemption predicate
+    (else 403 dance_not_owned); an unchanged selection answers
+    {applied: false} and keeps the stored motion; the single-use nonce; then
+    the selection is written and the stored motion deleted (it was captured
+    for the old dance). It writes active_dance_id and nothing else of the
+    player: never _set_active_cosmetic, whose unknown-kind default is
+    active_title_id."""
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    item = _pc_dance_item_id(item_id)
+    if item is None:
+        raise HTTPException(status_code=422, detail={"error": "item_invalid"})
+    canon = _pcm.canon_dance(steam_id, nonce, item_id)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+    current = (await db.execute(text("""
+        SELECT p.active_dance_id FROM players p
+         WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
+           FOR NO KEY UPDATE
+    """), {"pid": pid})).mappings().first()
+    if current is None:
+        await db.rollback()
+        raise HTTPException(status_code=410, detail="Account deleted")
+    if item:
+        chosen = (await db.execute(text("""
+            SELECT si.sku AS dance_sku, si.kind AS dance_kind, si.catalog_ready AS dance_ready,
+                   EXISTS (SELECT 1 FROM player_items pi
+                            WHERE pi.player_id = CAST(:pid AS uuid) AND pi.item_id = si.id) AS dance_bought
+              FROM shop_items si WHERE si.id = CAST(:item AS bigint)
+        """), {"pid": pid, "item": item})).mappings().first()
+        if chosen is None or chosen["dance_kind"] != "dance":
+            await db.rollback()
+            raise HTTPException(status_code=422, detail={"error": "item_invalid"})
+        if not chosen["dance_ready"]:
+            await db.rollback()
+            raise HTTPException(status_code=403, detail={"error": "dance_not_ready"})
+        if not _pcm.owns_dance(chosen, steam_id, _auto_owned):
+            await db.rollback()
+            raise HTTPException(status_code=403, detail={"error": "dance_not_owned"})
+    was = current["active_dance_id"]
+    if (was or 0) == item:
+        await db.rollback()   # unchanged: the stored motion stays
+        return {"applied": False, "reason": "same", "item_id": item}
+    used = (await db.execute(text("""
+        INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
+        ON CONFLICT DO NOTHING RETURNING nonce
+    """), {"pid": pid, "nonce": nonce})).scalar_one_or_none()
+    if used is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "nonce_replayed"})
+    await db.execute(text("UPDATE players SET active_dance_id = CAST(:item AS bigint) WHERE id = CAST(:pid AS uuid)"),
+                     {"item": item or None, "pid": pid})
+    await db.execute(text("DELETE FROM pc_motions WHERE player_id = CAST(:pid AS uuid)"), {"pid": pid})
+    await db.commit()
+    print(f"[PC-DANCE] player={steam_id} selected={item or 'none'} was={was or 'none'}")
+    return {"applied": True, "item_id": item}
+
+
 @app.post("/api/v1/admin/pc/portrait/clear", tags=["Admin"])
 async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
     """Admin-HMAC canonical admin:{admin}:pc_portrait_clear:{steam_id}:{lock_days}.

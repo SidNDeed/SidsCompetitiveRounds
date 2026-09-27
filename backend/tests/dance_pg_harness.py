@@ -100,6 +100,12 @@ class Lane:
                         "sku": sku, "kind": "dance", "name": sku, "price": 100,
                         "rarity": "common", "catalog_ready": True})
                     self.items[sku] = int(row["id"])
+                # one item of another kind, for the selection's kind check and
+                # the columns it must leave alone (a title a dancer wears)
+                row = await lh._insert(db, "shop_items", {
+                    "sku": "title_dancer", "kind": "title", "name": "title_dancer", "price": 100,
+                    "rarity": "common", "catalog_ready": True})
+                self.items["title_dancer"] = int(row["id"])
                 await db.commit()
         except BaseException:
             await self.case.__aexit__(None, None, None)
@@ -333,6 +339,55 @@ async def put_motion(lane, pid, still, *, descriptor=DESC, dance="dance_bounce",
              "c": count, "ms": period, "sh": still, "sd": descriptor})
         await db.commit()
     return h
+
+
+async def select_dance(lane, steam, secret, item_id, *, nonce_value=None, sig=None, db=None):
+    """One call of the selection route (POST /api/v1/pc/dance) on its own
+    session, or on `db` when given: (status, answer). `item_id` is sent as
+    its text, as the query string carries it."""
+    n = nonce_value or nonce()
+    raw = item_id if isinstance(item_id, str) else str(item_id)
+    if sig is None:
+        sig = sign(secret, pcm.canon_dance(steam, n, raw))
+    req = Req(path="/api/v1/pc/dance")
+
+    async def call(session):
+        try:
+            return 200, await main.pc_dance_select(req, steam_id=steam, sig=sig, nonce=n, item_id=raw, db=session)
+        except main.HTTPException as ex:
+            return ex.status_code, ex.detail
+    if db is not None:
+        return await call(db)
+    async with lane.sm() as session:
+        return await call(session)
+
+
+async def own(lane, pid, item):
+    """A player_items row: `pid` bought `item`."""
+    await execute(lane, "INSERT INTO player_items (player_id, item_id, purchase_price) "
+                        "VALUES (CAST(:pid AS uuid), CAST(:item AS bigint), 0)", pid=pid, item=item)
+
+
+ROW_LOCK_PROBES = (("key share", "FOR KEY SHARE"), ("share", "FOR SHARE"), ("no key update", "FOR NO KEY UPDATE"))
+
+
+async def row_lock_probe(lane, pid):
+    """Which row locks on the player's row another session can take NOW,
+    without waiting (NOWAIT, each in a transaction of its own)."""
+    import asyncpg
+    conn = await lane.connect()
+    seen = {}
+    try:
+        for name, clause in ROW_LOCK_PROBES:
+            try:
+                async with conn.transaction():
+                    await conn.fetchval("SELECT 1 FROM players WHERE id = $1::uuid " + clause + " NOWAIT", pid)
+                seen[name] = True
+            except asyncpg.LockNotAvailableError:
+                seen[name] = False
+    finally:
+        await conn.close()
+    return seen
 
 
 # Waiting locks of THIS database's backends only: the instance is shared.
