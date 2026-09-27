@@ -56,14 +56,15 @@ namespace CompetitiveRounds
     /// value the room holds; see "The physical game's token" below.
     ///
     /// A token is one physical game's only while every seat that carries it
-    /// is in that game (v1.41.0 beta review round 5, finding F27; round 6).
-    /// So the token names the ORDINAL of the physical game it was published
-    /// for, by the host's own count of the room's game starts, and an EPOCH
-    /// the host raises at each publish; a seat takes it only for the game
-    /// its own count and its posts both name; a post or a DC report carries
-    /// it only while it still names that game; and the server reads it only
-    /// for the game it names. Each of those rules withholds a token; none
-    /// grants one.
+    /// is in that game (v1.41.0 beta review round 5, findings F27 and F28;
+    /// round 6). So the token names the ORDINAL of the physical game it was
+    /// published for, by the host's own count of the room's game starts, and
+    /// an EPOCH the host raises at each publish; a seat takes it only for the
+    /// game its own count and its posts both name; a post or a DC report
+    /// carries it only while this seat's reading of the score, made when the
+    /// post or the report is built, still shows that game; and the server
+    /// reads it only for the game it names. Each of those rules withholds a
+    /// token; none grants one.
     ///
     /// Nothing here touches Photon or Unity. The sentinel below runs the same
     /// Tracker class the game runs, in the game through the [Broadcast]
@@ -135,7 +136,7 @@ namespace CompetitiveRounds
             "team-live-points-game:5b0c7e1a-2d3f-4a5b-8c6d-7e8f9a0b1c2d:90000000000700009:2:1:3:team_pin_room";
 
         // ---- The physical game's token (round 5, finding F25; round 6,
-        // finding F27) -------------------------------------------------------
+        // findings F27 and F28) ----------------------------------------------
         //
         // At each game start in a cr_ff room the room's host publishes a token
         // as the room property TokenRoomKey
@@ -165,10 +166,15 @@ namespace CompetitiveRounds
         //     room (it may belong to a game this seat did not see start), every
         //     value read during an earlier game, and the value the room held
         //     at each game over.
-        // A post or a DC report carries the taken value only while the room
-        // still holds it and while it names the game this seat is in, by its
-        // own count and by the number its posts name (Tracker.TokenFor). The
-        // server settles a
+        // A different value read while one is taken ends it for the rest of
+        // the game (round 6, F28: the next game's publish, or a second
+        // publisher). A post or a DC report carries the taken value only while
+        // the room still holds it and while this seat's own reading of the
+        // score, taken when the post or the report is built, still shows the
+        // game the value was taken in (Tracker.TokenFor): a game over, a fall
+        // of the rounds, a 0-0 with no points, or a gap in the readings that
+        // could hide a game boundary each withhold it, whether or not a game
+        // over or a game start reached this seat. The server settles a
         // lead-forfeit only from posts that carried the DC report's token,
         // when that token names the game being settled, is its record's own,
         // no post filed there carried another token or one naming another
@@ -193,6 +199,49 @@ namespace CompetitiveRounds
 
         /// <summary>The highest epoch a token carries (nine digits).</summary>
         internal const long MaxEpoch = 999999999;
+
+        /// <summary>Round 6, finding F28: the longest (seconds) this seat may
+        /// go without a fresh reading of its score inside a game before it can
+        /// no longer rule out a game boundary in the gap. A reading is as fresh
+        /// as the room's transport: the time it was taken less the time the
+        /// transport had then been silent (Score.Silent). A longer gap ends the
+        /// game's token and this seat's count of the room's games. The poll
+        /// reads the score every 0.1 s of real time (ROUNDS holds
+        /// Time.timeScale at 1, #332), and a boundary the score cannot show
+        /// needs the rest of one game and the next game's play up to a score
+        /// that follows the last reading (Follows): at least a game's rounds
+        /// to win of play inside one gap (#771: no honest game is that short).
+        /// It only ever withholds: no token is carried BECAUSE a gap was
+        /// short.</summary>
+        internal const double MaxSampleAge = 5.0;
+
+        /// <summary>The scoreboard as a seat reads it (round 6, finding F28):
+        /// both sides' rounds and points, the rounds a game is won at (0 = not
+        /// known), and how long (seconds) the room's transport had received
+        /// nothing when it was read (Silent): the reading shows the room as of
+        /// that long before it was taken. Read false: it could not be read (the
+        /// fields are not resolved, or the room's messages are held), and
+        /// nothing that reads it carries a token.</summary>
+        internal struct Score
+        {
+            public bool Read;
+            public int R1, R2, P1, P2, RoundsToWin;
+            public double Silent;
+
+            internal static Score Of(int r1, int r2, int p1, int p2, int roundsToWin)
+            {
+                return new Score { Read = true, R1 = r1, R2 = r2, P1 = p1, P2 = p2, RoundsToWin = roundsToWin };
+            }
+
+            internal bool AllZero { get { return R1 == 0 && R2 == 0 && P1 == 0 && P2 == 0; } }
+
+            internal bool Over { get { return RoundsToWin > 0 && (R1 >= RoundsToWin || R2 >= RoundsToWin); } }
+
+            public override string ToString()
+            {
+                return Read ? "rounds " + Num(R1) + "-" + Num(R2) + ", points " + Num(P1) + "-" + Num(P2) : "unread";
+            }
+        }
 
         /// <summary>A nonce: 16 lowercase hex digits, the part of a token the
         /// server keeps (main.py _TEAM_GAME_TOKEN_RE; migration 354's CHECK).</summary>
@@ -284,6 +333,11 @@ namespace CompetitiveRounds
             return n.Substring(0, 8) + " (game " + Num(o) + ", epoch " + e.ToString(CultureInfo.InvariantCulture) + ")";
         }
 
+        private static string Secs(double s)
+        {
+            return s.ToString("0.00", CultureInfo.InvariantCulture);
+        }
+
         /// <summary>What a post carrying a token signs for it, apart from the
         /// pair's own signature (update_team_live_points, token_sig): series,
         /// reporter, t1, t2, game number, room (unescaped), token. The token is
@@ -324,6 +378,20 @@ namespace CompetitiveRounds
         internal const string PinDcTokenExpected =
             "team-dc-token:90000000000700009:5b0c7e1a-2d3f-4a5b-8c6d-7e8f9a0b1c2d:90000000000700008:0123456789abcdef:3:7";
 
+        /// <summary>Round 6, finding F28: whether `s` can follow `last` inside
+        /// one game. Inside a game the rounds only rise, and while neither
+        /// side's rounds change the points only rise: a point's end sets the
+        /// score in one RPC, raising one side's rounds and resetting both
+        /// points together when it ends the round (vanilla RPCA_NextRound, as
+        /// SpectatorPatches mirrors it). A game's reset takes the rounds and
+        /// the points to 0-0, which follows nothing but 0-0.</summary>
+        internal static bool Follows(Score last, Score s)
+        {
+            if (s.R1 < last.R1 || s.R2 < last.R2) return false;
+            if (s.R1 == last.R1 && s.R2 == last.R2) return s.P1 >= last.P1 && s.P2 >= last.P2;
+            return true;
+        }
+
         internal sealed class Tracker
         {
             // Recorded games per series: the highest any read showed. A seat
@@ -346,9 +414,9 @@ namespace CompetitiveRounds
             // counted (0 = none, and then no ordinal in this room); `physical`
             // is the game in progress, anchor + countStarts - 1 (0 = none).
             // `countLost`: this seat saw a game boundary without its game start
-            // (a game boundary inside its game: round 5's missed-boundary
-            // guard), so its count no longer names physical games until the
-            // count restarts (the series or the room changes, or the room is
+            // (a game boundary inside its game, or play read after a reset with
+            // no game start), so its count no longer names physical games until
+            // the count restarts (the series or the room changes, or the room is
             // left).
             private int anchor, physical;
             private bool countLost;
@@ -371,10 +439,24 @@ namespace CompetitiveRounds
             private int adoptedOrdinal;        // the game it names (this seat's own when taken)
             private bool took;                 // a token was taken in the game in progress
             private bool inGame;               // from a game start to its game over
+            private bool overSeen;             // the score showed the game in progress over
             private bool boundaryMissed;       // a game boundary this seat did not see: no token until the next start
+            private bool withdrawn;            // the game's token was withdrawn: none for the rest of the game
             private bool published;            // this seat's publish for the game in progress was sent
             private string noted = "";         // the last value logged (each is logged once)
             private long epochRead, epochStale, epochPublished;
+            // Round 6, finding F28: this seat's readings of the score. The last
+            // one and the time its information is from (`sampledAt`, seconds on
+            // the caller's clock: when it was taken, less the transport's
+            // silence then); `sampled`: one was taken in the game in progress
+            // (from its start). Between games: `resetOut`, a reset was read since
+            // this seat's game ended, and `playOut`, the readings of play in a
+            // row since that reset with no game start.
+            private bool sampled;
+            private Score lastScore;
+            private double sampledAt;
+            private bool resetOut;
+            private int playOut;
 
             /// <summary>A read of team/series/{id}/state for `seriesId`.
             /// `hasWins`: the answer carried both win counts (the canceled and
@@ -395,12 +477,15 @@ namespace CompetitiveRounds
             }
 
             /// <summary>A game starts in a cr_ff room: freeze the number its posts
-            /// carry, and count the physical game (round 6, finding F27). Returns
-            /// the number, 0 = its posts go without the pair; `log` is the line
-            /// to write.</summary>
-            internal int OnGameStart(string seriesId, string room, out string log)
+            /// carry, and count the physical game (round 6, finding F27). `live`
+            /// is the score this seat reads at the start and `now` the time on
+            /// the clock ObserveScore and TokenFor are given (round 6, finding
+            /// F28: the game's first reading; one that cannot be read means no
+            /// token in this game). Returns the number, 0 = its posts go without
+            /// the pair; `log` is the line to write.</summary>
+            internal int OnGameStart(string seriesId, string room, Score live, double now, out string log)
             {
-                BeginGameToken();
+                BeginGameToken(live, now);
                 seriesId = seriesId ?? "";
                 room = room ?? "";
                 string sid8 = seriesId.Length > 8 ? seriesId.Substring(0, 8) : seriesId;
@@ -604,12 +689,17 @@ namespace CompetitiveRounds
                 adoptedOrdinal = 0;
                 took = false;
                 inGame = false;
+                overSeen = false;
                 boundaryMissed = false;
+                withdrawn = false;
                 published = false;
                 noted = "";
                 epochRead = 0;
                 epochStale = 0;
                 epochPublished = 0;
+                sampled = false;
+                resetOut = false;
+                playOut = 0;
             }
 
             // The game in progress ends (a game over, a game start without one,
@@ -625,15 +715,136 @@ namespace CompetitiveRounds
                 adopted = "";   // a token is never carried into another game
                 adoptedOrdinal = 0;
                 published = false;
+                withdrawn = false;
                 noted = "";
             }
 
-            private void BeginGameToken()
+            // Round 6, finding F28: a game start seeds the readings with the
+            // score read there. One that cannot be read, or that shows the room
+            // as of more than MaxSampleAge ago, leaves the game without a token.
+            private void BeginGameToken(Score live, double now)
             {
                 EndGameToken();
                 inGame = true;
-                boundaryMissed = false;
+                overSeen = false;
+                boundaryMissed = !live.Read || live.Silent > MaxSampleAge;
                 took = false;
+                sampled = live.Read;
+                lastScore = live;
+                sampledAt = InformationTime(live, now);
+                resetOut = false;
+                playOut = 0;
+            }
+
+            // Round 6, finding F28: the game's token ends at once, and none is
+            // taken for the rest of the game.
+            private void Withdraw()
+            {
+                Stale(adopted);
+                adopted = "";
+                adoptedOrdinal = 0;
+                withdrawn = true;
+            }
+
+            // A reading's information time: when it was taken, less the time the
+            // room's transport had then been silent.
+            private static double InformationTime(Score s, double now)
+            {
+                return s.Silent > 0 ? now - s.Silent : now;
+            }
+
+            /// <summary>Round 6, finding F28: the score as this seat reads it on
+            /// a poll tick (`s`), at `now` seconds on the clock TokenFor is
+            /// given. Inside this seat's game: the game over ends the game's
+            /// token at once, before any game over from the watcher arrives, and
+            /// a reading that cannot follow the one before it inside one game
+            /// (Follows), or whose information is more than MaxSampleAge newer
+            /// than the last reading's, is a game boundary this seat did not see
+            /// (round 5's missed-boundary guard, now on the points too and seeded
+            /// at the game start). A reading that cannot be read is skipped, so
+            /// the gap runs on from the last one that could. Between games: play
+            /// read twice in a row after a reset with no game start is a game
+            /// this seat did not see start. Returns the line to log, or
+            /// null.</summary>
+            internal string ObserveScore(Score s, double now)
+            {
+                if (!s.Read) return null;
+                string line = null;
+                double at = InformationTime(s, now);
+                bool follows = sampled && Follows(lastScore, s);
+                if (inGame && overSeen)
+                {
+                    // The score showed this game over; its reset ends the game
+                    // here when the watcher's game over did not.
+                    if (sampled && !follows)
+                    {
+                        EndGameToken();
+                        inGame = false;
+                        overSeen = false;
+                        resetOut = true;
+                        playOut = 0;
+                    }
+                }
+                else if (inGame)
+                {
+                    if (sampled && !boundaryMissed)
+                    {
+                        if (at - sampledAt > MaxSampleAge)
+                            line = Missed("no fresh reading of the score for " + Secs(at - sampledAt) + " s inside this"
+                                          + " seat's game (a game boundary could hide in the gap)");
+                        else if (!follows)
+                            line = Missed("the score went down inside this seat's game (a game boundary it did not see;"
+                                          + " " + lastScore + " then " + s + ")");
+                        else if (s.Over)
+                        {
+                            bool had = adopted.Length > 0;
+                            EndGameToken();
+                            overSeen = true;
+                            if (had) line = LogTag + " the score shows the game over (" + s + "): its game token is dropped";
+                        }
+                    }
+                }
+                else if (s.AllZero)
+                {
+                    resetOut = true;
+                    playOut = 0;
+                }
+                else
+                {
+                    if (sampled && !follows)
+                    {
+                        resetOut = true;
+                        playOut = 0;
+                    }
+                    if (resetOut && ++playOut >= 2 && countStarts > 0 && !countLost)
+                    {
+                        countLost = true;
+                        line = LogTag + " play was read after a reset with no game start on this seat (" + s + "): its"
+                               + " count of the room's games missed a game, so its posts and a DC report carry no"
+                               + " token in this room again";
+                    }
+                }
+                sampled = true;
+                lastScore = s;
+                sampledAt = at;
+                return line;
+            }
+
+            // Round 6, finding F28 (round 5's missed-boundary guard, D10): a game
+            // boundary inside this seat's game that it did not see. Its token is
+            // dropped at once and it takes none until its next game start; and
+            // since the watcher's next game start does not come without its game
+            // over, its count of the room's games is no longer trusted.
+            private string Missed(string why)
+            {
+                bool had = adopted.Length > 0;
+                EndGameToken();
+                boundaryMissed = true;
+                bool wasLost = countLost;
+                countLost = true;
+                return LogTag + " " + why + ": " + (had ? "its game token is dropped, and " : "")
+                       + "its posts and a DC report carry no token"
+                       + (wasLost ? "" : ", in this room again: its count of the room's games missed that game start");
             }
 
             /// <summary>The room's TokenRoomKey value as this seat reads it now
@@ -663,16 +874,30 @@ namespace CompetitiveRounds
                 }
                 if (v.Length == 0) return null;
                 NoteEpoch(epoch);
-                if (!inGame) return null;
+                if (!inGame || overSeen) return null;
                 Remember(seen, v);
                 if (adopted.Length > 0)
                 {
-                    if (v == adopted || v == noted) return null;
+                    if (v == adopted) return null;
+                    // Round 6, finding F28: another value inside this seat's game
+                    // (the next game's publish, a later game's, a second
+                    // publisher's) ends the game's token at once.
+                    Withdraw();
                     noted = v;
                     return LogTag + " the room's game token changed to " + Describe(v) + " inside this seat's game: its"
-                           + " posts and a DC report carry no token until its next game start";
+                           + " token is withdrawn, and its posts and a DC report carry none until its next game start";
                 }
-                if (boundaryMissed || countLost) return null;
+                if (withdrawn || boundaryMissed || countLost) return null;
+                int own = PhysicalOrdinal();
+                if (own > 0 && ordinal > own)
+                {
+                    // Round 6, finding F28: a later game's token. The room's
+                    // games are ahead of this seat's, which takes none for its own.
+                    withdrawn = true;
+                    noted = v;
+                    return LogTag + " the room's game token " + Describe(v) + " names a game after this seat's (game "
+                           + Num(own) + "): its posts and a DC report carry no token until its next game start";
+                }
                 if (stale.Contains(nonce)) return null;
                 string why = epoch <= epochStale
                     ? "its epoch is not above " + epochStale.ToString(CultureInfo.InvariantCulture)
@@ -707,6 +932,29 @@ namespace CompetitiveRounds
                 return null;
             }
 
+            // Round 6, finding F28: why this seat's reading of the score now
+            // (`live`, at `now`) does not show the game its token was taken in,
+            // or null. It fails closed: a score this seat cannot read, one that
+            // shows the room as of more than MaxSampleAge ago, no reading in the
+            // game, a last fresh reading older than MaxSampleAge, rounds to win
+            // not known or one (a one-round game's score cannot be told from the
+            // next game's), the game over, a 0-0 with no points (a game's reset:
+            // no crossing of the game in progress exists before its first
+            // point), and a score that cannot follow the last reading inside one
+            // game. Time only ever withholds here (#771).
+            private string ReadTimeRefusal(Score live, double now)
+            {
+                if (!live.Read) return "this seat cannot read the score";
+                if (live.Silent > MaxSampleAge) return "the room's transport has been silent for " + Secs(live.Silent) + " s";
+                if (!sampled) return "this seat has no reading of the score in this game";
+                if (now - sampledAt > MaxSampleAge) return "this seat's last reading of the score is " + Secs(now - sampledAt) + " s old";
+                if (live.RoundsToWin <= 1) return "the rounds a game is won at are not known or one: a game's score cannot be told from the next game's";
+                if (live.Over) return "the score shows the game over (" + live + ")";
+                if (live.AllZero) return "the score reads 0-0 with no points (a game's reset)";
+                if (!Follows(lastScore, live)) return "the score went down (" + lastScore + " then " + live + ")";
+                return null;
+            }
+
             /// <summary>This seat's game is over. The value the room holds now
             /// (`v`) and everything read or taken in the game are stale for
             /// every later game, but a value naming a later game. Returns the
@@ -720,44 +968,41 @@ namespace CompetitiveRounds
                 if (string.Equals(room ?? "", tokenRoom, StringComparison.Ordinal) && !NamesLaterGame(v, ending)) Stale(v);
                 EndGameToken();
                 inGame = false;
+                overSeen = false;
                 boundaryMissed = false;
+                resetOut = false;
+                playOut = 0;
                 return line;
             }
 
-            /// <summary>The score went down inside this seat's game: a game
-            /// ended and another started without this seat's game over. The
-            /// token it took is stale, and it takes none until its next game
-            /// start; and its count of the room's games missed that game start,
-            /// so it holds no physical-game ordinal in this room again (round
-            /// 6, finding F27).</summary>
-            internal void OnMissedBoundary(out string log)
-            {
-                bool had = adopted.Length > 0;
-                EndGameToken();
-                boundaryMissed = true;
-                bool wasLost = countLost;
-                countLost = true;
-                log = LogTag + " the score went down inside this seat's game (a game boundary it did not see): "
-                      + (had ? "its game token is dropped, and " : "")
-                      + "its posts and a DC report carry no token"
-                      + (wasLost ? "" : ", in this room again: its count of the room's games missed that game start");
-            }
-
             /// <summary>The token a post or a DC report sent now carries, "" =
-            /// none. The one taken in this seat's game, while that game is in
-            /// progress, in the series and the room its number was frozen for,
-            /// while the room still holds it (`v`: the room's value now), and
-            /// while it names the game this seat is in by its own count and by
-            /// the number its posts name (round 6, F27).</summary>
-            internal string TokenFor(string seriesId, string room, string v)
+            /// none (`why`: the reason, for the log). The one taken in this
+            /// seat's game, while that game is in progress, in the series and
+            /// the room its number was frozen for, while the room still holds it
+            /// (`v`: the room's value now), while it names the game this seat is
+            /// in by its own count and by the number its posts name (round 6,
+            /// F27), and while this seat's reading of the score now (`live`, at
+            /// `now`) still shows that game (round 6, F28). Every check is made
+            /// here, when the post or the report is built, so a game over or a
+            /// game start that has not reached this seat withholds the token as
+            /// surely as one that has.</summary>
+            internal string TokenFor(string seriesId, string room, string v, Score live, double now, out string why)
             {
-                return TokenRefusal(seriesId, room, v) == null ? adopted : "";
+                why = TokenRefusal(seriesId, room, v, live, now);
+                return why == null ? adopted : "";
             }
 
-            private string TokenRefusal(string seriesId, string room, string v)
+            internal string TokenFor(string seriesId, string room, string v, Score live, double now)
             {
-                if (!inGame) return WhyNoGame;
+                string why;
+                return TokenFor(seriesId, room, v, live, now, out why);
+            }
+
+            private string TokenRefusal(string seriesId, string room, string v, Score live, double now)
+            {
+                if (!inGame || overSeen) return WhyNoGame;
                 if (boundaryMissed || countLost) return WhyMissed;
+                if (withdrawn) return "this game's token was withdrawn";
                 if (adopted.Length == 0) return "no game token was taken in this game";
                 if (string.IsNullOrEmpty(seriesId)) return "no series";
                 room = room ?? "";
@@ -766,7 +1011,9 @@ namespace CompetitiveRounds
                     || !string.Equals(room, tokenRoom, StringComparison.Ordinal))
                     return "the series or the room is not the one the token was taken for";
                 if (!string.Equals(v ?? "", adopted, StringComparison.Ordinal)) return "the room no longer holds this game's token";
-                return OrdinalRefusal(adoptedOrdinal);
+                string ordinalWhy = OrdinalRefusal(adoptedOrdinal);
+                if (ordinalWhy != null) return ordinalWhy;
+                return ReadTimeRefusal(live, now);
             }
 
             /// <summary>The token this seat publishes now, or "" and why not
@@ -782,10 +1029,10 @@ namespace CompetitiveRounds
             {
                 why = null;
                 long epoch = Math.Max(epochRead, epochPublished) + 1;
-                if (!inGame) why = WhyNoGame;
+                if (!inGame || overSeen) why = WhyNoGame;
                 else if (boundaryMissed || countLost) why = WhyMissed;
                 else if (PhysicalOrdinal() <= 0) why = WhyNoOrdinal;
-                else if (adopted.Length > 0) why = WhyTaken;
+                else if (adopted.Length > 0 || withdrawn) why = WhyTaken;
                 else if (published) why = WhyPublished;
                 else if (!firstRound) why = WhyLate;
                 else if (!isHost) why = WhyNotHost;
@@ -837,7 +1084,7 @@ namespace CompetitiveRounds
         {
             private readonly Tracker t = new Tracker();
             internal override void Read(string series, int recordedGames) { t.ObserveRead(series, true, recordedGames, 0); }
-            internal override void Start(string series, string room) { string line; t.OnGameStart(series, room, out line); }
+            internal override void Start(string series, string room) { string line; t.OnGameStart(series, room, Played, 0.0, out line); }
             internal override void Leave() { t.Clear(); }
             internal override int Name(string series, string room) { return t.For(series, room); }
         }
@@ -997,7 +1244,7 @@ namespace CompetitiveRounds
             return tally;
         }
 
-        // ---- The token sentinel (round 5, finding F25; round 6, F27) --------
+        // ---- The token sentinel (round 5, finding F25; round 6, F27 and F28) --
         //
         // The reviewer's scenario and its neighbours, run on two real Trackers:
         // the room's host H (team 1) and a peer P (team 2). Game 1 is recorded
@@ -1008,10 +1255,12 @@ namespace CompetitiveRounds
         // when the room's new value reaches P (inside P's game 2 because the
         // host started first, before P's game 3 start, after it, never),
         // whether the host's echo arrives before the DC report, whether P
-        // missed the boundary between the games (its score went down inside a
-        // game), how far game 3 got (0-0, one point each, two points each), and
-        // which seat reports the DC. The lead rule is outside the model: every
-        // DC report comes from the team a game up. The server is main.py's rule
+        // missed the boundary between the games (its polls read game 3's reset
+        // inside its game 2), how far game 3 got (0-0, one point, two points
+        // each), and which seat reports the DC. Every seat reads its own score
+        // on its own clock (TokenSeat.Tick) and starts a game at its first
+        // combat, the score 0-0. The lead rule is outside the model: every DC
+        // report comes from the team a game up. The server is main.py's rule
         // (TokenServer). The invariant: nothing settles from a post of a
         // physical game other than the one the DC is in. The liveness check:
         // with game 2 recorded before game 3 starts, the publish sent, the
@@ -1021,8 +1270,18 @@ namespace CompetitiveRounds
         // start, #182). The same sweep against the rule before round 5 (no
         // token read) must settle from another game, or it could not see F25.
         //
-        // Round 6 adds a model on three real Trackers, F27's seats a game
-        // apart; it is described above its own code below.
+        // Round 6 adds two models on three real Trackers each, F27's seats a
+        // game apart and F28's reporter that did not see a game boundary; each
+        // is described above its own code below.
+
+        // Scores the model's seats read (rounds to win 5).
+        private static readonly Score Reset = Score.Of(0, 0, 0, 0, 5);     // a game's 0-0, before its first point
+        private static readonly Score Played = Score.Of(0, 0, 1, 0, 5);    // its first point
+        private static readonly Score TwoEach = Score.Of(0, 0, 1, 1, 5);   // one point each: two points, a crossing
+        private static readonly Score RoundUp = Score.Of(1, 0, 0, 0, 5);   // its first round won
+        private static readonly Score Later = Score.Of(3, 2, 0, 0, 5);     // deep in a game
+        private static readonly Score Continue = Score.Of(4, 2, 0, 0, 5);  // deeper in the same game
+        private static readonly Score Final = Score.Of(5, 2, 0, 0, 5);     // its game over
 
         private sealed class TokenRec
         {
@@ -1099,21 +1358,40 @@ namespace CompetitiveRounds
             public readonly Tracker T = new Tracker();
             public string View = "";     // the room's value as this seat holds it
             public int Team;
+            public Score Live = Reset;   // this seat's scoreboard now
+            public double Now;           // this seat's clock, seconds
 
             public void Read(string room, string v) { View = v; T.ObserveRoomToken(room, v); }
 
-            // The watcher's game start, then its read of the room.
-            public void Start(string series, string room)
+            // A poll tick `dt` s after the last: the score reads `s` (the room's
+            // transport silent for `silent` s), then the room's value.
+            public void Tick(string room, Score s, double dt = 0.1, double silent = 0.0)
             {
-                string line;
-                T.OnGameStart(series, room, out line);
+                Now += dt;
+                s.Silent = silent;
+                Live = s;
+                T.ObserveScore(s, Now);
                 T.ObserveRoomToken(room, View);
             }
 
-            // The watcher's game over.
-            public void Over(string room) { T.OnTokenGameOver(room, View); }
+            // The watcher's game start (at the game's first combat, or at its
+            // first point), then its read of the room.
+            public void Start(string series, string room)
+            {
+                string line;
+                T.OnGameStart(series, room, Live, Now, out line);
+                T.ObserveRoomToken(room, View);
+            }
 
-            public string Token(string series, string room) { return T.TokenFor(series, room, View); }
+            // The watcher's game over: the tick that reads the final score, then
+            // its game over.
+            public void Over(string room)
+            {
+                Tick(room, Final);
+                T.OnTokenGameOver(room, View);
+            }
+
+            public string Token(string series, string room) { return T.TokenFor(series, room, View, Live, Now); }
 
             public void Post(TokenServer srv, string series, string room, bool two, int game)
             {
@@ -1129,11 +1407,19 @@ namespace CompetitiveRounds
         private const int Rep2BeforeStart = 0, Rep2AfterPosts = 1, Rep2AfterDc = 2, Rep2Never = 3;
         private const int ReachesInGame2 = 0, ReachesBeforeStart = 1, ReachesAfterStart = 2, ReachesNever = 3;
 
+        // A seat's game start: its poll reads the reset, then the watcher starts
+        // the game at its first combat.
+        private static void SeatStart(TokenSeat s, string series, string room)
+        {
+            s.Tick(room, Reset);
+            s.Start(series, room);
+        }
+
         // The host's game start: a seat's, then its publish when due. Returns
         // the room's value after it.
         private static string HostStart(TokenSeat h, string series, string room, string value, bool sent)
         {
-            h.Start(series, room);
+            SeatStart(h, series, room);
             string why;
             string tok = h.T.TokenToPublish(true, true, h.View, out why);
             if (tok.Length == 0 || !sent) return value;
@@ -1158,11 +1444,15 @@ namespace CompetitiveRounds
             for (int g = 1; g <= 2; g++)
             {
                 value = HostStart(h, S, R, value, g == 2 || g1Sent);
-                p.Start(S, R);
+                SeatStart(p, S, R);
                 h.Read(R, value);
                 p.Read(R, value);
+                h.Tick(R, TwoEach);
+                p.Tick(R, TwoEach);
                 h.Post(srv, S, R, true, g);
                 p.Post(srv, S, R, true, g);
+                h.Tick(R, Later);
+                p.Tick(R, Later);
                 if (g == 2) break;
                 h.Over(R);
                 p.Over(R);
@@ -1193,13 +1483,16 @@ namespace CompetitiveRounds
                 if (echo) h.Read(R, value);
             }
             if (reaches == ReachesBeforeStart) p.Read(R, value);
-            // P's game 3: its start, or (it missed the boundary: its score went
-            // down inside its game 2) round 5's missed-boundary guard.
-            if (missed) { string line; p.T.OnMissedBoundary(out line); }
-            else p.Start(S, R);
+            // P's game 3: its start, or (it missed the boundary) only its poll,
+            // which reads game 3's reset inside its game 2.
+            if (missed) p.Tick(R, Reset);
+            else SeatStart(p, S, R);
             if (reaches == ReachesAfterStart) p.Read(R, value);
             if (reached > 0)
             {
+                Score g3 = reached == 2 ? TwoEach : Played;
+                h.Tick(R, g3);
+                p.Tick(R, g3);
                 h.Post(srv, S, R, reached == 2, 3);
                 p.Post(srv, S, R, reached == 2, 3);
             }
@@ -1245,13 +1538,13 @@ namespace CompetitiveRounds
         // 2 start, H and C file game 2's crossing under it, and A reads it
         // inside its game 3. A team-2 player leaves in A's game and A reports.
         // What varies: A ahead or LEVEL (A plays game 2 with H and C: the
-        // control), A's points at the DC (none, as the report has it, its
-        // first point, two points), whether game 2's result lands before the
-        // DC, whether H catches up and publishes game 3's token before the DC,
-        // and whether C's game 2 start comes late, with C reading game 2's
-        // token inside its own game 1 (#182: a late hook must still take its
-        // game's token). The invariant: nothing settles from a post of a
-        // physical game other than the one A's DC is in. The liveness check:
+        // control), A's score at the DC (0-0 as the report has it, its first
+        // point, two points), whether game 2's result lands before the DC,
+        // whether H catches up and publishes game 3's token before the DC, and
+        // whether C's game 2 start comes 10 s after the host's, with C reading
+        // game 2's token inside its own game 1 (#182: a late hook must still
+        // take its game's token). The invariant: nothing settles from a post of
+        // a physical game other than the one A's DC is in. The liveness check:
         // level, two points each in the DC's game, nothing else moved: it
         // settles, late hook or not.
 
@@ -1275,9 +1568,9 @@ namespace CompetitiveRounds
             foreach (var x in all) x.Read(R, value);
             // Game 1, seen by every seat, and recorded: team 1 leads 1-0.
             value = HostStart(h, S, R, value, true);
-            c.Start(S, R);
-            a.Start(S, R);
-            foreach (var x in all) { x.Read(R, value); x.Post(srv, S, R, true, 1); }
+            SeatStart(c, S, R);
+            SeatStart(a, S, R);
+            foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, 1); x.Tick(R, Later); }
             h.Over(R);
             a.Over(R);
             if (!lateHook) c.Over(R);
@@ -1287,11 +1580,13 @@ namespace CompetitiveRounds
             if (!lateHook) c.T.ObserveRead(S, true, 1, 0);
             if (ahead)
             {
-                a.Start(S, R);
+                SeatStart(a, S, R);
+                a.Tick(R, TwoEach);
                 a.Post(srv, S, R, true, 2);
+                a.Tick(R, Later);
                 a.Over(R);
                 a.T.ObserveRead(S, true, srv.Recorded, 0);
-                a.Start(S, R);
+                SeatStart(a, S, R);
             }
             // The host's game 2 start (a game behind A when A is ahead), its
             // publish and its echo.
@@ -1302,18 +1597,21 @@ namespace CompetitiveRounds
                 c.Read(R, value);
                 c.Over(R);
                 c.T.ObserveRead(S, true, 1, 0);
+                c.Tick(R, Reset, 10.0);
             }
-            c.Start(S, R);
+            SeatStart(c, S, R);
             c.Read(R, value);
-            if (!ahead) a.Start(S, R);
+            if (!ahead) SeatStart(a, S, R);
             a.Read(R, value);
             // Game 2's crossing under the host's token.
+            h.Tick(R, TwoEach);
             h.Post(srv, S, R, true, 2);
+            c.Tick(R, TwoEach);
             c.Post(srv, S, R, true, 2);
             int aGame = ahead ? 3 : 2;
-            // A's points in its game at the DC: two each when level.
-            bool aPosts = !ahead || dcAt != DcAtReset, aTwo = !ahead || dcAt == DcAtTwo;
-            if (aPosts) a.Post(srv, S, R, aTwo, aGame);
+            Score dc = !ahead ? TwoEach : dcAt == DcAtReset ? Reset : dcAt == DcAtPoint ? Played : TwoEach;
+            a.Tick(R, dc);
+            if (!dc.AllZero) a.Post(srv, S, R, dc.P1 + dc.P2 >= 2, aGame);
             if (rep2Lands)
             {
                 srv.Recorded = 2;
@@ -1321,6 +1619,7 @@ namespace CompetitiveRounds
             }
             if (catchUp)
             {
+                h.Tick(R, Later);
                 h.Over(R);
                 h.T.ObserveRead(S, true, srv.Recorded, 0);
                 value = HostStart(h, S, R, value, true);
@@ -1328,6 +1627,7 @@ namespace CompetitiveRounds
                 c.Read(R, value);
                 a.Read(R, value);
             }
+            a.Tick(R, dc);
             sent = a.Token(S, R);
             return srv.Settles(sent, aGame, out fromAnother);
         }
@@ -1358,10 +1658,121 @@ namespace CompetitiveRounds
             return tally;
         }
 
+        // ---- Round 6, finding F28: a boundary the reporter did not see --------
+        //
+        // The reviewer's scenario on three real Trackers: the room's host H
+        // (team 1), P (team 2) and the reporter R (team 1). Team 1 leads 1-0;
+        // game 2 crosses two points each under the host's token, and its
+        // result stays queued. R's last reading of the score is in game 2 (two
+        // points in its first round, or deep in it). Game 2 ends and game 3
+        // starts in the room; R sees none of it (no game over, no game start,
+        // no poll tick); a team-2 player leaves and R's DC report is built at
+        // once. What varies: R's last reading; the score R reads when the
+        // report is built (game 3's reset, its first point, its first round
+        // won; or NO boundary: game 2 is still going); how the time since R's
+        // last reading passed (0.1 s; 6 s with R's main thread frozen; 6 s of
+        // polls reading a game frozen by a silent transport); whether the host
+        // published game 3's token first (R's read of the room then shows it);
+        // which lifecycle events reached R first (none, the game over, the game
+        // over and game 3's start); and whether a poll tick ran first. The
+        // invariant: across a boundary R's report carries no token, except in
+        // the shape the notes name as the residual (a score that follows R's
+        // last reading inside one game, 0.1 s after it on a live transport,
+        // with the room still holding the token and nothing else reaching R),
+        // which the sweep counts apart. The liveness check: with no boundary,
+        // 0.1 s, R's report carries game 2's token.
+
+        private const int AtReset = 0, AtPoint = 1, AtRoundUp = 2, AtNoBoundary = 3;
+        private const int GapPoll = 0, GapFreeze = 1, GapStall = 2;
+        private const int LifeNone = 0, LifeOver = 1, LifeOverAndStart = 2;
+
+        private sealed class F28Tally
+        {
+            public int Timelines, Across, Residual, Carry, Carried;
+        }
+
+        private static string SimulateF28(bool deep, int at, int gapKind, bool published, int life, bool pollFirst,
+                                          out bool settled, out bool fromAnother, out bool residual)
+        {
+            const string S = "series-f28", R = "room-f28";
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true };
+            var h = new TokenSeat { Team = 0 };
+            var p = new TokenSeat { Team = 1 };
+            var r = new TokenSeat { Team = 0 };
+            var all = new[] { h, p, r };
+            string value = "";
+            foreach (var x in all) x.Read(R, value);
+            value = HostStart(h, S, R, value, true);
+            SeatStart(p, S, R);
+            SeatStart(r, S, R);
+            foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, 1); x.Tick(R, Later); }
+            foreach (var x in all) { x.Over(R); x.T.ObserveRead(S, true, 1, 0); }
+            srv.Recorded = 1;
+            value = HostStart(h, S, R, value, true);
+            SeatStart(p, S, R);
+            SeatStart(r, S, R);
+            foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, 2); }
+            Score last = deep ? Later : TwoEach;
+            r.Tick(R, last);
+            bool boundary = at != AtNoBoundary;
+            Score callback = at == AtReset ? Reset : at == AtPoint ? Played : at == AtRoundUp ? RoundUp
+                             : (deep ? Continue : RoundUp);
+            if (gapKind == GapStall)
+                for (int i = 1; i <= 60; i++) r.Tick(R, last, 0.1, 0.1 * i);
+            else
+                r.Now += gapKind == GapFreeze ? 6.0 : 0.1;
+            if (boundary)
+            {
+                h.Tick(R, last);
+                h.Over(R);
+                h.T.ObserveRead(S, true, 1, 0);
+                value = HostStart(h, S, R, value, published);
+                r.View = value;
+                if (life >= LifeOver) { r.Over(R); r.T.ObserveRead(S, true, 1, 0); }
+                if (life == LifeOverAndStart) SeatStart(r, S, R);
+            }
+            if (pollFirst) r.Tick(R, callback, 0.0);
+            r.Live = callback;
+            string sent = r.Token(S, R);
+            settled = srv.Settles(sent, boundary ? 3 : 2, out fromAnother);
+            residual = boundary && Follows(last, callback) && gapKind == GapPoll && !published && life == LifeNone;
+            return sent;
+        }
+
+        private static F28Tally SweepF28()
+        {
+            var tally = new F28Tally();
+            for (int deep = 0; deep < 2; deep++)
+            for (int at = 0; at < 4; at++)
+            for (int gap = 0; gap < 3; gap++)
+            for (int pub = 0; pub < 2; pub++)
+            for (int life = 0; life < 3; life++)
+            for (int poll = 0; poll < 2; poll++)
+            {
+                // With no boundary nothing was published and nothing happened.
+                if (at == AtNoBoundary && (pub != 0 || life != LifeNone)) continue;
+                bool settled, fromAnother, residual;
+                string sent = SimulateF28(deep != 0, at, gap, pub != 0, life, poll != 0, out settled, out fromAnother,
+                                          out residual);
+                tally.Timelines++;
+                if (at != AtNoBoundary)
+                {
+                    if (sent.Length > 0 && residual) tally.Residual++;
+                    else if (sent.Length > 0 || settled) tally.Across++;
+                }
+                else if (gap == GapPoll)
+                {
+                    tally.Carry++;
+                    if (sent.Length > 0 && settled && !fromAnother) tally.Carried++;
+                }
+            }
+            return tally;
+        }
+
         private static int Begin(Tracker t, string series, string room)
         {
             string line;
-            return t.OnGameStart(series, room, out line);
+            return t.OnGameStart(series, room, Played, 0.0, out line);
         }
 
         private static string Tok(char c, int ordinal, long epoch)
@@ -1489,79 +1900,121 @@ namespace CompetitiveRounds
             if (f27.Live == 0 || f27.LiveSettled != f27.Live)
             { pass = false; detail += " F27-sweep:level-dc-settled=" + f27.LiveSettled + "/" + f27.Live; }
 
-            // The token on one Tracker (k): taken only fresh and for this seat's
-            // game, and never carried into another game.
+            // Round 6, finding F28: the reviewer's scenario, named, and its
+            // controls; then the sweep around it.
+            bool st, res;
+            string f28 = SimulateF28(true, AtReset, GapPoll, false, LifeNone, false, out st, out fa, out res);
+            checks++;
+            if (f28.Length != 0 || st) { pass = false; detail += " F28-REVIEWER:token-sent-or-settled"; }
+            f28 = SimulateF28(true, AtReset, GapPoll, false, LifeOver, false, out st, out fa, out res);
+            checks++;
+            if (f28.Length != 0 || st) { pass = false; detail += " F28-GAME-OVER-FIRST-CONTROL:token-sent"; }
+            f28 = SimulateF28(true, AtReset, GapPoll, false, LifeNone, true, out st, out fa, out res);
+            checks++;
+            if (f28.Length != 0 || st) { pass = false; detail += " F28-POLL-FIRST-CONTROL:token-sent"; }
+            f28 = SimulateF28(true, AtReset, GapPoll, true, LifeNone, true, out st, out fa, out res);
+            checks++;
+            if (f28.Length != 0 || st) { pass = false; detail += " F28-LATER-TOKEN-FIRST-CONTROL:token-sent"; }
+            f28 = SimulateF28(true, AtNoBoundary, GapPoll, false, LifeNone, false, out st, out fa, out res);
+            checks++;
+            if (f28.Length == 0 || !st || fa) { pass = false; detail += " F28-NO-BOUNDARY-CONTROL:not-carried"; }
+            F28Tally f28t = SweepF28();
+            checks++;
+            if (f28t.Across != 0) { pass = false; detail += " F28-sweep:" + f28t.Across + "-tokens-across-a-boundary"; }
+            checks++;
+            if (f28t.Carry == 0 || f28t.Carried != f28t.Carry)
+            { pass = false; detail += " F28-sweep:carried=" + f28t.Carried + "/" + f28t.Carry; }
+
+            // The score's successor rule (F28).
+            checks++;
+            if (!Follows(Reset, Reset) || !Follows(Reset, Played) || !Follows(Played, TwoEach) || !Follows(TwoEach, RoundUp)
+                || !Follows(Later, Continue) || !Follows(Continue, Final) || Follows(Played, Reset)
+                || Follows(TwoEach, Played) || Follows(Later, Reset) || Follows(Later, RoundUp) || Follows(Final, Reset))
+            { pass = false; detail += " follows"; }
+
+            // The token on one Tracker (k): taken only fresh, for this seat's
+            // game, and never carried past a signal that its game ended.
             string TA = Tok('a', 1, 1), TB = Tok('b', 1, 2), TC = Tok('c', 1, 3), TD = Tok('d', 2, 4);
             string TE = Tok('e', 3, 5), TF = Tok('f', 3, 6);
             string line;
+            double kt = 0;
             var k = new Tracker();
             k.ObserveRoomToken("R", TA);
-            k.OnGameStart("S", "R", out line);
+            k.OnGameStart("S", "R", Reset, kt, out line);
             k.ObserveRoomToken("R", TA);
+            k.ObserveScore(Played, kt += 0.1);
             checks++;
-            if (k.TokenFor("S", "R", TA) != "") { pass = false; detail += " token:first-read-in-a-room-taken"; }
+            if (k.TokenFor("S", "R", TA, Played, kt) != "") { pass = false; detail += " token:first-read-in-a-room-taken"; }
             k.ObserveRoomToken("R", TB);
             checks++;
-            if (k.TokenFor("S", "R", TB) != TB || k.TokenFor("S", "R", TA) != "" || k.TokenFor("S2", "R", TB) != ""
-                || k.TokenFor("S", "R2", TB) != "" || k.TokenFor(null, "R", TB) != "" || k.TokenFor("S", null, TB) != "")
+            if (k.TokenFor("S", "R", TB, Played, kt) != TB || k.TokenFor("S", "R", TA, Played, kt) != ""
+                || k.TokenFor("S2", "R", TB, Played, kt) != "" || k.TokenFor("S", "R2", TB, Played, kt) != ""
+                || k.TokenFor(null, "R", TB, Played, kt) != "" || k.TokenFor("S", null, TB, Played, kt) != "")
             { pass = false; detail += " token:for"; }
             k.ObserveRoomToken("R", TC);
             checks++;
-            if (k.TokenFor("S", "R", TC) != "" || k.TokenFor("S", "R", TB) != TB) { pass = false; detail += " token:second-value-in-a-game"; }
+            if (k.TokenFor("S", "R", TC, Played, kt) != "" || k.TokenFor("S", "R", TB, Played, kt) != "" || k.Adopted != "")
+            { pass = false; detail += " token:second-value-in-a-game-not-withdrawn"; }
             k.OnTokenGameOver("R", TC);
             checks++;
-            if (k.TokenFor("S", "R", TB) != "" || k.TokenFor("S", "R", TC) != "") { pass = false; detail += " token:after-game-over"; }
+            if (k.TokenFor("S", "R", TB, Played, kt) != "" || k.TokenFor("S", "R", TC, Played, kt) != "")
+            { pass = false; detail += " token:after-game-over"; }
             k.ObserveRead("S", true, 1, 0);
-            k.OnGameStart("S", "R", out line);
+            k.OnGameStart("S", "R", Reset, kt += 0.1, out line);
             k.ObserveRoomToken("R", TC);
             k.ObserveRoomToken("R", TB);
+            k.ObserveScore(Played, kt += 0.1);
             checks++;
-            if (k.TokenFor("S", "R", TC) != "" || k.TokenFor("S", "R", TB) != "" || k.Adopted != "")
+            if (k.TokenFor("S", "R", TC, Played, kt) != "" || k.TokenFor("S", "R", TB, Played, kt) != "" || k.Adopted != "")
             { pass = false; detail += " token:stale-taken"; }
             k.ObserveRoomToken("R", TD);
             checks++;
-            if (k.TokenFor("S", "R", TD) != TD || k.PhysicalOrdinal() != 2) { pass = false; detail += " token:fresh-not-taken"; }
+            if (k.TokenFor("S", "R", TD, Played, kt) != TD || k.PhysicalOrdinal() != 2) { pass = false; detail += " token:fresh-not-taken"; }
             k.ObserveRead("S", true, 2, 0);
-            k.OnGameStart("S", "R", out line);
+            k.OnGameStart("S", "R", Reset, kt += 0.1, out line);
             k.ObserveRoomToken("R", TD);
+            k.ObserveScore(Played, kt += 0.1);
             checks++;
-            if (k.TokenFor("S", "R", TD) != "" || k.Adopted != "") { pass = false; detail += " token:reused-across-a-restart"; }
+            if (k.TokenFor("S", "R", TD, Played, kt) != "" || k.Adopted != "") { pass = false; detail += " token:reused-across-a-restart"; }
             k.ObserveRoomToken("R", TE);
             checks++;
-            if (k.TokenFor("S", "R", TE) != TE) { pass = false; detail += " token:game-3-not-taken"; }
-            string missedLine;
-            k.OnMissedBoundary(out missedLine);
+            if (k.TokenFor("S", "R", TE, Played, kt) != TE) { pass = false; detail += " token:game-3-not-taken"; }
+            string missedLine = k.ObserveScore(Reset, kt += 0.1);
             k.ObserveRoomToken("R", TF);
             checks++;
-            if (k.Adopted != "" || k.TokenFor("S", "R", TE) != "" || k.TokenFor("S", "R", TF) != ""
+            if (k.Adopted != "" || k.TokenFor("S", "R", TE, Played, kt) != "" || k.TokenFor("S", "R", TF, Played, kt) != ""
                 || missedLine == null || !missedLine.StartsWith(LogTag + " the score went down inside this seat's game (a game boundary it did not see", StringComparison.Ordinal))
             { pass = false; detail += " token:missed-boundary"; }
             // The missed boundary also ends this seat's count of the room's
             // games: no ordinal, no publish, no token at its next game start.
             k.OnTokenGameOver("R", TF);
             k.ObserveRead("S", true, 3, 0);
-            k.OnGameStart("S", "R", out line);
+            k.OnGameStart("S", "R", Reset, kt += 0.1, out line);
             string whyK;
             checks++;
             if (k.PhysicalOrdinal() != 0 || k.TokenToPublish(true, true, TF, out whyK) != "" || whyK != WhyMissed)
             { pass = false; detail += " token:count-lost-after-a-missed-boundary"; }
             k.Clear();
             k.ObserveRoomToken("R", Tok('0', 4, 7));
-            k.OnGameStart("S", "R", out line);
+            k.OnGameStart("S", "R", Reset, kt += 0.1, out line);
             k.ObserveRoomToken("R", Tok('0', 4, 7));
+            k.ObserveScore(Played, kt += 0.1);
             checks++;
-            if (k.TokenFor("S", "R", Tok('0', 4, 7)) != "" || k.PhysicalOrdinal() != 4)
+            if (k.TokenFor("S", "R", Tok('0', 4, 7), Played, kt) != "" || k.PhysicalOrdinal() != 4)
             { pass = false; detail += " token:clear"; }
 
             // Round 6, finding F27, on one Tracker: the ordinal, the epoch and
             // the nonce each refuse alone; a late hook takes its game's token.
             var o = new Tracker();
+            double ot = 0;
             o.ObserveRoomToken("R", "");
-            o.OnGameStart("S", "R", out line);            // physical 1, game 1
+            o.OnGameStart("S", "R", Reset, ot, out line);            // physical 1, game 1
             o.ObserveRoomToken("R", Tok('1', 1, 1));
+            o.ObserveScore(Played, ot += 0.1);
+            o.ObserveScore(Final, ot += 0.1);
             o.OnTokenGameOver("R", Tok('1', 1, 1));
             o.ObserveRead("S", true, 1, 0);
-            o.OnGameStart("S", "R", out line);            // physical 2, game 2
+            o.OnGameStart("S", "R", Reset, ot += 0.1, out line);     // physical 2, game 2
             o.ObserveRoomToken("R", Tok('2', 1, 2));
             checks++;
             if (o.Adopted != "" || o.PhysicalOrdinal() != 2) { pass = false; detail += " F27:an-earlier-games-ordinal-taken"; }
@@ -1574,28 +2027,135 @@ namespace CompetitiveRounds
             o.ObserveRoomToken("R", Tok('4', 2, 3));
             checks++;
             if (o.Adopted != Tok('4', 2, 3)) { pass = false; detail += " F27:its-games-token-not-taken"; }
-            // A value naming the next game, read inside this game, is not stale
-            // at this game's over and is taken at the next game start (#182).
-            o.ObserveRoomToken("R", Tok('5', 3, 4));
-            o.OnTokenGameOver("R", Tok('5', 3, 4));
-            o.ObserveRead("S", true, 2, 0);
-            o.OnGameStart("S", "R", out line);            // physical 3, game 3
+            // A value naming the next game, read inside this game, withdraws
+            // this game's token (F28) and is taken at the next game start (#182).
+            o.ObserveScore(Played, ot += 0.1);
             o.ObserveRoomToken("R", Tok('5', 3, 4));
             checks++;
-            if (o.TokenFor("S", "R", Tok('5', 3, 4)) != Tok('5', 3, 4)) { pass = false; detail += " F27:a-late-hook-lost-its-games-token"; }
+            if (o.Adopted != "" || o.TokenFor("S", "R", Tok('4', 2, 3), Played, ot) != "")
+            { pass = false; detail += " F28:a-later-games-token-did-not-withdraw"; }
+            o.ObserveScore(Final, ot += 0.1);
+            o.OnTokenGameOver("R", Tok('5', 3, 4));
+            o.ObserveRead("S", true, 2, 0);
+            o.ObserveScore(Reset, ot += 10.0);
+            o.OnGameStart("S", "R", Reset, ot += 0.1, out line);     // physical 3, game 3
+            o.ObserveRoomToken("R", Tok('5', 3, 4));
+            o.ObserveScore(Played, ot += 0.1);
+            checks++;
+            if (o.TokenFor("S", "R", Tok('5', 3, 4), Played, ot) != Tok('5', 3, 4)) { pass = false; detail += " F27:a-late-hook-lost-its-games-token"; }
             // A seat whose posts name game 2 (game 2's result queued) while its
             // own count says game 3 takes no token naming either.
             var q = new Tracker();
+            double qt = 0;
             q.ObserveRoomToken("R", "");
             q.ObserveRead("S", true, 1, 0);
-            q.OnGameStart("S", "R", out line);            // physical 2 (anchor 2), game 2
+            q.OnGameStart("S", "R", Reset, qt, out line);            // physical 2 (anchor 2), game 2
+            q.ObserveScore(Played, qt += 0.1);
+            q.ObserveScore(Final, qt += 0.1);
             q.OnTokenGameOver("R", "");
-            q.OnGameStart("S", "R", out line);            // physical 3, game 2 (no new read)
+            q.OnGameStart("S", "R", Reset, qt += 0.1, out line);     // physical 3, game 2 (no new read)
             q.ObserveRoomToken("R", Tok('6', 2, 1));
             q.ObserveRoomToken("R", Tok('7', 3, 2));
             checks++;
             if (q.Adopted != "" || q.PhysicalOrdinal() != 3 || q.For("S", "R") != 2)
             { pass = false; detail += " F27:a-token-taken-while-the-count-and-the-number-differ"; }
+
+            // Round 6, finding F28, on one Tracker: each of the four signals
+            // clears the taken token at once, and the read-time check withholds
+            // it whenever the score does not show the game it was taken in.
+            var f = new Tracker();
+            double ft = 0;
+            string FT1 = Tok('8', 1, 1);
+            f.ObserveRoomToken("R", "");
+            f.OnGameStart("S", "R", Reset, ft, out line);
+            f.ObserveRoomToken("R", FT1);
+            f.ObserveScore(TwoEach, ft += 0.1);
+            checks++;
+            if (f.TokenFor("S", "R", FT1, TwoEach, ft) != FT1 || f.TokenFor("S", "R", FT1, RoundUp, ft + 0.1) != FT1)
+            { pass = false; detail += " F28:the-games-token-not-carried"; }
+            string whyF;
+            checks++;
+            if (f.TokenFor("S", "R", FT1, Reset, ft, out whyF) != "" || f.TokenFor("S", "R", FT1, Played, ft) != ""
+                || f.TokenFor("S", "R", FT1, Final, ft) != "" || f.TokenFor("S", "R", FT1, default(Score), ft) != ""
+                || f.TokenFor("S", "R", FT1, TwoEach, ft + MaxSampleAge + 0.1) != ""
+                || f.TokenFor("S", "R", FT1, Score.Of(0, 0, 1, 1, 1), ft) != ""
+                || f.TokenFor("S", "R", FT1, Score.Of(0, 0, 1, 1, 0), ft) != "")
+            { pass = false; detail += " F28:read-time-check"; }
+            Score silent = TwoEach;
+            silent.Silent = MaxSampleAge + 0.1;
+            checks++;
+            if (f.TokenFor("S", "R", FT1, silent, ft) != "") { pass = false; detail += " F28:a-silent-transport-carried"; }
+            f.ObserveScore(Final, ft += 0.1);
+            checks++;
+            if (f.Adopted != "" || f.TokenFor("S", "R", FT1, TwoEach, ft) != "") { pass = false; detail += " F28:game-over-by-the-score"; }
+            f.OnTokenGameOver("R", FT1);
+            string FT2 = Tok('9', 2, 2);
+            f.ObserveRead("S", true, 1, 0);
+            f.OnGameStart("S", "R", Reset, ft += 0.1, out line);
+            f.ObserveRoomToken("R", FT2);
+            f.ObserveScore(TwoEach, ft += 0.1);
+            f.OnTokenGameOver("R", FT2);
+            checks++;
+            if (f.Adopted != "" || f.TokenFor("S", "R", FT2, TwoEach, ft) != "") { pass = false; detail += " F28:game-over-by-the-watcher"; }
+            string FT3 = Tok('a', 3, 3);
+            f.ObserveRead("S", true, 2, 0);
+            f.OnGameStart("S", "R", Reset, ft += 0.1, out line);
+            f.ObserveRoomToken("R", FT3);
+            f.ObserveScore(TwoEach, ft += 0.1);
+            string advanced = f.Adopted;
+            f.ObserveRead("S", true, 3, 0);
+            f.OnGameStart("S", "R", Reset, ft += 0.1, out line);
+            checks++;
+            if (advanced != FT3 || f.Adopted != "" || f.TokenFor("S", "R", FT3, TwoEach, ft) != "")
+            { pass = false; detail += " F28:the-ordinal-advancing"; }
+            string FT4 = Tok('b', 4, 4);
+            f.ObserveRoomToken("R", FT4);
+            f.ObserveScore(TwoEach, ft += 0.1);
+            f.ObserveScore(Reset, ft += 0.1);
+            checks++;
+            if (f.Adopted != "" || f.TokenFor("S", "R", FT4, TwoEach, ft) != "") { pass = false; detail += " F28:a-reset-by-the-score"; }
+            // A later game's token seen first: nothing is taken for this game
+            // after it, this game's own token included.
+            var lo = new Tracker();
+            lo.ObserveRoomToken("R", "");
+            lo.OnGameStart("S", "R", Reset, 0.0, out line);
+            lo.ObserveRoomToken("R", Tok('1', 2, 2));
+            lo.ObserveRoomToken("R", Tok('2', 1, 3));
+            lo.ObserveScore(Played, 0.1);
+            checks++;
+            if (lo.Adopted != "" || lo.TokenFor("S", "R", Tok('2', 1, 3), Played, 0.1) != "")
+            { pass = false; detail += " F28:taken-after-a-later-games-token"; }
+            // A report at 0-0 with no points carries no token, even one taken
+            // for its own game; the game's first point carries it.
+            var z = new Tracker();
+            z.ObserveRoomToken("R", "");
+            z.OnGameStart("S", "R", Reset, 0.0, out line);
+            z.ObserveRoomToken("R", Tok('3', 1, 1));
+            checks++;
+            if (z.Adopted != Tok('3', 1, 1) || z.TokenFor("S", "R", Tok('3', 1, 1), Reset, 0.1) != ""
+                || z.TokenFor("S", "R", Tok('3', 1, 1), Played, 0.1) != Tok('3', 1, 1))
+            { pass = false; detail += " F28:a-0-0-report-carried"; }
+            // An unreadable score at the game start: no token in that game.
+            var u = new Tracker();
+            u.ObserveRoomToken("R", "");
+            u.OnGameStart("S", "R", default(Score), 0.0, out line);
+            u.ObserveRoomToken("R", Tok('c', 1, 1));
+            u.ObserveScore(TwoEach, 0.1);
+            checks++;
+            if (u.TokenFor("S", "R", Tok('c', 1, 1), TwoEach, 0.1) != "") { pass = false; detail += " F28:an-unread-start-carried"; }
+            // Play read after a reset with no game start ends the count.
+            var pl = new Tracker();
+            pl.ObserveRoomToken("R", "");
+            pl.OnGameStart("S", "R", Reset, 0.0, out line);
+            pl.ObserveScore(TwoEach, 0.1);
+            pl.ObserveScore(Final, 0.2);
+            pl.OnTokenGameOver("R", "");
+            pl.ObserveScore(Reset, 0.3);
+            pl.ObserveScore(Played, 0.4);
+            int beforeSecond = pl.PhysicalOrdinal();
+            pl.ObserveScore(TwoEach, 0.5);
+            checks++;
+            if (beforeSecond != 1 || pl.PhysicalOrdinal() != 0) { pass = false; detail += " F28:play-without-a-start"; }
 
             // The publish.
             var w = new Tracker();
@@ -1603,7 +2163,7 @@ namespace CompetitiveRounds
             w.ObserveRoomToken("R", TA);
             checks++;
             if (w.TokenToPublish(true, true, TA, out why) != "" || why != WhyNoGame) { pass = false; detail += " publish:outside-a-game"; }
-            w.OnGameStart("S", "R", out line);
+            w.OnGameStart("S", "R", Reset, 0.0, out line);
             w.ObserveRoomToken("R", TA);
             string drawn = w.TokenToPublish(true, true, TA, out why);
             string dn;
@@ -1619,17 +2179,18 @@ namespace CompetitiveRounds
             checks++;
             if (w.TokenToPublish(true, true, TA, out why) != "" || why != WhyPublished) { pass = false; detail += " publish:twice-in-a-game"; }
             w.ObserveRoomToken("R", drawn);
+            w.ObserveScore(Played, 0.1);
             checks++;
-            if (w.TokenFor("S", "R", drawn) != drawn || w.TokenToPublish(true, true, drawn, out why) != "" || why != WhyTaken)
+            if (w.TokenFor("S", "R", drawn, Played, 0.1) != drawn || w.TokenToPublish(true, true, drawn, out why) != "" || why != WhyTaken)
             { pass = false; detail += " publish:own-echo"; }
             var e = new Tracker();
             e.ObserveRoomToken("R", Tok('d', 5, 7));
             e.ObserveRead("S", true, 5, 0);
-            e.OnGameStart("S", "R", out line);
+            e.OnGameStart("S", "R", Reset, 0.0, out line);
             string next = e.TokenToPublish(true, true, Tok('d', 5, 7), out why);
             var none = new Tracker();
             none.ObserveRoomToken("R", "");
-            none.OnGameStart("S", "", out line);
+            none.OnGameStart("S", "", Reset, 0.0, out line);
             string whyNone;
             checks++;
             if (!TryParseToken(next, out dn, out dord, out dep) || dord != 6 || dep != 8
@@ -1671,7 +2232,9 @@ namespace CompetitiveRounds
                 + tok.CleanSettled + " of " + tok.Clean + " clean DC reports settled; without the token: "
                 + untok.Settled + " settled, " + untok.FromAnother + " from another game; F27 sweep: " + f27.Timelines
                 + " timelines, " + f27.Settled + " settled, " + f27.FromAnother + " from another game, "
-                + f27.LiveSettled + " of " + f27.Live + " level DC reports settled)";
+                + f27.LiveSettled + " of " + f27.Live + " level DC reports settled; F28 sweep: " + f28t.Timelines
+                + " timelines, " + f28t.Across + " tokens across a boundary, " + f28t.Residual + " in the residual shape, "
+                + f28t.Carried + " of " + f28t.Carry + " no-boundary reports carried)";
             return SentinelTag + " " + (pass ? "PASS" : "FAIL") + ": " + checks + " checks" + sweep + detail;
         }
     }

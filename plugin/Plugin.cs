@@ -4417,11 +4417,16 @@ namespace CompetitiveRounds
                 int t2Points = GameStateWatcher.LastP2Points;
                 // v1.41.0 beta round 5, finding F25: the token of the physical
                 // game this seat is in ("" = none: the server then settles no
-                // lead-forfeit and the series goes to an admin).
-                string dcToken = GameStateWatcher.TeamTokenForReport(seriesId);
+                // lead-forfeit and the series goes to an admin). Round 6,
+                // findings F27 and F28: checked as this report is built, so a
+                // game over or a game start this seat has not seen yet
+                // withholds it; the reason is logged.
+                string dcTokenWhy;
+                string dcToken = GameStateWatcher.TeamTokenForReport(seriesId, out dcTokenWhy);
                 ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points, dcToken);
                 Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} pts={t1Points}/{t2Points}"
-                    + (dcToken.Length > 0 ? $" game token {TeamGameNumber.Describe(dcToken)}" : " no game token (no automatic lead-forfeit)"));
+                    + (dcToken.Length > 0 ? $" game token {TeamGameNumber.Describe(dcToken)}"
+                                          : $" no game token ({dcTokenWhy}; no automatic lead-forfeit)"));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }

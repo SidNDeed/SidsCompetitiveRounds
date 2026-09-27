@@ -2966,6 +2966,54 @@ def test_the_dropped_post_token_test_can_fail(wired, monkeypatch, mutant):
     assert _run(go()) == {"bad-signature": kept, "epoch-altered": kept}
 
 
+async def _f28(lab, report):
+    """The F28 reviewer's scenario. Team 1 leads 1-0 and game 2 crosses under
+    T2 (every seat posts 1-0 and 1-1 naming game 2, carrying it) while its
+    result is still on its way. Seat 0 (team 1) misses game 2's end and game
+    3's start; seat 2 leaves game 3 at 0-0, and seat 0's OnPlayerLeftRoom
+    builds its report before its next poll. `report` is the token that report
+    names: None, a round-6 client's (its read-time check finds no reading
+    that still shows game 2: TeamGameNumber.cs, F28-REVIEWER), or T2, the
+    round-5 client's."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=T2)
+    await lab.report_dc(ser, reporter_seat=0, dc_seat=2, token=report, **ZERO)
+    return await lab.settlement(ser)
+
+
+@needs_pg
+def test_the_f28_reviewers_report_carries_no_token_and_settles_nothing(wired):
+    """F28, the server's half (brief 3.3: no new server behavior): the fixed
+    client's report in the reviewer's scenario names no token, and the
+    server gives it what it gives every tokenless report: dc_incomplete,
+    nothing completed, no result, rating or gold moved."""
+    async def go():
+        async with _Lab() as lab:
+            return await _f28(lab, None)
+
+    assert _run(go()) == INCOMPLETE
+    assert wired == [], wired
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["round-5-client", "token-layer-off", "pass-through"])
+def test_the_f28_report_test_can_fail(wired, monkeypatch, mutant):
+    """Controls: the round-5 client's report, naming the token it kept past
+    game 2, completes game 3's 0-0 leave from game 2's crossing (the defect
+    as reported: the server cannot tell it from a genuine game-2 leave, so
+    the fix is the client's); with the token rule off, the tokenless report
+    completes it too; the inert twin changes nothing."""
+    if mutant == "token-layer-off":
+        _token_layer_off(monkeypatch)
+
+    async def go():
+        async with _Lab() as lab:
+            return await _f28(lab, T2 if mutant == "round-5-client" else None)
+
+    assert _run(go()) == (INCOMPLETE if mutant == "pass-through" else COMPLETED)
+    assert len(wired) == (0 if mutant == "pass-through" else 1), wired
+
+
 async def _dropped_token_report(lab, case):
     """Team 1 leads 1-0 and game 2 crosses, every post carrying game 2's
     token. Seat 2 leaves and seats 0 and 1 report it naming game 2's token,
@@ -3042,7 +3090,9 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     from these helpers only, and their one caller each passes the token.
     Round 6, finding F27: PinToken is 'nonce:ordinal:epoch', both canonicals
     end with the whole token, and the token with its ordinal or its epoch
-    altered after signing, or sent as its nonce alone, is not accepted."""
+    altered after signing, or sent as its nonce alone, is not accepted. The
+    report's token is read as the report is built (F28): TeamTokenForReport
+    passes this seat's reading of the score to TokenFor."""
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
     src = _read(os.path.join(_PLUGIN_DIR, "TeamGameNumber.cs"))
     series, reporter, room, token, dc_player, post_pin, dc_pin = (_cs_const(src, n) for n in (
@@ -3106,8 +3156,14 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     body = watcher[start:watcher.index("\n        }\n", start)]
     assert body.count("TeamGameNumber.Live.TokenFor(") == 1, "MaybeSendLivePoints"
     assert "teamGame, teamRoom, teamToken);" in body, "MaybeSendLivePoints"
+    assert "ReadLiveScore(), TokenClock());" in body, "MaybeSendLivePoints"
+    start = watcher.index("internal static string TeamTokenForReport(")
+    body = watcher[start:watcher.index("\n        }\n", start)]
+    assert body.count("TeamGameNumber.Live.TokenFor(") == 1, "TeamTokenForReport"
+    assert "ReadLiveScore()," in body and "TokenClock(), out why);" in body, "TeamTokenForReport"
     plugin = _read(os.path.join(_PLUGIN_DIR, "Plugin.cs"))
     assert plugin.count("ApiClient.ReportTeamSeriesDc(") == 1
-    assert "string dcToken = GameStateWatcher.TeamTokenForReport(seriesId);" in plugin
+    assert ("string dcToken = GameStateWatcher.TeamTokenForReport(seriesId, out dcTokenWhy);"
+            in plugin)
     assert ("ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points, dcToken);"
             in plugin)

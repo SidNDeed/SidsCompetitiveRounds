@@ -94,13 +94,14 @@ namespace CompetitiveRounds
         // 2v2 post carried ("" = none), so the token's arrival is itself a
         // reason to post; whether this seat still owes the game's publish (set
         // at every cr_ff game start, retried each poll tick only while it waits
-        // for the host role inside the first round); the last reason logged for
-        // not publishing; and the highest rounds seen since the game's start
-        // (-1 = none yet), whose fall inside a game is a missed game boundary.
+        // for the host role inside the first round); and the last reason logged
+        // for not publishing. Round 6, finding F28: the readings of the score
+        // that end a game's token (round 5's high-water rounds, now seeded at
+        // the game start and on the points too) are the tracker's
+        // (TeamGameNumber.Live.ObserveScore).
         private static string liveSentTeamToken = "";
         private static bool teamTokenOwed;
         private static string teamTokenLastWhy = "";
-        private static int teamTokenHighP1 = -1, teamTokenHighP2 = -1;
         private static int p1Points = 0;
         private static int p2Points = 0;
         private static int p1Rounds = 0;
@@ -4830,7 +4831,9 @@ namespace CompetitiveRounds
             // v1.41.0 beta round 5, finding F25: read the room's game token,
             // publish it when this seat owes it, and drop it when the score
             // falls inside a game (TeamGameNumber, "The physical game's token").
-            TickTeamToken(curP1Rounds, curP2Rounds);
+            // Round 6, finding F28: the score it reads there ends the game's
+            // token BEFORE OnMatchStarted or OnGameOver below can run.
+            TickTeamToken();
 
             if (gameActive && !wasGameInProgress && !isTracking)
             {
@@ -5235,11 +5238,12 @@ namespace CompetitiveRounds
             // TokenFor; "" = the post goes without one). A token that arrives
             // after the pair was sent is itself a reason to post again, so a
             // pair first sent without it carries it on the next tick rather
-            // than at the 20 s refresh. Round 6, finding F27: the token is
-            // checked as the post is built, against this seat's own count of
-            // the room's games.
+            // than at the 20 s refresh. Round 6, findings F27 and F28: the
+            // token is checked as the post is built, against this seat's own
+            // count of the room's games and its reading of the score now.
             string teamRoom = TeamGameRoom();
-            string teamToken = TeamGameNumber.Live.TokenFor(ApiClient.ActiveTeamSeriesId, teamRoom, ReadTeamToken());
+            string teamToken = TeamGameNumber.Live.TokenFor(ApiClient.ActiveTeamSeriesId, teamRoom, ReadTeamToken(),
+                                                            ReadLiveScore(), TokenClock());
             bool tokenNews = teamToken != liveSentTeamToken && (sp1 > 0 || sp2 > 0);
             if (force || tokenNews || sp1 != liveSentTeamP1 || sp2 != liveSentTeamP2)
             {
@@ -5279,52 +5283,103 @@ namespace CompetitiveRounds
 
         /// <summary>Round 5, finding F25: the token a 2v2 DC report names,
         /// "" when this seat holds none for the game in progress
-        /// (TeamGameNumber.Live.TokenFor). The server then withholds the
-        /// lead-forfeit and the series goes to an admin.</summary>
-        internal static string TeamTokenForReport(string seriesId)
+        /// (TeamGameNumber.Live.TokenFor; `why` says why not, for the log).
+        /// The server then withholds the lead-forfeit and the series goes to
+        /// an admin. Round 6, findings F27 and F28: it is checked here, as the
+        /// report is built, against the room's value, this seat's own count
+        /// of the room's games and its reading of the score now, so a game
+        /// over or a game start that has not reached this seat withholds it
+        /// (OnPlayerLeftRoom can run before the next poll tick).</summary>
+        internal static string TeamTokenForReport(string seriesId, out string why)
         {
-            try { return TeamGameNumber.Live.TokenFor(seriesId, TeamGameRoom(), ReadTeamToken()); }
-            catch { return ""; }
+            why = "";
+            try
+            {
+                return TeamGameNumber.Live.TokenFor(seriesId, TeamGameRoom(), ReadTeamToken(), ReadLiveScore(),
+                                                    TokenClock(), out why);
+            }
+            catch (Exception ex)
+            {
+                why = "the token could not be read: " + ex.Message;
+                return "";
+            }
         }
 
-        /// <summary>Round 5, finding F25, once per poll tick: in a cr_ff room,
-        /// read the room's game token; while tracking a game, treat a fall of
-        /// either side's rounds below the highest seen since the game's start
-        /// as a game boundary this seat did not see (its token is dropped
-        /// until its next game start); and publish when this seat owes the
-        /// game's token.</summary>
-        private static void TickTeamToken(int curP1Rounds, int curP2Rounds)
+        /// <summary>Round 6, finding F28: the scoreboard as this seat reads it
+        /// now (TeamGameNumber.Score): both sides' rounds and points, the
+        /// rounds a game is won at (the game's own field when it reads above
+        /// 0, else the value OnGameOver uses), and how long the room's
+        /// transport has received nothing. Unread when the fields are not
+        /// resolved, when no room is joined, when the room's messages are held
+        /// (PhotonNetwork.IsMessageQueueRunning false: the scoreboard then
+        /// shows the room as of an unknown time) or when the transport's
+        /// silence cannot be read. An unread score carries no token.</summary>
+        private static TeamGameNumber.Score ReadLiveScore()
+        {
+            try
+            {
+                if (!fieldsResolved || !PhotonNetwork.InRoom || !PhotonNetwork.IsMessageQueueRunning)
+                    return default(TeamGameNumber.Score);
+                var gm = GM_ArmsRace.instance;
+                if (gm == null) return default(TeamGameNumber.Score);
+                double silent = TransportSilence();
+                if (silent < 0) return default(TeamGameNumber.Score);
+                int toWin = f_roundsToWinGame != null ? GetFieldInt(gm, f_roundsToWinGame) : 0;
+                if (toWin <= 0) toWin = roundsToWin;
+                var s = TeamGameNumber.Score.Of(GetFieldInt(gm, f_p1Rounds), GetFieldInt(gm, f_p2Rounds),
+                                                GetFieldInt(gm, f_p1Points), GetFieldInt(gm, f_p2Points), toWin);
+                s.Silent = silent;
+                return s;
+            }
+            catch { return default(TeamGameNumber.Score); }
+        }
+
+        /// <summary>Round 6, finding F28: seconds since the room's transport
+        /// last received anything, on the clock Photon's own disconnect
+        /// timeout reads (SampleConnectionQuality's measure); -1 when it
+        /// cannot be read.</summary>
+        private static double TransportSilence()
+        {
+            try
+            {
+                var client = PhotonNetwork.NetworkingClient;
+                var peer = client != null ? client.LoadBalancingPeer : null;
+                if (peer == null) return -1;
+                int silent = peer.ConnectionTime - peer.TimestampOfLastSocketReceive;
+                return silent > 0 ? silent / 1000.0 : 0;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>Round 6, finding F28: the clock the tracker's readings of
+        /// the score are timed on (real seconds since this process
+        /// started).</summary>
+        private static double TokenClock()
+        {
+            return _tickStopwatch.Elapsed.TotalSeconds;
+        }
+
+        /// <summary>Round 5, finding F25, and round 6, findings F27 and F28,
+        /// once per poll tick in a cr_ff room: the score as this seat reads it
+        /// (TeamGameNumber.Tracker.ObserveScore ends the game's token at once
+        /// on the game over, on a score that cannot follow the last reading
+        /// inside one game -- round 5's missed-boundary guard, now seeded at
+        /// the game start and on the points too -- and on a gap in the
+        /// readings), then the room's game token (a changed value or a later
+        /// game's ends it too), then the host's publish when this seat owes
+        /// the game's token.</summary>
+        private static void TickTeamToken()
         {
             try
             {
                 var props = PhotonNetwork.CurrentRoom?.CustomProperties;
                 if (PhotonNetwork.OfflineMode || props == null || !props.ContainsKey("cr_ff")) return;
-                string line = TeamGameNumber.Live.ObserveRoomToken(TeamGameRoom(), ReadTeamToken());
+                TeamGameNumber.Score s = ReadLiveScore();
+                string line = TeamGameNumber.Live.ObserveScore(s, TokenClock());
                 if (line != null) Plugin.Log.LogInfo(line);
-                if (isTracking)
-                {
-                    if (teamTokenHighP1 < 0 || teamTokenHighP2 < 0)
-                    {
-                        teamTokenHighP1 = curP1Rounds;
-                        teamTokenHighP2 = curP2Rounds;
-                    }
-                    else if (curP1Rounds < teamTokenHighP1 || curP2Rounds < teamTokenHighP2)
-                    {
-                        string missed;
-                        TeamGameNumber.Live.OnMissedBoundary(out missed);
-                        Plugin.Log.LogInfo(missed + " (rounds " + teamTokenHighP1 + "-" + teamTokenHighP2 + " then "
-                                           + curP1Rounds + "-" + curP2Rounds + ")");
-                        teamTokenHighP1 = curP1Rounds;
-                        teamTokenHighP2 = curP2Rounds;
-                        teamTokenOwed = false;
-                    }
-                    else
-                    {
-                        teamTokenHighP1 = Math.Max(teamTokenHighP1, curP1Rounds);
-                        teamTokenHighP2 = Math.Max(teamTokenHighP2, curP2Rounds);
-                    }
-                }
-                if (teamTokenOwed) TryPublishTeamToken(curP1Rounds == 0 && curP2Rounds == 0);
+                line = TeamGameNumber.Live.ObserveRoomToken(TeamGameRoom(), ReadTeamToken());
+                if (line != null) Plugin.Log.LogInfo(line);
+                if (teamTokenOwed && s.Read) TryPublishTeamToken(s.R1 == 0 && s.R2 == 0);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} game token tick error: {ex.Message}"); }
         }
@@ -5443,14 +5498,16 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.OfflineMode && tgnProps != null && tgnProps.ContainsKey("cr_ff"))
                 {
                     string tgnLine;
-                    TeamGameNumber.Live.OnGameStart(ApiClient.ActiveTeamSeriesId, TeamGameRoom(), out tgnLine);
+                    TeamGameNumber.Live.OnGameStart(ApiClient.ActiveTeamSeriesId, TeamGameRoom(), ReadLiveScore(),
+                                                    TokenClock(), out tgnLine);
                     Plugin.Log.LogInfo(tgnLine);
                     // Round 5, finding F25: the game's token. What the room
                     // holds now is read at once (a value published for this
                     // game before this seat's start is taken: a late start
                     // still takes its game's token, #182); the host's publish
                     // goes on the next poll tick (TickTeamToken), with the
-                    // rounds it reads there.
+                    // score it reads there. Round 6, finding F28: the score
+                    // read here seeds the readings that end the game's token.
                     string tokLine = TeamGameNumber.Live.ObserveRoomToken(TeamGameRoom(), ReadTeamToken());
                     if (tokLine != null) Plugin.Log.LogInfo(tokLine);
                     teamTokenOwed = true;
@@ -5463,8 +5520,6 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
-            teamTokenHighP1 = -1;
-            teamTokenHighP2 = -1;
             liveSentTeamToken = "";
             // Match-scoped DC latch — must reset per GAME, not only on room leave
             // (learning #27). Rematches reuse the room, so a latch set during
@@ -5752,6 +5807,20 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return;   // spectator: no result paths
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
+            // v1.41.0 beta round 6, finding F28: this game's token, and the
+            // value the room holds now, are stale for every later game. FIRST,
+            // before anything below can throw, and in its own try.
+            try
+            {
+                var tokProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (!PhotonNetwork.OfflineMode && tokProps != null && tokProps.ContainsKey("cr_ff"))
+                {
+                    teamTokenOwed = false;
+                    string tokLine = TeamGameNumber.Live.OnTokenGameOver(TeamGameRoom(), ReadTeamToken());
+                    if (tokLine != null) Plugin.Log.LogInfo(tokLine);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} game token game-over error: {ex.Message}"); }
             sessionMatchCount++;
             // Roster census (bug 391 §4.1) — the last reading of the roster
             // this game, taken before the diagnostics windows are closed.
@@ -5785,11 +5854,8 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.OfflineMode && goProps != null && goProps.ContainsKey("cr_ff"))
                 {
                     ApiClient.RefreshTeamGameRecord(ApiClient.ActiveTeamSeriesId);
-                    // Round 5, finding F25: this game's token, and the value
-                    // the room holds now, are stale for every later game.
-                    teamTokenOwed = false;
-                    string tokLine = TeamGameNumber.Live.OnTokenGameOver(TeamGameRoom(), ReadTeamToken());
-                    if (tokLine != null) Plugin.Log.LogInfo(tokLine);
+                    // The game's token was made stale at the top of OnGameOver
+                    // (round 6, finding F28).
                 }
             }
             catch { }

@@ -32422,14 +32422,15 @@ async def update_team_live_points(
 # pair every 20 seconds while the game has a point) counts in full: a
 # tokenless post clears nothing, and nothing it sets counts.
 #
-# THE TOKEN'S GAME (v1.41.0 beta review round 5, finding F27; round 6). A
-# token is one physical game's only while every seat that carries it is
+# THE TOKEN'S GAME (v1.41.0 beta review round 5, findings F27 and F28; round
+# 6). A token is one physical game's only while every seat that carries it is
 # in that game, and a seat a game ahead of a lagging host can read the host's
 # token while it is already in the next game. So the token names the ORDINAL
 # of the physical game it was published for (the host's own count of the
 # room's game starts) and the host's EPOCH, all three parts signed:
 # 'nonce:ordinal:epoch' (_team_game_wire_token). The client takes a token
-# only for the game its own count and its posts both name
+# only for the game its own count and its posts both name, and carries it
+# only while its reading of the score still shows that game
 # (plugin/TeamGameNumber.cs). Here, a post whose token names a game other
 # than the one it is filed under marks the record as holding another
 # physical game (token_conflict), and a DC report's token is read only when
