@@ -1113,6 +1113,9 @@ namespace CompetitiveRounds
         public static void FitOneLine(object t){SetOverflowMode(t,0);SetWordWrap(t,false);}
         public static void SetCharSpacing(object t,float spacing){if(t!=null)pTmpCharSpacing?.SetValue(t,spacing);}
         public static void SetImageColor(GameObject go,Color c){if(go==null)return;var img=go.GetComponent(tImage);if(img!=null)pImgColor?.SetValue(img,c);}
+        /// <summary>Item 13 round-2 R4: an image's colour as rendered, for
+        /// the settings harness to read back; clear when there is none.</summary>
+        public static Color GetImageColor(GameObject go){if(go==null||pImgColor==null)return Color.clear;var img=go.GetComponent(tImage);if(img==null)return Color.clear;try{return (Color)pImgColor.GetValue(img);}catch{return Color.clear;}}
         public static void SetImageSprite(GameObject go,Sprite spr){if(go==null||tImage==null)return;var img=go.GetComponent(tImage);if(img!=null)tImage.GetProperty("sprite",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,spr);}
         public static object GetButtonText(GameObject btn){if(btn==null)return null;foreach(Transform ch in btn.transform)foreach(var co in ch.GetComponents<Component>())if(co.GetType().Name=="TextMeshProUGUI")return co;return null;}
         /* Icon button (music transport pass): the root GO IS the Image — the

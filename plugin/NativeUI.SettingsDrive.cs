@@ -48,7 +48,7 @@ namespace CompetitiveRounds
         internal static bool SettingsTestRunning => SettingsDriveRunning || SettingsSelfTestRunning;
 
         /// <summary>The scenarios, in the order "5:drive" runs them.</summary>
-        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2", "l11" };
+        private static readonly string[] SettingsDriveScenarios = { "m1", "l3", "l2", "l11", "r4" };
 
         private static void DrvOk(string m) { drvPass++; Plugin.Log.LogInfo("[SETTINGS-DRIVE] PASS " + m); }
         private static void DrvBad(string m) { drvFail++; Plugin.Log.LogWarning("[SETTINGS-DRIVE] FAIL " + m); }
@@ -146,6 +146,7 @@ namespace CompetitiveRounds
                 case "l3": return DriveL3();
                 case "l2": return DriveL2();
                 case "l11": return DriveL11();
+                case "r4": return DriveR4();
             }
             return DriveNothing();
         }
@@ -453,6 +454,91 @@ namespace CompetitiveRounds
                 settingsPinnedKey = savedPin;
                 settingsPaneDirty = true;
             }
+        }
+
+        /// <summary>Round-2 R4: the mail relay switch paints neutral (a dim
+        /// track, a dim knob at the centre) while its value is not known -
+        /// before the first status poll, or with no linked Discord - and on
+        /// or off by its value otherwise. Each case sets the two session facts
+        /// (MailClient.StatusEverSeen and DiscordLinked, never persisted) and,
+        /// where the case needs one, the row's getter; lets the page repaint;
+        /// and reads what was rendered: the track colour, the knob colour and
+        /// position, and the value word. The two unknown cases force the
+        /// cached value ON, the value the round-1 switch painted green beside
+        /// "checking...". Everything is put back; the relay's writer is never
+        /// called, so nothing is sent and no preference is written.</summary>
+        private static IEnumerator DriveR4()
+        {
+            SettingsRowRec rec;
+            if (!settingsByKey.TryGetValue("SMailRelay", out rec) || rec.Track == null || rec.Knob == null)
+            {
+                DrvBad("R4 the relay switch row is not built");
+                yield break;
+            }
+            SettingsSwitchSubTab(rec.Tab);
+            yield return 0.6f;
+            bool seen0 = MailClient.StatusEverSeen, linked0 = MailClient.DiscordLinked;
+            var get0 = rec.GetBool;
+            bool real = false;
+            try { real = get0 != null && get0(); } catch { }
+            bool english = I18n.Locale == "en";
+            string[] names = { "not yet polled, cached ON", "no linked Discord, cached ON",
+                               "known, the row's own value", "known, the other value (painter control)" };
+            bool[] seens = { false, true, true, true };
+            bool[] linkeds = { true, false, true, true };
+            int[] forced = { 1, 1, -1, real ? 0 : 1 };
+            string[] needles = { "checking", "link Discord first", real ? "On" : "Off", null };
+            try
+            {
+                for (int i = 0; i < names.Length; i++)
+                {
+                    MailClient.StatusEverSeen = seens[i];
+                    MailClient.DiscordLinked = linkeds[i];
+                    if (forced[i] < 0) rec.GetBool = get0;
+                    else { bool v = forced[i] == 1; rec.GetBool = () => v; }
+                    dirty = true;
+                    yield return 0.6f;
+                    bool neutral = i < 2;
+                    bool on = forced[i] < 0 ? real : forced[i] == 1;
+                    Color track = UIFactory.GetImageColor(rec.Track);
+                    Color knob = UIFactory.GetImageColor(rec.Knob);
+                    float kx = rec.Knob.GetComponent<RectTransform>().anchoredPosition.x;
+                    string word = SettingsModel.StripTags(UIFactory.GetTmpText(rec.Word) ?? "");
+                    Color wantTrack = neutral ? SW_NA : on ? SW_ON : SW_OFF;
+                    Color wantKnob = neutral ? SW_KNOB_NA : SW_KNOB;
+                    float wantX = neutral ? 14f : on ? 26f : 2f;
+                    string seenAs = "track " + DrvColor(track) + ", knob " + DrvColor(knob) + " at x="
+                        + kx.ToString("0", CultureInfo.InvariantCulture) + ", word '" + word + "'";
+                    string wantAs = (neutral ? "neutral" : on ? "on" : "off") + " (track " + DrvColor(wantTrack)
+                        + ", knob " + DrvColor(wantKnob) + " at x=" + wantX.ToString("0", CultureInfo.InvariantCulture) + ")";
+                    bool painted = DrvSameColor(track, wantTrack) && DrvSameColor(knob, wantKnob) && Mathf.Abs(kx - wantX) < 0.5f;
+                    bool worded = needles[i] == null || !english || word.IndexOf(needles[i], StringComparison.Ordinal) >= 0;
+                    string tag = (i < 2 ? "R4 " : "R4 control: ") + names[i] + ": ";
+                    if (painted && worded) DrvOk(tag + seenAs + " = " + wantAs);
+                    else DrvBad(tag + seenAs + ", want " + wantAs
+                        + (!worded ? " and a word containing '" + needles[i] + "'" : ""));
+                }
+            }
+            finally
+            {
+                MailClient.StatusEverSeen = seen0;
+                MailClient.DiscordLinked = linked0;
+                rec.GetBool = get0;
+                dirty = true;
+            }
+        }
+
+        private static string DrvColor(Color c)
+        {
+            var inv = CultureInfo.InvariantCulture;
+            return "(" + c.r.ToString("0.00", inv) + "," + c.g.ToString("0.00", inv) + ","
+                + c.b.ToString("0.00", inv) + "," + c.a.ToString("0.00", inv) + ")";
+        }
+
+        private static bool DrvSameColor(Color a, Color b)
+        {
+            return Mathf.Abs(a.r - b.r) < 0.01f && Mathf.Abs(a.g - b.g) < 0.01f
+                && Mathf.Abs(a.b - b.b) < 0.01f && Mathf.Abs(a.a - b.a) < 0.01f;
         }
     }
 }

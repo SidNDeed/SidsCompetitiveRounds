@@ -61,6 +61,10 @@ namespace CompetitiveRounds
             internal UnityEngine.Events.UnityAction Toggle;
             internal GameObject Track, Knob;
             internal object Word;
+            // Round-2 R4: false while the row cannot know its own value (the
+            // mail relay before its first status poll, or with no linked
+            // Discord); the switch then paints neither on nor off.
+            internal Func<bool> Known;
             // segmented / dropdown
             internal string[] Ids;
             internal Func<string[]> IdsF, NamesF;
@@ -100,6 +104,12 @@ namespace CompetitiveRounds
         private const int SETTINGS_TABS = 7;
         private static readonly Color SW_ON = new Color(0.22f, 0.55f, 0.30f, 0.95f);
         private static readonly Color SW_OFF = new Color(0.30f, 0.30f, 0.34f, 0.95f);
+        // Round-2 R4: the neutral switch, for a row whose Known is false - a
+        // dim track and a dim knob at the centre, so the widget never reads
+        // on or off beside a label that says the value is not known.
+        private static readonly Color SW_NA = new Color(0.16f, 0.16f, 0.19f, 0.60f);
+        private static readonly Color SW_KNOB = new Color(0.92f, 0.92f, 0.95f, 1f);
+        private static readonly Color SW_KNOB_NA = new Color(0.50f, 0.50f, 0.54f, 0.85f);
 
         private static readonly Dictionary<object, SettingsRowRec> settingsRegistry = new Dictionary<object, SettingsRowRec>(new SettingsRefEq());
         private static readonly Dictionary<string, SettingsRowRec> settingsByKey = new Dictionary<string, SettingsRowRec>();
@@ -463,14 +473,15 @@ namespace CompetitiveRounds
         // ---------------------------------------------------------------
 
         internal static GameObject SettingsSwitch(Transform parent, string key, string desc, Func<bool> get,
-            UnityEngine.Events.UnityAction toggle)
+            UnityEngine.Events.UnityAction toggle, Func<bool> known = null)
         {
             var rec = SettingsNewRow(parent, key, SettingsKind.Switch, desc);
             rec.GetBool = get;
             rec.Toggle = toggle;
+            rec.Known = known;
             var track = UIFactory.CreatePanel(key + "_t", rec.Cell.transform, SW_OFF, new Vector2(46, 22));
             UIFactory.AddLE(track, minW: 46, minH: 22, prefW: 46, prefH: 22, flexW: 0, flexH: 0);
-            var knob = UIFactory.CreatePanel(key + "_k", track.transform, new Color(0.92f, 0.92f, 0.95f, 1f));
+            var knob = UIFactory.CreatePanel(key + "_k", track.transform, SW_KNOB);
             var krt = knob.GetComponent<RectTransform>();
             krt.anchorMin = new Vector2(0f, 0.5f);
             krt.anchorMax = new Vector2(0f, 0.5f);
@@ -698,10 +709,12 @@ namespace CompetitiveRounds
                 {
                     case SettingsKind.Switch:
                     {
-                        bool on = false;
+                        bool on = false, known = true;
                         try { on = rec.GetBool != null && rec.GetBool(); } catch { }
-                        UIFactory.SetImageColor(rec.Track, on ? SW_ON : SW_OFF);
-                        if (rec.Knob != null) rec.Knob.GetComponent<RectTransform>().anchoredPosition = new Vector2(on ? 26f : 2f, 0f);
+                        try { known = rec.Known == null || rec.Known(); } catch { known = false; }
+                        UIFactory.SetImageColor(rec.Track, !known ? SW_NA : on ? SW_ON : SW_OFF);
+                        UIFactory.SetImageColor(rec.Knob, known ? SW_KNOB : SW_KNOB_NA);
+                        if (rec.Knob != null) rec.Knob.GetComponent<RectTransform>().anchoredPosition = new Vector2(!known ? 14f : on ? 26f : 2f, 0f);
                         UIFactory.SetTextNoHook(rec.Word, rec.LastValue);
                         break;
                     }

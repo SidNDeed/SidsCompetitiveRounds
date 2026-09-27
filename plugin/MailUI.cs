@@ -601,7 +601,13 @@ namespace CompetitiveRounds
                 id => { SetMailFrom(id); });
             btnMailRelay = NativeUI.SettingsSwitch(parent, "SMailRelay",
                 I18n.Tr("Also DM new mail to your linked Discord. You can reply from there."),
-                () => mailRelayPending ?? MailClient.DiscordRelay, ToggleMailRelay);
+                () => mailRelayPending ?? MailClient.DiscordRelay, ToggleMailRelay,
+                // Round-2 R4: before a status poll has landed, or with no
+                // linked Discord, the stored flag is not something the row can
+                // act on, so the switch paints neutral beside the label's
+                // "checking..." / "link Discord first"; a click still reaches
+                // SetMailRelay, which answers with the same explanation.
+                known: () => MailClient.StatusEverSeen && MailClient.DiscordLinked);
             // Ask for the relay state now rather than waiting out the poll
             // interval: this row is the only place it is shown, and an empty
             // answer here reads as a wrong one.
