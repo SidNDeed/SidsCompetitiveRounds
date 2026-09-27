@@ -21,6 +21,7 @@ Steam account id, so no fixture id is anyone's.
 """
 
 import contextvars
+import copy
 import datetime as _dt
 import decimal as _decimal
 import io
@@ -43,6 +44,35 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E40
 
 STEAM_BASE = 76561190035500000
 UTC = _dt.timezone.utc
+
+# Fixture ids are derived, never random: a query that orders by a player
+# or lobby id (the bet settlement orders by player_id::text) then walks the
+# fixture's rows in the same order in every run, so two runs of the same
+# code write the same trace (the twin rule).
+_ID_NS = uuid.UUID("5c0f5e1e-2b1d-4c55-9a55-000000000355")
+
+
+def fixture_uuid(kind, key):
+    return uuid.uuid5(_ID_NS, "%s:%s" % (kind, key))
+
+
+# The process memory main keeps between requests (TTL caches, last-seen
+# and last-run memos), captured at import. Every case starts from it, so
+# no statement depends on which cases ran earlier in the process or how
+# long ago: the region volumes (a 600 s cache) and the service-account
+# UUIDs (an hourly cache) each issue their query only when cold. A name
+# that reads as a constant (upper case, a number) is configuration, not
+# state, and is left alone.
+_STATE_RE = re.compile(r"(?i)cache|seen|last|mono|prune")
+_MAIN_STATE = {}
+for _name, _val in list(vars(main).items()):
+    if _name.startswith("__") or not _STATE_RE.search(_name):
+        continue
+    if isinstance(_val, bool) or not isinstance(_val, (dict, set, list, float, int, type(None))):
+        continue
+    if _name.lstrip("_").isupper() and not isinstance(_val, (dict, set, list)):
+        continue
+    _MAIN_STATE[_name] = copy.deepcopy(_val)
 
 _LOCKS_SQL = (
     "SELECT /*cf-locks*/ l.locktype, COALESCE(c.relname, ''), l.mode FROM pg_locks l"
@@ -278,6 +308,8 @@ class Env:
         # Presence is process memory keyed by steam id, and every case reuses
         # the same synthetic ids: each case starts with nobody online.
         mp.setattr(main, "_presence_seen", {})
+        for name, val in _MAIN_STATE.items():
+            mp.setattr(main, name, copy.deepcopy(val))
         mp.setattr(sys, "stdout", _TaskStdout(sys.stdout))
 
     def close(self):
@@ -343,9 +375,10 @@ class Env:
         pids = []
         for i, sid in enumerate(sids):
             pids.append(await self.conn.fetchval(
-                "INSERT INTO players (steam_id, display_name, mod_version)"
-                " VALUES ($1, $2, '1.41.0') RETURNING id", sid, "cf s%d-%d" % (self.serial, i)))
-        lid = lid if lid is not None else uuid.uuid4()
+                "INSERT INTO players (id, steam_id, display_name, mod_version)"
+                " VALUES ($3, $1, $2, '1.41.0') RETURNING id", sid, "cf s%d-%d" % (self.serial, i),
+                fixture_uuid("player", sid)))
+        lid = lid if lid is not None else fixture_uuid("lobby", self.serial)
         room = "ffa_cf%06d" % self.serial
         await self.conn.execute(
             "INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_count,"
@@ -625,8 +658,9 @@ class Env:
         self.serial += 1
         sid = str(STEAM_BASE + self.serial * 20 + 19)
         pid = await self.conn.fetchval(
-            "INSERT INTO players (steam_id, display_name, mod_version, gold_earned)"
-            " VALUES ($1, $2, '1.41.0', $3) RETURNING id", sid, "cf bettor %d" % self.serial, gold)
+            "INSERT INTO players (id, steam_id, display_name, mod_version, gold_earned)"
+            " VALUES ($4, $1, $2, '1.41.0', $3) RETURNING id", sid, "cf bettor %d" % self.serial, gold,
+            fixture_uuid("player", sid))
         return pid, sid
 
     async def wager(self, lid, bettor_pid, on_pid, *, game=1, amount=100, odds=2.5):
@@ -701,7 +735,7 @@ class Env:
                 seed.append((p, "L%dP%d" % (i, j)))
         body = normalise({"statements": self.rec.stmts, "locks": self.rec.locks,
                           "answers": [[a.status, a.body] for a in self.answers],
-                          "lines": [ln for ln in self.lines if ln.startswith("[FFA")],
+                          "lines": _sort_runs([ln for ln in self.lines if ln.startswith("[FFA")]),
                           "rows": rows}, seed=seed)
         path = os.path.join(d, re.sub(r"[^A-Za-z0-9_.-]", "_", name) + ".json")
         with io.open(path, "w", encoding="ascii", newline="\n") as fh:
@@ -715,11 +749,36 @@ _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 _ID8_RE = re.compile(r"(?<![0-9A-Za-z_])(lobby|->) ([0-9a-f]{8})(?![0-9A-Za-z_])")
 _ROOM_RE = re.compile(r"\bffa_[0-9a-f]{12}\b")
 # Columns whose value is read from the real clock (SQL NOW()) rather than the
-# frozen one: compared to the second only.
-_REAL_CLOCK_INTS = {"dissolve_after_ms"}
+# frozen one. Compared to the second, they still split at a second's edge
+# (dissolve_after_ms read 3703 and 3702 in two runs of one code), so they
+# compare by presence, like the answer ages below.
+_REAL_CLOCK_INTS = set()
 # Answer fields computed from the route's monotonic clock at build time: two
 # runs of the same code differ by scheduling, so a twin compares presence.
-_REAL_CLOCK_MASK = {"server_age_ms", "admit_left_ms"}
+_REAL_CLOCK_MASK = {"server_age_ms", "admit_left_ms", "dissolve_after_ms"}
+# The erasure's random placeholder name (deleted_ + 8 hex): named by first
+# appearance, like a UUID.
+_PLACEHOLDER_RE = re.compile(r"\bdeleted_[0-9a-f]{8}\b")
+
+
+def _line_template(ln):
+    return re.sub(r"[0-9a-f]{8,}|[0-9]+", "#", _UUID_RE.sub("U", ln))
+
+
+def _sort_runs(lines):
+    """Each run of consecutive lines of one template (the same text once
+    ids and numbers are masked) in a fixed order: one loop's lines over an
+    unordered result (a DELETE ... RETURNING) keep their set, not the
+    order the rows came back in."""
+    out, i = [], 0
+    while i < len(lines):
+        t = _line_template(lines[i])
+        j = i + 1
+        while j < len(lines) and _line_template(lines[j]) == t:
+            j += 1
+        out.extend(sorted(lines[i:j], key=lambda s: _UUID_RE.sub("U", s)))
+        i = j
+    return out
 
 
 def normalise(obj, seed=()):
@@ -758,7 +817,7 @@ def normalise(obj, seed=()):
             return "ts"
         if isinstance(o, str):
             sd = dict(seeded)
-            return _UUID_RE.sub(lambda m: sd.get(m.group(0), "U?"), o)
+            return _PLACEHOLDER_RE.sub("deleted_?", _UUID_RE.sub(lambda m: sd.get(m.group(0), "U?"), o))
         if key in _REAL_CLOCK_MASK or key in _REAL_CLOCK_INTS:
             return "rt"
         if isinstance(o, (bytes, bytearray, _decimal.Decimal, float)):
@@ -782,6 +841,7 @@ def normalise(obj, seed=()):
             s = _UUID_RE.sub(lambda m: uname(m.group(0)), o)
             s = _ID8_RE.sub(lambda m: "%s %s" % (m.group(1), id8name(m.group(2))), s)
             s = _ROOM_RE.sub("ffa_ROOM", s)
+            s = _PLACEHOLDER_RE.sub(lambda m: "deleted_" + uname("ph:" + m.group(0)), s)
             return s
         if key in _REAL_CLOCK_MASK and isinstance(o, int):
             return "rt"

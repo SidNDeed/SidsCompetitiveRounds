@@ -800,9 +800,10 @@ async def _open_lobby(env, n, caps):
     pids = []
     for i, sid in enumerate(sids):
         pids.append(await env.conn.fetchval(
-            "INSERT INTO players (steam_id, display_name, mod_version) VALUES ($1, $2, '1.41.0')"
-            " RETURNING id", sid, "cf o%d-%d" % (env.serial, i)))
-    lid = uuid.uuid4()
+            "INSERT INTO players (id, steam_id, display_name, mod_version)"
+            " VALUES ($3, $1, $2, '1.41.0') RETURNING id", sid, "cf o%d-%d" % (env.serial, i),
+            cf_asm.fixture_uuid("player", sid)))
+    lid = cf_asm.fixture_uuid("lobby", env.serial)
     await env.conn.execute(
         "INSERT INTO ffa_lobbies (id, status, host_player_id, created_at, is_ranked,"
         "  player_count, member_ids) VALUES ($1, 'open', $2, clock_timestamp() - interval"
@@ -1084,8 +1085,8 @@ def test_s15_the_seat_row_answer(monkeypatch):
         assert row["reformed_to"] is not None, ("S15 leave reform", row["status"])
         new = await env.lobby_row(row["reformed_to"])
         a = await env.census_of(lob, 1, [0, 1, 2, 3])
-        assert a["status"] == "reformed" and a["lock"]["room_name"] == new["photon_room_id"], \
-            ("S15 reformed", a)
+        assert a["status"] == "reformed" and isinstance(a["lock"], dict) \
+            and a["lock"].get("room_name") == new["photon_room_id"], ("S15 reformed", a)
         off = await env.conn.fetchval(
             "SELECT lock_offered_at FROM ffa_assembly_seats WHERE lobby_id = $1 AND player_id = $2",
             new["id"], lob.pids[1])

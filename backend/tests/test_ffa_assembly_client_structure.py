@@ -367,6 +367,15 @@ def written_keys(node):
     return keys
 
 
+def _outcomes(v):
+    """The string constants an expression can evaluate to: a conditional's
+    two results, never its test (`"s" if s["verdict"] == "granted" else "l"`
+    is {"s", "l"})."""
+    if isinstance(v, ast.IfExp):
+        return _outcomes(v.body) | _outcomes(v.orelse)
+    return {c.value for c in ast.walk(v) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+
+
 def dict_values_for(node, key):
     """Constant values stored under `key` in the function's dict literals."""
     vals = set()
@@ -374,9 +383,7 @@ def dict_values_for(node, key):
         if isinstance(n, ast.Dict):
             for k, v in zip(n.keys, n.values):
                 if isinstance(k, ast.Constant) and k.value == key:
-                    for c in ast.walk(v):
-                        if isinstance(c, ast.Constant) and isinstance(c.value, str):
-                            vals.add(c.value)
+                    vals |= _outcomes(v)
     return vals
 
 
@@ -386,10 +393,12 @@ def model_fields(name):
 
 
 def client_reads(files, key):
-    """Offsets of ExtractJson*(<expr>, "key" reads across the named files."""
+    """Count of ExtractJson*(<expr>, "key" and Window(<map>, "key" reads across
+    the named files (the lock payload's windows go through Window)."""
     n = 0
     for f in files:
-        n += len(re.findall(r"ExtractJson\w*\(\s*\w+\s*,\s*\"" + re.escape(key) + r"\"", kept(src(f))))
+        n += len(re.findall(r"(?:ExtractJson\w*|Window)\(\s*\w+\s*,\s*\"" + re.escape(key) + r"\"",
+                            kept(src(f))))
     return n
 
 
@@ -718,8 +727,9 @@ def test_k06_k20_barrier_position():
     facts = {"found": [p >= 0 for p in pos], "ordered": all(p >= 0 for p in pos) and pos == sorted(pos),
              "started_once": len(offsets(ds, r"(?<![A-Za-z0-9_.])GameStartedInRoom = true;"))}
     trace(facts)
-    assert all(facts["found"]), ("K6 found", facts["found"])
+    assert all(facts["found"][i] for i in (0, 1, 4)), ("K6 found", facts["found"])
     assert pos[1] < pos[4], ("K6 moved-out before started", pos)
+    assert all(facts["found"][i] for i in (2, 3)), ("K20 found", facts["found"])
     assert facts["ordered"], ("K20 barrier order", pos)
     assert facts["started_once"] == 1, ("K20 started once", facts["started_once"])
 
@@ -805,7 +815,8 @@ def test_k24_suppression_lease():
         writes.append((norm(kept(t)[mm.start(1):mm.end(1)]), conds(t, mm.start())))
     lease = re.search(r"const float SuppressLeaseS = ([0-9.]+)f;", kept(t))
     sa = re.search(r"internal static bool SuppressActive\s*\{\s*get\s*\{\s*return\s*([^;]*);", kept(t))
-    idents = sorted(set(re.findall(r"[A-Za-z_][A-Za-z_0-9.]*", sa.group(1)))) if sa else []
+    pred = re.sub(r"\"[^\"]*\"", "", sa.group(1)) if sa else ""
+    idents = sorted(set(re.findall(r"[A-Za-z_][A-Za-z_0-9.]*", pred))) if sa else []
     facts = {"writes": len(writes),
              "rhs": [w[0] for w in writes],
              "hold_gated": all(any(re.search(r"a\.Hold == 1", c) for c in w[1]) for w in writes),
@@ -879,6 +890,7 @@ def test_k33_k43_spawn_gate_and_late_spawn():
         "creates": creates, "late_spawn_callers": ls_calls,
         "may_before_spawn": 0 <= cps.find("FfaLateRules.MaySpawn(") < cps.find("LateSpawn();"),
         "may_once": calls(block("FfaLateEntry.cs", "void CheckPendingSnapshot("), r"FfaLateRules\.MaySpawn") == 1,
+        "opens": len(re.findall(r"_spawnOpenRoom = room;", sk)),
     }
     trace(facts)
     assert facts["open_ms"] == "a.ServerAgeMs - a.SpawnOkAgeMs", ("K43 open ms", facts["open_ms"])
@@ -886,6 +898,7 @@ def test_k33_k43_spawn_gate_and_late_spawn():
     assert facts["first_a_before_test"], ("K43 judged once", first_a, stA, win_at)
     assert facts["state_a"], ("K43 state A", sk[:160])
     assert facts["clock_reads"] == 0, ("K43 no clock", facts["clock_reads"])
+    assert facts["opens"] == 2, ("K33 gate opens", facts["opens"])
     assert creates == ["LateSpawn"], ("K33 one create", creates)
     assert ls_calls == ["CheckPendingSnapshot"] and facts["may_before_spawn"] and facts["may_once"], \
         ("K33 spawn behind MaySpawn", facts)
@@ -998,8 +1011,10 @@ def test_k11_wp1_caps():
     qa = re.search(r"return\s+([^;]*);", kept(block("FfaLateEntry.cs", "internal static bool QuarantineAttached(")))
     rel = re.search(r"const bool G3Build = (\w+);", cs.strip_comments_only(fa))
     g3 = re.search(r"const bool G3Build = (\w+);", cs.strip_comments_only(fa, frozenset({"SCR_G3"})))
-    tok = dict(re.findall(r"internal const string (CapsToken|AdmCapsToken) = \"([^\"]*)\";", kept(fa)))
+    tok = dict(re.findall(r"(?:(?:internal|public|const|static)\s+)+string\s+(CapsToken|AdmCapsToken)\s*=\s*"
+                          r"\"([^\"]*)\"\s*;", kept(fa)))
     facts = {
+        "asm_source": bool(re.search(r"bool\s+asm\s*=\s*AsmCapable\(\);", caps)),
         "asm_terms": sorted(and_terms(asm.group(1))) if asm else [],
         "quarantine_terms": sorted(and_terms(qa.group(1))) if qa else [],
         "adm_terms": sorted(and_terms(adm.group(1))) if adm else [],
@@ -1014,6 +1029,7 @@ def test_k11_wp1_caps():
     assert facts["asm_terms"] == sorted(["Initialised", "DoStartPrefixAttached", "LoadGateAttached",
                                          "ExitHookHandoffCompiled", "BarrierCompiled",
                                          "FfaLateEntry.QuarantineAttached()"]), ("K11 asm six", facts["asm_terms"])
+    assert facts["asm_source"], ("K11 asm source", caps[:200])
     assert facts["quarantine_terms"] == sorted(["PickPrefixAttached", "ForcePrefixAttached", "SyncPrefixAttached",
                                                 "MapReportPrefixAttached", "VisiblePostfixAttached",
                                                 "SimulatedPostfixAttached", "RegisterPostfixAttached", "damage"]), \
@@ -1265,6 +1281,7 @@ def test_k21_k22_k41_barrier_run():
     lat = kept(block("FfaAssembly.cs", "bool LatestIsAssemblingPending0("))
     facts = {
         "no_age": not re.search(r"\bub\b|StartEarlyMs|start_early_s", bk),
+        "no_hint": not re.search(r"PropAsmHint|cr_asm_hint|Hint", bk),
         "pass_once": len(re.findall(r"Passed = true;", bk)),
         "grant_cases": grant_cases,
         "exit_statuses": bool(re.search(r"_room == MovedOutOf \|\| st == \"reformed\" \|\| st == \"dissolved\" "
@@ -1282,6 +1299,7 @@ def test_k21_k22_k41_barrier_run():
     }
     trace(facts)
     assert facts["no_age"] and facts["pass_once"] == 1, ("K21 pass", facts)
+    assert facts["no_hint"], ("K21 no hint", "hint")
     assert grant_cases == ["start_ok", "admitted_late"], ("K21 grant only own start", grant_cases)
     assert facts["exit_statuses"] and facts["expiry"], ("K21 exits", facts)
     assert facts["lease"] == [("HandleAnswer", "a.Rt + StartHoldS", ["IsRenewing(a.Status)"]),
@@ -1307,7 +1325,8 @@ def test_k23_timeouts_and_single_flight():
             posts.append((f.name, member_of(t, at), "timeout: PostTimeout" in args))
     pt = re.search(r"const int PostTimeout = (\d+);", kept(fa))
     api = kept(src("ApiClient.cs"))
-    defaults = re.findall(r"public static void (AsmPost|PostRequest)\([^)]*int timeout = (\d+)\)", api)
+    defaults = re.findall(r"(?:public|private|internal) static \w+ (AsmPost|PostRequest)\([^)]*int timeout = (\d+)\)",
+                          api)
     flags = {}
     for flag in ("_censusInFlight", "_startInFlight", "_releaseInFlight"):
         clears = []
@@ -1342,12 +1361,13 @@ def test_k28_k48_wp9_census_body():
         "bodies": "PlayerManager.instance.players" in k and "data.view.OwnerActorNr" in k,
         "steam": bool(re.search(r"RoomActors\.SteamIdOf\(a\) \?\? \"\"", k)),
         "kept": calls(cb, r"FfaLateEntry\.IsKeptActor") == 1,
+        "b_from_bodies": "int b = bodies.Contains(an) ? 1 : 0;" in k,
         "empty_dropped": bool(re.search(r"IsNullOrEmpty\(s\)\)\s*continue", k)),
         "keys": keys,
     }
     trace(facts)
     assert facts["present"] and facts["fighter_views"] == 0, ("K48 census list", facts)
-    assert facts["bodies"] and facts["steam"] and facts["kept"], ("K28 entry", facts)
+    assert facts["bodies"] and facts["steam"] and facts["kept"] and facts["b_from_bodies"], ("K28 entry", facts)
     assert not facts["empty_dropped"], ("K28 empty s kept", k[:200])
     server = model_fields("_AsmAssemblyReq") | model_fields("_AsmCensusEntry")
     assert set(keys) == server, ("WP9 census keys", sorted(set(keys) ^ server))
@@ -1374,7 +1394,7 @@ def test_k29_k30_k31_arrival_master_ready_tick():
         "extra": all(("\\\"%s\\\"" % x) in ok_ for x in ("actor", "region", "uid_missing")),
         "master_ready": loop_end >= 0 and len(wl) == 1 and loop_end <= mr < wl[0][0] < iss,
         "master_ready_free": mr >= 0 and conds(jw, mr) == [],
-        "tick_first": norm(masked(upd)[1:]).startswith("FfaAssembly.Tick();"),
+        "tick_first": re.sub(r"\s+", "", masked(upd)[1:]).startswith("FfaAssembly.Tick();"),
     }
     trace(facts)
     assert facts["arrival_order"], ("K29 repair first", order)
@@ -1413,6 +1433,10 @@ def test_k32_join_deadline():
                                      kept(block("FfaAssembly.cs", "internal static void AfterGameStart(")))),
         "no_admit_deadline": not any("AdmitDeadlineRt" in kept(f.read_text(encoding="utf-8"))
                                      for f in PLUGIN.glob("*.cs")),
+        "disarm_members": sorted(member_of(t, mm.start()) for t in [f.read_text(encoding="utf-8")
+                                                                      for f in sorted(PLUGIN.glob("*.cs"))]
+                                 for mm in re.finditer(r"(?<![A-Za-z0-9_.])(?:FfaAssembly\.)?JoinDeadlineRt\s*=\s*0f\s*;",
+                                                       masked(t))),
     }
     trace(facts)
     assert facts["arms"] == ["now + ReformCapS", "now + l.AdmitLeftMs / 1000f + 10f", "now + JoinCapS"], \
@@ -1422,6 +1446,8 @@ def test_k32_join_deadline():
     assert statuses == ["admitted_late", "dissolved", "excluded", "start_ok"], ("K32 disarm statuses", statuses)
     assert facts["fallback"] and facts["game_start"], ("K32 fallback disarm", facts)
     assert facts["no_admit_deadline"], ("K32 no AdmitDeadlineRt", "present")
+    assert facts["disarm_members"] == ["AfterGameStart", "Exit", "HandleAnswer", "HandleAnswer", "JoinDeadlineTick",
+                                       "OnLockPayload", "OnQueueCleared"], ("K32 disarm sites", facts["disarm_members"])
 
 
 # ================================================================ K34 (latch)
@@ -1472,9 +1498,11 @@ def test_k36_load_gate():
                                    kept(block("FfaAssembly.cs", "class " + patch.group(1))))) if patch else False,
         "prefix": "return FfaAssembly.LoadGate(sceneName);" in pre,
         "order": all(o >= 0 for o in order) and order == sorted(order),
-        "replay_local": bool(re.search(r"_replayBypass = true;\s*MapManager\.instance\.RPCA_LoadLevel\(", rh)),
+        "replay_local": bool(re.search(r"_replayBypass = true;\s*(?:try\s*\{\s*)?MapManager\.instance\.RPCA_LoadLevel\(",
+                                       rh)),
         "rpc": len(re.findall(r"\.RPC\(|RpcTarget", k)),
         "hint_reads": sum(len(re.findall(r"PropAsmHint|cr_asm_hint", s)) for s in spans),
+        "age_reads": sum(len(re.findall(r"\w*AgeMs\w*|StartEarlyMs|\bub\b", s)) for s in spans),
         "held": bool(re.search(r"HoldScene\([^;]*\);\s*NoteTrigger\([^;]*\);\s*return false;", kept(lg))),
     }
     trace(facts)
@@ -1482,6 +1510,7 @@ def test_k36_load_gate():
     assert facts["order"], ("K36 pass order", order)
     assert facts["replay_local"] and facts["rpc"] == 0, ("K36 local replay", facts)
     assert facts["hint_reads"] == 0, ("K36 no hint", facts["hint_reads"])
+    assert facts["age_reads"] == 0, ("K36 no age grant", facts["age_reads"])
     assert facts["held"], ("K36 held", kept(lg)[-300:])
 
 
@@ -1537,11 +1566,13 @@ def test_k38_master_boundary():
         "propose": bool(re.search(r"FfaLateRules\.MayPropose\(nStar, PointEpoch, selfKindS\) && MasterMaySend\(\)", k)),
         "epoch_others": bool(re.search(r"Raise\(EVT_EPOCH, [^;]*Receivers = ReceiverGroup\.Others", k)),
         "ack_wait": "FfaLateRules.AckComplete(" in k and "FfaAssembly.EpochAckS" in k,
-        "stamp_fence": 0 <= first(mb, r"if \(!MasterMaySend\(\)\) yield break;\s*Raise\(EVT_CALLIN"),
+        "stamp_fence": 0 <= first(mb, r"if \(!MasterMaySend\(\)\) yield break;\s*"
+                                      r"(?:var stamp = new FfaLateRules\.Stamp \{[^;]*;\s*)?Raise\(EVT_CALLIN"),
         "callin_once": len(re.findall(r"Raise\(EVT_CALLIN", k)),
         "ack_grant": norm(masked(block("FfaLateEntry.cs", "void OnProposal("))[1:]).startswith("if (!HoldsGrant) return;"),
         "ack_target": bool(re.search(r"Raise\(EVT_EPOCH_ACK, [^;]*TargetActors = new\[\] \{ e\.Sender \}", op)),
         "validate_once": len(re.findall(r"FfaLateRules\.ValidateEpoch\(", op)),
+        "refusal_returns": bool(re.search(r"Step\(\"epoch_refused\"[^;]*;\s*return;", op)),
         "late_kind_l": "e.Kind == 'l'" in olr and "LateList" in olr and "steam_id != sid" in olr,
         "listed": "FfaLateRules.ListedIn(actor, Record" in k,
         "closed_after_two": bool(re.search(r"if \(waits >= 2\)\s*\{\s*SendSnapshot\(actor, kv\.Value, true\);", k)),
@@ -1552,7 +1583,8 @@ def test_k38_master_boundary():
     assert facts["first"] and facts["barrier_once"], ("K38 barrier once", facts)
     assert facts["propose"] and facts["epoch_others"], ("K38 proposal", facts)
     assert facts["ack_wait"] and facts["stamp_fence"] and facts["callin_once"] == 1, ("K38 stamp", facts)
-    assert facts["ack_grant"] and facts["ack_target"] and facts["validate_once"] == 1, ("K38 ack", facts)
+    assert facts["ack_grant"] and facts["ack_target"] and facts["validate_once"] == 1 \
+        and facts["refusal_returns"], ("K38 ack", facts)
     assert facts["late_kind_l"] and facts["listed"] and facts["closed_after_two"], ("K38 late request", facts)
     assert facts["third_load_exit"], ("K38 third load exit", facts)
 
@@ -1577,21 +1609,28 @@ def test_k39_k40_reporter_rule_and_ghosts():
     facts = {
         "lag_skip": 0 <= lag < sits < elect and "report_skip why=lag_out" in k,
         "elect_args": bool(re.search(r"ElectReporter\(candActors, a => FfaLateEntry\.LaggedInGame\(a, reportGame\), "
-                                     r"a => FfaLateEntry\.LateInSitting\(a\)\)", k)),
+                                     r"a => FfaLateEntry\.LateInSitting\(a\)\)", norm(k))),
         "self_barred": bool(re.search(r"selfBarred = FfaLateEntry\.LateInSitting\(ownActor\) \|\| "
                                       r"FfaLateEntry\.LaggedInGame\(ownActor, reportGame\);", k)),
         "fallback": "if (lowest == null && !selfBarred) lowest = localSteamId;" in norm(k),
         "own_late_local": "if (actor == OwnActor()) return !string.IsNullOrEmpty(AdmittedLateLobby);" in norm(li),
         "own_lag_local": "if (actor == OwnActor()) return LagGame == g && g > 0;" in norm(lg),
+        "late_lobby": "return !string.IsNullOrEmpty(v) && v == Lobby8;" in norm(li),
+        "lag_game": bool(re.search(r"FfaLateRules\.LagNames\([^;]*,\s*Lobby8,\s*g,\s*0\)", lg)),
         "ghosts": all(x in k for x in ("leftEarly = true", "absent = true", "gamePointsAtLeave = -1")),
         "ghost_source": "ApiClient.FfaLockedRoster" in k,
-        "relay": rec >= 0 and "!FfaLateEntry.IsQuarantinedActor(p.ActorNumber)" in conds(nl, rec),
+        "ghost_skip": "if (presentSteams.Contains(gm.steam_id) || FfaMode.Leavers.ContainsKey(gm.steam_id)) continue;"
+        in norm(k),
+        "relay": rec >= 0 and any(c in ("!FfaLateEntry.IsQuarantinedActor(p.ActorNumber)",
+                                        "FfaLateEntry.IsKeptActor(p.ActorNumber)") for c in conds(nl, rec)),
     }
     trace(facts)
     assert facts["lag_skip"], ("K39 lag skip", lag, sits, elect)
     assert facts["elect_args"] and facts["self_barred"] and facts["fallback"], ("K39 election", facts)
     assert facts["own_late_local"] and facts["own_lag_local"], ("K39 local records", facts)
-    assert facts["ghosts"] and facts["ghost_source"], ("K40 ghosts", facts)
+    assert facts["late_lobby"], ("K39 late lobby", li[-200:])
+    assert facts["lag_game"], ("K39 lag lobby", lg[-200:])
+    assert facts["ghosts"] and facts["ghost_source"] and facts["ghost_skip"], ("K40 ghosts", facts)
     assert facts["relay"], ("K40 relay", conds(nl, rec) if rec >= 0 else None)
 
 
@@ -1657,6 +1696,18 @@ K42_RECEIVERS = [
 ]
 
 
+def target_into_switch(ftk, var):
+    """SetMasterClient's argument is FenceTarget's result, or a local whose
+    initialiser reads it."""
+    sm = re.search(r"SetMasterClient\(\s*(\w+)\s*\)", ftk)
+    if not var or not sm:
+        return False
+    if sm.group(1) == var:
+        return True
+    init = re.search(r"var\s+" + re.escape(sm.group(1)) + r"\s*=\s*([^;]*);", ftk)
+    return bool(init and re.search(r"\b" + re.escape(var) + r"\b", init.group(1)))
+
+
 def test_k42_per_site_views_and_fence():
     """K42 per site: one view call in each listed span (#432; sub-sites
     counted where a span holds several), ActiveFighterCount's gated path, the
@@ -1687,12 +1738,19 @@ def test_k42_per_site_views_and_fence():
     smc = [member_of(le, mm.start()) for mm in re.finditer(r"SetMasterClient\s*\(", masked(le))]
     tgt = re.search(r"var\s+(\w+)\s*=\s*FfaLateRules\.FenceTarget\(", kept(ft))
     receivers = {label: [calls(block(f, *sigs), n) for n in names] for label, f, sigs, names in K42_RECEIVERS}
+    polarity = {}
+    for label, f, sigs, names in K42_RECEIVERS:
+        if "RefusedAuthority" not in names:
+            continue
+        b = block(f, *sigs)
+        polarity[label] = [any(re.search(r"^!\s*(?:FfaLateEntry\.)?MasterKept\(\)$", c) for c in conds(b, o))
+                           for o in offsets(b, r"(?<![A-Za-z0-9_])RefusedAuthority\s*\(")]
     ra = kept(block("FfaLateEntry.cs", "internal static void RefusedAuthority("))
     facts = {"counts": counts, "afc": 0 <= gated < fast, "senders": senders, "prefixes": prefixes,
              "fence_sites": fence_sites, "set_master": smc,
-             "target_into_switch": bool(tgt) and bool(re.search(r"SetMasterClient\([^;]*\b" + tgt.group(1) + r"\b",
-                                                               kept(ft))) if tgt else False,
-             "receivers": receivers, "refused_authority": 'Refused("authority", MasterActor());' in ra}
+             "target_into_switch": target_into_switch(kept(ft), tgt.group(1) if tgt else None),
+             "receivers": receivers, "polarity": polarity,
+             "refused_authority": 'Refused("authority", MasterActor());' in ra}
     trace(facts)
     bad = {k: v for k, v in counts.items() if v[0] != v[1]}
     assert not bad, ("K42 per-site view", bad)
@@ -1701,8 +1759,8 @@ def test_k42_per_site_views_and_fence():
     assert all("!FfaLateEntry.MasterFenced()" in v for v in prefixes.values()), ("K42 map authority", prefixes)
     assert all(v >= 1 for v in fence_sites.values()), ("K42 fence sites", fence_sites)
     assert smc == ["FenceTick"] and facts["target_into_switch"], ("K42 fence target", smc)
-    assert all(all(n >= 1 for n in v) for v in receivers.values()) and facts["refused_authority"], \
-        ("K42 receivers", receivers)
+    assert all(all(n >= 1 for n in v) for v in receivers.values()) and facts["refused_authority"] \
+        and len(polarity) == 3 and all(v and all(v) for v in polarity.values()), ("K42 receivers", receivers, polarity)
 
 
 CENSUS = TOOLS / "kept_view_census" / "kept_view_census.py"
@@ -1755,13 +1813,14 @@ PROBES = {
 }
 ROWS = {
     "red": [("ProbeCount", "players", "V", "")],
-    "red_twin": [("ProbeCount", "players", "V", "")],
-    "req": [("ProbeCount", "players", "V", "LocalSitsOut")],
+    "red_twin": [("ProbeCount", "players", "V", ""), ("ProbeCount", "IsKeptActor", "V", "")],
+    "req": [("ProbeCount", "players", "V", "LocalSitsOut"), ("ProbeCount", "IsKeptActor", "V", "")],
     "req_twin": [("ProbeCount", "players", "V", "LocalSitsOut")],
     "alias": [("ProbeCount", "RoomPlayers", "V", ""), ("ProbeClose", "GetPlayer", "F", "")],
-    "alias_twin": [("ProbeCount", "RoomPlayers", "V", ""), ("ProbeClose", "GetPlayer", "F", "")],
-    "branch": [("ProbeCount", "players", "V", "")],
-    "branch_twin": [("ProbeCount", "players", "V", "")],
+    "alias_twin": [("ProbeCount", "RoomPlayers", "V", ""), ("ProbeClose", "GetPlayer", "F", ""),
+                   ("ProbeClose", "MasterMaySend", "F", "")],
+    "branch": [("ProbeCount", "players", "V", ""), ("ProbeCount", "IsKeptActor", "V", "")],
+    "branch_twin": [("ProbeCount", "players", "V", ""), ("ProbeCount", "IsKeptActor", "V", "")],
 }
 
 
@@ -1804,15 +1863,16 @@ def test_k42_census_red_pairs():
     fails --structure (UNCLASSIFIED, 1); classed V without a view read, the
     full check (NOVIEW, 1); a required-accessor row served only by an
     unrelated view (NOVIEW, 1); the alias pair (NOVIEW and NOFENCE, 2); the
-    multi-branch pair (NOVIEW, 1). Each twin exits 0 with no problem."""
+    multi-branch pair (NOVIEW, 1). Each twin, classified, exits 0 with no
+    problem, --structure included."""
     root = tempfile.mkdtemp(prefix="cf_k42_")
     jobs = {"unclassified": ("red", False, True), "noview": ("red", True, False),
-            "twin_structure": ("red_twin", False, True), "twin": ("red_twin", True, False),
+            "twin_structure": ("red_twin", True, True), "twin": ("red_twin", True, False),
             "req": ("req", True, False), "req_twin": ("req_twin", True, False),
             "alias": ("alias", True, False), "alias_twin": ("alias_twin", True, False),
             "branch": ("branch", True, False), "branch_twin": ("branch_twin", True, False)}
     try:
-        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             fut = {k: pool.submit(_census_fixture, v[0], os.path.join(root, k), v[1], v[2]) for k, v in jobs.items()}
             res = {k: f.result() for k, f in fut.items()}
     finally:
@@ -1824,8 +1884,7 @@ def test_k42_census_red_pairs():
     assert res["alias"] == [1, 2, ["NOFENCE", "NOVIEW"]], ("K42 census alias", res["alias"])
     assert res["branch"] == [1, 1, ["NOVIEW"]], ("K42 census branch", res["branch"])
     twins = {k: v for k, v in res.items() if "twin" in k}
-    assert twins["twin_structure"] == [1, 1, ["UNCLASSIFIED"]], ("K42 census twin structure", twins)
-    assert all(v == [0, 0, []] for k, v in twins.items() if k != "twin_structure"), ("K42 census twins", twins)
+    assert all(v == [0, 0, []] for v in twins.values()), ("K42 census twins", twins)
 
 
 # ================================================================ K44 (digest)
@@ -1898,7 +1957,7 @@ def test_k47_gated_roster_freeze():
         args = args_at(gw, mm.end() - 1)
         freezes.append(args[0] if args else None)
     fighter_reads = []
-    for mm in re.finditer(r"if \(lockIds == null\) foreach \(var f in RoomActors\.ActiveFighters\(\)\)", kept(gw)):
+    for mm in re.finditer(r"if \(lockIds == null\)\s*foreach \(var f in RoomActors\.ActiveFighters\(\)\)", kept(gw)):
         fighter_reads.append(member_of(gw, mm.start()))
     gf = kept(block("GameStateWatcher.cs", "List<string> GatedFreezeIds("))
     facts = {"freezes": freezes, "fighter_reads_ungated": len(fighter_reads),
@@ -2032,7 +2091,8 @@ def test_wp5_room_and_player_properties():
     uses = {}
     for f in sorted(PLUGIN.glob("*.cs")):
         t = kept(f.read_text(encoding="utf-8"))
-        for name, val in re.findall(r"internal const string (Prop\w+) = \"(cr_[a-z_]+)\";", t):
+        for name, val in re.findall(r"(?:(?:internal|public|const|static)\s+)+string\s+(Prop\w+)\s*=\s*"
+                                    r"\"(cr_[a-z_]+)\"\s*;", t):
             consts[name] = val
         for lit in ("cr_asm_hint", "cr_late", "cr_bd", "cr_lag", "cr_gv"):
             n = len(re.findall(r"\"" + lit + r"\"", t))
@@ -2042,6 +2102,11 @@ def test_wp5_room_and_player_properties():
             n = len(re.findall(r"(?<![A-Za-z0-9_])" + name + r"(?![A-Za-z0-9_])(?!\s*=\s*\")", t))
             if n:
                 uses[f.name + ":" + name] = n
+    # The four WP5 constants and any other constant naming their literals; a
+    # pre-existing Prop constant of another property is not WP5's.
+    consts = {k: v for k, v in consts.items()
+              if k in ("PropAsmHint", "PropLate", "PropBd", "PropLag")
+              or v in ("cr_asm_hint", "cr_late", "cr_bd", "cr_lag", "cr_gv")}
     le = kept(src("FfaLateEntry.cs"))
     lr = kept(src("FfaLateRules.cs"))
     facts = {
@@ -2121,8 +2186,9 @@ def test_wp7_wp10_wp11_events():
     step and its game key on both sides."""
     le = kept(src("FfaLateEntry.cs"))
     lr = kept(src("FfaLateRules.cs"))
-    codes = dict((n, int(v)) for n, v in re.findall(r"internal const byte (EVT_\w+) = (\d+);", le))
-    spec = dict((n, int(v)) for n, v in re.findall(r"internal const byte (EVT_\w+) = (\d+);", kept(src("SpectatorSync.cs"))))
+    decl = r"(?:(?:internal|public|const|static)\s+)+byte\s+(EVT_\w+)\s*=\s*(\d+)\s*;"
+    codes = dict((n, int(v)) for n, v in re.findall(decl, le))
+    spec = dict((n, int(v)) for n, v in re.findall(decl, kept(src("SpectatorSync.cs"))))
     payload = {}
     for name in ("EVT_READY", "EVT_EPOCH", "EVT_SCALE", "EVT_EPOCH_ACK", "EVT_CALLIN", "EVT_MASTER"):
         payload[name] = [norm(x) for x in re.findall(r"Raise\(" + name + r", new object\[\] \{([^}]*)\}", le)]
@@ -2147,7 +2213,7 @@ def test_wp7_wp10_wp11_events():
     reader = sorted(set(re.findall(r"s\.Result == \"([a-z]+)\"", vs)))
     scale_senders = calls(src("FfaMode.cs"), r"FfaMapScale\.MasterPublishCount")
     raise_scale = calls(src("FfaMapScale.cs"), r"FfaLateEntry\.RaiseScale")
-    lag_client = bool(re.search(r"FfaAssembly\.Receipt\(lobby, \"lag\", \"\\\\\"game\\\\\":\"", kept(src("FfaLateEntry.cs"))))
+    lag_client = bool(re.search(r'FfaAssembly\.Receipt\(lobby, "lag", "\\"game\\":"', kept(src("FfaLateEntry.cs"))))
     steps = server_const("_ASM_STEPS") or frozenset()
     handler = server_def("_asm_connect_problem")
     htxt = ast.get_source_segment(MAIN_PY.read_text(encoding="utf-8"), handler) if handler else ""

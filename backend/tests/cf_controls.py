@@ -116,6 +116,9 @@ def run_pytest(base, nodes, db, trace_dir=None, tag="run", src_dir=None):
     env = dict(os.environ)
     env["CF_TEST_PG_DSN"] = HOST + db
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # One hash seed for every run: a set's iteration order is then the same
+    # in the baseline's process and each twin's.
+    env["PYTHONHASHSEED"] = "0"
     env.update(source_env(src_dir))
     env.pop("CF_TRACE_DIR", None)
     if trace_dir:
