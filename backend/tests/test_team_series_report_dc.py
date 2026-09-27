@@ -1078,16 +1078,30 @@ def test_after_game_one_a_one_one_counts_only_when_it_names_its_game(wired, name
     assert settled[:2] == (("completed", 1) if played else ("dc_incomplete", None)), settled
 
 
+def _sitting_rule_off(monkeypatch):
+    """Round 7 (F29): no game token is read outside the series' original
+    sitting (main._team_game_sitting_refusal). The relocked-sitting tests
+    below also run with that rule switched off, so the record rule beneath
+    it keeps tests that can watch it decide."""
+    monkeypatch.setattr(main, "_team_game_sitting_refusal", lambda rec: None)
+
+
 @needs_pg
+@pytest.mark.parametrize("sitting_rule", [True, False], ids=["sitting-rule", "sitting-rule-off"])
 @pytest.mark.parametrize("now, named, played", [(((1, 0), (1, 1)), True, True),
                                                 (((2, 1),), False, False)],
                          ids=["own-crossing", "leftover"])
 def test_the_game_after_a_relocked_sittings_first_reads_its_own_record(
-        wired, now, named, played):
+        wired, monkeypatch, sitting_rule, now, named, played):
     """The game after a relocked sitting's first is named by the new
     sitting's room and its own number. Posts naming exactly that, a 1-1 from
     every seat, prove it; a pair the replayed game 1 went on to (2-1),
-    naming no game, proves nothing."""
+    naming no game, proves nothing. Since round 7 (F29) a relocked series
+    reads no game token, so with the sitting rule both go to an admin; with
+    the rule off the record rule decides."""
+    if not sitting_rule:
+        _sitting_rule_off(monkeypatch)
+
     async def go():
         async with _Lab() as lab:
             ser = await lab.series(t1_wins=0, t2_wins=0)
@@ -1101,17 +1115,25 @@ def test_the_game_after_a_relocked_sittings_first_reads_its_own_record(
             return await lab.settlement(ser)
 
     settled = _run(go())
-    assert settled[:2] == (("completed", 1) if played else ("dc_incomplete", None)), settled
+    completes = played and not sitting_rule
+    assert settled[:2] == (("completed", 1) if completes else ("dc_incomplete", None)), settled
 
 
 @needs_pg
+@pytest.mark.parametrize("sitting_rule", [True, False], ids=["sitting-rule", "sitting-rule-off"])
 @pytest.mark.parametrize("attested", [True, False], ids=["attested", "legacy"])
-def test_an_attested_post_settles_the_first_game_of_a_relocked_sitting(wired, attested):
+def test_an_attested_post_settles_the_first_game_of_a_relocked_sitting(
+        wired, monkeypatch, sitting_rule, attested):
     """The first game of a relocked sitting takes no legacy proof: the dead
     sitting's posts can land in its record carrying anything. A post naming
     its game and sitting is filed only when it is exactly that game, so a 1-1
     named so by a seat of each team proves the game crossed. The same posts
-    without the names settle nothing."""
+    without the names settle nothing. Since round 7 (F29) a relocked series
+    reads no game token, so with the sitting rule neither settles; with the
+    rule off the record rule decides."""
+    if not sitting_rule:
+        _sitting_rule_off(monkeypatch)
+
     async def go():
         async with _Lab() as lab:
             ser = await lab.series()
@@ -1128,7 +1150,8 @@ def test_an_attested_post_settles_the_first_game_of_a_relocked_sitting(wired, at
     row, settled = _run(go())
     assert row["pair_seats"] == _bit(1, 1, 0) | _bit(1, 1, 2), row
     assert row["attested_seats"] == (row["pair_seats"] if attested else 0), row
-    assert settled[:2] == (("completed", 1) if attested else ("dc_incomplete", None)), settled
+    completes = attested and not sitting_rule
+    assert settled[:2] == (("completed", 1) if completes else ("dc_incomplete", None)), settled
 
 
 @needs_pg
@@ -2391,6 +2414,168 @@ def test_the_f27_reviewers_scenario_test_can_fail(wired, monkeypatch, mutant):
 
     assert _run(go()) == (INCOMPLETE if mutant == "pass-through" else COMPLETED)
     assert len(wired) == (0 if mutant == "pass-through" else 1), wired
+
+
+# F29 (round 7): a seat's physical game is never taken from the recorded
+# games. The reviewer's scenario: the series stands 1-1 and physical game 3's
+# result (team 1's win) is still on its way, so the server counts two
+# recorded games and settles game 3 while physical game 4 is played. Round
+# 6's seats that joined, rejoined or changed rooms before game 4 anchored
+# their count on the recorded games and named game 4 "game 3"; round 7's
+# name no game until a host's publish grounds them (plugin/TeamGameNumber.cs),
+# and the server reads a token only in the series' original sitting
+# (main._team_game_sitting_refusal) and only when it names the game being
+# settled.
+T4 = _wire("a4" * 8, 4)          # physical game 4's token, naming game 4
+# Physical game 4's token as a round-6 host re-anchored on the two recorded
+# games published it: it names game 3.
+T4_AS_3 = _wire("a4" * 8, 3, 4)
+INCOMPLETE2 = ("dc_incomplete", None, 2, "dc_manual_pending", 0)
+COMPLETED2 = ("completed", 2, None, None, 1)
+_F29 = ["tokenless", "host-ordinal", "count-anchored", "in-step"]
+
+
+async def _f29(lab, case, sitting="original"):
+    """The F29 reviewer's scenario, as the server sees it. The series stands
+    1-1 (in-step: 2-1, game 3's result recorded before game 4). In physical
+    game 4 every seat posts 1-0 and then 1-1 naming the game the server has
+    in progress (the posts' own number is the recorded games plus one) and
+    carrying the token `case` gives; seat 0 (team 1) leaves and seat 2 (team
+    2) reports it at 1-1 naming the same token. With `sitting` "relocked"
+    the series moved to ROOM_NEXT before game 4 (the room change), and the
+    posts and the report name that room; "moved" is the same room change
+    without a relock stamp (the stamp is savepointed, and skipped before
+    migration 235: #235), after seat 0 had filed a 1-0 of game 3 in ROOM, so
+    the series has a game on record in another room. `case`:
+      tokenless       round 7's seats: each one that joined, rejoined or
+                      changed rooms before game 4 holds no physical game, so
+                      none carries a token and the report names none;
+      host-ordinal    a host that kept its physical game published T4, which
+                      names game 4, and every seat carries it;
+      count-anchored  round 6's seats (the defect as reported): anchored on
+                      the recorded games, they carry T4_AS_3;
+      in-step         the control: game 3 recorded in step, T4 carried.
+    Returns the settlement and the record the posts were filed under."""
+    ser = await lab.series(t1_wins=2 if case == "in-step" else 1, t2_wins=1)
+    room = ROOM
+    game = 4 if case == "in-step" else 3
+    if sitting == "relocked":
+        await lab.relock(ser, ROOM_NEXT)
+        room = ROOM_NEXT
+    elif sitting == "moved":
+        await lab.post(ser, 0, 1, 0, game=game, room=ROOM, token=None)
+        await lab.sql("UPDATE team_series SET photon_room_id = :r WHERE id = :sid",
+                      {"sid": ser["sid"], "r": ROOM_NEXT})
+        room = ROOM_NEXT
+    token = {"tokenless": None, "host-ordinal": T4, "count-anchored": T4_AS_3,
+             "in-step": T4}[case]
+    await _post_all(lab, ser, (1, 0), (1, 1), game=game, room=room, token=token)
+    await lab.report_dc(ser, reporter_seat=2, dc_seat=0, room=room, token=token, **HIGH)
+    return await lab.settlement(ser), await lab.game_row(ser, game, room)
+
+
+@needs_pg
+@pytest.mark.parametrize("case, sitting", [("tokenless", "original"), ("host-ordinal", "original"),
+                                           ("tokenless", "relocked"), ("count-anchored", "relocked"),
+                                           ("count-anchored", "moved")],
+                         ids=["rejoin-tokenless", "rejoin-host-ordinal",
+                              "room-change-tokenless", "room-change-count-anchored",
+                              "room-moved-count-anchored"])
+def test_the_f29_reviewers_scenario_is_ineligible(wired, case, sitting):
+    """F29 (round 7): with game 3's result still on its way the series goes
+    to an admin (dc_incomplete) whatever game 4's seats carry: nothing is
+    completed and no result, rating or gold moves. Round 7's seats are
+    tokenless after a join, a rejoin or a room change. A host that kept its
+    physical game names game 4, which is not the game being settled (game
+    3): the token's number and the server's have different origins, and its
+    posts, filed under game 3, mark that record as holding another game.
+    After a room change even round 6's count-anchored token is not read: the
+    series is outside its original sitting, by its relock stamp or, when the
+    stamp is missing, by its game on record in another room."""
+    async def go():
+        async with _Lab() as lab:
+            return await _f29(lab, case, sitting)
+
+    settled, record = _run(go())
+    assert settled == INCOMPLETE2, settled
+    assert wired == [], wired
+    want = {"tokenless": (None, 0, False), "host-ordinal": (None, 0, True),
+            "count-anchored": (_nonce(T4_AS_3), _GAME_TWO_BITS, False)}[case]
+    assert (record["game_token"], record["token_seats"], record["token_conflict"]) == want, record
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["count-anchored", "count-anchored-sitting-rule-off",
+                                    "count-anchored-moved-sitting-rule-off",
+                                    "token-layer-off", "in-step", "pass-through"])
+def test_the_f29_reviewers_scenario_test_can_fail(wired, monkeypatch, mutant):
+    """Controls (#391). With round 6's count-anchored seats (the count
+    anchor restored: the defect as reported) game 4 crosses under a token
+    naming game 3 and the server completes the series for team 2 before game
+    3's result lands: the server alone cannot tell that from a genuine game-3
+    leave, which is why the seats must be tokenless (the harness's F29
+    mutants restore the anchor and fail). After a room change, with or
+    without its relock stamp, the same seats complete it once the sitting
+    rule is off. With the token rule off the
+    tokenless report completes it too. With game 3 recorded in step, T4 and
+    the same posts complete it: the rules withhold only the game with a
+    result on its way. The inert twin changes nothing."""
+    sitting = {"count-anchored-sitting-rule-off": "relocked",
+               "count-anchored-moved-sitting-rule-off": "moved"}.get(mutant, "original")
+    if sitting != "original":
+        _sitting_rule_off(monkeypatch)
+    if mutant == "token-layer-off":
+        _token_layer_off(monkeypatch)
+    case = mutant if mutant in _F29 else ("count-anchored" if sitting != "original" else "tokenless")
+
+    async def go():
+        async with _Lab() as lab:
+            return (await _f29(lab, case, sitting))[0]
+
+    assert _run(go()) == (INCOMPLETE2 if mutant == "pass-through" else COMPLETED2)
+    assert len(wired) == (0 if mutant == "pass-through" else 1), wired
+
+
+@needs_pg
+def test_the_state_answer_carries_the_series_sitting(wired):
+    """F29 (round 7): the series state answer carries `relocked`, false
+    until a relock stamps the series and true after it, and
+    `two_points_on_record`, false until a live-points pair of two points or
+    more, from any seat, is on the series' record: a 1-0 is not, a 1-1 is.
+    The room's creator names the room's first physical game only while both
+    read false (plugin/TeamGameNumber.cs, TryBoot); the state poll reads both
+    keys by these names (plugin/ApiClient.cs)."""
+    async def go():
+        async with _Lab() as lab:
+            ser = await lab.series()
+            await lab.sql("UPDATE team_series SET spawn_confirmations = 4 WHERE id = :sid",
+                          {"sid": ser["sid"]})
+
+            async def state():
+                async with lab.sm() as db:
+                    s = await main.team_series_state(str(ser["sid"]), db)
+                return s["status"], s["relocked"], s["two_points_on_record"]
+
+            fresh = await state()
+            await lab.post(ser, 0, 1, 0, game=2, room=ROOM)
+            one = await state()
+            await lab.post(ser, 3, 1, 1, game=2, room=ROOM)
+            two = await state()
+            await lab.relock(ser, ROOM_NEXT)
+            return fresh, one, two, await state()
+
+    fresh, one, two, relocked = _run(go())
+    assert fresh == ("active", False, False), fresh
+    assert one == ("active", False, False), one
+    assert two == ("active", False, True), two
+    assert relocked == ("active", True, True), relocked
+    # The state poll takes the sitting as known only when both keys are in
+    # the answer, and reads each by its name: a key renamed on either side
+    # would leave every room creator's boot waiting (#341).
+    api = _read(os.path.join(_PLUGIN_DIR, "ApiClient.cs"))
+    for key in ("relocked", "two_points_on_record"):
+        assert 'resp.IndexOf("\\"%s\\":", StringComparison.Ordinal) >= 0' % key in api, key
+        assert 'ExtractJsonBool(resp, "%s")' % key in api, key
 
 
 async def _report_naming(lab, game):

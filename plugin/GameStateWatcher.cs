@@ -5238,9 +5238,10 @@ namespace CompetitiveRounds
             // TokenFor; "" = the post goes without one). A token that arrives
             // after the pair was sent is itself a reason to post again, so a
             // pair first sent without it carries it on the next tick rather
-            // than at the 20 s refresh. Round 6, findings F27 and F28: the
-            // token is checked as the post is built, against this seat's own
-            // count of the room's games and its reading of the score now.
+            // than at the 20 s refresh. Round 6, findings F27 and F28, and
+            // round 7, finding F29: the token is checked as the post is built,
+            // against the physical game this seat holds (grounded on a host's
+            // publish, never on a count) and its reading of the score now.
             string teamRoom = TeamGameRoom();
             string teamToken = TeamGameNumber.Live.TokenFor(ApiClient.ActiveTeamSeriesId, teamRoom, ReadTeamToken(),
                                                             ReadLiveScore(), TokenClock());
@@ -5286,8 +5287,8 @@ namespace CompetitiveRounds
         /// (TeamGameNumber.Live.TokenFor; `why` says why not, for the log).
         /// The server then withholds the lead-forfeit and the series goes to
         /// an admin. Round 6, findings F27 and F28: it is checked here, as the
-        /// report is built, against the room's value, this seat's own count
-        /// of the room's games and its reading of the score now, so a game
+        /// report is built, against the room's value, the physical game this
+        /// seat holds (round 7, F29) and its reading of the score now, so a game
         /// over or a game start that has not reached this seat withholds it
         /// (OnPlayerLeftRoom can run before the next poll tick).</summary>
         internal static string TeamTokenForReport(string seriesId, out string why)
@@ -5389,12 +5390,14 @@ namespace CompetitiveRounds
         /// 0-0). Armed only when SetCustomProperties reports the send (#428);
         /// the host's own posts then wait for the room to show the value, like
         /// every other seat's. Every reason not to publish is logged once per
-        /// game. Two are retried on the next tick while the first round lasts:
-        /// "not the host" (a host handoff inside the first round) and a send
-        /// SetCustomProperties refused; every other one ends this seat's part.
-        /// Round 6, finding F27: the token names the physical game's ordinal by
-        /// this seat's own count of the room's game starts and an epoch above
-        /// every one this seat has read in the room or published
+        /// game. Three are retried on the next tick while the first round
+        /// lasts: "not the host" (a host handoff inside the first round), the
+        /// room's creator waiting for a read to name the room's first game
+        /// (round 7, F29), and a send SetCustomProperties refused; every other
+        /// one ends this seat's part. Round 7, finding F29: the token names
+        /// the physical game's ordinal this seat holds (grounded on a host's
+        /// publish or on the room's first game, never on a count) and an epoch
+        /// above every one this seat has read in the room or published
         /// (TeamGameNumber.Tracker.TokenToPublish).</summary>
         private static void TryPublishTeamToken(bool firstRound)
         {
@@ -5406,7 +5409,7 @@ namespace CompetitiveRounds
             string token = TeamGameNumber.Live.TokenToPublish(host, firstRound, current, out why);
             if (token.Length == 0)
             {
-                if (why != TeamGameNumber.WhyNotHost) teamTokenOwed = false;
+                if (why != TeamGameNumber.WhyNotHost && why != TeamGameNumber.WhyBootPending) teamTokenOwed = false;
                 if (why != teamTokenLastWhy)
                 {
                     teamTokenLastWhy = why;

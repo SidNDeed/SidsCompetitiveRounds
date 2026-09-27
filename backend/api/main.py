@@ -32422,21 +32422,31 @@ async def update_team_live_points(
 # pair every 20 seconds while the game has a point) counts in full: a
 # tokenless post clears nothing, and nothing it sets counts.
 #
-# THE TOKEN'S GAME (v1.41.0 beta review round 5, findings F27 and F28; round
-# 6). A token is one physical game's only while every seat that carries it is
-# in that game, and a seat a game ahead of a lagging host can read the host's
-# token while it is already in the next game. So the token names the ORDINAL
-# of the physical game it was published for (the host's own count of the
-# room's game starts) and the host's EPOCH, all three parts signed:
-# 'nonce:ordinal:epoch' (_team_game_wire_token). The client takes a token
-# only for the game its own count and its posts both name, and carries it
-# only while its reading of the score still shows that game
+# THE TOKEN'S GAME (v1.41.0 beta review rounds 5 to 7, findings F27, F28 and
+# F29). A token is one physical game's only while every seat that carries it
+# is in that game, and a seat a game ahead of a lagging host can read the
+# host's token while it is already in the next game. So the token names the
+# ORDINAL of the physical game it was published for and the host's EPOCH, all
+# three parts signed: 'nonce:ordinal:epoch' (_team_game_wire_token). Since
+# round 7 (F29) that ordinal is never taken from a count of recorded games:
+# the seat that created the room names the room's first game physical game
+# 1, and only when a read shows the series with no recorded game and never
+# relocked; a seat adds one at each game start the game itself reported to
+# it and loses the ordinal at any other; and a seat that joined, rejoined or
+# changed rooms names no game until it takes a host's publish. The client
+# takes a token only for the game its own ordinal and its posts both name,
+# and carries it only while its reading of the score still shows that game
 # (plugin/TeamGameNumber.cs). Here, a post whose token names a game other
 # than the one it is filed under marks the record as holding another
-# physical game (token_conflict), and a DC report's token is read only when
-# it names the game being settled (_team_game_token_seats). The record keeps
-# the nonce (migration 354's game_token); the ordinal and the epoch are
-# checked in the request and not stored, so no column is added.
+# physical game (token_conflict), and a DC report's token is read only in
+# the series' original sitting and only when it names the game being settled
+# (_team_game_token_seats). That comparison has two origins: the token's
+# ordinal counts the physical games its host saw start, and the game being
+# settled is the games recorded plus one (_team_game_identity). They agree
+# only while the games recorded are as many as the physical games before
+# this one, so a result still on its way leaves the game ineligible. The
+# record keeps the nonce (migration 354's game_token); the ordinal and the
+# epoch are checked in the request and not stored, so no column is added.
 #
 # What this does NOT change: a live-points post is accepted on the shared mod
 # secret and the series membership of the seat it names in a query parameter,
@@ -32480,6 +32490,9 @@ def _team_game_two_points_bits(team_seats) -> int:
 # more.
 _TEAM_GAME_TWO_POINTS = (_team_game_two_points_bits((0, 1)),
                          _team_game_two_points_bits((2, 3)))
+# Every seat's bits of a pair of two points or more (round 7, finding F29:
+# team_series_state's two_points_on_record).
+_TEAM_GAME_ANY_TWO_POINTS = _team_game_two_points_bits((0, 1, 2, 3))
 
 
 def _team_game_both_teams_reached_two(seats: int) -> bool:
@@ -32619,23 +32632,47 @@ def _team_dc_game_token(series_id, reporter_steam_id, dc_player_steam_id,
     return None
 
 
+def _team_game_sitting_refusal(rec):
+    """Why no game token may be read in the sitting `rec` (a row of
+    _TEAM_GAME_CROSSED_SQL) describes, or None (round 7, finding F29). A
+    token's ordinal is counted from the room's first game, which a client
+    names only when a read shows the series never relocked
+    (plugin/TeamGameNumber.cs, TryBoot). Outside the series' original
+    sitting -- relocked, or with a game on record in another room -- no seat
+    can tell whether a game is still waiting to be recorded, so no token is
+    read there, whatever game it names."""
+    if rec["relocked"]:
+        return ("the series was relocked: a game token is read only in the "
+                "series' original sitting")
+    if rec["other_room"]:
+        return ("the series has a game on record in another room: a game token "
+                "is read only in the series' original sitting")
+    return None
+
+
 def _team_game_token_seats(rec, token, ordinal):
     """(bits, why_not): the bits of the game's record that were posted with
     the DC report's game `token` -- the only bits a crossing is read from --
     or (0, the reason none may be read). `token` is (nonce, ordinal, epoch)
     as _team_dc_game_token returned it, `ordinal` the game being settled, and
     `rec` the row _TEAM_GAME_CROSSED_SQL returned for the token's nonce. None
-    may be read when the report names no token, when its token names another
-    game than the one being settled (round 6, finding F27: the reporter is
-    not in that game), when two different tokens, or a token naming another
-    game, were filed under the game (its record holds more than one physical
-    game), when no post filed under it carried a token, when its token is not
-    the report's (it is another physical game's record), or when the
-    report's token is also on another game of the series. Each of those
-    withholds the lead-forfeit; none of them is a verdict that the game was
-    not played."""
+    may be read when the report names no token, outside the series' original
+    sitting (round 7, finding F29: _team_game_sitting_refusal), when its
+    token names another game than the one being settled (round 6, finding
+    F27: the reporter is not in that game; since round 7 the two numbers
+    have different origins, and a result still on its way shows here too:
+    THE TOKEN'S GAME above), when two different tokens, or a token naming
+    another game, were filed under the game (its record holds more than one
+    physical game), when no post filed under it carried a token, when its
+    token is not the report's (it is another physical game's record), or
+    when the report's token is also on another game of the series. Each of
+    those withholds the lead-forfeit; none of them is a verdict that the
+    game was not played."""
     if token is None:
         return 0, "the report names no game token"
+    sitting = _team_game_sitting_refusal(rec)
+    if sitting is not None:
+        return 0, sitting
     if token[1] != ordinal:
         return 0, (f"the report's game token names game {token[1]}, and the game "
                    f"being settled is game {ordinal}")
@@ -32809,11 +32846,12 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     False when no room is stored, when the record cannot be read (before
     migration 348, 351, 352 or 354, or any statement error inside the
     savepoint), when no bit of the record may be read for `token` (the report
-    names none; its token names another game; two tokens, or one naming
-    another game, were filed under the game; no post there carried one; its
-    token is not the report's; the report's token is also on another game of
-    the series), and when the posts that count and carried the token
-    do not show two points from both teams. Each has its own log line, and
+    names none; the series is outside its original sitting; its token names
+    another game; two tokens, or one naming another game, were filed under
+    the game; no post there carried one; its token is not the report's; the
+    report's token is also on another game of the series), and when the
+    posts that count and carried the token do not show two points from both
+    teams. Each has its own log line, and
     two points from both teams that are on record only without the game's
     token have theirs. Every one of those settles as dc_incomplete, the
     outcome an admin can still change. Never raises."""
@@ -41688,7 +41726,7 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
                    invalidation_reason, completed_at,
                    dc_grace_until, dc_team_remaining, dc_player_id,
                    t1_series_wins, t2_series_wins, room_issued_at,
-                   t1a_id, t1b_id, t2a_id, t2b_id
+                   t1a_id, t1b_id, t2a_id, t2b_id, relocked_at
               FROM team_series
              WHERE id = :sid
         """),
@@ -41795,6 +41833,25 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
                 _tc_decided = any(v is not None for v in _tcr)
     except Exception:
         pass
+    # v1.41.0 beta round 7, finding F29: whether a live-points pair of two
+    # points or more (any seat, any sitting) is on the series' per-game
+    # record. Only a played game puts one there, so the room's creator names
+    # the room's first physical game only while this reads false
+    # (plugin/TeamGameNumber.cs, TryBoot), and a room created again under the
+    # same name while a game's result is still on its way is not taken for a
+    # fresh one. Savepointed separate read (#235): before migration 348 the
+    # table is absent, the field is omitted, and a client then learns nothing
+    # about the sitting.
+    _two_on_record = None
+    try:
+        async with db.begin_nested():
+            _two_on_record = bool((await db.execute(text(
+                "SELECT EXISTS (SELECT 1 FROM team_series_games"
+                "                WHERE series_id = :sid"
+                "                  AND (pair_seats & CAST(:two AS bigint)) <> 0)"),
+                {"sid": sid_uuid, "two": _TEAM_GAME_ANY_TWO_POINTS})).scalar())
+    except Exception:
+        _two_on_record = None
     return {
         "status": s_status,
         "reason": s_reason,
@@ -41807,6 +41864,13 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
         "dc_player_id": str(s_dc_player) if s_dc_player else None,
         "t1_series_wins": int(r[9] or 0),
         "t2_series_wins": int(r[10] or 0),
+        # v1.41.0 beta round 7, finding F29: whether the series was ever
+        # relocked. The room's creator names the room's first physical game
+        # only when this reads false (plugin/TeamGameNumber.cs, TryBoot); the
+        # canceled and dc_incomplete answers above carry no `relocked`, and a
+        # client then learns nothing about the sitting.
+        "relocked": r[16] is not None,
+        **({"two_points_on_record": _two_on_record} if _two_on_record is not None else {}),
         "t1_color_name": _tc[0], "t1_color_hex": _tc[1],
         "t2_color_name": _tc[2], "t2_color_hex": _tc[3],
         "color_decided": _tc_decided,

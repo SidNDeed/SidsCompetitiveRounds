@@ -14712,12 +14712,22 @@ namespace CompetitiveRounds
                 // names its game from (TeamGameNumber). Only an answer that
                 // carries both counts is a read: the canceled and dc_incomplete
                 // answers carry neither, and a missing field parses as 0.
+                // Round 7, finding F29: whether the series was ever relocked,
+                // and whether a live-points pair of two points or more is on
+                // its record (the room's creator names the room's first
+                // physical game only in the series' original sitting, with no
+                // game played on it); an answer without both (an older
+                // server's) teaches nothing about the sitting.
                 try
                 {
-                    TeamGameNumber.Live.ObserveRead(seriesId,
+                    string tgnLine = TeamGameNumber.Live.ObserveRead(seriesId,
                         resp.IndexOf("\"t1_series_wins\":", StringComparison.Ordinal) >= 0
                         && resp.IndexOf("\"t2_series_wins\":", StringComparison.Ordinal) >= 0,
-                        LastSeriesT1Wins, LastSeriesT2Wins);
+                        LastSeriesT1Wins, LastSeriesT2Wins,
+                        resp.IndexOf("\"relocked\":", StringComparison.Ordinal) >= 0
+                        && resp.IndexOf("\"two_points_on_record\":", StringComparison.Ordinal) >= 0,
+                        ExtractJsonBool(resp, "relocked"), ExtractJsonBool(resp, "two_points_on_record"));
+                    if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
                 }
                 catch { }
                 // Codex r2 f8: stamp WHICH series this answer described — the

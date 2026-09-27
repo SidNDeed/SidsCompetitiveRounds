@@ -4608,7 +4608,16 @@ namespace CompetitiveRounds
         public void OnCustomAuthenticationFailed(string debugMessage) { }
 
         public void OnFriendListUpdate(System.Collections.Generic.List<Photon.Realtime.FriendInfo> friendList) { }
-        public void OnCreatedRoom() { }
+        public void OnCreatedRoom()
+        {
+            // v1.41.0 beta round 7, finding F29: the room this seat created.
+            // Only its creator may name a fresh room's first physical game,
+            // and only when a read shows the series with no recorded game,
+            // never relocked and no game played on its record
+            // (TeamGameNumber.Tracker.TryBoot). Photon calls OnJoinedRoom
+            // right after, which consumes this.
+            try { TeamGameNumber.Live.NoteRoomCreated(PhotonNetwork.CurrentRoom?.Name ?? ""); } catch { }
+        }
         public void OnCreateRoomFailed(short returnCode, string message)
         {
             if (Diag2v2.PendingSlot() < 0) return;
@@ -4616,6 +4625,18 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // v1.41.0 beta round 7, finding F29: every join, a rejoin of the
+            // same room included, breaks the physical-game ordinal and the
+            // game token this seat held (the poll can miss a leave+join inside
+            // one tick, so the reliable Photon edge does it). Only a host's
+            // publish grounds them again (TeamGameNumber, "Which physical
+            // game").
+            try
+            {
+                string tgnLine = TeamGameNumber.Live.NoteRoomJoined(PhotonNetwork.CurrentRoom?.Name ?? "");
+                if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
+            }
+            catch { }
             // Bug 392: a new room starts with no inherited transport state.
             // The cause store has its own validity window, but a window is a
             // soft bound and a room edge is a hard one — without this, a
