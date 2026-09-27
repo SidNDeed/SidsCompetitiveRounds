@@ -5598,6 +5598,33 @@ _RL_PC_PREFIX = "/api/v1/pc/"
 # upload per render and at most one paced retry per visit.
 _RL_PC_UPLOAD = (20, 10.0)
 _RL_PC_UPLOAD_PATH = "/api/v1/pc/portrait"
+# Dance cards (design S2.7). The motion upload has an exact-path bucket of its
+# own, matched BEFORE the family prefix, which would otherwise take it at 90 per
+# 10 s. The stock client keeps one upload in flight and never sends before the
+# writer's retry_after (its 30 s pacing), so two per 60 s is all it uses.
+_RL_PC_MOTION_UPLOAD = (2, 60.0)
+_RL_PC_MOTION_UPLOAD_PATH = "/api/v1/pc/portrait/motion"
+# The two public motion reads -- the per-visit read (exactly this path) and the
+# atlas (under it) -- share one bucket, matched BEFORE the face prefix that also
+# matches them, so motion traffic never spends the static faces' allowance.
+_RL_PC_MOTION_READ = (60, 10.0)
+_RL_PC_MOTION_READ_PATH = "/api/v1/pc-face/motion"
+# M6 (design S2.7, S11.1). The edge's abuse jail counts 429 RESPONSES per
+# forwarded address inside its findtime, whichever bucket they come from
+# (#659). Each motion bucket answers its FIRST refusal for an address with a
+# normal 429 and latches: every later refusal from that bucket for that address
+# inside the latch answers 503 with Retry-After, which the jail does not count,
+# so one address adds at most ONE jail-counted 429 per motion bucket per latch
+# period however fast it retries. The period is the jail's findtime (10
+# minutes); the deploy precondition re-reads the daemon's live findtime and
+# maxretry and confirms its filter does not count a 503. A 503 rather than a
+# 200-shaped "still limited" body: the atlas answers an immutable image/png,
+# and a 200 at that URL is a body a cache may keep. The latch lives in this
+# process -- the api runs one worker (Dockerfile, --workers 1) and the motion
+# routes are served by the primary only; routed to a second box as well, the
+# bound would double.
+_RL_MOTION_LATCH_S = 600.0
+_RL_MOTION_LATCH = {}
 _RL_SENSITIVE_PREFIXES = (
     "/api/v1/achievements/unlock", "/api/v1/matches", "/api/v1/team/matches",
     "/api/v1/report-disconnect", "/api/v1/bets", "/api/v1/team-bets",
@@ -5651,6 +5678,12 @@ _RL_SENSITIVE_PREFIXES = (
 )
 _RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
 _RL_LAST_PRUNE = [0.0]
+# The idle prune keeps every entry still inside the LONGEST window. It used to
+# drop anything older than 30 s from every bucket, which let a 60 s bucket
+# forget half its window whenever a prune ran and admit a third motion upload
+# inside one minute.
+_RL_PRUNE_HORIZON = max(window for _limit, window in (
+    _RL_GLOBAL, _RL_SENSITIVE, _RL_FACE, _RL_PC, _RL_PC_UPLOAD, _RL_PC_MOTION_UPLOAD, _RL_PC_MOTION_READ))
 
 
 # Rate limiting has its OWN, smaller bypass (Codex wave-2 round-3 find N1):
@@ -5708,7 +5741,16 @@ async def rate_limit_gate(request: Request, call_next):
             pass
     ip = request.client.host if request.client else "unknown"
     now = _rl_time.monotonic()
-    if path.startswith(_RL_FACE_PREFIX):
+    latch = None
+    if path == _RL_PC_MOTION_READ_PATH or path.startswith(_RL_PC_MOTION_READ_PATH + "/"):
+        # The two motion reads, ahead of the face prefix that also matches them.
+        limit, window = _RL_PC_MOTION_READ
+        key = latch = f"{ip}|pcfm"
+    elif path == _RL_PC_MOTION_UPLOAD_PATH:
+        # Exactly the motion upload, ahead of the family prefix.
+        limit, window = _RL_PC_MOTION_UPLOAD
+        key = latch = f"{ip}|pcmu"
+    elif path.startswith(_RL_FACE_PREFIX):
         # The public face route: read-only, offline, its own bucket (v22 §2.2).
         sensitive = False
         limit, window = _RL_FACE
@@ -5730,6 +5772,15 @@ async def rate_limit_gate(request: Request, call_next):
     while dq and dq[0] < cutoff:
         dq.popleft()
     if len(dq) >= limit:
+        if latch is not None:
+            if _RL_MOTION_LATCH.get(latch, 0.0) > now:
+                # M6: this address already drew this bucket's 429 inside the
+                # latch; the excess is answered without a jail-counted status.
+                return JSONResponse(
+                    status_code=503, content={"error": "rate_limited", "retry_after": int(window)},
+                    headers={"Retry-After": str(int(window))},
+                )
+            _RL_MOTION_LATCH[latch] = now + _RL_MOTION_LATCH_S
         return JSONResponse(
             status_code=429, content={"error": "rate_limited", "retry_after": int(window)},
             headers={"Retry-After": str(int(window))},
@@ -5740,10 +5791,12 @@ async def rate_limit_gate(request: Request, call_next):
         _RL_LAST_PRUNE[0] = now
         for k in list(_RL_BUCKETS.keys()):
             d = _RL_BUCKETS[k]
-            while d and d[0] < now - 30:
+            while d and d[0] < now - _RL_PRUNE_HORIZON:
                 d.popleft()
             if not d:
                 del _RL_BUCKETS[k]
+        for k in [k for k, until in _RL_MOTION_LATCH.items() if until <= now]:
+            del _RL_MOTION_LATCH[k]
     return await call_next(request)
 
 
