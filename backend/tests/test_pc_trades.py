@@ -12,8 +12,10 @@ THE DATABASE. One schema, pc_trades_t, in the database PC_TRADES_TEST_PG_DSN
 names. Every migration numbered up to 352 is replayed into it statement by
 statement (each file's own transaction honoured, a statement that fails on an
 empty database recorded, not fatal), the ORM creates the tables no migration
-creates, the replay runs again, the ORM's missing columns are added, and 353
-is applied whole: the pre-353 schema is fingerprinted, then the full one.
+creates, the replay runs again, the ORM's missing columns are added -- all
+but the ones 353 itself adds to older tables, which the ORM maps since F63
+and which 353 alone may create -- and 353 is applied whole: the pre-353
+schema is fingerprinted, then the full one.
 The build is reused while the migrations, models.py and this harness are
 unchanged and the schema still fingerprints as built; anything else rebuilds
 it. Before any DROP or CREATE the harness CENSUSES every schema the role's
@@ -93,7 +95,7 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 
 SCHEMA = "pc_trades_t"
 HARNESS_TABLE = "pc_trades_harness"
-HARNESS_VERSION = "1"
+HARNESS_VERSION = "2"
 SQL_DIR = BACKEND / "sql"
 MIGRATION = SQL_DIR / "353_pc_trades.sql"
 MIGRATION_NUMBER = 353
@@ -406,15 +408,27 @@ async def _create_all(c):
     await c.run_sync(models.Base.metadata.create_all)
 
 
+def _353_added_columns():
+    """(table, column) for every column 353 adds to an older table. The ORM
+    maps players' two since F63; were the harness to add them before 353
+    ran, the pre-353 fingerprint would carry them and "missing" would not be
+    the database 353 has not reached."""
+    found = set(re.findall(r"(?im)^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)",
+                           MIGRATION.read_text(encoding="utf-8")))
+    assert {("players", "pc_trades_open"), ("players", "pc_trades_generation"),
+            ("pc_prints", "acquired_by_trade")} <= found, found
+    return found
+
+
 async def _orm_columns(c):
     from sqlalchemy.schema import CreateColumn
-    added = []
+    added, skip = [], _353_added_columns()
     for table in models.Base.metadata.sorted_tables:
         have = {r[0] for r in (await c.exec_driver_sql(
             "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass('\"%s\".\"%s\"') "
             "AND attnum > 0 AND NOT attisdropped" % (SCHEMA, table.name))).all()}
         for col in table.columns:
-            if col.name not in have:
+            if col.name not in have and (table.name, col.name) not in skip:
                 ddl = str(CreateColumn(col).compile(dialect=c.dialect))
                 await c.exec_driver_sql('ALTER TABLE "%s"."%s" ADD COLUMN %s' % (SCHEMA, table.name, ddl))
                 added.append("%s.%s" % (table.name, col.name))
@@ -2504,3 +2518,106 @@ def test_f62_control_a_consistent_sql_row_executes(env, side):
     assert out["ans"][0] == 200, out
     assert (out["status"], out["held"]) == ("executed", 0), out
     assert out["owners"] == [out["b"], out["a"], out["a"]], out
+
+
+_F63_NAMES = ("pc_trades_open", "pc_trades_generation")
+
+
+def test_f63_the_player_mapper_carries_both_trade_columns():
+    """F63 (LAND; build brief B3): the Player mapper carries both columns 353
+    adds to players -- Boolean and Integer, NOT NULL, their defaults 353's
+    own (true, 0) held server-side with no Python-side default -- deferred,
+    so select(Player) names neither, and Player's eager_defaults is off, so
+    an ORM insert never RETURNs them (the note above the class in
+    models.py). The database leg below runs both schema states."""
+    from sqlalchemy import Boolean, Integer, inspect as sa_inspect, select
+    from sqlalchemy.dialects import postgresql
+    mapper = sa_inspect(models.Player)
+    for name, kind, default in (("pc_trades_open", Boolean, "true"), ("pc_trades_generation", Integer, "0")):
+        col = models.Player.__table__.columns[name]
+        assert type(col.type) is kind and col.nullable is False, (name, col.type, col.nullable)
+        assert col.default is None and str(col.server_default.arg) == default, (name, col.default,
+                                                                              col.server_default)
+        assert mapper.column_attrs[name].deferred is True, name
+    assert mapper.eager_defaults is False
+    compiled = str(select(models.Player).compile(dialect=postgresql.dialect()))
+    assert "players.steam_id" in compiled and not any(n in compiled for n in _F63_NAMES), compiled
+
+
+def _f63_orm_uses(sources):
+    """Every ORM-shaped use of the two names in (label, source) pairs: an
+    attribute (player.pc_trades_open, Player.pc_trades_generation), a
+    keyword argument (Player(pc_trades_open=...), .values(...)), or a
+    getattr/setattr/hasattr literal. A raw-SQL string naming them is none."""
+    import ast
+    found = []
+    for label, src in sources:
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Attribute) and node.attr in _F63_NAMES:
+                found.append("%s:%d attribute %s" % (label, node.lineno, node.attr))
+            elif isinstance(node, ast.keyword) and node.arg in _F63_NAMES:
+                found.append("%s:%d keyword %s" % (label, node.value.lineno, node.arg))
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id in ("getattr", "setattr", "hasattr") and len(node.args) >= 2
+                  and isinstance(node.args[1], ast.Constant) and node.args[1].value in _F63_NAMES):
+                found.append("%s:%d %s %s" % (label, node.lineno, node.func.id, node.args[1].value))
+    return found
+
+
+def test_f63_no_code_reads_or_writes_them_through_the_orm():
+    """F63's control: raw SQL stays the only reader and writer of both
+    columns (learning #346; the models.py note). No backend module but
+    models.py uses either name as an attribute, a keyword argument or a
+    getattr/setattr/hasattr literal -- such a use would load a deferred
+    column (failing on a database 353 has not reached) or write through
+    the ORM. The detector sees each form (the planted source), and a use
+    planted in main.py turns this red (the mutation leg in
+    trading-server-land-f63.log)."""
+    planted = ("p.pc_trades_open\nPlayer(steam_id='x', pc_trades_generation=1)\n"
+               "getattr(p, 'pc_trades_open')\nq = 'SELECT pc_trades_open, pc_trades_generation FROM players'\n")
+    assert len(_f63_orm_uses([("planted", planted)])) == 3
+    paths = sorted(p for p in BACKEND.rglob("*.py")
+                   if "tests" not in p.relative_to(BACKEND).parts and p.name != "models.py")
+    assert any(p.name == "main.py" for p in paths) and any(p.name == "player_cards.py" for p in paths), paths
+    uses = _f63_orm_uses([(str(p.relative_to(BACKEND)), p.read_text(encoding="utf-8")) for p in paths])
+    assert uses == [], uses
+
+
+def test_f63_an_orm_player_round_trips_on_both_schemas(env):
+    """F63's database leg (learning #674: run the ORM's own INSERT on both
+    schema states). On the database 353 has not reached, an ORM insert of a
+    player, select(Player), Session.get and Session.refresh all succeed and
+    not one of their statements names either column; on the full schema the
+    same round trip names neither, the ORM-made player reads 353's own
+    defaults (true, 0), and an explicit ORM read of the two mapped columns
+    answers them."""
+    from sqlalchemy import select
+    pattern = re.compile(r"\bpc_trades_(?:open|generation)\b")
+
+    async def orm_round(ctx, name, n):
+        maker = await ctx.session(name)
+        async with maker() as db:
+            db.add(models.Player(steam_id=_steam(n), display_name="Mapper %d" % n))
+            await db.commit()
+        async with maker() as db:
+            got = (await db.execute(select(models.Player).where(models.Player.steam_id == _steam(n)))).scalar_one()
+            again = await db.get(models.Player, got.id)
+            await db.refresh(again)
+            return str(got.id), [s for s in ctx.statements(name) if pattern.search(s)]
+
+    async def body(ctx):
+        await _missing(ctx, env)
+        try:
+            _pid, named_missing = await orm_round(ctx, "orm_missing", 120)
+        finally:
+            await _restore_now(env)
+        pid, named_full = await orm_round(ctx, "orm_full", 121)
+        row = (await _q("SELECT pc_trades_open, pc_trades_generation FROM players WHERE id = $1::uuid", pid))[0]
+        maker = await ctx.session("orm_read")
+        async with maker() as db:
+            mapped = (await db.execute(select(models.Player.pc_trades_open, models.Player.pc_trades_generation)
+                                       .where(models.Player.id == uuid.UUID(pid)))).one()
+        return dict(named_missing=named_missing, named_full=named_full, row=tuple(row), mapped=tuple(mapped))
+    out = scenario(env, body)
+    assert out["named_missing"] == [] and out["named_full"] == [], out
+    assert out["row"] == (True, 0) and out["mapped"] == (True, 0), out
