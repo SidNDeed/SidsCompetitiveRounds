@@ -405,3 +405,254 @@ def servable(row, steam_id, auto_owned):
     if row.get("m_item") is None or row.get("m_item") != row.get("active_dance_id"):
         return False
     return dance_held(row, steam_id, auto_owned)
+
+
+# -- derivation: the fingerprint, the revisions and the jobs (S4.2-S4.5) -------
+import functools as _pcm_functools
+import os as _pcm_os
+
+ATLAS_COLUMNS = 8                    # row-major cells, eight per atlas row (S4.4)
+CARD_CELL, TILE_CELL = 256, 96       # a cell's edge in the card atlas and the tile atlas
+# The portrait window of a rendered face, (left, top, right, bottom): the
+# only pixels of a face that its portrait moves (S4.4; T21 proves every other
+# pixel equal). If a fixture ever fails that, the window grows -- never the
+# tolerance.
+CARD_WINDOW = (80, 150, 670, 740)
+TILE_WINDOW = (40, 75, 335, 370)
+CARD_ATLAS_MAX_BYTES = 12 << 20      # an encoded atlas above its cap is not published;
+TILE_ATLAS_MAX_BYTES = 6 << 20       # its key answers 404 motion_too_large
+GIF_COLOURS = 255                    # one fixed palette by median cut, plus one transparent index
+GIF_ALPHA_THRESHOLD = 128            # a pixel under this alpha is the transparent index
+# M5: ONE 4 MiB card-GIF ceiling end to end -- the bot's face cap
+# (_PC_FACE_MAX_BYTES) and the face route's card ceiling. Above it the tile
+# GIF is tried at 3 MiB, then none. No path carries 8 MiB.
+CARD_GIF_MAX_BYTES = 4 << 20
+TILE_GIF_MAX_BYTES = 3 << 20
+JOB_DEADLINE_S = 120.0               # checked after every frame render and every encode step (S4.6)
+
+
+class MotionDeadline(Exception):
+    """A derivation passed its deadline and stopped at the step that noticed:
+    it overran by at most that one step (S4.6)."""
+
+
+def encoder_params():
+    """Every encoder choice a derived byte depends on, as one string (S4.3):
+    the cells, windows and columns of the atlas, the resampling, the palette
+    method, dither, transparency, disposal, loop, delay and the caps."""
+    return ";".join((
+        "upscale=nearest-x2", "atlas-cols=%d" % ATLAS_COLUMNS,
+        "card=%d@%s" % (CARD_CELL, ",".join(str(v) for v in CARD_WINDOW)),
+        "tile=%d@%s" % (TILE_CELL, ",".join(str(v) for v in TILE_WINDOW)),
+        "resample=lanczos", "png=pc_face-encoder",
+        "atlas-max=%d,%d" % (CARD_ATLAS_MAX_BYTES, TILE_ATLAS_MAX_BYTES),
+        "gif-colours=%d" % GIF_COLOURS, "gif-quantize=median-cut", "gif-dither=none", "gif-table=global",
+        "gif-alpha=%d" % GIF_ALPHA_THRESHOLD, "gif-disposal=1", "gif-loop=0", "gif-delay=period",
+        "gif-max=%d,%d" % (CARD_GIF_MAX_BYTES, TILE_GIF_MAX_BYTES)))
+
+
+@_pcm_functools.lru_cache(maxsize=8)
+def _motion_fp_cached(renderer_fp, path, _size, _mtime_ns, params):
+    with open(path, "rb") as source:
+        code = source.read()
+    return _pcm_portrait.h16("motion_fp", renderer_fp, code, MOTION_RECIPE, params)
+
+
+def motion_fingerprint(renderer_fp, path=None):
+    """h16("motion_fp", renderer_fp, the bytes of this module, MOTION_RECIPE,
+    the encoder parameters) (S4.3), cached on the module file's path, size
+    and mtime the way renderer_fp is (#744) -- any edit of this file, a
+    comment included, moves every motion URL. None when renderer_fp is None:
+    a box that cannot key a face cannot key a motion."""
+    if renderer_fp is None:
+        return None
+    path = _pcm_os.path.abspath(path or __file__)
+    stat = _pcm_os.stat(path)
+    return _motion_fp_cached(renderer_fp, path, stat.st_size, stat.st_mtime_ns, encoder_params())
+
+
+def motion_rev(motion_fp, face_rev, motion_hash):
+    """One print's motion at one locale (S4.3). face_rev covers the
+    renderer, the locale's catalogue, the whole print spec and the still;
+    motion_hash covers the dance, recipe, frame count, period and every
+    frame. None when any input is missing: nothing is keyed on a
+    placeholder."""
+    if not (motion_fp and face_rev and motion_hash):
+        return None
+    return _pcm_portrait.h16("motion_rev", motion_fp, face_rev, motion_hash)
+
+
+def motion_preview_rev(motion_fp, preview_rev, motion_hash):
+    """The /card preview's key (S4.3): the same rule over preview_rev."""
+    if not (motion_fp and preview_rev and motion_hash):
+        return None
+    return _pcm_portrait.h16("motion_preview_rev", motion_fp, preview_rev, motion_hash)
+
+
+def _motion_rgba(png):
+    with _Image.open(_pcm_io.BytesIO(png)) as source:
+        source.load()
+        rgba = source if source.mode == "RGBA" else source.convert("RGBA")
+        return _Image.frombytes("RGBA", rgba.size, rgba.tobytes())
+
+
+def frame_portrait(png):
+    """S4.2: a canonical 590-pixel frame, upscaled x2 by nearest neighbour to
+    1180 and encoded by the renderer's own PNG writer -- a rig portrait for
+    the UNCHANGED render_face, which composites it over the portrait
+    background and box-reduces it by 2 (card) or 4 (tile). By the
+    nearest-neighbour identity the card draws the frame at native 590 and
+    the tile draws it reduced by 2 (T22)."""
+    frame = _motion_rgba(png)
+    if frame.size != (FRAME_EDGE, FRAME_EDGE):
+        raise ValueError("frame_size")
+    return _face._encode_rgba(frame.resize((2 * FRAME_EDGE, 2 * FRAME_EDGE), _Image.Resampling.NEAREST))
+
+
+def _check_deadline(deadline, clock):
+    if deadline is not None and clock() > deadline:
+        raise MotionDeadline()
+
+
+def atlas_rows(count):
+    return (count + ATLAS_COLUMNS - 1) // ATLAS_COLUMNS
+
+
+def derive_atlases(spec, labels, container, *, deadline=None, clock=_time.monotonic, render=None):
+    """The print atlas job, both sizes in one job (S4.4): for every frame k,
+    R_k = render_face(spec, labels, U_k, size) at card and at tile, its
+    window LANCZOS-resized into cell k of an eight-column, row-major atlas;
+    each atlas encoded as canonical PNG. Returns (card PNG or None, tile PNG
+    or None): None where the encoded atlas is above its cap -- that key
+    answers 404 motion_too_large. The deadline is checked after every frame
+    render and every encode step (MotionDeadline)."""
+    render = _face.render_face if render is None else render
+    _header, frames = parse_container(container)
+    rows = atlas_rows(len(frames))
+    card = _Image.new("RGBA", (ATLAS_COLUMNS * CARD_CELL, rows * CARD_CELL), (0, 0, 0, 0))
+    tile = _Image.new("RGBA", (ATLAS_COLUMNS * TILE_CELL, rows * TILE_CELL), (0, 0, 0, 0))
+    for k, png in enumerate(frames):
+        portrait = frame_portrait(png)
+        _check_deadline(deadline, clock)
+        col, row = k % ATLAS_COLUMNS, k // ATLAS_COLUMNS
+        for size, window, cell, atlas in (("card", CARD_WINDOW, CARD_CELL, card),
+                                          ("tile", TILE_WINDOW, TILE_CELL, tile)):
+            face = _motion_rgba(render(spec, labels, portrait, size))
+            _check_deadline(deadline, clock)
+            atlas.paste(face.crop(window).resize((cell, cell), _Image.Resampling.LANCZOS),
+                        (col * cell, row * cell))
+    card_png = _face._encode_rgba(card)
+    _check_deadline(deadline, clock)
+    tile_png = _face._encode_rgba(tile)
+    _check_deadline(deadline, clock)
+    return (card_png if len(card_png) <= CARD_ATLAS_MAX_BYTES else None,
+            tile_png if len(tile_png) <= TILE_ATLAS_MAX_BYTES else None)
+
+
+def _fast_png(image):
+    out = _pcm_io.BytesIO()
+    image.save(out, format="PNG", compress_level=1)
+    return out.getvalue()
+
+
+def _opaque_rgb(image):
+    """The RGB of an RGBA image with every pixel under the alpha threshold
+    black: the palette is built from what the GIF can show."""
+    rgb = image.convert("RGB")
+    clear = image.getchannel("A").point(lambda a: 255 if a < GIF_ALPHA_THRESHOLD else 0)
+    rgb.paste((0, 0, 0), (0, 0) + image.size, clear)
+    return rgb
+
+
+def _gif_palette(static, crops):
+    """One palette of GIF_COLOURS colours by median cut, no dither, over a
+    mosaic of the static face and every window crop reduced by 4 (S4.5)."""
+    small = [_motion_rgba(png).reduce(4) for png in crops]
+    edge = small[0].width if small else 1
+    per_row = max(1, static.width // edge)
+    mosaic = _Image.new("RGB", (static.width, static.height + atlas_rows_of(len(small), per_row) * edge),
+                        (0, 0, 0))
+    mosaic.paste(_opaque_rgb(static), (0, 0))
+    for k, crop in enumerate(small):
+        mosaic.paste(_opaque_rgb(crop), ((k % per_row) * edge, static.height + (k // per_row) * edge))
+    return mosaic.quantize(colors=GIF_COLOURS, method=_Image.Quantize.MEDIANCUT, dither=_Image.Dither.NONE)
+
+
+def atlas_rows_of(count, per_row):
+    return (count + per_row - 1) // per_row
+
+
+def _gif_frame(image, palette):
+    """One frame on the fixed palette: nearest colour, no dither, and every
+    pixel under the alpha threshold on the transparent index (GIF_COLOURS)."""
+    frame = _opaque_rgb(image).quantize(palette=palette, dither=_Image.Dither.NONE)
+    frame.paste(GIF_COLOURS, (0, 0) + image.size,
+                image.getchannel("A").point(lambda a: 255 if a < GIF_ALPHA_THRESHOLD else 0))
+    return frame
+
+
+def _encode_gif(static, crops, window, period, deadline, clock):
+    palette = _gif_palette(static, crops)
+    _check_deadline(deadline, clock)
+    # Exactly GIF_COLOURS entries (a median cut may return fewer; the rest pad
+    # as black) and the transparent slot last, so index GIF_COLOURS is always
+    # the transparent one.
+    lut = (palette.getpalette() + [0, 0, 0] * GIF_COLOURS)[:3 * GIF_COLOURS] + [0, 0, 0]
+    frames = []
+    for png in crops:
+        full = static.copy()
+        full.paste(_motion_rgba(png), window[:2])
+        frame = _gif_frame(full, palette)
+        frame.putpalette(lut)
+        frames.append(frame)
+        _check_deadline(deadline, clock)
+    out = _pcm_io.BytesIO()
+    # `palette` makes the fixed palette the ONE global table: without it the
+    # writer gives every delta frame a local copy of its own.
+    frames[0].save(out, format="GIF", save_all=True, append_images=frames[1:], loop=0,
+                   duration=int(period), disposal=1, transparency=GIF_COLOURS, optimize=False,
+                   palette=bytes(lut))
+    _check_deadline(deadline, clock)
+    return out.getvalue()
+
+
+def _gif_at(size, spec, labels, still, container, deadline, clock, render):
+    header, frames = parse_container(container)
+    window = CARD_WINDOW if size == "card" else TILE_WINDOW
+    static = _motion_rgba(render(spec, labels, still, size))
+    _check_deadline(deadline, clock)
+    crops = []
+    for png in frames:
+        face = _motion_rgba(render(spec, labels, frame_portrait(png), size))
+        crops.append(_fast_png(face.crop(window)))
+        _check_deadline(deadline, clock)
+    return _encode_gif(static, crops, window, header["ms"], deadline, clock)
+
+
+def gif_ladder(card_gif, tile_gif):
+    """M5's ladder, deterministic from the source (S4.5): (size, bytes) of the
+    card GIF when it is at or below 4 MiB, else of the tile GIF at or below 3
+    MiB, else (None, None) -- no GIF, and the key answers 404
+    motion_too_large. Each argument is a callable that encodes its size, so
+    the tile GIF is encoded only when the card GIF did not fit."""
+    card = card_gif()
+    if len(card) <= CARD_GIF_MAX_BYTES:
+        return "card", card
+    tile = tile_gif()
+    if len(tile) <= TILE_GIF_MAX_BYTES:
+        return "tile", tile
+    return None, None
+
+
+def derive_preview_gif(spec, labels, still, container, *, deadline=None, clock=_time.monotonic, render=None):
+    """The preview GIF job (S4.5) for the /card surface: the preview spec's
+    per-frame renders, a mosaic pass for the one palette, then the full
+    faces (the static face with crop k pasted, which T21 proves equal to
+    R_k) through the pinned Pillow's multi-frame writer -- loop 0, one
+    uniform duration (the period), disposal 1, the fixed palette. The
+    writer may merge consecutive identical frames and sum their delays; the
+    total stays N x period. Returns gif_ladder's (size, bytes)."""
+    render = _face.render_face if render is None else render
+    return gif_ladder(
+        lambda: _gif_at("card", spec, labels, still, container, deadline, clock, render),
+        lambda: _gif_at("tile", spec, labels, still, container, deadline, clock, render))

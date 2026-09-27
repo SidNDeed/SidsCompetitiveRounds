@@ -109,3 +109,88 @@ def decodable_png(image, depth=8, interlace=0):
     ihdr = struct.pack(">IIBBBBB", width, height, depth, 6, 0, 0, interlace)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
             + chunk(b"IDAT", zlib.compress(b"".join(rows), 6)) + chunk(b"IEND", b""))
+
+
+# -- derivation fixtures (S4.2-S4.5) ------------------------------------------
+
+def spec(**overrides):
+    """A print spec pc_face.render_face draws (every field it reads), ASCII."""
+    values = {
+        "band": "legendary", "name": "Dancer", "title": "Master I", "title_rgb": (85, 216, 70),
+        "subtitle": None, "rating": 1650, "pool_rank": 4, "board_rank": 4, "wins": 30, "losses": 9,
+        "foil": False, "signed": False, "sign": None, "edition_label": "Edition 1",
+        "minted_on": "2026-09-27", "print_short": "#d4c3a1", "top_card": "", "top_card_rgb": None,
+    }
+    values.update(overrides)
+    return values
+
+
+# A second locale's labels (ASCII): every chip, stat and footer label moves.
+LABELS_XX = {
+    "pc.signed": "SIGNIERT", "pc.edition": "Ausgabe", "pc.foil": "FOLIE", "pc.foil_short": "FOL",
+    "pc.stat.rank": "RANG", "pc.stat.rating": "WERTUNG", "pc.stat.pool": "POOL",
+    "pc.stat.board": "TABELLE", "pc.stat.record": "SIEGE/NIEDERLAGEN",
+}
+
+
+def edge_still(level=1):
+    """A valid 1180 still (coverage inside the writer's 2-60 % band) whose
+    content reaches its outer edge: an 8-pixel border (4 at card, 2 at tile)
+    plus a disc. Frames keep their outer 2 pixels clear (S2.5), so a face
+    drawn from this still and one drawn from a frame differ along the very
+    edge of the window -- the strip a shrunk-window mutant drops (M8)."""
+    image = Image.new("RGBA", (2 * EDGE, 2 * EDGE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 2 * EDGE - 1, 2 * EDGE - 1), outline=(40, 90, 200, 255), width=8)
+    draw.ellipse((420, 300, 760, 980), fill=(230, 120, 60, 255))
+    return png_bytes(image, level)
+
+
+def edge_frame(t=0.0, level=1):
+    """A frame the content checks accept whose content touches the first
+    column and row a frame may change (index EDGE_MARGIN, just inside the
+    clear band): the dancer plus a one-pixel ring at that index."""
+    image = figure(t)
+    m = pcm.EDGE_MARGIN
+    ImageDraw.Draw(image).rectangle((m, m, EDGE - 1 - m, EDGE - 1 - m), outline=(250, 250, 90, 255), width=1)
+    return png_bytes(image, level)
+
+
+def fake_render(spec_, labels, portrait_png, size):
+    """A fast stand-in for pc_face.render_face with its geometry -- a card or
+    tile of a fixed pattern, the rig portrait composited over the portrait
+    background and reduced by 2 or 4 into the window -- for the encoder tests
+    that must not wait on the real renderer (T23, T24). T21 and T22 use the
+    real one."""
+    import pc_face
+    card = size == "card"
+    w, h = (pc_face.CARD_W, pc_face.CARD_H) if card else (pc_face.TILE_W, pc_face.TILE_H)
+    window = pcm.CARD_WINDOW if card else pcm.TILE_WINDOW
+    body = Image.new("RGBA", (w, h), (30, 30, 46, 255))
+    draw = ImageDraw.Draw(body)
+    for y in range(0, h, 16):
+        draw.line((0, y, w, y), fill=(60 + (y % 64), 40, 90, 255))
+    draw.text((10, h - 40), str(spec_.get("name", "")) + " " + str(labels.get("pc.edition", "Edition")),
+              fill=(240, 240, 240, 255))
+    with Image.open(io.BytesIO(portrait_png)) as source:
+        source.load()
+        fg = source.convert("RGBA")
+    over = Image.alpha_composite(Image.new("RGBA", fg.size, pc_face._portrait_bg()), fg)
+    body.paste(over.reduce(2 if card else 4), window[:2])
+    out = io.BytesIO()
+    body.save(out, format="PNG", compress_level=1)
+    return out.getvalue()
+
+
+def noise_frames(count, seed=7, level=1):
+    """Frames holding one 230-pixel square of seeded noise (15 % coverage,
+    centred, each frame under the 256 KiB frame cap): valid shapes that
+    encode to large GIFs, for the size ladder's real overflow."""
+    import random
+    rnd = random.Random(seed)
+    out = []
+    for _k in range(count):
+        image = blank()
+        image.paste(Image.frombytes("RGB", (230, 230), rnd.randbytes(230 * 230 * 3)).convert("RGBA"), (180, 180))
+        out.append(png_bytes(image, level))
+    return out
