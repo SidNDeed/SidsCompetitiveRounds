@@ -910,6 +910,20 @@ class HealthResponse(BaseModel):
     # it raises instead of silently leaving the key out. Absent on any build
     # before that batch, which is how the train reads the old build.
     ladder_hook: int
+    # team_dc_fallback: whether the database this box is connected to has the
+    # two columns migration 356 adds, which the 2v2 disconnect deferral reads
+    # and writes (main._team_dc_fallback_probe). 1 when a probe naming every
+    # dc_fallback_* column the deferral's SQL names runs, 0 when it fails for
+    # a missing column or table. The column list is DERIVED from that SQL
+    # when main is imported, never written down (#342). The one word here that
+    # asks the database: the connected arm probes, the degraded arm answers the
+    # last probe's value (0 before any). The release train's discriminator for
+    # the migration as the api sees it, on both roles (the standby's schema
+    # arrives by replication); read by nothing else (#306). Declared without a
+    # default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before the 2v2 deferral batch,
+    # which is how the train reads the old build.
+    team_dc_fallback: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

@@ -6749,6 +6749,13 @@ _RJ_TRIAGE_MARKER = 2
 # Its sibling _LEAD_FORFEIT_PERGAME (the /health `lead_forfeit_pergame` word)
 # is DERIVED from the two 2v2 per-game wirings rather than written here, so
 # it is defined after team_series_report_dc, whose reader call it reads.
+# Its sibling _TEAM_DC_FALLBACK_LAST (the /health `team_dc_fallback` word) is
+# the one word on this route that asks the DATABASE: whether this box's
+# team_series has the columns the 2v2 disconnect deferral reads and writes
+# (migration 356). The connected arm probes and the degraded arm reads back
+# the last probe's answer. The probe's column list is DERIVED from the four
+# functions that use those columns, so it is defined after the last of them,
+# team_series_report_dc.
 # TICKET-REDACTION, reported on /health as `ticket_redaction`. A marker whose
 # only purpose is to be probed (#306): nothing reads it and no behaviour
 # depends on it. 1 = this build applies log_redaction's credential rule (the
@@ -6767,6 +6774,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
     try:
         await db.execute(text("SELECT 1"))
+        team_dc_fallback = await _team_dc_fallback_probe(db)
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
@@ -6778,12 +6786,16 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
+                              team_dc_fallback=team_dc_fallback,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
+        # team_dc_fallback is the one word here that needs the database, so
+        # this arm answers what the last probe on this worker found: 0 before
+        # the first one, which the release train reads as not proven.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
@@ -6792,6 +6804,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
+                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST,
                               pc_card_themes=_pc_card_themes_word())
 
 
@@ -42490,6 +42503,121 @@ _LEAD_FORFEIT_PERGAME = _lead_forfeit_pergame_marker(
                               "_record_team_game_points"),
     _lead_forfeit_loaded_name(team_series_report_dc.__code__,
                               "_team_game_crossed_two"))
+
+
+# -- The 2v2 disconnect-deferral marker (/health `team_dc_fallback`) --------
+# A survivor's fallback disconnect report no longer settles a 2v2 series on
+# arrival: team_series_report_dc stamps team_series.dc_fallback_at and
+# dc_fallback_player_id, and team_dc_fallback_sweep_loop settles the row once
+# the deferral bound has passed. Migration 356 adds those two columns. The
+# report, the sweep, the marker clear and the read-only status route each run
+# statements naming one or both of them, and such a statement fails with
+# UndefinedColumn when it runs on a database that lacks a column it names.
+# This word says whether the database THIS box is connected to has them: 1
+# when a probe naming every such column runs, 0 when it fails because a
+# column or the table is missing. It is the release train's discriminator for
+# the migration as the api sees it, and nothing else reads it (#306). It is
+# the one word on this route that runs a statement -- every sibling is
+# computed without the database -- so it describes the database the answering
+# box uses, not the code alone; the code half is told by the status route,
+# which a build before this one does not carry at all.
+#
+# DERIVED, never written down (#342): the probe names every dc_fallback_*
+# identifier that a SQL statement among these four functions' compiled string
+# constants names (nested code included), so it asks for exactly what the
+# code will ask for. A constant counts as a statement only when it opens
+# with an upper-case SQL verb, each def's own docstring is skipped whatever
+# it opens with, and a comment is not a constant at all -- so prose and
+# response keys add no name. A build whose statements named no such column
+# would have nothing to prove, and reads 0 without probing.
+#
+# The probe runs on the connected arm only, after its SELECT 1, and catches
+# ONE class of error: the statement named a column or a table this database
+# does not have (SQLSTATE 42703 or 42P01), found on the error's own wrapping
+# chain (.orig and __cause__). That error aborts the transaction, so the probe
+# rolls back before it answers 0 and the session is usable again. Any other
+# error is left to health_check's own catch, which reports the box degraded
+# as it does when SELECT 1 fails: a probe that fails for any other reason is
+# a database fault, not a schema answer. A box that is merely unmigrated
+# answers "ok" with a 0 here, never "database disconnected" (#430). The
+# degraded arm cannot probe, so it answers the last value a probe on this
+# worker wrote -- 0 until one has run, which the train reads as not proven.
+import asyncpg.exceptions as _team_dc_apg_exc
+
+_TEAM_DC_FALLBACK_STATEMENT = _re.compile(r"^\s*(?:SELECT|UPDATE|INSERT|WITH|DELETE)\b")
+_TEAM_DC_FALLBACK_NAME = _re.compile(r"\bdc_fallback_[a-z_]+\b")
+_TEAM_DC_FALLBACK_SQLSTATES = frozenset({"42703", "42P01"})   # undefined_column, undefined_table
+
+
+def _team_dc_fallback_columns(*functions) -> tuple:
+    """The dc_fallback_* names that the SQL statements among `functions`'
+    compiled string constants use (nested code objects included), sorted,
+    each once. A statement is a constant that opens with an upper-case SQL
+    verb; each function's own docstring is skipped whatever it opens with."""
+    names = set()
+    for f in functions:
+        todo = [f.__code__]
+        while todo:
+            code = todo.pop()
+            for const in code.co_consts:
+                if isinstance(const, type(code)):
+                    todo.append(const)
+                elif (isinstance(const, str) and const is not f.__doc__
+                      and _TEAM_DC_FALLBACK_STATEMENT.match(const)):
+                    names.update(_TEAM_DC_FALLBACK_NAME.findall(const))
+    return tuple(sorted(names))
+
+
+_TEAM_DC_FALLBACK_COLUMNS = _team_dc_fallback_columns(
+    _team_clear_dc_fallback_marker, _team_dc_fallback_sweep_once,
+    team_series_status_readonly, team_series_report_dc)
+_TEAM_DC_FALLBACK_PROBE = (
+    "SELECT " + ", ".join(_TEAM_DC_FALLBACK_COLUMNS) + " FROM team_series LIMIT 0"
+    if _TEAM_DC_FALLBACK_COLUMNS else "")
+_TEAM_DC_FALLBACK_LAST = 0
+
+
+def _team_dc_fallback_schema_missing(exc) -> bool:
+    """True when the statement named a column or a table the database does
+    not have: the driver's own class for either, or SQLSTATE 42703 / 42P01,
+    on `exc` or on its wrapping chain (.orig and __cause__). An exception
+    merely raised while another was being handled (__context__) is not
+    wrapping it, and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, (_team_dc_apg_exc.UndefinedColumnError,
+                            _team_dc_apg_exc.UndefinedTableError)):
+            return True
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if str(state or "") in _TEAM_DC_FALLBACK_SQLSTATES:
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+async def _team_dc_fallback_probe(db) -> int:
+    """/health `team_dc_fallback` on the connected arm, written through to
+    the cache the degraded arm reads: 1 when the probe ran, 0 when the
+    database lacks a column or the table it names. Any other error is
+    raised to health_check's own catch."""
+    global _TEAM_DC_FALLBACK_LAST
+    if not _TEAM_DC_FALLBACK_PROBE:
+        _TEAM_DC_FALLBACK_LAST = 0
+        return 0
+    try:
+        await db.execute(text(_TEAM_DC_FALLBACK_PROBE))
+    except Exception as exc:
+        if not _team_dc_fallback_schema_missing(exc):
+            raise
+        await db.rollback()
+        _TEAM_DC_FALLBACK_LAST = 0
+        return 0
+    _TEAM_DC_FALLBACK_LAST = 1
+    return 1
 
 
 # ── 2v2 series continuation (recording-gap fix) ─────────────────────────────
