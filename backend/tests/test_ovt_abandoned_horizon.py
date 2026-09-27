@@ -1577,9 +1577,14 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # Both counts, because one source line can expand into several statements
     # and reporting only one number is how two counts get reconciled instead
     # of explained (#431).
-    assert len(census["declines"]) == 23, census["declines"]
+    # Dance cards B9 (design S3.6): two declining sites join, both in
+    # _pc_motion_janitor -- the selection's FOR NO KEY UPDATE SKIP LOCKED and
+    # the motion row's FOR UPDATE SKIP LOCKED -- and no waiter.
+    assert sum(r["func"] == "_pc_motion_janitor" for r in census["declines"]) == 2, census["declines"]
+    assert not any(r["func"] == "_pc_motion_janitor" for r in census["waits"]), census["waits"]
+    assert len(census["declines"]) == 25, census["declines"]
     assert len(census["waits"]) == 13, census["waits"]
-    assert len(census["decline_sites"]) == 20, census["decline_sites"]
+    assert len(census["decline_sites"]) == 22, census["decline_sites"]
     assert len(census["wait_sites"]) == 10, census["wait_sites"]
 
 

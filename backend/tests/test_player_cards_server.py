@@ -555,8 +555,9 @@ def test_janitor_takes_the_first_snapshot_when_none_exists(monkeypatch):
     today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
     db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
     _run(main._pc_snapshot_janitor_step())
-    # retention, the blob janitor, the edition rollover, then the snapshot
-    assert taken == ["first"] and db.committed == 4
+    # retention, the blob janitor, the motion janitor's two candidate reads
+    # (dance cards S3.6), the edition rollover, then the snapshot
+    assert taken == ["first"] and db.committed == 6
     # the rollover ran, and ran BEFORE the due read -- it is deliberately not
     # behind the snapshot's due gate, so its position in the log is the
     # property under test and not an implementation detail
@@ -586,13 +587,14 @@ def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
     # already done today: last snapshot after 00:05 today — retention still runs (c3 F)
     db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today))
     _run(main._pc_snapshot_janitor_step())
-    # retention + the rollover; no snapshot
-    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 3
+    # retention, the motion janitor's two reads + the rollover; no snapshot
+    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 5
     assert db.count(ROLL_KEY) == 1
-    # lock held elsewhere: no snapshot (retention and the rollover committed)
+    # lock held elsewhere: no snapshot (retention, the motion janitor's two
+    # reads and the rollover committed)
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today + timedelta(minutes=1), today), lock=False)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.committed == 3
+    assert taken == [] and db.committed == 5
 
 
 def test_the_rollover_runs_on_a_pass_that_takes_no_snapshot(monkeypatch):
@@ -643,7 +645,7 @@ def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
 
     monkeypatch.setattr(main, "_pc_take_snapshot", _take)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 3
+    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 5
 
 
 # ── the wire shape ───────────────────────────────────────────────────────────

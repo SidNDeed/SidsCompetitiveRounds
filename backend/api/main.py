@@ -25629,6 +25629,14 @@ async def _pc_snapshot_janitor_step() -> None:
         # ten unreferenced minutes, each under its P lock.
         await _pc_portrait_blob_janitor(db)
         await db.commit()
+        # Dance cards (S3.6): the motion cleanups, in a try of their own -- a
+        # failure there must not cost the pool its snapshot or the season its
+        # rollover below.
+        try:
+            await _pc_motion_janitor(db)
+        except Exception as ex:
+            await db.rollback()
+            print(f"[PC-MOTION] janitor error: {type(ex).__name__}")
         # The edition schedule: four-month seasons, the boundary carried by
         # pc_editions.ends_at_planned. Deliberately placed BEFORE the
         # snapshot's due gate below and not inside it -- the gate returns
@@ -27477,6 +27485,101 @@ async def _pc_portrait_blob_janitor(db: AsyncSession) -> int:
     return deleted
 
 
+
+# -- Dance cards: the janitor's motion cleanups (design S3.6) --------------------
+# Cleanups, not the guarantee: what a motion route serves is decided at read
+# time by pc_motion.servable (S4.9). Each arm reads its candidates and
+# commits, then takes ONE candidate per transaction: it DECLINES a row another
+# transaction holds (SKIP LOCKED -- a janitor statement that waits holds every
+# arm behind it in the same tick, #276/#430) and, once the lock is held,
+# re-checks its predicate in a statement of its own, on that statement's own
+# snapshot (#208). The candidate reads page by id, so a candidate this pass
+# declines to act on (the exemption) never hides the ones behind it. A
+# selection is never nulled because its item is not catalog_ready: readiness
+# can return, and the read predicate already serves nothing for an unready
+# item.
+_PC_MOTION_JANITOR_BATCH = 100
+_PC_MOTION_JANITOR_PAGES = 10
+# The selection's ownership has gone: no player_items row names it. The one
+# exemption predicate (_auto_owned, through pc_motion.owns_dance) is the other
+# half of ownership and is applied in Python.
+_PC_DANCE_UNOWNED_SQL = (
+    "NOT EXISTS (SELECT 1 FROM player_items pi"
+    " WHERE pi.player_id = p.id AND pi.item_id = p.active_dance_id)")
+# A stored motion that must go: its owner's selection is none or another item
+# (S3.6), or its binding to the owner's game still is broken (S3.4) and it was
+# stored more than 24 hours ago.
+_PC_MOTION_STALE_SQL = (
+    "(p.active_dance_id IS NULL OR p.active_dance_id <> m.dance_item_id"
+    " OR (m.stored_at < now() - INTERVAL '24 hours'"
+    " AND (p.pc_game_portrait_hash IS DISTINCT FROM m.static_hash"
+    " OR p.pc_game_portrait_descriptor IS DISTINCT FROM m.static_descriptor)))")
+
+
+async def _pc_motion_janitor(db: AsyncSession) -> tuple:
+    """The two cleanups of S3.6, at most _PC_MOTION_JANITOR_PAGES pages of a
+    batch each per pass: a selection whose ownership has gone is nulled, then
+    a stale motion (above) is deleted -- in that order, so a selection nulled
+    here takes its motion with it in the same pass. Returns (nulled,
+    deleted)."""
+    if _pcm is None:
+        return 0, 0
+    nulled = 0
+    after = "00000000-0000-0000-0000-000000000000"
+    for _page in range(_PC_MOTION_JANITOR_PAGES):
+        lost = (await db.execute(text(
+            "SELECT p.id, p.steam_id, p.active_dance_id, si.sku AS dance_sku FROM players p"
+            " LEFT JOIN shop_items si ON si.id = p.active_dance_id"
+            " WHERE p.active_dance_id IS NOT NULL AND p.id > CAST(:after AS uuid) AND " + _PC_DANCE_UNOWNED_SQL +
+            " ORDER BY p.id LIMIT CAST(:n AS integer)"),
+            {"after": after, "n": _PC_MOTION_JANITOR_BATCH})).mappings().all()
+        await db.commit()
+        for r in lost:
+            if _pcm.owns_dance({"dance_bought": False, "dance_sku": r["dance_sku"]}, r["steam_id"], _auto_owned):
+                continue   # the exemption owns it
+            key = {"pid": str(r["id"]), "item": int(r["active_dance_id"])}
+            held = (await db.execute(text(
+                "SELECT p.id FROM players p WHERE p.id = CAST(:pid AS uuid)"
+                " AND p.active_dance_id = CAST(:item AS bigint) FOR NO KEY UPDATE SKIP LOCKED"), key)).first()
+            if held is not None:
+                gone = (await db.execute(text(
+                    "UPDATE players p SET active_dance_id = NULL WHERE p.id = CAST(:pid AS uuid)"
+                    " AND p.active_dance_id = CAST(:item AS bigint) AND " + _PC_DANCE_UNOWNED_SQL +
+                    " RETURNING p.id"), key)).first()
+                nulled += 1 if gone is not None else 0
+            await db.commit()
+        if len(lost) < _PC_MOTION_JANITOR_BATCH:
+            break
+        after = str(lost[-1]["id"])
+    deleted = 0
+    after = "00000000-0000-0000-0000-000000000000"
+    for _page in range(_PC_MOTION_JANITOR_PAGES):
+        stale = (await db.execute(text(
+            "SELECT m.player_id FROM pc_motions m JOIN players p ON p.id = m.player_id"
+            " WHERE m.player_id > CAST(:after AS uuid) AND " + _PC_MOTION_STALE_SQL +
+            " ORDER BY m.player_id LIMIT CAST(:n AS integer)"),
+            {"after": after, "n": _PC_MOTION_JANITOR_BATCH})).mappings().all()
+        await db.commit()
+        for r in stale:
+            key = {"pid": str(r["player_id"])}
+            held = (await db.execute(text(
+                "SELECT m.player_id FROM pc_motions m WHERE m.player_id = CAST(:pid AS uuid)"
+                " FOR UPDATE SKIP LOCKED"), key)).first()
+            if held is not None:
+                gone = (await db.execute(text(
+                    "DELETE FROM pc_motions m USING players p WHERE m.player_id = CAST(:pid AS uuid)"
+                    " AND p.id = m.player_id AND " + _PC_MOTION_STALE_SQL +
+                    " RETURNING m.player_id"), key)).first()
+                deleted += 1 if gone is not None else 0
+            await db.commit()
+        if len(stale) < _PC_MOTION_JANITOR_BATCH:
+            break
+        after = str(stale[-1]["player_id"])
+    if nulled or deleted:
+        print(f"[PC-MOTION] janitor nulled {nulled} selection(s), deleted {deleted} motion(s)")
+    return nulled, deleted
+
+
 async def _pc_steam_claim(db: AsyncSession, limit: int, ids=None, never_only: bool = False) -> list:
     """Claim due players (or only these ids — the priming path) FOR NO KEY
     UPDATE SKIP LOCKED and LEASE them (v4 §1): pc_steam_attempt advances —
@@ -28189,6 +28292,10 @@ async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days):
     locked = (await db.execute(text(
         "UPDATE players SET " + ", ".join(sets) +
         " WHERE id = CAST(:pid AS uuid) RETURNING pc_game_portrait_locked_until"), params)).scalar_one_or_none()
+    # Dance cards (S3.5): the stored motion goes with the stills, in this
+    # transaction and under the caller's identity lock, so both callers --
+    # the admin clear and data deletion -- remove it.
+    await db.execute(text("DELETE FROM pc_motions WHERE player_id = CAST(:pid AS uuid)"), {"pid": pid})
     # Release, never delete: the janitor removes a blob ten minutes after its
     # last reference went (v2 §6), so a render that read this row a moment
     # ago still finds its bytes.
@@ -35630,6 +35737,12 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("DELETE FROM pc_delivery_leases WHERE subject_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_portrait_nonces WHERE player_id = :pid"), {"pid": pid})
     await _pc_clear_portrait_unit(db, str(pid), lock_days=None)
+    # Dance cards (S3.5): the clear unit above removed the stored motion; the
+    # selection and the motion counters are reset here. The row is
+    # anonymised, never deleted (#437), so no foreign key action is relied on.
+    await db.execute(text(
+        "UPDATE players SET active_dance_id = NULL, pc_motion_at = NULL, pc_motion_day = NULL,"
+        " pc_motion_day_count = 0 WHERE id = CAST(:pid AS uuid)"), {"pid": str(pid)})
     # Music ratings (design-v4-report M15). EXPLICIT delete per the #437 audit
     # rule: this endpoint ANONYMIZES the players row rather than deleting it,
     # so music_ratings' ON DELETE CASCADE never fires — an ondelete clause is
