@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 366   # title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 370   # connect-failure: +4 (the three assembly routes and the G3 seat admin route; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 365   # title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 369   # connect-failure: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -879,7 +879,30 @@ def test_the_helper_closure_stays_affordable():
     # alone: measured 20 / 55 / 198 with data-into-data expansion, against
     # 16 / 48 / 191 before it.
     assert code_median <= 24, f"median code closure {code_median} of {total}"
-    assert code_p90 <= 75, f"p90 code closure {code_p90} of {total}"
+    # Connect-failure lane (2026-09-27): the p90 moved for measured growth.
+    # The same walk with the same route seeds over each tree's own
+    # backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   main 9a1dd9d                          365   21 / 69 / 326
+    #   lane f25c084 (api code)               369   21 / 76 / 326
+    #
+    # The p90 is a rank statistic, the value at sorted position int(0.9 * n),
+    # and it moved while no route near that position did: 37 of 369 routes
+    # sit above 75 on the lane (33 of 365 on main), which puts position 332
+    # on GET /api/v1/admin/quarantine/triage/{mode}/{group_id}, 76 on both
+    # trees. The four that crossed are the lane's three new assembly routes
+    # (POST /api/v1/ffa/lobby/{lobby_id}/connect 268, .../assembly 266 and
+    # .../release 93) and POST /api/v1/ffa/queue/leave, 53 -> 234: the leave
+    # now runs the assembly leave plan (the gone test and its witness census,
+    # the dissolve with the closers' record, and the re-form, which locks the
+    # next roster through the start's own _ffa_lock_roster, with its region
+    # pick, wager binding and titles). Every one is a binding its route
+    # really runs, and the median has not moved.
+    #
+    # The bound moves to 80, ~5% over the measurement; the median and worst
+    # bounds stay.
+    assert code_p90 <= 80, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -920,7 +943,19 @@ def test_the_helper_closure_stays_affordable():
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
     assert all_median <= 90, f"median closure {all_median} of {total}"
-    assert all_p90 <= 150, f"p90 closure {all_p90} of {total}"
+    # Connect-failure lane (2026-09-27), the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 9a1dd9d                          365   72 / 140 / 457
+    #   lane f25c084 (api code)               369   73 / 151 / 457
+    #
+    # The same rank effect as the code p90 above: 37 of 369 routes sit above
+    # 150 (33 of 365 on main), which puts position 332 on POST
+    # /api/v1/ovt/matches, 151 on both trees. The four that crossed are the
+    # same four: connect 377, assembly 375, release 152, and POST
+    # /api/v1/ffa/queue/leave 118 -> 341. The bound moves to 160, ~6% over
+    # the measurement; the median and worst bounds stay.
+    assert all_p90 <= 160, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
