@@ -5235,7 +5235,9 @@ namespace CompetitiveRounds
             // TokenFor; "" = the post goes without one). A token that arrives
             // after the pair was sent is itself a reason to post again, so a
             // pair first sent without it carries it on the next tick rather
-            // than at the 20 s refresh.
+            // than at the 20 s refresh. Round 6, finding F27: the token is
+            // checked as the post is built, against this seat's own count of
+            // the room's games.
             string teamRoom = TeamGameRoom();
             string teamToken = TeamGameNumber.Live.TokenFor(ApiClient.ActiveTeamSeriesId, teamRoom, ReadTeamToken());
             bool tokenNews = teamToken != liveSentTeamToken && (sp1 > 0 || sp2 > 0);
@@ -5334,7 +5336,11 @@ namespace CompetitiveRounds
         /// every other seat's. Every reason not to publish is logged once per
         /// game. Two are retried on the next tick while the first round lasts:
         /// "not the host" (a host handoff inside the first round) and a send
-        /// SetCustomProperties refused; every other one ends this seat's part.</summary>
+        /// SetCustomProperties refused; every other one ends this seat's part.
+        /// Round 6, finding F27: the token names the physical game's ordinal by
+        /// this seat's own count of the room's game starts and an epoch above
+        /// every one this seat has read in the room or published
+        /// (TeamGameNumber.Tracker.TokenToPublish).</summary>
         private static void TryPublishTeamToken(bool firstRound)
         {
             bool host = false;
@@ -5380,7 +5386,7 @@ namespace CompetitiveRounds
             }
             TeamGameNumber.Live.ArmPublished(token);
             teamTokenOwed = false;
-            Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} game token {token.Substring(0, 8)} published as the room's host;"
+            Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} game token {TeamGameNumber.Describe(token)} published as the room's host;"
                                + " this seat's posts carry it once the room shows it");
         }
 
@@ -5440,10 +5446,11 @@ namespace CompetitiveRounds
                     TeamGameNumber.Live.OnGameStart(ApiClient.ActiveTeamSeriesId, TeamGameRoom(), out tgnLine);
                     Plugin.Log.LogInfo(tgnLine);
                     // Round 5, finding F25: the game's token. What the room
-                    // holds now is read at once (a value published before this
-                    // seat's start is taken if this seat had not read it
-                    // before); the host's publish goes on the next poll tick
-                    // (TickTeamToken), with the rounds it reads there.
+                    // holds now is read at once (a value published for this
+                    // game before this seat's start is taken: a late start
+                    // still takes its game's token, #182); the host's publish
+                    // goes on the next poll tick (TickTeamToken), with the
+                    // rounds it reads there.
                     string tokLine = TeamGameNumber.Live.ObserveRoomToken(TeamGameRoom(), ReadTeamToken());
                     if (tokLine != null) Plugin.Log.LogInfo(tokLine);
                     teamTokenOwed = true;

@@ -4421,7 +4421,7 @@ namespace CompetitiveRounds
                 string dcToken = GameStateWatcher.TeamTokenForReport(seriesId);
                 ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points, dcToken);
                 Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} pts={t1Points}/{t2Points}"
-                    + (dcToken.Length > 0 ? $" game token {dcToken.Substring(0, 8)}" : " no game token (no automatic lead-forfeit)"));
+                    + (dcToken.Length > 0 ? $" game token {TeamGameNumber.Describe(dcToken)}" : " no game token (no automatic lead-forfeit)"));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }

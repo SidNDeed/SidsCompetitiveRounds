@@ -32228,16 +32228,20 @@ async def update_team_live_points(
     game count toward a crossing.
 
     OPTIONAL on a post that names its game, both or neither: game_token, the
-    token of the PHYSICAL game the pair was taken in (16 lowercase hex digits,
-    published by the room's host as a Photon room property at that game's
-    start; every seat reads it from the room), and token_sig, the HMAC of
+    token of the PHYSICAL game the pair was taken in ('nonce:ordinal:epoch':
+    16 lowercase hex digits, the ordinal of the game it was published for and
+    the host's epoch, round 6; published by the room's host as a Photon room
+    property at that game's start; every seat reads it from the room), and
+    token_sig, the HMAC of
     'team-live-points-token:{series_id}:{reporter_steam_id}:{t1}:{t2}:{game_number}:{photon_room_id}:{game_token}'.
     `sig` is the same with or without them, so a server from before the token
     checks such a post exactly as before and ignores the two. A token this
     endpoint cannot verify (sent on a post that names no game, one of the two
-    without the other, not 16 lowercase hex digits, or a signature that does
-    not verify) is logged and dropped, never refused: the post is filed
-    without it. Only the posts that carried the game's token are read toward
+    without the other, not in that shape, or a signature that does not
+    verify) is logged and dropped, never refused: the post is filed without
+    it; a verified token naming a game other than game_number is not filed,
+    and marks the record as holding another physical game (round 6, finding
+    F27). Only the posts that carried the game's token are read toward
     a crossing (the comment above _team_game_identity, WHICH PHYSICAL GAME).
     """
     if not MATCH_HMAC_SECRET:
@@ -32418,6 +32422,21 @@ async def update_team_live_points(
 # pair every 20 seconds while the game has a point) counts in full: a
 # tokenless post clears nothing, and nothing it sets counts.
 #
+# THE TOKEN'S GAME (v1.41.0 beta review round 5, finding F27; round 6). A
+# token is one physical game's only while every seat that carries it is
+# in that game, and a seat a game ahead of a lagging host can read the host's
+# token while it is already in the next game. So the token names the ORDINAL
+# of the physical game it was published for (the host's own count of the
+# room's game starts) and the host's EPOCH, all three parts signed:
+# 'nonce:ordinal:epoch' (_team_game_wire_token). The client takes a token
+# only for the game its own count and its posts both name
+# (plugin/TeamGameNumber.cs). Here, a post whose token names a game other
+# than the one it is filed under marks the record as holding another
+# physical game (token_conflict), and a DC report's token is read only when
+# it names the game being settled (_team_game_token_seats). The record keeps
+# the nonce (migration 354's game_token); the ordinal and the epoch are
+# checked in the request and not stored, so no column is added.
+#
 # What this does NOT change: a live-points post is accepted on the shared mod
 # secret and the series membership of the seat it names in a query parameter,
 # and neither check reads what was played, exactly as neither did for the old
@@ -32502,42 +32521,65 @@ def _team_game_evidence(shape: str, cur_seats: int, attested_seats: int) -> int:
     return cur_seats if shape == "first" else attested_seats
 
 
-# The physical game's token (WHICH PHYSICAL GAME, above): what the client
-# draws, 16 lowercase hex digits. Migration 354's CHECK holds the column to
-# the same shape.
+# The physical game's token (WHICH PHYSICAL GAME, above). Its nonce, the part
+# the record keeps, is what the client draws: 16 lowercase hex digits.
+# Migration 354's CHECK holds the column to the same shape.
 _TEAM_GAME_TOKEN_RE = _re.compile(r"[0-9a-f]{16}")
+# The token as a post or a DC report sends it (round 6, finding F27):
+# 'nonce:ordinal:epoch', the ordinal of the physical game it was published
+# for (1-99, the range game_number takes) and the host's epoch
+# (1-999999999), both without a sign or a leading zero
+# (TeamGameNumber.TryParseToken). All three parts are signed.
+_TEAM_GAME_WIRE_TOKEN_RE = _re.compile(r"([0-9a-f]{16}):([1-9][0-9]?):([1-9][0-9]{0,8})")
 
 
 def _team_game_token_valid(token) -> bool:
     return isinstance(token, str) and _TEAM_GAME_TOKEN_RE.fullmatch(token) is not None
 
 
+def _team_game_wire_token(token):
+    """(nonce, ordinal, epoch) for a token in the shape a post or a DC report
+    sends it, or None."""
+    if not isinstance(token, str):
+        return None
+    m = _TEAM_GAME_WIRE_TOKEN_RE.fullmatch(token)
+    if m is None:
+        return None
+    return m.group(1), int(m.group(2)), int(m.group(3))
+
+
 def _team_game_token_mac(canonical: str) -> str:
     return hmac.new(MATCH_HMAC_SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
+_TEAM_GAME_TOKEN_SHAPE = ("the token is not 'nonce:game:epoch' (16 lowercase hex digits, a "
+                          "game 1-99 and an epoch 1-999999999)")
+
+
 def _team_game_post_token(series_id, reporter_steam_id, t1_points, t2_points,
                           game_number, photon_room_id, game_token, token_sig):
-    """The physical game's token a live-points post carries, or None. Called
-    after the post's own signature verified, with MATCH_HMAC_SECRET set.
-    `game_number` is None when the post names no game; the token is carried
-    only by a post that names its game. A token that is not verified is
-    logged and dropped: the post is filed without one, which only ever keeps
-    its pair from counting."""
+    """The physical game's token a live-points post carries, as (nonce,
+    ordinal, epoch), or None. Called after the post's own signature
+    verified, with MATCH_HMAC_SECRET set. `game_number` is None when the
+    post names no game; the token is carried only by a post that names its
+    game. The signature covers the whole token, so its ordinal and its
+    epoch are signed with it (round 6, finding F27). A token that is not
+    verified is logged and dropped: the post is filed without one, which
+    only ever keeps its pair from counting."""
     if game_token is None and token_sig is None:
         return None
     if game_number is None:
         why = "the post names no game"
     elif game_token is None or token_sig is None:
         why = "game_token and token_sig are sent together"
-    elif not _team_game_token_valid(game_token):
-        why = "the token is not 16 lowercase hex digits"
+    elif _team_game_wire_token(game_token) is None:
+        why = _TEAM_GAME_TOKEN_SHAPE
     elif not hmac.compare_digest(token_sig, _team_game_token_mac(
             f"team-live-points-token:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}"
             f":{game_number}:{photon_room_id}:{game_token}")):
         why = "its signature does not verify"
     else:
-        return game_token
+        return _team_game_wire_token(game_token)
     print(f"[TEAM-GAME-POINTS] series={series_id} game token dropped: {why}. "
           f"The post is filed without one.")
     return None
@@ -32545,9 +32587,11 @@ def _team_game_post_token(series_id, reporter_steam_id, t1_points, t2_points,
 
 def _team_dc_game_token(series_id, reporter_steam_id, dc_player_steam_id,
                         game_token, token_sig):
-    """The token of the physical game the DC report's reporter is in, or None.
-    It is signed apart from hmac_sig, whose canonical is frozen: token_sig is
-    the HMAC of 'team-dc-token:{reporter}:{series}:{dc_player}:{token}'.
+    """The token of the physical game the DC report's reporter is in, as
+    (nonce, ordinal, epoch), or None. It is signed apart from hmac_sig, whose
+    canonical is frozen: token_sig is the HMAC of
+    'team-dc-token:{reporter}:{series}:{dc_player}:{token}', the whole token
+    (its ordinal and its epoch included: round 6, finding F27).
     Without MATCH_HMAC_SECRET the report's own signature is not checked
     (_verify_team_dc_hmac), and neither is this one. A token that is not
     verified is logged and dropped: the report then names no token, and its
@@ -32560,39 +32604,47 @@ def _team_dc_game_token(series_id, reporter_steam_id, dc_player_steam_id,
         return None
     if game_token is None:
         why = "token_sig was sent without game_token"
-    elif not _team_game_token_valid(game_token):
-        why = "the token is not 16 lowercase hex digits"
+    elif _team_game_wire_token(game_token) is None:
+        why = _TEAM_GAME_TOKEN_SHAPE
     elif MATCH_HMAC_SECRET and not hmac.compare_digest(
             token_sig or "", _team_game_token_mac(
                 f"team-dc-token:{reporter_steam_id}:{series_id}:{dc_player_steam_id}"
                 f":{game_token}")):
         why = "its signature does not verify"
     else:
-        return game_token
+        return _team_game_wire_token(game_token)
     print(f"[TEAM-DC] series={series_id} game token dropped: {why}. The report "
           f"names no game token.")
     return None
 
 
-def _team_game_token_seats(rec, token):
+def _team_game_token_seats(rec, token, ordinal):
     """(bits, why_not): the bits of the game's record that were posted with
     the DC report's game `token` -- the only bits a crossing is read from --
-    or (0, the reason none may be read). `rec` is the row
-    _TEAM_GAME_CROSSED_SQL returned for `token`. None may be read when the
-    report names no token, when two different tokens were filed under the
-    game (its record holds two physical games), when no post filed under it
-    carried a token, when its token is not the report's (it is another
-    physical game's record), or when the report's token is also on another
-    game of the series. Each of those withholds the lead-forfeit; none of
-    them is a verdict that the game was not played."""
+    or (0, the reason none may be read). `token` is (nonce, ordinal, epoch)
+    as _team_dc_game_token returned it, `ordinal` the game being settled, and
+    `rec` the row _TEAM_GAME_CROSSED_SQL returned for the token's nonce. None
+    may be read when the report names no token, when its token names another
+    game than the one being settled (round 6, finding F27: the reporter is
+    not in that game), when two different tokens, or a token naming another
+    game, were filed under the game (its record holds more than one physical
+    game), when no post filed under it carried a token, when its token is not
+    the report's (it is another physical game's record), or when the
+    report's token is also on another game of the series. Each of those
+    withholds the lead-forfeit; none of them is a verdict that the game was
+    not played."""
     if token is None:
         return 0, "the report names no game token"
+    if token[1] != ordinal:
+        return 0, (f"the report's game token names game {token[1]}, and the game "
+                   f"being settled is game {ordinal}")
     if rec["cur_token_conflict"]:
-        return 0, ("posts carrying two different game tokens were filed under this "
-                   "game: its record holds more than one physical game")
+        return 0, ("posts carrying two different game tokens, or a token naming another "
+                   "game, were filed under this game: its record holds more than one "
+                   "physical game")
     if rec["cur_token"] is None:
         return 0, "no post filed under this game carried a game token"
-    if rec["cur_token"] != token:
+    if rec["cur_token"] != token[0]:
         return 0, ("the game's token on record is not the report's: the record "
                    "holds another physical game")
     if rec["token_elsewhere"]:
@@ -32600,17 +32652,19 @@ def _team_game_token_seats(rec, token):
     return int(rec["cur_token_seats"] or 0), None
 
 
-# The token columns (migration 354): the record keeps the first token filed
-# under it, ORs in the bits of the posts that carried that token, and sets
-# token_conflict when a post carrying any other token is filed there. A post
-# without a token sets neither. RETURNING says which token the record holds.
+# The token columns (migration 354): the record keeps the first token (its
+# nonce) filed under it, ORs in the bits of the posts that carried that
+# token, and sets token_conflict when a post carrying any other token is
+# filed there, or (round 6, finding F27) a post whose token names another
+# game (:foreign; such a post files no token). A post without a token sets
+# neither. RETURNING says which token the record holds.
 _TEAM_GAME_POINTS_UPSERT_SQL = (
     "INSERT INTO team_series_games"
     "  (series_id, game_ordinal, sitting_room, pair_seats, attested_seats,"
-    "   game_token, token_seats)"
+    "   game_token, token_seats, token_conflict)"
     " VALUES (:sid, CAST(:ord AS integer), CAST(:room AS text),"
     "         CAST(:bits AS bigint), CAST(:att AS bigint),"
-    "         CAST(:tok AS text), CAST(:tbits AS bigint))"
+    "         CAST(:tok AS text), CAST(:tbits AS bigint), CAST(:foreign AS boolean))"
     " ON CONFLICT (series_id, game_ordinal, sitting_room) DO UPDATE"
     "    SET pair_seats = team_series_games.pair_seats | EXCLUDED.pair_seats,"
     "        attested_seats = team_series_games.attested_seats | EXCLUDED.attested_seats,"
@@ -32620,6 +32674,7 @@ _TEAM_GAME_POINTS_UPSERT_SQL = (
     "                        = COALESCE(team_series_games.game_token, EXCLUDED.game_token)"
     "                   THEN EXCLUDED.token_seats ELSE 0 END,"
     "        token_conflict = team_series_games.token_conflict"
+    "            OR EXCLUDED.token_conflict"
     "            OR COALESCE(EXCLUDED.game_token <> team_series_games.game_token, FALSE),"
     "        last_posted_at = NOW()"
     " RETURNING game_token, token_conflict")
@@ -32672,12 +32727,14 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
     is also set in attested_seats; a post naming any other game or sitting is
     not filed at all.
 
-    `token` is the physical game's token the post carried, already verified by
-    the endpoint (_team_game_post_token), or None. Only a post filed as
-    attested carries one. The record keeps the FIRST token filed under it and
-    ORs this post's bit into token_seats only when the post carried that same
-    token; a post carrying any other token sets token_conflict, and the record
-    then proves no crossing (_team_game_token_seats), whatever else it holds.
+    `token` is the physical game's token the post carried, (nonce, ordinal,
+    epoch) as the endpoint verified it (_team_game_post_token), or None. Only
+    a post filed as attested carries one. The record keeps the FIRST token's
+    nonce filed under it and ORs this post's bit into token_seats only when
+    the post carried that same token; a post carrying any other token, or
+    (round 6, finding F27) a token naming a game other than `game`, sets
+    token_conflict, and the record then proves no crossing
+    (_team_game_token_seats), whatever else it holds.
 
     Only ever raises: the masks are only OR-ed, the kept token is never
     replaced and the conflict flag is never cleared, so no later post clears
@@ -32697,10 +32754,19 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
                   f"{named_game} or another sitting; game {ordinal} is in progress. "
                   f"Not filed.")
             return False
-    if token is not None and (attested is None or not _team_game_token_valid(token)):
-        print(f"[TEAM-GAME-POINTS] series={series_id} game {ordinal}: a game token on a "
-              f"post that names no game, or not 16 lowercase hex digits. Filed without it.")
-        token = None
+    nonce, foreign = None, False
+    if token is not None:
+        if (attested is None or not isinstance(token, tuple) or len(token) != 3
+                or not _team_game_token_valid(token[0])):
+            print(f"[TEAM-GAME-POINTS] series={series_id} game {ordinal}: a game token on a "
+                  f"post that names no game, or not a token. Filed without it.")
+        elif token[1] != ordinal:
+            foreign = True
+            print(f"[TEAM-GAME-POINTS] series={series_id} game {ordinal}: this post's game "
+                  f"token names game {token[1]}. The record now holds a post of another "
+                  f"physical game and proves no crossing.")
+        else:
+            nonce = token[0]
     t1, t2 = min(int(t1_points or 0), 2), min(int(t2_points or 0), 2)
     bit = 1 << (4 * (3 * t1 + t2) + int(seat))
     try:
@@ -32708,11 +32774,12 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
             kept = (await db.execute(text(_TEAM_GAME_POINTS_UPSERT_SQL), {
                 "sid": series_id, "ord": ordinal, "room": room,
                 "bits": bit, "att": bit if attested is not None else 0,
-                "tok": token, "tbits": bit if token is not None else 0})).first()
+                "tok": nonce, "tbits": bit if nonce is not None else 0,
+                "foreign": foreign})).first()
     except Exception as ex:
         print(f"[TEAM-GAME-POINTS] series={series_id} not recorded: {type(ex).__name__}")
         return False
-    if token is not None and kept is not None and kept[0] != token:
+    if nonce is not None and kept is not None and kept[0] != nonce:
         print(f"[TEAM-GAME-POINTS] series={series_id} game {ordinal}: this post carries a "
               f"game token other than the one on record. The record now holds more than "
               f"one physical game and proves no crossing.")
@@ -32727,7 +32794,9 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     this game (_team_game_evidence) -- every post in the first game of the
     original sitting, only the posts that named exactly this game and sitting
     in any other -- and, of those, only the posts that carried `token`, the
-    physical game's token the DC report names (_team_game_token_seats). The
+    physical game's token the DC report names, (nonce, ordinal, epoch) as
+    _team_dc_game_token returned it, when it names this game
+    (_team_game_token_seats). The
     caller holds the series row lock and passes the row it read under that
     lock, so the game is named by the same helper, from the same locked
     state, that the posts were filed by.
@@ -32739,9 +32808,10 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     False when no room is stored, when the record cannot be read (before
     migration 348, 351, 352 or 354, or any statement error inside the
     savepoint), when no bit of the record may be read for `token` (the report
-    names none; two tokens were filed under the game; no post there carried
-    one; its token is not the report's; the report's token is also on another
-    game of the series), and when the posts that count and carried the token
+    names none; its token names another game; two tokens, or one naming
+    another game, were filed under the game; no post there carried one; its
+    token is not the report's; the report's token is also on another game of
+    the series), and when the posts that count and carried the token
     do not show two points from both teams. Each has its own log line, and
     two points from both teams that are on record only without the game's
     token have theirs. Every one of those settles as dc_incomplete, the
@@ -32757,7 +32827,7 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
         async with db.begin_nested():
             rec = (await db.execute(text(_TEAM_GAME_CROSSED_SQL), {
                 "sid": series_id, "ord": ordinal, "room": room,
-                "tok": token})).mappings().first()
+                "tok": token[0] if token is not None else None})).mappings().first()
     except Exception as ex:
         print(f"[TEAM-DC] series={series_id} game {ordinal}: per-game record "
               f"unreadable ({type(ex).__name__}); treated as not played")
@@ -32766,7 +32836,7 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     shape = _team_game_shape(original, ordinal, rec["first_ordinal"])
     evidence = _team_game_evidence(shape, int(rec["cur_seats"] or 0),
                                    int(rec["cur_attested"] or 0))
-    carried, why_not = _team_game_token_seats(rec, token)
+    carried, why_not = _team_game_token_seats(rec, token, ordinal)
     crossed = _team_game_both_teams_reached_two(evidence & carried)
     if not crossed:
         if why_not is not None:
@@ -42953,7 +43023,8 @@ async def team_series_report_dc(
     report's point snapshot) shows the abandoned game reached >=2 total
     points, read only from posts that carried the physical game's token the
     report names (game_token, signed apart from hmac_sig by token_sig; see
-    _team_dc_game_token), the whole series completes to them with full
+    _team_dc_game_token), and only when that token names the game being
+    settled (round 6, finding F27), the whole series completes to them with full
     ratings/economy;
     (2) otherwise the series flips to status='dc_incomplete'
     (invalidation_reason='dc_manual_pending') for manual admin resolution —

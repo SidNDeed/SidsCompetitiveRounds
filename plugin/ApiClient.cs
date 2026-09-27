@@ -2897,7 +2897,13 @@ namespace CompetitiveRounds
         /// (TeamGameNumber.TokenCanonical), signed apart from the pair's own
         /// sig, which is unchanged. A server that does not know the token
         /// ignores the two parameters; one that cannot verify it files the
-        /// post without it. A post without the pair never carries it.</summary>
+        /// post without it. A post without the pair never carries it.
+        ///
+        /// Round 6, finding F27: the token is 'nonce:ordinal:epoch'
+        /// (TeamGameNumber.MakeToken), all three parts signed. The server
+        /// takes a post whose token names a game other than the one it is
+        /// filed under as proof that the record holds another physical
+        /// game.</summary>
         public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points,
                                               int gameNumber = 0, string photonRoomId = null, string gameToken = null)
         {
@@ -2921,7 +2927,7 @@ namespace CompetitiveRounds
             {
                 namedUrl += TeamGameNumber.QueryToken(gameToken, ComputeHmacHex(TeamGameNumber.TokenCanonical(
                     seriesId, reporterSteamId, t1Points, t2Points, gameNumber, photonRoomId, gameToken)));
-                tag += " token " + gameToken.Substring(0, 8);
+                tag += " token " + TeamGameNumber.Describe(gameToken);
             }
             SendLivePoints("2v2:" + seriesId, namedUrl, tag + " game " + gameNumber,
                 fallbackUrl: legacyUrl,
@@ -14571,7 +14577,9 @@ namespace CompetitiveRounds
         /// (TeamGameNumber.DcTokenCanonical); hmac_sig and its canonical are
         /// unchanged. The server reads the abandoned game's crossing only from
         /// posts that carried this token; without one it settles no
-        /// lead-forfeit.</summary>
+        /// lead-forfeit. Round 6, finding F27: the token's ordinal and epoch
+        /// are signed with it, and the server reads it only when its ordinal
+        /// is the game being settled.</summary>
         public static void ReportTeamSeriesDc(
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
             int t1PointsTotal, int t2PointsTotal, string gameToken = null)
