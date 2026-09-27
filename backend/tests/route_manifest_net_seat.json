@@ -3171,6 +3171,42 @@
           "main",
           "pc_portrait_upload",
           "8e9f9a4dfb45229426377c3bea0c495f784bee78"
+        ],
+        [
+          "/api/v1/pc/portrait/motion",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_motion_upload",
+          "unpinned"
+        ],
+        [
+          "/api/v1/pc/dance",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_dance_select",
+          "unpinned"
+        ],
+        [
+          "/api/v1/pc-face/motion",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_face_motion_read",
+          "unpinned"
+        ],
+        [
+          "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_face_motion_atlas",
+          "unpinned"
         ]
       ]
     },
@@ -3513,11 +3549,15 @@
     "GET /api/v1/internal/pc/collection -> main.internal_pc_collection",
     "GET /api/v1/internal/pc/card -> main.internal_pc_card",
     "POST /api/v1/pc/portrait -> main.pc_portrait_upload",
+    "POST /api/v1/pc/portrait/motion -> main.pc_motion_upload",
+    "POST /api/v1/pc/dance -> main.pc_dance_select",
     "POST /api/v1/admin/pc/portrait/clear -> main.admin_pc_portrait_clear",
     "POST /api/v1/internal/pc/lease -> main.internal_pc_lease",
     "GET /api/v1/internal/pc/lease/{lease_id} -> main.internal_pc_lease_check",
     "DELETE /api/v1/internal/pc/lease/{lease_id} -> main.internal_pc_lease_release",
     "GET /api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png -> main.pc_face_png",
+    "GET /api/v1/pc-face/motion -> main.pc_face_motion_read",
+    "GET /api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png -> main.pc_face_motion_atlas",
     "GET /api/v1/internal/pc/face/print/{print_id}/{locale} -> main.internal_pc_face_print",
     "GET /api/v1/internal/pc/face/preview/{player_ref}/{locale} -> main.internal_pc_face_preview",
     "GET /api/v1/internal/pc/face/back -> main.internal_pc_face_back",
