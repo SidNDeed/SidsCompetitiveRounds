@@ -1577,9 +1577,13 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # Both counts, because one source line can expand into several statements
     # and reporting only one number is how two counts get reconciled instead
     # of explained (#431).
-    assert len(census["declines"]) == 23, census["declines"]
+    # 886bed8 LAND: +1 decline at +1 site, the deferred-fallback sweep's
+    # locked re-read (_team_dc_fallback_sweep_once, FOR NO KEY UPDATE SKIP
+    # LOCKED), reached from the team_dc_fallback_sweep_loop root. It declines
+    # and never waits, so the two WAIT counts do not move. Before: 23, 20.
+    assert len(census["declines"]) == 24, census["declines"]
     assert len(census["waits"]) == 13, census["waits"]
-    assert len(census["decline_sites"]) == 20, census["decline_sites"]
+    assert len(census["decline_sites"]) == 21, census["decline_sites"]
     assert len(census["wait_sites"]) == 10, census["wait_sites"]
 
 
