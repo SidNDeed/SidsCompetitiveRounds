@@ -430,9 +430,9 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[pctrade\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The count at the last commit that added cases (round 2, TC-L2): a floor
+    # The count at the last commit that added cases (round 2, TC-L3): a floor
     # far below it would be a gate that cannot fail (#342).
-    assert run >= 33, "the PcTradeRules suite shrank to %d cases" % run
+    assert run >= 37, "the PcTradeRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -450,7 +450,12 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     "discovery classifies the four answers and keeps state on the rest",
     "discovery gates the tab, propose and reads",
     "buckets",
-    "refetch after every refusal but busy/transport/limit; busy retried once",
+    # the refetch rule (round 2, TC-L3: V8 6.4/6.6 reconcile every refusal but busy)
+    "a rate limit is a server refusal: the trades and the binder are re-read",
+    "the version floor's outdated is a server answer: re-read",
+    "every other server refusal is re-read",
+    "busy is retried once instead and transport had no answer: neither is re-read",
+    "the local short-circuits never reached the server: not re-read",
     "accept confirms only on the armed row inside six seconds",
     "new ids against the last summary, never against zero",
     "offered = give of sent open proposals only",

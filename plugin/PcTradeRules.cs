@@ -190,23 +190,33 @@ namespace CompetitiveRounds
         // -- after an action ---------------------------------------------------
 
         /// <summary>Whether a refused action is followed by a forced full read
-        /// (and, for the binder, a forced collection read). Every refusal is,
-        /// except the answers that taught the client nothing about its own
-        /// copy: busy (retried once instead), transport (no answer), a rate
-        /// limit (a read on top of a limit that is already refusing), and the
-        /// local refusals that never reached the server. The FinishDiscard
-        /// rule V8 6.6 names.</summary>
+        /// (and, for the binder, a forced collection read). V8 6.4 and 6.6:
+        /// after every refusal except busy, since the client's own copy may be
+        /// what was wrong. Two server-side codes are excluded, each for its
+        /// own reason: busy is retried once instead (V8 1.4) and the retry's
+        /// answer is the one reconciled, and transport means no answer reached
+        /// the client, so there is no refusal to act on (the build brief's
+        /// extension of V8's text). no-consent and in-flight are excluded for
+        /// a different reason: they are local short-circuits that never
+        /// reached the server, not refusals at all, and a read after them
+        /// would stop at the same local gate. A rate limit and the version
+        /// floor's outdated are answers the server gave, and are reconciled
+        /// like every other refusal (round 2, TC-L3).</summary>
         internal static bool RefetchAfterRefusal(string code)
         {
             switch (code)
             {
+                // server-side, excluded: retried instead, or no answer at all
                 case "busy":
                 case "transport":
-                case "rate_limited":
+                    return false;
+                // local short-circuits: nothing reached the server
                 case "no-consent":
-                case "outdated":
                 case "in-flight":
                     return false;
+                // server answers, reconciled like every other refusal
+                case "rate_limited":
+                case "outdated":
                 default:
                     return true;
             }
@@ -589,15 +599,26 @@ namespace CompetitiveRounds
                           && BucketOf(null, "proposed") == Bucket.Recent;
                 Check(r, "buckets", ok, "ok=" + ok);
             }
-            // 9. The refetch and retry rules.
+            // 9. The refetch and retry rules: V8 6.4 and 6.6 reconcile every
+            //    refusal but busy; transport had no answer, and the local
+            //    short-circuits never reached the server (round 2, TC-L3).
             {
-                bool ok = !RefetchAfterRefusal("busy") && !RefetchAfterRefusal("transport")
-                          && !RefetchAfterRefusal("rate_limited")
-                          && RefetchAfterRefusal("bad_terms") && RefetchAfterRefusal("print_gone")
-                          && RefetchAfterRefusal("not_found") && RefetchAfterRefusal("trading_off")
-                          && RefetchAfterRefusal("http")
-                          && RetryBusy("busy", false) && !RetryBusy("busy", true) && !RetryBusy("pair_busy", false);
-                Check(r, "refetch after every refusal but busy/transport/limit; busy retried once", ok, "ok=" + ok);
+                bool limit = RefetchAfterRefusal("rate_limited");
+                Check(r, "a rate limit is a server refusal: the trades and the binder are re-read",
+                      limit, "rate_limited=" + limit);
+                bool floor = RefetchAfterRefusal("outdated");
+                Check(r, "the version floor's outdated is a server answer: re-read", floor, "outdated=" + floor);
+                bool refusals = RefetchAfterRefusal("bad_terms") && RefetchAfterRefusal("print_gone")
+                                && RefetchAfterRefusal("not_found") && RefetchAfterRefusal("trading_off")
+                                && RefetchAfterRefusal("session_required") && RefetchAfterRefusal("http");
+                Check(r, "every other server refusal is re-read", refusals, "ok=" + refusals);
+                bool busy = !RefetchAfterRefusal("busy") && RetryBusy("busy", false) && !RetryBusy("busy", true)
+                            && !RetryBusy("pair_busy", false);
+                bool transport = !RefetchAfterRefusal("transport");
+                Check(r, "busy is retried once instead and transport had no answer: neither is re-read",
+                      busy && transport, "busy=" + busy + " transport=" + transport);
+                bool local = !RefetchAfterRefusal("no-consent") && !RefetchAfterRefusal("in-flight");
+                Check(r, "the local short-circuits never reached the server: not re-read", local, "ok=" + local);
                 bool arm = ConfirmsArmed("t1", 10f, "t1", 15.9f) && !ConfirmsArmed("t1", 10f, "t1", 16.1f)
                            && !ConfirmsArmed("t1", 10f, "t2", 11f) && !ConfirmsArmed(null, 10f, "t1", 11f);
                 Check(r, "accept confirms only on the armed row inside six seconds", arm, "ok=" + arm);

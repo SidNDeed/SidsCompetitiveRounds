@@ -3319,10 +3319,11 @@ namespace CompetitiveRounds
             });
         }
 
-        /// <summary>After every action and every refusal except the ones that
-        /// taught nothing (busy, no answer, a rate limit): the trade list AND
-        /// the binder are re-read from the server, since this client's copy may
-        /// be what was wrong (V8 6.4, 6.6 - the rule FinishDiscard follows).</summary>
+        /// <summary>After every action, and after every refusal
+        /// PcTradeRules.RefetchAfterRefusal names (all but busy, retried
+        /// instead, and transport, no answer; a rate limit included): the
+        /// trade list AND the binder are re-read from the server, since this
+        /// client's copy may be what was wrong (V8 6.4, 6.6).</summary>
         private static void AfterTradeAction(string id)
         {
             if (id == null) return;
