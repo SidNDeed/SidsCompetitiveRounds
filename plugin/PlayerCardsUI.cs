@@ -2687,10 +2687,12 @@ namespace CompetitiveRounds
 
         /// <summary>A failed read classifies the discovery state (404 absent,
         /// 503 trading_unavailable unavailable, anything else keeps it); a read
-        /// that landed is acted on by ProcessTradeAnswers.</summary>
+        /// that landed is acted on by ProcessTradeAnswers. An answer the trades
+        /// fence kept out (ApiClient.PcStaleOrder) is ignored like a stale
+        /// identity: a newer answer is already held (TC-L5).</summary>
         private static void TradeReadLanded(string kind, bool ok, string resp)
         {
-            if (!ok && (resp == null || resp == "in-flight" || resp == "no-id" || resp == "stale-identity")) return;
+            if (!ok && (resp == null || resp == "in-flight" || resp == "no-id" || resp == "stale-identity" || resp == ApiClient.PcStaleOrder)) return;
             if (!ok)
             {
                 string code = ApiClient.PcTradeErrorCode(resp);

@@ -292,8 +292,10 @@ namespace CompetitiveRounds
         /// as long as the clock that set the slot runs ahead of the one
         /// answering now (a step back, or two boxes answering), while the next
         /// read sent always outranks everything held, so this fence never
-        /// freezes the cache (#276). ApiClient writes a slot only when Take*
-        /// says so, and an answer kept out moves no FetchedAt stamp.</summary>
+        /// freezes the cache (#276). ApiClient lands every answer, success or
+        /// failure, through LandSummary / LandFull (TC-L5) and writes a slot
+        /// only when they let it through; an answer kept out moves no
+        /// FetchedAt stamp, writes no error and is never classified.</summary>
         internal sealed class TradeCacheFence
         {
             private int sent;
@@ -327,11 +329,42 @@ namespace CompetitiveRounds
                 return true;
             }
 
+            /// <summary>One summary answer landing, success or failure (TC-L5).
+            /// An answer that bears state competes for the slot exactly as a
+            /// success does: behind a newer answer a stale 404 or 503 is kept
+            /// out, and a newer one is taken. An answer that bears none is let
+            /// through only while nothing newer is held and never advances the
+            /// slot: it decides nothing, so it must not keep out an older
+            /// answer that does (#276). True: ApiClient may act on it.</summary>
+            internal bool LandSummary(int order, bool ok, int httpStatus, string code)
+            {
+                if (!BearsState(ok, httpStatus, code)) return NotOlder(order, Summary);
+                return TakeSummary(order);
+            }
+
+            /// <summary>One full answer landing: as LandSummary, against both
+            /// slots, since a full answer writes both.</summary>
+            internal bool LandFull(int order, bool ok, int httpStatus, string code)
+            {
+                if (!BearsState(ok, httpStatus, code)) return NotOlder(order, Summary) && NotOlder(order, Full);
+                return TakeFull(order);
+            }
+
             /// <summary>The caches were emptied (an identity edge, a consent
             /// revoke): nothing is held. An answer sent before the edge never
             /// reaches the fence - ApiClient's epoch check drops it first - and
             /// the numbers keep counting.</summary>
             internal void Clear() { Summary = 0; Full = 0; }
+        }
+
+        /// <summary>Whether one landed read answer carries discovery state
+        /// (TC-L5): a success, a 404 or a 503 trading_unavailable - exactly the
+        /// answers Classify turns into a state. Every other answer (transport,
+        /// 401, busy, a rate limit, any other 5xx, a parse failure) leaves the
+        /// state as it was and says nothing about the trades.</summary>
+        internal static bool BearsState(bool ok, int httpStatus, string code)
+        {
+            return ok || Classify(Discovery.Unknown, false, false, httpStatus, code) != Discovery.Unknown;
         }
 
         // -- a deferred re-read and the identity generation (TC-M2) --------------
@@ -851,6 +884,114 @@ namespace CompetitiveRounds
                       took2 && kept1 && sent == 1 && reaskTaken && g.Summary == 3 && g.Full == 3,
                       "sent=" + sent + " reask_taken=" + reaskTaken + " summary=" + g.Summary + " full=" + g.Full);
             }
+            // 17. State-bearing failures take the same fence (TC-L5). Discovery is
+            //     modelled as PlayerCardsUI keeps it (LandRun): an answer the fence
+            //     lets through is classified (a success through the summary cache,
+            //     a failure in TradeReadLanded); one kept out is never seen.
+            //     LandRun prints the state, the view (shown), the full reads, the
+            //     next summary delay, and a (let through) or k (kept out) per answer.
+            {
+                // the fence is outcome-blind: behind a newer answer a stale
+                // success, 404 or 503 is kept out alike, and a newer failure that
+                // is held keeps out an older success
+                var f = new TradeCacheFence();
+                int a = f.Dispatch(), b = f.Dispatch();
+                bool newerOk = f.LandFull(b, true, 200, null);
+                bool stale404 = f.LandSummary(a, false, 404, "http");
+                bool stale503 = f.LandSummary(a, false, 503, "trading_unavailable");
+                bool staleOk = f.LandSummary(a, true, 200, null);
+                var g = new TradeCacheFence();
+                int c = g.Dispatch(), d = g.Dispatch();
+                bool newer404 = g.LandFull(d, false, 404, "http");
+                bool olderOk = g.LandSummary(c, true, 200, null);
+                Check(r, "failure fence: behind a newer answer a stale success, 404 or 503 is kept out alike",
+                      newerOk && !stale404 && !stale503 && !staleOk && newer404 && !olderOk && f.Summary == b && g.Summary == d,
+                      "newer_ok=" + newerOk + " stale_404=" + stale404 + " stale_503=" + stale503 + " stale_ok=" + staleOk
+                      + " newer_404=" + newer404 + " older_ok=" + olderOk + " held=" + f.Summary + "/" + g.Summary);
+                // the round-2 report's scenario, the view open (Enabled): summary S1
+                // is sent and held, full F2 is sent, lands first and says enabled,
+                // then S1 lands as a 404 - and, separately, as a 503
+                string s404 = LandRun(Discovery.Enabled, 2, new[] { new Landing(true, 2, "ok"), new Landing(false, 1, "404") });
+                Check(r, "failure fence: a stale 404 behind a newer success keeps the view and the 120 s cadence (the round-2 scenario)",
+                      s404 == "Enabled shown=1 reads=1 next=120 ak", "after=" + s404);
+                string s503 = LandRun(Discovery.Enabled, 2, new[] { new Landing(true, 2, "ok"), new Landing(false, 1, "503") });
+                Check(r, "failure fence: a stale 503 behind a newer success keeps the reads and the 120 s cadence",
+                      s503 == "Enabled shown=1 reads=1 next=120 ak", "after=" + s503);
+                // the control: a genuinely newer 404 or 503 is still let through and
+                // classifies (a 404 hides the view and rechecks at 600 s), and a
+                // newer success recovers from it
+                string n404 = LandRun(Discovery.Enabled, 2, new[] { new Landing(false, 1, "ok"), new Landing(true, 2, "404") });
+                string n503 = LandRun(Discovery.Enabled, 2, new[] { new Landing(false, 1, "ok"), new Landing(false, 2, "503") });
+                string back = LandRun(Discovery.Enabled, 2, new[] { new Landing(true, 1, "404"), new Landing(false, 2, "ok") });
+                Check(r, "failure fence: a genuinely newer 404 or 503 is still taken and classifies, and a newer success recovers",
+                      n404 == "Absent shown=0 reads=0 next=600 aa" && n503 == "Unavailable shown=1 reads=0 next=120 aa"
+                      && back == "Enabled shown=1 reads=1 next=120 aa",
+                      "newer_404=" + n404 + " newer_503=" + n503 + " recovered=" + back);
+                // which answers bear state: exactly the ones Classify turns into one
+                bool bears = BearsState(true, 200, null) && BearsState(false, 404, "http")
+                             && BearsState(false, 503, "trading_unavailable");
+                bool none = !BearsState(false, 503, "busy") && !BearsState(false, 0, "transport")
+                            && !BearsState(false, 401, "session_required") && !BearsState(false, 429, "rate_limited")
+                            && !BearsState(false, 500, "http");
+                Check(r, "failure fence: only a success, a 404 and a 503 trading_unavailable bear state",
+                      bears && none, "bears=" + bears + " none_of_the_rest=" + none);
+                // an answer that bears no state decides nothing and never advances
+                // the fence, so an older answer that does is still let through; a
+                // stale one is kept out like any other
+                string newerNone = LandRun(Discovery.Enabled, 2, new[] { new Landing(true, 2, "transport"), new Landing(false, 1, "paused") });
+                string newerNoneS = LandRun(Discovery.Enabled, 2, new[] { new Landing(false, 2, "transport"), new Landing(true, 1, "paused") });
+                string staleNone = LandRun(Discovery.Enabled, 2, new[] { new Landing(true, 2, "ok"), new Landing(false, 1, "busy") });
+                Check(r, "failure fence: an answer that bears no state neither decides nor keeps out an older answer",
+                      newerNone == "Paused shown=1 reads=1 next=120 aa" && newerNoneS == "Paused shown=1 reads=1 next=120 aa"
+                      && staleNone == "Enabled shown=1 reads=1 next=120 ak",
+                      "newer_full=" + newerNone + " newer_summary=" + newerNoneS + " stale=" + staleNone);
+                // every landing order of S1 F2 S3 F4 under every mix of six
+                // outcomes: the state ends on the newest answer that bears one
+                // (read from the table below, not from BearsState), and the answers
+                // let through that bear state never go back in dispatch order
+                string[] outs = { "ok", "paused", "404", "503", "busy", "transport" };
+                var landings = Permutations(new[] { 1, 2, 3, 4 });
+                int runs = 0, bad = 0;
+                for (int m = 0; m < 1296; m++)
+                {
+                    var o = new string[5];
+                    int x = m;
+                    for (int i = 1; i <= 4; i++) { o[i] = outs[x % 6]; x /= 6; }
+                    Discovery want = Discovery.Unknown;
+                    for (int i = 4; i >= 1; i--)
+                    {
+                        if (o[i] == "ok") { want = Discovery.Enabled; break; }
+                        if (o[i] == "paused") { want = Discovery.Paused; break; }
+                        if (o[i] == "404") { want = Discovery.Absent; break; }
+                        if (o[i] == "503") { want = Discovery.Unavailable; break; }
+                    }
+                    foreach (var landing in landings)
+                    {
+                        runs++;
+                        var h = new TradeCacheFence();
+                        for (int i = 0; i < 4; i++) h.Dispatch();
+                        var state = Discovery.Unknown;
+                        int lastState = 0;
+                        bool wentBack = false;
+                        foreach (int n in landing)
+                        {
+                            bool ok, enabled; int http; string code;
+                            LandOutcome(o[n], out ok, out enabled, out http, out code);
+                            bool through = n % 2 == 0 ? h.LandFull(n, ok, http, code) : h.LandSummary(n, ok, http, code);
+                            if (!through) continue;
+                            if (o[n] != "busy" && o[n] != "transport")
+                            {
+                                if (n < lastState) wentBack = true;
+                                lastState = n;
+                            }
+                            state = Classify(state, ok, enabled, http, code);
+                        }
+                        if (state != want || wentBack) bad++;
+                    }
+                }
+                Check(r, "failure fence: every landing order of four mixed answers ends on the newest that bears state",
+                      runs == 31104 && bad == 0, "runs=" + runs + " bad=" + bad);
+            }
             return r;
         }
 
@@ -889,6 +1030,51 @@ namespace CompetitiveRounds
                 e.ReadIssued();
             }
             return string.Join(",", reads.ToArray());
+        }
+
+        /// <summary>One landed answer of a discovery script (TC-L5): full or
+        /// summary, its dispatch number, and what it said (ok, paused, 404,
+        /// 503 = trading_unavailable, busy = a 503 busy, transport).</summary>
+        private struct Landing
+        {
+            internal bool Full;
+            internal int Order;
+            internal string Outcome;
+            internal Landing(bool full, int order, string outcome) { Full = full; Order = order; Outcome = outcome; }
+        }
+
+        /// <summary>Lands `steps` through a fresh fence (`sent` reads dispatched
+        /// first) as ApiClient lands them, and classifies what the fence lets
+        /// through as PlayerCardsUI does, from `start`. Returns the state, shown
+        /// (TabShown), reads (ReadsAllowed), next (NextSummaryDelay) and a (let
+        /// through) or k (kept out) per answer.</summary>
+        private static string LandRun(Discovery start, int sent, Landing[] steps)
+        {
+            var f = new TradeCacheFence();
+            for (int i = 0; i < sent; i++) f.Dispatch();
+            var d = start;
+            var marks = new StringBuilder();
+            foreach (var s in steps)
+            {
+                bool ok, enabled; int http; string code;
+                LandOutcome(s.Outcome, out ok, out enabled, out http, out code);
+                bool through = s.Full ? f.LandFull(s.Order, ok, http, code) : f.LandSummary(s.Order, ok, http, code);
+                marks.Append(through ? 'a' : 'k');
+                if (through) d = Classify(d, ok, enabled, http, code);
+            }
+            return d + " shown=" + (TabShown(d) ? 1 : 0) + " reads=" + (ReadsAllowed(d) ? 1 : 0)
+                   + " next=" + NextSummaryDelay(d).ToString(CultureInfo.InvariantCulture) + " " + marks;
+        }
+
+        /// <summary>What one scripted outcome looks like to the landing: the ok
+        /// flag, the enabled switch, the HTTP status, and the error code
+        /// ApiClient.PcTradeErrorCode reads from such an answer.</summary>
+        private static void LandOutcome(string o, out bool ok, out bool enabled, out int http, out string code)
+        {
+            ok = o == "ok" || o == "paused";
+            enabled = o == "ok";
+            http = ok ? 200 : o == "404" ? 404 : (o == "503" || o == "busy") ? 503 : 0;
+            code = ok ? null : o == "503" ? "trading_unavailable" : o == "busy" ? "busy" : o == "404" ? "http" : "transport";
         }
 
         /// <summary>Every ordering of `items` (the cache fence's landing orders).</summary>

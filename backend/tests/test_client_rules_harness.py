@@ -430,9 +430,9 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[pctrade\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The count at the last commit that added cases (round 3, TC-M2): a floor
+    # The count at the last commit that added cases (round 3, TC-L5): a floor
     # far below it would be a gate that cannot fail (#342).
-    assert run >= 40, "the PcTradeRules suite shrank to %d cases" % run
+    assert run >= 47, "the PcTradeRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -481,6 +481,14 @@ def test_the_pc_trade_suite_ran_every_case_and_none_failed(harness_run):
     "deferred re-read: the scheduling generation passes, a newer one does not",
     "deferred re-read: an identity edge before the frame drops the re-ask (the round-2 scenario)",
     "deferred re-read: with no edge the kept-out answer re-asks once and the re-ask is taken",
+    # state-bearing failures take the same fence (round 3, TC-L5)
+    "failure fence: behind a newer answer a stale success, 404 or 503 is kept out alike",
+    "failure fence: a stale 404 behind a newer success keeps the view and the 120 s cadence (the round-2 scenario)",
+    "failure fence: a stale 503 behind a newer success keeps the reads and the 120 s cadence",
+    "failure fence: a genuinely newer 404 or 503 is still taken and classifies, and a newer success recovers",
+    "failure fence: only a success, a 404 and a 503 trading_unavailable bear state",
+    "failure fence: an answer that bears no state neither decides nor keeps out an older answer",
+    "failure fence: every landing order of four mixed answers ends on the newest that bears state",
 ])
 def test_the_pc_trade_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "pctrade")

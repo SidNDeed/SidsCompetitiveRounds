@@ -310,9 +310,15 @@ def test_the_trades_cache_takes_an_answer_only_through_the_ordering_fence():
     dispatch = "int order = pcTradeFence.Dispatch();"
     assert summary.index("pcTradeSummaryInFlight = true;") < summary.index(dispatch)
     assert full.index("pcTradesInFlight = true;") < full.index(dispatch)
-    assert ("if (pcTradeFence.TakeSummary(order)) { CachedPcTradeSummary = s; "
+    # round 3 re-pin (TC-L5): each slot is written only where the landing
+    # (LandSummary / LandFull, which reach TakeSummary / TakeFull) let the
+    # answer through; the properties pinned here are unchanged
+    assert ("else if (ok) { CachedPcTradeSummary = s; "
             "PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }") in summary
-    fenced = _span(full, "if (pcTradeFence.TakeFull(order))", "keptOut = true;")
+    assert summary.index("bool keptOut = !pcTradeFence.LandSummary(order,") < summary.index("CachedPcTradeSummary = s;")
+    fenced = _span(full, "bool keptOut = !pcTradeFence.LandFull(order,", "else { PcTradesError = resp;")
+    assert fenced.index("if (keptOut)") < fenced.index("else if (ok)")
+    fenced = fenced[fenced.index("else if (ok)"):]
     for write in ("CachedPcTrades = f;", "PcTradesFetchedAt = Time.realtimeSinceStartup;",
                   "CachedPcTradeSummary = f;", "PcTradeSummaryFetchedAt = PcTradesFetchedAt;"):
         assert write in fenced, write
@@ -321,10 +327,10 @@ def test_the_trades_cache_takes_an_answer_only_through_the_ordering_fence():
     assert "CachedPcTradeSummary = null; CachedPcTrades = null;" in api
     clear = _span(api, "private static void ClearPcTradeCaches()", end)
     assert "pcTradeFence.Clear(); pcTradesStaleReask = false;" in clear
-    # one re-ask per kept-out answer: the re-ask's own answer is marked
+    # one re-ask per kept-out success: the re-ask's own answer is marked
     assert "bool reask = pcTradesStaleReask; pcTradesStaleReask = false;" in full
-    assert "if (again || (keptOut && !reask))" in full
-    assert "pcTradesStaleReask = keptOut && !reask;" in full
+    assert "bool reaskNow = keptOut && ok && !reask;" in full and "if (again || reaskNow)" in full
+    assert "pcTradesStaleReask = reaskNow;" in full
 
 
 def test_the_trades_entry_edge_is_re_armed_by_the_close_and_by_every_frame_off_the_view():
@@ -414,6 +420,48 @@ def test_every_deferred_trades_and_binder_re_read_is_bound_to_its_identity_gener
     assert ident.index("_pcCacheEpoch++;") < ident.index("ClearPcTradeCaches();") < ident.index("ReleasePcReadLatches();")
     assert ("                _pcCacheEpoch++;\n                CachedPcMe = null; CachedPcCollection = null;\n"
             "                ClearPcTradeCaches();\n                ReleasePcReadLatches();\n") in api
+
+
+def test_the_trades_reads_land_state_bearing_failures_through_the_same_fence():
+    """Card trading round 3, TC-L5. Each trades answer, success or failure,
+    lands through PcTradeRules.TradeCacheFence exactly once (LandSummary /
+    LandFull, executed by the rules harness), after the parse and before any
+    write. An answer the fence keeps out writes no cache and no error string,
+    and its callback hears ApiClient.PcStaleOrder, which TradeReadLanded
+    ignores before it classifies anything, so a stale 404 or 503 behind a
+    newer answer can neither eject the view nor move the recheck. Only a
+    success kept out is asked again."""
+    api = API.read_text(encoding="utf-8")
+    src = CLIENT.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    assert 'internal const string PcStaleOrder = "stale-order";' in api
+    # TakeSummary / TakeFull are reached only through the two landings
+    assert api.count("pcTradeFence.Take") == 0
+    tail = "(order, ok, ok ? 200 : PcHttpCode(resp), ok ? null : PcTradeErrorCode(resp));"
+    for sig, land, parse, cache, error in (
+            ("public static void PcTradeSummary(",
+             "bool keptOut = !pcTradeFence.LandSummary" + tail,
+             'if (ok) { s = ParsePcTradeSummary(resp); if (s == null) { ok = false; resp = "parse"; } }',
+             "else if (ok) { CachedPcTradeSummary = s;", "PcTradeSummaryError = resp;"),
+            ("public static void PcTrades(string steamId, bool force, Action<bool, string> callback)",
+             "bool keptOut = !pcTradeFence.LandFull" + tail,
+             'if (ok) { f = ParsePcTradeFull(resp); if (f == null) { ok = false; resp = "parse"; } }',
+             "CachedPcTrades = f;", "PcTradesError = resp;")):
+        body = _span(api, sig, end)
+        assert body.count(land) == 1 and body.count("pcTradeFence.Land") == 1, sig
+        assert body.count(error) == 1, sig
+        assert (body.index("if (epoch != _pcCacheEpoch)") < body.index(parse) < body.index(land)
+                < body.index("if (keptOut)") < body.index(cache) < body.index(error)), sig
+        assert body.count("callback?.Invoke(!keptOut && ok, keptOut ? PcStaleOrder : resp);") == 1, sig
+        assert 'stale answer kept out kind=' in body and ' outcome=" + (ok ? "ok" : "fail")' in body, sig
+    full = _span(api, "public static void PcTrades(string steamId, bool force, Action<bool, string> callback)", end)
+    assert "bool reaskNow = keptOut && ok && !reask;" in full and "if (again || reaskNow)" in full
+    assert "pcTradesStaleReask = reaskNow;" in full
+    # the landing handler ignores the sentinel before it classifies anything
+    landed = _span(src, "private static void TradeReadLanded(string kind, bool ok, string resp)", end)
+    ignore = 'resp == "stale-identity" || resp == ApiClient.PcStaleOrder)) return;'
+    assert landed.count(ignore) == 1
+    assert landed.index(ignore) < landed.index("PcTradeRules.Classify(")
 
 
 def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():

@@ -4266,11 +4266,21 @@ namespace CompetitiveRounds
         private static float pcTradeSummaryAttemptAt = -100f, pcTradesAttemptAt = -100f;
         // TC-L1: the ordering fence over the two slots. Every trades read takes
         // a dispatch number when it is SENT, and a slot never takes an answer
-        // sent before the one it holds (PcTradeRules.TradeCacheFence). A full
-        // answer the fence keeps out is asked again once; the re-ask's own
-        // answer is never re-asked, so the fence cannot start a chain of reads.
+        // sent before the one it holds (PcTradeRules.TradeCacheFence). TC-L5:
+        // every answer lands through it once, failures included, so a stale
+        // 404 or 503 is kept out like a stale success and never classified. A
+        // full success the fence keeps out is asked again once; the re-ask's
+        // own answer is never re-asked, so the fence cannot start a chain of
+        // reads.
         private static readonly PcTradeRules.TradeCacheFence pcTradeFence = new PcTradeRules.TradeCacheFence();
         private static bool pcTradesStaleReask;
+
+        /// <summary>What a trades read's callback hears in place of its answer
+        /// when the fence kept that answer out (TC-L5): a newer answer is
+        /// already held, so this one is neither shown nor classified.
+        /// PlayerCardsUI.TradeReadLanded ignores it, as it ignores
+        /// stale-identity.</summary>
+        internal const string PcStaleOrder = "stale-order";
 
         /// <summary>Called at both Player Cards cache-clearing edges (identity
         /// change, consent revoke), after the epoch has advanced.</summary>
@@ -4322,19 +4332,19 @@ namespace CompetitiveRounds
                     return;
                 }
                 pcTradeSummaryInFlight = false;
-                if (ok)
-                {
-                    var s = ParsePcTradeSummary(resp);
-                    if (s != null)
-                    {
-                        if (pcTradeFence.TakeSummary(order)) { CachedPcTradeSummary = s; PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }
-                        else Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=summary sent=" + order + " held=" + pcTradeFence.Summary);
-                    }
-                    else { PcTradeSummaryError = "parse"; ok = false; resp = "parse"; }
-                }
+                PcTradeSummaryAnswer s = null;
+                if (ok) { s = ParsePcTradeSummary(resp); if (s == null) { ok = false; resp = "parse"; } }
+                // ONE landing per answer, success or failure (TC-L5): an answer
+                // older than the one the slot holds is kept out whatever it says -
+                // no cache write, no error string, and the callback hears
+                // PcStaleOrder, so a stale 404 or 503 is never classified
+                bool keptOut = !pcTradeFence.LandSummary(order, ok, ok ? 200 : PcHttpCode(resp), ok ? null : PcTradeErrorCode(resp));
+                if (keptOut)
+                    Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=summary outcome=" + (ok ? "ok" : "fail") + " sent=" + order + " held=" + pcTradeFence.Summary);
+                else if (ok) { CachedPcTradeSummary = s; PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }
                 else { PcTradeSummaryError = resp; Plugin.Log.LogInfo($"[PC] trade summary failed: {PcShort(resp)}"); }
                 try { NativeUI.MarkDirty(); } catch { }
-                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade summary callback threw: {cex.Message}"); }
+                try { callback?.Invoke(!keptOut && ok, keptOut ? PcStaleOrder : resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade summary callback threw: {cex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
         }
 
@@ -4381,42 +4391,41 @@ namespace CompetitiveRounds
                     PcTrades(who, true, callback);
                     return;
                 }
-                bool keptOut = false;
-                if (ok)
+                PcTradeFull f = null;
+                if (ok) { f = ParsePcTradeFull(resp); if (f == null) { ok = false; resp = "parse"; } }
+                // ONE landing per answer, success or failure (TC-L5): a full answer
+                // writes both slots, so it must be no older than either; one kept
+                // out writes nothing, whatever it says, and the callback hears
+                // PcStaleOrder
+                bool keptOut = !pcTradeFence.LandFull(order, ok, ok ? 200 : PcHttpCode(resp), ok ? null : PcTradeErrorCode(resp));
+                if (keptOut)
                 {
-                    var f = ParsePcTradeFull(resp);
-                    if (f != null)
-                    {
-                        if (pcTradeFence.TakeFull(order))
-                        {
-                            CachedPcTrades = f; PcTradesFetchedAt = Time.realtimeSinceStartup; PcTradesError = null;
-                            // the full read carries every summary field: the summary cache follows it
-                            CachedPcTradeSummary = f; PcTradeSummaryFetchedAt = PcTradesFetchedAt; PcTradeSummaryError = null;
-                        }
-                        else
-                        {
-                            // a newer answer is already held: taking this one would put the cache back
-                            keptOut = true;
-                            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=full sent=" + order + " held=" + pcTradeFence.Summary + (reask ? " reask=1" : ""));
-                        }
-                    }
-                    else { PcTradesError = "parse"; ok = false; resp = "parse"; }
+                    // a newer answer is already held: taking this one would put the cache back
+                    Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=full outcome=" + (ok ? "ok" : "fail") + " sent=" + order + " held=" + pcTradeFence.Summary + (reask ? " reask=1" : ""));
+                }
+                else if (ok)
+                {
+                    CachedPcTrades = f; PcTradesFetchedAt = Time.realtimeSinceStartup; PcTradesError = null;
+                    // the full read carries every summary field: the summary cache follows it
+                    CachedPcTradeSummary = f; PcTradeSummaryFetchedAt = PcTradesFetchedAt; PcTradeSummaryError = null;
                 }
                 else { PcTradesError = resp; Plugin.Log.LogInfo($"[PC] trades read failed: {PcShort(resp)}"); }
                 // A forced read that came in while this one was out, or ONE re-ask
-                // after an answer the fence kept out (the full slot is then older
+                // after a SUCCESS the fence kept out (the full slot is then older
                 // than the summary): re-issued next frame, once this answer has
-                // committed.
-                if (again || (keptOut && !reask))
+                // committed. A failure kept out is not asked again: the answer
+                // that kept it out is newer.
+                bool reaskNow = keptOut && ok && !reask;
+                if (again || reaskNow)
                 {
                     pcTradesAttemptAt = -100f;
-                    pcTradesStaleReask = keptOut && !reask;
+                    pcTradesStaleReask = reaskNow;
                     // bound to this answer's generation: the epoch check above proved
                     // the dispatch epoch is still the current one (TC-M2)
                     try { Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who, epoch)); } catch { }
                 }
                 try { NativeUI.MarkDirty(); } catch { }
-                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trades callback threw: {cex.Message}"); }
+                try { callback?.Invoke(!keptOut && ok, keptOut ? PcStaleOrder : resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trades callback threw: {cex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
         }
 
