@@ -1,6 +1,6 @@
 {
   "measured_from": {
-    "lane": "46f54d4689bba538f13f5ab81e5a98463bc22e09",
+    "lane": "8328b74c49c8c0141edfce00fb25658d0e0b61bc",
     "manifest": {
       "lane": "46f54d4689bba538f13f5ab81e5a98463bc22e09",
       "pin": "cc924982d612470830a90f7ffd05ef615fa96401"
@@ -39,21 +39,6 @@
       "class": "reason",
       "key": "SBloom",
       "text": "painted-in glow stays whatever you pick"
-    },
-    {
-      "class": "reason",
-      "key": "SBugBtn",
-      "text": "the form attaches the current log, which a later report cannot"
-    },
-    {
-      "class": "help_body",
-      "key": "SBugBtn",
-      "text": "Opens the report form. It attaches the log the game is writing right now, which is why a report filed while the problem is on screen carries more than one written afterwards."
-    },
-    {
-      "class": "when_to_press",
-      "key": "SBugBtn",
-      "text": "while the problem is still on screen"
     },
     {
       "class": "reason",
@@ -561,5 +546,5 @@
       "text": "Privacy & account"
     }
   ],
-  "total": 110
+  "total": 107
 }

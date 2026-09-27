@@ -83,7 +83,13 @@ def load():
     if frozen.get("schema") != "item13-i18n-authored/1":
         raise SystemExit("unexpected frozen schema %r" % frozen.get("schema"))
     fz = {(t["class"], t["key"], t["text"]) for t in frozen["terms"]}
-    au = {(t["class"], t["key"], t["text"]) for t in d["authored_i18n"]}
+    # Round-2 L5: the frozen set is the LANE's authored set - the terms of the
+    # rows present on the lane plus the page-wide terms (keys that name no
+    # row) - so the table's terms are compared in the same scope. A row the
+    # lane does not build (SBugBtn) authors nothing the lane ships.
+    desc = d["descriptors"]
+    au = {(t["class"], t["key"], t["text"]) for t in d["authored_i18n"]
+          if t["key"] not in desc or "lane" in desc[t["key"]]["present_on"]}
     if fz != au:
         raise SystemExit("the descriptor table's authored_i18n differs from the frozen set: "
                          "+%d -%d" % (len(au - fz), len(fz - au)))
