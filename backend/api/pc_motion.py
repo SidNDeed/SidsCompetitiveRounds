@@ -885,6 +885,17 @@ def job_key(print_id, rev, locale):
     return "atlas/%s/%s/%s" % (print_id, rev, locale)
 
 
+def preview_key(player_ref, rev, locale):
+    """The /card preview GIF's cache key, and the single-flight key of its
+    job (S4.7, S6.2): the subject, the preview's motion revision and the
+    locale, validated as a face key's parts are, else None. ONE file per
+    key -- the size ladder picks the card or the tile GIF from the source
+    (S4.5) -- so the key names no size."""
+    if _pcm_portrait.face_key(player_ref, rev, locale, "card") is None:
+        return None
+    return "preview/%s/%s/%s.gif" % (player_ref, rev, locale)
+
+
 class MotionCache:
     """Derived motion files on local disk under its own root (S4.7): a 1 GiB
     LRU by bytes, the face cache's 7-day age and 1-hour temporary limits,

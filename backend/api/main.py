@@ -30890,6 +30890,68 @@ async def internal_pc_face_print(
     return resp
 
 
+async def _pc_preview_read(db: AsyncSession, player_ref: str, loc: str, snapshot_id, *, motion: bool = False):
+    """The /card preview's read of its subject and the spec it draws -- ONE
+    read for both preview routes, the face preview and the motion preview GIF
+    (dance cards S6.2), so the GIF is drawn from exactly the spec the PNG is
+    and a subject one of them refuses cannot pass the other. Returns (sub,
+    ctx, spec, kind, phash, rev), or None when the subject is not in the pool
+    or has no member row in the snapshot read. `snapshot_id` pins that member
+    read to the snapshot the caller's /card body came from (r7 L1); None
+    reads the latest. `motion` adds the columns `pc_motion.servable` reads,
+    the subject's Steam id and its id (S4.9), for the GIF route and its job."""
+    # This decides pool membership -- it answers not_in_pool -- so it carries
+    # the pool's WHOLE word and not one half of it: no row comes back for a
+    # subject the word refuses (deleted, banned, id not a SteamID64, or never
+    # ran the mod), whichever snapshot is pinned. It read _PC_POOL_STEAM_ID_SQL
+    # alone until 2026-09-15, which is the Steam half of the merged rule and
+    # not the rule. The deleted/banned re-check below is that gate said again
+    # over the row `portrait_for` resolves the picture from.
+    cols, joins = _PC_PORTRAIT_RESOLVE_COLS, ""
+    if motion:
+        cols = _pc_motion_servable_cols("p") + ", p.steam_id AS subject_sid, p.id AS subject_player_id"
+        joins = _pc_motion_servable_joins("p")
+    sub = (await db.execute(text(
+        "SELECT p.display_name, " + cols +
+        " FROM players p" + joins + " WHERE p.id = CAST(:pid AS uuid) AND " + _PC_POOL_MEMBER_SQL), {"pid": player_ref})).mappings().first()
+    if sub is None or sub["subject_deleted"] or sub["subject_banned"]:
+        return None
+    member = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
+          FROM pc_pool_members m
+         WHERE m.player_id = CAST(:pid AS uuid)
+           AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))
+    """), {"pid": player_ref, "snap": snapshot_id})).mappings().first()
+    if member is None:
+        return None
+    ctx = await _pc_face_ctx(db, loc)
+    labels = ctx["labels"]
+    kind, phash = _pcp.portrait_for(sub)
+    name = _pcp.public_render_name(sub["display_name"])
+    rating = _pc_num(member["rating"])
+    board_rating = _pc_board_rating(rating) if rating is not None else None
+    # The same projection a minted face gets (v4 section 6): the tier in the
+    # RANK slot, the equipped shop title as the subtitle.
+    rank_name = _pc_rank_name(rating)
+    title = rank_name
+    subtitle = _pc_shop_title(member["title"], rank_name)
+    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
+    spec = {
+        "band": member["rarity"], "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "subtitle": subtitle,
+        "rating": int(board_rating) if board_rating is not None else None,
+        "pool_rank": int(member["pool_rank"]),
+        "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
+        "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
+        "foil": False, "signed": False, "sign": None,
+        "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
+        "top_card": _pcp.coverage_strip(member["top_card"] or ""),
+        "top_card_rgb": _PC_CARD_THEMES.get(_pcp.coverage_strip(member["top_card"] or "")),
+    }
+    rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
+    return sub, ctx, spec, kind, phash, rev
+
+
 @app.get("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", tags=["Internal"])
 async def internal_pc_face_preview(
     player_ref: str, locale: str,
@@ -30910,51 +30972,13 @@ async def internal_pc_face_preview(
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     loc = _pcp.effective_locale(locale, _pc_served_locales())
     await _pc_steam_prime([player_ref])   # v2 §7: the preview shows the picture, not the plate, on a first look
-    # This decides pool membership -- it answers not_in_pool -- so it carries
-    # the pool's WHOLE word and not one half of it: no row comes back for a
-    # subject the word refuses (deleted, banned, id not a SteamID64, or never
-    # ran the mod), whichever snapshot is pinned. It read _PC_POOL_STEAM_ID_SQL
-    # alone until 2026-09-15, which is the Steam half of the merged rule and
-    # not the rule. The deleted/banned re-check below is that gate said again
-    # over the row `portrait_for` resolves the picture from.
-    sub = (await db.execute(text(
-        "SELECT p.display_name, " + _PC_PORTRAIT_RESOLVE_COLS +
-        " FROM players p WHERE p.id = CAST(:pid AS uuid) AND " + _PC_POOL_MEMBER_SQL), {"pid": player_ref})).mappings().first()
-    if sub is None or sub["subject_deleted"] or sub["subject_banned"]:
+    # Pool membership, the member row of the pinned snapshot and the spec:
+    # the one preview read the motion preview GIF shares (_pc_preview_read).
+    read = await _pc_preview_read(db, player_ref, loc, snapshot_id)
+    if read is None:
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
-    member = (await db.execute(text("""
-        SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
-          FROM pc_pool_members m
-         WHERE m.player_id = CAST(:pid AS uuid)
-           AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))
-    """), {"pid": player_ref, "snap": snapshot_id})).mappings().first()
-    if member is None:
-        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
-    ctx = await _pc_face_ctx(db, loc)
+    _sub, ctx, spec, _kind, phash, rev = read
     labels = ctx["labels"]
-    kind, phash = _pcp.portrait_for(sub)
-    name = _pcp.public_render_name(sub["display_name"])
-    rating = _pc_num(member["rating"])
-    board_rating = _pc_board_rating(rating) if rating is not None else None
-    # The same projection a minted face gets (v4 §6): the tier in the RANK
-    # slot, the equipped shop title as the subtitle.
-    rank_name = _pc_rank_name(rating)
-    title = rank_name
-    subtitle = _pc_shop_title(member["title"], rank_name)
-    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
-    spec = {
-        "band": member["rarity"], "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
-        "subtitle": subtitle,
-        "rating": int(board_rating) if board_rating is not None else None,
-        "pool_rank": int(member["pool_rank"]),
-        "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
-        "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
-        "foil": False, "signed": False, "sign": None,
-        "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
-        "top_card": _pcp.coverage_strip(member["top_card"] or ""),
-        "top_card_rgb": _PC_CARD_THEMES.get(_pcp.coverage_strip(member["top_card"] or "")),
-    }
-    rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
     bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
     key = f"preview/{player_ref}/{rev}/{loc}/{bucket}.png"
     pbytes = await _pc_portrait_bytes(db, phash)
@@ -30963,6 +30987,116 @@ async def internal_pc_face_preview(
     data = await _pc_face_cache.get_or_render(
         key, _functools.partial(_pcf.render_face, spec, labels, pbytes, "card"))
     return _pc_png_response(data, "private, max-age=60")
+
+
+def _pc_gif_response(data: bytes, rev: str, still: str):
+    """The motion preview's warm answer (S6.2): private and a minute at most
+    -- the URL names the subject, not the picture -- with the preview's motion
+    revision and the still the motion is bound to, which the bot checks
+    against its lease before it posts."""
+    return _PcResponse(content=data, media_type="image/gif",
+                       headers={"Cache-Control": "private, max-age=60", "Content-Length": str(len(data)),
+                                "X-Motion-Rev": rev, "X-Motion-Static-Hash": still})
+
+
+async def _pc_motion_preview_job(player_ref: str, snapshot_id, locale: str, rev: str, expect: tuple):
+    """The /card preview GIF job (S4.5), run by the motion scheduler when it
+    STARTS. L5 holds here as for the print job: the subject is read again
+    through the one preview read, and the job goes on only while S4.9 still
+    holds, the preview's motion revision still recomputes to the one it was
+    scheduled under, and the subject, motion hash, still hash and still
+    descriptor are the ones the scheduling request read; the container is
+    read by that motion hash and the still by its hash. Anything else
+    publishes nothing. The derivation runs on the motion worker process
+    (S2F14) and the publish here. Returns ("done", the ladder's size or None)
+    or ("stale", why)."""
+    async with _pc_motion_sessions()() as db:
+        read = await _pc_preview_read(db, player_ref, locale, snapshot_id, motion=True)
+        if read is None:
+            return ("stale", "row")
+        sub, ctx, spec, _kind, phash, preview_rev = read
+        container = (await db.execute(text(
+            "SELECT bytes FROM pc_motions WHERE player_id = CAST(:pid AS uuid) AND motion_hash = CAST(:h AS text)"),
+            {"pid": player_ref, "h": sub["m_hash"]})).scalar_one_or_none()
+        still = await _pc_portrait_bytes(db, phash)
+    now_rev = None
+    if _pcm.servable(sub, sub["subject_sid"], _auto_owned):
+        now_rev = _pcm.motion_preview_rev(_pcm.motion_fingerprint(ctx["renderer_fp"]), preview_rev, sub["m_hash"])
+    if now_rev is None or now_rev != rev or _pc_motion_expect(sub) != expect or container is None or still is None:
+        return ("stale", "moved")
+    deadline = time.monotonic() + _pcm.JOB_DEADLINE_S       # the job's own clock starts when it does
+    size, data = await _pcm.in_motion_pool(_functools.partial(
+        _pcm.derive_preview_gif, spec, ctx["labels"], still, bytes(container), deadline=deadline))
+    key = _pcm.preview_key(player_ref, rev, locale)
+    if data is None:
+        _pcm.TOO_LARGE.add(key)
+    else:
+        await _pcm.in_motion_io(_pc_motion_cache.publish, key, data)
+    return ("done", size)
+
+
+@app.get("/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif", tags=["Internal"])
+async def internal_pc_motion_preview(
+    request: Request, player_ref: str, locale: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+    snapshot_id: int | None = Query(None, ge=1),
+    lease_id: str = Query("", max_length=64),
+):
+    """The /card motion preview GIF (dance cards S6.2). The subject is read
+    exactly as the face preview reads it -- the one preview read, with the
+    pool's whole word and its SteamID64 rule, and the member row of
+    `snapshot_id` -- and the lease is read, never written: unexpired, naming
+    this subject, its portrait_hash the motion's static_hash. Then the S4.9
+    predicate. Any of these false: 404. Warm: 200 image/gif, private for a
+    minute, with X-Motion-Rev and X-Motion-Static-Hash. Cold: the preview job
+    is scheduled or joined and the answer is 404 motion_cold AT ONCE -- this
+    route never renders, and never waits on a render, inside the bot's send
+    window. The key moves with every input of the picture (the preview's
+    motion revision over preview_rev), so a warm file is never another
+    picture's; the file is never the authority -- the row is read first."""
+    _require_internal_key(x_internal_key)
+    if not (_pcp.print_id_ok(player_ref) and _pcp.print_id_ok(lease_id)):
+        raise HTTPException(status_code=404, detail="Not found")
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    lease = (await db.execute(text("""
+        SELECT (l.until > now()) AS unexpired, l.portrait_hash AS leased_hash
+          FROM pc_delivery_leases l
+         WHERE l.id = CAST(:lease AS uuid) AND l.subject_id = CAST(:pid AS uuid)
+    """), {"lease": lease_id, "pid": player_ref})).mappings().first()
+    if lease is None or not lease["unexpired"]:
+        raise HTTPException(status_code=404, detail="Not found")
+    read = await _pc_preview_read(db, player_ref, loc, snapshot_id, motion=True)
+    if read is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    sub, ctx, _spec, _kind, _phash, preview_rev = read
+    if (not _pcm.servable(sub, sub["subject_sid"], _auto_owned) or not lease["leased_hash"]
+            or lease["leased_hash"] != sub["m_static"]):
+        raise HTTPException(status_code=404, detail="Not found")
+    rev = _pcm.motion_preview_rev(_pcm.motion_fingerprint(ctx["renderer_fp"]), preview_rev, sub["m_hash"])
+    key = _pcm.preview_key(player_ref, rev, loc) if rev else None
+    if key is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    expect = _pc_motion_expect(sub)
+    still = sub["m_static"]
+    await db.rollback()           # the reads are done: no connection is held while the scheduler is asked
+    if key in _pcm.TOO_LARGE:
+        raise HTTPException(status_code=404, detail={"error": "motion_too_large"})
+    data = await asyncio.to_thread(_pc_motion_cache.read, key)
+    if data is not None:
+        return _pc_gif_response(data, rev, still)
+    left = _pc_motion_jobs.failed_for(key)
+    if left:
+        raise _pc_motion_refusal(503, {"error": "motion_failed", "retry_after": int(left) + 1})
+    try:
+        _pc_motion_jobs.submit(key, _rl_client_address(request), _functools.partial(
+            _pc_motion_preview_job, player_ref, snapshot_id, loc, rev, expect))
+    except _pcm.MotionBusy:
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "retry_after": _PC_MOTION_RETRY_S})
+    raise HTTPException(status_code=404, detail={"error": "motion_cold"})
 
 
 @app.get("/api/v1/internal/pc/face/back", tags=["Internal"])
@@ -56633,16 +56767,16 @@ _LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
 
 # Dance cards (design S11.3): `pc_motion` on /health is how many of the
 # motion routes are REGISTERED on this app when /health is asked -- the
-# motion upload (S2.1), the per-visit motion read (S5.2), the atlas (S4.8)
-# and the selection (S2.10). The bot's GIF route (S6.2) is not built on this
-# branch; it joins the tuple when it is, and the word then reads 5. The key
-# is absent on any build before the batch and reads 4 on this one -- the
-# build discriminator S11.3 gives the release train -- and a build that
-# lost a route's registration reads fewer. DERIVED on every call, never
-# written down (#306, #342): a handler that is defined but not registered
-# does not count, and a comment or a docstring cannot move it. The tuple
-# holds the handlers themselves, so it is bound here, after the last of them.
-_PC_MOTION_ROUTES = (pc_motion_upload, pc_face_motion_read, pc_face_motion_atlas, pc_dance_select)
+# motion upload (S2.1), the per-visit motion read (S5.2), the atlas (S4.8),
+# the selection (S2.10) and the bot's motion preview GIF (S6.2). The key is
+# absent on any build before the batch and reads 5 on this one -- the build
+# discriminator S11.3 gives the release train -- and a build that lost a
+# route's registration reads fewer. DERIVED on every call, never written
+# down (#306, #342): a handler that is defined but not registered does not
+# count, and a comment or a docstring cannot move it. The tuple holds the
+# handlers themselves, so it is bound here, after the last of them.
+_PC_MOTION_ROUTES = (pc_motion_upload, pc_face_motion_read, pc_face_motion_atlas, pc_dance_select,
+                     internal_pc_motion_preview)
 
 
 def _pc_motion_health_word() -> int:
