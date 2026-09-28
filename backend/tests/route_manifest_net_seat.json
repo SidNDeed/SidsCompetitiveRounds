@@ -1759,7 +1759,7 @@
           ],
           "main",
           "ffa_lobby_assembly",
-          "a9a40cd2ecc98ff2c4acabba28a867c933fb0f5f"
+          "2f5e63bf2236334afd35580f175b0141fa065cf0"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/connect",
@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_lobby_connect",
-          "4ec4bdbf3928087375a95b9c62c5ef9f981f7e63"
+          "d36403e0537acfb5dc83da62d3c3bda1d5b7071d"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/release",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "ffa_lobby_release",
-          "c24f5425a8b6cbfc10fda7842d1d65563e50c869"
+          "ef338cf6d2ce36f7a7ab9c1240189f7b18aaefab"
         ],
         [
           "/api/v1/ffa/queue/join",
@@ -1840,7 +1840,7 @@
           ],
           "main",
           "health_check",
-          "cb0a29629e86a6b2d610c14ee7b6b14bf50546a4"
+          "e40966ab5d3150e3203812af960759ca4a2fad7d"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2650,7 +2650,7 @@
           ],
           "main",
           "spectate_participant_attest",
-          "0f94aa8a50d4802aad48606287cf0a899f360aea"
+          "d609e2edf20a974a0c07a58b21ab1120f7e54ac6"
         ],
         [
           "/api/v1/spectate/validate",
