@@ -662,7 +662,7 @@ def test_the_harness_compiles_only_the_rule_files():
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
                       "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
-                      "plugin/SessionReportRules.cs"):
+                      "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -732,3 +732,35 @@ def test_the_race_axis_is_the_modes_win_target(harness_run, name):
     rounds the mode is played to."""
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line
+
+
+# -- board row 31: the idle showcase's rotation -------------------------------
+
+def test_the_showcase_suite_ran_every_case_and_none_failed(harness_run):
+    """Board row 31: ShowcaseRules, executed - the idle showcase walks every
+    Compare metric in the tab's own order with one dwell each and leaves the
+    rest of its rotation as it was."""
+    suites = _suites(harness_run)
+    assert "showcase" in suites, "the ShowcaseRules suite did not report"
+    run, fail, verdict = suites["showcase"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[showcase\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 5 cases on the commit that added the suite; the floor is that count
+    # (#342). Raise it when cases are added.
+    assert run >= 5, "the ShowcaseRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    "showcase: every metric is one Compare view, in list order, one dwell each",
+    "showcase: Home, the two profiles, 2v2 and FFA keep their places and dwells",
+    "showcase: the metric dwell defaults to 15 s and is held to 3-300 s",
+    "showcase: one rotation shows all 34 metrics in order and logs each once",
+    "showcase (control): with fewer than 2 candidates the metric walk is skipped, as before",
+])
+def test_the_showcase_walk_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "showcase")
+    assert line.startswith("[showcase] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)

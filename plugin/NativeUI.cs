@@ -6327,9 +6327,15 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>Curated-metric setter for the showcase (design review:
-        /// never blindly iterate ActiveMetrics — several entries trigger
-        /// per-player lazy fetch storms). Matches the EXACT label in
+        /// <summary>Board row 31: the Compare tab's metric list in its order,
+        /// for the idle showcase's walk. A copy, so no caller can reorder the
+        /// array the render sites switch on.</summary>
+        internal static string[] CompareMetricNames => (string[])COMPARE_METRICS.Clone();
+
+        /// <summary>Metric setter for the showcase, which walks every
+        /// COMPARE_METRICS entry since board row 31 (IdleShowcase states the
+        /// request cost: a board metric fetches once per candidate per session
+        /// through ApiClient's caches). Matches the EXACT label in
         /// COMPARE_METRICS, then (Sept 1, broadcast verification of the Cards
         /// rework) in CARD_METRICS — a card-metric match flips to the Cards
         /// sub-tab and, when nothing is selected, seeds the selection from
@@ -16875,8 +16881,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             // collapsed into one per ladder — the axis is chosen on the graph itself
             // (RatingGraphAxis: updates / calendar / since first, remembered in the
             // config), and "over games" named a count the rows never were. The
-            // rename retires the old translation keys; IdleShowcase's CURATED_METRICS
-            // byte-matches this array and moved with it; DevSetCompareMetricByName
+            // rename retires the old translation keys; the idle showcase walks this
+            // array itself (board row 31, CompareMetricNames); DevSetCompareMetricByName
             // still accepts the four old names as aliases.
             "Elo", "FFA Elo",
             "Top Cards", "Worst Cards", "Hit / Block %",

@@ -180,6 +180,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
+        internal static ConfigEntry<float> BroadcastShowcaseMetricSeconds; // broadcast seat only -- board row 31: the idle showcase's dwell per Compare category
+        internal static ConfigEntry<string> BroadcastTestShowcase;         // broadcast seat only -- any new value plays one showcase rotation with the stream-live gate lifted
         internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
@@ -1162,6 +1164,12 @@ namespace CompetitiveRounds
             BroadcastTestDance = Config.Bind(
                 "Broadcast", "TestDance", "",
                 "Broadcast seat only. 'wheel' pins the dance wheel open, 'preview:<sku>' toggles the shop puppet, 'play:<idx>' dev-installs a dance on the local sandbox body (offline only). Empty closes the wheel + puppet; an installed play simply expires on its own.");
+            BroadcastShowcaseMetricSeconds = Config.Bind(
+                "Broadcast", "ShowcaseMetricSeconds", 15f,
+                "Broadcast seat only: how many seconds the idle showcase shows each Compare tab category; it walks every category in the tab's own order. 0 or less means the default (15); other values are held between 3 and 300. Applies from the next rotation.");
+            BroadcastTestShowcase = Config.Bind(
+                "Broadcast", "TestShowcase", "",
+                "Broadcast seat only: set to any NEW value to play one idle-showcase rotation even when the stream is not live; every other condition still applies (the director idle with nothing to watch, not in an online room, the F5 page free). Each Compare category shown logs a [SHOWCASE] metric line. A value present at startup never runs.");
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
@@ -2644,6 +2652,23 @@ namespace CompetitiveRounds
             }
         }
 
+        // Board row 31: [Broadcast] TestShowcase - one idle-showcase rotation
+        // with only the stream-live gate lifted, for the in-game witness (each
+        // Compare metric shown logs a [SHOWCASE] metric line). The sentinel
+        // levers' grammar and identity gate: the value present at startup is
+        // the baseline and never runs; each distinct NEW value runs once.
+        private static string _lastTestShowcase;
+        private void TickTestShowcase()
+        {
+            if (Plugin.BroadcastTestShowcase == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestShowcase.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestShowcase == null) { _lastTestShowcase = raw; return; }
+            if (raw == _lastTestShowcase) return;
+            _lastTestShowcase = raw;
+            if (raw.Length == 0) return;
+            IdleShowcase.DevRunOneRotation();
+        }
+
         // ── [Broadcast] TestSilence: headless silence-indicator verification ──
         // Sets data.silenceTime on a sandbox bot and lets vanilla
         // SilenceHandler.Update discover it — the same code path a real
@@ -3094,6 +3119,7 @@ namespace CompetitiveRounds
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }
+            try { TickTestShowcase(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)

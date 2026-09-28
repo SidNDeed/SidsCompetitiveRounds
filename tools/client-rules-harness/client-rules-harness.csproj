@@ -56,6 +56,11 @@
                         hook), so the client parser is executed against the
                         server's actual output.
 
+      ShowcaseRules.cs  the broadcast idle showcase's rotation (board row 31):
+                        every Compare metric in the tab's own order with one
+                        dwell each, the other views' places and dwells, the
+                        skip rule, and the one log line per metric shown.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -86,6 +91,7 @@
     <Compile Include="TitleLadderRulesSelfTest.cs" />
     <Compile Include="../../plugin/SessionReportRules.cs" />
     <Compile Include="SessionReportRulesSelfTest.cs" />
+    <Compile Include="../../plugin/ShowcaseRules.cs" />
   </ItemGroup>
 
 </Project>
