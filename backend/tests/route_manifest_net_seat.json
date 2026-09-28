@@ -709,7 +709,7 @@
           ],
           "main",
           "pc_open_pack",
-          "252cf43e752f4cb02f5a4777a31c6af790469f80"
+          "ff81410efa4f9e9e7f50fb9f284045ad508bb0dc"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -2972,7 +2972,7 @@
           ],
           "main",
           "internal_pc_daily",
-          "03bf4ca832d8332baa8b5767a530c9f6699b1177"
+          "daa549ed7e06e87ef986eccbb2e6194060163f06"
         ],
         [
           "/api/v1/internal/pc/events/ack",
@@ -3198,6 +3198,15 @@
           "main",
           "internal_pc_packs",
           "d5fbe3a83521448d0f98009cd43b4663087684c6"
+        ],
+        [
+          "/api/v1/internal/pc/packs/open",
+          [
+            "POST"
+          ],
+          "main",
+          "internal_pc_open_pack",
+          "86d78e2dd5851ddf03f629b1241c4ed0aa466313"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
@@ -3464,7 +3473,7 @@
       [
         "main",
         "lifespan",
-        "3714239a16bdc607734802d418c07cf087b05c00"
+        "c114912fc3655b220586c3c1a7b8f7a753a1866f"
       ]
     ]
   },
@@ -3616,6 +3625,7 @@
     "GET /api/v1/internal/pc/events/pending -> main.internal_pc_events_pending",
     "POST /api/v1/internal/pc/events/ack -> main.internal_pc_events_ack",
     "POST /api/v1/internal/pc/daily -> main.internal_pc_daily",
+    "POST /api/v1/internal/pc/packs/open -> main.internal_pc_open_pack",
     "GET /api/v1/internal/pc/collection -> main.internal_pc_collection",
     "GET /api/v1/internal/pc/card -> main.internal_pc_card",
     "POST /api/v1/pc/portrait -> main.pc_portrait_upload",
