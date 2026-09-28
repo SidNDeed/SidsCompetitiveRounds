@@ -1397,7 +1397,7 @@ def test_the_builds_page_continues_instead_of_discarding_rows():
     assert rules.count("starts.Add(i)") == 1, "the packer records a page break in one place"
     assert "blockH[" in builds and "blockH.Add(" in measure, "the draw path pages with the heights it measured"
     model = PLUGIN / "SessionReportModel.cs"
-    assert "FIXED_PAGES = 3" in strip_comments_only(model.read_text(encoding="utf-8"))
+    assert "FIXED_PAGES = 6" in strip_comments_only(model.read_text(encoding="utf-8"))
 
 
 def test_dividers_and_diagnostics_are_translated():
@@ -1605,3 +1605,64 @@ def test_a_builds_page_names_the_games_it_holds():
     assert 'I18n.TrF("Games {0}-{1} of {2}", first + 1, last + 1, Builds.Count)' in rng
     assert 'I18n.TrF("Game {0} of {1}", first + 1, Builds.Count)' in rng
 
+
+# -- board row 30d: the Totals pages ------------------------------------------
+
+def test_the_totals_pages_are_derived_by_the_executed_rules():
+    """Board row 30d: every Totals number comes from SessionReportRules.Derive
+    (the client harness executes it against the server's envelopes), called
+    once per model; the model keeps no second summing path of its own."""
+    model = PLUGIN / "SessionReportModel.cs"
+    build = _cs_body(model, "internal static Model Build(Envelope env)")
+    assert build.count("BuildTotalsPages(m, env)") == 1
+    pages = _cs_body(model, "private static void BuildTotalsPages(Model m, Envelope env)")
+    assert pages.count("Derive(env, m.Players)") == 1
+    whole = strip_comments_only(model.read_text(encoding="utf-8"))
+    for gone in ("kills_derived", "BuildTotals(", "SummaryLines", "TotalsRows"):
+        assert gone not in whole, gone
+    assert "FIXED_PAGES = 6" in whole, "timeline, rates and the four Totals pages"
+
+
+def test_a_stat_nobody_recorded_is_omitted_never_zero():
+    """Board row 30d: a column exists only when some player has a value, a
+    missing cell reads "-", and every cell formatter answers null (not 0) for
+    a value the set does not carry."""
+    model = PLUGIN / "SessionReportModel.cs"
+    col = _cs_body(model, "private static void Column(List<KeyValuePair<string, string[]>> cols, string header, int n, Func<int, string> cell)")
+    assert "if (any) cols.Add(" in col
+    fill = _cs_body(model, "private static void FillTable(Model m, Table t, List<KeyValuePair<string, string[]>> cols)")
+    assert 'c.Value[pi] ?? "-"' in fill and "if (cols.Count == 0) return;" in fill
+    for sig in ("private static string RatingCell(Envelope env, Model m, int pi, int which)",
+                "private static string PerGame(List<float?> xs, string fmt)",
+                "private static string KeysPerS(PlayerLine pl)",
+                "private static string Kd(PlayerLine pl)"):
+        assert "return null" in _cs_body(model, sig) or ": null" in _cs_body(model, sig), sig
+    text = strip_comments_only(model.read_text(encoding="utf-8"))
+    for helper in ("private static string F0(float? v) => v.HasValue ?",
+                   "private static string Int(int? v) => v.HasValue ?",
+                   "private static string Signed(int? v) => v.HasValue ?"):
+        line = text[text.index(helper):text.index(";", text.index(helper))]
+        assert line.rstrip().endswith(": null"), line
+    bars = _cs_body(model, "private static Bars MakeBars(string title, string unit, Derived d, Func<PlayerLine, List<float?>> pick, int games)")
+    assert 'b.Missing = I18n.Tr("not recorded for this mode")' in bars
+
+
+def test_the_totals_pages_draw_one_element_per_data_type():
+    """Board rows 30d/30f: the set page's tiles and game-length strip, the
+    players' rate tables, the per-game comparisons as bars, the progress
+    table - each page draws the element its data type calls for."""
+    view = PLUGIN / "SessionReportView.cs"
+    page = _cs_body(view, "private static void DrawPage(Rect body, SessionReportModel.Model m, int pg)")
+    for call in ("case 2: DrawSetPage(body, m)", "case 3: DrawPlayersPage(body, m)",
+                 "case 4: DrawPerGamePage(body, m)", "case 5: DrawProgressPage(body, m)"):
+        assert call in page, call
+    assert "DrawStrip(" in _cs_body(view, "private static void DrawSetPage(Rect body, SessionReportModel.Model m)")
+    assert "DrawTiles(" in _cs_body(view, "private static void DrawSetPage(Rect body, SessionReportModel.Model m)")
+    assert _cs_body(view, "private static void DrawPlayersPage(Rect body, SessionReportModel.Model m)").count("DrawTable(") == 2
+    assert _cs_body(view, "private static void DrawPerGamePage(Rect body, SessionReportModel.Model m)").count("DrawBars(") == 2
+    prog = _cs_body(view, "private static void DrawProgressPage(Rect body, SessionReportModel.Model m)")
+    assert "DrawTable(" in prog and prog.count("DrawBars(") == 2
+    model = PLUGIN / "SessionReportModel.cs"
+    pages = _cs_body(model, "private static void BuildTotalsPages(Model m, Envelope env)")
+    assert "d.Players[pi].Gold" in pages and "d.Players[pi].Xp" in pages, "gold and XP are the Derive lines' (set totals)"
+    assert "RatingCell(env, m, pi, 0)" in pages and "RatingCell(env, m, pi, 2)" in pages

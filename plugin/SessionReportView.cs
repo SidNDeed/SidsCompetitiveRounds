@@ -63,12 +63,13 @@ namespace CompetitiveRounds
         private static int PageCount() => SessionReportModel.FIXED_PAGES + Mathf.Max(1, buildPages);
 
         private static bool stylesReady;
-        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny, stChip;
+        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny, stChip, stTinyC, stWrap;
         private static readonly Color BACKDROP = new Color(0.04f, 0.05f, 0.08f, 0.95f);
         private static readonly Color PANEL = new Color(1f, 1f, 1f, 0.05f);
         private static readonly Color GRID = new Color(1f, 1f, 1f, 0.08f);
         private static readonly Color DIVIDER = new Color(1f, 1f, 1f, 0.40f);
         private static readonly Color ROW = new Color(1f, 1f, 1f, 0.04f);
+        private static readonly Color STRIP_PLAIN = new Color(0.55f, 0.62f, 0.72f);
         private static readonly CultureInfo INV = CultureInfo.InvariantCulture;
 
         /// <summary>Open (or re-target) the view on one set. `selector` is
@@ -304,7 +305,10 @@ namespace CompetitiveRounds
                     DrawPanel(new Rect(body.x + half + gap, sy, half, hs), m.Fps, m, false);
                     break;
                 }
-                case 2: DrawTotals(body, m); break;
+                case 2: DrawSetPage(body, m); break;
+                case 3: DrawPlayersPage(body, m); break;
+                case 4: DrawPerGamePage(body, m); break;
+                case 5: DrawProgressPage(body, m); break;
                 default: DrawBuilds(body, m, pg - SessionReportModel.FIXED_PAGES); break;
             }
         }
@@ -388,42 +392,179 @@ namespace CompetitiveRounds
             return new Vector2(x, y);
         }
 
-        // ── totals page ──────────────────────────────────────────────────────
+        // -- the Totals pages (board row 30d) ---------------------------------------
 
-        private static void DrawTotals(Rect body, SessionReportModel.Model m)
+        /// <summary>Set: the tiles (games, time, shortest, longest, average,
+        /// final score), the game-length strip, and the score race summary.</summary>
+        private static void DrawSetPage(Rect body, SessionReportModel.Model m)
         {
-            Fill(body, PANEL);
-            int cols = m.TotalsHeader.Count;
-            if (cols == 0) return;
-            float nameW = Mathf.Min(260f, body.width * 0.28f);
-            float otherW = (body.width - nameW - 16f) / Mathf.Max(1, cols - 1);
-            float rowH = 30f, y = body.y + 8f;
+            const float gap = 10f, tilesH = 86f, stripH = 118f;
+            DrawTiles(new Rect(body.x, body.y, body.width, tilesH), m.SetTiles);
+            DrawStrip(new Rect(body.x, body.y + tilesH + gap, body.width, stripH), m);
+            var race = new Rect(body.x, body.y + tilesH + stripH + 2f * gap, body.width, body.height - tilesH - stripH - 2f * gap);
+            Fill(race, PANEL);
+            GUI.Label(new Rect(race.x + 8f, race.y + 2f, race.width - 16f, 22f), I18n.Tr("Score race"), stBody);
+            float noteH = m.RaceNote.Length > 0 ? 24f : 0f;
+            if (noteH > 0f)
+                GUI.Label(new Rect(race.x + 8f, race.y + 26f, race.width - 16f, 22f), m.RaceNote, stSmall);
+            GUI.Label(new Rect(race.x + 8f, race.y + 28f + noteH, race.width - 16f, race.height - 32f - noteH), m.RaceLine, stWrap);
+        }
+
+        /// <summary>Players: the combat table, then cards, points and momentum.</summary>
+        private static void DrawPlayersPage(Rect body, SessionReportModel.Model m)
+        {
+            const float gap = 10f;
+            float h1 = (body.height - gap) * 0.5f;
+            string missing = I18n.Tr("not recorded for this mode");
+            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Combat, missing);
+            DrawTable(new Rect(body.x, body.y + h1 + gap, body.width, body.height - h1 - gap), m.Play, missing);
+        }
+
+        /// <summary>Per game: damage and kills, one bar per player per game.</summary>
+        private static void DrawPerGamePage(Rect body, SessionReportModel.Model m)
+        {
+            const float gap = 10f;
+            float h1 = (body.height - gap) * 0.5f;
+            DrawBars(new Rect(body.x, body.y, body.width, h1), m.DamageBars, m);
+            DrawBars(new Rect(body.x, body.y + h1 + gap, body.width, body.height - h1 - gap), m.KillsBars, m);
+        }
+
+        /// <summary>Progress: rating before / after / change, gold and XP this
+        /// set, then gold and XP per game where the games recorded them.</summary>
+        private static void DrawProgressPage(Rect body, SessionReportModel.Model m)
+        {
+            const float gap = 10f;
+            float h1 = Mathf.Min(body.height * 0.45f, 60f + 28f * (m.Players.Count + 1));
+            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Progress, I18n.Tr("no rating, gold or XP recorded for this set"));
+            float y = body.y + h1 + gap, h2 = body.height - h1 - gap, half = (body.width - gap) / 2f;
+            DrawBars(new Rect(body.x, y, half, h2), m.GoldBars, m);
+            DrawBars(new Rect(body.x + half + gap, y, half, h2), m.XpBars, m);
+        }
+
+        private static void DrawTiles(Rect r, List<SessionReportModel.Tile> tiles)
+        {
+            if (tiles.Count == 0) return;
+            const float gap = 10f;
+            // The final score (the last tile) gets twice a tile's width.
+            float unit = (r.width - gap * (tiles.Count - 1)) / (tiles.Count + 1);
+            float x = r.x;
+            for (int i = 0; i < tiles.Count; i++)
+            {
+                float w = i == tiles.Count - 1 ? r.xMax - x : unit;
+                var t = new Rect(x, r.y, w, r.height);
+                Fill(t, PANEL);
+                GUI.Label(new Rect(t.x + 10f, t.y + 4f, t.width - 20f, 20f), "<color=#8FA3B8>" + tiles[i].Label + "</color>", stSmall);
+                GUI.Label(new Rect(t.x + 10f, t.y + 26f, t.width - 20f, 30f), tiles[i].Value, stHeader);
+                if (tiles[i].Sub.Length > 0)
+                    GUI.Label(new Rect(t.x + 10f, t.y + 58f, t.width - 20f, 20f), "<color=#8FA3B8>" + tiles[i].Sub + "</color>", stTiny);
+                x += w + gap;
+            }
+        }
+
+        /// <summary>The game-length strip: one segment per timed game, its
+        /// width its share of the set's time; the shortest and longest marked.</summary>
+        private static void DrawStrip(Rect r, SessionReportModel.Model m)
+        {
+            Fill(r, PANEL);
+            GUI.Label(new Rect(r.x + 8f, r.y + 2f, r.width * 0.5f, 22f), I18n.Tr("Game lengths"), stBody);
+            GUI.Label(new Rect(r.x + r.width * 0.5f, r.y + 2f, r.width * 0.5f - 8f, 22f), m.StripKey, stSmallR);
+            if (m.Strip.Count == 0 || m.StripTotal <= 0f)
+            {
+                GUI.Label(r, "<color=#8FA3B8>" + I18n.Tr("not recorded for this mode") + "</color>", stCenter);
+                return;
+            }
+            var bar = new Rect(r.x + 8f, r.y + 32f, r.width - 16f, 40f);
+            float x = bar.x;
+            for (int i = 0; i < m.Strip.Count; i++)
+            {
+                var s = m.Strip[i];
+                float w = bar.width * s.Seconds / m.StripTotal;
+                Color c = s.Mark == 1 ? SessionReportModel.STRIP_SHORT : s.Mark == 2 ? SessionReportModel.STRIP_LONG : STRIP_PLAIN;
+                Fill(new Rect(x, bar.y, Mathf.Max(1f, w - 2f), bar.height), new Color(c.r, c.g, c.b, 0.55f));
+                string lab = w >= 96f ? s.Label : (w >= 18f ? s.Short : "");
+                if (lab.Length > 0) GUI.Label(new Rect(x + 4f, bar.y, w - 6f, bar.height), lab, stSmall);
+                x += w;
+            }
+            if (m.StripNote.Length > 0)
+                GUI.Label(new Rect(r.x + 8f, bar.yMax + 6f, r.width - 16f, 20f), "<color=#8FA3B8>" + m.StripNote + "</color>", stTiny);
+        }
+
+        /// <summary>A Totals table: the columns the model kept (a stat nobody
+        /// recorded is not a column), one row per player.</summary>
+        private static void DrawTable(Rect r, SessionReportModel.Table t, string missing)
+        {
+            Fill(r, PANEL);
+            GUI.Label(new Rect(r.x + 8f, r.y + 2f, r.width - 16f, 22f), t.Title, stBody);
+            int cols = t.Header.Count;
+            if (cols == 0)
+            {
+                GUI.Label(r, "<color=#8FA3B8>" + missing + "</color>", stCenter);
+                return;
+            }
+            float nameW = Mathf.Min(240f, r.width * 0.22f);
+            float otherW = (r.width - nameW - 16f) / Mathf.Max(1, cols - 1);
+            float rowH = 28f, y = r.y + 28f;
             for (int c = 0; c < cols; c++)
             {
-                float x = body.x + 8f + (c == 0 ? 0f : nameW + (c - 1) * otherW);
-                GUI.Label(new Rect(x, y, c == 0 ? nameW : otherW, rowH), "<color=#8FA3B8>" + m.TotalsHeader[c] + "</color>", stCellHead);
+                float x = r.x + 8f + (c == 0 ? 0f : nameW + (c - 1) * otherW);
+                GUI.Label(new Rect(x, y, c == 0 ? nameW : otherW, rowH), "<color=#8FA3B8>" + t.Header[c] + "</color>", stCellHead);
             }
             y += rowH;
-            for (int ri = 0; ri < m.TotalsRows.Count; ri++)
+            for (int ri = 0; ri < t.Rows.Count; ri++)
             {
-                if (y + rowH > body.yMax - 8f) break;
-                if ((ri & 1) == 0) Fill(new Rect(body.x + 4f, y, body.width - 8f, rowH), ROW);
-                var row = m.TotalsRows[ri];
+                if (y + rowH > r.yMax - 2f) break;
+                if ((ri & 1) == 0) Fill(new Rect(r.x + 4f, y, r.width - 8f, rowH), ROW);
+                var row = t.Rows[ri];
                 for (int c = 0; c < cols && c < row.Count; c++)
                 {
-                    float x = body.x + 8f + (c == 0 ? 0f : nameW + (c - 1) * otherW);
+                    float x = r.x + 8f + (c == 0 ? 0f : nameW + (c - 1) * otherW);
                     GUI.Label(new Rect(x, y, c == 0 ? nameW : otherW, rowH), row[c], stCell);
                 }
                 y += rowH;
             }
-            y += 14f;
-            GUI.Label(new Rect(body.x + 8f, y, body.width - 16f, 24f), I18n.Tr("Set summary"), stBody);
-            y += 26f;
-            for (int i = 0; i < m.SummaryLines.Count; i++)
+        }
+
+        /// <summary>Per-game grouped bars on a fixed grid: one group per game
+        /// (numbered), one bar per player in the player's colour, the value
+        /// above the bar where it fits.</summary>
+        private static void DrawBars(Rect r, SessionReportModel.Bars b, SessionReportModel.Model m)
+        {
+            Fill(r, PANEL);
+            GUI.Label(new Rect(r.x + 8f, r.y + 2f, r.width * 0.7f, 22f), b.Title, stBody);
+            GUI.Label(new Rect(r.xMax - r.width * 0.3f - 8f, r.y + 2f, r.width * 0.3f, 22f), b.Unit, stSmallR);
+            if (b.Missing != null)
             {
-                if (y + 22f > body.yMax - 4f) break;
-                GUI.Label(new Rect(body.x + 8f, y, body.width - 16f, 22f), m.SummaryLines[i], stSmall);
-                y += 22f;
+                GUI.Label(r, "<color=#8FA3B8>" + b.Missing + "</color>", stCenter);
+                return;
+            }
+            var plot = new Rect(r.x + 60f, r.y + 44f, r.width - 76f, r.height - 44f - 22f);
+            if (plot.width < 20f || plot.height < 10f) return;
+            for (int k = 0; k <= 4; k++)
+            {
+                float y = plot.yMax - plot.height * k / 4f;
+                CompetitiveUI.GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), GRID, 1f);
+                float v = b.MaxY * k / 4f;
+                GUI.Label(new Rect(r.x + 4f, y - 10f, 52f, 20f),
+                    "<color=#8FA3B8>" + v.ToString(v >= 100f ? "F0" : "0.#", INV) + "</color>", stSmallR);
+            }
+            int games = b.Values.Count, n = m.Players.Count;
+            float groupW = plot.width / Mathf.Max(1, games);
+            float barW = Mathf.Max(1f, (groupW - 6f) / Mathf.Max(1, n));
+            for (int gi = 0; gi < games; gi++)
+            {
+                float gx = plot.x + gi * groupW + 3f;
+                var row = b.Values[gi];
+                for (int pi = 0; pi < n && pi < row.Length; pi++)
+                {
+                    if (!row[pi].HasValue) continue;
+                    float hgt = Mathf.Clamp01(Mathf.Max(0f, row[pi].Value) / Mathf.Max(1e-3f, b.MaxY)) * plot.height;
+                    var bar = new Rect(gx + pi * barW, plot.yMax - hgt, Mathf.Max(1f, barW - 1f), hgt);
+                    Fill(bar, pi < m.Tints.Count ? m.Tints[pi] : Color.white);
+                    if (barW >= 28f && b.Texts[gi][pi] != null)
+                        GUI.Label(new Rect(bar.x - 6f, bar.y - 18f, barW + 12f, 18f), b.Texts[gi][pi], stTinyC);
+                }
+                if (groupW >= 14f)
+                    GUI.Label(new Rect(gx, plot.yMax + 2f, groupW - 6f, 18f), b.Labels[gi], stTinyC);
             }
         }
 
@@ -611,6 +752,10 @@ namespace CompetitiveRounds
             stTiny = Mk(12, TextAnchor.UpperLeft, FontStyle.Bold);
             // A card chip: one line, never wrapped (MiddleLeft does not wrap in Mk).
             stChip = Mk(13, TextAnchor.MiddleLeft, FontStyle.Bold);
+            stTinyC = Mk(12, TextAnchor.MiddleCenter, FontStyle.Bold);
+            stTinyC.wordWrap = false;
+            // The score race summary: a paragraph that wraps (UpperLeft wraps in Mk).
+            stWrap = Mk(15, TextAnchor.UpperLeft, FontStyle.Bold);
             stCell = Mk(15, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCellHead = Mk(13, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCenter = Mk(18, TextAnchor.MiddleCenter, FontStyle.Bold);

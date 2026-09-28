@@ -39,12 +39,13 @@ namespace CompetitiveRounds
     {
         /// <summary>Rolling-window length for DPS / hit % / block %.</summary>
         internal const float WINDOW_S = 15f;
-        /// <summary>Pages with a fixed layout (timeline, rates, totals). The
+        /// <summary>Pages with a fixed layout (timeline, rates, and the four
+        /// Totals pages: set, players, per game, progress - board row 30d). The
         /// builds follow: one block per game, as many blocks per page as fit
         /// and as many pages as they need - their count depends on the body
         /// size, so the VIEW owns it (SessionReportView.PageCount) and nothing
         /// is ever dropped for not fitting (review r1, board row 30c).</summary>
-        internal const int FIXED_PAGES = 3;
+        internal const int FIXED_PAGES = 6;
         private const int NAME_CAP = 18;
         /// <summary>A card chip's cap: long enough for the longest shipped
         /// localized card name, short enough that one chip fits a column.</summary>
@@ -119,6 +120,38 @@ namespace CompetitiveRounds
             public readonly List<BuildCol> Cols = new List<BuildCol>();
         }
 
+        /// <summary>A Set page tile: what it counts, the number, a footnote.</summary>
+        internal sealed class Tile { public string Label = "", Value = "", Sub = ""; }
+
+        /// <summary>One timed game on the game-length strip.</summary>
+        internal sealed class StripSeg
+        {
+            public float Seconds;
+            public string Label = "", Short = "";
+            public int Mark;                 // 1 = the set's shortest game, 2 = its longest
+        }
+
+        /// <summary>A Totals table: the columns some player has a value for,
+        /// one row per player; a cell with no value reads "-".</summary>
+        internal sealed class Table
+        {
+            public string Title = "";
+            public readonly List<string> Header = new List<string>();
+            public readonly List<List<string>> Rows = new List<List<string>>();
+        }
+
+        /// <summary>Per-game grouped bars: one group per game, one bar per
+        /// player (null: the player did not play that game, or it recorded no
+        /// value) - the element for per-game comparisons.</summary>
+        internal sealed class Bars
+        {
+            public string Title = "", Unit = "", Missing;
+            public float MaxY = 1f;
+            public readonly List<float?[]> Values = new List<float?[]>();
+            public readonly List<string[]> Texts = new List<string[]>();
+            public readonly List<string> Labels = new List<string>();
+        }
+
         internal sealed class Model
         {
             public Envelope Env;
@@ -133,10 +166,14 @@ namespace CompetitiveRounds
             public Panel Damage, Score;
             // page 2
             public Panel Dps, HitPct, BlockPct, Ping, Fps;
-            // page 3
-            public readonly List<string> TotalsHeader = new List<string>();
-            public readonly List<List<string>> TotalsRows = new List<List<string>>();
-            public readonly List<string> SummaryLines = new List<string>();
+            // the Totals pages (board row 30d): set, players, per game, progress
+            public Derived Derived;
+            public readonly List<Tile> SetTiles = new List<Tile>();
+            public readonly List<StripSeg> Strip = new List<StripSeg>();
+            public float StripTotal;
+            public string StripKey = "", StripNote = "", RaceLine = "", RaceNote = "";
+            public readonly Table Combat = new Table(), Play = new Table(), Progress = new Table();
+            public Bars DamageBars, KillsBars, GoldBars, XpBars;
             // the builds pages: one block per game, packed onto pages by the view
             public readonly List<GameBuild> Builds = new List<GameBuild>();
             public string BuildsMissing;
@@ -173,7 +210,10 @@ namespace CompetitiveRounds
             string missing = I18n.Tr("not recorded for this mode");
             m.PageTitles[0] = I18n.Tr("Timeline");
             m.PageTitles[1] = I18n.Tr("Rates");
-            m.PageTitles[2] = I18n.Tr("Totals");
+            m.PageTitles[2] = I18n.Tr("Set totals");
+            m.PageTitles[3] = I18n.Tr("Player totals");
+            m.PageTitles[4] = I18n.Tr("Per game");
+            m.PageTitles[5] = I18n.Tr("Progress");
             m.BuildsTitle = I18n.Tr("Builds");
 
             // Roster, colours, legend.
@@ -332,9 +372,10 @@ namespace CompetitiveRounds
             if (m.BlockPct.Missing != null && legacyBlocks)
                 m.BlockPct.Missing = I18n.Tr("not recorded (older block format)");
 
-            // Page 3 — totals strip (summed over the games that recorded them)
-            // and the set summary, taken from set_summary ONCE (C-7).
-            BuildTotals(m, env);
+            // The Totals pages (board row 30d): derived by SessionReportRules.Derive,
+            // which the client harness executes; rating, gold and XP are read
+            // from set_summary ONCE (C-7).
+            BuildTotalsPages(m, env);
 
             // The builds (board row 30c): one compact block per game - its
             // number, recorded score and length in the header, then one column
@@ -381,95 +422,233 @@ namespace CompetitiveRounds
             return m;
         }
 
-        private static void BuildTotals(Model m, Envelope env)
+        /// <summary>The four Totals pages (board row 30d). Every number comes
+        /// from SessionReportRules.Derive over named envelope fields (the field
+        /// map is in the lane notes); rating, gold and XP are the set_summary's,
+        /// read ONCE (C-7). A column nobody has a value for is omitted and a
+        /// missing cell reads "-" - a stat that was not recorded is never a 0.</summary>
+        private static void BuildTotalsPages(Model m, Envelope env)
         {
-            m.TotalsHeader.Clear();
-            m.TotalsHeader.AddRange(new[]
-            {
-                I18n.Tr("Player"), I18n.Tr("Damage"), I18n.Tr("Shots"), I18n.Tr("Hit %"),
-                I18n.Tr("Blocks"), I18n.Tr("Block %"), I18n.Tr("Keys/s"), I18n.Tr("Deaths"),
-                I18n.Tr("Kills"), I18n.Tr("K/D"),
-            });
+            var d = Derive(env, m.Players);
+            m.Derived = d;
+            var set = d.Set;
             int n = m.Players.Count;
-            var sum = new Dictionary<string, float>[n];
-            for (int i = 0; i < n; i++) sum[i] = new Dictionary<string, float>();
-            float totalDur = 0f; int durGames = 0;
-            foreach (var g in env.Games)
+
+            // Set: the tiles, the game-length strip and the score race summary.
+            m.SetTiles.Add(new Tile
             {
-                if (g.DurationS > 0f) { totalDur += g.DurationS; durGames++; }
-                for (int pi = 0; pi < n; pi++)
-                {
-                    Dictionary<string, float> t;
-                    if (!g.Totals.TryGetValue(m.Players[pi].Id, out t) || t == null) continue;
-                    foreach (var kv in t)
-                    {
-                        float cur;
-                        sum[pi].TryGetValue(kv.Key, out cur);
-                        sum[pi][kv.Key] = cur + kv.Value;
-                    }
-                }
-                // 1v1: a fighter's kill is the other fighter's death (server-derived
-                // from the point events when the row itself carries no kill count).
-                if (n == 2)
-                {
-                    for (int pi = 0; pi < 2; pi++)
-                    {
-                        Dictionary<string, float> other;
-                        float od;
-                        if (g.Totals.TryGetValue(m.Players[1 - pi].Id, out other) && other != null
-                            && other.TryGetValue("deaths", out od))
-                        {
-                            float cur;
-                            sum[pi].TryGetValue("kills_derived", out cur);
-                            sum[pi]["kills_derived"] = cur + od;
-                        }
-                    }
-                }
-            }
-            for (int pi = 0; pi < n; pi++)
+                Label = I18n.Tr("Games"), Value = set.Games.ToString(INV),
+                Sub = env.GamesOmitted > 0 ? I18n.TrF("{0} not shown", env.GamesOmitted) : "",
+            });
+            if (set.Timed > 0)
             {
-                var s = sum[pi];
-                float shots = Val(s, "shots"), hits = Val(s, "hits"), blocks = Val(s, "blocks"), ok = Val(s, "blocks_ok");
-                float keys = Val(s, "keys"), act = Val(s, "active_s"), deaths = Val(s, "deaths");
-                float kills = s.ContainsKey("kills") ? s["kills"] : Val(s, "kills_derived");
-                var row = new List<string>
-                {
-                    Coloured(m, pi, Safe(m.Players[pi].Name)),
-                    Cell(s, "damage"),
-                    Cell(s, "shots"),
-                    shots > 0f ? (100f * hits / shots).ToString("F0", INV) + "%" : "-",
-                    Cell(s, "blocks"),
-                    blocks > 0f ? (100f * ok / blocks).ToString("F0", INV) + "%" : "-",
-                    act > 0.5f && !float.IsNaN(keys) ? (keys / act).ToString("F1", INV) : "-",
-                    Cell(s, "deaths"),
-                    float.IsNaN(kills) ? "-" : kills.ToString("F0", INV),
-                    !float.IsNaN(kills) && !float.IsNaN(deaths)
-                        ? (deaths > 0f ? (kills / deaths).ToString("F2", INV) : kills.ToString("F0", INV))
-                        : "-",
-                };
-                m.TotalsRows.Add(row);
+                string timed = set.Timed < set.Games ? I18n.TrF("{0} of {1} games timed", set.Timed, set.Games) : "";
+                m.SetTiles.Add(new Tile { Label = I18n.Tr("Total time"), Value = Clock(set.TotalS), Sub = timed });
+                m.SetTiles.Add(new Tile { Label = I18n.Tr("Shortest game"), Value = Clock(set.ShortestS), Sub = I18n.TrF("game {0}", set.ShortestGame + 1) });
+                m.SetTiles.Add(new Tile { Label = I18n.Tr("Longest game"), Value = Clock(set.LongestS), Sub = I18n.TrF("game {0}", set.LongestGame + 1) });
+                m.SetTiles.Add(new Tile { Label = I18n.Tr("Average game"), Value = Clock(set.AverageS), Sub = timed });
+                m.StripNote = timed;
             }
-            if (durGames > 0)
-                m.SummaryLines.Add(I18n.TrF("Average game length: {0}", Clock(totalDur / durGames)));
-            for (int pi = 0; pi < n; pi++)
+            m.SetTiles.Add(new Tile { Label = I18n.Tr("Final score"), Value = FinalScore(m, set.Wins) });
+            for (int gi = 0; gi < env.Games.Count; gi++)
             {
-                string pid = m.Players[pi].Id;
-                string who = Coloured(m, pi, Safe(m.Players[pi].Name));
-                RatingEntry r;
-                if (env.Rating.TryGetValue(pid, out r) && r != null)
+                var g = env.Games[gi];
+                if (g.DurationS <= 0f) continue;
+                m.Strip.Add(new StripSeg
                 {
-                    string delta = (r.Delta >= 0f ? "+" : "") + r.Delta.ToString("F1", INV);
-                    if (r.Before.HasValue && r.After.HasValue)
-                        m.SummaryLines.Add(I18n.TrF("{0}: rating {1} -> {2} ({3})", who,
-                            r.Before.Value.ToString("F0", INV), r.After.Value.ToString("F0", INV), delta));
-                    else
-                        m.SummaryLines.Add(I18n.TrF("{0}: rating {1}", who, delta));
-                }
-                int gold;
-                if (env.Gold.TryGetValue(pid, out gold))
-                    m.SummaryLines.Add(I18n.TrF("{0}: {1} gold", who, (gold >= 0 ? "+" : "") + gold.ToString(INV)));
+                    Seconds = g.DurationS,
+                    Label = I18n.TrF("Game {0}", gi + 1) + "  " + Clock(g.DurationS),
+                    Short = (gi + 1).ToString(INV),
+                    Mark = gi == set.ShortestGame ? 1 : gi == set.LongestGame ? 2 : 0,
+                });
+                m.StripTotal += g.DurationS;
             }
-            if (m.SummaryLines.Count == 0) m.SummaryLines.Add(I18n.Tr("no rating or gold recorded for this set"));
+            m.StripKey = Tinted(STRIP_SHORT, I18n.Tr("shortest")) + "   " + Tinted(STRIP_LONG, I18n.Tr("longest"));
+            var race = new StringBuilder();
+            for (int gi = 0; gi < env.Games.Count; gi++)
+            {
+                if (gi > 0) race.Append("      ");
+                race.Append(BlockHeader(m, env.Games[gi], gi + 1));
+            }
+            m.RaceLine = race.ToString();
+            if (set.LeadChanges >= 0)
+                m.RaceNote = I18n.TrF("The lead in rounds changed hands {0} times over the set", set.LeadChanges);
+
+            // Players: combat, then cards, points and momentum.
+            m.Combat.Title = I18n.Tr("Combat");
+            var combat = new List<KeyValuePair<string, string[]>>();
+            Column(combat, I18n.Tr("Damage"), n, pi => F0(d.Players[pi].Total("damage")));
+            Column(combat, I18n.Tr("Dmg/game"), n, pi => PerGame(d.Players[pi].DamageByGame, "F0"));
+            Column(combat, I18n.Tr("Shots"), n, pi => F0(d.Players[pi].Total("shots")));
+            Column(combat, I18n.Tr("Hit %"), n, pi => Pct(d.Players[pi].Total("hits"), d.Players[pi].Total("shots")));
+            Column(combat, I18n.Tr("Blocks"), n, pi => F0(d.Players[pi].Total("blocks")));
+            Column(combat, I18n.Tr("Block %"), n, pi => Pct(d.Players[pi].Total("blocks_ok"), d.Players[pi].Total("blocks")));
+            Column(combat, I18n.Tr("Keys/s"), n, pi => KeysPerS(d.Players[pi]));
+            Column(combat, I18n.Tr("Deaths"), n, pi => F0(d.Players[pi].Total("deaths")));
+            Column(combat, I18n.Tr("Kills"), n, pi => F0(d.Players[pi].Kills));
+            Column(combat, I18n.Tr("Kills/game"), n, pi => PerGame(d.Players[pi].KillsByGame, "F1"));
+            Column(combat, I18n.Tr("K/D"), n, pi => Kd(d.Players[pi]));
+            FillTable(m, m.Combat, combat);
+
+            m.Play.Title = I18n.Tr("Cards and points");
+            var play = new List<KeyValuePair<string, string[]>>();
+            Column(play, I18n.Tr("Cards picked"), n, pi => Int(d.Players[pi].CardsPicked));
+            Column(play, I18n.Tr("Cards/game"), n, pi => d.Players[pi].CardsPicked.HasValue && d.Players[pi].Games > 0
+                ? (d.Players[pi].CardsPicked.Value / (float)d.Players[pi].Games).ToString("F1", INV) : null);
+            Column(play, I18n.Tr("Points won"), n, pi => Int(d.Players[pi].PointsWon));
+            Column(play, I18n.Tr("Points lost"), n, pi => Int(d.Players[pi].PointsLost));
+            Column(play, I18n.Tr("First bloods"), n, pi => Int(d.Players[pi].FirstBloods));
+            Column(play, I18n.Tr("Longest point streak"), n, pi => Int(d.Players[pi].LongestStreak));
+            Column(play, I18n.Tr("Biggest comeback (rounds)"), n, pi => Int(d.Players[pi].BiggestComeback));
+            Column(play, I18n.Tr("Time in lead"), n, pi => d.Players[pi].LeadS.HasValue ? Clock(d.Players[pi].LeadS.Value) : null);
+            FillTable(m, m.Play, play);
+
+            // Per game: one bar per player per game.
+            int games = env.Games.Count;
+            m.DamageBars = MakeBars(I18n.Tr("Damage per game"), I18n.Tr("dmg"), d, pl => pl.DamageByGame, games);
+            m.KillsBars = MakeBars(I18n.Tr("Kills per game"), I18n.Tr("kills"), d, pl => pl.KillsByGame, games);
+
+            // Progress: rating before / after / change, gold and XP this set.
+            m.Progress.Title = I18n.Tr("Rating, gold and XP");
+            var prog = new List<KeyValuePair<string, string[]>>();
+            Column(prog, I18n.Tr("Rating before"), n, pi => RatingCell(env, m, pi, 0));
+            Column(prog, I18n.Tr("Rating after"), n, pi => RatingCell(env, m, pi, 1));
+            Column(prog, I18n.Tr("Change"), n, pi => RatingCell(env, m, pi, 2));
+            Column(prog, I18n.Tr("Gold this set"), n, pi => Signed(d.Players[pi].Gold));
+            Column(prog, I18n.Tr("XP this set"), n, pi => Signed(d.Players[pi].Xp));
+            FillTable(m, m.Progress, prog);
+            m.GoldBars = MakeBars(I18n.Tr("Gold per game"), I18n.Tr("gold"), d, pl => pl.GoldByGame, games);
+            m.XpBars = MakeBars(I18n.Tr("XP per game"), I18n.Tr("XP"), d, pl => pl.XpByGame, games);
+        }
+
+        /// <summary>A table column: kept only when some player has a value.</summary>
+        private static void Column(List<KeyValuePair<string, string[]>> cols, string header, int n, Func<int, string> cell)
+        {
+            var cells = new string[n];
+            bool any = false;
+            for (int i = 0; i < n; i++)
+            {
+                cells[i] = cell(i);
+                if (cells[i] != null) any = true;
+            }
+            if (any) cols.Add(new KeyValuePair<string, string[]>(header, cells));
+        }
+
+        private static void FillTable(Model m, Table t, List<KeyValuePair<string, string[]>> cols)
+        {
+            if (cols.Count == 0) return;
+            t.Header.Add(I18n.Tr("Player"));
+            foreach (var c in cols) t.Header.Add(c.Key);
+            for (int pi = 0; pi < m.Players.Count; pi++)
+            {
+                var row = new List<string> { Coloured(m, pi, Safe(m.Players[pi].Name)) };
+                foreach (var c in cols) row.Add(c.Value[pi] ?? "-");
+                t.Rows.Add(row);
+            }
+        }
+
+        private static Bars MakeBars(string title, string unit, Derived d, Func<PlayerLine, List<float?>> pick, int games)
+        {
+            var b = new Bars { Title = title, Unit = unit };
+            bool any = false;
+            for (int gi = 0; gi < games; gi++)
+            {
+                var row = new float?[d.Players.Count];
+                var text = new string[d.Players.Count];
+                for (int pi = 0; pi < row.Length; pi++)
+                {
+                    var xs = pick(d.Players[pi]);
+                    row[pi] = gi < xs.Count ? xs[gi] : null;
+                    if (!row[pi].HasValue) continue;
+                    any = true;
+                    float v = row[pi].Value;
+                    if (v > b.MaxY) b.MaxY = v;
+                    text[pi] = v.ToString(Mathf.Abs(v - Mathf.Round(v)) < 0.05f ? "F0" : "F1", INV);
+                }
+                b.Values.Add(row);
+                b.Texts.Add(text);
+                b.Labels.Add("<color=#8FA3B8>" + (gi + 1).ToString(INV) + "</color>");
+            }
+            if (!any) b.Missing = I18n.Tr("not recorded for this mode");
+            else b.MaxY = NiceCeil(b.MaxY);
+            return b;
+        }
+
+        /// <summary>The set's final score in games won: the two names with the
+        /// winner in colour (two players), the two sides (2v2 / 1v2), or the
+        /// best four (FFA).</summary>
+        private static string FinalScore(Model m, int[] wins)
+        {
+            int n = m.Players.Count;
+            if (n == 2) return ScoreLine(m, 0, wins[0], 1, wins[1]);
+            if (m.Kind == "team" || m.Kind == "ovt")
+            {
+                int p1 = -1, p2 = -1;
+                for (int i = 0; i < n; i++)
+                {
+                    if (m.Players[i].Team == 1 && p1 < 0) p1 = i;
+                    else if (m.Players[i].Team == 2 && p2 < 0) p2 = i;
+                }
+                if (p1 < 0 || p2 < 0) return "-";
+                string a = wins[p1].ToString(INV), b = wins[p2].ToString(INV);
+                if (wins[p1] > wins[p2]) a = Coloured(m, p1, a);
+                else if (wins[p2] > wins[p1]) b = Coloured(m, p2, b);
+                return m.Kind == "ovt"
+                    ? I18n.TrF("solo {0}-{1} duo", a, b)
+                    : I18n.TrF("team 1 {0}-{1} team 2", a, b);
+            }
+            var order = new List<int>();
+            for (int i = 0; i < n; i++) order.Add(i);
+            order.Sort((x, y) => wins[y] != wins[x] ? wins[y].CompareTo(wins[x]) : x.CompareTo(y));
+            var sb = new StringBuilder();
+            for (int k = 0; k < order.Count && k < 4; k++)
+            {
+                if (k > 0) sb.Append(", ");
+                sb.Append(Coloured(m, order[k], Safe(m.Players[order[k]].Name))).Append(' ').Append(wins[order[k]].ToString(INV));
+            }
+            if (order.Count > 4) sb.Append(", ").Append(I18n.TrF("+{0} more", order.Count - 4));
+            return sb.ToString();
+        }
+
+        /// <summary>set_summary.rating for player `pi`: 0 = before, 1 = after,
+        /// 2 = the signed change; null when the set carries no such value.</summary>
+        private static string RatingCell(Envelope env, Model m, int pi, int which)
+        {
+            RatingEntry r;
+            if (!env.Rating.TryGetValue(m.Players[pi].Id, out r) || r == null) return null;
+            if (which == 0) return r.Before.HasValue ? r.Before.Value.ToString("F0", INV) : null;
+            if (which == 1) return r.After.HasValue ? r.After.Value.ToString("F0", INV) : null;
+            return (r.Delta >= 0f ? "+" : "") + r.Delta.ToString("F1", INV);
+        }
+
+        private static string F0(float? v) => v.HasValue ? v.Value.ToString("F0", INV) : null;
+
+        private static string Int(int? v) => v.HasValue ? v.Value.ToString(INV) : null;
+
+        private static string Signed(int? v) => v.HasValue ? (v.Value >= 0 ? "+" : "") + v.Value.ToString(INV) : null;
+
+        private static string Pct(float? num, float? den)
+            => num.HasValue && den.HasValue && den.Value > 0f ? (100f * num.Value / den.Value).ToString("F0", INV) + "%" : null;
+
+        private static string PerGame(List<float?> xs, string fmt)
+        {
+            float sum = 0f;
+            int k = 0;
+            foreach (var x in xs) if (x.HasValue) { sum += x.Value; k++; }
+            return k > 0 ? (sum / k).ToString(fmt, INV) : null;
+        }
+
+        private static string KeysPerS(PlayerLine pl)
+        {
+            float? keys = pl.Total("keys"), act = pl.Total("active_s");
+            return keys.HasValue && act.HasValue && act.Value > 0.5f ? (keys.Value / act.Value).ToString("F1", INV) : null;
+        }
+
+        private static string Kd(PlayerLine pl)
+        {
+            float? deaths = pl.Total("deaths");
+            if (!pl.Kills.HasValue || !deaths.HasValue) return null;
+            return deaths.Value > 0f ? (pl.Kills.Value / deaths.Value).ToString("F2", INV) : pl.Kills.Value.ToString("F0", INV);
         }
 
         // ── series maths (pure) ──────────────────────────────────────────────
@@ -527,6 +706,8 @@ namespace CompetitiveRounds
         private static readonly Color RARITY_RARE = new Color(0.95f, 0.35f, 0.65f);
         private static readonly Color RARITY_OTHER = new Color(0.7f, 0.7f, 0.75f);
         private static readonly Color ROLLED_TEXT = new Color(0.44f, 0.48f, 0.53f);
+        internal static readonly Color STRIP_SHORT = new Color(0.45f, 0.8f, 0.55f);
+        internal static readonly Color STRIP_LONG = new Color(0.95f, 0.65f, 0.3f);
 
         internal static Color RarityTint(string rarity)
         {

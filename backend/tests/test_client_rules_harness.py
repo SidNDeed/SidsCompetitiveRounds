@@ -267,9 +267,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The suite ran 31 cases on the commit that added it, 35 once board row
-    # 30b added the overlay rule's cases and 38 with 30c's builds layout; the
-    # floor is that count (#342). Raise it when cases are added.
-    assert run >= 38, "the SessionReportRules suite shrank to %d cases" % run
+    # 30b added the overlay rule's cases, 38 with 30c's builds layout and 59
+    # with 30d's derived numbers; the floor is that count (#342). Raise it
+    # when cases are added.
+    assert run >= 59, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -675,6 +676,7 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "SessionReportRulesSelfTest" not in plugin_proj
     assert not (REPO / "plugin" / "SessionReportRulesSelfTest.cs").exists()
 
+
 @pytest.mark.parametrize("name", [
     "builds: pages pack as many games as fit and a tall one alone",
     "builds (control): no cap - thirty short games share one page when they fit",
@@ -686,3 +688,33 @@ def test_the_builds_pages_pack_and_flow_by_the_rules(harness_run, name):
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line
 
+
+@pytest.mark.parametrize("name", [
+    "derive: 1v1 first bloods from the first point of each game",
+    "derive: 1v1 longest point streak",
+    "derive: 1v1 biggest comeback counts games won only",
+    "derive: 1v1 seconds in the lead (rounds)",
+    "derive: 1v1 lead changes over the set",
+    "derive: every game's rounds race ends on its recorded rounds",
+    "derive: points won and lost (1v1)",
+    "derive: set shortest, longest, average and total time",
+    "derive: the final score counts games won",
+    "derive: damage per game in game order",
+    "derive: 1v1 kills per game are the other fighter's recorded deaths",
+    "derive: hit and block rate per game",
+    "derive: cards picked count every pick of the player",
+    "derive: gold and XP this set are the server's totals",
+    "derive: per-game gold and XP in game order",
+    "derive (control): without the totals the legacy gold shows and XP is omitted",
+    "derive (control): a stream that skips a point is not replayed",
+    "derive: 2v2 points lost are the other side's points",
+    "derive: 2v2 has no first blood, streak, comeback or lead (no point events)",
+    "derive: an FFA player's games count only the games they played",
+    "derive: FFA has no points lost and its games are won by the top score",
+])
+def test_the_session_report_derives_every_totals_number(harness_run, name):
+    """Board row 30d: SessionReportRules.Derive / Replay1v1, executed against
+    the envelopes the server tests produced; the model and view only format
+    and draw these numbers."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line

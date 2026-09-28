@@ -75,6 +75,10 @@ namespace CompetitiveRounds
             /// key is "not recorded", never zero (#257).</summary>
             public readonly Dictionary<string, Dictionary<string, float>> Totals
                 = new Dictionary<string, Dictionary<string, float>>();
+            /// <summary>Board row 30d: this game's own ledger gold and XP record
+            /// per player (sparse).</summary>
+            public readonly Dictionary<string, int> Gold = new Dictionary<string, int>();
+            public readonly Dictionary<string, int> Xp = new Dictionary<string, int>();
         }
 
         internal sealed class RatingEntry { public float? Before, After; public float Delta; }
@@ -91,6 +95,12 @@ namespace CompetitiveRounds
             public readonly List<Game> Games = new List<Game>();
             public readonly Dictionary<string, RatingEntry> Rating = new Dictionary<string, RatingEntry>();
             public readonly Dictionary<string, int> Gold = new Dictionary<string, int>();
+            /// <summary>Board row 30d: what the set earned (set_summary.gold_total /
+            /// xp_total). HasTotals is false for a server that predates them; the
+            /// page then shows the legacy `gold` and no XP.</summary>
+            public bool HasTotals;
+            public readonly Dictionary<string, int> GoldTotal = new Dictionary<string, int>();
+            public readonly Dictionary<string, int> XpTotal = new Dictionary<string, int>();
         }
 
         // -- parse --------------------------------------------------------------
@@ -220,6 +230,8 @@ namespace CompetitiveRounds
                     case "end_stats":
                         foreach (var e in Members(kv.Value)) { string s = Str(e.Value); if (s.Length > 0) g.EndStats[e.Key] = s; }
                         break;
+                    case "gold": Ints(kv.Value, g.Gold); break;
+                    case "xp": Ints(kv.Value, g.Xp); break;
                     case "totals":
                         foreach (var pl in Members(kv.Value))
                         {
@@ -256,14 +268,19 @@ namespace CompetitiveRounds
                         env.Rating[pl.Key] = r;
                     }
                 }
-                else if (kv.Key == "gold")
-                {
-                    foreach (var e in Members(kv.Value))
-                    {
-                        float v = Num(e.Value, float.NaN);
-                        if (!float.IsNaN(v)) env.Gold[e.Key] = (int)v;
-                    }
-                }
+                else if (kv.Key == "gold") Ints(kv.Value, env.Gold);
+                else if (kv.Key == "gold_total") { env.HasTotals = true; Ints(kv.Value, env.GoldTotal); }
+                else if (kv.Key == "xp_total") { env.HasTotals = true; Ints(kv.Value, env.XpTotal); }
+            }
+        }
+
+        /// <summary>{key: number} into `into`, a non-number skipped (sparse).</summary>
+        private static void Ints(string obj, Dictionary<string, int> into)
+        {
+            foreach (var e in Members(obj))
+            {
+                float v = Num(e.Value, float.NaN);
+                if (!float.IsNaN(v)) into[e.Key] = (int)v;
             }
         }
 
@@ -497,6 +514,353 @@ namespace CompetitiveRounds
             }
             rows = widths.Count == 0 ? 0 : row + 1;
             return at;
+        }
+
+        // -- board row 30d: the Totals pages' numbers (pure) --------------------
+
+        /// <summary>ROUNDS' two-sided rule: a round is won at 2 points
+        /// (GameStateWatcher's recorder; the mod does not change it).</summary>
+        internal const int POINTS_PER_ROUND = 2;
+
+        /// <summary>A 1v1 game's point events replayed: who scored first, each
+        /// side's longest run of consecutive points, its worst deficit in rounds,
+        /// the seconds it led in rounds, how often the lead changed hands, and
+        /// the rounds race itself. The recorder writes each side's value as
+        /// rounds * 2 + points inside the round (GameStateWatcher; the server
+        /// passes it through as the `score` stream), so a round win zeroes BOTH
+        /// sides' points. `Exact` is false - and nothing else is set - when the
+        /// streams cannot be replayed one point per event into the recorded
+        /// rounds (a decimated or damaged stream): a derived number is shown
+        /// only when the events prove it.</summary>
+        internal sealed class Momentum
+        {
+            public bool Exact;
+            public int FirstScorer = -1;
+            public readonly int[] LongestStreak = new int[2];
+            public readonly int[] WorstDeficit = new int[2];
+            public readonly float[] LeadS = new float[2];
+            public int LeadChanges;
+            /// <summary>(t, rounds) at every round end, from (0, 0).</summary>
+            public readonly List<Pt>[] Rounds = { new List<Pt>(), new List<Pt>() };
+        }
+
+        internal static Momentum Replay1v1(List<Pt> a, List<Pt> b, int roundsA, int roundsB, float durationS)
+        {
+            if (a == null || b == null || a.Count == 0 || a.Count != b.Count) return new Momentum();
+            var m = new Momentum();
+            int ra = 0, rb = 0, pa = 0, pb = 0, run = 0, runSide = -1;
+            int leader = -1, lastLeader = -1;
+            float lastT = 0f;
+            m.Rounds[0].Add(new Pt(0f, 0f));
+            m.Rounds[1].Add(new Pt(0f, 0f));
+            for (int i = 0; i < a.Count; i++)
+            {
+                int va = (int)Math.Round(a[i].Y), vb = (int)Math.Round(b[i].Y);
+                float t = a[i].X;
+                if (va < 0 || vb < 0 || t < lastT || Math.Abs(b[i].X - t) > 0.05f) return new Momentum();
+                int na = va / POINTS_PER_ROUND, npa = va % POINTS_PER_ROUND;
+                int nb = vb / POINTS_PER_ROUND, npb = vb % POINTS_PER_ROUND;
+                int side = Scorer(ra, pa, rb, pb, na, npa, nb, npb);
+                if (side < 0) return new Momentum();
+                if (m.FirstScorer < 0) m.FirstScorer = side;
+                run = side == runSide ? run + 1 : 1;
+                runSide = side;
+                if (run > m.LongestStreak[side]) m.LongestStreak[side] = run;
+                if (leader >= 0) m.LeadS[leader] += t - lastT;
+                lastT = t;
+                bool roundEnded = na != ra || nb != rb;
+                ra = na; pa = npa; rb = nb; pb = npb;
+                if (roundEnded)
+                {
+                    m.Rounds[0].Add(new Pt(t, ra));
+                    m.Rounds[1].Add(new Pt(t, rb));
+                    leader = ra > rb ? 0 : rb > ra ? 1 : -1;
+                    if (leader >= 0 && lastLeader >= 0 && leader != lastLeader) m.LeadChanges++;
+                    if (leader >= 0) lastLeader = leader;
+                    m.WorstDeficit[0] = Math.Max(m.WorstDeficit[0], rb - ra);
+                    m.WorstDeficit[1] = Math.Max(m.WorstDeficit[1], ra - rb);
+                }
+            }
+            if (ra != roundsA || rb != roundsB) return new Momentum();
+            if (leader >= 0 && durationS > lastT) m.LeadS[leader] += durationS - lastT;
+            m.Exact = true;
+            return m;
+        }
+
+        /// <summary>Which side scored the ONE point that moved (ra, pa, rb, pb)
+        /// to the new state: 0, 1, or -1 when no single point explains it.</summary>
+        private static int Scorer(int ra, int pa, int rb, int pb, int na, int npa, int nb, int npb)
+        {
+            if (na == ra && nb == rb && npa == pa + 1 && npb == pb) return 0;
+            if (na == ra && nb == rb && npb == pb + 1 && npa == pa) return 1;
+            // the point that won the round: both sides' points reset
+            if (na == ra + 1 && nb == rb && npa == 0 && npb == 0 && pa == POINTS_PER_ROUND - 1) return 0;
+            if (nb == rb + 1 && na == ra && npa == 0 && npb == 0 && pb == POINTS_PER_ROUND - 1) return 1;
+            return -1;
+        }
+
+        /// <summary>One player's line of the Totals pages. Every field is
+        /// derived from named envelope fields (the field map is in the lane
+        /// notes); null means the data does not exist for this set or mode,
+        /// and the page omits it - never a zero.</summary>
+        internal sealed class PlayerLine
+        {
+            public int Games;
+            /// <summary>Stored counters summed over the games that recorded them.</summary>
+            public readonly Dictionary<string, float> Sum = new Dictionary<string, float>();
+            public float? Kills;
+            public int? CardsPicked, PointsWon, PointsLost;
+            public int? FirstBloods, LongestStreak, BiggestComeback;
+            public float? LeadS;
+            public int? Gold, Xp;
+            public readonly List<float?> DamageByGame = new List<float?>();
+            public readonly List<float?> KillsByGame = new List<float?>();
+            public readonly List<float?> HitPctByGame = new List<float?>();
+            public readonly List<float?> BlockPctByGame = new List<float?>();
+            public readonly List<float?> GoldByGame = new List<float?>();
+            public readonly List<float?> XpByGame = new List<float?>();
+
+            internal float? Total(string counter)
+            {
+                float v;
+                return Sum.TryGetValue(counter, out v) ? v : (float?)null;
+            }
+        }
+
+        internal sealed class SetLine
+        {
+            public int Games, Timed;
+            public float TotalS, ShortestS, LongestS, AverageS;
+            public int ShortestGame = -1, LongestGame = -1;
+            /// <summary>Per player: games won (a 2v2 / 1v2 player carries the
+            /// side's wins; an FFA game is won by its unique top score).</summary>
+            public int[] Wins = new int[0];
+            /// <summary>1v1 when every game replays exactly, else -1.</summary>
+            public int LeadChanges = -1;
+        }
+
+        internal sealed class Derived
+        {
+            public readonly SetLine Set = new SetLine();
+            public readonly List<PlayerLine> Players = new List<PlayerLine>();
+            /// <summary>Per game; null outside 1v1.</summary>
+            public readonly List<Momentum> Moments = new List<Momentum>();
+        }
+
+        internal static bool IsTwoSided(string kind) => kind == "team" || kind == "ovt";
+
+        /// <summary>The Totals pages' numbers for `players` (the de-duplicated
+        /// roster, in order) over every game of the envelope.</summary>
+        internal static Derived Derive(Envelope env, IList<Player> players)
+        {
+            var d = new Derived();
+            int n = players.Count;
+            string kind = env.Kind ?? "";
+            bool v1 = n == 2 && !IsTwoSided(kind) && kind != "ffa";
+            var set = d.Set;
+            set.Games = env.Games.Count;
+            set.Wins = new int[n];
+            set.ShortestS = float.MaxValue;
+            for (int gi = 0; gi < env.Games.Count; gi++)
+            {
+                var g = env.Games[gi];
+                if (g.DurationS > 0f)
+                {
+                    set.Timed++;
+                    set.TotalS += g.DurationS;
+                    if (g.DurationS < set.ShortestS) { set.ShortestS = g.DurationS; set.ShortestGame = gi; }
+                    if (g.DurationS > set.LongestS) { set.LongestS = g.DurationS; set.LongestGame = gi; }
+                }
+                CountWins(kind, g, players, set.Wins);
+            }
+            if (set.Timed > 0) set.AverageS = set.TotalS / set.Timed;
+            else set.ShortestS = 0f;
+
+            bool allExact = v1 && env.Games.Count > 0;
+            for (int gi = 0; gi < env.Games.Count; gi++)
+            {
+                Momentum mo = null;
+                if (v1)
+                {
+                    var g = env.Games[gi];
+                    mo = Replay1v1(Stream(g, players[0].Id, "score"), Stream(g, players[1].Id, "score"),
+                                   Score(g, players[0].Id), Score(g, players[1].Id), g.DurationS);
+                    if (!mo.Exact) allExact = false;
+                }
+                d.Moments.Add(mo);
+            }
+            if (allExact)
+            {
+                set.LeadChanges = 0;
+                foreach (var mo in d.Moments) set.LeadChanges += mo.LeadChanges;
+            }
+
+            for (int pi = 0; pi < n; pi++)
+            {
+                string pid = players[pi].Id;
+                var line = new PlayerLine();
+                bool killsRecorded = false, killsDerived = false, capped = false;
+                float kills = 0f, derivedKills = 0f;
+                int picks = 0, won = 0, lost = 0;
+                bool wonKnown = false, lostKnown = kind != "ffa";
+                for (int gi = 0; gi < env.Games.Count; gi++)
+                {
+                    var g = env.Games[gi];
+                    bool played = g.Scores.ContainsKey(pid);
+                    Dictionary<string, float> tot;
+                    g.Totals.TryGetValue(pid, out tot);
+                    float? gKills = null, gDmg = null, gHit = null, gBlock = null;
+                    if (played)
+                    {
+                        line.Games++;
+                        if (tot != null)
+                        {
+                            foreach (var kv in tot)
+                            {
+                                float cur;
+                                line.Sum.TryGetValue(kv.Key, out cur);
+                                line.Sum[kv.Key] = cur + kv.Value;
+                            }
+                            float v;
+                            if (tot.TryGetValue("damage", out v)) gDmg = v;
+                            if (tot.TryGetValue("kills", out v)) { gKills = v; kills += v; killsRecorded = true; }
+                            float shots, hits, blocks, ok;
+                            if (tot.TryGetValue("shots", out shots) && tot.TryGetValue("hits", out hits) && shots > 0f)
+                                gHit = 100f * hits / shots;
+                            if (tot.TryGetValue("blocks", out blocks) && tot.TryGetValue("blocks_ok", out ok) && blocks > 0f)
+                                gBlock = 100f * ok / blocks;
+                        }
+                        if (v1 && gKills == null)
+                        {
+                            // 1v1: a fighter's kill is the other fighter's recorded death
+                            Dictionary<string, float> other;
+                            float od;
+                            if (g.Totals.TryGetValue(players[1 - pi].Id, out other) && other != null
+                                && other.TryGetValue("deaths", out od))
+                            {
+                                gKills = od;
+                                derivedKills += od;
+                                killsDerived = true;
+                            }
+                        }
+                        foreach (var pk in g.Picks) if (pk.Id == pid) picks++;
+                        if (g.PicksCapped) capped = true;
+                        int pts;
+                        if (g.Points.TryGetValue(pid, out pts)) { won += pts; wonKnown = true; }
+                        if (lostKnown)
+                        {
+                            int opp = OpponentPoints(kind, g, players, pi);
+                            if (opp < 0) lostKnown = false; else lost += opp;
+                        }
+                    }
+                    line.DamageByGame.Add(gDmg);
+                    line.KillsByGame.Add(gKills);
+                    line.HitPctByGame.Add(gHit);
+                    line.BlockPctByGame.Add(gBlock);
+                    int gv;
+                    line.GoldByGame.Add(played && g.Gold.TryGetValue(pid, out gv) ? gv : (float?)null);
+                    line.XpByGame.Add(played && g.Xp.TryGetValue(pid, out gv) ? gv : (float?)null);
+                }
+                if (killsRecorded) line.Kills = kills;
+                else if (killsDerived) line.Kills = derivedKills;
+                if (line.Games > 0 && !capped) line.CardsPicked = picks;
+                if (wonKnown) line.PointsWon = won;
+                if (lostKnown && line.Games > 0) line.PointsLost = lost;
+                if (allExact)
+                {
+                    int fb = 0, streak = 0, comeback = 0;
+                    float lead = 0f;
+                    for (int gi = 0; gi < d.Moments.Count; gi++)
+                    {
+                        var mo = d.Moments[gi];
+                        if (mo.FirstScorer == pi) fb++;
+                        streak = Math.Max(streak, mo.LongestStreak[pi]);
+                        lead += mo.LeadS[pi];
+                        var g = env.Games[gi];
+                        if (Score(g, pid) > Score(g, players[1 - pi].Id))
+                            comeback = Math.Max(comeback, mo.WorstDeficit[pi]);
+                    }
+                    line.FirstBloods = fb;
+                    line.LongestStreak = streak;
+                    line.BiggestComeback = comeback;
+                    line.LeadS = lead;
+                }
+                int total;
+                if (env.HasTotals)
+                {
+                    if (env.GoldTotal.TryGetValue(pid, out total)) line.Gold = total;
+                    if (env.XpTotal.TryGetValue(pid, out total)) line.Xp = total;
+                }
+                else if (env.Gold.TryGetValue(pid, out total)) line.Gold = total;
+                d.Players.Add(line);
+            }
+            return d;
+        }
+
+        private static void CountWins(string kind, Game g, IList<Player> players, int[] wins)
+        {
+            int n = players.Count;
+            if (IsTwoSided(kind))
+            {
+                int s1 = -1, s2 = -1;
+                for (int i = 0; i < n; i++)
+                {
+                    int v;
+                    if (!g.Scores.TryGetValue(players[i].Id, out v)) continue;
+                    if (players[i].Team == 1 && s1 < 0) s1 = v;
+                    else if (players[i].Team == 2 && s2 < 0) s2 = v;
+                }
+                if (s1 < 0 || s2 < 0 || s1 == s2) return;
+                int side = s1 > s2 ? 1 : 2;
+                for (int i = 0; i < n; i++) if (players[i].Team == side && g.Scores.ContainsKey(players[i].Id)) wins[i]++;
+                return;
+            }
+            int best = int.MinValue, at = -1;
+            bool tie = false;
+            for (int i = 0; i < n; i++)
+            {
+                int v;
+                if (!g.Scores.TryGetValue(players[i].Id, out v)) continue;
+                if (v > best) { best = v; at = i; tie = false; }
+                else if (v == best) tie = true;
+            }
+            if (at >= 0 && !tie) wins[at]++;
+        }
+
+        /// <summary>The points scored against player `pi` in game g: the other
+        /// fighter's in 1v1, the other side's in 2v2 / 1v2; -1 when the game
+        /// does not say (FFA has no "against").</summary>
+        private static int OpponentPoints(string kind, Game g, IList<Player> players, int pi)
+        {
+            if (kind == "ffa") return -1;
+            if (IsTwoSided(kind))
+            {
+                int mine = players[pi].Team;
+                for (int i = 0; i < players.Count; i++)
+                {
+                    int v;
+                    if (players[i].Team != mine && players[i].Team > 0 && g.Points.TryGetValue(players[i].Id, out v))
+                        return v;
+                }
+                return -1;
+            }
+            if (players.Count != 2) return -1;
+            int o;
+            return g.Points.TryGetValue(players[1 - pi].Id, out o) ? o : -1;
+        }
+
+        internal static int Score(Game g, string id)
+        {
+            int v;
+            return g.Scores.TryGetValue(id, out v) ? v : 0;
+        }
+
+        internal static List<Pt> Stream(Game g, string id, string name)
+        {
+            Dictionary<string, List<Pt>> streams;
+            List<Pt> s;
+            if (g.Timelines.TryGetValue(id, out streams) && streams != null && streams.TryGetValue(name, out s)) return s;
+            return null;
         }
 
         // -- series maths (pure) -----------------------------------------------
