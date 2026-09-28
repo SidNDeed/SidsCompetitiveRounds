@@ -1074,7 +1074,18 @@ def test_the_helper_closure_stays_affordable():
     # That last one widens the reviewed surface rather than narrowing it, which
     # is the only direction this gate may be wrong in. The bound moves to 460,
     # the same ~5% headroom 420 gave over 401 and 400 gave over 383.
-    assert all_worst <= 460, f"worst closure {all_worst} of {total}"
+    # Discord fix (2026-09-28): the same route measured 459 at the lane base
+    # 64885ef, 460 at the round-1 tip d4a284d and 461 at round 2's 12952d5 -
+    # one code binding per round, each one the route really runs:
+    # main._pc_open_for (round 1: the open path this route and the bot's
+    # POST /api/v1/internal/pc/packs/open share, keyed by the purchase's
+    # nonce) and main._pc_committed_answer (round 2: the recorded outcome a
+    # replayed key, a pack voided at open and /pc/packs/result answer, so no
+    # work after a purchase commits can fail its answer). Code tier 326 ->
+    # 327 -> 328, under its bound; median 75 and p90 164 -> 166 under
+    # theirs. The bound moves to 484, the same ~5% headroom 460 gave over
+    # 439, for that reason and no other.
+    assert all_worst <= 484, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
