@@ -2122,25 +2122,25 @@ def _n66(part):
     return PG + "test_s66_the_release[%s]" % part
 
 
-_REL_ROUTE = ('    held = {"lease": 0}\n'
+_REL_ROUTE = ('    held = {"lease": 0, "mark": "kept"}\n'
               '    return await _asm_run("release", lobby_id, req.steam_id, request, db,\n'
               '                          _asm_release_work, (req, held),\n'
               '                          pre=_asm_release_pre(req.steam_id, lobby_id, req.why, held))\n')
-_REL_UPD = ('            "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"\n'
-            '            " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL"),\n')
+_REL_UPD = ('    "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"\n'
+            '    " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL")\n')
 _REL_DEL = ('    row = (await ctx.db.execute(text(\n'
             '        "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid RETURNING player_id"),\n'
             '        {"pid": pid, "lid": ctx.lid})).scalar()\n')
 _REL_WHY = '    if req.why not in _ASM_RELEASE_WHY or not _pg_text_ok(req.steam_id):\n'
-_REL_PRE = ('            "DELETE FROM queue_leases WHERE player_id = :pid AND mode = \'ffa\''
-            ' AND group_id = :lid"),\n')
+_REL_PRE = ('    "DELETE FROM queue_leases WHERE player_id = :pid AND mode = \'ffa\''
+            ' AND group_id = :lid")\n')
 _REL_ME = ('    me = ctx.seat_of(pid)\n'
            '    row = (await ctx.db.execute(text(\n'
            '        "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid')
 _REL_RET = '    return {"release": {"status": "ok"}}\n'
 row("S66", ["test_s66_the_release[%s]" % p for p in ("i-iii", "iv", "v", "check")], [
     M("through_the_leave", "S66 i byte-identical",
-      E(MAIN, _REL_ROUTE, '    held = {"lease": 0}\n'
+      E(MAIN, _REL_ROUTE, '    held = {"lease": 0, "mark": "kept"}\n'
                           '    out = await _asm_run("release", lobby_id, req.steam_id, request, db,\n'
                           '                         _asm_release_work, (req, held),\n'
                           '                         pre=_asm_release_pre(req.steam_id, lobby_id, req.why, held))\n'
@@ -2226,18 +2226,17 @@ row("N10", "test_n10_a_released_seat_never_reaches_the_gone_rule", [
      E(MAIN, _WIT_REL, '        if q["gone_game"] is not None or bool(q["released_at"]):\n')))
 
 # -- Round 2, M1: the release's marker and lease, one durable unit -------------
-_M1_UNIT = ('        marked = await db.execute(text(\n'
-            + _REL_UPD +
-            '            {"why": why, "lid": lobby_id, "pid": pid})\n'
-            '        if (marked.rowcount or 0) == 0:\n'
-            '            seat = (await db.execute(text(\n'
-            '                "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),\n'
-            '                {"lid": lobby_id, "pid": pid})).scalar()\n'
-            '            if seat is None:\n'
-            '                return\n'
-            '        freed = await db.execute(text(\n'
-            + _REL_PRE +
-            '            {"pid": pid, "lid": lobby_id})\n'
+_M1_UNIT = ('        seat = (await db.execute(text(\n'
+            '            "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),\n'
+            '            {"lid": lobby_id, "pid": pid})).scalar()\n'
+            '        if seat is None:\n'
+            '            return\n'
+            '        marked = await db.execute(text(_ASM_RELEASE_MARK_SQL),\n'
+            '                                  {"why": why, "lid": lobby_id, "pid": pid})\n'
+            '        if (marked.rowcount or 0) > 0:\n'
+            '            held["mark"] = "pre"\n'
+            '        freed = await db.execute(text(_ASM_RELEASE_LEASE_SQL),\n'
+            '                                 {"pid": pid, "lid": lobby_id})\n'
             '        held["lease"] = 1 if (freed.rowcount or 0) > 0 else 0\n'
             '        await db.commit()\n'
             '        await _asm_begin(db, t0)\n'
@@ -2257,19 +2256,72 @@ _M1_WORK1 = ('    me = ctx.seat_of(pid)\n'
              '        {"why": req.why, "lid": ctx.lid, "pid": pid})\n'
              '    row = (await ctx.db.execute(text(\n'
              '        "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid')
-_M1_SEAT = ('                {"lid": lobby_id, "pid": pid})).scalar()\n'
-            '            if seat is None:\n'
-            '                return\n')
+_M1_SEAT = ('            {"lid": lobby_id, "pid": pid})).scalar()\n'
+            '        if seat is None:\n'
+            '            return\n')
 _M1_HELD = '        held["lease"] = 1 if (freed.rowcount or 0) > 0 else 0\n'
+# Round 3, M1: the locked step's re-check (the marker and the lease when the seat
+# row it reads under the lobby lock carries no marker).
+_M1B_LEASE = ('        freed = await ctx.db.execute(text(_ASM_RELEASE_LEASE_SQL),\n'
+              '                                     {"pid": pid, "lid": ctx.lid})\n'
+              '        if (freed.rowcount or 0) > 0:\n'
+              '            held["lease"] = 1\n')
+_M1B_CHECK = ('    if me["released_at"] is None:\n'
+              '        marked = await ctx.db.execute(text(_ASM_RELEASE_MARK_SQL),\n'
+              '                                      {"why": req.why, "lid": ctx.lid, "pid": pid})\n'
+              '        if (marked.rowcount or 0) > 0:\n'
+              '            held["mark"] = "lock"\n'
+              + _M1B_LEASE)
+_M1B_PRINT = ('    ctx.log(f"release slot={me[\'slot\']} why={req.why} lease={held[\'lease\']} "\n'
+              '            f"row={0 if row is None else 1} mark={held[\'mark\']}")\n')
 row("M1", "test_m1_the_release_marker_and_lease_are_one_unit", [
     M("round_one_ordering", "M1 no record",
-      E(MAIN, _M1_UNIT, _M1_ROUND1), E(MAIN, _REL_ME, _M1_WORK1),
+      E(MAIN, _M1_UNIT, _M1_ROUND1), E(MAIN, _REL_ME, _M1_WORK1), E(MAIN, _M1B_CHECK, ""),
       note="round 1 restored (5c6ddcf): the lease through _lease_release_by_steam in its own "
-           "COMMIT before the lock, the marker inside the locked work the deadline rolls back"),
+           "COMMIT before the lock, the marker inside the locked work the deadline rolls back "
+           "(round 3's locked re-check removed with it)"),
     M("unpaired_lease", "M1 unpaired",
-      E(MAIN, _M1_SEAT, '                {"lid": lobby_id, "pid": pid})).scalar()\n'),
+      E(MAIN, _M1_SEAT, '            {"lid": lobby_id, "pid": pid})).scalar()\n'),
       note="with no seat row the lease still goes, so a lease is released with no marker"),
 ], T("held_by_int", E(MAIN, _M1_HELD, '        held["lease"] = int((freed.rowcount or 0) > 0)\n')))
+
+# The round-2 release (de70bb4), for M1b's negative control: the pre-step marks
+# first and reads the seat row only when its UPDATE matched none; the locked
+# step deletes only the queue row.
+_M1B_PRE_R2 = ('        marked = await db.execute(text(\n'
+               '            "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"\n'
+               '            " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL"),\n'
+               '            {"why": why, "lid": lobby_id, "pid": pid})\n'
+               '        if (marked.rowcount or 0) == 0:\n'
+               '            seat = (await db.execute(text(\n'
+               '                "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),\n'
+               '                {"lid": lobby_id, "pid": pid})).scalar()\n'
+               '            if seat is None:\n'
+               '                return\n'
+               '        freed = await db.execute(text(\n'
+               '            "DELETE FROM queue_leases WHERE player_id = :pid AND mode = \'ffa\' AND group_id = :lid"),\n'
+               '            {"pid": pid, "lid": lobby_id})\n'
+               '        held["lease"] = 1 if (freed.rowcount or 0) > 0 else 0\n'
+               '        await db.commit()\n'
+               '        await _asm_begin(db, t0)\n'
+               '    return _pre\n')
+_M1B_PRINT_R2 = ('    ctx.log(f"release slot={me[\'slot\']} why={req.why} lease={held[\'lease\']} "\n'
+                 '            f"row={0 if row is None else 1}")\n')
+row("M1b", "test_m1b_a_release_racing_the_start_closes_under_the_lock", [
+    M("round_two_release", "M1b marker",
+      E(MAIN, _M1B_CHECK + _M1B_PRINT, _M1B_PRINT_R2), E(MAIN, _M1_UNIT, _M1B_PRE_R2),
+      note="the negative control: de70bb4's release restored, so the release whose "
+           "pre-step met Start's uncommitted seat row answers 200 with no marker, its lease "
+           "kept"),
+    M("lock_step_keeps_the_lease", "M1b lease", E(MAIN, _M1B_LEASE, ""),
+      note="the locked step writes the marker but not the lease DELETE"),
+    M("released_seat_through_the_gone_rule", "M1b never gone",
+      E(MAIN, _SUBJ_REL, '            and s["gone_game"] is None\n'),
+      E(MAIN, _WRITE_REL, '        "   AND gone_game IS NULL"),\n'),
+      note="N10's exclusion lifted (the subject predicate and the record's own UPDATE): the "
+           "granted seat the race released reaches the gone rule, two witnesses omit it"),
+], T("marker_by_truth",
+     E(MAIN, '    if me["released_at"] is None:\n', '    if not me["released_at"]:\n')))
 
 _M2_CALL = ('    if req.mode == "ffa":\n'
             '        # After A an admissible seat is excluded here too (connect-failure\n'

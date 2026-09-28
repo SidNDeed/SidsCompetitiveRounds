@@ -5278,6 +5278,138 @@ def test_m2_the_attest_runs_the_expiry_after_a(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_m1b_a_release_racing_the_start_closes_under_the_lock(monkeypatch):
+    """Round 3, M1 (B11, N10), the reviewer's control. A real Start pauses
+    after inserting the seat and lease rows, its lobby row lock held and
+    nothing committed; an assembly request queues on the lobby lock first;
+    the release then runs its pre-step, whose seat read finds no row (no
+    lease DELETE, no COMMIT), and queues behind it; Start commits. The
+    assembly waiter starts the lobby short (rule E) and grants seat 3, the
+    releasing seat; the release's locked step, which reads seat 3 under the
+    lock, answers 200 with the marker written and the lease and the queue
+    row gone (mark=lock). Two omission censuses after the start write no
+    gone record for seat 3. Fixture devices, none of them the property: the
+    READY censuses the grant needs are written into Start's own transaction
+    by the pause (no request can reach a seat row before Start commits); the
+    assembly deadline is 30 s, so the staged waits never meet the 3 s
+    lock_timeout under load; and each post-COMMIT tail (Start's refund flush,
+    the waiter's answer build) waits its turn, so the statements record in
+    one order."""
+    async def body(env):
+        env.mp.setattr(main, "ASM_TXN_DEADLINE_S", 30)
+        lob = await _open_lobby(env, 5, ["ffa_asm1,ffa_adm1"] * 5)
+        for pid in lob.pids:
+            await env.conn.execute(
+                "INSERT INTO ffa_g3_seats (player_id, expires_at)"
+                " VALUES ($1, now() + interval '1 hour')", pid)
+        assert sorted(lob.sids, key=main._ffa_sort_key) == lob.sids, "M1b premise slots"
+        gate = {k: asyncio.Event() for k in ("paused", "start", "answer", "tail")}
+        held = {}
+        acquire, flush, build = (main._lease_acquire_many, main._flush_lobby_bet_refunds,
+                                 main._asm_answer_build)
+
+        async def paused_acquire(db, player_ids, mode, group_id=None, *rest, **kw):
+            await acquire(db, player_ids, mode, group_id, *rest, **kw)
+            if group_id != lob.lid or "spid" in held:
+                return
+            row = (await db.execute(main.text(
+                "SELECT created_at, region FROM ffa_lobbies WHERE id = :lid"),
+                {"lid": lob.lid})).mappings().first()
+            lob.region = row["region"]
+            env.now = row["created_at"] + main.timedelta(seconds=30)
+            await db.execute(main.text(
+                "UPDATE ffa_assembly_seats SET census_slots = CAST(:s AS smallint[]),"
+                "  census_actors = CAST(:a AS smallint[]), census_nobody = CAST(:e AS smallint[]),"
+                "  census_unkept = CAST(:e AS smallint[]), census_anon = 0, census_region = :r,"
+                "  census_game = 0, census_at = :now, census_seen_at = :now,"
+                "  actor_claim = slot + 1, claim_region = :r, actor_nr = slot + 1,"
+                "  actor_region = :r, body_seen_at = :now"
+                " WHERE lobby_id = :lid AND slot < 4"),
+                {"s": [0, 1, 2, 3], "a": [1, 2, 3, 4], "e": [], "r": lob.region,
+                 "now": env.now, "lid": lob.lid})
+            held["spid"] = (await db.execute(main.text("SELECT pg_backend_pid()"))).scalar()
+            gate["paused"].set()
+            await gate["start"].wait()
+
+        async def gated_flush(db, mode=None, lobby_id=None, *rest, **kw):
+            if lobby_id == lob.lid and not gate["tail"].is_set():
+                await gate["tail"].wait()
+            return await flush(db, mode, lobby_id, *rest, **kw)
+
+        async def gated_build(db, ctx, plan, steam_id):
+            if steam_id == lob.sids[0] and not gate["answer"].is_set():
+                await gate["answer"].wait()
+            return await build(db, ctx, plan, steam_id)
+        env.mp.setattr(main, "_lease_acquire_many", paused_acquire)
+        env.mp.setattr(main, "_flush_lobby_bet_refunds", gated_flush)
+        env.mp.setattr(main, "_asm_answer_build", gated_build)
+
+        async def queued(want):
+            # The release queues behind the assembly request, not behind Start
+            # itself: count every waiter reachable from Start's backend.
+            n = 0
+            for _ in range(250):
+                n = await env.conn.fetchval(
+                    "WITH RECURSIVE w(pid) AS ("
+                    "  SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))"
+                    "  UNION SELECT a.pid FROM pg_stat_activity a JOIN w"
+                    "    ON w.pid = ANY(pg_blocking_pids(a.pid)))"
+                    " SELECT count(*) FROM w", held["spid"])
+                if n >= want:
+                    break
+                await asyncio.sleep(0.02)
+            return n
+
+        entries = [env.entry(lob, s, 1 + s) for s in range(4)]
+        start = asyncio.ensure_future(_start(env, main, lob))
+        waiter = release = None
+        try:
+            await asyncio.wait_for(gate["paused"].wait(), 60)
+            waiter = asyncio.ensure_future(env.assembly(lob, 0, 1, entries, seen_age_ms=30000))
+            first = await queued(1)
+            mark = len(env.rec.stmts)
+            release = asyncio.ensure_future(env.release(lob, 3, "fence_expired"))
+            both = await queued(2)
+            pre = [s[:2] for s in env.rec.stmts[mark:]]
+            last = env.rec.stmts[-1]
+            assert first >= 1 and both >= 2 and not start.done() and not waiter.done() \
+                and not release.done(), ("M1b premise queued", first, both)
+            assert not [s for s in pre if s[0] in ("INSERT", "DELETE", "COMMIT")] \
+                and ["SELECT", "ffa_assembly_seats"] in pre \
+                and last[:2] == ["SELECT", "ffa_lobbies"] and last[3] == "FOR NO KEY UPDATE", \
+                ("M1b premise pre-step", pre, last)
+            gate["start"].set()
+            a = await asyncio.wait_for(release, 60)
+            seat = await env.seat(lob, 3)
+            assert a.status == 200 and a.body == {"status": "ok"}, ("M1b premise release", a)
+            assert seat["released_at"] is not None and seat["release_why"] == "fence_expired", \
+                ("M1b marker", seat["released_at"], seat["release_why"])
+            lease = await env.lease(lob, 3)
+            assert lease is None, ("M1b lease", lease)
+            assert await env.queue_row(lob, 3) is None, "M1b queue"
+            assert env.asm_lines("release slot=3 why=fence_expired lease=1 row=1 mark=lock"), \
+                ("M1b print", env.asm_lines("release"))
+            gate["answer"].set()
+            w = await asyncio.wait_for(waiter, 60)
+            gate["tail"].set()
+            s = await asyncio.wait_for(start, 60)
+        finally:
+            for g in gate.values():
+                g.set()
+            await asyncio.gather(*[t for t in (start, waiter, release) if t is not None],
+                                 return_exceptions=True)
+        row, seat = await env.lobby_row(lob), await env.seat(lob, 3)
+        assert s.status == 200 and w.status == 200 and row["asm_rule"] == "E" \
+            and row["start_granted_at"] is not None and seat["verdict"] == "granted" \
+            and seat["start_roster"], ("M1b premise grant", s, w, row["asm_rule"], seat["verdict"])
+        await env.at(lob, 60.0)
+        await _omit(env, lob, [0], 3)
+        c = await env.census_of(lob, 1, [0, 1, 2, 4])
+        assert c.status == 200, ("M1b census", c)
+        assert await _gone(env, lob, 3) == (None, None), "M1b never gone"
+    run_env(monkeypatch, body)
+
+
 _N12_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap", "same_card_rule",
              "is_ranked", "settings_known", "settings_changed_at", "password_hash",

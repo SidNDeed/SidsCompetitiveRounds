@@ -49838,23 +49838,52 @@ async def _asm_assembly_work(ctx, pid, req) -> dict:
 
 # -- Writer 8: the release (V11, N10) ----------------------------------------
 
+# The release's two durable writes (round 3, M1): the caller's marker, first
+# write wins, and its ffa lease for the lobby the URL names. Its pre-step and
+# its locked step both write them, through these two statements.
+_ASM_RELEASE_MARK_SQL = (
+    "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"
+    " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL")
+_ASM_RELEASE_LEASE_SQL = (
+    "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid")
+
+
 async def _asm_release_work(ctx, pid, arg) -> dict:
-    """The release's locked step: the caller's own queue row for this lobby,
-    under the lobby row and its queue rows. The marker and the lease were
-    committed before the lobby lock, by _asm_release_pre (round 2, M1).
-    Nothing else: no departure, cause, verdict, receipt, gone record, status,
-    bet or survivor row, and no rule runs. A deadline answer here rolls back only
-    this delete; the row waits for the client's next try (three in all). A
-    row the tries never reach holds no lease, so the player's next FFA join
-    clears it as an unleased husk (ffa_queue_join), and the janitor's
-    stranded-row sweep deletes it once the lobby is no longer active."""
+    """The release's locked step, under the lobby row and its queue rows: the
+    caller's own queue row for this lobby, then, when the caller's seat row
+    as read after the lobby lock carries no marker, the marker and the lease
+    (round 3, M1). The pre-step (_asm_release_pre) commits those two before
+    the lobby lock, but only when its own read finds the seat row, and that
+    read takes no lock: a seat row Start or REFORM has inserted and not yet
+    committed is invisible to it. _asm_lock reads the seat row again after
+    the lobby lock (404 when there is none), and this step writes the pair
+    in the transaction that deletes the queue row, so every 200 commits with
+    the marker set and neither the caller's lease for this lobby nor its
+    queue row for it left. Nothing else: no departure, cause, verdict,
+    receipt, gone record, status, bet or survivor row, and no rule runs. A
+    deadline answer here rolls back this step's writes; a marker and lease a
+    pre-step committed stay, and the row waits for the client's next try
+    (three in all). A row the tries never reach holds no lease once any
+    try's pre-step has found the seat row (else its lease expires by its
+    TTL), so the player's next FFA join clears it as an unleased husk
+    (ffa_queue_join), and the janitor's stranded-row sweep deletes it once
+    the lobby is no longer active."""
     req, held = arg
     me = ctx.seat_of(pid)
     row = (await ctx.db.execute(text(
         "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid RETURNING player_id"),
         {"pid": pid, "lid": ctx.lid})).scalar()
+    if me["released_at"] is None:
+        marked = await ctx.db.execute(text(_ASM_RELEASE_MARK_SQL),
+                                      {"why": req.why, "lid": ctx.lid, "pid": pid})
+        if (marked.rowcount or 0) > 0:
+            held["mark"] = "lock"
+        freed = await ctx.db.execute(text(_ASM_RELEASE_LEASE_SQL),
+                                     {"pid": pid, "lid": ctx.lid})
+        if (freed.rowcount or 0) > 0:
+            held["lease"] = 1
     ctx.log(f"release slot={me['slot']} why={req.why} lease={held['lease']} "
-            f"row={0 if row is None else 1}")
+            f"row={0 if row is None else 1} mark={held['mark']}")
     return {"release": {"status": "ok"}}
 
 
@@ -49863,36 +49892,41 @@ def _asm_release_pre(steam_id, lobby_id, why, held):
     release marker (released_at and release_why, first write wins) and its
     lease for the lobby the URL names, in ONE transaction committed before
     any other lock, the leave route's order, so no lease is held while the
-    lobby lock is awaited. The lease goes only beside a marker: with no seat
-    row in that lobby nothing is written here and the lock step answers 404.
-    A deadline answer before this COMMIT therefore leaves nothing durable,
-    and one after it (the pool stage of the checkout that follows it, or the
-    lock, statement or pre-commit arm of _asm_run) leaves a released seat,
-    which the gone rule and writer 7 (d) exclude (N10), and at most the
-    caller's own queue row (_asm_release_work). The
+    lobby lock is awaited. The lease goes only beside a marker. The seat row
+    is read first and the pair written only when that read finds it (round
+    3, M1): main.py never deletes a seat row, so the UPDATE after a read that
+    found it finds it too, and a seat row Start or REFORM inserted and has
+    not committed is found by neither, so nothing is written here. When
+    nothing is written, _asm_lock answers 404 if no seat row exists under the
+    lobby lock, and otherwise the locked step writes the pair
+    (_asm_release_work). A deadline answer before this COMMIT therefore
+    leaves nothing durable, and one after it (the pool stage of the checkout
+    that follows it, or the lock, statement or pre-commit arm of _asm_run)
+    leaves a released seat, which the gone rule and writer 7 (d) exclude
+    (N10), and at most the caller's own queue row (_asm_release_work). The
     seat row is written before the lease, the order the post-start writers
     take the two (the expiry; a gone record and its deferred departure).
-    `held["lease"]` records whether this request removed the lease. The
-    COMMIT ends the transaction the deadline's timeouts were set in, so they
-    are set again after it."""
+    `held["lease"]` records whether this request removed the lease, and
+    `held["mark"]` which step wrote the marker ("pre" here, "lock" in the
+    locked step, "kept" when one already stood). The COMMIT ends the
+    transaction the deadline's timeouts were set in, so they are set again
+    after it."""
     async def _pre(db, t0):
         pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
                                 {"sid": steam_id})).scalar()
         if pid is None:
             return
-        marked = await db.execute(text(
-            "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"
-            " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL"),
-            {"why": why, "lid": lobby_id, "pid": pid})
-        if (marked.rowcount or 0) == 0:
-            seat = (await db.execute(text(
-                "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
-                {"lid": lobby_id, "pid": pid})).scalar()
-            if seat is None:
-                return
-        freed = await db.execute(text(
-            "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid"),
-            {"pid": pid, "lid": lobby_id})
+        seat = (await db.execute(text(
+            "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
+            {"lid": lobby_id, "pid": pid})).scalar()
+        if seat is None:
+            return
+        marked = await db.execute(text(_ASM_RELEASE_MARK_SQL),
+                                  {"why": why, "lid": lobby_id, "pid": pid})
+        if (marked.rowcount or 0) > 0:
+            held["mark"] = "pre"
+        freed = await db.execute(text(_ASM_RELEASE_LEASE_SQL),
+                                 {"pid": pid, "lid": lobby_id})
         held["lease"] = 1 if (freed.rowcount or 0) > 0 else 0
         await db.commit()
         await _asm_begin(db, t0)
@@ -49938,11 +49972,14 @@ async def ffa_lobby_release(lobby_id: uuid.UUID, req: _AsmReleaseReq, request: R
     """I2 writer 8 (V11, N10): the two protocol exits, FENCE_EXPIRED and an
     admitted late seat's own two-boundary bound. Records released_at and
     release_why and frees the caller's lease for this lobby in one committed
-    unit before the lobby lock (round 2, M1), then deletes its own queue row
-    for it, and writes nothing else; idempotent (200 on a repeat)."""
+    unit before the lobby lock (round 2, M1), then, under the lock, deletes
+    its own queue row for it and writes that pair itself when the seat row
+    it reads there carries no marker (round 3, M1), so every 200 commits
+    with the marker set and neither that lease nor that queue row left;
+    writes nothing else; idempotent (200 on a repeat)."""
     if req.why not in _ASM_RELEASE_WHY or not _pg_text_ok(req.steam_id):
         raise HTTPException(422, "invalid release")
-    held = {"lease": 0}
+    held = {"lease": 0, "mark": "kept"}
     return await _asm_run("release", lobby_id, req.steam_id, request, db,
                           _asm_release_work, (req, held),
                           pre=_asm_release_pre(req.steam_id, lobby_id, req.why, held))
