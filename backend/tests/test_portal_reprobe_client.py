@@ -176,13 +176,16 @@ def test_no_steam_ticket_is_requested_while_the_api_would_refuse_to_exchange_it(
     unexchanged tickets were followed by no further ticket for the rest of the
     session, so after the secure route came back (witness W3) the session could
     not sign in and the portal button met the sign-in refusal. SteamAuth now
-    asks the exchange's own question before it requests a ticket and spends no
-    attempt when refused; PostSteamAuth asks the same one; the notice both
-    show lives in one place and stays once per session."""
+    asks the exchange's own question before its session checks (so the notice
+    also reaches a session that is held but withheld on the backup, as it did
+    when a withheld 401 still cleared it) and spends no attempt when refused;
+    PostSteamAuth asks the same one; the notice both show lives in one place
+    and stays once per session."""
     refresh = code_of(STEAMAUTH, "public static void MaybeRefresh()")
     gate = "if (!ApiClient.TicketExchangeAllowed())"
     assert refresh.count(gate) == 1, refresh
     at = refresh.index(gate)
+    assert at < refresh.index("if (HasFreshToken || _requestInFlight) return;"), refresh
     assert at < refresh.index("_lastAttemptAt = Time.realtimeSinceStartup;"), refresh
     assert at < refresh.index('SteamUser.GetAuthTicketForWebApi("competitive-rounds");'), refresh
     branch = refresh[at:refresh.index("}", at)]
