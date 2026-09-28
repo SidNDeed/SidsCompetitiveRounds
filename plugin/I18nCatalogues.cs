@@ -1466,6 +1466,16 @@ namespace CompetitiveRounds
             ["Devil Horns"] = "Cuernos de diablo",
             ["Disable"] = "Desactivar",
             ["Discard"] = "Descartar",
+            // Added 2026-09-28: board row 24 (the Settings full card). Placed
+            // after "Discard" instead of at the end, so a
+            // lane appending at the end merges without a conflict. Sorted among
+            // themselves; the entries around them are untouched.
+            ["Loading your card..."] = "Cargando tu carta...",
+            ["Other players still see this card: your new picture was not sent (the note below says why)."] = "Los dem\u00e1s jugadores siguen viendo esta carta: tu nueva imagen no se envi\u00f3 (la nota de abajo dice por qu\u00e9).",
+            ["Saving your new picture - your card updates here once it has been sent."] = "Guardando tu nueva imagen - tu carta se actualiza aqu\u00ed en cuanto se haya enviado.",
+            ["You are not in the card pool yet, so there is no card to show - this is your picture."] = "Todav\u00eda no est\u00e1s en el pool de cartas, as\u00ed que no hay carta que mostrar - esta es tu imagen.",
+            ["Your card as other players see it."] = "Tu carta tal como la ven los dem\u00e1s jugadores.",
+            ["Your card could not be loaded right now - it is tried again shortly."] = "Tu carta no se pudo cargar ahora mismo - se volver\u00e1 a intentar en breve.",
             ["Discord"] = "Discord",
             ["Discord Link"] = "Vincular Discord",
             ["Dismiss (1 min)"] = "Ocultar (1 min)",
@@ -4435,6 +4445,16 @@ namespace CompetitiveRounds
             ["Devil Horns"] = "Рога дьявола",
             ["Disable"] = "Выключить",
             ["Discard"] = "Сбросить",
+            // Added 2026-09-28: board row 24 (the Settings full card). Placed
+            // after "Discard" instead of at the end, so a
+            // lane appending at the end merges without a conflict. Sorted among
+            // themselves; the entries around them are untouched.
+            ["Loading your card..."] = "\u0417\u0430\u0433\u0440\u0443\u0436\u0430\u0435\u043c \u0442\u0432\u043e\u044e \u043a\u0430\u0440\u0442\u0443...",
+            ["Other players still see this card: your new picture was not sent (the note below says why)."] = "\u0414\u0440\u0443\u0433\u0438\u0435 \u0438\u0433\u0440\u043e\u043a\u0438 \u043f\u043e-\u043f\u0440\u0435\u0436\u043d\u0435\u043c\u0443 \u0432\u0438\u0434\u044f\u0442 \u044d\u0442\u0443 \u043a\u0430\u0440\u0442\u0443: \u0442\u0432\u043e\u044f \u043d\u043e\u0432\u0430\u044f \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 \u043d\u0435 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0430 (\u043f\u043e\u0447\u0435\u043c\u0443 - \u0441\u043a\u0430\u0437\u0430\u043d\u043e \u0432 \u0437\u0430\u043c\u0435\u0442\u043a\u0435 \u043d\u0438\u0436\u0435).",
+            ["Saving your new picture - your card updates here once it has been sent."] = "\u0421\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u043c \u0442\u0432\u043e\u044e \u043d\u043e\u0432\u0443\u044e \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443 - \u043a\u0430\u0440\u0442\u0430 \u043e\u0431\u043d\u043e\u0432\u0438\u0442\u0441\u044f \u0437\u0434\u0435\u0441\u044c, \u043a\u0430\u043a \u0442\u043e\u043b\u044c\u043a\u043e \u0435\u0451 \u043e\u0442\u043f\u0440\u0430\u0432\u044f\u0442.",
+            ["You are not in the card pool yet, so there is no card to show - this is your picture."] = "\u0422\u0435\u0431\u044f \u0435\u0449\u0451 \u043d\u0435\u0442 \u0432 \u043f\u0443\u043b\u0435 \u043a\u0430\u0440\u0442, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043a\u0430\u0440\u0442\u0443 \u043d\u0435\u043b\u044c\u0437\u044f - \u044d\u0442\u043e \u0442\u0432\u043e\u044f \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0430.",
+            ["Your card as other players see it."] = "\u0422\u0432\u043e\u044f \u043a\u0430\u0440\u0442\u0430 \u0442\u0430\u043a\u043e\u0439, \u043a\u0430\u043a\u043e\u0439 \u0435\u0451 \u0432\u0438\u0434\u044f\u0442 \u0434\u0440\u0443\u0433\u0438\u0435 \u0438\u0433\u0440\u043e\u043a\u0438.",
+            ["Your card could not be loaded right now - it is tried again shortly."] = "\u0421\u0435\u0439\u0447\u0430\u0441 \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0442\u0432\u043e\u044e \u043a\u0430\u0440\u0442\u0443 - \u0441\u043a\u043e\u0440\u043e \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0435\u043c \u0441\u043d\u043e\u0432\u0430.",
             ["Discord"] = "Discord",
             ["Discord Link"] = "Привязка Discord",
             ["Dismiss (1 min)"] = "Скрыть (1 мин)",
@@ -7350,6 +7370,16 @@ namespace CompetitiveRounds
             ["Devil Horns"] = "Роги диявола",
             ["Disable"] = "Вимкнути",
             ["Discard"] = "Скинути",
+            // Added 2026-09-28: board row 24 (the Settings full card). Placed
+            // after "Discard" instead of at the end, so a
+            // lane appending at the end merges without a conflict. Sorted among
+            // themselves; the entries around them are untouched.
+            ["Loading your card..."] = "\u0417\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0443\u0454\u043c\u043e \u0432\u0430\u0448\u0443 \u043a\u0430\u0440\u0442\u043a\u0443...",
+            ["Other players still see this card: your new picture was not sent (the note below says why)."] = "\u0406\u043d\u0448\u0456 \u0433\u0440\u0430\u0432\u0446\u0456 \u0434\u043e\u0441\u0456 \u0431\u0430\u0447\u0430\u0442\u044c \u0446\u044e \u043a\u0430\u0440\u0442\u043a\u0443: \u0432\u0430\u0448\u0435 \u043d\u043e\u0432\u0435 \u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u043d\u044f \u043d\u0435 \u043d\u0430\u0434\u0456\u0441\u043b\u0430\u043d\u043e (\u0447\u043e\u043c\u0443 - \u0441\u043a\u0430\u0437\u0430\u043d\u043e \u0432 \u043f\u0440\u0438\u043c\u0456\u0442\u0446\u0456 \u043d\u0438\u0436\u0447\u0435).",
+            ["Saving your new picture - your card updates here once it has been sent."] = "\u0417\u0431\u0435\u0440\u0456\u0433\u0430\u0454\u043c\u043e \u0432\u0430\u0448\u0435 \u043d\u043e\u0432\u0435 \u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u043d\u044f - \u043a\u0430\u0440\u0442\u043a\u0430 \u043e\u043d\u043e\u0432\u0438\u0442\u044c\u0441\u044f \u0442\u0443\u0442, \u0449\u043e\u0439\u043d\u043e \u0439\u043e\u0433\u043e \u0431\u0443\u0434\u0435 \u043d\u0430\u0434\u0456\u0441\u043b\u0430\u043d\u043e.",
+            ["You are not in the card pool yet, so there is no card to show - this is your picture."] = "\u0412\u0430\u0441 \u0449\u0435 \u043d\u0435\u043c\u0430\u0454 \u0432 \u043f\u0443\u043b\u0456 \u043a\u0430\u0440\u0442\u043e\u043a, \u0442\u043e\u0436 \u043a\u0430\u0440\u0442\u043a\u0438 \u0434\u043b\u044f \u043f\u043e\u043a\u0430\u0437\u0443 \u043d\u0435\u043c\u0430\u0454 - \u0446\u0435 \u0432\u0430\u0448\u0435 \u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u043d\u044f.",
+            ["Your card as other players see it."] = "\u0412\u0430\u0448\u0430 \u043a\u0430\u0440\u0442\u043a\u0430 \u0442\u0430\u043a\u043e\u044e, \u044f\u043a\u043e\u044e \u0457\u0457 \u0431\u0430\u0447\u0430\u0442\u044c \u0456\u043d\u0448\u0456 \u0433\u0440\u0430\u0432\u0446\u0456.",
+            ["Your card could not be loaded right now - it is tried again shortly."] = "\u0417\u0430\u0440\u0430\u0437 \u043d\u0435 \u0432\u0434\u0430\u043b\u043e\u0441\u044f \u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u0432\u0430\u0448\u0443 \u043a\u0430\u0440\u0442\u043a\u0443 - \u043d\u0435\u0437\u0430\u0431\u0430\u0440\u043e\u043c \u0441\u043f\u0440\u043e\u0431\u0443\u0454\u043c\u043e \u0437\u043d\u043e\u0432\u0443.",
             ["Discord"] = "Discord",
             ["Discord Link"] = "Прив’язка Discord",
             ["Dismiss (1 min)"] = "Сховати (1 хв)",
@@ -10245,6 +10275,16 @@ namespace CompetitiveRounds
             ["Devil Horns"] = "Djävulshorn",
             ["Disable"] = "Inaktivera",
             ["Discard"] = "Kasta",
+            // Added 2026-09-28: board row 24 (the Settings full card). Placed
+            // after "Discard" instead of at the end, so a
+            // lane appending at the end merges without a conflict. Sorted among
+            // themselves; the entries around them are untouched.
+            ["Loading your card..."] = "Laddar ditt kort...",
+            ["Other players still see this card: your new picture was not sent (the note below says why)."] = "Andra spelare ser fortfarande det h\u00e4r kortet: din nya bild skickades inte (anteckningen nedan s\u00e4ger varf\u00f6r).",
+            ["Saving your new picture - your card updates here once it has been sent."] = "Sparar din nya bild - ditt kort uppdateras h\u00e4r n\u00e4r den har skickats.",
+            ["You are not in the card pool yet, so there is no card to show - this is your picture."] = "Du \u00e4r inte med i kortpoolen \u00e4n, s\u00e5 det finns inget kort att visa - det h\u00e4r \u00e4r din bild.",
+            ["Your card as other players see it."] = "Ditt kort som andra spelare ser det.",
+            ["Your card could not be loaded right now - it is tried again shortly."] = "Ditt kort kunde inte laddas just nu - det provas igen strax.",
             ["Discord"] = "Discord",
             ["Discord Link"] = "Discord-koppling",
             ["Dismiss (1 min)"] = "Dölj (1 min)",

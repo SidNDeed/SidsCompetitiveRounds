@@ -442,5 +442,45 @@ namespace CompetitiveRounds
             try { return Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 100f); }
             catch { return null; }
         }
+
+        /// <summary>A face the CALLER owns (the Settings full card, board row 24):
+        /// the header rule the cache applies (IhdrOk: exact dimensions for the
+        /// size, 8-bit RGBA, no interlace) and the same decode, but the texture
+        /// is the caller's to keep and destroy -- never entered in the cache,
+        /// never evicted, never counted against its budget. Null when the
+        /// header is not that size or the decode disagrees with it.
+        /// <paramref name="mips"/>: decoded with a mip chain and sampled
+        /// trilinear, for a slot that shows the face far below its own size
+        /// (the Settings card is under a third of it), where a single level
+        /// would shimmer on every thin stroke of the lettering.</summary>
+        internal static Texture2D DecodeOwned(byte[] data, string size, bool mips)
+        {
+            int w, h;
+            if (!IhdrOk(data, size, out w, out h))
+            {
+                Plugin.Log.LogWarning($"[PC-FACE] owned {size}: header refused ({w}x{h})");
+                return null;
+            }
+            Texture2D tex = null;
+            try
+            {
+                tex = new Texture2D(2, 2, TextureFormat.RGBA32, mips);
+                if (!tex.LoadImage(data, true) || tex.width != w || tex.height != h)
+                {
+                    UnityEngine.Object.Destroy(tex);
+                    Plugin.Log.LogWarning($"[PC-FACE] owned {size}: decode failed");
+                    return null;
+                }
+                tex.filterMode = mips ? FilterMode.Trilinear : FilterMode.Bilinear;
+                tex.wrapMode = TextureWrapMode.Clamp;
+                return tex;
+            }
+            catch (Exception ex)
+            {
+                if (tex != null) UnityEngine.Object.Destroy(tex);
+                Plugin.Log.LogWarning($"[PC-FACE] owned {size}: texture threw {ex.Message}");
+                return null;
+            }
+        }
     }
 }

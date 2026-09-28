@@ -152,6 +152,20 @@ namespace CompetitiveRounds
         private static object btnPublicTxt, btnAnnounceTxt, btnPresetTxt, txtPicNote;
         private static int previewShown = -1;   // PortraitRender.PreviewSerial the preview sprite was made from
         private static Sprite previewSprite;
+        // Board row 24: the Settings preview is the WHOLE card as other players
+        // see it -- the server's own drawing (ApiClient.PcFacePreview), owned
+        // here and never the face cache's. While a new look is on its way the
+        // slot shows the live picture above with a pending note instead.
+        private const float SETTINGS_CARD_W = 240f, SETTINGS_CARD_H = 336f;   // the 750x1050 card at 0.32, its 5:7 kept
+        private const float SETTINGS_CAP_W = 420f;                            // the line beside it; 240 + 12 + 420 fits the 700 column
+        private const int SC_NONE = 0, SC_CARD = 1, SC_NOT_IN_POOL = 2, SC_UNAVAILABLE = 3;
+        private static object txtSettingsCardCap;
+        private static Texture2D settingsCardTex;
+        private static Sprite settingsCardSprite, settingsCardBound;
+        private static string settingsCardKey;           // identity epoch | stored portrait hash | locale the card was drawn for
+        private static bool settingsCardInFlight;
+        private static float settingsCardRetryAt, settingsCardAt = -1000f;
+        private static int settingsCardState = SC_NONE;
         private static bool setInFlight; private static float setAt;
         // identity fence (c4): every callback captures uiEpoch at dispatch and
         // returns when an identity edge advanced it; priceChangedAt gates a
@@ -385,6 +399,10 @@ namespace CompetitiveRounds
             if (previewSprite != null) { try { UnityEngine.Object.Destroy(previewSprite); } catch { } previewSprite = null; }
             previewShown = -1;
             if (presetPreview != null) { try { PlayerCardFaces.SetFace(presetPreview, null); } catch { } }
+            // Board row 24: the previous account's full card is not this one's.
+            // A fetch still in flight is dropped by its epoch check.
+            SettingsCardDrop();
+            settingsCardInFlight = false; settingsCardRetryAt = 0f; settingsCardAt = -1000f;
             // FinishDiscard is not on this path, so the run state it clears
             // is cleared here too. A per-copy retry latch left populated
             // would be carried into the NEXT account's run, where those
@@ -472,6 +490,9 @@ namespace CompetitiveRounds
                 // rendered while the stored picture was current. The check now
                 // draws the preview in that case (PortraitRender.Tick).
                 if (!settingsVisited) { settingsVisited = true; try { PortraitRender.OnTabVisit(); } catch { } }
+                // Board row 24: the full card the slot shows, asked for here
+                // (Settings has no fetch chain of its own).
+                try { SettingsCardTick(id); } catch (Exception ex) { Plugin.Log.LogWarning($"[PC] settings card tick threw: {ex.Message}"); }
                 return;
             }
             if (Time.unscaledTime >= meRefreshAt) { meRefreshAt = Time.unscaledTime + 30f; ApiClient.FetchPcMe(id, true); }
@@ -2448,14 +2469,29 @@ namespace CompetitiveRounds
             // its picture centred in that ("too far to the right", Sid,
             // 2026-09-13). It shows as soon as a render exists, which the
             // Settings tab now asks for itself (MaybeTick -> OnTabVisit).
+            //
+            // Board row 24: the row is the WHOLE card as other players see it
+            // -- frame, band, name, title, numbers and picture, drawn by the
+            // server (SettingsCardTick) -- in a card-shaped slot, with a line
+            // beside it saying which picture is showing and why. The picture
+            // fills the slot's own rect (CreatePanel stretches a child and the
+            // slot has no layout group), so the card lands edge to edge and the
+            // square live picture letterboxes on the slot's dark ground.
             presetPreviewRow = new GameObject("SPcPrevRow");
             presetPreviewRow.transform.SetParent(parent, false);
             presetPreviewRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(presetPreviewRow, spacing: 8, forceExpandW: false, forceExpandH: false);
-            UIFactory.AddLE(presetPreviewRow, prefH: 118, minH: 118, flexH: 0);
-            presetPreview = UIFactory.CreatePanel("SPcPrev", presetPreviewRow.transform, C_CARD);
-            UIFactory.AddLE(presetPreview, prefW: 118, minW: 118, prefH: 118, minH: 118, flexW: 0, flexH: 0);
+            UIFactory.AddHLG(presetPreviewRow, spacing: 12, forceExpandW: false, forceExpandH: false);
+            UIFactory.SetHLGChildAlignMiddle(presetPreviewRow);
+            UIFactory.AddLE(presetPreviewRow, prefH: SETTINGS_CARD_H, minH: SETTINGS_CARD_H, flexH: 0);
+            var slot = UIFactory.CreatePanel("SPcCard", presetPreviewRow.transform, C_CARD);
+            UIFactory.AddLE(slot, prefW: SETTINGS_CARD_W, minW: SETTINGS_CARD_W, prefH: SETTINGS_CARD_H, minH: SETTINGS_CARD_H, flexW: 0, flexH: 0);
+            presetPreview = UIFactory.CreatePanel("SPcPrev", slot.transform, C_CARD);
             PlayerCardFaces.SetFace(presetPreview, null);
+            settingsCardBound = null;
+            txtSettingsCardCap = UIFactory.CreateText("SPcCardCap", presetPreviewRow.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(SETTINGS_CAP_W, 60));
+            UIFactory.SetWordWrap(txtSettingsCardCap, true);
+            var capGO = (txtSettingsCardCap as Component)?.gameObject;
+            if (capGO != null) UIFactory.AddLE(capGO, prefW: SETTINGS_CAP_W, minW: SETTINGS_CAP_W, flexW: 0);
             presetPreviewRow.SetActive(false);
             // The renderer's last word (rendered / uploading / picture current /
             // why it refused), the diagnostic the picture row used to carry.
@@ -2541,16 +2577,161 @@ namespace CompetitiveRounds
             string note = PortraitRender.LastResult;
             UIFactory.SetTextRaw(txtPicNote, string.IsNullOrEmpty(note) ? "" : "(" + note + ")");
             if (presetPreviewRow == null || presetPreview == null) return;
-            bool show = PortraitRender.PreviewTex != null;
-            presetPreviewRow.SetActive(show);
-            if (show && previewShown != PortraitRender.PreviewSerial)
+            // The live picture's Sprite follows the renderer's serial, as it
+            // always has; a Sprite that is on the slot is taken off BEFORE it
+            // is destroyed, so the Image never holds a dead one.
+            if (previewShown != PortraitRender.PreviewSerial)
             {
                 previewShown = PortraitRender.PreviewSerial;
                 var old = previewSprite;
                 previewSprite = PlayerCardFaces.SpriteOf(PortraitRender.PreviewTex);
-                PlayerCardFaces.SetFace(presetPreview, previewSprite);
-                if (old != null) { try { UnityEngine.Object.Destroy(old); } catch { } }
+                if (old != null)
+                {
+                    if (settingsCardBound == old) { PlayerCardFaces.SetFace(presetPreview, null); settingsCardBound = null; }
+                    try { UnityEngine.Object.Destroy(old); } catch { }
+                }
             }
+            Sprite show; string cap;
+            SettingsCardView(out show, out cap);
+            presetPreviewRow.SetActive(show != null || cap != null);
+            if (show != settingsCardBound) { PlayerCardFaces.SetFace(presetPreview, show); settingsCardBound = show; }
+            UIFactory.SetTextRaw(txtSettingsCardCap, cap ?? "");
+        }
+
+        // -- Board row 24: the Settings full card ------------------------------
+        // The slot shows the card the server draws for this player -- the same
+        // drawing the Discord /card preview shows, from the portrait the server
+        // HOLDS -- because that is what other players see. The one time it is
+        // not the truth to show is while a new look is on its way (a preset
+        // change still settling, a render that will upload, the upload itself):
+        // the server's card is then the OLD picture, so the slot shows the live
+        // picture with a pending line, and the upload's answer (which writes the
+        // new portrait hash into /pc/me) changes the key below, which fetches
+        // the new card.
+
+        /// <summary>What a fetched card is good for: the identity epoch, the
+        /// portrait the server holds, and the language its labels are drawn in.
+        /// A change to any of them asks the server again.</summary>
+        private static string SettingsCardWant(ApiClient.PcMe me)
+        {
+            return uiEpoch + "|" + (me != null ? me.portrait_hash ?? "" : "") + "|" + (string.IsNullOrEmpty(I18n.Locale) ? "en" : I18n.Locale);
+        }
+
+        /// <summary>From MaybeTick while Settings is the current tab (every two
+        /// seconds). Asks for the card when the one held is for another key or
+        /// five minutes old (the numbers on it move with the daily snapshot and
+        /// every ranked result), never before a refusal's retry time, and never
+        /// while a new look is on its way (the server would draw the picture it
+        /// still holds; the upload's answer changes the key anyway). One fetch
+        /// at a time; an answer from before an identity edge commits nothing.</summary>
+        private static void SettingsCardTick(string id)
+        {
+            var me = ApiClient.CachedPcMe;
+            if (id == null || me == null || !SessionReady || settingsCardInFlight || presetPreview == null) return;
+            if (PortraitRender.LookPending) return;
+            string want = SettingsCardWant(me);
+            bool stale = want != settingsCardKey || Now - settingsCardAt > 300f;
+            if (!stale || Now < settingsCardRetryAt) return;
+            settingsCardInFlight = true;
+            int ep = uiEpoch;
+            ApiClient.PcFacePreview(id, (ok, data, code) =>
+            {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                settingsCardInFlight = false;
+                settingsCardAt = Now;
+                Texture2D tex = ok ? PlayerCardFaces.DecodeOwned(data, "card", true) : null;
+                if (tex != null)
+                {
+                    var spr = PlayerCardFaces.SpriteOf(tex);
+                    if (spr == null) { try { UnityEngine.Object.Destroy(tex); } catch { } }
+                    else
+                    {
+                        SettingsCardDrop();
+                        settingsCardTex = tex; settingsCardSprite = spr;
+                        settingsCardKey = want; settingsCardState = SC_CARD; settingsCardRetryAt = 0f;
+                        Plugin.Log.LogInfo($"[PC] settings card: {tex.width}x{tex.height} ({want})");
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                }
+                if (ok || code != 404)
+                {
+                    // Not drawn, or drawn but not the card size: a card already
+                    // held stays up (its key says whether it is still current),
+                    // and the next try is thirty seconds out.
+                    settingsCardState = SC_UNAVAILABLE;
+                    settingsCardRetryAt = Now + 30f;
+                    Plugin.Log.LogWarning($"[PC] settings card: not drawn (HTTP {code}); retry in 30 s");
+                }
+                else
+                {
+                    // No row in the pool snapshot in force: there is no card of
+                    // this player to show until the next snapshot takes them.
+                    SettingsCardDrop();
+                    settingsCardKey = want; settingsCardState = SC_NOT_IN_POOL;
+                    settingsCardRetryAt = Now + 300f;
+                    Plugin.Log.LogInfo("[PC] settings card: not in the pool yet");
+                }
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>The held card, off the slot first and then destroyed.</summary>
+        private static void SettingsCardDrop()
+        {
+            if (settingsCardSprite != null && settingsCardBound == settingsCardSprite)
+            {
+                if (presetPreview != null) { try { PlayerCardFaces.SetFace(presetPreview, null); } catch { } }
+                settingsCardBound = null;
+            }
+            if (settingsCardSprite != null) { try { UnityEngine.Object.Destroy(settingsCardSprite); } catch { } settingsCardSprite = null; }
+            if (settingsCardTex != null) { try { UnityEngine.Object.Destroy(settingsCardTex); } catch { } settingsCardTex = null; }
+            settingsCardKey = null; settingsCardState = SC_NONE;
+        }
+
+        /// <summary>What the slot shows and the line beside it.
+        ///
+        /// A new look on its way: the live picture (the held card until a
+        /// render exists), with the pending line. Otherwise the server's card
+        /// whenever the one held is for the current key -- with a line saying
+        /// other players still see it when the picture on screen differs from
+        /// the one the server holds (a render that was not sent; the note below
+        /// the row says why). No card for this key: not in the pool, a refused
+        /// fetch, or one still on its way, each with its own line, over the
+        /// live picture when there is one.</summary>
+        private static void SettingsCardView(out Sprite show, out string cap)
+        {
+            var me = ApiClient.CachedPcMe;
+            Sprite live = previewSprite;
+            Sprite held = settingsCardSprite;
+            if (me == null && ApiClient.PcMeError != null && held == null) { show = live; cap = live != null ? "" : null; return; }
+            if (!SessionReady && held == null) { show = live; cap = ReasonText("session_required"); return; }
+            if (PortraitRender.LookPending)
+            {
+                show = live ?? held;
+                cap = I18n.Tr("Saving your new picture - your card updates here once it has been sent.");
+                return;
+            }
+            if (held != null && me != null && settingsCardKey == SettingsCardWant(me))
+            {
+                show = held;
+                string ld = PortraitRender.PreviewDescriptor;
+                bool unsent = live != null && ld != null && ld != (me.portrait_descriptor ?? "");
+                cap = unsent
+                    ? I18n.Tr("Other players still see this card: your new picture was not sent (the note below says why).")
+                    : I18n.Tr("Your card as other players see it.");
+                return;
+            }
+            if (settingsCardState == SC_NOT_IN_POOL)
+            {
+                show = live;
+                cap = I18n.Tr("You are not in the card pool yet, so there is no card to show - this is your picture.");
+                return;
+            }
+            show = live ?? held;
+            cap = settingsCardState == SC_UNAVAILABLE && !settingsCardInFlight
+                ? I18n.Tr("Your card could not be loaded right now - it is tried again shortly.")
+                : I18n.Tr("Loading your card...");
         }
 
         private static bool SettingValue(ApiClient.PcMe me, string key)

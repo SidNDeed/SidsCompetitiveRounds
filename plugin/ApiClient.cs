@@ -4348,6 +4348,19 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>The Settings tab's full card (board row 24): the caller's
+        /// OWN card as the pool sees it now -- frame, rarity, name, rank title,
+        /// rating, record and picture -- one 750x1050 PNG drawn by the server
+        /// with the renderer the bot's /card preview uses. Signed over
+        /// pcread:{steam}:face:preview; (ok, bytes, HTTP status): 404 while the
+        /// caller has no card in the pool yet, 503 while the server cannot draw
+        /// one. The caller checks the header for the CARD size before decoding.</summary>
+        public static void PcFacePreview(string steamId, Action<bool, byte[], long> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, null, 0); return; }
+            FetchBytes(PcUrl("face/preview", steamId, $"pcread:{steamId}:face:preview", null), PC_FACE_MAX_BYTES, callback);
+        }
+
         /// <summary>Compare-and-set one setting: the revision the caller read
         /// must still be current (409 stale_revision otherwise). The answer is
         /// the full settings row and is written into the cache before the

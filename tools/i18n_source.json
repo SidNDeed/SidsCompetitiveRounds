@@ -1459,6 +1459,7 @@
   "Loading shop sales...",
   "Loading the reviewed cosmetic...",
   "Loading your binder...",
+  "Loading your card...",
   "Loading your dances - try E again in a second.",
   "Loading your packs...",
   "Loading...",
@@ -1731,6 +1732,7 @@
   "Other\u0004report reason",
   "Other players can collect a Player Card of you showing your name, rank, rating, ranked record and your public Steam profile picture (your in-game character replaces the picture once this PC has sent it). Deleting your data removes every card of you.",
   "Other players can pull, collect and trade a card of you showing your name, rank title, rating and ranked record - the same things the leaderboard shows. Its picture is your Steam profile picture until this PC has sent your in-game character - the same body, face, colour and effect you play with, drawn here and sent once. Deleting your data (below) removes every card of you from every binder.",
+  "Other players still see this card: your new picture was not sent (the note below says why).",
   "Overall Series: {0}",
   "Override the default orange/blue team color with a tint of your choice. Only visible to modded players. Premium tiers (Prismatic, Chrome) animate during combat.",
   "Owned",
@@ -2084,6 +2086,7 @@
   "Sapphire",
   "Sapphire Gradient",
   "Save Votes",
+  "Saving your new picture - your card updates here once it has been sent.",
   "Scale",
   "Scarlet",
   "Score",
@@ -2691,6 +2694,7 @@
   "Yin & Yang",
   "You",
   "You are muted - mail is unavailable while the mute lasts.",
+  "You are not in the card pool yet, so there is no card to show - this is your picture.",
   "You can't kick yourself.",
   "You cannot block yourself.",
   "You don't own any dances yet - check the Shop's DANCES section!",
@@ -2708,6 +2712,8 @@
   "Your Hit Rate",
   "Your Player Cards settings changed elsewhere - refreshed, try again",
   "Your block list is full - unblock someone first.",
+  "Your card as other players see it.",
+  "Your card could not be loaded right now - it is tried again shortly.",
   "Your game is dropping frames (worst {0} ms)",
   "Your last pack ({0}) - {1}",
   "Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>",
@@ -10288,6 +10294,11 @@
    "location": "RefreshBinder",
    "kind": "Tr"
   },
+  "Loading your card...": {
+   "surface": "PlayerCardsUI",
+   "location": "SettingsCardView",
+   "kind": "Tr"
+  },
   "Loading your dances - try E again in a second.": {
    "surface": "CompetitiveUI",
    "location": "DrawDanceWheel",
@@ -11647,6 +11658,11 @@
    "surface": "PlayerCardsUI",
    "location": "BuildSettingsRows",
    "kind": "CreateText"
+  },
+  "Other players still see this card: your new picture was not sent (the note below says why).": {
+   "surface": "PlayerCardsUI",
+   "location": "SettingsCardView",
+   "kind": "Tr"
   },
   "Overall Series: {0}": {
    "surface": "SpectatorHud",
@@ -13412,6 +13428,11 @@
    "surface": "NativeUI",
    "location": "BuildTournamentsTab",
    "kind": "CreateButton"
+  },
+  "Saving your new picture - your card updates here once it has been sent.": {
+   "surface": "PlayerCardsUI",
+   "location": "SettingsCardView",
+   "kind": "Tr"
   },
   "Scale": {
    "surface": "TabStatsOverlay",
@@ -16448,6 +16469,11 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "You are not in the card pool yet, so there is no card to show - this is your picture.": {
+   "surface": "PlayerCardsUI",
+   "location": "SettingsCardView",
+   "kind": "Tr"
+  },
   "You can't kick yourself.": {
    "surface": "ApiClient",
    "location": "KickRefusalText",
@@ -16531,6 +16557,16 @@
   "Your block list is full - unblock someone first.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "Your card as other players see it.": {
+   "surface": "PlayerCardsUI",
+   "location": "SettingsCardView",
+   "kind": "Tr"
+  },
+  "Your card could not be loaded right now - it is tried again shortly.": {
+   "surface": "PlayerCardsUI",
+   "location": "SettingsCardView",
    "kind": "Tr"
   },
   "Your game is dropping frames (worst {0} ms)": {
