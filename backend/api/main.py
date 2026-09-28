@@ -26365,6 +26365,12 @@ async def _pc_snapshot_janitor_step() -> None:
         # older than a day can never be replayed (its session proof expired).
         await db.execute(text("DELETE FROM pc_delivery_leases WHERE until < NOW() - INTERVAL '1 hour'"))
         await db.execute(text("DELETE FROM pc_portrait_nonces WHERE used_at < NOW() - INTERVAL '1 day'"))
+        # The batch shard's idempotency rows (migration 360) after 30 days: a
+        # print pays at most once whatever survives here (its discard is
+        # conditional), so a replay past the window answers not_owned and
+        # still credits nothing. Skipped only while 360 has not run.
+        if (await db.execute(text("SELECT to_regclass('pc_shard_batches') IS NOT NULL"))).scalar_one_or_none():
+            await db.execute(text("DELETE FROM pc_shard_batches WHERE created_at < NOW() - INTERVAL '30 days'"))
         # Released portrait blobs (Steam pictures v2 §6): deleted only after
         # ten unreferenced minutes, each under its P lock.
         await _pc_portrait_blob_janitor(db)
@@ -27006,17 +27012,17 @@ async def pc_discard_print(
 ):
     """Discard ONE print for shards (HMAC over pcdiscard:{steam}:{print_id},
     strict session): the owner check and the discard are one conditional
-    UPDATE under the player lock; the shard value is the print's rarity."""
+    UPDATE under the player lock; the shard value is the print's rarity.
+    The refusal gate is the one the batch route passes (_pc_discard_gate,
+    board row 25), so the two routes cannot refuse different prints."""
     player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_discard(steam_id, print_id), db)
     pid = str(player.id)
     try:
-        _ = uuid.UUID(print_id)
+        norm = str(uuid.UUID(print_id))
     except Exception:
         raise HTTPException(status_code=404, detail="Print not found")
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
-    rarity = (await db.execute(text(
-        "SELECT rarity FROM pc_prints WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL"),
-        {"print": print_id, "pid": pid})).scalar_one_or_none()
+    rarity = (await _pc_discard_gate(db, pid, [norm])).get(norm)
     if rarity is None:
         await db.rollback()
         raise HTTPException(status_code=404, detail={"error": "not_owned"})
@@ -27039,6 +27045,162 @@ async def pc_discard_print(
     await db.commit()
     print(f"[PC-DISCARD] player={steam_id} print={print_id} rarity={rarity} shards=+{value} balance={shards}")
     return {"status": "discarded", "print_id": print_id, "rarity": rarity, "shards_gained": value, "shards": int(shards)}
+
+
+# -- Board row 25: the batch shard (whole-pack quick shard) --------------------
+# The refusal gate BOTH discard routes pass, and the batch route beside the
+# single one. Lock order in every discard: the caller's players row (FOR NO
+# KEY UPDATE, #202), then the named prints FOR NO KEY UPDATE in print-id
+# order -- one fixed order for both routes, so two discards naming
+# overlapping prints queue behind each other instead of deadlocking.
+_PC_DISCARD_GATE_SQL = """
+    SELECT id::text AS id, rarity
+      FROM pc_prints
+     WHERE id = ANY(CAST(:ids AS uuid[]))
+       AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL
+     ORDER BY id
+       FOR NO KEY UPDATE
+"""
+
+
+async def _pc_discard_gate(db: AsyncSession, pid: str, print_ids: list) -> dict:
+    """{print_id: rarity} for every named print the caller may discard now:
+    theirs and not yet discarded, each row locked FOR NO KEY UPDATE in
+    print-id order (the caller already holds its players-row lock). A print
+    that may not be discarded is ABSENT from the answer, and both routes then
+    refuse the WHOLE request (404 not_owned): nothing is discarded unless
+    every print it names can be. `print_ids` are canonical lowercase UUIDs.
+
+    Any per-print protection belongs here, where both routes read it. There
+    is no equipped-print rule because no print carries an equipped, preset or
+    pinned state (none exists in the schema, this api or the client as of
+    2026-09-28); a player's LAST copy of a card is a confirmation the client
+    asks for, not a refusal here -- a product decision that may change."""
+    rows = (await db.execute(text(_PC_DISCARD_GATE_SQL), {"ids": list(print_ids), "pid": pid})).mappings().all()
+    return {r["id"]: r["rarity"] for r in rows}
+
+
+class PcDiscardBatchBody(BaseModel):
+    """The batch shard's body: the idempotency key (the pack id when a pack
+    is sharded from its result, a client nonce for a binder selection) and
+    the prints, in the order the signed line lists them."""
+    key: str = ""
+    print_ids: list[str] = []
+
+
+_PC_BATCH_KEY_RE = _re.compile(r"[A-Za-z0-9-]{8,64}")
+
+
+@app.post("/api/v1/pc/prints/discard-batch", tags=["Player Cards"])
+async def pc_discard_batch(
+    request: Request,
+    body: PcDiscardBatchBody,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Discard up to PC_DISCARD_BATCH_CAP prints for shards in ONE
+    transaction (board row 25: shard a whole pack from its result, or a
+    selection from the binder). HMAC over
+    pcdiscardn:{steam}:{key}:{the print ids as the body lists them}, strict
+    session: the verified actor the single route uses.
+
+    The body is refused before anything is read (422): a key that is not 8
+    to 64 of [A-Za-z0-9-] (bad_key), no prints (no_prints), more than the cap
+    (too_many), an id that is not a UUID (bad_print_id), one print twice
+    (duplicate_print). Then, under the caller's players-row lock:
+      * a key already committed with the same SET of prints answers the
+        stored total again and credits nothing (replayed: true); with a
+        different set it is refused, nothing done (409 key_reused);
+      * the gate the single route shares (_pc_discard_gate) locks every
+        print in print-id order; one print not the caller's or already
+        discarded refuses the whole batch, nothing discarded (404
+        not_owned, naming them);
+      * each print's conditional discard at its rarity's value, their
+        delivery leases dropped, ONE delta credit of the total (never an
+        absolute write, #326) and the key's row, committed together.
+    503 shard_batch_unavailable while migration 360 has not run on this box
+    (checked before the first lock or write)."""
+    key = body.key or ""
+    ids = [str(x) for x in (body.print_ids or [])]
+    if not _PC_BATCH_KEY_RE.fullmatch(key):
+        raise HTTPException(status_code=422, detail={"error": "bad_key"})
+    if not ids:
+        raise HTTPException(status_code=422, detail={"error": "no_prints"})
+    if len(ids) > _pc.PC_DISCARD_BATCH_CAP:
+        raise HTTPException(status_code=422, detail={"error": "too_many", "cap": _pc.PC_DISCARD_BATCH_CAP})
+    norm = []
+    for raw in ids:
+        try:
+            norm.append(str(uuid.UUID(raw)))
+        except Exception:
+            raise HTTPException(status_code=422, detail={"error": "bad_print_id"})
+    if len(set(norm)) != len(norm):
+        raise HTTPException(status_code=422, detail={"error": "duplicate_print"})
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_discard_batch(steam_id, key, ids), db)
+    pid = str(player.id)
+    if not (await db.execute(text("SELECT to_regclass('pc_shard_batches') IS NOT NULL"))).scalar_one_or_none():
+        await db.rollback()
+        raise HTTPException(status_code=503, detail={"error": "shard_batch_unavailable"})
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    order = sorted(norm)
+    joined = ",".join(order)
+    prior = (await db.execute(text("""
+        SELECT print_ids, prints, shards_gained FROM pc_shard_batches
+         WHERE player_id = CAST(:pid AS uuid) AND batch_key = CAST(:key AS text)
+    """), {"pid": pid, "key": key})).mappings().first()
+    if prior is not None:
+        if prior["print_ids"] != joined:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail={"error": "key_reused"})
+        rows = (await db.execute(text("""
+            SELECT id::text AS id, rarity, discard_shards FROM pc_prints
+             WHERE id = ANY(CAST(:ids AS uuid[])) AND owner_player_id = CAST(:pid AS uuid)
+             ORDER BY id
+        """), {"ids": order, "pid": pid})).mappings().all()
+        balance = (await db.execute(text("SELECT pc_shards FROM players WHERE id = CAST(:pid AS uuid)"),
+                                    {"pid": pid})).scalar_one()
+        await db.commit()
+        print(f"[PC-DISCARD-BATCH] player={steam_id} key={key} replayed prints={prior['prints']} "
+              f"shards=+{prior['shards_gained']} balance={balance}")
+        return {"status": "discarded", "replayed": True, "key": key, "prints": int(prior["prints"]),
+                "shards_gained": int(prior["shards_gained"]), "shards": int(balance),
+                "results": [{"print_id": r["id"], "rarity": r["rarity"],
+                             "shards_gained": int(r["discard_shards"] or 0)} for r in rows]}
+    found = await _pc_discard_gate(db, pid, order)
+    missing = [p for p in order if p not in found]
+    if missing:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_owned", "print_ids": missing})
+    results, total = [], 0
+    for p in order:
+        rarity = found[p]
+        value = _pc.shards_for(rarity)
+        done = (await db.execute(text("""
+            UPDATE pc_prints SET discarded_at = now(), discard_shards = CAST(:value AS integer)
+             WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL
+            RETURNING id
+        """), {"value": value, "print": p, "pid": pid})).scalar_one_or_none()
+        if done is None:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail={"error": "not_owned", "print_ids": [p]})
+        results.append({"print_id": p, "rarity": rarity, "shards_gained": value})
+        total += value
+    # A discarded print is dead: its delivery leases die with it (the single
+    # route's rule, r18 H1).
+    await db.execute(text("DELETE FROM pc_delivery_leases WHERE print_id = ANY(CAST(:ids AS uuid[]))"), {"ids": order})
+    shards = (await db.execute(text("""
+        UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer)
+         WHERE id = CAST(:pid AS uuid) RETURNING pc_shards
+    """), {"value": total, "pid": pid})).scalar_one()
+    await db.execute(text("""
+        INSERT INTO pc_shard_batches (player_id, batch_key, print_ids, prints, shards_gained)
+        VALUES (CAST(:pid AS uuid), CAST(:key AS text), CAST(:ids AS text), CAST(:n AS integer), CAST(:total AS integer))
+    """), {"pid": pid, "key": key, "ids": joined, "n": len(order), "total": total})
+    await db.commit()
+    print(f"[PC-DISCARD-BATCH] player={steam_id} key={key} prints={len(order)} shards=+{total} balance={shards}")
+    return {"status": "discarded", "replayed": False, "key": key, "prints": len(order), "shards_gained": total,
+            "shards": int(shards), "results": results}
 
 
 _PC_SETTINGS_SQL = {
@@ -36921,6 +37083,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         print(f"[PC-LEASE] deletion waited {waited:.1f}s for the lines in flight naming the player")
     await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_prints WHERE owner_player_id = :pid"), {"pid": pid})
+    # The batch shard's idempotency record (migration 360), by name: this row
+    # is anonymised, never deleted, so the table's ON DELETE CASCADE never
+    # fires (#437). Skipped only while 360 has not run (no table, no rows).
+    if (await db.execute(text("SELECT to_regclass('pc_shard_batches') IS NOT NULL"))).scalar_one_or_none():
+        await db.execute(text("DELETE FROM pc_shard_batches WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_packs WHERE player_id = :pid"), {"pid": pid})
     # The pool snapshot's own lock, blocking form (the takers hold the try

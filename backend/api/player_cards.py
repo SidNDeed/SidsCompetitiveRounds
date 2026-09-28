@@ -175,6 +175,20 @@ def canon_discard(steam_id: str, print_id: str) -> str:
     return f"pcdiscard:{steam_id}:{print_id}"
 
 
+# Board row 25 (whole-pack quick shard): the most prints one batch shard may
+# name. A pack is prints_per_pack (5) and a binder page ten tiles; the client
+# caps a selection here as well, so a request past it is a refusal (422
+# too_many), never a partial shard.
+PC_DISCARD_BATCH_CAP = 40
+
+
+def canon_discard_batch(steam_id: str, key: str, print_ids) -> str:
+    """The batch shard's signed line: the idempotency key and every print id
+    in the order the body lists them, comma-joined (no id contains a comma;
+    the route refuses any that is not a UUID)."""
+    return f"pcdiscardn:{steam_id}:{key}:{','.join(print_ids)}"
+
+
 def canon_settings(steam_id: str, nonce: str, revision: int, key: str, value: int) -> str:
     return f"pcset:{steam_id}:{nonce}:{revision}:{key}:{value}"
 

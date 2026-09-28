@@ -676,7 +676,7 @@ def _main_code():
     return "".join(lines)
 
 
-MUTATIONS = ("pc_open_pack", "pc_daily_claim", "pc_discard_print", "pc_set_setting")
+MUTATIONS = ("pc_open_pack", "pc_daily_claim", "pc_discard_print", "pc_discard_batch", "pc_set_setting")
 PRIVATE_READS = ("pc_pack_result", "pc_me")
 
 
@@ -847,6 +847,7 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/packs/open", ("POST",)), ("/api/v1/pc/packs/result", ("GET",)),
         ("/api/v1/pc/packs", ("GET",)),   # the pack history pager (Sept 12)
         ("/api/v1/pc/daily", ("POST",)), ("/api/v1/pc/prints/discard", ("POST",)),
+        ("/api/v1/pc/prints/discard-batch", ("POST",)),   # the batch shard (board row 25)
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
         ("/api/v1/pc/portrait", ("POST",)),
