@@ -4608,16 +4608,7 @@ namespace CompetitiveRounds
         public void OnCustomAuthenticationFailed(string debugMessage) { }
 
         public void OnFriendListUpdate(System.Collections.Generic.List<Photon.Realtime.FriendInfo> friendList) { }
-        public void OnCreatedRoom()
-        {
-            // v1.41.0 beta round 7, finding F29: the room this seat created.
-            // Only its creator may name a fresh room's first physical game,
-            // and only when a read shows the series with no recorded game,
-            // never relocked and no game played on its record
-            // (TeamGameNumber.Tracker.TryBoot). Photon calls OnJoinedRoom
-            // right after, which consumes this.
-            try { TeamGameNumber.Live.NoteRoomCreated(PhotonNetwork.CurrentRoom?.Name ?? ""); } catch { }
-        }
+        public void OnCreatedRoom() { }
         public void OnCreateRoomFailed(short returnCode, string message)
         {
             if (Diag2v2.PendingSlot() < 0) return;

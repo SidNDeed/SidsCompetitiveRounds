@@ -59,12 +59,13 @@ namespace CompetitiveRounds
     /// is in that game (v1.41.0 beta review round 5, findings F27 and F28;
     /// round 6). So the token names the ORDINAL of the physical game it was
     /// published for and an EPOCH the host raises at each publish. The
-    /// ordinal is never taken from a count (round 7, finding F29): a seat
-    /// holds one only once a host's publish it took grounds it or, for the
-    /// room's first game, when it created the room for a series with no
-    /// recorded game, never relocked and no pair of two points or more on its
-    /// record; it then adds one at every game start the game itself reports
-    /// and loses it at any other, and at every join.
+    /// ordinal is never taken from a count (round 7, finding F29), and its
+    /// origin never from this seat's own reading of the series (round 8,
+    /// finding F31): a seat holds one only once a publish it took grounds it
+    /// or, for the series' physical game 1, once the server issued that game
+    /// to it as the series' reporter (AskFirstGame, OnFirstGame); it then adds
+    /// one at every game start the game itself reports and loses it at any
+    /// other, and at every join.
     /// A seat takes a token only for the physical game it holds and the game
     /// its posts name; the game's own game over and next game start on this
     /// seat end it (round 7, finding F30: GM_ArmsRace's lifecycle, which
@@ -162,23 +163,36 @@ namespace CompetitiveRounds
         // (#428), so until then the host's posts go without a token like every
         // other seat's, and a send that never reached the room is never used.
         //
-        // Which physical game (round 7, finding F29). The ordinal is never
-        // taken from a count: the series' recorded games lag the physical game
-        // whenever a result is still on its way, and every seat that read the
-        // same count would agree on the same wrong game. A seat holds an
-        // ordinal (Tracker.PhysicalOrdinal) only once one of two things
-        // grounds it: a host's publish it took (ObserveRoomToken), or, for the
-        // room's first game, having created the room for a series a read shows
-        // with no recorded game, never relocked and no pair of two points or
-        // more on its record, which only a played game puts there
-        // (Tracker.TryBoot, the only seat that names a game no publish named).
+        // Which physical game (round 7, finding F29; round 8, finding F31).
+        // The ordinal is never taken from a count: the series' recorded games
+        // lag the physical game whenever a result is still on its way, and
+        // every seat that read the same count would agree on the same wrong
+        // game. Nor is its origin taken from absence: a read showing no
+        // recorded game, no relock and no pair of two points on the series'
+        // record does not rule out an earlier game whose posts all failed
+        // while its result waits in the reporter's outbox (F31). A seat holds
+        // an ordinal (Tracker.PhysicalOrdinal) only once one of two things
+        // grounds it: a publish it took (ObserveRoomToken), or the server's
+        // issue of the series' physical game 1 to this seat as the series'
+        // reporter (Tracker.AskFirstGame and OnFirstGame; main.py,
+        // team_series_first_game: once per series, only while nothing of the
+        // series is recorded, only on a Steam session issued before the series
+        // was created, so only to a process that was there when the series
+        // began, and asked only while this seat's client has sent and queued
+        // no report of the series). Physical game 1's token
+        // carries the issued nonce, and the seat it was issued to publishes it
+        // in the game's first round whether or not it is the room's host;
+        // every later game's host draws its nonce as the issued nonce's first
+        // 8 digits (the ANCHOR, learned from the issue or from the token a
+        // seat was grounded on) and 8 fresh ones, and the server reads a
+        // token only when it begins with the anchor.
         // It then adds one at every game start the game itself reported
         // (GM_ArmsRace.DoStartGame, exactly
         // one since its last game start: TeamGameLifecycle), and loses it at
         // any other game start, at a missed game boundary and at every join
         // (a rejoin of the same room included: Tracker.NoteRoomJoined). A seat
-        // holding none publishes nothing and carries nothing until a host's
-        // publish grounds it again. So a new host after a master change inside
+        // holding none publishes nothing and carries nothing until a publish
+        // grounds it again. So a new host after a master change inside
         // the room continues from the ordinal it holds and the epochs the room
         // holds, and after a room change no seat holds one: the new room's
         // host publishes nothing for the rest of the series' sitting there.
@@ -231,19 +245,20 @@ namespace CompetitiveRounds
         internal const string TokenRoomKey = "cr_tg_token";
 
         /// <summary>Why a seat does not publish (Tracker.TokenToPublish).
-        /// Only WhyNotHost (a host handoff) and WhyBootPending (round 7, F29:
-        /// the room's creator waits for a read of the series to name the
-        /// room's first game) can change inside the game's first round, so
+        /// Only WhyNotHost (a host handoff) and WhyFirstGamePending (round 8,
+        /// F31: the series' reporter waits for the server's answer on physical
+        /// game 1) can change inside the game's first round, so
         /// GameStateWatcher retries on those two and on nothing else.</summary>
         internal const string WhyNoGame = "no game is in progress";
         internal const string WhyMissed = "this seat missed a game boundary";
         internal const string WhyNoOrdinal = "this seat holds no physical-game ordinal for this game";
-        internal const string WhyBootPending = "this seat waits for a read of the series to name the room's first game";
+        internal const string WhyFirstGamePending = "this seat waits for the server's answer on the series' physical game 1";
         internal const string WhyTaken = "this game's token is already in the room";
         internal const string WhyPublished = "this seat already published this game's token";
         internal const string WhyLate = "the game's first round is over";
         internal const string WhyNotHost = "this seat is not the room's host";
         internal const string WhyEpoch = "the room's epoch is at its bound";
+        internal const string WhyNoAnchor = "this seat holds no issued physical game 1 to draw its nonce from";
 
         /// <summary>The highest epoch a token carries (nine digits).</summary>
         internal const long MaxEpoch = 999999999;
@@ -360,6 +375,17 @@ namespace CompetitiveRounds
             return sb.ToString();
         }
 
+        /// <summary>Round 8, finding F31: 8 fresh lowercase hex digits (the
+        /// first 4 bytes of a new Guid), the part of a later game's nonce after
+        /// the anchor (Tracker.TokenToPublish).</summary>
+        internal static string DrawSuffix()
+        {
+            byte[] b = Guid.NewGuid().ToByteArray();
+            var sb = new System.Text.StringBuilder(8);
+            for (int i = 0; i < 4; i++) sb.Append(b[i].ToString("x2", CultureInfo.InvariantCulture));
+            return sb.ToString();
+        }
+
         /// <summary>A token as a log line names it: the nonce's first 8 digits,
         /// its game and its epoch.</summary>
         internal static string Describe(string token)
@@ -398,6 +424,86 @@ namespace CompetitiveRounds
             return "&game_token=" + token + "&token_sig=" + tokenSig;
         }
 
+        /// <summary>Round 8, finding F31: what the series' reporter signs when
+        /// it asks the server for the series' physical game 1
+        /// (team_series_first_game): series, requester, room (unescaped).</summary>
+        internal static string FirstGameCanonical(string seriesId, string requesterSteamId, string photonRoomId)
+        {
+            return "team-first-game:" + seriesId + ":" + requesterSteamId + ":" + photonRoomId;
+        }
+
+        /// <summary>Round 8, finding F31: the ask's three query parameters, the
+        /// room already URL-escaped by the caller.</summary>
+        internal static string QueryFirstGame(string requesterSteamId, string escapedRoom, string sig)
+        {
+            return "?requester_steam_id=" + requesterSteamId + "&photon_room_id=" + escapedRoom + "&sig=" + sig;
+        }
+
+        /// <summary>Round 8, finding F31: a series id the client's report
+        /// ledger (ApiClient.cs, CompetitiveRounds.team-reports-sent.txt) can
+        /// hold on one line: the server's UUIDs, hex digits and dashes, at
+        /// most 64 characters.</summary>
+        internal static bool LedgerKey(string seriesId)
+        {
+            if (string.IsNullOrEmpty(seriesId) || seriesId.Length > 64) return false;
+            foreach (char c in seriesId)
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '-'))
+                    return false;
+            return true;
+        }
+
+        /// <summary>Round 8, finding F31: the ledger's line for a match report
+        /// of the series handed to the network.</summary>
+        internal static string LedgerSent(string seriesId)
+        {
+            return "sent " + seriesId;
+        }
+
+        /// <summary>Round 8, finding F31: the ledger's line for the series'
+        /// issued physical game 1, by its anchor (the issued nonce's first 8
+        /// digits).</summary>
+        internal static string LedgerAnchor(string seriesId, string anchor)
+        {
+            return "anchor " + seriesId + " " + anchor;
+        }
+
+        /// <summary>Round 8, finding F31: reads one ledger line, "sent
+        /// <series>" or "anchor <series> <8 hex>" (`anchorLine` says which;
+        /// `anchor` is "" for a sent line). False for anything else: a line an
+        /// interrupted append tore, which the ledger skips.</summary>
+        internal static bool ParseLedgerLine(string line, out bool anchorLine, out string seriesId, out string anchor)
+        {
+            anchorLine = false;
+            seriesId = "";
+            anchor = "";
+            string[] f = (line ?? "").Trim().Split(' ');
+            if (f.Length == 2 && f[0] == "sent" && LedgerKey(f[1]))
+            {
+                seriesId = f[1];
+                return true;
+            }
+            if (f.Length == 3 && f[0] == "anchor" && LedgerKey(f[1]) && f[2].Length == 8 && NonceValid(f[2] + "00000000"))
+            {
+                anchorLine = true;
+                seriesId = f[1];
+                anchor = f[2];
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>Round 8, finding F31: whether a report in the client's
+        /// outbox (`url`, `json`) is a match report of `seriesId`: a team match
+        /// report whose body names the series (ApiClient.ReportTeamMatch writes
+        /// "series_id" first). A team report with no body counts as one of
+        /// every series.</summary>
+        internal static bool QueuedReportOf(string url, string json, string seriesId)
+        {
+            if (url == null || !url.EndsWith("/api/v1/team/matches", StringComparison.Ordinal)) return false;
+            if (json == null) return true;
+            return json.IndexOf("\"series_id\":\"" + (seriesId ?? "") + "\"", StringComparison.Ordinal) >= 0;
+        }
+
         // The token's contract pin, read by the same backend test as the pin
         // above: it signs PinTokenExpected and PinDcTokenExpected and asks the
         // server's own token checks to accept PinToken for these inputs (the
@@ -410,6 +516,11 @@ namespace CompetitiveRounds
             "team-live-points-token:5b0c7e1a-2d3f-4a5b-8c6d-7e8f9a0b1c2d:90000000000700009:2:1:3:team_pin_room:0123456789abcdef:3:7";
         internal const string PinDcTokenExpected =
             "team-dc-token:90000000000700009:5b0c7e1a-2d3f-4a5b-8c6d-7e8f9a0b1c2d:90000000000700008:0123456789abcdef:3:7";
+        // Round 8, finding F31: the first-game ask's canonical for PinSeries,
+        // PinReporter and PinRoom (the same backend test signs it and asks the
+        // route's own signature check to accept it).
+        internal const string PinFirstGameExpected =
+            "team-first-game:5b0c7e1a-2d3f-4a5b-8c6d-7e8f9a0b1c2d:90000000000700009:team_pin_room";
 
         /// <summary>Round 6, finding F28: whether `s` can follow `last` inside
         /// one game. Inside a game the rounds only rise, and while neither
@@ -448,33 +559,35 @@ namespace CompetitiveRounds
             // lost the chain at a game boundary it did not see. `witnessed`:
             // this game start was matched by exactly one start of the game
             // itself (OnGmStart) since this seat's last game start in the room.
-            // `bootCandidate`: this is the first game start of the series this
-            // seat saw, in a room it created, so the chain may still be grounded
-            // at 1 while the game lasts (TryBoot).
             private string chainSeries = "", chainRoom = "";
             private int roomStarts, chain;
-            private bool witnessed, bootCandidate;
+            private bool witnessed;
+            // Round 8, finding F31: physical game 1 is issued by the server to
+            // the series' reporter (AskFirstGame, OnFirstGame). `gameGen`
+            // counts this seat's game starts and room changes, so an answer is
+            // applied only to the game it was asked from; `askGen` is the game
+            // an ask is out for (0 = none) and `askedGen` the last game an ask
+            // was made in (one per game). `firstNonce`: the issued nonce, while
+            // this seat holds physical game 1 by the server's issue (its token
+            // carries it, and this seat publishes it, host or not). `anchor`:
+            // the issued nonce's first 8 digits, from the issue or from the
+            // token this seat's ordinal was grounded on; a host draws every
+            // later game's nonce as the anchor and 8 fresh digits.
+            private int gameGen, askGen, askedGen;
+            private string firstNonce = "", anchor = "";
             // Round 7, F29: the game's own starts on this seat
             // (GM_ArmsRace.DoStartGame, TeamGameLifecycle) in `gmRoom`, and how
             // many of them this seat's game starts have accounted for.
             private string gmRoom = "";
             private int gmStarts, gmSeen;
-            // Round 7, F29: the room this seat created (Photon's OnCreatedRoom,
-            // `createdPending` until the join that follows it names the same
-            // room), the series this process saw a game start of, and what reads
-            // showed of each series' sitting. A full set of series makes every
-            // series count as seen, so it only ever withholds. `sitting` holds
-            // flags, and a flag once read is never forgotten: SittingKnown, a
-            // read carried the sitting; SittingRelocked, it showed the series
-            // relocked; SittingPlayed, it showed a live-points pair of two
-            // points or more on the series' record (any seat, any sitting).
-            // Only a played game puts one there, and the room's own first game
-            // seldom has by the first point this seat saw of it (a seat that saw
-            // a second point first may have posted one: this seat then names no
-            // game, a liveness cost only).
-            private string created = "", createdPending = "";
-            private const int MaxStartedSeries = 4096;
-            private readonly HashSet<string> startedSeries = new HashSet<string>(StringComparer.Ordinal);
+            // Round 7, F29: what reads showed of each series' sitting. `sitting`
+            // holds flags, and a flag once read is never forgotten:
+            // SittingKnown, a read carried the sitting; SittingRelocked, it
+            // showed the series relocked; SittingPlayed, it showed a live-points
+            // pair of two points or more on the series' record (any seat, any
+            // sitting). Since round 8 (F31) they name no game: they only save
+            // the series' reporter an ask the server would refuse
+            // (AskFirstGame).
             private const int SittingKnown = 1, SittingRelocked = 2, SittingPlayed = 4;
             private readonly Dictionary<string, int> sitting = new Dictionary<string, int>(StringComparer.Ordinal);
             // The physical game's token (round 5, finding F25; round 6). The
@@ -522,9 +635,10 @@ namespace CompetitiveRounds
             /// not, and then nothing is learned about the sitting); `played`:
             /// a live-points pair of two points or more is on the series'
             /// record. A relock or a played game, read once, is never
-            /// forgotten. A read can let the room's creator name the room's
-            /// first game physical game 1 (TryBoot), never any other game.
-            /// Returns the line to log, or null.</summary>
+            /// forgotten. Since round 8 (F31) a read names no game: it only
+            /// saves the series' reporter an ask the server would refuse
+            /// (AskFirstGame). Returns the line to log, or null (nothing is
+            /// logged here since round 8).</summary>
             internal string ObserveRead(string seriesId, bool hasWins, int t1Wins, int t2Wins, bool sittingKnown,
                                         bool relocked, bool played)
             {
@@ -549,7 +663,7 @@ namespace CompetitiveRounds
                         recorded[seriesId] = n;
                     }
                 }
-                return string.Equals(seriesId, chainSeries, StringComparison.Ordinal) ? TryBoot() : null;
+                return null;
             }
 
             /// <summary>A game starts in a cr_ff room (the watcher's game start):
@@ -566,12 +680,14 @@ namespace CompetitiveRounds
             /// adds one to an ordinal this seat holds; any other start (none of
             /// the game's own, or more than one: a game this seat's watcher did
             /// not see) loses it for the room. It is never taken from a count:
-            /// it is grounded only on a host's publish this seat took
-            /// (ObserveRoomToken) or, for the room's first game, by the seat that
-            /// created the room (TryBoot).</summary>
+            /// it is grounded only on a publish this seat took
+            /// (ObserveRoomToken) or, for the series' physical game 1, on the
+            /// server's issue of that game to this seat (round 8, finding F31:
+            /// AskFirstGame and OnFirstGame, asked after this start).</summary>
             internal int OnGameStart(string seriesId, string room, Score live, out string log)
             {
                 BeginGameToken(live);
+                gameGen = gameGen == int.MaxValue ? 1 : gameGen + 1;
                 seriesId = seriesId ?? "";
                 room = room ?? "";
                 string sid8 = seriesId.Length > 8 ? seriesId.Substring(0, 8) : seriesId;
@@ -585,7 +701,6 @@ namespace CompetitiveRounds
                     Freeze("", "", 0);
                     chain = 0;
                     witnessed = false;
-                    bootCandidate = false;
                     log = LogTag + " game start with no " + (seriesId.Length == 0 ? "series" : "room")
                           + ": its posts go without the pair and carry no token";
                     return 0;
@@ -613,11 +728,6 @@ namespace CompetitiveRounds
                 {
                     chain = chain >= MaxGameNumber ? 0 : chain + 1;
                 }
-                bool firstOfSeries = startedSeries.Count < MaxStartedSeries && !startedSeries.Contains(seriesId);
-                if (startedSeries.Count < MaxStartedSeries) startedSeries.Add(seriesId);
-                bootCandidate = witnessed && chain == 0 && firstOfSeries
-                                && string.Equals(room, created, StringComparison.Ordinal);
-                string boot = TryBoot();
                 int had;
                 bool read = recorded.TryGetValue(seriesId, out had);
                 int n = read ? had + 1 : (roomStarts == 1 ? 1 : 0);
@@ -626,7 +736,6 @@ namespace CompetitiveRounds
                     Freeze(seriesId, room, 0);
                     log = LogTag + " series=" + sid8 + " game number " + Num(n) + " or the room is outside what the"
                           + " server accepts: its posts go without the pair" + restarted + chainNote + OrdinalNote();
-                    if (boot != null) log += "; " + boot;
                     return 0;
                 }
                 Freeze(seriesId, room, n);
@@ -647,7 +756,6 @@ namespace CompetitiveRounds
                           + restarted;
                 }
                 log += chainNote + OrdinalNote();
-                if (boot != null) log += "; " + boot;
                 return n;
             }
 
@@ -658,49 +766,110 @@ namespace CompetitiveRounds
                 gameNumber = n;
             }
 
-            // Round 7, finding F29 (the bootstrap): the seat that created the
-            // room names the room's first game physical game 1, while that game
-            // lasts, when this is the first game start of the series this
-            // process saw, the game itself reported it (witnessed), and a read
-            // shows the series with no recorded game, never relocked (its
-            // original sitting) and no pair of two points or more on its
-            // record, so that a room created again under the same name while
-            // an earlier game's result is still on its way is not taken for a
-            // fresh one once any post of two points of that game reached the
-            // server. Any read showing a recorded game, a relock or such a pair
-            // ends the candidacy; with no read yet it waits (BootPending).
-            // Returns the line to log, or null.
-            private string TryBoot()
+            /// <summary>Round 8, finding F31: whether this seat asks the server
+            /// for the series' physical game 1 now, and the game the ask is for
+            /// (`gen`, handed back with the answer to OnFirstGame); false and
+            /// why not otherwise. Only the series' reporter asks (`reporter`:
+            /// this seat holds the lowest Steam ID of the room's four fighters,
+            /// the seat whose client sends the series' match reports), once per
+            /// game, in a game in progress whose start the game itself reported,
+            /// in which this seat holds no ordinal, and only while its client
+            /// has sent no report of the series and queued none
+            /// (`reportsClean`: an earlier game's result may otherwise still be
+            /// on its way). A read showing the series with a recorded game,
+            /// relocked or with a pair of two points or more on its record saves
+            /// an ask the server would refuse. The server decides
+            /// (team_series_first_game), and also refuses an ask whose Steam
+            /// session was issued after the series was created, as a restarted
+            /// client's is, or one's on another machine or profile, whose
+            /// ledger cannot show that game's reports; nothing here names a
+            /// game.</summary>
+            internal bool AskFirstGame(string seriesId, string room, bool reporter, bool reportsClean, out int gen,
+                                       out string why)
             {
-                if (!bootCandidate || chain > 0) return null;
-                if (!inGame || overSeen || boundaryMissed) return null;
-                int st, rec;
-                bool stKnown = sitting.TryGetValue(chainSeries, out st);
-                bool recKnown = recorded.TryGetValue(chainSeries, out rec);
-                int spent = stKnown ? st & (SittingRelocked | SittingPlayed) : 0;
-                if (spent != 0 || (recKnown && rec != 0))
-                {
-                    bootCandidate = false;
-                    return LogTag + " this seat created the room, but a read shows the series "
-                           + ((spent & SittingRelocked) != 0 ? "relocked"
-                              : spent != 0 ? "with a pair of two points or more on its record"
-                              : Num(rec) + " recorded game(s)")
-                           + ": it names no physical game here (tokenless unless a host's publish grounds it)";
-                }
-                if (!stKnown || !recKnown) return null;
-                chain = 1;
-                bootCandidate = false;
-                return LogTag + " this seat created the room and saw its first game start, and a read shows the"
-                       + " series with no recorded game, never relocked and no pair of two points or more on its"
-                       + " record: the room's first game is physical game 1";
+                gen = 0;
+                seriesId = seriesId ?? "";
+                room = room ?? "";
+                int rec, st;
+                bool recKnown = recorded.TryGetValue(seriesId, out rec);
+                bool stKnown = sitting.TryGetValue(seriesId, out st);
+                if (!inGame || overSeen) why = WhyNoGame;
+                else if (boundaryMissed) why = WhyMissed;
+                else if (!witnessed) why = "the game itself did not report this game start";
+                else if (chain > 0) why = "this seat already holds this game's physical-game ordinal";
+                else if (askedGen == gameGen) why = "this seat already asked in this game";
+                else if (seriesId.Length == 0 || room.Length == 0
+                         || !string.Equals(seriesId, chainSeries, StringComparison.Ordinal)
+                         || !string.Equals(room, chainRoom, StringComparison.Ordinal))
+                    why = "the series or the room is not this game's";
+                else if (!reporter) why = "this seat is not the series' reporter";
+                else if (!reportsClean)
+                    why = "this seat's client has sent or queued a report of the series: an earlier game's result may"
+                          + " still be on its way";
+                else if (recKnown && rec > 0) why = "a read shows " + Num(rec) + " recorded game(s)";
+                else if (stKnown && (st & SittingRelocked) != 0) why = "a read shows the series relocked";
+                else if (stKnown && (st & SittingPlayed) != 0)
+                    why = "a read shows a pair of two points or more on the series' record";
+                else why = null;
+                if (why != null) return false;
+                askedGen = gameGen;
+                askGen = gameGen;
+                gen = gameGen;
+                return true;
             }
 
-            // Round 7, F29: the room's creator still waits for a read to name
-            // the room's first game.
-            private bool BootPending()
+            /// <summary>Round 8, finding F31: the server's answer to the ask made
+            /// for game `gen` (AskFirstGame). `issued`: that game is the series'
+            /// physical game 1 and `nonce` its issued nonce; `reason` says why
+            /// not otherwise. It is taken only while this seat is still in the
+            /// game it asked from, holds no ordinal, and its client has still
+            /// sent and queued no report of the series (`reportsClean`, read
+            /// again now). This seat then holds physical game 1 and publishes its
+            /// token in the game's first round (TokenToPublish). Any other
+            /// answer, or one too late, leaves the game tokenless. Returns the
+            /// line to log.</summary>
+            internal string OnFirstGame(string seriesId, string room, int gen, bool issued, string nonce, string reason,
+                                        bool reportsClean)
             {
-                if (!bootCandidate || chain > 0) return false;
-                return !sitting.ContainsKey(chainSeries) || !recorded.ContainsKey(chainSeries);
+                bool current = gen > 0 && gen == askGen && gen == gameGen;
+                if (gen > 0 && gen == askGen) askGen = 0;
+                if (!issued)
+                    return LogTag + " physical game 1 not issued (" + (string.IsNullOrEmpty(reason) ? "no reason given" : reason)
+                           + "): this game is tokenless unless a publish grounds this seat";
+                string why = null;
+                if (!current || !inGame || overSeen || boundaryMissed) why = "this seat is no longer in the game it asked from";
+                else if (chain > 0) why = "this seat already holds a physical-game ordinal";
+                else if (!string.Equals(seriesId ?? "", chainSeries, StringComparison.Ordinal)
+                         || !string.Equals(room ?? "", chainRoom, StringComparison.Ordinal))
+                    why = "the series or the room changed";
+                else if (!NonceValid(nonce)) why = "the answer carries no nonce";
+                else if (!reportsClean) why = "this seat's client has since sent or queued a report of the series";
+                if (why != null)
+                    return LogTag + " physical game 1 issued, but not taken: " + why + "; the server issues it once per"
+                           + " series, so no later game of the series is named game 1 either";
+                chain = 1;
+                firstNonce = nonce;
+                anchor = nonce.Substring(0, 8);
+                return LogTag + " physical game 1 issued by the server (" + anchor + "): this seat holds it and publishes"
+                       + " its token";
+            }
+
+            /// <summary>Round 8, finding F31: the answer to the ask made for
+            /// game `gen` is dropped, not taken, because the client cannot keep
+            /// what taking it needs (`why`). Settles the ask; returns the line
+            /// to log.</summary>
+            internal string DropFirstGame(int gen, string why)
+            {
+                if (gen > 0 && gen == askGen) askGen = 0;
+                return LogTag + " physical game 1 issued, but not taken: " + why + "; the server issues it once per"
+                       + " series, so no later game of the series is named game 1 either";
+            }
+
+            // Round 8, finding F31: this seat's ask for physical game 1 is out
+            // for the game in progress.
+            private bool FirstGamePending()
+            {
+                return chain == 0 && askGen > 0 && askGen == gameGen;
             }
 
             private string OrdinalNote()
@@ -711,9 +880,10 @@ namespace CompetitiveRounds
             }
 
             /// <summary>Round 7, finding F29: the physical game this seat is in
-            /// (or last was), grounded on a host's publish it took or on the
-            /// room's first game it named, and counted at every game start the
-            /// game itself reported since; 0 = it cannot say.</summary>
+            /// (or last was), grounded on a publish it took or (round 8, F31) on
+            /// the server's issue of the series' physical game 1, and counted at
+            /// every game start the game itself reported since; 0 = it cannot
+            /// say.</summary>
             internal int PhysicalOrdinal()
             {
                 return chain;
@@ -742,14 +912,11 @@ namespace CompetitiveRounds
             /// <summary>The room was left (the watcher's polled exit): nothing
             /// frozen, the physical-game ordinal is gone, and so is the token
             /// state (the first value read in the next room, the same room
-            /// rejoined included, is taken as an earlier game's). Reads, and the
-            /// series this process saw a game start of, are kept (they belong to
-            /// the series, not the room).</summary>
+            /// rejoined included, is taken as an earlier game's). Reads are kept
+            /// (they belong to the series, not the room).</summary>
             internal void Clear()
             {
                 ResetRoom("");
-                created = "";
-                createdPending = "";
             }
 
             // Round 7, F29: everything this seat holds for the room it is in.
@@ -761,36 +928,32 @@ namespace CompetitiveRounds
                 roomStarts = 0;
                 chain = 0;
                 witnessed = false;
-                bootCandidate = false;
+                // Round 8, F31: an answer to an ask from the room left behind
+                // names no game here, and the issued game is dropped with the
+                // ordinal.
+                gameGen = gameGen == int.MaxValue ? 1 : gameGen + 1;
+                askGen = 0;
+                firstNonce = "";
+                anchor = "";
                 gmRoom = gm ?? "";
                 gmStarts = 0;
                 gmSeen = 0;
                 ResetToken("");
             }
 
-            /// <summary>Round 7, finding F29: Photon's OnCreatedRoom: this seat
-            /// created `room` (it then joins it: NoteRoomJoined).</summary>
-            internal void NoteRoomCreated(string room)
-            {
-                createdPending = room ?? "";
-            }
-
             /// <summary>Round 7, finding F29: Photon's OnJoinedRoom, for every
             /// join (a rejoin of the same room included): a join breaks this
             /// seat's physical-game ordinal, so everything it held for a room is
-            /// dropped, and the room counts as created by this seat only when
-            /// the create just before this join named it. Returns the line to
-            /// log, or null.</summary>
+            /// dropped. Round 8, finding F31: which seat created the room names
+            /// nothing. Returns the line to log, or null.</summary>
             internal string NoteRoomJoined(string room)
             {
                 room = room ?? "";
                 bool had = chain > 0 || adopted.Length > 0;
                 ResetRoom(room);
-                created = room.Length > 0 && string.Equals(room, createdPending, StringComparison.Ordinal) ? room : "";
-                createdPending = "";
                 return had
                     ? LogTag + " joined a room: this seat's physical-game ordinal and game token are dropped (a join"
-                      + " breaks them; only a host's publish grounds them again)"
+                      + " breaks them; only a publish grounds them again)"
                     : null;
             }
 
@@ -916,6 +1079,7 @@ namespace CompetitiveRounds
                 tokenRoom = room ?? "";
                 adopted = "";
                 adoptedOrdinal = 0;
+                firstNonce = "";
                 took = false;
                 inGame = false;
                 overSeen = false;
@@ -943,6 +1107,7 @@ namespace CompetitiveRounds
                 Stale(adopted);
                 adopted = "";   // a token is never carried into another game
                 adoptedOrdinal = 0;
+                firstNonce = "";   // round 8, F31: the issued game's token is published in that game only
                 published = false;
                 withdrawn = false;
                 noted = "";
@@ -1160,8 +1325,12 @@ namespace CompetitiveRounds
                 took = true;
                 if (chain > 0) return LogTag + " game token " + Describe(v) + " taken for this game";
                 // Round 7, finding F29: a seat holding no ordinal is grounded on
-                // the host's publish it takes, and only on that.
+                // the publish it takes, and only on that (or on the server's
+                // issue of physical game 1: OnFirstGame). Round 8, finding F31:
+                // the token's first 8 digits are the anchor every nonce this
+                // seat later publishes as the host begins with.
                 chain = ordinal;
+                anchor = nonce.Substring(0, 8);
                 return LogTag + " game token " + Describe(v) + " taken for this game: this seat's physical-game"
                        + " ordinal is grounded on it (game " + Num(ordinal) + ")";
             }
@@ -1169,7 +1338,8 @@ namespace CompetitiveRounds
             // Round 6, finding F27; round 7, finding F29: why a token naming
             // `ordinal` is not the token of this seat's game, or null. When this
             // seat holds the physical game's ordinal (PhysicalOrdinal: grounded
-            // on a host's publish or on the room's first game, never on a count)
+            // on a publish or on the server's issue of physical game 1, never on
+            // a count)
             // the token must name it: a seat a game ahead of a lagging host
             // holds a higher ordinal than the one the host's token names. It
             // must also name the game this seat's posts name (the server's
@@ -1234,8 +1404,9 @@ namespace CompetitiveRounds
             /// seat's game, while that game is in progress, in the series and
             /// the room its number was frozen for, while the room still holds it
             /// (`v`: the room's value now), while it names this seat's physical
-            /// game (round 7, F29: PhysicalOrdinal, grounded on a host's publish,
-            /// never on a count) and the number its posts name (round 6, F27),
+            /// game (round 7, F29: PhysicalOrdinal, grounded on a publish or on
+            /// the server's issue of physical game 1, never on a count) and the
+            /// number its posts name (round 6, F27),
             /// and while this seat's reading of the score now (`live`) still
             /// shows that game (round 6, F28), and only while both of the game's
             /// lifecycle hooks are attached (`hooksLive`, round 7, finding F30:
@@ -1278,35 +1449,42 @@ namespace CompetitiveRounds
             }
 
             /// <summary>The token this seat publishes now, or "" and why not
-            /// (`why`, one of the Why constants). Only the room's host
-            /// (`isHost`) publishes, once per game, while the game's first round
-            /// is in progress (`firstRound`: the rounds are 0-0), only while this
-            /// seat has taken no token in the game and holds the physical game's
-            /// ordinal (round 7, F29: PhysicalOrdinal, grounded on a host's
-            /// publish this seat took or on the room's first game it named, and
-            /// counted at every game start the game itself reported since),
-            /// which the token names. A seat holding none publishes nothing. Its
-            /// epoch is one above the highest this seat has read in the room or
-            /// published (a new host after a master change continues the room's
-            /// epochs from the value the room holds). `current`
-            /// is the room's value now; the fresh nonce is neither its nonce nor
-            /// any stale for this seat or read in this game.</summary>
+            /// (`why`, one of the Why constants). Once per game, while the
+            /// game's first round is in progress (`firstRound`: the rounds are
+            /// 0-0), only while this seat has taken no token in the game and
+            /// holds the physical game's ordinal (round 7, F29: PhysicalOrdinal,
+            /// grounded on a publish this seat took or on the server's issue of
+            /// physical game 1, and counted at every game start the game itself
+            /// reported since), which the token names. A seat holding none
+            /// publishes nothing. Round 8, finding F31: the seat the server
+            /// issued physical game 1 to publishes that game's token, its nonce
+            /// the issued one, whether or not it is the room's host; every other
+            /// token is the host's (`isHost`), its nonce the anchor (the issued
+            /// nonce's first 8 digits) and 8 fresh digits. Its epoch is one
+            /// above the highest this seat has read in the room or published (a
+            /// new host after a master change continues the room's epochs from
+            /// the value the room holds). `current` is the room's value now; the
+            /// fresh nonce is neither its nonce nor any stale for this seat or
+            /// read in this game.</summary>
             internal string TokenToPublish(bool isHost, bool firstRound, string current, out string why)
             {
                 why = null;
                 long epoch = Math.Max(epochRead, epochPublished) + 1;
+                bool issued = firstNonce.Length > 0 && PhysicalOrdinal() == 1;
                 if (!inGame || overSeen) why = WhyNoGame;
                 else if (boundaryMissed) why = WhyMissed;
-                else if (PhysicalOrdinal() <= 0) why = BootPending() && firstRound ? WhyBootPending : WhyNoOrdinal;
+                else if (PhysicalOrdinal() <= 0) why = FirstGamePending() && firstRound ? WhyFirstGamePending : WhyNoOrdinal;
                 else if (adopted.Length > 0 || withdrawn) why = WhyTaken;
                 else if (published) why = WhyPublished;
                 else if (!firstRound) why = WhyLate;
-                else if (!isHost) why = WhyNotHost;
+                else if (!isHost && !issued) why = WhyNotHost;
                 else if (epoch > MaxEpoch) why = WhyEpoch;
+                else if (!issued && !NonceValid(anchor + "00000000")) why = WhyNoAnchor;
                 if (why != null) return "";
+                if (issued) return MakeToken(firstNonce, 1, epoch);
                 string current16 = NonceOf(current);
                 string n;
-                do n = DrawNonce();
+                do n = anchor + DrawSuffix();
                 while (n == current16 || stale.Contains(n) || SeenNonce(n));
                 return MakeToken(n, PhysicalOrdinal(), epoch);
             }
@@ -1540,12 +1718,16 @@ namespace CompetitiveRounds
         // game apart and F28's reporter that did not see a game boundary; each
         // is described above its own code below.
         //
-        // Round 7 (finding F29): in every model the host created the room and
-        // names its first game (Tracker.TryBoot, after a read of the series),
-        // every other seat holds a physical game only through the host's
-        // publishes it takes, and the game itself starts each game on a seat
-        // (Rematch: DoStartGame, TeamGameLifecycle) before that seat's watcher
-        // does. F29's own model follows F28's.
+        // Round 7 (finding F29): a seat holds a physical game only through a
+        // publish it takes or the server's issue of physical game 1, and the
+        // game itself starts each game on a seat (Rematch: DoStartGame,
+        // TeamGameLifecycle) before that seat's watcher does. F29's own model
+        // follows F28's. Round 8 (finding F31): in every model but F31's the
+        // room's host is also the series' reporter, and physical game 1 is the
+        // server's issue to it at its first game start (TokenSeat.Ask,
+        // TokenServer.GrantFirst), never a read of the series; the server reads
+        // a DC report's token only when it is counted from that issue
+        // (ReadsAnchor). F31's own model follows F29's.
 
         // Scores the model's seats read (rounds to win 5).
         private static readonly Score Reset = Score.Of(0, 0, 0, 0, 5);     // a game's 0-0, before its first point
@@ -1577,16 +1759,31 @@ namespace CompetitiveRounds
         // the same way, and a DC report settles only when its token names the
         // game being settled. ReadsSitting (round 7, F29; main.py,
         // _team_game_sitting_refusal): a DC report's token settles nothing once
-        // the series was relocked or has a record in another room.
+        // the series was relocked or has a record in another room. ReadsAnchor
+        // (round 8, F31; main.py, _team_game_first_game_refusal): nor unless
+        // the series was issued a physical game 1 (GrantFirst), not voided
+        // (Land), and the token's nonce begins with the issued nonce's first 8
+        // digits. Unreachable: the seats' requests fail (a post is not filed,
+        // an ask is not answered).
         private sealed class TokenServer
         {
-            public bool ReadsTokens, ReadsOrdinals, ReadsSitting;
+            public bool ReadsTokens, ReadsOrdinals, ReadsSitting, ReadsAnchor;
             public int Recorded;
             public string Stored = "";
             public bool Relocked;
             // Round 7, F29: a post of two points or more was filed (main.py,
             // team_series_state's two_points_on_record).
             public bool AnyTwo;
+            // Round 8, F31 (main.py, team_series_first_game and
+            // _team_first_game_void; migration 359): physical game 1 was issued
+            // (`FirstNonce`), and a recorded report without its anchor voided it.
+            public bool Unreachable, Granted, Voided;
+            public string FirstNonce = "";
+            // Round 8, F31: team_series_first_game issues only to an ask whose
+            // own Steam session was issued before the series was created (the
+            // asking process was there when the series began); false is a
+            // server without that rule.
+            public bool ReadsSession = true;
             private readonly Dictionary<string, TokenRec> recs = new Dictionary<string, TokenRec>(StringComparer.Ordinal);
 
             private static string Key(int game, string room) { return Num(game) + "@" + room; }
@@ -1598,8 +1795,46 @@ namespace CompetitiveRounds
                 Relocked = true;
             }
 
+            // Round 8, F31: main.py's team_series_first_game. Issued once per
+            // series, to the series' reporter, on a session issued before the
+            // series was created (`born`: the asking process was there when the
+            // series began), only while the series has no recorded game, was
+            // never relocked, has no game on record in another room and no pair
+            // of two points or more on its record, and only in its stored room;
+            // `reason` says why not.
+            public bool GrantFirst(string room, bool reporter, bool born, out string nonce, out string reason)
+            {
+                nonce = "";
+                reason = null;
+                if (Unreachable) reason = "no answer: the server cannot be reached";
+                else if (!reporter) reason = "the requester is not the series' reporter";
+                else if (Recorded > 0) reason = "a game of the series is recorded";
+                else if (Relocked) reason = "the series was relocked";
+                else if (room != Stored) reason = "the requester's room is not the series' stored room";
+                else if (Granted) reason = "physical game 1 was already issued for this series";
+                else if (ReadsSession && !born) reason = "the requester's session was not issued before the series was created";
+                else if (OtherRoom()) reason = "the series has a game on record in another room";
+                else if (AnyTwo) reason = "a pair of two points or more is on the series' record";
+                if (reason != null) return false;
+                Granted = true;
+                FirstNonce = DrawNonce();
+                nonce = FirstNonce;
+                return true;
+            }
+
+            // Round 8, F31: main.py's submit_team_match. A match report is
+            // recorded; `anchor` is what the reporter's client held for the
+            // series when it built the report ("" = none). One without the
+            // issued anchor voids physical game 1 for good.
+            public void Land(string anchor)
+            {
+                Recorded++;
+                if (Granted && !Voided && (anchor ?? "") != FirstNonce.Substring(0, 8)) Voided = true;
+            }
+
             public void File(int named, string room, string token, int team, bool two, int game)
             {
+                if (Unreachable) return;
                 if (named < 1 || named != Recorded + 1 || room != Stored) return;
                 TokenRec r;
                 string key = Key(named, room);
@@ -1620,6 +1855,11 @@ namespace CompetitiveRounds
             public bool Settles(string token, int game, out bool fromAnother)
             {
                 fromAnother = false;
+                // main.py's lead-forfeit reads the record only when the
+                // remaining team already won a game of the series (the model
+                // takes any recorded game as its win): none recorded, nothing
+                // settles.
+                if (Recorded < 1) return false;
                 TokenRec r;
                 string key = Key(Recorded + 1, Stored);
                 if (!recs.TryGetValue(key, out r)) return false;
@@ -1632,6 +1872,8 @@ namespace CompetitiveRounds
                     if (!TryParseToken(token, out nonce, out ordinal, out epoch)) return false;
                     if (ReadsOrdinals && ordinal != Recorded + 1) return false;
                     if (ReadsSitting && (Relocked || OtherRoom())) return false;
+                    if (ReadsAnchor && (!Granted || Voided || nonce.Substring(0, 8) != FirstNonce.Substring(0, 8)))
+                        return false;
                     if (r.Conflict || r.Token != nonce || r.TokTeams != 3) return false;
                     foreach (var kv in recs)
                         if (kv.Key != key && kv.Value.Token == nonce) return false;
@@ -1666,14 +1908,32 @@ namespace CompetitiveRounds
             // bridge), and whether both hooks are attached (`HooksLive`,
             // TokenFor's gate).
             public bool Hooks = true, HooksLive = true;
+            // Round 8, F31: this seat is the series' reporter (`Reporter`: the
+            // lowest Steam ID of the four; its client sends the series' match
+            // reports and asks for physical game 1), and the server it asks
+            // (`Srv`; null: it never asks). The reporter client's durable
+            // state, kept across a restart: the ledger's series it sent or
+            // queued a report of (`Sent`) and the anchors of the issues it took
+            // (`Anchors`), and the reports still in its outbox, oldest first
+            // (`Outbox`, each the anchor it was built with).
+            public bool Reporter;
+            public TokenServer Srv;
+            public readonly HashSet<string> Sent = new HashSet<string>(StringComparer.Ordinal);
+            public readonly Dictionary<string, string> Anchors = new Dictionary<string, string>(StringComparer.Ordinal);
+            public readonly List<string> Outbox = new List<string>();
+            private string series = "";
+            // Round 8, F31: this seat's process was there when the series was
+            // created (its Steam session was issued before the series); a
+            // restart is a new process, on a session issued after it.
+            public bool Born = true;
 
             public void Read(string room, string v) { View = v; T.ObserveRoomToken(room, v); }
 
-            // Round 7, F29: Photon's OnCreatedRoom (`create`) and OnJoinedRoom,
-            // then this seat's first read of the room's value `v`.
-            public void Enter(string room, string v, bool create)
+            // Round 7, F29: Photon's OnJoinedRoom, then this seat's first read
+            // of the room's value `v`. Round 8, F31: which seat created the
+            // room names nothing.
+            public void Enter(string room, string v)
             {
-                if (create) T.NoteRoomCreated(room);
                 T.NoteRoomJoined(room);
                 Read(room, v);
             }
@@ -1687,11 +1947,15 @@ namespace CompetitiveRounds
             }
 
             // Round 7, F29: the game restarted as a new process; nothing the
-            // old one held survives.
+            // old one held survives but its durable files (round 8, F31: the
+            // reporter's ledger and outbox), and its Steam session is a new
+            // one, issued after the series was created.
             public void Restart()
             {
                 T = new Tracker();
                 View = "";
+                series = "";
+                Born = false;
             }
 
             // Round 7, F29: the game itself starts a game on this seat
@@ -1714,21 +1978,53 @@ namespace CompetitiveRounds
             }
 
             // The watcher's game start (at the game's first combat, or at its
-            // first point), then its read of the room.
+            // first point), then its read of the room, then (round 8, F31) the
+            // reporter's ask for physical game 1, answered at once
+            // (GameStateWatcher.TryAskTeamFirstGame).
             public void Start(string series, string room)
             {
                 string line;
+                this.series = series ?? "";
                 T.OnGameStart(series, room, Live, out line);
                 T.ObserveRoomToken(room, View);
+                Ask(series, room);
             }
 
+            // Round 8, F31: the ask, and the answer taken (its anchor written
+            // to the ledger first, as ApiClient.NoteTeamAnchor does).
+            public void Ask(string series, string room)
+            {
+                if (Srv == null) return;
+                int gen;
+                string why;
+                if (!T.AskFirstGame(series, room, Reporter, Clean(series), out gen, out why)) return;
+                string nonce, reason;
+                bool issued = Srv.GrantFirst(room, Reporter, Born, out nonce, out reason);
+                if (issued && Clean(series)) Anchors[series ?? ""] = nonce.Substring(0, 8);
+                T.OnFirstGame(series, room, gen, issued, nonce, reason, Clean(series));
+            }
+
+            // Round 8, F31: the reporter client's ledger and outbox hold no
+            // report of the series (ApiClient.TeamReportsClean: no team report
+            // of any series in the outbox).
+            public bool Clean(string series) { return !Sent.Contains(series ?? "") && Outbox.Count == 0; }
+
             // The game's own game over on this seat, then the watcher's: the
-            // tick that reads the final score, then its game over.
-            public void Over(string room)
+            // tick that reads the final score, then its game over. Round 8,
+            // F31: the reporter's client then sends the game's report, written
+            // to its ledger first and built with the anchor its ledger holds for
+            // the series; returns that anchor ("" = none), or null when this
+            // seat sends no report. The model lands it (TokenServer.Land) or
+            // queues it (Outbox).
+            public string Over(string room)
             {
                 GmOver();
                 Tick(room, Final);
                 T.OnTokenGameOver(room, View);
+                if (!Reporter || series.Length == 0) return null;
+                Sent.Add(series);
+                string a;
+                return Anchors.TryGetValue(series, out a) ? a : "";
             }
 
             public string Token(string series, string room) { return T.TokenFor(series, room, View, Live, HooksLive); }
@@ -1785,18 +2081,53 @@ namespace CompetitiveRounds
             return tok;
         }
 
+        // Round 8, F31: the reporter's publish when it is not the room's host:
+        // the token of the physical game 1 the server issued it (TokenToPublish
+        // publishes that one host or not; every other token is the host's).
+        // Returns the room's value after it.
+        private static string ReporterPublish(TokenSeat s, string value, bool sent)
+        {
+            string why;
+            string tok = s.T.TokenToPublish(false, true, s.View, out why);
+            if (tok.Length == 0 || !sent) return value;
+            s.T.ArmPublished(tok);
+            return tok;
+        }
+
+        // Round 8, F31: the kept copy of round 7's creator boot. The room's
+        // creator and host, holding no physical game at its game start in a
+        // room it created, names that game physical game 1 because a read
+        // shows the series with no recorded game, never relocked and no pair of
+        // two points on its record (the caller calls it only then), and
+        // publishes it with a fresh nonce (round 7's TryBoot and draw).
+        // Returns the room's value after it.
+        private static string KeptBoot(TokenSeat h, string value)
+        {
+            string why;
+            if (h.T.PhysicalOrdinal() != 0 || h.T.TokenToPublish(true, true, h.View, out why) != "" || why != WhyNoOrdinal)
+                return value;
+            string n;
+            int o;
+            long e;
+            long above = TryParseToken(h.View, out n, out o, out e) ? e : 0;
+            string tok = MakeToken(DrawNonce(), 1, above + 1);
+            h.T.ArmPublished(tok);
+            return tok;
+        }
+
         private static void SimulateToken(bool readsTokens, bool g1Sent, int rep2, bool sent, int reaches, bool echo,
                                           bool missed, int reached, bool hostReports, TokenTally tally)
         {
             const string S = "series-t", R = "room-t";
             var srv = new TokenServer { ReadsTokens = readsTokens, ReadsOrdinals = readsTokens, ReadsSitting = readsTokens,
+                                        ReadsAnchor = readsTokens,
                                         Stored = R };
-            var h = new TokenSeat { Team = 0 };
+            var h = new TokenSeat { Team = 0, Reporter = true, Srv = srv };
             var p = new TokenSeat { Team = 1 };
             string value = "";
             tally.Timelines++;
-            h.Enter(R, value, true);
-            p.Enter(R, value, false);
+            h.Enter(R, value);
+            p.Enter(R, value);
             h.Fetch(S, 0, false, srv.AnyTwo);
             p.Fetch(S, 0, false, srv.AnyTwo);
             // Games 1 and 2: the value reaches both seats before their posts;
@@ -1926,15 +2257,15 @@ namespace CompetitiveRounds
                                         out bool fromAnother, out string sent)
         {
             const string S = "series-f27", R = "room-f27";
-            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, Stored = R };
-            var h = new TokenSeat { Team = 0 };
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true, Stored = R };
+            var h = new TokenSeat { Team = 0, Reporter = true, Srv = srv };
             var c = new TokenSeat { Team = 1 };
             var a = new TokenSeat { Team = 0 };
             var all = new[] { h, c, a };
             string value = "";
-            h.Enter(R, value, true);
-            c.Enter(R, value, false);
-            a.Enter(R, value, false);
+            h.Enter(R, value);
+            c.Enter(R, value);
+            a.Enter(R, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
             // Game 1, seen by every seat, and recorded: team 1 leads 1-0.
             Rematch(R, all);
@@ -2080,15 +2411,15 @@ namespace CompetitiveRounds
                                           bool hooks, out bool settled, out bool fromAnother)
         {
             const string S = "series-f28", R = "room-f28";
-            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, Stored = R };
-            var h = new TokenSeat { Team = 0 };
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true, Stored = R };
+            var h = new TokenSeat { Team = 0, Reporter = true, Srv = srv };
             var p = new TokenSeat { Team = 1 };
             var r = new TokenSeat { Team = 0 };
             var all = new[] { h, p, r };
             string value = "";
-            h.Enter(R, value, true);
-            p.Enter(R, value, false);
-            r.Enter(R, value, false);
+            h.Enter(R, value);
+            p.Enter(R, value);
+            r.Enter(R, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
             Rematch(R, all);
             value = HostStart(h, S, R, value, true);
@@ -2203,15 +2534,15 @@ namespace CompetitiveRounds
                                           out bool fromAnother, out bool heldT2)
         {
             const string S = "series-f30", R = "room-f30";
-            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, Stored = R };
-            var h = new TokenSeat { Team = 0 };
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true, Stored = R };
+            var h = new TokenSeat { Team = 0, Reporter = true, Srv = srv };
             var p = new TokenSeat { Team = 1 };
             var r = new TokenSeat { Team = 0 };
             var all = new[] { h, p, r };
             string value = "";
-            h.Enter(R, value, true);
-            p.Enter(R, value, false);
-            r.Enter(R, value, false);
+            h.Enter(R, value);
+            p.Enter(R, value);
+            r.Enter(R, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
             for (int g = 1; g <= 2; g++)
             {
@@ -2306,15 +2637,15 @@ namespace CompetitiveRounds
                                                out bool settled, out bool fromAnother)
         {
             const string S = "series-f30s", R = "room-f30s";
-            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, Stored = R };
-            var h = new TokenSeat { Team = 0 };
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true, Stored = R };
+            var h = new TokenSeat { Team = 0, Reporter = true, Srv = srv };
             var p = new TokenSeat { Team = 1 };
             var r = new TokenSeat { Team = 0 };
             var all = new[] { h, p, r };
             string value = "";
-            h.Enter(R, value, true);
-            p.Enter(R, value, false);
-            r.Enter(R, value, false);
+            h.Enter(R, value);
+            p.Enter(R, value);
+            r.Enter(R, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
             for (int g = 1; g <= 2; g++)
             {
@@ -2403,8 +2734,9 @@ namespace CompetitiveRounds
         // ---- Round 7, finding F29: seats re-anchored while a result is queued -
         //
         // The reviewer's scenario on three real Trackers: the room's host H
-        // (team 1, the seat that created the room and named its first game)
-        // and team 2's C and R (R reports). Games 1 and 2 are played and
+        // (team 1, the room's creator and master, and the series' reporter,
+        // which the server issued physical game 1) and team 2's C and R (R
+        // reports the leave). Games 1 and 2 are played and
         // recorded (1-1). Game 3 crosses, under the host's token or with its
         // publish not sent, and team 1 wins it; its result is QUEUED (the
         // server still counts two games) or, in the in-step control, recorded,
@@ -2427,6 +2759,10 @@ namespace CompetitiveRounds
         // a kept copy (a master holding no physical game publishes the game its
         // posts name) must settle while queued, or it could not see F29; with
         // the server's sitting rule off as well, the room change settles too.
+        // Both kept copies run against a server without round 8's anchor rule
+        // (`readsAnchor` false), which alone refuses every token the kept seed
+        // draws (a fresh nonce, not counted from the issued game 1); with the
+        // anchor rule the kept copy settles nothing while queued.
 
         private const int KindRejoin = 0, KindRoomChange = 1, KindRecreate = 2;
 
@@ -2436,18 +2772,20 @@ namespace CompetitiveRounds
         }
 
         private static bool SimulateF29(int kind, int mask, bool queued, bool restart, bool g3Sent, bool countSeed,
-                                        bool readsSitting, out bool wrong, out int carrying, out int reanchoredCarrying)
+                                        bool readsSitting, bool readsAnchor, out bool wrong, out int carrying,
+                                        out int reanchoredCarrying)
         {
             const string S = "series-f29", R1 = "room-f29", R2 = "room-f29-next";
-            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = readsSitting, Stored = R1 };
-            var h = new TokenSeat { Team = 0 };
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = readsSitting,
+                                        ReadsAnchor = readsAnchor, Stored = R1 };
+            var h = new TokenSeat { Team = 0, Reporter = true, Srv = srv };
             var c = new TokenSeat { Team = 1 };
             var r = new TokenSeat { Team = 1 };
             var all = new[] { h, c, r };
             string room = R1, value = "";
-            h.Enter(room, value, true);
-            c.Enter(room, value, false);
-            r.Enter(room, value, false);
+            h.Enter(room, value);
+            c.Enter(room, value);
+            r.Enter(room, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
             // Games 1 to 3, seen by every seat, each under the host's token
             // (game 3's when its publish is sent).
@@ -2487,7 +2825,7 @@ namespace CompetitiveRounds
             {
                 if (!re[k]) continue;
                 if (restart) all[k].Restart();
-                all[k].Enter(room, value, kind != KindRejoin && k == 0);
+                all[k].Enter(room, value);
                 all[k].Fetch(S, srv.Recorded, kind == KindRoomChange, srv.AnyTwo);
             }
             // Game 4.
@@ -2510,7 +2848,7 @@ namespace CompetitiveRounds
             return settled;
         }
 
-        private static F29Tally SweepF29(bool countSeed, bool readsSitting)
+        private static F29Tally SweepF29(bool countSeed, bool readsSitting, bool readsAnchor)
         {
             var tally = new F29Tally();
             for (int kind = KindRejoin; kind <= KindRecreate; kind++)
@@ -2521,8 +2859,8 @@ namespace CompetitiveRounds
             {
                 bool wrong;
                 int carrying, reCarrying;
-                bool settled = SimulateF29(kind, mask, q != 0, rs != 0, g3 != 0, countSeed, readsSitting, out wrong,
-                                           out carrying, out reCarrying);
+                bool settled = SimulateF29(kind, mask, q != 0, rs != 0, g3 != 0, countSeed, readsSitting, readsAnchor,
+                                           out wrong, out carrying, out reCarrying);
                 tally.Timelines++;
                 if (settled) tally.Settled++;
                 if (wrong) tally.Wrong++;
@@ -2540,64 +2878,193 @@ namespace CompetitiveRounds
             return tally;
         }
 
-        // Round 7, finding F29: the room's first game named by a creator that
-        // cannot tell an earlier game was played. Team 1's H (the room's
-        // creator and master) and team 2's C and R (R reports). Game 1 is
-        // played and crosses, under H's token (`g1Sent`) or with its publish
-        // not sent, and its result is QUEUED. Every seat leaves, and H,
-        // restarted as a new process, creates the same room again (its
-        // properties gone with it); every seat joins it and reads the series:
-        // no recorded game, never relocked. Game 2 is played; game 1's result
-        // lands after it, and game 2's is queued in turn. Game 3 crosses, a
-        // team-1 player leaves, and R reports it. The server settles game 2
-        // by then, so any settlement is game 3's crossing: wrong. Round 7's
-        // creator reads game 1's pair of two points on the series' record and
-        // names no game; `readsPlayed` false is the kept copy of a creator
-        // that does not read it, which must settle, or the scenario proves
-        // nothing.
-        private static bool SimulateRecreateFirst(bool g1Sent, bool readsPlayed, out bool wrong, out int carrying)
+        // ---- Round 8, finding F31: the room created again over queued results -
+        //
+        // The reviewer's scenario on three real Trackers: team 1's H (the
+        // room's creator and master) and R, and team 2's C. The series'
+        // reporter M (the lowest Steam ID of the four: its client sends the
+        // series' match reports and is the only one that asks for physical
+        // game 1) is H, R or C. Games 1 and 2 are played in the room while the
+        // server cannot be reached: every live-points post fails, and so does
+        // M's ask unless game 1's went through first (`g1Issued`); both games'
+        // results wait in M's durable outbox (its ledger holds the series).
+        // Every seat leaves; H, restarted, creates the same room again (its
+        // properties gone with it), and every other seat joins it, restarted
+        // (`restartAll`) or the same process; the server answers again, and
+        // every seat reads the series: no recorded game, never relocked, no
+        // pair of two points on its record. Game 3 is played; game 1's result
+        // lands after it (`land`), game 2's stays queued. Game 4 crosses two
+        // points each, a team-2 player leaves and R reports it (`dcIn` 3: the
+        // leave is in game 3). Any settlement is wrong: the server then
+        // settles game 2 at most (game 1 recorded), while game 2's result is
+        // still on its way. The fixed path: no seat names a physical game and
+        // none carries a token (M's ledger shows the series' reports, so M
+        // does not ask; had game 1's ask been answered, the server would issue
+        // nothing again), and nothing settles. `keptBoot` is the kept copy of
+        // round 7's creator boot (H names game 3 physical game 1 from the
+        // reads' absence alone, and publishes it): against a server without
+        // round 8's anchor rule (`readsAnchor` false) it must settle wrongly,
+        // with the restarted and joined seats carrying its token, or the
+        // scenario proves nothing; against the anchor rule nothing settles
+        // (the server half alone). `ledgerLost`: M plays on from another
+        // machine or profile, a new process whose ledger and outbox hold
+        // nothing, so M asks at game 3; the server refuses it, the session it
+        // asks on having been issued after the series was created
+        // (`readsSession`), and nothing settles. The queued results land, if
+        // at all (`land`), from where they were sent; with `ownLands` M's own
+        // reports of the games it plays there land as it plays them. Against
+        // a server without the session rule that never answered game 1's ask,
+        // M is issued physical game 3 as game 1: with game 1's result landing
+        // and M's own delayed, that report, built without the issued anchor,
+        // voids the issue (the void alone: nothing settles; without the anchor
+        // rule, which reads the void, it settles wrongly); with game 1's
+        // result never landing and M's own landing, nothing is voided and a
+        // leave in game 4 settles wrongly (the session rule alone closes it).
+
+        private sealed class F31Tally
         {
-            const string S = "series-f29r", R = "room-f29r";
-            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, Stored = R };
-            var h = new TokenSeat { Team = 0 };
-            var c = new TokenSeat { Team = 1 };
-            var r = new TokenSeat { Team = 1 };
-            var all = new[] { h, c, r };
+            public int Timelines, Settled, Wrong, Carrying, Named;
+        }
+
+        private static bool SimulateF31(int reporter, bool g1Issued, bool restartAll, bool land, int dcIn,
+                                        bool keptBoot, bool readsAnchor, bool ledgerLost, bool ownLands,
+                                        bool readsSession, out bool wrong, out int carrying, out int ordinals)
+        {
+            const string S = "series-f31", R = "room-f31";
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true,
+                                        ReadsAnchor = readsAnchor, ReadsSession = readsSession, Stored = R };
+            var h = new TokenSeat { Team = 0, Srv = srv };
+            var r = new TokenSeat { Team = 0, Srv = srv };
+            var c = new TokenSeat { Team = 1, Srv = srv };
+            var all = new[] { h, r, c };
+            TokenSeat m = all[reporter];
+            m.Reporter = true;
             string value = "";
-            h.Enter(R, value, true);
-            c.Enter(R, value, false);
-            r.Enter(R, value, false);
+            foreach (var x in all) x.Enter(R, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
-            for (int g = 1; g <= 3; g++)
+            for (int g = 1; g <= 2; g++)
             {
-                if (g == 2)
-                {
-                    // Every seat left; H, restarted, creates the room again.
-                    h.Restart();
-                    value = "";
-                    for (int k = 0; k < 3; k++)
-                    {
-                        all[k].Enter(R, value, k == 0);
-                        all[k].Fetch(S, srv.Recorded, false, readsPlayed && srv.AnyTwo);
-                    }
-                }
+                srv.Unreachable = !(g == 1 && g1Issued);
                 Rematch(R, all);
-                value = HostStart(h, S, R, value, g > 1 || g1Sent);
-                SeatStart(c, S, R);
-                SeatStart(r, S, R);
+                value = HostStart(h, S, R, value, true);
+                foreach (var x in all) if (x != h) SeatStart(x, S, R);
+                value = ReporterPublish(m, value, true);
+                srv.Unreachable = true;
+                foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); x.Tick(R, Later); }
+                foreach (var x in all) { string rep = x.Over(R); if (rep != null) m.Outbox.Add(rep); }
+            }
+            List<string> queued = m.Outbox;
+            if (ledgerLost)
+            {
+                queued = new List<string>(m.Outbox);
+                m.Outbox.Clear();
+                m.Sent.Clear();
+                m.Anchors.Clear();
+            }
+            srv.Unreachable = false;
+            value = "";
+            foreach (var x in all)
+            {
+                if (x == h || restartAll || (ledgerLost && x == m)) x.Restart();
+                x.Enter(R, value);
+                x.Fetch(S, srv.Recorded, false, srv.AnyTwo);
+            }
+            for (int g = 3; g <= dcIn; g++)
+            {
+                Rematch(R, all);
+                value = HostStart(h, S, R, value, true);
+                if (keptBoot && g == 3) value = KeptBoot(h, value);
+                foreach (var x in all) if (x != h) SeatStart(x, S, R);
+                value = ReporterPublish(m, value, true);
                 foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); }
-                if (g == 3) break;
-                foreach (var x in all) x.Tick(R, Later);
-                foreach (var x in all) x.Over(R);
-                if (g == 2) srv.Recorded = 1;
-                foreach (var x in all) x.Fetch(S, srv.Recorded, false, readsPlayed && srv.AnyTwo);
+                if (g == dcIn) break;
+                foreach (var x in all) { x.Tick(R, Later); string rep = x.Over(R); if (rep != null) m.Outbox.Add(rep); }
+                if (ledgerLost && ownLands && m.Outbox.Count > 0) { srv.Land(m.Outbox[0]); m.Outbox.RemoveAt(0); }
+                if (land && queued.Count > 0) { srv.Land(queued[0]); queued.RemoveAt(0); }
+                foreach (var x in all) x.Fetch(S, srv.Recorded, false, srv.AnyTwo);
+            }
+            carrying = 0;
+            ordinals = 0;
+            foreach (var x in all)
+            {
+                if (x.Token(S, R).Length != 0) carrying++;
+                if (x.T.PhysicalOrdinal() != 0) ordinals++;
+            }
+            bool fromAnother;
+            bool settled = srv.Settles(r.Token(S, R), dcIn, out fromAnother);
+            wrong = settled && (srv.Recorded + 1 != dcIn || fromAnother);
+            return settled;
+        }
+
+        // `lost`: 0 the reporter's ledger kept, 1 lost with its own reports
+        // landing as it plays, 2 lost with its own reports delayed.
+        private static F31Tally SweepF31(bool keptBoot, bool readsAnchor, bool readsSession)
+        {
+            var tally = new F31Tally();
+            for (int rep = 0; rep < 3; rep++)
+            for (int g1 = 0; g1 < 2; g1++)
+            for (int ra = 0; ra < 2; ra++)
+            for (int land = 0; land < 2; land++)
+            for (int dc = 3; dc <= 4; dc++)
+            for (int lost = 0; lost < 3; lost++)
+            {
+                bool wrong;
+                int carrying, ordinals;
+                bool settled = SimulateF31(rep, g1 != 0, ra != 0, land != 0, dc, keptBoot, readsAnchor, lost != 0,
+                                           lost == 1, readsSession, out wrong, out carrying, out ordinals);
+                tally.Timelines++;
+                if (settled) tally.Settled++;
+                if (wrong) tally.Wrong++;
+                tally.Carrying += carrying;
+                tally.Named += ordinals;
+            }
+            return tally;
+        }
+
+        // Round 8, finding F31: the genuinely fresh room, the control. The same
+        // seats and reporter, the server answering throughout. Game 1: M asks
+        // at its game start and the server issues physical game 1; M publishes
+        // its token (host or not) and every seat takes it; game 1 crosses and
+        // team 1 wins it, and its report lands carrying the issued anchor. With
+        // `restartBetween` R and C restart and join the room again before game
+        // 2. Game 2 crosses under the host's token (its nonce the anchor and 8
+        // fresh digits), a team-2 player leaves and R reports it: it settles,
+        // from game 2's posts, every seat carrying game 2's token.
+        private static bool SimulateF31Fresh(int reporter, bool restartBetween, out bool fromAnother, out int carrying)
+        {
+            const string S = "series-f31f", R = "room-f31f";
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true,
+                                        Stored = R };
+            var h = new TokenSeat { Team = 0, Srv = srv };
+            var r = new TokenSeat { Team = 0, Srv = srv };
+            var c = new TokenSeat { Team = 1, Srv = srv };
+            var all = new[] { h, r, c };
+            TokenSeat m = all[reporter];
+            m.Reporter = true;
+            string value = "";
+            foreach (var x in all) x.Enter(R, value);
+            foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
+            for (int g = 1; g <= 2; g++)
+            {
+                Rematch(R, all);
+                value = HostStart(h, S, R, value, true);
+                foreach (var x in all) if (x != h) SeatStart(x, S, R);
+                value = ReporterPublish(m, value, true);
+                foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); }
+                if (g == 2) break;
+                foreach (var x in all) { x.Tick(R, Later); string rep = x.Over(R); if (rep != null) srv.Land(rep); }
+                if (restartBetween)
+                {
+                    r.Restart();
+                    c.Restart();
+                    r.Enter(R, value);
+                    c.Enter(R, value);
+                }
+                foreach (var x in all) x.Fetch(S, srv.Recorded, false, srv.AnyTwo);
             }
             carrying = 0;
             foreach (var x in all) if (x.Token(S, R).Length != 0) carrying++;
-            bool fromAnother;
-            bool settled = srv.Settles(r.Token(S, R), 3, out fromAnother);
-            wrong = settled && (srv.Recorded + 1 != 3 || fromAnother);
-            return settled;
+            return srv.Settles(r.Token(S, R), 2, out fromAnother) && srv.Recorded == 1 && !srv.Voided;
         }
 
         private static int Begin(Tracker t, string series, string room)
@@ -2611,25 +3078,47 @@ namespace CompetitiveRounds
             return MakeToken(new string(c, 16), ordinal, epoch);
         }
 
-        // Round 7, finding F29: the physical game a fresh Tracker names at its
-        // first game start in room R, series S: the room created (`created`,
-        // "" = none) and joined, a read of the series (`recorded`, the sitting
-        // known or not, relocked or not, a pair of two points or more on its
-        // record or not), the game's own start reported or not (`gm`);
-        // `secondStart`: this process already saw a game start of the series
-        // (in another room).
-        private static int BootOrdinal(string created, bool gm, bool sittingKnown, bool relocked, int recorded,
-                                       bool secondStart, bool played)
+        // Round 8, finding F31: whether a fresh Tracker asks for physical game 1
+        // at its first game start in room R, series S: a read of the series
+        // (`recorded`, relocked or not, a pair of two points or more on its
+        // record or not), the game's own start reported or not (`gm`), this
+        // seat the series' reporter or not, its client's reports clean or not.
+        private static bool AskOutcome(bool gm, int recorded, bool relocked, bool played, bool reporter, bool clean)
         {
             var t = new Tracker();
-            string line;
-            if (secondStart) t.OnGameStart("S", "R0", Reset, out line);
-            if (created.Length > 0) t.NoteRoomCreated(created);
+            string line, why;
+            int gen;
             t.NoteRoomJoined("R");
             t.ObserveRoomToken("R", "");
-            t.ObserveRead("S", true, recorded, 0, sittingKnown, relocked, played);
+            t.ObserveRead("S", true, recorded, 0, true, relocked, played);
             if (gm) t.OnGmStart("R");
             t.OnGameStart("S", "R", Reset, out line);
+            return t.AskFirstGame("S", "R", reporter, clean, out gen, out why);
+        }
+
+        // Round 8, finding F31: the physical game a fresh Tracker holds after
+        // it asked at its first game start (a read showing the series unplayed)
+        // and the answer came back: issued or not, with `nonce`, after
+        // `startsBetween` more game starts and a join or not (`joinBetween`),
+        // its client's reports clean or not (`clean`). -1: it did not ask.
+        private static int IssueOrdinal(bool issued, string nonce, int startsBetween, bool joinBetween, bool clean)
+        {
+            var t = new Tracker();
+            string line, why;
+            int gen;
+            t.NoteRoomJoined("R");
+            t.ObserveRoomToken("R", "");
+            t.ObserveRead("S", true, 0, 0, true, false, false);
+            t.OnGmStart("R");
+            t.OnGameStart("S", "R", Reset, out line);
+            if (!t.AskFirstGame("S", "R", true, true, out gen, out why)) return -1;
+            for (int i = 0; i < startsBetween; i++)
+            {
+                t.OnGmStart("R");
+                t.OnGameStart("S", "R", Reset, out line);
+            }
+            if (joinBetween) t.NoteRoomJoined("R");
+            t.OnFirstGame("S", "R", gen, issued, nonce, issued ? null : "refused", clean);
             return t.PhysicalOrdinal();
         }
 
@@ -2836,42 +3325,45 @@ namespace CompetitiveRounds
             // Round 7, finding F29: the reviewer's scenario, named (every seat
             // re-anchored by a rejoin, and by a room change), and its controls;
             // then the sweep around it, the kept copy of round 6's host seed,
-            // and the server's sitting rule on and off.
+            // and the server's sitting rule on and off (the kept copy and the
+            // sitting rule off both against a server without round 8's anchor
+            // rule; with it, the kept copy settles nothing while queued).
             // SimulateF29(kind, mask, queued, restart, g3Sent, countSeed,
-            // readsSitting, ...).
+            // readsSitting, readsAnchor, ...).
             bool w29;
             int carry29, reCarry29;
             checks++;
-            if (SimulateF29(KindRejoin, 7, true, false, false, false, true, out w29, out carry29, out reCarry29)
+            if (SimulateF29(KindRejoin, 7, true, false, false, false, true, true, out w29, out carry29, out reCarry29)
                 || carry29 != 0 || reCarry29 != 0)
             { pass = false; detail += " F29-REVIEWER-REJOIN:settled-or-token-carried"; }
             checks++;
-            if (SimulateF29(KindRoomChange, 7, true, false, true, false, true, out w29, out carry29, out reCarry29)
+            if (SimulateF29(KindRoomChange, 7, true, false, true, false, true, true, out w29, out carry29, out reCarry29)
                 || carry29 != 0 || reCarry29 != 0)
             { pass = false; detail += " F29-REVIEWER-ROOM-CHANGE:settled-or-token-carried"; }
             checks++;
-            if (SimulateF29(KindRecreate, 7, true, true, false, false, true, out w29, out carry29, out reCarry29)
+            if (SimulateF29(KindRecreate, 7, true, true, false, false, true, true, out w29, out carry29, out reCarry29)
                 || carry29 != 0)
             { pass = false; detail += " F29-RECREATED-ROOM-RESTARTED:settled-or-token-carried"; }
             checks++;
-            if (SimulateF29(KindRoomChange, 7, true, true, true, false, false, out w29, out carry29, out reCarry29)
+            if (SimulateF29(KindRoomChange, 7, true, true, true, false, false, false, out w29, out carry29, out reCarry29)
                 || carry29 != 0)
             { pass = false; detail += " F29-ROOM-CHANGE-RESTARTED-WITHOUT-THE-SITTING-RULE:settled-or-token-carried"; }
             checks++;
-            if (SimulateF29(KindRejoin, 6, true, false, true, false, true, out w29, out carry29, out reCarry29)
+            if (SimulateF29(KindRejoin, 6, true, false, true, false, true, true, out w29, out carry29, out reCarry29)
                 || carry29 != 0)
             { pass = false; detail += " F29-HOST-STAYED-QUEUED:settled-or-token-carried"; }
             checks++;
-            if (!SimulateF29(KindRejoin, 6, false, false, true, false, true, out w29, out carry29, out reCarry29) || w29
+            if (!SimulateF29(KindRejoin, 6, false, false, true, false, true, true, out w29, out carry29, out reCarry29) || w29
                 || reCarry29 != 2)
             { pass = false; detail += " F29-IN-STEP-CONTROL:not-settled-or-the-re-anchored-seats-took-nothing"; }
             checks++;
-            if (!SimulateF29(KindRejoin, 7, true, false, false, true, true, out w29, out carry29, out reCarry29) || !w29)
+            if (!SimulateF29(KindRejoin, 7, true, false, false, true, true, false, out w29, out carry29, out reCarry29) || !w29)
             { pass = false; detail += " F29-KEPT-COPY-CONTROL:not-settled-while-queued(the-scenario-proves-nothing)"; }
-            F29Tally f29 = SweepF29(false, true);
-            F29Tally f29bare = SweepF29(false, false);
-            F29Tally f29kept = SweepF29(true, true);
-            F29Tally f29open = SweepF29(true, false);
+            F29Tally f29 = SweepF29(false, true, true);
+            F29Tally f29bare = SweepF29(false, false, false);
+            F29Tally f29kept = SweepF29(true, true, false);
+            F29Tally f29open = SweepF29(true, false, false);
+            F29Tally f29anchored = SweepF29(true, true, true);
             checks++;
             if (f29.Wrong != 0 || f29bare.Wrong != 0)
             { pass = false; detail += " F29-sweep:" + f29.Wrong + "+" + f29bare.Wrong + "-settled-while-a-result-was-queued"; }
@@ -2886,19 +3378,116 @@ namespace CompetitiveRounds
             checks++;
             if (f29open.Wrong <= f29kept.Wrong)
             { pass = false; detail += " F29-sitting-rule:the-room-change-settles-no-less-without-it(the-sweep-proves-nothing)"; }
-            // Round 7, finding F29: the room created again after a queued first
-            // game (SimulateRecreateFirst(g1Sent, readsPlayed, ...)), and the
-            // kept copy of a creator that does not read the record.
-            bool wr29;
-            int carryR29;
             checks++;
-            if (SimulateRecreateFirst(true, true, out wr29, out carryR29) || carryR29 != 0
-                || SimulateRecreateFirst(false, true, out wr29, out carryR29) || carryR29 != 0)
-            { pass = false; detail += " F29-RECREATED-AFTER-A-QUEUED-FIRST-GAME:settled-or-token-carried"; }
+            if (f29anchored.Wrong != 0)
+            { pass = false; detail += " F29-anchor-rule:" + f29anchored.Wrong + "-of-round-6's-seeded-tokens-settled-while-queued"; }
+
+            // Round 8, finding F31: the reviewer's scenario, named, for every
+            // reporter, with game 1's ask answered or not, the other seats
+            // restarted or only joined again; the client half alone (a server
+            // without the anchor rule); the kept copy of round 7's creator boot
+            // against a server without the anchor rule (it must settle wrongly
+            // with every seat carrying its token, restarted and joined ones
+            // included, or the scenario proves nothing) and against the anchor
+            // rule (the server half alone: nothing settles); the reporter's
+            // ledger and outbox lost, M playing on from another
+            // machine or profile (the session rule: nothing settles, with its
+            // own reports landing or delayed and with game 1's result never
+            // landing; without the session rule the last settles wrongly, and
+            // the void alone catches the case where game 1's result lands
+            // first, which without the anchor rule settles wrongly); then the
+            // sweep and the genuinely fresh room's control.
+            // SimulateF31(reporter, g1Issued, restartAll, land, dcIn,
+            // keptBoot, readsAnchor, ledgerLost, ownLands, readsSession, ...).
+            int f31Named = 0, f31Client = 0, f31Kept = 0, f31Server = 0, f31Lost = 0, f31Unlanded = 0;
+            int f31UnlandedOpen = 0, f31Void = 0, f31VoidOpen = 0;
+            for (int rep = 0; rep < 3; rep++)
+            for (int g1 = 0; g1 < 2; g1++)
+            for (int ra = 0; ra < 2; ra++)
+            {
+                bool w31;
+                int carry31, ord31;
+                bool st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, false, false, true,
+                                        out w31, out carry31, out ord31);
+                if (st31 || carry31 != 0 || ord31 != 0) f31Named++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, false, false, false, true,
+                                   out w31, out carry31, out ord31);
+                if (st31 || carry31 != 0 || ord31 != 0) f31Client++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, true, false, false, false, true,
+                                   out w31, out carry31, out ord31);
+                if (w31 && carry31 == 3) f31Kept++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, true, true, false, false, true,
+                                   out w31, out carry31, out ord31);
+                if (st31) f31Server++;
+                for (int landsOwn = 0; landsOwn < 2; landsOwn++)
+                {
+                    st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, true, landsOwn != 0, true,
+                                       out w31, out carry31, out ord31);
+                    if (st31 || carry31 != 0 || ord31 != 0) f31Lost++;
+                }
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, true,
+                                   out w31, out carry31, out ord31);
+                if (st31 || carry31 != 0 || ord31 != 0) f31Unlanded++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false,
+                                   out w31, out carry31, out ord31);
+                if (w31) f31UnlandedOpen++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, true, false, false,
+                                   out w31, out carry31, out ord31);
+                if (st31) f31Void++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, false, true, false, false,
+                                   out w31, out carry31, out ord31);
+                if (w31) f31VoidOpen++;
+            }
             checks++;
-            if (!SimulateRecreateFirst(true, false, out wr29, out carryR29) || !wr29
-                || !SimulateRecreateFirst(false, false, out wr29, out carryR29) || !wr29)
-            { pass = false; detail += " F29-RECREATED-KEPT-COPY:not-settled-while-queued(the-scenario-proves-nothing)"; }
+            if (f31Named != 0)
+            { pass = false; detail += " F31-REVIEWER:" + f31Named + "-of-12-named-a-game-carried-a-token-or-settled"; }
+            checks++;
+            if (f31Client != 0)
+            { pass = false; detail += " F31-CLIENT-HALF:" + f31Client + "-of-12-named-a-game-carried-a-token-or-settled"; }
+            checks++;
+            if (f31Kept != 12)
+            { pass = false; detail += " F31-KEPT-COPY:" + f31Kept + "-of-12-settled-wrongly-with-every-seat-carrying(the-scenario-proves-nothing)"; }
+            checks++;
+            if (f31Server != 0) { pass = false; detail += " F31-SERVER-HALF:" + f31Server + "-of-12-settled"; }
+            checks++;
+            if (f31Lost != 0)
+            { pass = false; detail += " F31-LEDGER-LOST:" + f31Lost + "-of-24-named-a-game-carried-a-token-or-settled"; }
+            checks++;
+            if (f31Unlanded != 0)
+            { pass = false; detail += " F31-LEDGER-LOST-UNLANDED:" + f31Unlanded + "-of-12-named-a-game-carried-a-token-or-settled"; }
+            checks++;
+            if (f31UnlandedOpen == 0)
+            { pass = false; detail += " F31-LEDGER-LOST-WITHOUT-THE-SESSION-RULE:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            checks++;
+            if (f31Void != 0) { pass = false; detail += " F31-VOID-ALONE:" + f31Void + "-of-12-settled"; }
+            checks++;
+            if (f31VoidOpen == 0)
+            { pass = false; detail += " F31-VOID-UNREAD:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            F31Tally f31 = SweepF31(false, true, true);
+            F31Tally f31boot = SweepF31(true, false, true);
+            F31Tally f31open = SweepF31(false, true, false);
+            checks++;
+            if (f31.Settled != 0 || f31.Wrong != 0)
+            { pass = false; detail += " F31-sweep:" + f31.Settled + "-settled," + f31.Wrong + "-wrongly"; }
+            checks++;
+            if (f31.Carrying != 0 || f31.Named != 0)
+            { pass = false; detail += " F31-sweep:" + f31.Carrying + "-tokens-carried," + f31.Named + "-games-named"; }
+            checks++;
+            if (f31boot.Wrong == 0) { pass = false; detail += " F31-kept-copy-sweep:none-settled-wrongly(the-sweep-proves-nothing)"; }
+            checks++;
+            if (f31open.Wrong == 0)
+            { pass = false; detail += " F31-no-session-sweep:none-settled-wrongly(the-sweep-proves-nothing)"; }
+            int f31Fresh = 0;
+            for (int rep = 0; rep < 3; rep++)
+            for (int rb = 0; rb < 2; rb++)
+            {
+                bool fa31;
+                int carryF31;
+                if (SimulateF31Fresh(rep, rb != 0, out fa31, out carryF31) && !fa31 && carryF31 == 3) f31Fresh++;
+            }
+            checks++;
+            if (f31Fresh != 6)
+            { pass = false; detail += " F31-FRESH-ROOM-CONTROL:" + f31Fresh + "-of-6-settled-from-its-own-game-with-every-seat-carrying"; }
 
             // The score's successor rule (F28).
             checks++;
@@ -3238,52 +3827,143 @@ namespace CompetitiveRounds
                           + (ljCarried ? "" : ",far-apart-readings-not-carried");
             }
 
-            // Round 7, finding F29, on one Tracker: the room's first game is
-            // named physical game 1 only by the seat that created the room, at
-            // the first game start of the series it saw, when the game itself
-            // reported that start and a read shows the series with no recorded
-            // game, never relocked and no pair of two points or more on its
-            // record; until that read it waits.
+            // Round 8, finding F31, on one Tracker: a read showing the series
+            // with no recorded game, never relocked and no pair of two points or
+            // more on its record names no game (round 7's creator boot is gone);
+            // only the series' reporter asks, once per game, at a game start
+            // the game itself reported, holding no ordinal, with its client's
+            // reports clean and no read showing the series recorded, relocked
+            // or played; while the ask is out it waits (WhyFirstGamePending); a
+            // refusal leaves it holding none; the issue makes it hold physical
+            // game 1 and publish that game's token, host or not; its next
+            // game's host draws the anchor and 8 fresh digits; an answer for
+            // another game, after a join, after its client sent or queued a
+            // report, or without a nonce is not taken; a join drops the issue.
             var b = new Tracker();
-            string whyB;
-            b.NoteRoomCreated("R");
+            string whyB, whyX;
+            int genB = 0, genX;
             b.NoteRoomJoined("R");
             b.ObserveRoomToken("R", "");
+            b.ObserveRead("S", true, 0, 0, true, false, false);
             b.OnGmStart("R");
             b.OnGameStart("S", "R", Reset, out line);
             checks++;
-            if (b.PhysicalOrdinal() != 0 || b.TokenToPublish(true, true, "", out whyB) != "" || whyB != WhyBootPending)
-            { pass = false; detail += " F29:boot-did-not-wait-for-a-read"; }
-            string bootLine = b.ObserveRead("S", true, 0, 0, true, false, false);
-            string bootTok = b.TokenToPublish(true, true, "", out whyB);
-            string bn;
-            int bo;
-            long be;
+            if (b.PhysicalOrdinal() != 0 || b.TokenToPublish(true, true, "", out whyB) != "" || whyB != WhyNoOrdinal)
+            { pass = false; detail += " F31:absence-named-a-game"; }
             checks++;
-            if (b.PhysicalOrdinal() != 1 || bootLine == null || !TryParseToken(bootTok, out bn, out bo, out be) || bo != 1 || be != 1)
-            { pass = false; detail += " F29:boot"; }
+            if (!AskOutcome(true, 0, false, false, true, true)
+                || AskOutcome(false, 0, false, false, true, true)
+                || AskOutcome(true, 1, false, false, true, true)
+                || AskOutcome(true, 0, true, false, true, true)
+                || AskOutcome(true, 0, false, true, true, true)
+                || AskOutcome(true, 0, false, false, false, true)
+                || AskOutcome(true, 0, false, false, true, false))
+            { pass = false; detail += " F31:who-asks"; }
             checks++;
-            if (BootOrdinal("R", true, true, false, 0, false, false) != 1
-                || BootOrdinal("", true, true, false, 0, false, false) != 0
-                || BootOrdinal("R2", true, true, false, 0, false, false) != 0
-                || BootOrdinal("R", false, true, false, 0, false, false) != 0
-                || BootOrdinal("R", true, false, false, 0, false, false) != 0
-                || BootOrdinal("R", true, true, true, 0, false, false) != 0
-                || BootOrdinal("R", true, true, false, 1, false, false) != 0
-                || BootOrdinal("R", true, true, false, 0, true, false) != 0
-                || BootOrdinal("R", true, true, false, 0, false, true) != 0)
-            { pass = false; detail += " F29:boot-outside-a-fresh-room"; }
+            if (b.AskFirstGame("S2", "R", true, true, out genX, out whyX) || b.AskFirstGame("S", "R2", true, true, out genX, out whyX)
+                || b.AskFirstGame("", "R", true, true, out genX, out whyX) || b.AskFirstGame("S", "", true, true, out genX, out whyX)
+                || !b.AskFirstGame("S", "R", true, true, out genB, out whyX) || genB <= 0
+                || b.AskFirstGame("S", "R", true, true, out genX, out whyX)
+                || b.TokenToPublish(true, true, "", out whyB) != "" || whyB != WhyFirstGamePending
+                || b.TokenToPublish(true, false, "", out whyB) != "" || whyB != WhyNoOrdinal)
+            { pass = false; detail += " F31:the-ask"; }
+            string refusedLine = b.OnFirstGame("S", "R", genB, false, "", "a game of the series is recorded", true);
+            checks++;
+            if (b.PhysicalOrdinal() != 0 || refusedLine == null || b.TokenToPublish(true, true, "", out whyB) != ""
+                || whyB != WhyNoOrdinal || b.AskFirstGame("S", "R", true, true, out genX, out whyX))
+            { pass = false; detail += " F31:a-refusal"; }
+            // An issue the client cannot keep (its report ledger took no
+            // anchor, GameStateWatcher.TryAskTeamFirstGame) is dropped: the ask
+            // is settled, nothing is held, and the same answer offered again is
+            // not taken.
+            var bd = new Tracker();
+            int genD;
+            string whyD;
+            bd.NoteRoomJoined("R");
+            bd.ObserveRoomToken("R", "");
+            bd.OnGmStart("R");
+            bd.OnGameStart("S", "R", Reset, out line);
+            bool askedD = bd.AskFirstGame("S", "R", true, true, out genD, out whyD);
+            string droppedLine = bd.DropFirstGame(genD, "the report ledger cannot be written");
+            checks++;
+            if (!askedD || droppedLine == null || bd.PhysicalOrdinal() != 0
+                || bd.TokenToPublish(true, true, "", out whyD) != "" || whyD != WhyNoOrdinal
+                || bd.OnFirstGame("S", "R", genD, true, "0123456789abcdef", null, true)
+                       .IndexOf("not taken", StringComparison.Ordinal) < 0
+                || bd.PhysicalOrdinal() != 0)
+            { pass = false; detail += " F31:a-dropped-answer"; }
+            const string Issued = "0123456789abcdef";
+            var bi = new Tracker();
+            int genI;
+            string whyI, whyH;
+            bi.NoteRoomJoined("R");
+            bi.ObserveRoomToken("R", "");
+            bi.ObserveRead("S", true, 0, 0, true, false, false);
+            bi.OnGmStart("R");
+            bi.OnGameStart("S", "R", Reset, out line);
+            bi.AskFirstGame("S", "R", true, true, out genI, out whyI);
+            string issuedLine = bi.OnFirstGame("S", "R", genI, true, Issued, null, true);
+            string guestTok = bi.TokenToPublish(false, true, "", out whyI);
+            string hostTok = bi.TokenToPublish(true, true, "", out whyH);
+            checks++;
+            if (bi.PhysicalOrdinal() != 1 || issuedLine == null || guestTok != MakeToken(Issued, 1, 1) || hostTok != guestTok)
+            { pass = false; detail += " F31:the-issue"; }
+            bi.ArmPublished(guestTok);
+            bi.ObserveRoomToken("R", guestTok);
+            bi.ObserveScore(Played);
+            checks++;
+            if (bi.Adopted != guestTok || bi.TokenFor("S", "R", guestTok, Played, true) != guestTok
+                || bi.TokenToPublish(false, true, guestTok, out whyI) != "" || whyI != WhyTaken)
+            { pass = false; detail += " F31:the-issued-games-own-echo"; }
+            bi.ObserveScore(Final);
+            bi.OnTokenGameOver("R", guestTok);
+            bi.ObserveRead("S", true, 1, 0, true, false, false);
+            bi.OnGmStart("R");
+            bi.OnGameStart("S", "R", Reset, out line);
+            string nextI = bi.TokenToPublish(true, true, guestTok, out whyI);
+            string ni;
+            int oi;
+            long ei;
+            checks++;
+            if (!TryParseToken(nextI, out ni, out oi, out ei) || oi != 2 || ei != 2 || ni == Issued
+                || !ni.StartsWith("01234567", StringComparison.Ordinal)
+                || bi.TokenToPublish(false, true, guestTok, out whyH) != "" || whyH != WhyNotHost)
+            { pass = false; detail += " F31:the-next-games-draw"; }
+            checks++;
+            if (IssueOrdinal(true, Issued, 0, false, true) != 1
+                || IssueOrdinal(false, "", 0, false, true) != 0
+                || IssueOrdinal(true, Issued, 1, false, true) != 0
+                || IssueOrdinal(true, Issued, 0, true, true) != 0
+                || IssueOrdinal(true, Issued, 0, false, false) != 0
+                || IssueOrdinal(true, "", 0, false, true) != 0
+                || IssueOrdinal(true, "0123456789ABCDEF", 0, false, true) != 0)
+            { pass = false; detail += " F31:an-answer-taken-when-it-may-not"; }
+            string joinedI = bi.NoteRoomJoined("R");
+            bi.ObserveRoomToken("R", "");
+            bi.OnGmStart("R");
+            bi.OnGameStart("S", "R", Reset, out line);
+            checks++;
+            if (joinedI == null || bi.PhysicalOrdinal() != 0 || bi.TokenToPublish(true, true, "", out whyI) != ""
+                || whyI != WhyNoOrdinal)
+            { pass = false; detail += " F31:a-join-kept-the-issue"; }
             // A join drops the physical game; a game start the game itself did
             // not report (a rejoin in the middle of a game) takes nothing.
-            string joinLine = b.NoteRoomJoined("R");
+            var bj = new Tracker();
+            bj.NoteRoomJoined("R");
+            bj.ObserveRoomToken("R", "");
+            bj.ObserveRead("S", true, 0, 0, true, false, false);
+            bj.OnGmStart("R");
+            bj.OnGameStart("S", "R", Reset, out line);
+            bj.ObserveRoomToken("R", Tok('8', 1, 1));
+            string joinLine = bj.NoteRoomJoined("R");
             checks++;
-            if (b.PhysicalOrdinal() != 0 || joinLine == null) { pass = false; detail += " F29:a-join-kept-the-ordinal"; }
-            b.ObserveRoomToken("R", "");
-            b.ObserveRead("S", true, 1, 0, true, false, false);
-            b.OnGameStart("S", "R", Played, out line);
-            b.ObserveRoomToken("R", Tok('9', 2, 3));
+            if (bj.PhysicalOrdinal() != 0 || joinLine == null) { pass = false; detail += " F29:a-join-kept-the-ordinal"; }
+            bj.ObserveRoomToken("R", "");
+            bj.ObserveRead("S", true, 1, 0, true, false, false);
+            bj.OnGameStart("S", "R", Played, out line);
+            bj.ObserveRoomToken("R", Tok('9', 2, 3));
             checks++;
-            if (b.Adopted != "" || b.PhysicalOrdinal() != 0) { pass = false; detail += " F29:an-unreported-start-took-a-token"; }
+            if (bj.Adopted != "" || bj.PhysicalOrdinal() != 0) { pass = false; detail += " F29:an-unreported-start-took-a-token"; }
             // Two starts of the game itself before one of this seat's (its
             // watcher missed a game): the physical game is lost.
             var g2 = new Tracker();
@@ -3317,10 +3997,12 @@ namespace CompetitiveRounds
             checks++;
             if (sv.Adopted != Tok('7', 2, 3) || sv.PhysicalOrdinal() != 2) { pass = false; detail += " F29:a-value-read-after-the-games-own-start-lost"; }
 
-            // The publish.
+            // The publish: physical game 1's token, issued, the issued nonce
+            // itself, published by the seat it was issued to, host or not, once,
+            // in the game's first round, its epoch above the room's.
             var w = new Tracker();
             string why;
-            w.NoteRoomCreated("R");
+            int wGen;
             w.NoteRoomJoined("R");
             w.ObserveRoomToken("R", TA);
             w.ObserveRead("S", true, 0, 0, true, false, false);
@@ -3329,16 +4011,18 @@ namespace CompetitiveRounds
             w.OnGmStart("R");
             w.OnGameStart("S", "R", Reset, out line);
             w.ObserveRoomToken("R", TA);
-            string drawn = w.TokenToPublish(true, true, TA, out why);
+            w.AskFirstGame("S", "R", true, true, out wGen, out why);
+            w.OnFirstGame("S", "R", wGen, true, "5555555555555555", null, true);
+            string drawn = w.TokenToPublish(false, true, TA, out why);
             string dn;
             int dord;
             long dep;
-            string whyGuest, whyLate;
+            string whyHost, whyLate;
             checks++;
-            if (!TryParseToken(drawn, out dn, out dord, out dep) || dord != 1 || dep != 2 || dn == NonceOf(TA) || why != null
-                || w.TokenToPublish(false, true, TA, out whyGuest) != "" || whyGuest != WhyNotHost
-                || w.TokenToPublish(true, false, TA, out whyLate) != "" || whyLate != WhyLate)
-            { pass = false; detail += " publish:draw"; }
+            if (!TryParseToken(drawn, out dn, out dord, out dep) || dn != "5555555555555555" || dord != 1 || dep != 2 || why != null
+                || w.TokenToPublish(true, true, TA, out whyHost) != drawn
+                || w.TokenToPublish(false, false, TA, out whyLate) != "" || whyLate != WhyLate)
+            { pass = false; detail += " publish:the-issued-game"; }
             w.ArmPublished(drawn);
             checks++;
             if (w.TokenToPublish(true, true, TA, out why) != "" || why != WhyPublished) { pass = false; detail += " publish:twice-in-a-game"; }
@@ -3352,7 +4036,9 @@ namespace CompetitiveRounds
             // publishes nothing (round 6 seeded it from the count); a publish
             // it takes grounds it, and at its next game start the game itself
             // reported its own publish names the next game and continues the
-            // room's epochs.
+            // room's epochs, its nonce the anchor (round 8, F31: the first 8
+            // digits of the token it was grounded on) and 8 fresh digits; a
+            // seat that is not the host publishes nothing.
             var e = new Tracker();
             e.NoteRoomJoined("R");
             e.ObserveRoomToken("R", Tok('d', 5, 7));
@@ -3371,14 +4057,17 @@ namespace CompetitiveRounds
             e.OnGmStart("R");
             e.OnGameStart("S", "R", Reset, out line);
             string next = e.TokenToPublish(true, true, Tok('4', 6, 8), out why);
+            string whyGuest;
+            bool guestNone = e.TokenToPublish(false, true, Tok('4', 6, 8), out whyGuest) == "" && whyGuest == WhyNotHost;
             var none = new Tracker();
             none.ObserveRoomToken("R", "");
             none.OnGameStart("S", "", Reset, out line);
             string whyNone;
             checks++;
             if (!TryParseToken(next, out dn, out dord, out dep) || dord != 7 || dep != 9
+                || !dn.StartsWith("44444444", StringComparison.Ordinal) || dn == "4444444444444444" || !guestNone
                 || none.TokenToPublish(true, true, "", out whyNone) != "" || whyNone != WhyNoOrdinal)
-            { pass = false; detail += " publish:ordinal-and-epoch"; }
+            { pass = false; detail += " publish:ordinal-epoch-and-anchor"; }
 
             // The token's wire: its shape, both canonicals, the query, the pin.
             string pn;
@@ -3405,6 +4094,36 @@ namespace CompetitiveRounds
             if (TokenCanonical(PinSeries, PinReporter, 2, 1, 3, PinRoom, PinToken) != PinTokenExpected
                 || DcTokenCanonical(PinReporter, PinSeries, PinDcPlayer, PinToken) != PinDcTokenExpected)
             { pass = false; detail += " token-pin"; }
+            checks++;
+            if (FirstGameCanonical(PinSeries, PinReporter, PinRoom) != PinFirstGameExpected
+                || QueryFirstGame(PinReporter, "r", "sig") != "?requester_steam_id=" + PinReporter + "&photon_room_id=r&sig=sig")
+            { pass = false; detail += " first-game-pin"; }
+            // Round 8, finding F31: the report ledger's lines and the outbox
+            // rule (ApiClient.cs reads and writes the ledger through these).
+            {
+                bool al;
+                string ls, la;
+                checks++;
+                if (!ParseLedgerLine(LedgerSent(PinSeries), out al, out ls, out la) || al || ls != PinSeries || la != ""
+                    || !ParseLedgerLine(LedgerAnchor(PinSeries, "0123abcd") + "\r", out al, out ls, out la) || !al
+                    || ls != PinSeries || la != "0123abcd"
+                    || ParseLedgerLine("sent " + PinSeries.Substring(0, 12) + " x", out al, out ls, out la)
+                    || ParseLedgerLine("anchor " + PinSeries + " 0123ab", out al, out ls, out la)
+                    || ParseLedgerLine("anchor " + PinSeries + " 0123ABCD", out al, out ls, out la)
+                    || ParseLedgerLine("sen", out al, out ls, out la)
+                    || ParseLedgerLine("", out al, out ls, out la)
+                    || ParseLedgerLine("sent " + PinSeries + "\nsent x", out al, out ls, out la)
+                    || LedgerKey("") || LedgerKey("a b") || LedgerKey(new string('a', 65)) || !LedgerKey(PinSeries))
+                { pass = false; detail += " F31:ledger-lines"; }
+                string rep = "{\"series_id\":\"" + PinSeries + "\",\"t1a\":{}}";
+                checks++;
+                if (!QueuedReportOf("http://h:1/api/v1/team/matches", rep, PinSeries)
+                    || QueuedReportOf("http://h:1/api/v1/team/matches", rep, "5b0c7e1a")
+                    || QueuedReportOf("http://h:1/api/v1/matches", rep, PinSeries)
+                    || QueuedReportOf(null, rep, PinSeries)
+                    || !QueuedReportOf("http://h:1/api/v1/team/matches", null, PinSeries))
+                { pass = false; detail += " F31:queued-report"; }
+            }
 
             string sweep = " (sweep: " + cur.Timelines + " timelines per rule; tracker: " + cur.Posts + " posts, "
                 + cur.Filed + " filed, " + cur.Wrong + " under another game, " + cur.CleanFirstFiled + " of "
@@ -3428,7 +4147,18 @@ namespace CompetitiveRounds
                 + f29.Carrying + " tokens carried while queued (" + f29.ReanchoredCarrying + " by re-anchored seats), "
                 + f29.LiveSettled + " of " + f29.Live + " in-step DC reports settled; without the sitting rule: "
                 + f29bare.Wrong + " while queued, " + f29bare.Carrying + " tokens carried; round 6's host seed: "
-                + f29kept.Wrong + " while queued, and " + f29open.Wrong + " without the sitting rule)";
+                + f29kept.Wrong + " while queued, " + f29open.Wrong + " without the sitting rule, and "
+                + f29anchored.Wrong + " against the anchor rule; F31 sweep: " + f31.Timelines + " timelines per rule, "
+                + f31.Settled + " settled, " + f31.Wrong + " wrongly, " + f31.Carrying + " tokens carried and "
+                + f31.Named + " games named; without the session rule: " + f31open.Settled + " settled, "
+                + f31open.Wrong + " wrongly; round 7's creator boot against a server without the anchor rule: "
+                + f31boot.Settled + " settled, " + f31boot.Wrong + " wrongly; named: " + f31Kept
+                + " of 12 kept-copy timelines settled wrongly, " + f31Server + " against the anchor rule; the"
+                + " reporter's ledger lost: " + f31Lost + " of 24 timelines named a game, carried a token or settled, "
+                + f31Unlanded + " of 12 with game 1's result never landing, and " + f31UnlandedOpen + " of those 12"
+                + " settled wrongly without the session rule; the void alone: " + f31Void + " of 12 settled, "
+                + f31VoidOpen + " of 12 wrongly with the void unread; " + f31Fresh + " of 6 fresh-room DC reports"
+                + " settled)";
             return SentinelTag + " " + (pass ? "PASS" : "FAIL") + ": " + checks + " checks" + sweep + detail;
         }
     }

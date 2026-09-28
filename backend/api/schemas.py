@@ -1370,6 +1370,14 @@ class TeamMatchReport(BaseModel):
     t1b_telemetry: TeamPlayerTelemetry | None = None
     t2a_telemetry: TeamPlayerTelemetry | None = None
     t2b_telemetry: TeamPlayerTelemetry | None = None
+    # v1.41.0 beta round 8, finding F31 (migration 359): the first 8 digits of
+    # the series' issued physical game 1 as the reporter's client held them
+    # when it built this report (its ledger); None from a client that holds
+    # none and from older clients. ADVISORY and outside the frozen 11-field
+    # HMAC: a recorded report that does not carry the issued anchor voids the
+    # series' game tokens (main.py, _team_first_game_void) and is recorded all
+    # the same. Any string is accepted; only an exact match counts.
+    game_anchor: str | None = Field(None, max_length=64)
 
 
 class TeamMatchResponse(BaseModel):
