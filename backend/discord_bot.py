@@ -792,6 +792,29 @@ async def _faq_top_player(message):
     return line
 
 
+async def _faq_tournaments(message):
+    """Dynamic (board row 32): the static tournaments answer and, while a
+    sync tournament is in voting, one line with its start rule, how far
+    the vote has got and how to vote. In-game (message None) the static
+    answer alone - Discord's <t:...> timestamps do not render there - and
+    the static answer alone whenever the tally cannot be read."""
+    answer = next(e["answer"] for e in FAQ_ENTRIES if e["key"] == "tournaments")
+    if message is None:
+        return answer
+    try:
+        voting = [t for t in (_watch_cache or {}).get("tournaments") or []
+                  if isinstance(t, dict) and (t.get("kind") or "sync") == "sync"
+                  and t.get("status") == "voting"]
+        tally = await _tsync_tally_for(voting[0]) if voting else None
+    except Exception as ex:
+        print(f"[FAQ] tournaments tally read failed: {ex}")
+        tally = None
+    if tally is None:
+        return answer
+    return (f"{answer}\n**Current sync tournament:** {_tsync_rule(tally['min_players'], tally)} "
+            f"{_TSYNC_VOTE_HOW}")
+
+
 async def _faq_discord_link(discord_id):
     """Return (state, payload): state is ok, unlinked, or error.
 
@@ -1252,8 +1275,11 @@ FAQ_ENTRIES = [
                    "no Ready Up.\n"
                    "**Prizes scale with signups**: at 8 players 1st gets 1000g/5000xp, growing to double at 16. "
                    "The final sync time locks in **2 days before the default start** (so you always get 24h+ "
-                   "notice), and you'll get an availability-check DM 1-4 days before that lock (link your "
-                   "account with `/link` to receive it). Live status board: the #scr-tournaments channel."),
+                   "notice). Once 8 players agree on one time you'll get an availability-check DM that names "
+                   "that time, before the lock (link your account with `/link` to receive it). "
+                   "Live status board: the #scr-tournaments channel."),
+        # Row 32: in Discord the answer also carries the live sync tally.
+        "handler": _faq_tournaments,
     },
     {
         "key": "more_gold",
@@ -11003,6 +11029,89 @@ def _fmt_pt_rel(iso_str):
         return iso_str
 
 
+# -- The sync start rule, stated with its live tally (board row 32) ----------
+# A sync tournament starts only when min_players (8) players agree on ONE of
+# the offered start times: signing up is not agreeing. Every message the bot
+# composes about a sync tournament in voting states that rule, how far the
+# vote has got ("N of 8 agree on <time> so far") and how to vote. The tally is
+# the in-game tab's own: /tournaments/current's public time_slot_tallies,
+# which that route computes only for a caller (any registered player).
+
+_TSYNC_VOTE_HOW = "Vote for every time you can make in F5 -> Tournaments."
+
+
+async def _tsync_tally(steam_id=None):
+    """The current sync tournament's start-time tally, as the in-game tab
+    reads it: {"tournament_id", "status", "min_players", "votes" (the top
+    slot's count, 0 when no slot has a vote), "slots" (the unix seconds of
+    every slot holding that count, in time order)}. `steam_id` is any
+    registered player's; without one the answer carries no votes, which is
+    right only when nobody has signed up. None when the read fails."""
+    query = {"kind": "sync"}
+    if steam_id:
+        query["steam_id"] = str(steam_id)
+    data = await api_get("/tournaments/current?" + urllib.parse.urlencode(query))
+    if not isinstance(data, dict) or not data.get("tournament_id"):
+        return None
+    counts = {}
+    for row in data.get("time_slot_tallies") or []:
+        if not isinstance(row, dict):
+            continue
+        slot, votes = _unix_ts(row.get("slot_ts")), row.get("votes")
+        if slot is not None and isinstance(votes, int) and not isinstance(votes, bool) and votes > 0:
+            counts[slot] = counts.get(slot, 0) + votes
+    top = max(counts.values(), default=0)
+    need = data.get("min_players")
+    return {"tournament_id": str(data["tournament_id"]), "status": data.get("status"),
+            "min_players": need if isinstance(need, int) and not isinstance(need, bool) and need > 0 else 8,
+            "votes": top, "slots": sorted(slot for slot, votes in counts.items() if top and votes == top)}
+
+
+async def _tsync_tally_for(t):
+    """The tally of watch entry `t` (a sync tournament), read with one of its
+    signups' Steam ids (no signup, no vote); None when the read fails or
+    /tournaments/current answers another tournament."""
+    signers = [s for s in (t.get("signups") or []) if isinstance(s, dict) and s.get("steam_id")]
+    tally = await _tsync_tally(signers[0]["steam_id"] if signers else None)
+    if tally is None or tally["tournament_id"] != str(t.get("tournament_id")):
+        return None
+    return tally
+
+
+def _tsync_times(slots):
+    """The tied top slots as one phrase: '<A>', '<A> or <B>', or '<A> or N other times'."""
+    shown = [f"<t:{slot}:F>" for slot in slots]
+    if len(shown) <= 2:
+        return " or ".join(shown)
+    return f"{shown[0]} or {len(shown) - 1} other times"
+
+
+def _tsync_progress(tally):
+    """How far the vote has got: 'N of 8 agree on <time> so far'."""
+    need, votes = tally["min_players"], tally["votes"]
+    if votes <= 0 or not tally["slots"]:
+        return f"0 of {need} agree on a time so far"
+    if votes < need:
+        return f"{votes} of {need} agree on {_tsync_times(tally['slots'])} so far"
+    return f"{votes} players agree on {_tsync_times(tally['slots'])} so far - enough to lock it"
+
+
+def _tsync_rule(min_players, tally=None):
+    """The start rule in one sentence and, given a tally, how far the vote has got."""
+    rule = f"It starts when {min_players} players agree on one start time"
+    return f"{rule}: {_tsync_progress(tally)}." if tally is not None else f"{rule}."
+
+
+def _tsync_signups_open_text(t, tally):
+    """The channel post that opens a sync tournament's signups: the start
+    rule with the live tally (the rule alone when the tally could not be
+    read), the default start, how to vote, and when signups close."""
+    need = tally["min_players"] if tally is not None else (t.get("min_players") or 8)
+    return (f"**Tournament signups open.** {_tsync_rule(need, tally)} "
+            f"Default start: {_fmt_pt(t.get('default_start_ts'))}. {_TSYNC_VOTE_HOW} "
+            f"Signups close {_fmt_pt(t.get('lock_at'))}.")
+
+
 async def _promote_role(member, base_name, x2_name):
     """Grant base_name on first placement; on repeat placements, swap base -> x2.
     Idempotent: if member already has x2_name, nothing changes."""
@@ -11099,11 +11208,8 @@ async def poll_tournaments():
                     f"Signups close {_fmt_pt(t['lock_at'])}. Sign up in-game via the Tournaments → ASYNC tab."
                 )
             else:
-                await _announce_in_channel(
-                    f"**Tournament signups open.** Default start: {_fmt_pt(t['default_start_ts'])}. "
-                    f"Vote on alternate times or sign up in-game via the Tournaments tab. "
-                    f"Signups close {_fmt_pt(t['lock_at'])}."
-                )
+                # Row 32: the start rule, the live tally and how to vote.
+                await _announce_in_channel(_tsync_signups_open_text(t, await _tsync_tally_for(t)))
         # voting -> locked -> DM every signup what actually happens next.
         #
         # This MUST branch on kind. Until Aug 2026 it did not, and every async
@@ -11483,6 +11589,7 @@ async def nag_pending_async_matches():
 # custom_id in the message does not.
 
 _tavail_seen_notice_ids = set()  # process-lifetime re-ack guard
+_tavail_held = {}  # sync tournament id -> the tally its held availability checks were last logged at (row 32)
 
 
 def _unix_ts(v):
@@ -11587,7 +11694,7 @@ def _tdlc_message(opponent_name, deadline_unix, extension_available):
     )
 
 
-def _tavail_embed(kind, start_unix, lock_unix):
+def _tavail_embed(kind, start_unix, lock_unix, tally=None):
     if kind == "async":
         lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
         desc = (f"Signups close {lock_str}.\n\n"
@@ -11600,16 +11707,18 @@ def _tavail_embed(kind, start_unix, lock_unix):
     start_str = f"<t:{start_unix}:F>" if start_unix else "(time TBD)"
     lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
     # Wording contract (learning #130): "have ROUNDS open", never "be in the
-    # tab". July 17 round 3: the DEFAULT time shown is provisional — the
-    # final time is vote-decided at lock (>= 24h before play), so say so and
-    # point at the vote.
-    desc = (f"Default start: {start_str}\n"
-            f"⏰ The FINAL time locks in {lock_str} — it'll be whichever voted "
-            f"slot 8+ players agree on, always at least a day before play. "
-            f"Make sure your available times are picked in F5 → Tournaments!\n\n"
+    # tab". Row 32 (2026-09-28): the check names the time it asks about - the
+    # start time holding min_players votes, from the tally the notice loop
+    # read - with the start rule and how far the vote has got; the final time
+    # is still decided at the lock (>= 24h before play). The default start is
+    # shown only when no tally is handed in.
+    asked = _tsync_times(tally["slots"]) if tally is not None and tally["slots"] else start_str
+    desc = (f"Asked about: {asked}\n"
+            f"{_tsync_rule(tally['min_players'] if tally is not None else 8, tally)} "
+            f"The time locks in {lock_str}, always at least a day before play. {_TSYNC_VOTE_HOW}\n\n"
             "All matches are played back-to-back in one sitting (~2 hours, "
             "short skippable breaks between your matches). You only need "
-            "ROUNDS open at the main menu at the start time — the mod "
+            "ROUNDS open at the main menu at the start time - the mod "
             "auto-connects you to each match.")
     return discord.Embed(title="🏆 Synchronized tournament — availability check", description=desc, color=0xFAA61A)
 
@@ -11957,6 +12066,7 @@ async def poll_tournament_notices():
         if not data or not data.get("notices"):
             return
         to_ack = []
+        tick_tally = {}   # row 32: the sync tournament's tally, read at most once per tick
         for n in data["notices"]:
             if not isinstance(n, dict):
                 continue
@@ -12057,9 +12167,34 @@ async def poll_tournament_notices():
                 lock_unix = _unix_ts(payload.get("lock_ts")) or _unix_ts(n.get("lock_at"))
                 if kind == "async":
                     content = "Are you still in for the **Async tournament**?"
+                    embed = _tavail_embed(kind, start_unix, lock_unix)
                 else:
-                    content = "Are you still available to play in the **Synchronized tournament**?"
-                embed = _tavail_embed(kind, start_unix, lock_unix)
+                    # Row 32: the sync check asks about a TIME, so it goes out
+                    # only once some start time has min_players votes, and it
+                    # names that time. Until then the notice stays queued -
+                    # unacked, read again next tick; a tournament that is no
+                    # longer the sync one in voting drops it.
+                    if "sync" not in tick_tally:
+                        tick_tally["sync"] = await _tsync_tally(steam)
+                    tally = tick_tally["sync"]
+                    if tally is None:
+                        continue
+                    if tally["tournament_id"] != str(tid) or tally["status"] != "voting":
+                        print(f"[TAVAIL] availability check {nid} for tournament {str(tid)[:8]} dropped:"
+                              " it is no longer the sync tournament in voting")
+                        _tavail_seen_notice_ids.add(skey)
+                        to_ack.append((nid, rev))
+                        continue
+                    if tally["votes"] < tally["min_players"]:
+                        held = (tally["votes"], tuple(tally["slots"]))
+                        if _tavail_held.get(str(tid)) != held:
+                            _tavail_held[str(tid)] = held
+                            print(f"[TAVAIL] availability checks for tournament {str(tid)[:8]} held until a"
+                                  f" start time has {tally['min_players']} votes: {_tsync_progress(tally)}")
+                        continue
+                    content = ("Are you still available to play in the **Synchronized tournament** at "
+                               f"{_tsync_times(tally['slots'])}?")
+                    embed = _tavail_embed(kind, start_unix, lock_unix, tally)
                 view = _tavail_view(tid, steam)
             elif _is_deadline_checkin:
                 deadline_unix = _unix_ts(payload.get("deadline_epoch")
@@ -12689,9 +12824,10 @@ def _bracket_progress_lines(t, max_lines=28):
 _TOURNEY_HOW_IT_WORKS = {
     "sync": (
         "Weekly bracket played in ONE sitting. Sign up in-game "
-        "(F5 → Tournaments), vote on the start time, then just have ROUNDS "
-        "open at the main menu when it starts — the mod auto-connects you to "
-        "each match. Miss your ready window and you forfeit that match."
+        "(F5 -> Tournaments) and vote for every start time you can make: it "
+        "starts when 8 players agree on one time. Then have ROUNDS open at "
+        "the main menu - the mod auto-connects you to each match. Miss your "
+        "ready window and you forfeit that match."
     ),
     "async": (
         "No fixed play time. Sign up in-game (F5 → Tournaments); when signups "
@@ -12703,7 +12839,7 @@ _TOURNEY_HOW_IT_WORKS = {
 }
 
 
-def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
+def _build_tournament_board_embed(t, kind: str, tally=None) -> discord.Embed:
     """One embed per tournament kind, mirroring the in-game Sync/Async page."""
     kind_label = "Sync" if kind == "sync" else "Async"
     emoji = "🏆" if kind == "sync" else "🌀"
@@ -12731,7 +12867,9 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
         if kind == "sync":
             lines.append(f"Default start: {_fmt_pt(t.get('scheduled_start_ts') or t.get('default_start_ts'))}")
             lines.append(f"Signups + time voting close: {_fmt_pt(t.get('lock_at'))}")
-            lines.append("_Start-time voting is open in-game (F5 → Tournaments)._")
+            # Row 32: the start rule, how far the vote has got, how to vote.
+            lines.append(_tsync_rule(tally["min_players"] if tally is not None else min_p, tally))
+            lines.append(_TSYNC_VOTE_HOW)
         else:
             lines.append(f"Signups close: {_fmt_pt(t.get('lock_at'))} — the bracket starts then; "
                          f"each match has a {ASYNC_DEADLINE_DAYS}-day deadline.")
@@ -12796,9 +12934,12 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
     # Two embeds share ONE message's 6000-char total budget (Discord counts
     # across all embeds, fields included), so each description gets 2600 —
     # not the 4096 single-embed cap. Worst case, measured rather than
-    # estimated: 2 × 2582 truncated descriptions (2580 + the "\n…" appended
-    # below) + the two "How it works" values (sync 250, async 314) + their
-    # 15-char names + the two titles ≈ 5795, leaving ~200 spare. That margin
+    # estimated: 2 x 2582 truncated descriptions (2580 + the newline and
+    # ellipsis appended below) + the two "How it works" values (sync 294,
+    # async 314) + their 15-char names + the two titles = 5837, leaving ~160
+    # spare: board row 32 grew the sync blurb from 250 to 294 to state the
+    # start rule, and test_discord_tournament_start_rule.py re-measures the
+    # total. That margin
     # is REAL — the async blurb grew by 54 chars in Aug 2026 and ate a fifth
     # of it. Re-measure before growing either blurb much further, or drop the
     # description cap in the same edit; overshooting 6000 makes Discord reject
@@ -12847,8 +12988,12 @@ async def _publish_tournament_board():
         done = [t for t in tournaments if t.get("kind") == kind and t.get("status") == "completed"]
         return done[-1] if done else None
 
+    sync_t = pick("sync")
+    # Row 32: the sync board states the start rule with the live tally.
+    sync_tally = (await _tsync_tally_for(sync_t)
+                  if sync_t is not None and sync_t.get("status") == "voting" else None)
     embeds = [
-        _build_tournament_board_embed(pick("sync"), "sync"),
+        _build_tournament_board_embed(sync_t, "sync", sync_tally),
         _build_tournament_board_embed(pick("async"), "async"),
     ]
     # Living-message management — same shape as publish_lb.
