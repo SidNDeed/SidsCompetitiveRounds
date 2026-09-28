@@ -1177,7 +1177,7 @@
           ],
           "main",
           "submit_team_match",
-          "4ff12330e3a6251ddcf369afcef919a13da8a54c"
+          "a270eaa963bbb4052c7b0ca67cda0f8ad29db903"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "383c879e3bea76bfaf4a3bc41ed97b9dceba8614"
+          "327f79694e71bf00ffc73aec0406ee3665c5c60b"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1258,7 +1258,7 @@
           ],
           "main",
           "team_series_state",
-          "080679eebc288dedc4215a53f5bf76fe206a06bd"
+          "dbab085c61d2b50c7b28beed642dc6d6e2dd6ecc"
         ]
       ]
     },
@@ -3389,6 +3389,21 @@
           "d00b9ea939cf26d75a15ebdf22b3da86b896dce8"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "Static source review (v1.41.0 beta round 8, finding F31: the series' physical game 1, issued once to its reporter): over the route's whole reached surface no W1 private Match column is named, no SQL reads the matches table and the Match model is not used; it answers {\"issued\": bool, \"nonce\" or \"reason\"} from team_series, players and team_series_games (its session check reads steam_sessions).",
+      "routes": [
+        [
+          "/api/v1/team/series/{series_id}/first-game",
+          [
+            "POST"
+          ],
+          "main",
+          "team_series_first_game",
+          "4b97dd80776c6a327e7b41226b7fc2544054df51"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -3607,6 +3622,7 @@
     "POST /api/v1/series/preflight -> main.series_preflight",
     "POST /api/v1/series/{series_id}/live-points -> main.update_live_points",
     "POST /api/v1/team/series/{series_id}/live-points -> main.update_team_live_points",
+    "POST /api/v1/team/series/{series_id}/first-game -> main.team_series_first_game",
     "POST /api/v1/ffa/lobbies/{lobby_id}/live-points -> main.update_ffa_live_points",
     "POST /api/v1/discord-bets -> main.place_discord_bet",
     "POST /api/v1/bets -> main.place_bet",
