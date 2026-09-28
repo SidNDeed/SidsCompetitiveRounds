@@ -745,7 +745,7 @@
           ],
           "main",
           "pc_discard_print",
-          "929a20954f88371e70fa37f330975668bf49c513"
+          "ba49cdee4679ad8e937ceec88658202a7d799733"
         ],
         [
           "/api/v1/pc/settings",
@@ -943,7 +943,7 @@
           ],
           "main",
           "delete_player_data",
-          "d764029dc3ff772fa1118cbc57eac357dc5c7f28"
+          "07ea6764ad544054848adb555345e186c2938424"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -3116,7 +3116,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "cc0d47e81c55cf264d69035115ee9a8e5f824c1a"
+          "a71217df81c39981c3a44863fcabb8f73b5985fd"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3404,6 +3404,30 @@
           "4b97dd80776c6a327e7b41226b7fc2544054df51"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "Static source review (ASKS-B lane, board rows 24 and 25: the Settings card preview and the batch shard): over each route's whole reached surface, walked by this gate's own closure, no W1 private Match column is named, no SQL reads the matches table and the Match model is not used (the word occurs only in main's shared `from models import` line). POST /api/v1/pc/prints/discard-batch answers {status, replayed, key, prints, shards_gained, shards, results} from pc_prints, pc_shard_batches and players.pc_shards (it also deletes the discarded prints' pc_delivery_leases rows); GET /api/v1/pc/face/preview answers one PNG drawn by _pc_preview_face from the caller's players row, pc_pool_members/pc_pool_snapshots row and stored portrait.",
+      "routes": [
+        [
+          "/api/v1/pc/prints/discard-batch",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_discard_batch",
+          "e04a4eb9d4295fc163f100d74f7a09e8812797ab"
+        ],
+        [
+          "/api/v1/pc/face/preview",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_face_preview",
+          "d5f253a92e2fca385c941daf8b1eb2e325a7a946"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -3440,7 +3464,7 @@
       [
         "main",
         "lifespan",
-        "cef91a4deb84edd9d67ee1863e2c997c177b9cf9"
+        "fc6bd92a6d56b450a9eb3ba9581c22ac24afeae0"
       ]
     ]
   },
@@ -3581,6 +3605,7 @@
     "GET /api/v1/pc/packs -> main.pc_packs_history",
     "POST /api/v1/pc/daily -> main.pc_daily_claim",
     "POST /api/v1/pc/prints/discard -> main.pc_discard_print",
+    "POST /api/v1/pc/prints/discard-batch -> main.pc_discard_batch",
     "POST /api/v1/pc/settings -> main.pc_set_setting",
     "GET /api/v1/pc/me -> main.pc_me",
     "GET /api/v1/pc/collection -> main.pc_collection",
@@ -3600,6 +3625,7 @@
     "GET /api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png -> main.pc_face_png",
     "GET /api/v1/internal/pc/face/print/{print_id}/{locale} -> main.internal_pc_face_print",
     "GET /api/v1/internal/pc/face/preview/{player_ref}/{locale} -> main.internal_pc_face_preview",
+    "GET /api/v1/pc/face/preview -> main.pc_face_preview",
     "GET /api/v1/internal/pc/face/back -> main.internal_pc_face_back",
     "POST /api/v1/shop/purchase -> main.purchase_item",
     "POST /api/v1/music/rate -> main.music_rate",
