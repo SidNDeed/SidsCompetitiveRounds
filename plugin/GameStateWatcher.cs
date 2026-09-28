@@ -6762,7 +6762,7 @@ namespace CompetitiveRounds
             try
             {
                 if (UnityEngine.Time.time - lastContinuationRequestTime < 8f) return false;
-                // Census: gate AND iteration use the same fighter view; they
+                // Census: gate AND iteration use the same fighter view — they
                 // must convert together or disagree (recon structural hazard).
                 var fighters = RoomActors.ActiveFighters();
                 if (fighters.Length != 4) return false;
