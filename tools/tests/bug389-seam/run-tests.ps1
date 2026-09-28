@@ -1639,7 +1639,7 @@ Say ''
 # ClassifyWrite did not know the operator at all, so the write was invisible;
 # R8 now also requires every write to that field to be a form that retargets.
 $wireNullCoalesceAssign = New-WireRoot 'nullcoalesceassign' 'plugin/ApiClient.cs' `
-    'private static IEnumerator ProbeEndpointThenStart()' `
+    'private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)' `
     '                baseUrl = Plugin.LegacyApiUrl.TrimEnd(''/'');' `
     '                baseUrl ??= Plugin.LegacyApiUrl.TrimEnd(''/'');' ''
 $runWireNullCoalesceAssign = Invoke-Suite 'wire-nullcoalesceassign' $seam $wireNullCoalesceAssign
@@ -1647,7 +1647,7 @@ if (-not (Assert-Mutation 'a null-coalescing write to the request prefix' $runWi
 Say ''
 
 $wireNullCoalesceInert = New-WireRoot 'nullcoalesceinert' 'plugin/ApiClient.cs' `
-    'private static IEnumerator ProbeEndpointThenStart()' `
+    'private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)' `
     '                UsingLegacyFallback = true;' `
     '                UsingLegacyFallback = true;   // session only' ''
 $runWireNullCoalesceInert = Invoke-Suite 'wire-nullcoalesceinert' $seam $wireNullCoalesceInert

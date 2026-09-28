@@ -656,8 +656,14 @@ namespace CompetitiveRounds
             // `if (Success)` with no else, so LatestModVersion stays null, the
             // F5 Update button stays hidden, and the auto-updater never fires.
             // Probe first and fall back for the session if TLS can't connect.
+            // Board row 27: the probe is SecureRouteRules' one run
+            // (StartBootProbe). Only the compiled default gets a route: an
+            // explicit override is a deliberate choice and nothing re-checks
+            // or replaces it.
+            UsingLegacyFallback = false;
+            _route = null;
             if (string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
-                Plugin.Instance.StartCoroutine(ProbeEndpointThenStart());
+                StartBootProbe();
             else
                 CheckModVersion();
             // Start the tournament heartbeat loop. This runs forever and fires
@@ -2069,44 +2075,176 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Probe the TLS endpoint before committing to it for the session.
-        /// Falls back to the legacy plaintext endpoint ONLY on a transport-level
-        /// failure — never on an HTTP status, because any 4xx/5xx proves the port
-        /// and the TLS handshake both worked and the problem is elsewhere.
-        /// Deliberately does NOT write to config: this must re-evaluate every launch.
-        /// DELETE THIS along with Plugin.LegacyApiUrl in the same release that drops
-        /// the plaintext port-forward, or a broken TLS path is forgiven forever.</summary>
-        private static IEnumerator ProbeEndpointThenStart()
+        // Secure route (board row 27). The boot check, factored into one probe
+        // function (ProbeSecureRoute) driven by SecureRouteRules' run, so the
+        // portal button and a retry timer can run the same probe. A session
+        // whose two boot attempts fail still stays on the plaintext backup
+        // until the game restarts, and a LAN desktop fails them by construction
+        // (the router's hairpin hangs the second connection, #223).
+        // SecureRouteRules decides; this file does the I/O and owns the
+        // base-url field, which it copies from the route after a verdict.
+        // Deliberately never writes to config: the boot check re-evaluates every
+        // launch. DELETE the backup half along with Plugin.LegacyApiUrl in the
+        // same release that drops the plaintext port-forward, or a broken TLS
+        // path is forgiven forever.
+
+        /// <summary>This session's route; null when BaseUrl is an explicit
+        /// override, for which no check, backup or timer ever runs.</summary>
+        private static SecureRouteRules.Route _route;
+
+        /// <summary>The address a check probes: the compiled secure default.</summary>
+        private static string SecureProbeBase()
         {
-            const int attempts = 2;
-            bool reachable = false;
-            for (int i = 0; i < attempts && !reachable; i++)
+            return SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
+        }
+
+        private static double SecureRetrySeconds()
+        {
+            return SecureRouteRules.RetrySecondsFromMinutes(SecureRouteRules.DefaultRetryMinutes);
+        }
+
+        private static int SecureProbeOwner()
+        {
+            var host = Plugin.Instance;
+            return host != null ? host.GetInstanceID() : 0;
+        }
+
+        private static double RealtimeNow() => Time.realtimeSinceStartup;
+
+        /// <summary>The ONE probe every secure-route check runs (the boot check,
+        /// for now): GET mod-version with an 8 s timeout, stamped like every
+        /// request. "Reachable" must mean USABLE, not merely "something
+        /// answered". An earlier version accepted anything that wasn't a
+        /// ConnectionError, on the reasoning that an HTTP status proves the
+        /// port and TLS handshake worked. True, but useless to the player:
+        /// nginx up with the api container down returns 502, and a captive
+        /// portal or TLS-intercepting middlebox returns an HTML 200. Both would
+        /// pin the client to an endpoint it cannot actually use, and because
+        /// every recovery channel rides this same baseUrl there would be no way
+        /// back. So the reading records whether a parseable mod-version payload
+        /// came back, and SecureRouteRules.Classify calls anything else
+        /// unusable.</summary>
+        private static IEnumerator ProbeSecureRoute(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)
+        {
+            var reading = new SecureRouteRules.Reading
             {
-                using (var probe = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version"))
+                Result = SecureRouteRules.Transport.NotStarted, ResultName = "NotStarted",
+            };
+            float started = Time.realtimeSinceStartup;
+            using (var probe = UnityWebRequest.Get(url))
+            {
+                probe.timeout = timeoutSeconds;
+                StampVersionHeader(probe);
+                yield return probe.SendWebRequest();
+                try
                 {
-                    probe.timeout = 8;
-                    StampVersionHeader(probe);
-                    yield return probe.SendWebRequest();
-                    // "Reachable" must mean USABLE, not merely "something answered".
-                    // An earlier version accepted anything that wasn't a
-                    // ConnectionError, on the reasoning that an HTTP status proves
-                    // the port and TLS handshake worked. True — but useless to the
-                    // player: nginx up with the api container down returns 502, and
-                    // a captive portal or TLS-intercepting middlebox returns an
-                    // HTML 200. Both would pin the client to an endpoint it cannot
-                    // actually use, and because every recovery channel rides this
-                    // same baseUrl there would be no way back. Require a parseable
-                    // mod-version payload instead.
+                    reading.ResultName = probe.result.ToString();
+                    reading.HttpCode = probe.responseCode;
+                    reading.Error = probe.error;
+                    switch (probe.result)
+                    {
+                        case UnityWebRequest.Result.Success: reading.Result = SecureRouteRules.Transport.Success; break;
+                        case UnityWebRequest.Result.ProtocolError: reading.Result = SecureRouteRules.Transport.HttpError; break;
+                        case UnityWebRequest.Result.ConnectionError: reading.Result = SecureRouteRules.Transport.ConnectionError; break;
+                        default: reading.Result = SecureRouteRules.Transport.DataError; break;
+                    }
                     string body = probe.result == UnityWebRequest.Result.Success
                         ? (probe.downloadHandler?.text ?? "") : "";
-                    if (!string.IsNullOrEmpty(ExtractJsonString(body, "version")))
-                        reachable = true;
-                    else
-                        Plugin.Log.LogWarning(
-                            $"[API] TLS endpoint probe {i + 1}/{attempts} unusable: " +
-                            $"result={probe.result} code={probe.responseCode} err={probe.error}");
+                    reading.VersionParsed = !string.IsNullOrEmpty(ExtractJsonString(body, "version"));
                 }
+                catch (Exception ex) { reading.Error = "probe read failed: " + ex.Message; }
             }
+            reading.ElapsedSeconds = Time.realtimeSinceStartup - started;
+            try { done(reading); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] secure route verdict failed: {ex.Message}"); }
+        }
+
+        /// <summary>The route's transport: one ProbeSecureRoute coroutine per
+        /// attempt, on the current host.</summary>
+        private sealed class SecureProbeTransport : SecureRouteRules.ITransport
+        {
+            internal static readonly SecureProbeTransport Shared = new SecureProbeTransport();
+
+            public void Get(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)
+            {
+                Coroutine running = null;
+                try
+                {
+                    var host = Plugin.Instance;
+                    if (host != null) running = host.StartCoroutine(ProbeSecureRoute(url, timeoutSeconds, done));
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] secure route probe could not start: {ex.Message}"); }
+                // An inactive host returns null instead of throwing (see
+                // EnsureOutboxLoop), so the verdict is "not started", now.
+                if (running == null)
+                    done(new SecureRouteRules.Reading
+                    {
+                        Result = SecureRouteRules.Transport.NotStarted, ResultName = "NotStarted",
+                        Error = "the probe could not start (no active host)",
+                    });
+            }
+        }
+
+        /// <summary>The boot check: two attempts against the secure address,
+        /// then OnBootProbeConcluded, then the version check (as before).</summary>
+        private static void StartBootProbe()
+        {
+            var route = new SecureRouteRules.Route(Plugin.DefaultApiUrl, Plugin.LegacyApiUrl);
+            _route = route;
+            int gen = route.Begin(SecureRouteRules.Trigger.Boot, SecureProbeBase(), RealtimeNow(),
+                                  SecureProbeOwner(), SecureRetrySeconds());
+            if (gen == 0) { CheckModVersion(); return; }
+            RunSecureCheck(route, gen);
+        }
+
+        private static void RunSecureCheck(SecureRouteRules.Route route, int generation)
+        {
+            route.Run(generation, SecureProbeTransport.Shared, RealtimeNow, SecureRetrySeconds,
+                      LogSecureAttempt, c => OnSecureRunConcluded(route, c));
+        }
+
+        /// <summary>One log line per attempt. The boot run keeps the survey's
+        /// own line, unchanged, so a player's log still shows which route it
+        /// took and why (item d, #224); button and timer checks name their
+        /// outcome whatever it was.</summary>
+        private static void LogSecureAttempt(SecureRouteRules.Attempt a)
+        {
+            try
+            {
+                if (a.Trigger == SecureRouteRules.Trigger.Boot)
+                {
+                    if (a.Outcome != SecureRouteRules.Outcome.Usable)
+                        Plugin.Log.LogWarning(
+                            $"[API] TLS endpoint probe {a.Number}/{a.Of} unusable: " +
+                            $"result={a.Reading.ResultName} code={a.Reading.HttpCode} err={a.Reading.Error}");
+                    return;
+                }
+                string trigger = a.Trigger == SecureRouteRules.Trigger.Button ? "portal button" : "timer";
+                string outcome = SecureRouteRules.Describe(a.Outcome, a.Reading.HttpCode, SecureRouteRules.ProbeTimeoutSeconds);
+                string took = a.Reading.ElapsedSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+                string detail = a.Outcome == SecureRouteRules.Outcome.Usable ? ""
+                    : $" (result={a.Reading.ResultName} code={a.Reading.HttpCode} err={a.Reading.Error})";
+                Plugin.Log.LogInfo($"[SCR] secure route check {a.AttemptsSinceFallback} ({trigger}): {outcome} at "
+                                   + $"{SecureRouteRules.HostPort(a.Base)} in {took} s{detail}"
+                                   + (a.Current ? "" : " [superseded, ignored]"));
+            }
+            catch { }
+        }
+
+        private static void OnSecureRunConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            // A verdict from a superseded run, or from a route a later
+            // Initialize replaced (a respawn re-runs it), changes nothing.
+            if (c == null || c.Stale || !ReferenceEquals(route, _route)) return;
+            if (c.Trigger == SecureRouteRules.Trigger.Boot) OnBootProbeConcluded(route, c);
+        }
+
+        /// <summary>The boot run's verdict. On failure the session moves to the
+        /// plaintext backup (the survey's lines below are unchanged); either way
+        /// the version check runs next.</summary>
+        private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            bool reachable = c.Usable;
 
             if (!reachable)
             {
@@ -2119,6 +2257,10 @@ namespace CompetitiveRounds
                 // already looping on the dead TLS host has to be pointed at the
                 // fallback explicitly — otherwise chat stays dark all session.
                 try { ChatClient.Retarget(baseUrl); } catch (Exception ex) { Plugin.Log.LogWarning($"[API] chat retarget failed: {ex.Message}"); }
+            }
+            else
+            {
+                baseUrl = route.CurrentBase;
             }
             CheckModVersion();
         }
