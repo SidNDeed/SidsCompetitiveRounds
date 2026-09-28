@@ -29530,6 +29530,21 @@ async def internal_pc_face_preview(
     if not _pcp.print_id_ok(player_ref):
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     loc = _pcp.effective_locale(locale, _pc_served_locales())
+    data = await _pc_preview_face(db, player_ref, loc, snapshot_id)
+    return _pc_png_response(data, "private, max-age=60")
+
+
+async def _pc_preview_face(db: AsyncSession, player_ref: str, loc: str, snapshot_id: int | None = None) -> bytes:
+    """The subject as the pool sees them now, drawn as an unminted 750x1050
+    face: ONE drawing shared by the bot's /card preview
+    (internal_pc_face_preview) and the Settings tab's full-card preview
+    (pc_face_preview, board row 24), so what a player is shown of their own
+    card and what the bot shows others cannot come from two renderers. The
+    caller has gated the renderer and resolved `loc`. Re-applies the /card
+    gate itself (pool membership, deleted, live ban: 404 not_in_pool);
+    cached under a preview_rev over every drawn field for at most 60 s. A
+    `snapshot_id` pins the member row to that snapshot; None reads the
+    latest."""
     await _pc_steam_prime([player_ref])   # v2 §7: the preview shows the picture, not the plate, on a first look
     # This decides pool membership -- it answers not_in_pool -- so it carries
     # the pool's WHOLE word and not one half of it: no row comes back for a
@@ -29581,8 +29596,39 @@ async def internal_pc_face_preview(
     pbytes = await _pc_portrait_bytes(db, phash)
     if phash and pbytes is None:
         raise _PcPortraitMissing()   # released between the two reads: refuse, never cache the plate
-    data = await _pc_face_cache.get_or_render(
+    return await _pc_face_cache.get_or_render(
         key, _functools.partial(_pcf.render_face, spec, labels, pbytes, "card"))
+
+
+@app.get("/api/v1/pc/face/preview", tags=["Player Cards"])
+async def pc_face_preview(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """The Settings tab's full-card preview (board row 24): the caller's OWN
+    card as the pool sees it now -- frame, rarity band, name, rank title,
+    rating, record and picture -- as one 750x1050 PNG drawn by
+    _pc_preview_face, the helper the bot's /card preview draws with. HMAC
+    over pcread:{steam}:face:preview, strict session (the verified actor,
+    which also refuses a service account). The locale is the request's
+    X-Locale, as every Player Cards read. 404 not_in_pool while the caller
+    has no row in the pool snapshot in force (there is no card to show yet);
+    503 while this box cannot draw a face. Private, 60 s, never immutable:
+    the picture moves when the portrait is sent again and the numbers when
+    the daily snapshot rotates."""
+    _pc_require_renderer()
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_read(steam_id, "face", "preview"), db)
+    pid = str(player.id)
+    # The verified actor's SHARED identity lock is released before drawing:
+    # the helper's Steam prime writes under the EXCLUSIVE form of the same
+    # lock (_pc_steam_write), so holding it across the prime would make a
+    # first look wait out the whole prime deadline and draw the plate. The
+    # helper re-reads the pool gate (deleted, banned) itself, so nothing it
+    # draws rests on that lock.
+    await db.commit()
+    data = await _pc_preview_face(db, pid, _pc_locale(request))
     return _pc_png_response(data, "private, max-age=60")
 
 
