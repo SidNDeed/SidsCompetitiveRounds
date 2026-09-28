@@ -5,9 +5,11 @@ The level math itself -- the ceiling and both fade envelopes -- is EXECUTED by
 the client-rules harness (MusicLevels.SelfTest, the "musiclevels" suite in
 test_client_rules_harness.py). What a source test decides is that the engine
 feeds that math and nothing else: both sources take the slider through the
-ceiling, no third path writes a gain, the menu exit is what arms the long
-fade, every armed fade starts from a silent source, and the album note is
-authored text rendered at exactly the two places it was asked for.
+ceiling, no third path writes a gain, a fresh install takes the measured
+default and a stored 100 moves to it once behind its own flag, the menu exit
+is what arms the long fade, every armed fade starts from a silent source, and
+the album note is authored text rendered at exactly the two places it was
+asked for.
 """
 import io
 import os
@@ -68,6 +70,51 @@ def test_nothing_else_sets_a_music_source_gain():
 
 def test_the_slider_doc_no_longer_claims_vanilla_parity():
     assert "vanilla-equivalent loudness ceiling" not in _plugin(ENGINE)
+
+
+def test_a_fresh_install_takes_the_measured_default():
+    levels = code_of(_plugin("MusicLevels.cs"))
+    m = re.search(r"internal const int DEFAULT_PERCENT\s*=\s*(\d+)\s*;", levels)
+    assert m, "no DEFAULT_PERCENT constant"
+    assert 0 < int(m.group(1)) < 100, "the default must sit below the slider's top: " + m.group(1)
+    assert re.search(r"internal const int LEGACY_DEFAULT_PERCENT\s*=\s*100\s*;", levels)
+    plugin = code_of(_plugin("Plugin.cs"))
+    assert re.search(r'"Music",\s*"MusicVolume",\s*MusicLevels\.DEFAULT_PERCENT,', plugin), (
+        "MusicVolume must bind MusicLevels.DEFAULT_PERCENT as its default")
+    getter = code_of(_plugin(ENGINE), "internal static int VolumeStepPercent")
+    assert getter.count("MusicLevels.DEFAULT_PERCENT") == 2, getter
+    assert ": 100," not in getter and "return 100;" not in getter, getter
+    ui = code_of(_plugin("NativeUI.cs"))
+    assert ui.count("int vol = MusicLevels.DEFAULT_PERCENT;") == 1
+    assert ": MusicLevels.DEFAULT_PERCENT; } catch { }" in ui
+    assert "int vol = 100;" not in ui
+
+
+def test_the_volume_migration_runs_once_behind_its_own_flag():
+    plugin = code_of(_plugin("Plugin.cs"))
+    assert re.search(r'MusicVolumeMigrated = Config\.Bind\(\s*"Music",\s*"MusicVolumeMigrated",\s*false,',
+                     plugin), "the migration flag must bind false"
+    gate = "if (!MusicVolumeMigrated.Value)"
+    assert plugin.count(gate) == 1
+    block = plugin.split(gate, 1)[1]
+    block = block[:block.index("catch (Exception")]
+    assert "int migratedVolume = MusicLevels.MigratedPercent(storedVolume, false);" in block
+    assert "if (migratedVolume != storedVolume) MusicVolume.Value = migratedVolume;" in block
+    assert "MusicVolumeMigrated.Value = true;" in block
+    # Both keys are bound before the migration reads them.
+    assert plugin.index('"MusicVolume", MusicLevels.DEFAULT_PERCENT') < plugin.index(gate)
+    assert plugin.index('"MusicVolumeMigrated", false') < plugin.index(gate)
+    # Nothing else sets the flag, and nothing outside Plugin and MusicLevels
+    # runs the migration.
+    for name in sorted(os.listdir(PLUGIN)):
+        if not name.endswith(".cs"):
+            continue
+        code = code_of(_plugin(name))
+        flag_writes = len(re.findall(r"MusicVolumeMigrated\.Value\s*=[^=]", code))
+        assert flag_writes == (1 if name == "Plugin.cs" else 0), (name, flag_writes)
+        if name not in ("Plugin.cs", "MusicLevels.cs"):
+            assert "MigratedPercent(" not in code, name
+    assert plugin.count("MusicLevels.MigratedPercent(") == 1
 
 
 # -- (b) the long first-track fade -------------------------------------------

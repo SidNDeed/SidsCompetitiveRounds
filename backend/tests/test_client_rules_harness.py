@@ -661,8 +661,9 @@ def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[musiclevels\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The suite ran 18 cases on the commit that added it (#342).
-    assert run >= 18, "the MusicLevels suite shrank to %d cases" % run
+    # The suite ran 18 cases on the commit that added it and 26 once the
+    # measured levels and the volume migration joined (#342).
+    assert run >= 26, "the MusicLevels suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -671,6 +672,14 @@ def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
     "the slider never gets quieter as it rises",
     "the slider clamps outside 0..100",
     "the pre-1.41 slider is louder than half at 100 (control)",
+    "the default plays at the soundtrack's level, within 1 dB",
+    "the slider's 100 is at most 6.5 dB over the soundtrack",
+    "the default sits below the ceiling",
+    "the pre-1.41 default sat over 30 dB above the soundtrack (control)",
+    "a stored 100 becomes the default once",
+    "a stored 100 stays once the migration has run",
+    "the migration never changes any other value",
+    "a migration that resets every value fails the leave-alone check (control)",
     "the short fade starts at zero gain (60fps)",
     "the short fade reaches full gain at 0.6 s, not before (60fps)",
     "the long fade starts at zero gain (60fps)",

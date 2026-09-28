@@ -712,12 +712,12 @@ namespace CompetitiveRounds
         /// valid (the slider is continuous; VolumeUp/Down step ±10 from
         /// wherever the config sits, without snapping to a grid [I17]). The
         /// percent feeds MusicLevels.SliderGain: the squared law times
-        /// VOLUME_CEILING, so 100 is at most half of the pre-1.41 output
-        /// (v1.41.0 item 23a); the game's own music slider applies on top, on
-        /// the mixer group.</summary>
+        /// VOLUME_CEILING (v1.41.0 item 23a; MusicLevels records the measured
+        /// levels behind the ceiling and DEFAULT_PERCENT); the game's own
+        /// music slider applies on top, on the mixer group.</summary>
         internal static int VolumeStepPercent
         {
-            get { try { return Mathf.Clamp(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100, 0, 100); } catch { return 100; } }
+            get { try { return Mathf.Clamp(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : MusicLevels.DEFAULT_PERCENT, 0, 100); } catch { return MusicLevels.DEFAULT_PERCENT; } }
         }
 
         internal static void VolumeUp() { SetVolume(VolumeStepPercent + 10); }

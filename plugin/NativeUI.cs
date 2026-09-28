@@ -13027,7 +13027,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // Volume: the persisted config value IS the state (the contract's
             // SetVolumePercent writes it); silent so the repaint can't re-seek
             // the engine's volume path.
-            int vol = 100; try { vol = Plugin.MusicVolume != null ? Mathf.Clamp(Plugin.MusicVolume.Value, 0, 100) : 100; } catch { }
+            int vol = MusicLevels.DEFAULT_PERCENT; try { vol = Plugin.MusicVolume != null ? Mathf.Clamp(Plugin.MusicVolume.Value, 0, 100) : MusicLevels.DEFAULT_PERCENT; } catch { }
             if (musicVolSlider != null) musicVolSlider.SetSilent(vol / 100f);
             // Re-anchor the dedup to the PERSISTED value: without this, a
             // config change from elsewhere followed by the user dragging back

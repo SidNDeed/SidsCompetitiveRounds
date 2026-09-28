@@ -13,10 +13,27 @@ namespace CompetitiveRounds
     ///
     /// Ceiling. The mod's slider feeds a squared (perceptual) law, and its 100
     /// now maps to VOLUME_CEILING of the amplitude that 100 produced before
-    /// 1.41 (Sid's ruling of 2026-09-28: at most half). The factor is applied
-    /// on the source, before the game's own music slider, which keeps working
-    /// on the mixer group downstream; every stored slider value is scaled by
-    /// the same factor, so no player's cfg has to be rewritten for it.
+    /// 1.41 (Sid's ruling of 2026-09-28: at most half, lower still if the
+    /// loudness measurement says so). The factor is applied on the source,
+    /// before the game's own music slider, which keeps working on the mixer
+    /// group downstream; every stored slider value is scaled by the same
+    /// factor.
+    ///
+    /// The measurement (2026-09-28, the broadcast seat, listener output
+    /// through the game's music mixer group): the game's own soundtrack plays
+    /// at source gain 0.01 (its sound container's -40 dB), and the mod's
+    /// source at 0.0098 on the same clip measured within 0.1 dB of it, so the
+    /// two share one chain and only the source gain differs. The custom
+    /// albums' integrated loudness averages within 0.2 LU of the game's
+    /// in-round clips. Before 1.41 the slider's 100 was source gain 1.0, about
+    /// 40 dB over the soundtrack at the source, and already at half of that
+    /// the output peaked above full scale. VOLUME_CEILING = 0.02 puts 100 at
+    /// about 6 dB over the soundtrack and DEFAULT_PERCENT at its level.
+    ///
+    /// Migration. 100 was the default before 1.41, so a stored 100 is read as
+    /// never chosen, once: MigratedPercent turns it into DEFAULT_PERCENT
+    /// unless the one-time flag is already set, and returns every other value
+    /// unchanged (Plugin binds the flag and applies it).
     ///
     /// Fade-in. Every track start and resume keeps the 0.6 s linear envelope
     /// it always had. The first start after a silent main menu (the menu to
@@ -26,8 +43,22 @@ namespace CompetitiveRounds
     internal static class MusicLevels
     {
         /// <summary>The amplitude the slider's 100 maps to, as a fraction of
-        /// what 100 produced before 1.41. At most 0.5 by ruling.</summary>
-        internal const float VOLUME_CEILING = 0.5f;
+        /// what 100 produced before 1.41. At most 0.5 by ruling; 0.02 by the
+        /// measurement in the summary above.</summary>
+        internal const float VOLUME_CEILING = 0.02f;
+
+        /// <summary>The percent a fresh install starts at, and the one a
+        /// stored LEGACY_DEFAULT_PERCENT moves to once: the level of the
+        /// game's own soundtrack under VOLUME_CEILING.</summary>
+        internal const int DEFAULT_PERCENT = 70;
+
+        /// <summary>The slider's default before 1.41.</summary>
+        internal const int LEGACY_DEFAULT_PERCENT = 100;
+
+        /// <summary>The source gain the game's own soundtrack plays at (its
+        /// sound container's -40 dB), measured on the broadcast seat; the
+        /// reference the self-test holds the default and the top against.</summary>
+        internal const float SOUNDTRACK_SOURCE_GAIN = 0.01f;
 
         /// <summary>The envelope every track start and resume has always had.</summary>
         internal const float SHORT_FADE_SECONDS = 0.6f;
@@ -46,6 +77,15 @@ namespace CompetitiveRounds
             if (percent <= 0) return 0f;
             float f = percent >= 100 ? 1f : percent / 100f;
             return f * f * VOLUME_CEILING;
+        }
+
+        /// <summary>The one-time migration of a stored slider percent: the
+        /// pre-1.41 default becomes DEFAULT_PERCENT; every other value, and
+        /// every value once the migration has run, comes back unchanged.</summary>
+        internal static int MigratedPercent(int stored, bool alreadyMigrated)
+        {
+            if (alreadyMigrated) return stored;
+            return stored == LEGACY_DEFAULT_PERCENT ? DEFAULT_PERCENT : stored;
         }
 
         /// <summary>Envelope progress after one audible frame of dt seconds.
@@ -88,6 +128,32 @@ namespace CompetitiveRounds
         private static string F(float v)
         {
             return v.ToString("0.#####", CultureInfo.InvariantCulture);
+        }
+
+        private static double Db(double ratio)
+        {
+            return 20.0 * System.Math.Log10(ratio);
+        }
+
+        private static string D(double v)
+        {
+            return v.ToString("0.00", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Null when the migration leaves every value but the legacy
+        /// default unchanged, with the flag clear and with it set; otherwise
+        /// the first value it moved.</summary>
+        private static string LeaveAloneFailure(System.Func<int, bool, int> migrate)
+        {
+            var values = new System.Collections.Generic.List<int> { -5, 101, 250 };
+            for (int v = 0; v < LEGACY_DEFAULT_PERCENT; v++) values.Add(v);
+            foreach (int v in values)
+                foreach (bool done in new[] { false, true })
+                {
+                    int got = migrate(v, done);
+                    if (got != v) return "value=" + v + " flag=" + done + " became " + got;
+                }
+            return null;
         }
 
         /// <summary>Drives an envelope from arming at a fixed frame time and
@@ -144,6 +210,37 @@ namespace CompetitiveRounds
             Check(r, "the pre-1.41 slider is louder than half at 100 (control)",
                   SliderGainBefore(100) > 0.5f,
                   "old100=" + F(SliderGainBefore(100)));
+
+            // The measured levels, in dB against the game's own soundtrack.
+            double dbDefault = Db(SliderGain(DEFAULT_PERCENT) / SOUNDTRACK_SOURCE_GAIN);
+            double dbTop = Db(SliderGain(100) / SOUNDTRACK_SOURCE_GAIN);
+            double dbOld = Db(SliderGainBefore(LEGACY_DEFAULT_PERCENT) / SOUNDTRACK_SOURCE_GAIN);
+            Check(r, "the default plays at the soundtrack's level, within 1 dB",
+                  System.Math.Abs(dbDefault) <= 1.0,
+                  "default=" + DEFAULT_PERCENT + " gain=" + F(SliderGain(DEFAULT_PERCENT)) + " dB=" + D(dbDefault));
+            Check(r, "the slider's 100 is at most 6.5 dB over the soundtrack",
+                  dbTop > 0.0 && dbTop <= 6.5,
+                  "gain=" + F(SliderGain(100)) + " dB=" + D(dbTop));
+            Check(r, "the default sits below the ceiling",
+                  DEFAULT_PERCENT > 0 && DEFAULT_PERCENT < 100 && SliderGain(DEFAULT_PERCENT) < SliderGain(100),
+                  "default=" + DEFAULT_PERCENT + " g(default)=" + F(SliderGain(DEFAULT_PERCENT)) + " g(100)=" + F(SliderGain(100)));
+            Check(r, "the pre-1.41 default sat over 30 dB above the soundtrack (control)",
+                  dbOld > 30.0,
+                  "old100 dB=" + D(dbOld));
+
+            // The one-time migration of a stored percent.
+            Check(r, "a stored 100 becomes the default once",
+                  MigratedPercent(LEGACY_DEFAULT_PERCENT, false) == DEFAULT_PERCENT,
+                  "m(100,false)=" + MigratedPercent(LEGACY_DEFAULT_PERCENT, false));
+            Check(r, "a stored 100 stays once the migration has run",
+                  MigratedPercent(LEGACY_DEFAULT_PERCENT, true) == LEGACY_DEFAULT_PERCENT,
+                  "m(100,true)=" + MigratedPercent(LEGACY_DEFAULT_PERCENT, true));
+            string moved = LeaveAloneFailure(MigratedPercent);
+            Check(r, "the migration never changes any other value", moved == null,
+                  moved ?? "-5, 0..99, 101 and 250 unchanged with the flag clear and set");
+            string caught = LeaveAloneFailure((s, done) => done ? s : DEFAULT_PERCENT);
+            Check(r, "a migration that resets every value fails the leave-alone check (control)",
+                  caught != null, caught ?? "the check missed a reset");
 
             // Envelopes, driven at 60 fps and at this seat's ~10 fps.
             foreach (float frame in new[] { 1f / 60f, 0.1f })

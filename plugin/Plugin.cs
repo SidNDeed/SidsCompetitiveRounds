@@ -150,6 +150,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> MusicShuffle;
         internal static ConfigEntry<bool> MusicLoop;
         internal static ConfigEntry<int> MusicVolume;        // engine-local %, on top of the game's own music slider
+        internal static ConfigEntry<bool> MusicVolumeMigrated; // one-shot marker for the 1.41.0 MusicVolume migration (MusicLevels.MigratedPercent)
         internal static ConfigEntry<bool> MenuMusicEnabled;  // legacy bool (§8) — superseded by MenuMusicMode, kept per #190
         internal static ConfigEntry<string> MenuMusicMode;   // "vanilla" / "custom" / "silent" (Sept 2 feedback)
         internal static ConfigEntry<bool> MenuMusicModeMigrated; // one-shot marker for the MenuMusicEnabled→MenuMusicMode migration
@@ -1024,9 +1025,38 @@ namespace CompetitiveRounds
                 "Loop the custom-music playlist when it reaches the end."
             );
             MusicVolume = Config.Bind(
-                "Music", "MusicVolume", 100,
-                "Custom-music volume percent (0-100, set with the Music tab's volume slider; any hand-edited value is used as-is, clamped). Applied on top of the game's own music slider, which keeps working."
+                "Music", "MusicVolume", MusicLevels.DEFAULT_PERCENT,
+                "Custom-music volume percent (0-100, set with the Music tab's volume slider; any hand-edited value is used as-is, clamped). "
+                + MusicLevels.DEFAULT_PERCENT + " plays the custom albums at the level of the game's own soundtrack; 100 is about 6 dB louder. "
+                + "Applied on top of the game's own music slider, which keeps working."
             );
+            // One-shot MusicVolume migration (1.41.0 item 23a), the
+            // MenuMusicModeMigrated pattern below: Config.Bind never revisits
+            // a written default (#190). 1.41.0 lowered the slider's whole
+            // range (MusicLevels.VOLUME_CEILING) and put the default below the
+            // top, and 100 was the default before, so a stored 100 is read as
+            // never chosen and becomes the new default, once. Gated on its own
+            // marker key, so a 100 chosen afterwards is kept; MigratedPercent
+            // returns every other stored value unchanged.
+            MusicVolumeMigrated = Config.Bind(
+                "Music", "MusicVolumeMigrated", false,
+                "Internal: set once the one-time 1.41.0 MusicVolume migration has run (a stored "
+                + MusicLevels.LEGACY_DEFAULT_PERCENT + ", the old default, became " + MusicLevels.DEFAULT_PERCENT
+                + "; no other value is changed). Clearing it runs the migration again on next launch."
+            );
+            try
+            {
+                if (!MusicVolumeMigrated.Value)
+                {
+                    int storedVolume = MusicVolume.Value;
+                    int migratedVolume = MusicLevels.MigratedPercent(storedVolume, false);
+                    if (migratedVolume != storedVolume) MusicVolume.Value = migratedVolume;
+                    MusicVolumeMigrated.Value = true;
+                    Log.LogInfo("[MUSIC] MusicVolume migration ran once: stored " + storedVolume + " -> " + migratedVolume
+                                + " (only a stored " + MusicLevels.LEGACY_DEFAULT_PERCENT + " moves)");
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[MUSIC] MusicVolume migration skipped: {ex.Message}"); }
             MenuMusicEnabled = Config.Bind(
                 "Music", "MenuMusicEnabled", false,
                 "Superseded by MenuMusicMode - value migrated once, no longer consulted except as a pre-migration fallback."
