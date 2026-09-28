@@ -5510,10 +5510,10 @@ namespace CompetitiveRounds
         /// report sent on another session voids the issue, and a DC report this
         /// account sends on another session reads no token). The answer
         /// is taken only if that still holds and the client can first keep
-        /// the issued nonce's first 8 digits in its report ledger
-        /// (ApiClient.NoteTeamAnchor): every match report it sends for the
-        /// series then carries them, and a recorded one that does not voids
-        /// the issued game on the server. Any other seat, and any other
+        /// the whole issued nonce in its report ledger (ApiClient.NoteTeamAnchor;
+        /// round 9, finding M2): every match report it sends for the series
+        /// then carries it, and a recorded one that does not voids the issued
+        /// game on the server. Any other seat, and any other
         /// answer, leaves the game tokenless unless a publish grounds the
         /// seat.</summary>
         private static void TryAskTeamFirstGame()

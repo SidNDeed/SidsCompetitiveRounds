@@ -188,10 +188,15 @@ namespace CompetitiveRounds
         // Physical game 1's token
         // carries the issued nonce, and the seat it was issued to publishes it
         // in the game's first round whether or not it is the room's host;
-        // every later game's host draws its nonce as the issued nonce's first
-        // 8 digits (the ANCHOR, learned from the issue or from the token a
-        // seat was grounded on) and 8 fresh ones, and the server reads a
-        // token only when it begins with the anchor.
+        // every later game's host DERIVES its nonce from the whole issued
+        // nonce (the ROOT, learned from the issue or from physical game 1's
+        // token) and the token's own ordinal and epoch (round 9, finding M2:
+        // ChainNonce; main.py, _team_game_chain_nonce), and the server reads a
+        // token only when its nonce is exactly the one derived. Round 8 drew
+        // it as the issued nonce's first 8 digits and 8 fresh ones and read a
+        // token by those 8 digits alone. A later token does not reveal the
+        // root, so a seat that saw neither the issue nor physical game 1's
+        // token publishes nothing as the host (WhyNoAnchor).
         // It then adds one at every game start the game itself reported
         // (GM_ArmsRace.DoStartGame, exactly
         // one since its last game start: TeamGameLifecycle), and loses it at
@@ -264,7 +269,8 @@ namespace CompetitiveRounds
         internal const string WhyLate = "the game's first round is over";
         internal const string WhyNotHost = "this seat is not the room's host";
         internal const string WhyEpoch = "the room's epoch is at its bound";
-        internal const string WhyNoAnchor = "this seat holds no issued physical game 1 to draw its nonce from";
+        internal const string WhyNoAnchor = "this seat holds no issued physical game 1 to derive its nonce from";
+        internal const string WhyChainTaken = "the nonce derived for this game is one this seat already read or holds as stale";
 
         /// <summary>The highest epoch a token carries (nine digits).</summary>
         internal const long MaxEpoch = 999999999;
@@ -381,15 +387,47 @@ namespace CompetitiveRounds
             return sb.ToString();
         }
 
-        /// <summary>Round 8, finding F31: 8 fresh lowercase hex digits (the
-        /// first 4 bytes of a new Guid), the part of a later game's nonce after
-        /// the anchor (Tracker.TokenToPublish).</summary>
-        internal static string DrawSuffix()
+        /// <summary>Round 9, finding M2: the nonce physical game `ordinal`'s
+        /// token carries when published with `epoch`, counted from the series'
+        /// issued physical game 1 (`root`, its 16 lowercase hex digits): the
+        /// root itself for game 1, else the first 16 hex digits of HMAC-SHA256
+        /// keyed by the root's 16 ASCII digits over
+        /// "team-game-chain:{ordinal}:{epoch}", both in decimal as the wire
+        /// carries them (main.py, _team_game_chain_nonce, computes the same).
+        /// "" when the root is not a nonce or the ordinal or the epoch is out
+        /// of the token's range.</summary>
+        internal static string ChainNonce(string root, int ordinal, long epoch)
         {
-            byte[] b = Guid.NewGuid().ToByteArray();
-            var sb = new System.Text.StringBuilder(8);
-            for (int i = 0; i < 4; i++) sb.Append(b[i].ToString("x2", CultureInfo.InvariantCulture));
+            if (!NonceValid(root) || ordinal < 1 || ordinal > MaxGameNumber || epoch < 1 || epoch > MaxEpoch) return "";
+            if (ordinal == 1) return root;
+            byte[] key = System.Text.Encoding.ASCII.GetBytes(root);
+            byte[] msg = System.Text.Encoding.ASCII.GetBytes(ChainPrefix + ordinal.ToString(CultureInfo.InvariantCulture)
+                                                             + ":" + epoch.ToString(CultureInfo.InvariantCulture));
+            byte[] mac;
+            using (var hm = new System.Security.Cryptography.HMACSHA256(key)) mac = hm.ComputeHash(msg);
+            var sb = new System.Text.StringBuilder(16);
+            for (int i = 0; i < 8; i++) sb.Append(mac[i].ToString("x2", CultureInfo.InvariantCulture));
             return sb.ToString();
+        }
+
+        /// <summary>Round 9, finding M2: the derivation's message prefix, and
+        /// its pin vector: ChainNonce(PinChainRoot, PinChainOrdinal,
+        /// PinChainEpoch) is PinChainExpected on this client and on the server
+        /// (the sentinel checks it here, and
+        /// backend/tests/test_team_series_report_dc.py checks the same four
+        /// values against main._team_game_chain_nonce).</summary>
+        internal const string ChainPrefix = "team-game-chain:";
+        internal const string PinChainRoot = "0123456789abcdef";
+        internal const int PinChainOrdinal = 2;
+        internal const long PinChainEpoch = 7;
+        internal const string PinChainExpected = "4f9833dd5e56800d";
+
+        /// <summary>A nonce as a log line shows it: its first 8 digits (display
+        /// only: nothing compares them).</summary>
+        internal static string ShortNonce(string nonce)
+        {
+            if (nonce == null) return "";
+            return nonce.Length > 8 ? nonce.Substring(0, 8) : nonce;
         }
 
         /// <summary>A token as a log line names it: the nonce's first 8 digits,
@@ -400,7 +438,7 @@ namespace CompetitiveRounds
             int o;
             long e;
             if (!TryParseToken(token, out n, out o, out e)) return "(none)";
-            return n.Substring(0, 8) + " (game " + Num(o) + ", epoch " + e.ToString(CultureInfo.InvariantCulture) + ")";
+            return ShortNonce(n) + " (game " + Num(o) + ", epoch " + e.ToString(CultureInfo.InvariantCulture) + ")";
         }
 
         /// <summary>What a post carrying a token signs for it, apart from the
@@ -465,18 +503,22 @@ namespace CompetitiveRounds
             return "sent " + seriesId;
         }
 
-        /// <summary>Round 8, finding F31: the ledger's line for the series'
-        /// issued physical game 1, by its anchor (the issued nonce's first 8
-        /// digits).</summary>
-        internal static string LedgerAnchor(string seriesId, string anchor)
+        /// <summary>Round 8, finding F31; round 9, finding M2: the ledger's
+        /// line for the series' issued physical game 1, by its whole nonce
+        /// (the anchor every match report of the series carries). Round 8
+        /// wrote "anchor <series> <the first 8 digits>"; such a line no longer
+        /// parses (ParseLedgerLine), so the series' reports carry no anchor and
+        /// the server voids the issue.</summary>
+        internal static string LedgerIssued(string seriesId, string nonce)
         {
-            return "anchor " + seriesId + " " + anchor;
+            return "issued " + seriesId + " " + nonce;
         }
 
         /// <summary>Round 8, finding F31: reads one ledger line, "sent
-        /// <series>" or "anchor <series> <8 hex>" (`anchorLine` says which;
-        /// `anchor` is "" for a sent line). False for anything else: a line an
-        /// interrupted append tore, which the ledger skips.</summary>
+        /// <series>" or (round 9, finding M2) "issued <series> <16 hex>"
+        /// (`anchorLine` says which; `anchor` is "" for a sent line). False
+        /// for anything else: a line an interrupted append tore, which the
+        /// ledger skips, and a round-8 client's "anchor <series> <8 hex>".</summary>
         internal static bool ParseLedgerLine(string line, out bool anchorLine, out string seriesId, out string anchor)
         {
             anchorLine = false;
@@ -488,7 +530,7 @@ namespace CompetitiveRounds
                 seriesId = f[1];
                 return true;
             }
-            if (f.Length == 3 && f[0] == "anchor" && LedgerKey(f[1]) && f[2].Length == 8 && NonceValid(f[2] + "00000000"))
+            if (f.Length == 3 && f[0] == "issued" && LedgerKey(f[1]) && NonceValid(f[2]))
             {
                 anchorLine = true;
                 seriesId = f[1];
@@ -575,12 +617,15 @@ namespace CompetitiveRounds
             // an ask is out for (0 = none) and `askedGen` the last game an ask
             // was made in (one per game). `firstNonce`: the issued nonce, while
             // this seat holds physical game 1 by the server's issue (its token
-            // carries it, and this seat publishes it, host or not). `anchor`:
-            // the issued nonce's first 8 digits, from the issue or from the
-            // token this seat's ordinal was grounded on; a host draws every
-            // later game's nonce as the anchor and 8 fresh digits.
+            // carries it, and this seat publishes it, host or not). Round 9,
+            // finding M2: `root` is the whole issued nonce of series
+            // `rootSeries`, from the issue or from physical game 1's token (a
+            // later token does not reveal it, and one that is not the nonce
+            // derived from a root held drops that root); a host derives every
+            // later game's nonce from it (ChainNonce). A join keeps it: the
+            // ordinal is still lost, and only a publish taken grounds it again.
             private int gameGen, askGen, askedGen;
-            private string firstNonce = "", anchor = "";
+            private string firstNonce = "", root = "", rootSeries = "";
             // Round 7, F29: the game's own starts on this seat
             // (GM_ArmsRace.DoStartGame, TeamGameLifecycle) in `gmRoom`, and how
             // many of them this seat's game starts have accounted for.
@@ -719,6 +764,12 @@ namespace CompetitiveRounds
                     chainRoom = room;
                     roomStarts = 0;
                     chain = 0;
+                    // Round 9, finding M2: a root is one series' only.
+                    if (!string.Equals(seriesId, rootSeries, StringComparison.Ordinal))
+                    {
+                        root = "";
+                        rootSeries = "";
+                    }
                 }
                 roomStarts++;
                 witnessed = gm == 1;
@@ -858,9 +909,10 @@ namespace CompetitiveRounds
                            + " series, so no later game of the series is named game 1 either";
                 chain = 1;
                 firstNonce = nonce;
-                anchor = nonce.Substring(0, 8);
-                return LogTag + " physical game 1 issued by the server (" + anchor + "): this seat holds it and publishes"
-                       + " its token";
+                root = nonce;
+                rootSeries = chainSeries;
+                return LogTag + " physical game 1 issued by the server (" + ShortNonce(nonce) + "): this seat holds it and"
+                       + " publishes its token";
             }
 
             /// <summary>Round 8, finding F31: the answer to the ask made for
@@ -943,7 +995,6 @@ namespace CompetitiveRounds
                 gameGen = gameGen == int.MaxValue ? 1 : gameGen + 1;
                 askGen = 0;
                 firstNonce = "";
-                anchor = "";
                 gmRoom = gm ?? "";
                 gmStarts = 0;
                 gmSeen = 0;
@@ -1335,11 +1386,22 @@ namespace CompetitiveRounds
                 if (chain > 0) return LogTag + " game token " + Describe(v) + " taken for this game";
                 // Round 7, finding F29: a seat holding no ordinal is grounded on
                 // the publish it takes, and only on that (or on the server's
-                // issue of physical game 1: OnFirstGame). Round 8, finding F31:
-                // the token's first 8 digits are the anchor every nonce this
-                // seat later publishes as the host begins with.
+                // issue of physical game 1: OnFirstGame). Round 9, finding M2:
+                // physical game 1's token carries the root every nonce this
+                // seat later publishes as the host is derived from; a later
+                // token keeps a root this seat holds for the series only when
+                // it is the nonce derived from that root, and never reveals one.
                 chain = ordinal;
-                anchor = nonce.Substring(0, 8);
+                if (ordinal == 1)
+                {
+                    root = nonce;
+                    rootSeries = chainSeries;
+                }
+                else if (ChainNonce(RootFor(chainSeries), ordinal, epoch) != nonce)
+                {
+                    root = "";
+                    rootSeries = "";
+                }
                 return LogTag + " game token " + Describe(v) + " taken for this game: this seat's physical-game"
                        + " ordinal is grounded on it (game " + Num(ordinal) + ")";
             }
@@ -1468,13 +1530,15 @@ namespace CompetitiveRounds
             /// publishes nothing. Round 8, finding F31: the seat the server
             /// issued physical game 1 to publishes that game's token, its nonce
             /// the issued one, whether or not it is the room's host; every other
-            /// token is the host's (`isHost`), its nonce the anchor (the issued
-            /// nonce's first 8 digits) and 8 fresh digits. Its epoch is one
-            /// above the highest this seat has read in the room or published (a
-            /// new host after a master change continues the room's epochs from
-            /// the value the room holds). `current` is the room's value now; the
-            /// fresh nonce is neither its nonce nor any stale for this seat or
-            /// read in this game.</summary>
+            /// token is the host's (`isHost`). Its epoch is one above the highest
+            /// this seat has read in the room or published (a new host after a
+            /// master change continues the room's epochs from the value the room
+            /// holds). Round 9, finding M2: its nonce is derived from the root
+            /// this seat holds for the series and the token's ordinal and epoch
+            /// (ChainNonce; none held: WhyNoAnchor). `current` is the room's
+            /// value now; a derived nonce equal to its nonce, to one stale for
+            /// this seat or to one read in this game is not published
+            /// (WhyChainTaken).</summary>
             internal string TokenToPublish(bool isHost, bool firstRound, string current, out string why)
             {
                 why = null;
@@ -1488,14 +1552,23 @@ namespace CompetitiveRounds
                 else if (!firstRound) why = WhyLate;
                 else if (!isHost && !issued) why = WhyNotHost;
                 else if (epoch > MaxEpoch) why = WhyEpoch;
-                else if (!issued && !NonceValid(anchor + "00000000")) why = WhyNoAnchor;
+                else if (!issued && RootFor(chainSeries).Length == 0) why = WhyNoAnchor;
                 if (why != null) return "";
                 if (issued) return MakeToken(firstNonce, 1, epoch);
-                string current16 = NonceOf(current);
-                string n;
-                do n = anchor + DrawSuffix();
-                while (n == current16 || stale.Contains(n) || SeenNonce(n));
+                string n = ChainNonce(RootFor(chainSeries), PhysicalOrdinal(), epoch);
+                if (n.Length == 0 || n == NonceOf(current) || stale.Contains(n) || SeenNonce(n))
+                {
+                    why = WhyChainTaken;
+                    return "";
+                }
                 return MakeToken(n, PhysicalOrdinal(), epoch);
+            }
+
+            // Round 9, finding M2: the root this seat holds for `seriesId`, or "".
+            private string RootFor(string seriesId)
+            {
+                if (rootSeries.Length == 0 || !string.Equals(seriesId ?? "", rootSeries, StringComparison.Ordinal)) return "";
+                return root;
             }
 
             /// <summary>The publish of `token` was sent (SetCustomProperties
@@ -1781,9 +1854,11 @@ namespace CompetitiveRounds
         // the series was relocked or has a record in another room. ReadsAnchor
         // (round 8, F31; main.py, _team_game_first_game_refusal): nor unless
         // the series was issued a physical game 1 (GrantFirst), not voided
-        // (Land), and the token's nonce begins with the issued nonce's first 8
-        // digits; nor (round 9, M1, ReadsIssued) when the series' reporter's
-        // account reports on another session than the one the issue went to.
+        // (Land), and (round 9, M2) the token's nonce is the one derived from
+        // the issued nonce for its ordinal and epoch (ChainNonce; ReadsPrefix
+        // is round 8's rule, the kept copy: its first 8 digits alone); nor
+        // (round 9, M1, ReadsIssued) when the series' reporter's account
+        // reports on another session than the one the issue went to.
         // Unreachable: the seats' requests fail (a post is not filed, an ask
         // is not answered).
         private sealed class TokenServer
@@ -1818,6 +1893,11 @@ namespace CompetitiveRounds
             // (Settles). All three false is round 8's issuance.
             public bool ReadsOthers = true, ReadsAnyPost = true, ReadsIssued = true;
             public bool AnyPost;
+            // Round 9, M2: the kept copies of round 8's comparisons: a token
+            // read by the issued nonce's first 8 digits alone (ReadsPrefix),
+            // and a match report's anchor held to those 8 digits alone
+            // (ReadsPrefixAnchor).
+            public bool ReadsPrefix, ReadsPrefixAnchor;
             public string FirstSession = "";
             private readonly Dictionary<string, HashSet<string>> sessions =
                 new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
@@ -1904,8 +1984,27 @@ namespace CompetitiveRounds
             {
                 Recorded++;
                 if (!Granted || Voided) return;
-                if ((anchor ?? "") != FirstNonce.Substring(0, 8)) Voided = true;
+                if (!AnchorHolds(anchor)) Voided = true;
                 else if (ReadsIssued && (session ?? "") != FirstSession) Voided = true;
+            }
+
+            // Round 9, M2: whether a match report's anchor is the issued nonce,
+            // the whole of it (ReadsPrefixAnchor: round 8's first 8 digits
+            // alone, which an 8-digit anchor and any nonce sharing those
+            // digits pass).
+            private bool AnchorHolds(string anchor)
+            {
+                if (ReadsPrefixAnchor) return (anchor ?? "").Length >= 8 && anchor.Substring(0, 8) == FirstNonce.Substring(0, 8);
+                return (anchor ?? "") == FirstNonce;
+            }
+
+            // Round 9, M2: whether a token's nonce is counted from the issued
+            // physical game 1: the nonce derived for its ordinal and epoch
+            // (ReadsPrefix: round 8's first 8 digits alone).
+            private bool ChainHolds(string nonce, int ordinal, long epoch)
+            {
+                if (ReadsPrefix) return nonce.Substring(0, 8) == FirstNonce.Substring(0, 8);
+                return nonce == ChainNonce(FirstNonce, ordinal, epoch);
             }
 
             public void File(int named, string room, string token, int team, bool two, int game)
@@ -1962,8 +2061,7 @@ namespace CompetitiveRounds
                     if (!TryParseToken(token, out nonce, out ordinal, out epoch)) return false;
                     if (ReadsOrdinals && ordinal != Recorded + 1) return false;
                     if (ReadsSitting && (Relocked || OtherRoom())) return false;
-                    if (ReadsAnchor && (!Granted || Voided || nonce.Substring(0, 8) != FirstNonce.Substring(0, 8)))
-                        return false;
+                    if (ReadsAnchor && (!Granted || Voided || !ChainHolds(nonce, ordinal, epoch))) return false;
                     if (ReadsAnchor && ReadsIssued && byReporter && (session ?? "") != FirstSession) return false;
                     if (r.Conflict || r.Token != nonce || r.TokTeams != 3) return false;
                     foreach (var kv in recs)
@@ -2112,7 +2210,7 @@ namespace CompetitiveRounds
                 if (!T.AskFirstGame(series, room, Reporter, Clean(series), out gen, out why)) return;
                 string nonce, reason;
                 bool issued = Srv.GrantFirst(room, Reporter, Born, Account, Session, out nonce, out reason);
-                if (issued && Clean(series)) Anchors[series ?? ""] = nonce.Substring(0, 8);
+                if (issued && Clean(series)) Anchors[series ?? ""] = nonce;
                 T.OnFirstGame(series, room, gen, issued, nonce, reason, Clean(series));
             }
 
@@ -3175,23 +3273,38 @@ namespace CompetitiveRounds
             return tally;
         }
 
+        // Round 9: how game 1's report lands in the fresh room (SimulateF31Fresh).
+        private const int LandOwn = 0, LandShort = 1, LandTwin = 2;
+
         // Round 8, finding F31: the genuinely fresh room, the control. The same
         // seats and reporter, the server answering throughout. Game 1: M asks
         // at its game start and the server issues physical game 1; M publishes
         // its token (host or not) and every seat takes it; game 1 crosses and
         // team 1 wins it, and its report lands carrying the issued anchor. With
         // `restartBetween` R and C restart and join the room again before game
-        // 2. Game 2 crosses under the host's token (its nonce the anchor and 8
-        // fresh digits), a team-2 player leaves and R reports it: it settles,
-        // from game 2's posts, every seat carrying game 2's token. Round 9,
-        // M1: except where R is the reporter and restarted, reporting the leave
-        // on a session the issue did not go to: nothing settles (the cost of
-        // the issued-session rule, counted apart by the sentinel).
-        private static bool SimulateF31Fresh(int reporter, bool restartBetween, out bool fromAnother, out int carrying)
+        // 2. Game 2 crosses under the host's token (round 9, M2: its nonce
+        // derived from the issued one), a team-2 player leaves and R reports
+        // it: it settles, from game 2's posts, every seat carrying game 2's
+        // token. Round 9, M1: except where R is the reporter and restarted,
+        // reporting the leave on a session the issue did not go to: nothing
+        // settles (the cost of the issued-session rule, counted apart by the
+        // sentinel). Round 9, M2: with `prefixOnly` the host publishes for game
+        // 2, in place of the derived token, one whose nonce shares only the
+        // issued nonce's first 8 digits (PrefixPublish): every seat takes it,
+        // and it settles nothing, unless the server is round 8's copy that
+        // reads a token by those 8 digits (`readsPrefix`). Round 9, M2,
+        // `landMode`: game 1's report lands carrying, in place of the issued
+        // nonce, an anchor sharing only its first 8 digits (LandShort: a
+        // round-8 client's 8-digit anchor; LandTwin: 16 digits): the issue is
+        // void and nothing settles, unless the server is round 8's copy that
+        // holds an anchor to those 8 digits (`readsPrefixAnchor`).
+        private static bool SimulateF31Fresh(int reporter, bool restartBetween, bool prefixOnly, bool readsPrefix,
+                                             int landMode, bool readsPrefixAnchor,
+                                             out bool fromAnother, out int carrying)
         {
             const string S = "series-f31f", R = "room-f31f";
             var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true,
-                                        Stored = R };
+                                        ReadsPrefix = readsPrefix, ReadsPrefixAnchor = readsPrefixAnchor, Stored = R };
             var h = new TokenSeat { Team = 0, Srv = srv };
             var r = new TokenSeat { Team = 0, Srv = srv };
             var c = new TokenSeat { Team = 1, Srv = srv };
@@ -3205,12 +3318,21 @@ namespace CompetitiveRounds
             for (int g = 1; g <= 2; g++)
             {
                 Rematch(R, all);
-                value = HostStart(h, S, R, value, true);
+                bool prefix = prefixOnly && g == 2;
+                value = HostStart(h, S, R, value, !prefix);
+                if (prefix) value = PrefixPublish(h, srv.FirstNonce, value);
                 foreach (var x in all) if (x != h) SeatStart(x, S, R);
                 value = ReporterPublish(m, value, true);
                 foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); }
                 if (g == 2) break;
-                foreach (var x in all) { x.Tick(R, Later); string rep = x.Over(R); if (rep != null) srv.Land(rep, x.Session); }
+                foreach (var x in all)
+                {
+                    x.Tick(R, Later);
+                    string rep = x.Over(R);
+                    if (rep == null) continue;
+                    srv.Land(landMode == LandShort ? ShortNonce(srv.FirstNonce)
+                             : landMode == LandTwin ? PrefixTwin(srv.FirstNonce) : rep, x.Session);
+                }
                 if (restartBetween)
                 {
                     r.Restart();
@@ -3226,6 +3348,35 @@ namespace CompetitiveRounds
                    && !srv.Voided;
         }
 
+        // Round 9, finding M2: the host publishes, in place of its derived
+        // token, one whose nonce shares only the issued nonce's first 8 digits
+        // (`issued`), for the ordinal it holds and the room's next epoch.
+        // Returns the room's value after it (unchanged when nothing was
+        // issued: PrefixTwin).
+        private static string PrefixPublish(TokenSeat h, string issued, string value)
+        {
+            string twin = PrefixTwin(issued);
+            if (twin.Length == 0) return value;
+            string n;
+            int o;
+            long e;
+            long above = TryParseToken(value, out n, out o, out e) ? e : 0;
+            string tok = MakeToken(twin, h.T.PhysicalOrdinal(), above + 1);
+            h.T.ArmPublished(tok);
+            return tok;
+        }
+
+        // Round 9, finding M2: a nonce sharing only the issued nonce's first 8
+        // digits (`issued`): those 8, then 8 that differ from its last 8; ""
+        // when nothing was issued (a control that loses the issue then
+        // publishes or lands nothing in its place, and fails the checks that
+        // need the issue).
+        private static string PrefixTwin(string issued)
+        {
+            if (!NonceValid(issued)) return "";
+            return ShortNonce(issued) + (issued.EndsWith("e3e3e3e3", StringComparison.Ordinal) ? "3e3e3e3e" : "e3e3e3e3");
+        }
+
         private static int Begin(Tracker t, string series, string room)
         {
             string line;
@@ -3235,6 +3386,36 @@ namespace CompetitiveRounds
         private static string Tok(char c, int ordinal, long epoch)
         {
             return MakeToken(new string(c, 16), ordinal, epoch);
+        }
+
+        // Round 9, finding M2: a Tracker grounded on physical game 1's token
+        // (`issued`), then a join of the room, then grounded again on
+        // `later`, a game-2 token, at a game start the game itself reported;
+        // returns what it publishes as the host at the next game start ("" and
+        // why not in `why`).
+        private static string RootAfterJoin(string issued, string later, out string why)
+        {
+            string line;
+            var t = new Tracker();
+            t.NoteRoomJoined("R");
+            t.ObserveRoomToken("R", "");
+            t.ObserveRead("S", true, 0, 0, true, false, false);
+            t.OnGmStart("R");
+            t.OnGameStart("S", "R", Reset, out line);
+            t.ObserveRoomToken("R", MakeToken(issued, 1, 1));
+            t.NoteRoomJoined("R");
+            t.ObserveRoomToken("R", "");
+            t.ObserveRead("S", true, 1, 0, true, false, false);
+            t.OnGmStart("R");
+            t.OnGameStart("S", "R", Reset, out line);
+            t.ObserveRoomToken("R", later);
+            t.ObserveScore(Played);
+            t.ObserveScore(Final);
+            t.OnTokenGameOver("R", later);
+            t.ObserveRead("S", true, 2, 0, true, false, false);
+            t.OnGmStart("R");
+            t.OnGameStart("S", "R", Reset, out line);
+            return t.TokenToPublish(true, true, later, out why);
         }
 
         // Round 8, finding F31: whether a fresh Tracker asks for physical game 1
@@ -3735,13 +3916,33 @@ namespace CompetitiveRounds
             checks++;
             if (m1UnseenSweep.Settled != m1UnseenSweep.Wrong)
             { pass = false; detail += " M1-unseen-sweep:" + m1UnseenSweep.Settled + "-settled," + m1UnseenSweep.Wrong + "-wrongly"; }
-            int f31Fresh = 0, f31FreshRestarted = 0;
+            // Round 9, finding M2: the fresh room with game 2's token replaced
+            // by one sharing only the issued nonce's first 8 digits, which
+            // every seat takes: round 9's server reads it nowhere; round 8's
+            // comparison, the kept copy, reads it (or the scenario proves
+            // nothing). The same for game 1's report landing with an anchor
+            // sharing only those 8 digits (8 of them, or 16): round 9's server
+            // voids the issue; round 8's comparison keeps it, and the five
+            // timelines the control settles settle (or the scenario proves
+            // nothing).
+            int f31Fresh = 0, f31FreshRestarted = 0, m2Prefix = 0, m2PrefixRead = 0, m2Anchor = 0, m2AnchorRead = 0;
             for (int rep = 0; rep < 3; rep++)
             for (int rb = 0; rb < 2; rb++)
             {
-                bool fa31;
-                int carryF31;
-                bool stF31 = SimulateF31Fresh(rep, rb != 0, out fa31, out carryF31);
+                bool fa31, faP;
+                int carryF31, carryP;
+                bool stF31 = SimulateF31Fresh(rep, rb != 0, false, false, LandOwn, false, out fa31, out carryF31);
+                if (SimulateF31Fresh(rep, rb != 0, true, false, LandOwn, false, out faP, out carryP)) m2Prefix++;
+                if (SimulateF31Fresh(rep, rb != 0, true, true, LandOwn, false, out faP, out carryP) && carryP == 3)
+                    m2PrefixRead++;
+                for (int form = LandShort; form <= LandTwin; form++)
+                {
+                    if (SimulateF31Fresh(rep, rb != 0, false, false, form, false, out faP, out carryP)) m2Anchor++;
+                    if (!(rep == 1 && rb != 0)
+                        && SimulateF31Fresh(rep, rb != 0, false, false, form, true, out faP, out carryP)
+                        && !faP && carryP == 3)
+                        m2AnchorRead++;
+                }
                 if (rep == 1 && rb != 0) { if (stF31) f31FreshRestarted++; continue; }
                 if (stF31 && !fa31 && carryF31 == 3) f31Fresh++;
             }
@@ -3751,6 +3952,28 @@ namespace CompetitiveRounds
             checks++;
             if (f31FreshRestarted != 0)
             { pass = false; detail += " M1-RESTARTED-REPORTER:the-leave-reported-on-a-session-the-issue-did-not-go-to-settled"; }
+            checks++;
+            if (m2Prefix != 0) { pass = false; detail += " M2-PREFIX-ONLY:" + m2Prefix + "-of-6-settled"; }
+            checks++;
+            if (m2PrefixRead != 5)
+            { pass = false; detail += " M2-PREFIX-ONLY-ROUND-8-COMPARE:" + m2PrefixRead + "-of-5-settled-with-every-seat-carrying(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m2Anchor != 0) { pass = false; detail += " M2-PREFIX-ANCHOR:" + m2Anchor + "-of-12-settled"; }
+            checks++;
+            if (m2AnchorRead != 10)
+            { pass = false; detail += " M2-PREFIX-ANCHOR-ROUND-8-COMPARE:" + m2AnchorRead + "-of-10-settled-with-every-seat-carrying(the-scenario-proves-nothing)"; }
+            // Round 9, finding M2: the derivation's pin vector (the four values
+            // the server's test checks against main._team_game_chain_nonce);
+            // game 1's nonce is the root itself, and another ordinal or epoch
+            // gives another nonce.
+            checks++;
+            if (ChainNonce(PinChainRoot, PinChainOrdinal, PinChainEpoch) != PinChainExpected
+                || ChainNonce(PinChainRoot, 1, PinChainEpoch) != PinChainRoot
+                || ChainNonce(PinChainRoot, PinChainOrdinal, PinChainEpoch + 1) == PinChainExpected
+                || ChainNonce(PinChainRoot, PinChainOrdinal + 1, PinChainEpoch) == PinChainExpected
+                || ChainNonce("0123456789ABCDEF", PinChainOrdinal, PinChainEpoch) != ""
+                || ChainNonce(PinChainRoot, 0, PinChainEpoch) != "" || ChainNonce(PinChainRoot, PinChainOrdinal, 0) != "")
+            { pass = false; detail += " M2-PIN:the-derivation-does-not-give-the-pinned-nonce"; }
 
             // The score's successor rule (F28).
             checks++;
@@ -4099,7 +4322,8 @@ namespace CompetitiveRounds
             // or played; while the ask is out it waits (WhyFirstGamePending); a
             // refusal leaves it holding none; the issue makes it hold physical
             // game 1 and publish that game's token, host or not; its next
-            // game's host draws the anchor and 8 fresh digits; an answer for
+            // game's host derives its nonce from the issued one (round 9, M2);
+            // an answer for
             // another game, after a join, after its client sent or queued a
             // report, or without a nonce is not taken; a join drops the issue.
             var b = new Tracker();
@@ -4189,9 +4413,9 @@ namespace CompetitiveRounds
             long ei;
             checks++;
             if (!TryParseToken(nextI, out ni, out oi, out ei) || oi != 2 || ei != 2 || ni == Issued
-                || !ni.StartsWith("01234567", StringComparison.Ordinal)
+                || ni != ChainNonce(Issued, 2, 2)
                 || bi.TokenToPublish(false, true, guestTok, out whyH) != "" || whyH != WhyNotHost)
-            { pass = false; detail += " F31:the-next-games-draw"; }
+            { pass = false; detail += " M2:the-next-games-derived-nonce"; }
             checks++;
             if (IssueOrdinal(true, Issued, 0, false, true) != 1
                 || IssueOrdinal(false, "", 0, false, true) != 0
@@ -4298,10 +4522,11 @@ namespace CompetitiveRounds
             // physical game, however many games a read shows recorded, and
             // publishes nothing (round 6 seeded it from the count); a publish
             // it takes grounds it, and at its next game start the game itself
-            // reported its own publish names the next game and continues the
-            // room's epochs, its nonce the anchor (round 8, F31: the first 8
-            // digits of the token it was grounded on) and 8 fresh digits; a
-            // seat that is not the host publishes nothing.
+            // reported it would publish the next game (round 9, M2: grounded on
+            // a later game's token it holds no root and publishes nothing,
+            // WhyNoAnchor; one grounded on physical game 1's token names the
+            // next game, continues the room's epochs, and derives its nonce
+            // from that root); a seat that is not the host publishes nothing.
             var e = new Tracker();
             e.NoteRoomJoined("R");
             e.ObserveRoomToken("R", Tok('d', 5, 7));
@@ -4327,10 +4552,37 @@ namespace CompetitiveRounds
             none.OnGameStart("S", "", Reset, out line);
             string whyNone;
             checks++;
-            if (!TryParseToken(next, out dn, out dord, out dep) || dord != 7 || dep != 9
-                || !dn.StartsWith("44444444", StringComparison.Ordinal) || dn == "4444444444444444" || !guestNone
+            if (next != "" || why != WhyNoAnchor || !guestNone
                 || none.TokenToPublish(true, true, "", out whyNone) != "" || whyNone != WhyNoOrdinal)
-            { pass = false; detail += " publish:ordinal-epoch-and-anchor"; }
+            { pass = false; detail += " M2:a-later-token-gave-a-root"; }
+            var e1 = new Tracker();
+            e1.NoteRoomJoined("R");
+            e1.ObserveRoomToken("R", "");
+            e1.ObserveRead("S", true, 0, 0, true, false, false);
+            e1.OnGmStart("R");
+            e1.OnGameStart("S", "R", Reset, out line);
+            e1.ObserveRoomToken("R", Tok('4', 1, 8));
+            e1.ObserveScore(Played);
+            e1.ObserveScore(Final);
+            e1.OnTokenGameOver("R", Tok('4', 1, 8));
+            e1.ObserveRead("S", true, 1, 0, true, false, false);
+            e1.OnGmStart("R");
+            e1.OnGameStart("S", "R", Reset, out line);
+            string next1 = e1.TokenToPublish(true, true, Tok('4', 1, 8), out why);
+            checks++;
+            if (!TryParseToken(next1, out dn, out dord, out dep) || dord != 2 || dep != 9
+                || dn != ChainNonce("4444444444444444", 2, 9) || dn == "4444444444444444")
+            { pass = false; detail += " publish:ordinal-epoch-and-derived-nonce"; }
+            // Round 9, finding M2: a root survives a join of the room while
+            // the later token the seat is grounded on again is the one derived
+            // from it (the next game's publish derives from it); a later token
+            // that is not drops it.
+            string g2Tok = MakeToken(ChainNonce(Issued, 2, 2), 2, 2);
+            string rootKept = RootAfterJoin(Issued, g2Tok, out whyH);
+            string rootDropped = RootAfterJoin(Issued, MakeToken("5eed1ab00f1e2d3c", 2, 2), out whyI);
+            checks++;
+            if (rootKept != MakeToken(ChainNonce(Issued, 3, 3), 3, 3) || rootDropped != "" || whyI != WhyNoAnchor)
+            { pass = false; detail += " M2:the-root-across-a-join"; }
 
             // The token's wire: its shape, both canonicals, the query, the pin.
             string pn;
@@ -4363,16 +4615,19 @@ namespace CompetitiveRounds
             { pass = false; detail += " first-game-pin"; }
             // Round 8, finding F31: the report ledger's lines and the outbox
             // rule (ApiClient.cs reads and writes the ledger through these).
+            // Round 9, finding M2: the issue's line holds the whole nonce, and
+            // a round-8 client's 8-digit anchor line no longer parses.
             {
                 bool al;
                 string ls, la;
                 checks++;
                 if (!ParseLedgerLine(LedgerSent(PinSeries), out al, out ls, out la) || al || ls != PinSeries || la != ""
-                    || !ParseLedgerLine(LedgerAnchor(PinSeries, "0123abcd") + "\r", out al, out ls, out la) || !al
-                    || ls != PinSeries || la != "0123abcd"
+                    || !ParseLedgerLine(LedgerIssued(PinSeries, PinChainRoot) + "\r", out al, out ls, out la) || !al
+                    || ls != PinSeries || la != PinChainRoot
                     || ParseLedgerLine("sent " + PinSeries.Substring(0, 12) + " x", out al, out ls, out la)
-                    || ParseLedgerLine("anchor " + PinSeries + " 0123ab", out al, out ls, out la)
-                    || ParseLedgerLine("anchor " + PinSeries + " 0123ABCD", out al, out ls, out la)
+                    || ParseLedgerLine("issued " + PinSeries + " 0123456789abcde", out al, out ls, out la)
+                    || ParseLedgerLine("issued " + PinSeries + " 0123456789ABCDEF", out al, out ls, out la)
+                    || ParseLedgerLine("anchor " + PinSeries + " 0123abcd", out al, out ls, out la)
                     || ParseLedgerLine("sen", out al, out ls, out la)
                     || ParseLedgerLine("", out al, out ls, out la)
                     || ParseLedgerLine("sent " + PinSeries + "\nsent x", out al, out ls, out la)
@@ -4422,7 +4677,11 @@ namespace CompetitiveRounds
                 + " settled wrongly without the session rules, " + f31OthersAlone + " of 12 named a game, carried a token"
                 + " or settled against the other-session rule alone; the void alone: " + f31Void + " of 12 settled, "
                 + f31VoidOpen + " of 12 wrongly with the void unread; " + f31Fresh + " of 5 fresh-room DC reports"
-                + " settled, " + f31FreshRestarted + " where the reporter restarted and reported the leave; M1, the"
+                + " settled, " + f31FreshRestarted + " where the reporter restarted and reported the leave; M2: " + m2Prefix
+                + " of 6 fresh rooms settled from game-2 tokens sharing only the issued nonce's first 8 digits, "
+                + m2PrefixRead + " of 5 with round 8's comparison; " + m2Anchor + " of 12 settled where game 1's report"
+                + " carried an anchor sharing only those 8 digits, " + m2AnchorRead + " of 10 with round 8's comparison;"
+                + " M1, the"
                 + " reporter's account in a second process: " + m1Live + " of 48 timelines named a game, carried a token"
                 + " or settled where the first process held a session (" + m1LiveR8 + " settled wrongly with round 8's"
                 + " issuance, " + m1LiveNoOthers + " without the other-session rule), " + m1Posted + " of 48 where its"

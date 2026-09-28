@@ -32506,21 +32506,28 @@ async def update_team_live_points(
 # not see is caught when it lands (a leave settled before then is not
 # revisited, which is why the issue itself must rule out every process the
 # server can see), and so is a report from any process but the issued one:
-# the reporter's client writes the issued nonce's first 8 digits (the
-# ANCHOR) to the same ledger when it takes the issue, every match report
-# carries the anchor its client holds for the series (game_anchor), and a
-# match report the series records without the issued anchor, or on another
-# session than the one the issue was answered to, VOIDS the series' physical
-# game 1 for good (_team_first_game_void, called by submit_team_match:
-# first_game_nonce becomes 'void'), because the server cannot tell such a
-# report from one of a game outside the issued chain. Physical game 1's token
-# carries the issued nonce; every later game's host draws its nonce as the
-# anchor and 8 fresh digits (plugin/TeamGameNumber.cs). A DC report's token
-# is read only when the series was issued a physical game 1 with its session
-# on record, not voided, the token's nonce begins with the anchor, and, for a
-# report the reporter's account sends, the report arrives on the issued
-# session (_team_game_first_game_refusal): a token counted from any other
-# origin, a round-7 client's included, proves nothing.
+# the reporter's client writes the whole issued nonce (the ANCHOR; round 8
+# kept only its first 8 digits) to the same ledger when it takes the issue,
+# every match report carries the anchor its client holds for the series
+# (game_anchor), and a match report the series records without the issued
+# anchor, compared at all 16 digits, or on another session than the one the
+# issue was answered to, VOIDS the series' physical game 1 for good
+# (_team_first_game_void, called by submit_team_match: first_game_nonce
+# becomes 'void'), because the server cannot tell such a report from one of a
+# game outside the issued chain. Physical game 1's token carries the issued
+# nonce; every later game's nonce is DERIVED from the whole issued nonce and
+# the token's own ordinal and epoch (round 9, finding M2:
+# _team_game_chain_nonce; plugin/TeamGameNumber.cs, ChainNonce). Round 8
+# drew it as the issued nonce's first 8 digits and 8 fresh ones and read a
+# token whose first 8 digits matched, so a token from another origin that
+# shared those 8 digits was read. A DC report's token is read only when the
+# series was issued a physical game 1 with its session on record, not
+# voided, the token's nonce equals the one derived for its ordinal and
+# epoch, compared at full width, and, for a report the reporter's account
+# sends, the report arrives on the issued session
+# (_team_game_first_game_refusal): a token counted from any other origin, a
+# round-7 or round-8 client's included, proves nothing, and neither does a
+# round-8 client's 8-digit anchor.
 #
 # What this does NOT change: a live-points post is accepted on the shared mod
 # secret and the series membership of the seat it names in a query parameter,
@@ -32724,6 +32731,30 @@ def _team_game_sitting_refusal(rec):
     return None
 
 
+# Round 9, finding M2 (THE FIRST GAME, above _team_game_identity): the message
+# prefix of the derivation every later game's nonce is counted from the
+# issued one by. plugin/TeamGameNumber.cs keeps the same prefix and a pin
+# vector (PinChainRoot, PinChainOrdinal, PinChainEpoch, PinChainExpected)
+# that backend/tests/test_team_series_report_dc.py checks against
+# _team_game_chain_nonce.
+_TEAM_GAME_CHAIN_PREFIX = "team-game-chain:"
+
+
+def _team_game_chain_nonce(issued, ordinal, epoch):
+    """The nonce physical game `ordinal`'s token carries when it is published
+    with `epoch`, counted from the series' issued physical game 1 (`issued`,
+    16 lowercase hex digits): `issued` itself for game 1, else the first 16
+    hex digits of HMAC-SHA256 keyed by the 16 ASCII digits of `issued` over
+    'team-game-chain:{ordinal}:{epoch}', both in decimal as the wire carries
+    them (round 9, finding M2; plugin/TeamGameNumber.cs, ChainNonce). Every
+    nonce counted from the issue is bound to all 16 of its digits."""
+    if ordinal == 1:
+        return issued
+    return hmac.new(issued.encode("ascii"),
+                    f"{_TEAM_GAME_CHAIN_PREFIX}{int(ordinal)}:{int(epoch)}".encode("ascii"),
+                    hashlib.sha256).hexdigest()[:16]
+
+
 def _team_game_first_game_refusal(rec, token, session=None):
     """Why the DC report's game `token` ((nonce, ordinal, epoch)) may not be
     read because it is not counted from the series' issued physical game 1,
@@ -32735,10 +32766,13 @@ def _team_game_first_game_refusal(rec, token, session=None):
     sha256 of the DC report's own X-Session-Token ("" for none) when the
     series' reporter's account sent the report, None when any other member
     did. Physical game 1's token carries the issued nonce, and every later
-    game's host draws its nonce as its first 8 digits and 8 fresh ones, so a
-    token counted from the issued game begins with those 8 digits. One that
-    does not -- counted from a game a client named physical game 1 on its
-    own, as a round-7 client does -- is not read, whatever game it names.
+    game's nonce is derived from the whole issued nonce and the token's own
+    ordinal and epoch (round 9, finding M2: _team_game_chain_nonce), so a
+    token counted from the issued game carries exactly that nonce, compared
+    at full width. One that does not -- counted from a game a client named
+    physical game 1 on its own, as a round-7 client does, or drawn as the
+    issued nonce's first 8 digits and 8 others, as a round-8 client's host
+    does -- is not read, whatever game it names.
     Nor is any token once the issued game was voided ('void': a match report
     the series recorded did not carry its anchor or came on another session,
     _team_first_game_void), nor while no session of the issue is on record
@@ -32757,7 +32791,7 @@ def _team_game_first_game_refusal(rec, token, session=None):
     if not isinstance(bound, str) or not bound:
         return ("the series' physical game 1 was issued with no session on record: the "
                 "process it was issued to cannot be told")
-    if token[0][:8] != issued[:8]:
+    if not hmac.compare_digest(token[0], _team_game_chain_nonce(issued, token[1], token[2])):
         return ("the report's game token is not counted from the physical game 1 "
                 "issued for this series")
     if session is not None and not hmac.compare_digest(session, bound):
@@ -33106,9 +33140,11 @@ async def _team_first_game_void(db, series, series_uuid, anchor, session) -> boo
     """Round 8, finding F31, and round 9, finding M1 (THE FIRST GAME, above
     _team_game_identity): a match report the series is recording voids the
     series' issued physical game 1 for good unless it carries that game's
-    anchor, the issued nonce's first 8 digits (`anchor`, the report's
-    game_anchor: what the reporter's client holds for the series in its
-    ledger), AND arrives on the session the issue was answered to (`session`,
+    anchor, the whole issued nonce compared at all 16 digits (`anchor`, the
+    report's game_anchor: what the reporter's client holds for the series in
+    its ledger; round 8 compared its first 8 digits, which a round-8 client
+    still sends and which no longer match: round 9, finding M2), AND arrives
+    on the session the issue was answered to (`session`,
     the sha256 of the report's own X-Session-Token, "" for none, against the
     row's first_game_session, migration 362). A report that does not was
     built or sent by another process than the one the issue was answered to:
@@ -33132,7 +33168,7 @@ async def _team_first_game_void(db, series, series_uuid, anchor, session) -> boo
     if not _team_game_token_valid(issued):
         return False
     bound = series["first_game_session"] if "first_game_session" in series else None
-    anchored = isinstance(anchor, str) and anchor == issued[:8]
+    anchored = _team_game_token_valid(anchor) and hmac.compare_digest(anchor, issued)
     on_issue = (isinstance(bound, str) and isinstance(session, str) and bool(session)
                 and hmac.compare_digest(session, bound))
     if anchored and on_issue:

@@ -811,9 +811,13 @@ namespace CompetitiveRounds
         //   sent <series>            a match report of the series is handed to
         //                            the network (ReportTeamMatch, before its
         //                            first send)
-        //   anchor <series> <8 hex>  the server issued this client the series'
-        //                            physical game 1, whose nonce begins with
-        //                            these 8 digits (before the issue is taken)
+        //   issued <series> <16 hex> the server issued this client the series'
+        //                            physical game 1, this nonce (before the
+        //                            issue is taken; round 9, finding M2: a
+        //                            round-8 client's "anchor <series> <8 hex>"
+        //                            line no longer parses, so the series'
+        //                            reports carry no anchor and the server
+        //                            voids the issue)
         // The series' reporter asks the server for the series' physical game 1
         // only while this ledger names no report of the series and the outbox
         // queues none (TeamReportsClean): an earlier game's result may
@@ -924,17 +928,17 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The server issued this client the series' physical game 1
-        /// (`nonce`): its first 8 digits, the series' ANCHOR, are appended to
-        /// the ledger before the issue is taken; false, take nothing, when they
-        /// cannot be. Every match report this client sends for the series then
-        /// carries the anchor (ReportTeamMatch's game_anchor).</summary>
+        /// (`nonce`): the whole nonce, the series' ANCHOR (round 9, finding
+        /// M2; round 8 kept its first 8 digits), is appended to the ledger
+        /// before the issue is taken; false, take nothing, when it cannot be.
+        /// Every match report this client sends for the series then carries
+        /// the anchor (ReportTeamMatch's game_anchor).</summary>
         public static bool NoteTeamAnchor(string seriesId, string nonce)
         {
             if (!TeamLedgerKey(seriesId) || !TeamGameNumber.NonceValid(nonce)) return false;
             LoadTeamLedger();
-            string anchor = nonce.Substring(0, 8);
-            if (!AppendTeamLedger(TeamGameNumber.LedgerAnchor(seriesId, anchor))) return false;
-            _teamLedgerAnchors[seriesId] = anchor;
+            if (!AppendTeamLedger(TeamGameNumber.LedgerIssued(seriesId, nonce))) return false;
+            _teamLedgerAnchors[seriesId] = nonce;
             return true;
         }
 
@@ -15113,12 +15117,13 @@ namespace CompetitiveRounds
             AppendTeamTelemetry(sb, "t1b", t1bTele);
             AppendTeamTelemetry(sb, "t2a", t2aTele);
             AppendTeamTelemetry(sb, "t2b", t2bTele);
-            // v1.41.0 beta round 8, finding F31: the first 8 digits of the
-            // series' issued physical game 1 as this client's report ledger held
-            // them when the report was built. ADVISORY and outside the frozen
-            // 11-field canonical below; omitted when none is held. A report the
-            // series records without the issued anchor voids that game on the
-            // server (main.py, _team_first_game_void).
+            // v1.41.0 beta round 8, finding F31; round 9, finding M2: the whole
+            // nonce of the series' issued physical game 1 as this client's
+            // report ledger held it when the report was built. ADVISORY and
+            // outside the frozen 11-field canonical below; omitted when none is
+            // held. A report the series records without the issued anchor, or
+            // on another session than the issue's (round 9, finding M1), voids
+            // that game on the server (main.py, _team_first_game_void).
             if (!string.IsNullOrEmpty(gameAnchor))
                 sb.Append($"\"game_anchor\":\"{Escape(gameAnchor)}\",");
 

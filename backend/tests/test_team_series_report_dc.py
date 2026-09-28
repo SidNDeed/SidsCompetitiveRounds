@@ -23,9 +23,12 @@ physical game has started, and both games then name the same number (beta
 round 4 review, F25). No time is read (main.py, the comment above
 _team_game_identity). Since beta round 8 (F31) a token is read only when the
 server issued the series its physical game 1 (migration 359, POST
-/team/series/{id}/first-game) and the token's nonce begins with the issued
-nonce's first 8 digits, and a match report the series records without them
-voids that game.
+/team/series/{id}/first-game) and the token is counted from the issued game,
+and a match report the series records without the issued game's anchor
+voids that game. Since round 9 (M2) both are bound to the whole issued
+nonce: a later game's nonce is derived from it and the token's own ordinal
+and epoch, and the anchor is the whole nonce (round 8 compared the first 8
+digits of each).
 
 STRUCTURAL (always runs, no database): the condition that opens the
 lead-forfeit branch asks the per-game record and compares no snapshot.
@@ -281,13 +284,20 @@ def _dc_sig(reporter, series_id, dc_player):
 _AUTO = object()
 
 # Round 8, finding F31: the server issues each series' physical game 1, and a
-# DC report's token is read only when its nonce begins with the issued
-# nonce's first 8 digits (main._team_game_first_game_refusal). Every lab
-# series is issued LAB_FIRST unless a test says otherwise, and every lab
-# token begins with its anchor, so each test from before round 8 reads what
-# it read before; the F31 tests below model the tokens that do not.
-LAB_ANCHOR = "5eed1ab0"
-LAB_FIRST = LAB_ANCHOR + "0f1e2d3c"
+# DC report's token is read only when it is counted from the issued game
+# (main._team_game_first_game_refusal). Every lab series is issued LAB_FIRST
+# unless a test says otherwise. Since round 9 (finding M2) game 1's token
+# carries the issued nonce itself, every later game's nonce is derived from
+# the whole issued nonce and the token's own ordinal and epoch
+# (main._team_game_chain_nonce; _chain below, computed apart from it), and a
+# match report's anchor is the whole issued nonce (LAB_ANCHOR); round 8
+# compared the first 8 digits of each (LAB_PREFIX, the anchor a round-8
+# client still keeps). Every lab token is counted that way, so each test
+# from before round 9 reads what it read before; the F31 and M2 tests below
+# model the tokens that are not.
+LAB_FIRST = "5eed1ab00f1e2d3c"
+LAB_ANCHOR = LAB_FIRST
+LAB_PREFIX = LAB_FIRST[:8]
 # Round 9, finding M1: the issue is answered to one session, kept as the
 # series' first_game_session (migration 362), and a match report, or a DC
 # report the series' reporter (seat 0, the lowest Steam ID) sends, is read
@@ -318,11 +328,34 @@ def _nonce(token):
     return token.split(":", 1)[0]
 
 
+def _chain(issued, ordinal, epoch):
+    """Round 9, finding M2: the nonce physical game `ordinal`'s token carries
+    when it is published with `epoch`, counted from the issued nonce
+    `issued`, computed here apart from main._team_game_chain_nonce: `issued`
+    itself for game 1, else the first 16 hex digits of HMAC-SHA256 keyed by
+    the 16 ASCII digits of `issued` over 'team-game-chain:{ordinal}:{epoch}'."""
+    if ordinal == 1:
+        return issued
+    message = ("team-game-chain:%d:%d" % (ordinal, epoch)).encode("ascii")
+    return hmac.new(issued.encode("ascii"), message, hashlib.sha256).hexdigest()[:16]
+
+
+def _cwire(issued, game, epoch=None):
+    """A token counted from `issued` (round 9, M2) naming game `game` with
+    `epoch` (the game's own number unless given): its nonce is _chain's."""
+    epoch = game if epoch is None else epoch
+    return _wire(_chain(issued, game, epoch), game, epoch)
+
+
 def _tok(sid, game, room):
     """The lab's token for game `game` of the sitting of `room`, naming that
-    game, counted from the series' issued physical game 1 (LAB_ANCHOR)."""
-    return _wire(LAB_ANCHOR + hashlib.sha256(("%s:%s:%s" % (sid, game, _sitting(room))).encode())
-                 .hexdigest()[:8], game)
+    game, counted from the series' issued physical game 1 (LAB_FIRST). Its
+    epoch is drawn from the series, the game and the sitting, so each
+    sitting's token of a later game differs (round 9, M2: the nonce is
+    derived from the epoch)."""
+    epoch = 1 + int(hashlib.sha256(("%s:%s:%s" % (sid, game, _sitting(room))).encode())
+                    .hexdigest()[:7], 16)
+    return _cwire(LAB_FIRST, game, epoch)
 
 
 def _token_sig(series_id, reporter, t1, t2, game, room, token):
@@ -2402,14 +2435,16 @@ def test_the_clients_named_canonical_is_the_one_the_server_checks(monkeypatch):
 # inert twin.
 
 # Since round 8 (F31) every one of these is counted from the lab series'
-# issued physical game 1: its nonce begins with LAB_ANCHOR.
-T2 = _wire(LAB_ANCHOR + "a2" * 4, 2)        # physical game 2's token, naming game 2
-T3 = _wire(LAB_ANCHOR + "a3" * 4, 3)        # physical game 3's token, naming game 3
-TX = _wire(LAB_ANCHOR + "a1" * 4, 1)        # physical game 1's token, naming game 1
+# issued physical game 1, and since round 9 (M2) each one's nonce is derived
+# from the whole issued nonce and the token's own ordinal and epoch (_cwire).
+T2 = _cwire(LAB_FIRST, 2)        # physical game 2's token, naming game 2
+T3 = _cwire(LAB_FIRST, 3)        # physical game 3's token, naming game 3
+TX = _cwire(LAB_FIRST, 1)        # physical game 1's token, naming game 1
 # Physical game 3's token as a host whose own count names game 2 publishes
 # it (one that joined after game 2 started and anchored its count on the
-# recorded games): another physical game's token naming the same game.
-T3_AS_2 = _wire(LAB_ANCHOR + "a3" * 4, 2, 3)
+# recorded games): another physical game's token naming the same game, with
+# physical game 3's epoch.
+T3_AS_2 = _cwire(LAB_FIRST, 2, 3)
 ZERO = dict(t1_total=0, t2_total=0)
 INCOMPLETE = ("dc_incomplete", None, 1, "dc_manual_pending", 0)
 COMPLETED = ("completed", 1, None, None, 1)
@@ -2626,10 +2661,10 @@ def test_the_f27_reviewers_scenario_test_can_fail(wired, monkeypatch, mutant):
 # and the server reads a token only in the series' original sitting
 # (main._team_game_sitting_refusal) and only when it names the game being
 # settled.
-T4 = _wire(LAB_ANCHOR + "a4" * 4, 4)          # physical game 4's token, naming game 4
+T4 = _cwire(LAB_FIRST, 4)          # physical game 4's token, naming game 4
 # Physical game 4's token as a round-6 host re-anchored on the two recorded
 # games published it: it names game 3.
-T4_AS_3 = _wire(LAB_ANCHOR + "a4" * 4, 3, 4)
+T4_AS_3 = _cwire(LAB_FIRST, 3, 4)
 INCOMPLETE2 = ("dc_incomplete", None, 2, "dc_manual_pending", 0)
 COMPLETED2 = ("completed", 2, None, None, 1)
 _F29 = ["tokenless", "host-ordinal", "count-anchored", "in-step"]
@@ -2782,12 +2817,19 @@ def test_the_state_answer_carries_the_series_sitting(wired):
 
 async def _report_naming(lab, game):
     """Team 1 leads 1-0 and game 2 crosses: every seat posts 1-0 and 1-1
-    naming game 2 and carrying T2. Seat 2 leaves; seats 0 and 1 report it
-    naming a token with T2's nonce and epoch that names game `game`, signed
-    as it is sent."""
+    naming game 2 and carrying a token with epoch 2 that names game 2, its
+    nonce the one derived for game `game` (T2 itself for game 2). Seat 2
+    leaves; seats 0 and 1 report it naming the token that nonce was derived
+    for, which names game `game`, signed as it is sent. Since round 9 (M2) a
+    token's nonce is derived for its own ordinal, so a report token carrying
+    T2's nonce but naming another game is refused before its ordinal is
+    compared (main._team_game_first_game_refusal); this one passes that
+    check, and the comparison of its ordinal with the game being settled
+    alone refuses it."""
     ser = await lab.series(t1_wins=1, t2_wins=0)
-    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=T2)
-    await _two_reports(lab, ser, LOW, LOW, token=_wire(_nonce(T2), game, 2))
+    posted = _wire(_chain(LAB_FIRST, game, 2), 2, 2)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=posted)
+    await _two_reports(lab, ser, LOW, LOW, token=_cwire(LAB_FIRST, game, 2))
     return await lab.settlement(ser)
 
 
@@ -3150,15 +3192,21 @@ _REUSE = ["nonce-reused", "token-kept", "token-fresh"]
 
 async def _reused(lab, reuse):
     """Team 1 wins game 1 after every seat posted 1-0 and 1-1 naming it and
-    carrying TX. Game 2 crosses the same way, carrying, by `reuse`: TX's
-    nonce again, signed as game 2's ("nonce-reused"); TX itself, a token
-    kept past its own physical game ("token-kept"; since round 6 it names
-    game 1); or game 2's own ("token-fresh"). Seat 2 leaves and seats 0
-    and 1 report it naming the token game 2's posts carried."""
+    carrying TX. Game 2 crosses the same way, carrying, by `reuse`: a nonce
+    game 1's record holds too ("nonce-reused"); TX itself, a token kept past
+    its own physical game ("token-kept"; since round 6 it names game 1); or
+    game 2's own ("token-fresh"). Seat 2 leaves and seats 0 and 1 report it
+    naming the token game 2's posts carried. Since round 9 (M2) TX's nonce
+    signed as game 2's is not the nonce derived for game 2 and is refused
+    before any record is read, so for "nonce-reused" game 1's posts carry
+    game 2's own nonce, named as game 1, and game 2's carry T2: the same
+    nonce on two records, which only the read of the report's token on
+    another record refuses."""
     ser = await lab.series(t1_wins=0, t2_wins=0)
-    await _post_all(lab, ser, (1, 0), (1, 1), game=1, room=ROOM, token=TX)
+    first = _wire(_nonce(T2), 1) if reuse == "nonce-reused" else TX
+    await _post_all(lab, ser, (1, 0), (1, 1), game=1, room=ROOM, token=first)
     await lab.win_game(ser, winner=1)
-    tok = {"nonce-reused": _wire(_nonce(TX), 2), "token-kept": TX, "token-fresh": T2}[reuse]
+    tok = {"nonce-reused": T2, "token-kept": TX, "token-fresh": T2}[reuse]
     await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=tok)
     await _two_reports(lab, ser, LOW, LOW, token=tok)
     return await lab.settlement(ser)
@@ -3497,14 +3545,36 @@ def test_a_dc_token_the_route_cannot_verify_names_no_game(wired, case):
 
 
 @needs_pg
-@pytest.mark.parametrize("mutant", ["token-unverified", "pass-through"])
+@pytest.mark.parametrize("mutant", ["token-unverified", "chain-unread", "token-unverified-chain-unread",
+                                    "pass-through"])
 def test_the_dropped_dc_token_test_can_fail(wired, monkeypatch, mutant):
     """Control: with the DC route taking any token it is sent, the badly
-    signed report completes the series, and so does the one whose epoch was
-    altered after it was signed; the inert twin changes nothing."""
-    if mutant == "token-unverified":
+    signed report completes the series. Since round 9 (M2) the report whose
+    epoch was altered after it was signed is refused twice over: by its
+    signature, and by the chain, since a later game's nonce is derived from
+    the issued one over its ordinal AND its epoch, so the altered token no
+    longer carries the nonce derived for the epoch it names. Each refusal
+    alone keeps it out: with the route taking any token it stays incomplete
+    (the chain refuses it); with the chain unread (every token's nonce taken
+    as the one derived for its ordinal and epoch, the rest of the read
+    kept) it stays incomplete (the signature refuses it); with both off it
+    completes. The inert twin changes nothing."""
+    unverified = mutant in ("token-unverified", "token-unverified-chain-unread")
+    unchained = mutant in ("chain-unread", "token-unverified-chain-unread")
+    if unverified:
         monkeypatch.setattr(main, "_team_dc_game_token",
                             lambda sid, rep, dc, token, sig: main._team_game_wire_token(token))
+    if unchained:
+        real_read = main._team_game_first_game_refusal
+
+        def chain_unread(rec, token, session=None):
+            issued = rec["first_game_nonce"]
+            if main._team_game_token_valid(issued):
+                token = ((main._team_game_chain_nonce(issued, token[1], token[2]),)
+                         + tuple(token[1:]))
+            return real_read(rec, token, session)
+
+        monkeypatch.setattr(main, "_team_game_first_game_refusal", chain_unread)
 
     async def go():
         results = {}
@@ -3513,8 +3583,8 @@ def test_the_dropped_dc_token_test_can_fail(wired, monkeypatch, mutant):
                 results[case] = await _dropped_token_report(lab, case)
         return results
 
-    want = COMPLETED if mutant == "token-unverified" else INCOMPLETE
-    assert _run(go()) == {"bad-signature": want, "epoch-altered": want}
+    assert _run(go()) == {"bad-signature": COMPLETED if unverified else INCOMPLETE,
+                          "epoch-altered": COMPLETED if unverified and unchained else INCOMPLETE}
 
 
 def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch):
@@ -3634,9 +3704,9 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
 # included, is plugin/TeamGameNumber.cs's sentinel (F31-REVIEWER and its
 # siblings) with its mutants.
 
-F31_ANCHOR = "b0b1b2b3"                         # the chain the restarted creator drew
-F31_B = _wire(F31_ANCHOR + "b1b1b1b1", 1)       # physical game 2, named game 1 from absence
-F31_C = _wire(F31_ANCHOR + "c2c2c2c2", 2)       # physical game 3: that chain's game 2
+F31_ROOT = "b0b1b2b3b4b5b6b7"                   # the chain the restarted creator drew
+F31_B = _cwire(F31_ROOT, 1)                     # physical game 2, named game 1 from absence
+F31_C = _cwire(F31_ROOT, 2)                     # physical game 3: that chain's game 2
 _F31 = ["never-issued", "issued-in-the-lost-game", "ledger-lost", "ledger-lost-unlanded"]
 # The route's refusal of an ask whose own session was not issued before the
 # series was created (main.team_series_first_game).
@@ -3711,9 +3781,9 @@ async def _f31(lab, case):
         answer = await lab.ask_first_game(ser, session="after")
         if answer.get("issued"):
             nonce = answer["nonce"]
-            one, two = _wire(nonce, 1), _wire(nonce[:8] + "c2c2c2c2", 2)
+            one, two = _wire(nonce, 1), _cwire(nonce, 2)
             if case == "ledger-lost-unlanded":
-                anchor = nonce[:8]
+                anchor = nonce
     elif case == "issued-in-the-lost-game":
         anchor = LAB_ANCHOR
     await _post_all(lab, ser, (1, 0), game=1, room=ROOM, token=one)
@@ -3729,18 +3799,19 @@ async def _f31_fresh(lab):
     game its reporter (seat 0), whose ledger and outbox hold no report of the
     series, asks through the real route and is issued physical game 1. Game
     1's posts carry the issued game's token; its report, carrying the anchor,
-    is recorded: team 1 won it. Game 2's host draws its nonce from the
-    anchor, and every seat -- one that rejoined between the games and adopted
-    the room's token among them -- posts 1-0 and 1-1 naming game 2 and
-    carrying it; seat 2 (team 2) leaves and seats 0 and 1 report it. Returns
-    the settlement, the issued nonce and the series' first_game_nonce."""
+    is recorded: team 1 won it. Game 2's host derives its nonce from the
+    issued one (round 9, M2), and every seat -- one that rejoined between
+    the games and adopted the room's token among them -- posts 1-0 and 1-1
+    naming game 2 and carrying it; seat 2 (team 2) leaves and seats 0 and 1
+    report it. Returns the settlement, the issued nonce and the series'
+    first_game_nonce."""
     ser = await lab.series(t1_wins=0, t2_wins=0, granted=False)
     answer = await lab.ask_first_game(ser)
     assert answer["issued"] is True, answer
     nonce = answer["nonce"]
     await _post_all(lab, ser, (1, 0), (1, 1), (2, 1), game=1, room=ROOM, token=_wire(nonce, 1))
-    await lab.land_report(ser, winner=1, anchor=nonce[:8])
-    two = _wire(nonce[:8] + "d2d2d2d2", 2)
+    await lab.land_report(ser, winner=1, anchor=nonce)
+    two = _cwire(nonce, 2)
     await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=two)
     await _two_reports(lab, ser, HIGH, HIGH, token=two)
     return await lab.settlement(ser), nonce, await lab.first_game(ser)
@@ -3783,9 +3854,12 @@ def _apply_f31_mutant(monkeypatch, mutant):
                           origin (main._team_game_first_game_refusal answers
                           None), so the chain a creator named from absence
                           alone is settlement evidence;
-      prefix-unread       the issued game and its void are read, the token's
-                          anchor is not (every token counts as counted from
-                          the issued game);
+      chain-unread        the issued game and its void are read, the token's
+                          nonce is not (every token counts as counted from
+                          the issued game: its nonce is taken as the one
+                          derived for its ordinal and epoch; round 8's
+                          prefix-unread, which took its first 8 digits as
+                          the issued nonce's);
       session-unread      the route issues on any verified session, whenever
                           it was issued (the session read answers TRUE);
       void-off            a recorded report without the anchor voids nothing
@@ -3805,31 +3879,33 @@ def _apply_f31_mutant(monkeypatch, mutant):
     if mutant == "absence-chain-read":
         monkeypatch.setattr(main, "_team_game_first_game_refusal",
                             lambda rec, token, session=None: None)
-    elif mutant == "prefix-unread":
+    elif mutant == "chain-unread":
         real = main._team_game_first_game_refusal
 
-        def unanchored(rec, token, session=None):
+        def unchained(rec, token, session=None):
             issued = rec["first_game_nonce"]
             if main._team_game_token_valid(issued):
-                token = (issued[:8] + token[0][8:],) + tuple(token[1:])
+                token = ((main._team_game_chain_nonce(issued, token[1], token[2]),)
+                         + tuple(token[1:]))
             return real(rec, token, session)
 
-        monkeypatch.setattr(main, "_team_game_first_game_refusal", unanchored)
+        monkeypatch.setattr(main, "_team_game_first_game_refusal", unchained)
     else:
         assert mutant in ("session-unread", "void-off", "session-unread-void-off",
                           "pass-through"), mutant
 
 
 @needs_pg
-@pytest.mark.parametrize("mutant", ["absence-chain-read", "prefix-unread", "session-unread",
+@pytest.mark.parametrize("mutant", ["absence-chain-read", "chain-unread", "session-unread",
                                     "void-off", "session-unread-void-off", "pass-through"])
 def test_the_f31_sequence_test_can_fail(asking, monkeypatch, mutant):
     """Controls (#391) for the test above: every case under each mutant,
     with the fresh room beside them. Restoring round 7's read of a chain a
     creator named from absence alone completes every case for team 1: the
     defect as reported, and the test above turns red. Each other rule is
-    needed by exactly its cases: with the anchor unread, the creator's own
-    chain in a series whose game 1 was issued in the lost game completes it;
+    needed by exactly its cases: with the token's nonce unread, the
+    creator's own chain in a series whose game 1 was issued in the lost game
+    completes it;
     with the session's age unread, the chain issued to a reporter on another
     machine completes the case where the earlier game's result never lands
     (no report without the anchor arrives to void anything), and with the
@@ -3848,7 +3924,7 @@ def test_the_f31_sequence_test_can_fail(asking, monkeypatch, mutant):
             results["fresh-room"] = (await _f31_fresh(lab))[0]
         return results
 
-    completes = {"absence-chain-read": set(_F31), "prefix-unread": {"issued-in-the-lost-game"},
+    completes = {"absence-chain-read": set(_F31), "chain-unread": {"issued-in-the-lost-game"},
                  "session-unread": {"ledger-lost-unlanded"}, "void-off": set(),
                  "session-unread-void-off": {"ledger-lost", "ledger-lost-unlanded"},
                  "pass-through": set()}[mutant]
@@ -3887,7 +3963,7 @@ def test_the_first_game_is_issued_once_to_the_series_reporter(asking):
             ser = await lab.series(t1_wins=0, t2_wins=0, granted=False)
             first = await lab.ask_first_game(ser)
             again = await lab.ask_first_game(ser)
-            await lab.land_report(ser, winner=1, anchor=first["nonce"][:8])
+            await lab.land_report(ser, winner=1, anchor=first["nonce"])
             later = await lab.ask_first_game(ser)
             return first, again, later, await lab.first_game(ser)
 
@@ -4025,26 +4101,31 @@ def test_an_ask_the_route_cannot_trust_is_an_error_and_issues_nothing(asking, mo
 
 @needs_pg
 @pytest.mark.parametrize("case", ["no-anchor", "another-anchor", "the-anchor", "none-issued",
-                                  "already-void"])
+                                  "already-void", "round-8-anchor", "prefix-sharing-anchor"])
 def test_a_recorded_report_without_the_issued_anchor_voids_the_first_game(wired, case):
     """F31: a match report the series records voids its issued physical game
-    1 unless it carries the issued nonce's first 8 digits (game_anchor): one
-    with no anchor or another one voids it ('void'), one with the anchor
-    does not. A series issued no physical game 1 keeps none, and a void is
-    never undone, not even by a report carrying the anchor."""
+    1 unless it carries the issued nonce as its anchor (game_anchor; since
+    round 9, M2, the whole nonce, compared at all 16 digits): one with no
+    anchor or another one voids it ('void'), one with the anchor does not. A
+    series issued no physical game 1 keeps none, and a void is never undone,
+    not even by a report carrying the anchor. Round 9, M2: the issued
+    nonce's first 8 digits alone (the anchor a round-8 client keeps) void
+    it, and so does a 16-digit anchor sharing only those 8 digits."""
     async def go():
         async with _Lab() as lab:
             ser = await lab.series(t1_wins=0, t2_wins=0, granted=case != "none-issued")
             if case == "already-void":
                 await lab.land_report(ser, winner=1, anchor=None)
-            anchor = {"another-anchor": "deadbeef", "the-anchor": LAB_ANCHOR,
-                      "already-void": LAB_ANCHOR}.get(case)
+            anchor = {"another-anchor": "deadbeef" * 2, "the-anchor": LAB_ANCHOR,
+                      "already-void": LAB_ANCHOR, "round-8-anchor": LAB_PREFIX,
+                      "prefix-sharing-anchor": LAB_PREFIX + "00000000"}.get(case)
             voided = await lab.land_report(ser, winner=2, anchor=anchor)
             return voided, await lab.first_game(ser)
 
     assert _run(go()) == {"no-anchor": (True, "void"), "another-anchor": (True, "void"),
                           "the-anchor": (False, LAB_FIRST), "none-issued": (False, None),
-                          "already-void": (False, "void")}[case]
+                          "already-void": (False, "void"), "round-8-anchor": (True, "void"),
+                          "prefix-sharing-anchor": (True, "void")}[case]
 
 
 @needs_pg
@@ -4280,10 +4361,11 @@ async def _m1(lab, trace):
     the start of physical game 2 through the real route. If it is issued,
     every seat carries B's chain: game 2 is named physical game 1 (the issued
     nonce) and crosses, and B's report of it lands on B's session with the
-    anchor (team 1 the winner); physical game 3's host draws the anchor and
-    8 fresh digits, every seat posts 1-0 and 1-1 naming game 2 with it, seat
-    2 (team 2) leaves, and seats 0 (B) and 1 report it. If it is not issued,
-    every seat stays tokenless. Returns the ask's answer and the settlement."""
+    anchor (team 1 the winner); physical game 3's host derives its nonce
+    from the issued one (round 9, M2), every seat posts 1-0 and 1-1 naming
+    game 2 with it, seat 2 (team 2) leaves, and seats 0 (B) and 1 report it.
+    If it is not issued, every seat stays tokenless. Returns the ask's
+    answer and the settlement."""
     ser = await lab.series(t1_wins=0, t2_wins=0, granted=False)
     steam_a = ser["steams"][0]
     await lab.other_session(ser, "expired-before" if trace == "a-post-after-its-session-expired"
@@ -4305,9 +4387,9 @@ async def _m1(lab, trace):
     one = two = None
     if answer.get("issued"):
         nonce = answer["nonce"]
-        one, two = _wire(nonce, 1), _wire(nonce[:8] + "e3e3e3e3", 2)
+        one, two = _wire(nonce, 1), _cwire(nonce, 2)
     await _post_all(lab, ser, (1, 0), (1, 1), (2, 1), game=1, room=ROOM, token=one)
-    await lab.land_report(ser, winner=1, anchor=answer["nonce"][:8] if one else None)
+    await lab.land_report(ser, winner=1, anchor=answer["nonce"] if one else None)
     await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=two)
     await _two_reports(lab, ser, HIGH, HIGH, token=two)
     return answer, await lab.settlement(ser)
@@ -4633,3 +4715,190 @@ def test_before_migration_362_nothing_fails_and_nothing_auto_completes(asking, w
     assert [p["status"] for p in posted] == ["ok", "ok"], posted
     assert rows == 1, rows
     assert settled == (COMPLETED if with_362 else INCOMPLETE), settled
+
+
+# ---- Round 9, finding M2: the chain bound to the whole issued nonce -------
+#
+# Round 8 bound a DC report's token to the issued physical game 1 by the
+# issued nonce's first 8 digits (a later game's host drew its nonce as those
+# 8 digits and 8 fresh ones, and the server read a token whose first 8
+# digits matched), and a match report's anchor was the same 8 digits: 32
+# bits, so a chain from another origin that shared them was read. Since
+# round 9 game 1's token carries the whole issued nonce, every later game's
+# nonce is derived from it and the token's own ordinal and epoch
+# (main._team_game_chain_nonce; plugin/TeamGameNumber.cs, ChainNonce), the
+# anchor is the whole issued nonce, and both are compared at all 16 digits.
+# A round-8 client's host token and its 8-digit anchor are unreadable: a
+# report carrying that anchor voids the issue, and a DC report naming that
+# token reads nothing (tokenless, the conservative outcome).
+
+_M2 = ["derived", "prefix-only-token", "round-8-anchor", "prefix-sharing-anchor"]
+
+
+def _flip8(nonce):
+    """A 16-digit nonce that matches `nonce` in exactly its first 8 digits:
+    each of its last 8 moved by 8 (mod 16)."""
+    return nonce[:8] + "".join("%x" % ((int(c, 16) + 8) % 16) for c in nonce[8:16])
+
+
+async def _m2(lab, case):
+    """The M2 sequence, in a fresh room. The series stands 0-0 and its
+    reporter (seat 0), its ledger and outbox clean, asks through the real
+    route and is issued physical game 1. Game 1's posts carry the issued
+    nonce, and its report lands on the issued session, team 1 the winner,
+    carrying the whole issued nonce as its anchor, except: round-8-anchor,
+    its first 8 digits (the anchor a round-8 client keeps); and
+    prefix-sharing-anchor, a 16-digit nonce sharing only those 8 digits
+    with it. Physical game 2: every seat posts 1-0 and 1-1 naming game 2
+    and carrying game 2's token, its nonce derived from the whole issued
+    nonce, except for prefix-only-token, whose nonce shares only the issued
+    nonce's first 8 digits (a round-8 host's); seat 2 (team 2) leaves and
+    seats 0 and 1 report it naming the same token. Returns the settlement,
+    whether game 1's report voided the issue, the issued nonce and the
+    series' first_game_nonce."""
+    ser = await lab.series(t1_wins=0, t2_wins=0, granted=False)
+    answer = await lab.ask_first_game(ser)
+    assert answer["issued"] is True, answer
+    nonce = answer["nonce"]
+    anchor = {"round-8-anchor": nonce[:8], "prefix-sharing-anchor": _flip8(nonce)}.get(case, nonce)
+    await _post_all(lab, ser, (1, 0), (1, 1), (2, 1), game=1, room=ROOM, token=_wire(nonce, 1))
+    voided = await lab.land_report(ser, winner=1, anchor=anchor)
+    two = _wire(_flip8(nonce), 2) if case == "prefix-only-token" else _cwire(nonce, 2)
+    assert (_nonce(two) == _chain(nonce, 2, 2)) == (case != "prefix-only-token"), two
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=two)
+    await _two_reports(lab, ser, HIGH, HIGH, token=two)
+    return await lab.settlement(ser), voided, nonce, await lab.first_game(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("case", _M2)
+def test_a_chain_matching_only_the_first_eight_digits_is_unreadable(asking, case):
+    """M2 (round 9), the required control: a chain that matches only the
+    first 8 hex digits of the issued nonce is unreadable, and nothing
+    settles. A game-2 token whose nonce shares only those digits with the
+    issued one is not read: the leave goes to an admin (dc_incomplete), no
+    result, rating or gold moves, and the issue stands. A match report
+    carrying only those digits as its anchor, or a 16-digit anchor that
+    shares only them, voids the issue ('void') and no token of the series is
+    read again: the leave goes to an admin. The twin, its game-2 nonce
+    derived from the whole issued nonce and its report carrying the whole
+    nonce, completes the series for team 1, the team a game up."""
+    async def go():
+        async with _Lab() as lab:
+            return await _m2(lab, case)
+
+    settled, voided, nonce, stored = _run(go())
+    assert (settled, voided) == {"derived": (COMPLETED, False),
+                                 "prefix-only-token": (INCOMPLETE, False),
+                                 "round-8-anchor": (INCOMPLETE, True),
+                                 "prefix-sharing-anchor": (INCOMPLETE, True)}[case], (settled, voided)
+    assert stored == ("void" if voided else nonce), stored
+    assert len(asking) == (1 if case == "derived" else 0), asking
+
+
+def _restore_round_8_compare(monkeypatch, parts):
+    """M2's negative control: round 8's comparisons restored around round
+    9's functions. `parts` holds "read", a DC report's token is read when
+    its nonce's first 8 digits are the issued nonce's (it is handed on as
+    the nonce derived for its ordinal and epoch), and/or "void", a match
+    report whose anchor equals the issued nonce's first 8 digits carries the
+    issued anchor."""
+    if "read" in parts:
+        real_read = main._team_game_first_game_refusal
+
+        def round_8_read(rec, token, session=None):
+            issued = rec["first_game_nonce"]
+            if main._team_game_token_valid(issued) and token[0][:8] == issued[:8]:
+                token = ((main._team_game_chain_nonce(issued, token[1], token[2]),)
+                         + tuple(token[1:]))
+            return real_read(rec, token, session)
+
+        monkeypatch.setattr(main, "_team_game_first_game_refusal", round_8_read)
+    if "void" in parts:
+        real_void = main._team_first_game_void
+
+        async def round_8_void(db, series, series_uuid, anchor, session):
+            issued = series["first_game_nonce"] if "first_game_nonce" in series else None
+            if main._team_game_token_valid(issued) and anchor == issued[:8]:
+                anchor = issued
+            return await real_void(db, series, series_uuid, anchor, session)
+
+        monkeypatch.setattr(main, "_team_first_game_void", round_8_void)
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["round-8-read", "round-8-void", "round-8-read-and-void",
+                                    "pass-through"])
+def test_the_eight_digit_chain_test_can_fail(asking, monkeypatch, mutant):
+    """M2's negative control (#391), every case under each mutant. With
+    round 8's comparison of a token's first 8 digits restored, the game-2
+    token that matches only those digits is read and completes the series
+    for team 1; with round 8's comparison of the 8-digit anchor restored,
+    the round-8 anchor voids nothing and game 2's derived token completes
+    the series: the test above turns red under each. The 16-digit anchor
+    sharing only the first 8 digits voids under every mutant (round 8
+    compared the anchor with exactly those 8 digits). The derived twin
+    completes under every mutant, and the inert twin changes nothing."""
+    _restore_round_8_compare(monkeypatch, {"round-8-read": ("read",), "round-8-void": ("void",),
+                                           "round-8-read-and-void": ("read", "void"),
+                                           "pass-through": ()}[mutant])
+
+    async def go():
+        results = {}
+        for case in _M2:
+            async with _Lab() as lab:
+                settled, voided, nonce, stored = await _m2(lab, case)
+                results[case] = (settled, voided, stored == ("void" if voided else nonce))
+        return results
+
+    reads = mutant in ("round-8-read", "round-8-read-and-void")
+    kept = mutant in ("round-8-void", "round-8-read-and-void")
+    want = {"derived": (COMPLETED, False, True),
+            "prefix-only-token": (COMPLETED if reads else INCOMPLETE, False, True),
+            "round-8-anchor": (COMPLETED, False, True) if kept else (INCOMPLETE, True, True),
+            "prefix-sharing-anchor": (INCOMPLETE, True, True)}
+    assert _run(go()) == want
+    assert len(asking) == sum(1 for w in want.values() if w[0] == COMPLETED), asking
+
+
+def _cs_number(src, name):
+    m = re.search(r'internal const (?:int|long) %s\s*=\s*(\d+);' % name, src)
+    assert m, name
+    return int(m.group(1))
+
+
+def test_the_clients_chain_derivation_is_the_one_the_server_checks():
+    """M2: plugin/TeamGameNumber.cs derives a later game's nonce exactly as
+    main._team_game_chain_nonce does. Its message prefix is the server's,
+    and its pin vector (PinChainRoot, PinChainOrdinal, PinChainEpoch and
+    PinChainExpected; its sentinel checks that ChainNonce builds it) is what
+    the server's derivation gives, and what the one computed here apart from
+    both (_chain) gives. Game 1's nonce is the issued one. The derivation
+    moves with the ordinal, with the epoch and with the last 8 digits of the
+    issued nonce: a root that shares only its first 8 digits derives another
+    nonce."""
+    src = _read(os.path.join(_PLUGIN_DIR, "TeamGameNumber.cs"))
+    root, expected = _cs_const(src, "PinChainRoot"), _cs_const(src, "PinChainExpected")
+    ordinal, epoch = _cs_number(src, "PinChainOrdinal"), _cs_number(src, "PinChainEpoch")
+    assert _cs_const(src, "ChainPrefix") == main._TEAM_GAME_CHAIN_PREFIX == "team-game-chain:"
+    assert (root, ordinal, epoch, expected) == ("0123456789abcdef", 2, 7, "4f9833dd5e56800d")
+    assert main._team_game_chain_nonce(root, ordinal, epoch) == expected
+    assert _chain(root, ordinal, epoch) == expected
+    assert main._team_game_chain_nonce(root, 1, epoch) == root
+    derived = {main._team_game_chain_nonce(root, ordinal, epoch + 1),
+               main._team_game_chain_nonce(root, ordinal + 1, epoch),
+               main._team_game_chain_nonce(_flip8(root), ordinal, epoch), expected}
+    assert len(derived) == 4, derived
+    assert all(re.fullmatch(r"[0-9a-f]{16}", d) for d in derived), derived
+
+
+def test_no_eight_digit_comparison_is_left_on_the_server():
+    """M2: neither the read of a DC report's token against the issued chain
+    nor a match report's void compares a slice of the nonce: each compares
+    the whole of it (hmac.compare_digest) with the issued nonce or the one
+    derived from it."""
+    for fn in (main._team_game_first_game_refusal, main._team_first_game_void):
+        src = inspect.getsource(fn)
+        assert "[:8]" not in src and "compare_digest" in src, fn.__name__
+    src = inspect.getsource(main._team_game_first_game_refusal)
+    assert src.count("_team_game_chain_nonce(issued, token[1], token[2])") == 1
