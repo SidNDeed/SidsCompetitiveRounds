@@ -59046,8 +59046,10 @@ async def _asm_attest_expiry(db: AsyncSession, room: str, steam_id: str) -> None
         " LIMIT 1"), {"lid": lob["id"]})).scalar()
     if pending is None:
         return
-    await db.execute(text("SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"),
-                     {"lid": lob["id"]})
+    # The lobby row in the statement every other expiry trigger locks it with
+    # (_FFA_LOBBY_LOCK_SQL, through _ffa_lock_lobby_slot), without that
+    # helper's games_played catch-up write.
+    await db.execute(text(_FFA_LOBBY_LOCK_SQL), {"lid": lob["id"]})
     expired = await _ffa_expire_admissions(db, lob["id"], lock_rows=True)
     await db.commit()
     for line in _asm_log_expired(lob["id"], expired):
