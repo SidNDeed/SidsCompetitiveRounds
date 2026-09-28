@@ -11,7 +11,8 @@ def _one_line_print(*args, **kwargs):
     """Every log line is ONE line (r9 L8): a relayed message or a name that
     carries CR/LF must not split into lines that could read as the lifecycle
     markers the deploy train parses. Only the container's shell (the boot
-    line) and on_ready (the ready line) print markers."""
+    line) and on_ready (the dance-cards feature line, then the ready line)
+    print markers."""
     _gen_builtins.print(*(str(a).replace("\r", " ").replace("\n", " ") for a in args), **kwargs)
 
 
@@ -476,6 +477,10 @@ async def on_ready():
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
+    # The batch's bot arm (dance cards, round two): this build's positive
+    # signal, one whole line carrying the ready line's generation, printed
+    # just before it (_pc_card_gif_signal, beside /card).
+    print(_pc_card_gif_signal(), flush=True)
     # The deploy train's witness (r6 M6): its only job is to be probed. The
     # stamp binds the line to THIS process (r7 M2): a retained log tail can
     # carry an earlier incarnation's line after a crash-restart.
@@ -8932,6 +8937,46 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
                 face, filename = gif, "card.gif"
     if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, filename=filename, require_lease=True):
         await ctx.send("❌ That card isn't available right now — try again in a moment.")
+
+
+# Dance cards, round two (the integrator's addendum): the rebuilt bot's
+# positive signal for the release train's bot arm. The train's witness
+# ([BOT-BOOT] and [BOT-READY], matched by generation) proves that a new
+# process started, not which build it runs, so on_ready prints ONE more whole
+# line just before its ready line, with the same generation:
+#     [BOT-FEATURE] card_motion_gif=<n> -- gen=<gen>
+# <n> is DERIVED from /card's compiled callback, never written down (#306,
+# #342): 1 when its code (nested code included) loads every name of
+# _PC_CARD_GIF_NAMES -- the GIF branch's margin, its request timeout and the
+# upload cap that bounds its bytes, which nothing else in /card uses -- 0 on a
+# build whose /card lost that branch, and the exception's type name when the
+# derivation fails -- never 1, so it cannot pass for the new build, and it
+# never stops the ready line. Names, not text: a comment or a docstring cannot
+# move it. A build before this batch prints no such line. Its only job is to
+# be probed.
+_PC_CARD_GIF_NAMES = frozenset({"_PC_MOTION_GIF_MARGIN_S", "_PC_MOTION_GIF_TIMEOUT_S", "_pc_upload_cap"})
+
+
+def _pc_card_gif_word(command) -> int:
+    """1 when the compiled callback of `command` (a discord.py command, or a
+    plain function) loads every name of _PC_CARD_GIF_NAMES, nested code
+    included; else 0."""
+    fn = getattr(command, "callback", command)
+    names, todo = set(), [fn.__code__]
+    while todo:
+        code = todo.pop()
+        names.update(code.co_names)
+        todo.extend(c for c in code.co_consts if isinstance(c, type(code)))
+    return 1 if _PC_CARD_GIF_NAMES <= names else 0
+
+
+def _pc_card_gif_signal() -> str:
+    """The one whole line on_ready prints just before [BOT-READY] (above)."""
+    try:
+        word = str(_pc_card_gif_word(cmd_pc_card))
+    except Exception as exc:   # the probe must never stop the ready line
+        word = "error:" + type(exc).__name__
+    return "[BOT-FEATURE] card_motion_gif=" + word + " -- gen=" + _BOT_GEN
 
 
 def _pc_reveal_hex32(ref):

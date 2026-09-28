@@ -925,8 +925,8 @@ class HealthResponse(BaseModel):
     ladder_hook: int
     # pc_motion: how many of the dance-card motion routes are registered on
     # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
-    # per-visit motion read, the atlas and the selection -- 4 on this build,
-    # 5 once the bot's GIF route is built. DERIVED from app.routes on every
+    # per-visit motion read, the atlas, the selection and the bot's motion
+    # preview GIF -- 5 on this build. DERIVED from app.routes on every
     # request, never written down, so a build that lost a route's
     # registration reads fewer (#306/#342). The build discriminator for the
     # dance-cards batch, equal on both boxes by construction and read by
