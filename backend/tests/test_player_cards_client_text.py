@@ -219,7 +219,9 @@ def test_the_intent_and_answer_rules_are_pinned_in_the_client():
     # the price gate keys on when the /pc/me that produced the cache LEFT
     assert "ApiClient.PcMeDispatchedAt <= priceChangedAt" in src
     assert "PcMeDispatchedAt = dispatched;" in api and "PcMeDispatchedAt = -1f;" in api
-    assert api.count("int epoch = _pcCacheEpoch;") == 5   # + FetchPcPacks, the pack history pager (Sept 12)
+    # + FetchPcPacks, the pack history pager (Sept 12); + PcDiscardBatch, whose
+    # balance write into the cache is fenced the same way (board row 25)
+    assert api.count("int epoch = _pcCacheEpoch;") == 6
     # an empty binder after an identity edge is refetched
     assert "if (view == View.Binder && ApiClient.CachedPcCollection == null && ApiClient.PcCollectionError == null)" in src
     # the title line is the translated rank tier plus the SEPARATELY translated

@@ -1,8 +1,8 @@
-"""Client structure gates for board row 24 (the Settings full card), each
-run on the real sources and, with its mutation and control, on edited COPIES
-(#391): the mutation must turn the gate red and the control (an edit at the
-same site that changes no behaviour) must leave it green. Nothing here needs a
-database or the game.
+"""Client structure gates for board rows 24 (the Settings full card) and 25
+(the batch shard), each run on the real sources and, with its mutation and
+control, on edited COPIES (#391): the mutation must turn the gate red and the
+control (an edit at the same site that changes no behaviour) must leave it
+green. Nothing here needs a database or the game.
 
 Row 24 -- the Settings slot shows the WHOLE card other players see:
   G1  the client asks the server's full-card route, signed as the server
@@ -11,7 +11,17 @@ Row 24 -- the Settings slot shows the WHOLE card other players see:
   G2  while a new look is on its way the slot shows the live picture with the
       pending line, and the card is fetched again once the stored portrait
       (the key) changes -- never while the look is pending.
-Its strings:
+Row 25 -- the batch shard:
+  G3  the client signs the batch exactly as the server verifies it, on the
+      server's path, and its cap is the server's cap;
+  G4  the confirmation's total reads the server's rarity table;
+  G5  the pack key is the pack id; a selection's nonce is kept for the exact
+      set until an answer arrives (a lost answer asked again is a replay);
+  G6  every shard control is a ClickGuard'ed button, and a tile click in
+      Select mode is claimed before it picks;
+  G7  the last copy is a confirmation, never a block: the second click sends;
+  G8  the toast names the total the server credited, from its answer.
+Both rows:
   G9  every new string is in all four catalogues with its placeholders, and
       in the extractor's registry.
 """
@@ -33,6 +43,7 @@ FILES = {
     "api": PLUGIN / "ApiClient.cs",
     "faces": PLUGIN / "PlayerCardFaces.cs",
     "render": PLUGIN / "PortraitRender.cs",
+    "native": PLUGIN / "NativeUI.cs",
     "cats": PLUGIN / "I18nCatalogues.cs",
     "reg": ROOT / "tools" / "i18n_source.json",
     "main": ROOT / "backend" / "api" / "main.py",
@@ -126,6 +137,89 @@ def gate_g2_pending_shows_the_live_picture_and_the_key_refetches(s):
     assert "me.portrait_hash = h;" in upload, "an upload's answer no longer writes the stored hash the key reads"
 
 
+def gate_g3_the_batch_is_signed_and_capped_as_the_server_verifies(s):
+    api = _member(s["api"], "public static void PcDiscardBatch(")
+    assert 'string joined = string.Join(",", printIds);' in api, (
+        "the client's batch signature or path moved: the ids are no longer comma-joined as the server's canon is")
+    assert 'PcUrl("prints/discard-batch", steamId, $"pcdiscardn:{steamId}:{key}:{joined}", null)' in api, (
+        "the client's batch signature or path moved")
+    assert _pc.canon_discard_batch("S", "K", ["a", "b"]) == "pcdiscardn:S:K:a,b", "the server's batch canon moved"
+    assert '@app.post("/api/v1/pc/prints/discard-batch"' in s["main"]
+    assert "_pc.canon_discard_batch(steam_id, key, ids)" in _py_function(s["main"], "pc_discard_batch")
+    m = re.search(r"public const int PC_DISCARD_BATCH_CAP = (\d+);", s["api"])
+    assert m and int(m.group(1)) == _pc.PC_DISCARD_BATCH_CAP, "the client's cap is not the server's"
+    assert "printIds.Count > PC_DISCARD_BATCH_CAP" in api, "the client no longer refuses a batch over the cap unsent"
+
+
+def gate_g4_the_confirmation_total_reads_the_server_table(s):
+    fn = _member(s["ui"], "private static int ShardValue(")
+    table = dict(re.findall(r'case "(\w+)": return (\d+);', fn))
+    default = re.search(r"default: return (\d+);", fn)
+    table = {k: int(v) for k, v in table.items()}
+    assert default and "common" not in table
+    table["common"] = int(default.group(1))
+    assert table == _pc.PC_ECONOMY["shards"], "the client's shard table %r is not PC_ECONOMY's %r" % (
+        table, _pc.PC_ECONOMY["shards"])
+
+
+def gate_g5_the_keys(s):
+    ui = s["ui"]
+    pack = _member(ui, "private static void OnShardPackClick(")
+    assert pack.rstrip().endswith("SendShard(id, shown.pack_id, ids, shown.pack_id);\n        }"), (
+        "a Shard pack is no longer keyed by its pack id")
+    sel = _member(ui, "private static void OnShardSelectedClick(")
+    assert "if (shardKeyFor != set || string.IsNullOrEmpty(shardKey)) { shardKey = NewNonce(); shardKeyFor = set; }" in sel, (
+        "a selection's nonce is no longer kept for its exact set")
+    assert "SendShard(id, shardKey, ids, null);" in sel, "a selection is no longer sent under its kept nonce"
+    assert sel.count("NewNonce()") == 1, "a selection draws a fresh nonce on every click"
+    done = _member(ui, "private static void FinishShard(")
+    assert "if (packId == null) { shardKey = null; shardKeyFor = null; }" in done, (
+        "a selection's nonce is not retired when its answer arrives")
+    fail = _member(ui, "private static void FailShard(")
+    # the key is dropped only when the server says it was used with other cards
+    assert fail.count("shardKey = null;") == 1, "a refusal other than key_reused drops the selection's nonce"
+    assert (_at(fail, 'case "key_reused":', "no key_reused case") < _at(fail, "shardKey = null;", "the key is never dropped")
+            < _at(fail, 'case "too_many":', "no too_many case")), "the key is dropped outside the key_reused case"
+
+
+def gate_g6_click_guards(s):
+    native = _member(s["native"], "public static GameObject CreateButton(")
+    assert native.count("ClickGuard.Claim(go)") == 2, "CreateButton no longer guards both click paths"
+    ui = s["ui"]
+    for name, handler in (("PcShardPack", "OnShardPackClick"), ("PcBSelect", "OnSelectClick"),
+                          ("PcBShardSel", "OnShardSelectedClick")):
+        m = re.search(r'UIFactory\.CreateButton\("%s", [^;]*?, %s, sizeDelta' % (name, handler), ui)
+        assert m, "%s is not a CreateButton wired to %s" % (name, handler)
+    click = _member(ui, "private static void OnTileClick(")
+    claim = _at(click, "if (!ClickGuard.Claim(t.root)) return;", "a tile click is no longer claimed")
+    pick = _at(click, "ToggleSelected(t.print)", "a Select-mode tile click no longer picks the card")
+    assert claim < pick, "a Select-mode pick runs before the click is claimed"
+
+
+def gate_g7_the_last_copy_is_a_confirmation(s):
+    ui = s["ui"]
+    for sig in ("private static void OnShardPackClick(", "private static void OnShardSelectedClick("):
+        fn = _member(ui, sig)
+        arm = _at(fn, "if (!ShardConfirmed(", sig + ": no first-click question")
+        note = _at(fn, "OnlyCopyNote(batch, col)", sig + ": the question no longer names the only copies")
+        send = _at(fn, "SendShard(", sig + ": the second click no longer sends")
+        close = note + _at(fn[note:], "return;", sig + ": the question does not end the first click")
+        assert arm < note < close < send, sig + ": the only-copy note is not part of the first click's question"
+        assert fn.count("OnlyCopyNote(") == 1, sig + ": the only-copy note gates something besides the question"
+    note = _member(ui, "private static string OnlyCopyNote(")
+    assert 'I18n.TrF("this is your only copy of {0}", list)' in note, "the only-copy line is no longer the question's"
+
+
+def gate_g8_the_toast_names_the_credited_total(s):
+    done = _member(s["ui"], "private static void FinishShard(")
+    assert 'int total = ApiClient.PcInt(ApiClient.PcTopLevel(resp, "shards_gained"));' in done, (
+        "the toast no longer reads the credited total from the server's answer")
+    assert 'string msg = I18n.TrF("Sharded {0} cards for {1} shards", n, total);' in done, (
+        "the toast no longer names the credited total")
+    assert "CompetitiveUI.ShowNotification(msg, C_OK, 4f);" in done, "the credited total is no longer toasted"
+    assert "ShardTotal(" not in done, "the toast reports the client's estimate, not the server's credit"
+
+
 NEW_KEYS = [
     "Saving your new picture - your card updates here once it has been sent.",
     "Other players still see this card: your new picture was not sent (the note below says why).",
@@ -133,6 +227,27 @@ NEW_KEYS = [
     "You are not in the card pool yet, so there is no card to show - this is your picture.",
     "Your card could not be loaded right now - it is tried again shortly.",
     "Loading your card...",
+    "Shard pack (+{0})",
+    "Sure? +{0} shards",
+    "sharding...",
+    "Select",
+    "Stop selecting",
+    "Shard selected ({0})",
+    "Selected",
+    "Click cards to select them for shards",
+    "Click Shard pack again to shard {0} cards for {1} shards",
+    "Click Shard selected again to shard {0} cards for {1} shards",
+    "this is your only copy of {0}",
+    "Sharded {0} cards for {1} shards",
+    "You can shard up to {0} cards at once",
+    "Loading your binder - try again in a moment",
+    "One of those cards is no longer in your collection - nothing was sharded; your binder has been refreshed",
+    "That shard was already done with other cards - your binder has been refreshed",
+    "Shard pack is not available on this server yet - discard one card at a time for now",
+    "Select cards first - click the cards you want to shard",
+    "Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. "
+    "Shards buy packs. Discard takes one card and the Dupes button every other copy of that exact card; "
+    "Shard pack (on a pack you opened) and Select (in the binder) shard up to 40 cards in one go.",
 ]
 
 _ENTRY = re.compile(r'^\s+\["((?:[^"\\]|\\.)*)"\] = "((?:[^"\\]|\\.)*)",$', re.M)
@@ -180,6 +295,12 @@ def gate_g9_every_new_string_is_in_every_catalogue(s):
 
 GATES = [gate_g1_the_preview_requests_the_card_variant,
          gate_g2_pending_shows_the_live_picture_and_the_key_refetches,
+         gate_g3_the_batch_is_signed_and_capped_as_the_server_verifies,
+         gate_g4_the_confirmation_total_reads_the_server_table,
+         gate_g5_the_keys,
+         gate_g6_click_guards,
+         gate_g7_the_last_copy_is_a_confirmation,
+         gate_g8_the_toast_names_the_credited_total,
          gate_g9_every_new_string_is_in_every_catalogue]
 
 
@@ -232,6 +353,61 @@ MUTATIONS = [
      '            ["Your card as other players see it."] = "Your card as other players see it.",\n',
      '            ["Your card as other players see it."] = "Tu carta tal como la ven los  dem\\u00e1s jugadores.",\n',
      "ES leaves 'Your card as other players see it.' in English"),
+    ("M25a", gate_g3_the_batch_is_signed_and_capped_as_the_server_verifies, "api",
+     'string joined = string.Join(",", printIds);',
+     'string joined = string.Join(";", printIds);',
+     'string joined = string.Join(",", printIds); ',
+     "the client's batch signature or path moved"),
+    ("M25b", gate_g3_the_batch_is_signed_and_capped_as_the_server_verifies, "api",
+     "public const int PC_DISCARD_BATCH_CAP = 40;",
+     "public const int PC_DISCARD_BATCH_CAP = 41;",
+     "public const int PC_DISCARD_BATCH_CAP = 40; ",
+     "the client's cap is not the server's"),
+    ("M25c", gate_g4_the_confirmation_total_reads_the_server_table, "ui",
+     'case "legendary": return 600;',
+     'case "legendary": return 500;',
+     'case "legendary": return 600; // the top band',
+     "the client's shard table"),
+    ("M25d", gate_g5_the_keys, "ui",
+     "if (shardKeyFor != set || string.IsNullOrEmpty(shardKey)) { shardKey = NewNonce(); shardKeyFor = set; }",
+     "{ shardKey = NewNonce(); shardKeyFor = set; }",
+     "if (shardKeyFor != set || string.IsNullOrEmpty(shardKey)) { shardKey = NewNonce(); shardKeyFor = set; } ",
+     "a selection's nonce is no longer kept for its exact set"),
+    ("M25e", gate_g5_the_keys, "ui",
+     "            SendShard(id, shown.pack_id, ids, shown.pack_id);",
+     "            SendShard(id, NewNonce(), ids, shown.pack_id);",
+     "            // keyed by the pack id\n            SendShard(id, shown.pack_id, ids, shown.pack_id);",
+     "a Shard pack is no longer keyed by its pack id"),
+    ("M25f", gate_g6_click_guards, "ui",
+     'UIFactory.CreateButton("PcShardPack", hdrRow.transform, "", 12f',
+     'UIFactory.CreatePanel("PcShardPack", hdrRow.transform, C_DANGER); ((System.Action)(() => { }))(); var unused = ("", 12f',
+     'UIFactory.CreateButton("PcShardPack", hdrRow.transform, "" /* labelled by RefreshShardPackButton */, 12f',
+     "PcShardPack is not a CreateButton wired to OnShardPackClick"),
+    ("M25g", gate_g6_click_guards, "ui",
+     "            if (!ClickGuard.Claim(t.root)) return;\n",
+     "",
+     "            if (!ClickGuard.Claim(t.root)) return;   // claimed first\n",
+     "a tile click is no longer claimed"),
+    ("M25h", gate_g7_the_last_copy_is_a_confirmation, "ui",
+     "            SendShard(id, shown.pack_id, ids, shown.pack_id);",
+     "            if (OnlyCopyNote(batch, col).Length > 0) return;\n            SendShard(id, shown.pack_id, ids, shown.pack_id);",
+     "            SendShard(id, shown.pack_id, ids, shown.pack_id);  ",
+     "the only-copy note gates something besides the question"),
+    ("M25i", gate_g8_the_toast_names_the_credited_total, "ui",
+     'int total = ApiClient.PcInt(ApiClient.PcTopLevel(resp, "shards_gained"));',
+     "int total = ShardTotal(sent.ConvertAll(x => (ApiClient.PcPrint)null), sent);",
+     'int total = ApiClient.PcInt(ApiClient.PcTopLevel(resp, "shards_gained")); ',
+     "the toast no longer reads the credited total from the server's answer"),
+    ("M25j", gate_g9_every_new_string_is_in_every_catalogue, "cats",
+     '            ["Shard pack (+{0})"] = "Paket till sk\\u00e4rvor (+{0})",\n',
+     "",
+     '            ["Shard pack (+{0})"] = "Paket till sk\\u00e4rvor  (+{0})",\n',
+     "SV lacks 'Shard pack (+{0})'"),
+    ("M25k", gate_g9_every_new_string_is_in_every_catalogue, "cats",
+     '            ["Sure? +{0} shards"] = "S\\u00e4ker? +{0} sk\\u00e4rvor",\n',
+     '            ["Sure? +{0} shards"] = "S\\u00e4ker? sk\\u00e4rvor",\n',
+     '            ["Sure? +{0} shards"] = "S\\u00e4ker?  +{0} sk\\u00e4rvor",\n',
+     "SV changes the placeholders of 'Sure? +{0} shards'"),
 ]
 
 

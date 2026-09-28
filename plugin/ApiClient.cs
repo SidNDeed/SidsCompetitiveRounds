@@ -4348,6 +4348,77 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>The most prints one batch shard may name: the server's
+        /// PC_DISCARD_BATCH_CAP (player_cards.py), pinned equal by
+        /// test_pc_shard_client. A request past it is refused whole (422
+        /// too_many), so the client never builds one.</summary>
+        public const int PC_DISCARD_BATCH_CAP = 40;
+
+        /// <summary>The batch shard (board row 25): up to PC_DISCARD_BATCH_CAP of
+        /// the caller's prints discarded in ONE server transaction, all or none.
+        /// Signed over pcdiscardn:{steam}:{key}:{the ids as the body lists them};
+        /// the key is the pack id for a pack shard and a nonce for a binder
+        /// selection. The same key with the same prints is answered the stored
+        /// total and credits nothing, so a caller keeps its key until an answer
+        /// arrives and a retry can never pay twice. The key and the ids are
+        /// written into the JSON body as they are, so both must be plain tokens
+        /// ([A-Za-z0-9-], at most 64): anything else is refused here, unsent.
+        /// The balance in the answer is written into the cache before the
+        /// callback runs, as the single discard does.</summary>
+        public static void PcDiscardBatch(string steamId, string key, IList<string> printIds, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null || !PcPlainToken(key) || printIds == null || printIds.Count == 0
+                || printIds.Count > PC_DISCARD_BATCH_CAP)
+            { callback?.Invoke(false, "not ready"); return; }
+            var body = new StringBuilder();
+            body.Append("{\"key\":\"").Append(key).Append("\",\"print_ids\":[");
+            for (int i = 0; i < printIds.Count; i++)
+            {
+                if (!PcPlainToken(printIds[i])) { callback?.Invoke(false, "not ready"); return; }
+                if (i > 0) body.Append(',');
+                body.Append('"').Append(printIds[i]).Append('"');
+            }
+            body.Append("]}");
+            string joined = string.Join(",", printIds);
+            string url = PcUrl("prints/discard-batch", steamId, $"pcdiscardn:{steamId}:{key}:{joined}", null);
+            int epoch = _pcCacheEpoch;
+            int count = printIds.Count;
+            Plugin.Instance.StartCoroutine(PostRequest(url, body.ToString(), (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] discard-batch key={key} prints={count} ok={ok} resp={PcShort(resp)}");
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                {
+                    string sh = PcTopLevel(resp, "shards");
+                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard-batch callback threw: {cex.Message}"); }
+            }));
+        }
+
+        private static bool PcPlainToken(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > 64) return false;
+            foreach (char c in s)
+                if (!(c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
+            return true;
+        }
+
+        /// <summary>(print id, shards it paid) for every print a batch shard
+        /// answer lists under "results" -- the depth-aware readers, never a
+        /// JsonUtility parse of the nested array. Empty for anything else.</summary>
+        internal static List<KeyValuePair<string, int>> PcBatchResults(string resp)
+        {
+            var list = new List<KeyValuePair<string, int>>();
+            string arr = PcTopLevel(resp, "results");
+            if (string.IsNullOrEmpty(arr) || arr == "null") return list;
+            foreach (var o in SliceTopLevelObjects(arr))
+            {
+                string id = PcStr(PcTopLevel(o, "print_id"));
+                if (!string.IsNullOrEmpty(id)) list.Add(new KeyValuePair<string, int>(id, PcInt(PcTopLevel(o, "shards_gained"))));
+            }
+            return list;
+        }
+
         /// <summary>The Settings tab's full card (board row 24): the caller's
         /// OWN card as the pool sees it now -- frame, rarity, name, rank title,
         /// rating, record and picture -- one 750x1050 PNG drawn by the server

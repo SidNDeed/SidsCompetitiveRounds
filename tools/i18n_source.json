@@ -800,9 +800,12 @@
   "Click Discard again to discard that card for shards",
   "Click Dupes again to discard every other copy of that card",
   "Click MAIN MENU again to leave the match.",
+  "Click Shard pack again to shard {0} cards for {1} shards",
+  "Click Shard selected again to shard {0} cards for {1} shards",
   "Click a card to view it",
   "Click a player",
   "Click again to forfeit",
+  "Click cards to select them for shards",
   "Clock:",
   "Close",
   "Clown",
@@ -987,7 +990,7 @@
   "Discard this draft?",
   "Discarded {0} card(s) for {1} shards",
   "Discarded {0} card(s) for {1} shards; then: {2}",
-  "Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.",
+  "Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discard takes one card and the Dupes button every other copy of that exact card; Shard pack (on a pack you opened) and Select (in the binder) shard up to 40 cards in one go.",
   "Disco Fever",
   "Discord",
   "Discord Link",
@@ -1458,6 +1461,7 @@
   "Loading recent series...",
   "Loading shop sales...",
   "Loading the reviewed cosmetic...",
+  "Loading your binder - try again in a moment",
   "Loading your binder...",
   "Loading your card...",
   "Loading your dances - try E again in a second.",
@@ -1694,6 +1698,7 @@
   "One copy, full flight, bars on a log scale. The mod pins every eligible Grow bullet to the same 120 FPS growth clock: about x3.1.",
   "One free pack a day (resets at midnight UTC) - also /daily in Discord",
   "One of the recipients could not be found.",
+  "One of those cards is no longer in your collection - nothing was sharded; your binder has been refreshed",
   "One solo player faces a duo in a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- This is a consent queue with no Elo band and no ready-up.\n- The server assigns one solo and two duo players.\n- Solo Extra Initial Pick is optional: the solo draws\n  2 cards on the opening pick. In the random queue any\n  player's opt-in turns it on; in a hosted lobby the\n  host's setting decides.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first side to win 2 games wins the series.\n- 1v2 is an UNRANKED beta. No rating is applied yet.\n- Games are recorded and will count when ranked play launches.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Base XP is 500 per game, x1.5 on a win - then a\n  difficulty multiplier scales it, capped at x4\n  (the win bonus sits on top of the cap):\n  the solo earns x1.5 (and x1.20 more when the extra\n  pick is off), a duo facing a buffed solo earns x1.10,\n  and the opponents' rating tier multiplies up to x3.\n  Facing a top-3 1v2 player adds x1.35, win or lose.\n- Series end: 40 base Gold per winner, 20 per loser,\n  scaled by the opponents' rating tier.\n- Game XP converts to Gold at 100 XP = 1 Gold, and\n  level-ups pay their usual bonus Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n- The tab has separate Solo and Duo boards.\n- You appear only on boards for roles you have played.\n<color=#7FD4FF>Rank</color> - Activity order: wins, then WR, then games.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>W-L</color> - Games won and lost in that role only.\n<color=#7FD4FF>WR</color> - Win rate for games in that role.\n- These are activity boards. They are not sorted by Gold.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving while locked with no games played cancels the\n  series; a leave mid-game leaves the result to the\n  normal match report. The beta has no leave counter.",
   "Online",
   "Only the host can change lobby settings.",
@@ -2106,11 +2111,14 @@
   "Seasonal Spring",
   "Seats full",
   "Secure connection unavailable - signed-in features are disabled this session.",
+  "Select",
   "Select 2-12 players (left) to see who beats each of them most.",
   "Select 2-12 players to find their common nemesis.",
+  "Select cards first - click the cards you want to shard",
   "Select players (left) to chart {0}.",
   "Select players (left) to compare {0}.",
   "Select up to 12 players",
+  "Selected",
   "Selected {0}/{1}  -  click a card to add/remove",
   "Selected {0}/{1}  -  click a player to add/remove",
   "Self-Death %",
@@ -2157,6 +2165,10 @@
   "Settings",
   "Severity:",
   "Shades for those who want to show that they are the true genius of the battlefield",
+  "Shard pack (+{0})",
+  "Shard pack is not available on this server yet - discard one card at a time for now",
+  "Shard selected ({0})",
+  "Sharded {0} cards for {1} shards",
   "Shark",
   "Shark God",
   "Shark Pup",
@@ -2292,6 +2304,7 @@
   "Stock",
   "Stop",
   "Stop Avoiding in Ranked",
+  "Stop selecting",
   "Stop spectating first (Esc).",
   "Stop spectating?",
   "Stopped searching",
@@ -2307,6 +2320,7 @@
   "Sunburst Halo",
   "Sunset",
   "Sunset Gradient",
+  "Sure? +{0} shards",
   "Sure? Discard",
   "Sure? Discard dupes",
   "Sustained Power",
@@ -2371,6 +2385,7 @@
   "That pack purchase never went through - nothing was charged",
   "That pack was voided - the series it came from was reversed",
   "That player could not be found.",
+  "That shard was already done with other cards - your binder has been refreshed",
   "That {0} lobby is private — enter its password.",
   "That's you - pick someone else.",
   "The Bounce",
@@ -2695,6 +2710,7 @@
   "You",
   "You are muted - mail is unavailable while the mute lasts.",
   "You are not in the card pool yet, so there is no card to show - this is your picture.",
+  "You can shard up to {0} cards at once",
   "You can't kick yourself.",
   "You cannot block yourself.",
   "You don't own any dances yet - check the Shop's DANCES section!",
@@ -2889,6 +2905,7 @@
   "same-card",
   "series created",
   "series ends",
+  "sharding...",
   "short-match farming pattern",
   "showing the newest {0} games of this sitting",
   "showing the newest {0} games of this sitting ({1} not shown)",
@@ -2902,6 +2919,7 @@
   "the mod?",
   "the one automatic penalty",
   "the styled name - minus glow and typeface",
+  "this is your only copy of {0}",
   "title",
   "touch wall while holding into it",
   "tracks the whole game",
@@ -6999,6 +7017,16 @@
    "location": "OnGatedClick",
    "kind": "Tr"
   },
+  "Click Shard pack again to shard {0} cards for {1} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "OnShardPackClick",
+   "kind": "TrF"
+  },
+  "Click Shard selected again to shard {0} cards for {1} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "OnShardSelectedClick",
+   "kind": "TrF"
+  },
   "Click a card to view it": {
    "surface": "PlayerCardsUI",
    "location": "BuildBinderView",
@@ -7013,6 +7041,11 @@
    "surface": "NativeUI",
    "location": "OnForfeitClicked",
    "kind": "SetText"
+  },
+  "Click cards to select them for shards": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSelectRow",
+   "kind": "Tr"
   },
   "Clock:": {
    "surface": "NativeUI",
@@ -7934,7 +7967,7 @@
    "location": "FinishDiscard",
    "kind": "TrF"
   },
-  "Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.": {
+  "Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discard takes one card and the Dupes button every other copy of that exact card; Shard pack (on a pack you opened) and Select (in the binder) shard up to 40 cards in one go.": {
    "surface": "PlayerCardsUI",
    "location": "RefreshInfo",
    "kind": "Tr"
@@ -10289,6 +10322,11 @@
    "location": "StartCosmeticPlacementAdjustment",
    "kind": "ShowNotification"
   },
+  "Loading your binder - try again in a moment": {
+   "surface": "PlayerCardsUI",
+   "location": "OnShardPackClick, OnShardSelectedClick",
+   "kind": "Tr"
+  },
   "Loading your binder...": {
    "surface": "PlayerCardsUI",
    "location": "RefreshBinder",
@@ -11467,6 +11505,11 @@
   "One of the recipients could not be found.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "One of those cards is no longer in your collection - nothing was sharded; your binder has been refreshed": {
+   "surface": "PlayerCardsUI",
+   "location": "FailShard",
    "kind": "Tr"
   },
   "One solo player faces a duo in a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- This is a consent queue with no Elo band and no ready-up.\n- The server assigns one solo and two duo players.\n- Solo Extra Initial Pick is optional: the solo draws\n  2 cards on the opening pick. In the random queue any\n  player's opt-in turns it on; in a hosted lobby the\n  host's setting decides.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first side to win 2 games wins the series.\n- 1v2 is an UNRANKED beta. No rating is applied yet.\n- Games are recorded and will count when ranked play launches.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Base XP is 500 per game, x1.5 on a win - then a\n  difficulty multiplier scales it, capped at x4\n  (the win bonus sits on top of the cap):\n  the solo earns x1.5 (and x1.20 more when the extra\n  pick is off), a duo facing a buffed solo earns x1.10,\n  and the opponents' rating tier multiplies up to x3.\n  Facing a top-3 1v2 player adds x1.35, win or lose.\n- Series end: 40 base Gold per winner, 20 per loser,\n  scaled by the opponents' rating tier.\n- Game XP converts to Gold at 100 XP = 1 Gold, and\n  level-ups pay their usual bonus Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n- The tab has separate Solo and Duo boards.\n- You appear only on boards for roles you have played.\n<color=#7FD4FF>Rank</color> - Activity order: wins, then WR, then games.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>W-L</color> - Games won and lost in that role only.\n<color=#7FD4FF>WR</color> - Win rate for games in that role.\n- These are activity boards. They are not sorted by Gold.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving while locked with no games played cancels the\n  series; a leave mid-game leaves the result to the\n  normal match report. The beta has no leave counter.": {
@@ -13529,6 +13572,11 @@
    "location": "PostSteamAuth",
    "kind": "Tr"
   },
+  "Select": {
+   "surface": "PlayerCardsUI",
+   "location": "BuildBinderView, RefreshSelectRow",
+   "kind": "CreateButton, Tr"
+  },
   "Select 2-12 players (left) to see who beats each of them most.": {
    "surface": "NativeUI",
    "location": "BuildComparePlayerNemesisPanel",
@@ -13537,6 +13585,11 @@
   "Select 2-12 players to find their common nemesis.": {
    "surface": "NativeUI",
    "location": "BuildCompareNemesisPanel",
+   "kind": "Tr"
+  },
+  "Select cards first - click the cards you want to shard": {
+   "surface": "PlayerCardsUI",
+   "location": "OnShardSelectedClick",
    "kind": "Tr"
   },
   "Select players (left) to chart {0}.": {
@@ -13553,6 +13606,11 @@
    "surface": "NativeUI",
    "location": "BuildCompareTab",
    "kind": "CreateText"
+  },
+  "Selected": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "Tr"
   },
   "Selected {0}/{1}  -  click a card to add/remove": {
    "surface": "NativeUI",
@@ -13783,6 +13841,26 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Shard pack (+{0})": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshShardPackButton",
+   "kind": "TrF"
+  },
+  "Shard pack is not available on this server yet - discard one card at a time for now": {
+   "surface": "PlayerCardsUI",
+   "location": "FailShard",
+   "kind": "Tr"
+  },
+  "Shard selected ({0})": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSelectRow",
+   "kind": "TrF"
+  },
+  "Sharded {0} cards for {1} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "FinishShard",
+   "kind": "TrF"
   },
   "Shark": {
    "surface": "shop catalog",
@@ -14459,6 +14537,11 @@
    "location": "RefreshLeaderboard",
    "kind": "SetText"
   },
+  "Stop selecting": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSelectRow",
+   "kind": "Tr"
+  },
   "Stop spectating first (Esc).": {
    "surface": "ApiClient",
    "location": "SpectatorBlocksQueue",
@@ -14533,6 +14616,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Sure? +{0} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSelectRow, RefreshShardPackButton",
+   "kind": "TrF"
   },
   "Sure? Discard": {
    "surface": "PlayerCardsUI",
@@ -14852,6 +14940,11 @@
   "That player could not be found.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "That shard was already done with other cards - your binder has been refreshed": {
+   "surface": "PlayerCardsUI",
+   "location": "FailShard",
    "kind": "Tr"
   },
   "That {0} lobby is private — enter its password.": {
@@ -16474,6 +16567,11 @@
    "location": "SettingsCardView",
    "kind": "Tr"
   },
+  "You can shard up to {0} cards at once": {
+   "surface": "PlayerCardsUI",
+   "location": "FailShard, OnShardPackClick, OnShardSelectedClick +1",
+   "kind": "TrF"
+  },
   "You can't kick yourself.": {
    "surface": "ApiClient",
    "location": "KickRefusalText",
@@ -17444,6 +17542,11 @@
    "location": "BuildBetWindow",
    "kind": "Tr"
   },
+  "sharding...": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshBinder, RefreshSelectRow, RefreshShardPackButton",
+   "kind": "Tr"
+  },
   "short-match farming pattern": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
@@ -17508,6 +17611,11 @@
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
    "kind": "Tr"
+  },
+  "this is your only copy of {0}": {
+   "surface": "PlayerCardsUI",
+   "location": "OnDiscardClick, OnlyCopyNote",
+   "kind": "TrF"
   },
   "title": {
    "surface": "NativeUI",
