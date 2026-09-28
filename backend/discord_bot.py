@@ -8799,16 +8799,16 @@ async def cmd_pc_daily(ctx):
     elif status == 404 and d.get("error") == "not_linked":
         await ctx.send(_pc_not_linked(ctx, ctx.author)); return
     elif status == 409 and d.get("error") == "already_claimed":
-        await ctx.send(f"🎴 Already claimed today — the next pack unlocks {_pc_when(d.get('next_reset_utc'))}."
+        await ctx.send(f"Already claimed today - the next pack unlocks {_pc_when(d.get('next_reset_utc'))}."
                        " `/pack` shows your latest pack.")
         return
     else:
-        await ctx.send("❌ Couldn't claim today's pack right now — try again in a moment."); return
+        await ctx.send("Couldn't claim today's pack right now - try again in a moment."); return
     if not pack_id:
-        await ctx.send("🎴 Today's pack is claimed but could not be opened right now - `/daily` again opens it.")
+        await ctx.send("Today's pack is claimed but could not be opened right now - `/daily` again opens it.")
         return
     await _pc_open_and_show(ctx, {"pack_id": str(pack_id)},
-                            f"🎴 **Today's pack** (the next one unlocks {_pc_when(reset)})")
+                            f"**Today's pack** (the next one unlocks {_pc_when(reset)})")
 
 
 _PC_OPEN_TIMEOUT_S = 20.0   # the open rolls, mints and pre-renders: the api's own work, not a picture read
@@ -8839,31 +8839,31 @@ def _pc_open_refusal(ctx, status, body, bought=False):
     if status == 402 and err in ("insufficient_gold", "insufficient_shards"):
         what = "gold" if err == "insufficient_gold" else "shards"
         cost = f" - a pack costs {price} {what}" if isinstance(price, int) and not isinstance(price, bool) else ""
-        return f"❌ Not enough {what}{cost}. Nothing was charged."
+        return f"Not enough {what}{cost}. Nothing was charged."
     if status == 409 and err == "daily_cap":
         cap = d.get("cap")
-        return (f"❌ Today's limit of bought packs is {cap} - it resets at 00:00 UTC."
+        return (f"Today's limit of bought packs is {cap} - it resets at 00:00 UTC."
                 if isinstance(cap, int) and not isinstance(cap, bool) else
-                "❌ Today's limit of bought packs is reached - it resets at 00:00 UTC.")
+                "Today's limit of bought packs is reached - it resets at 00:00 UTC.")
     if status == 409 and d.get("status") == "rejected":
-        return "❌ No cards could be dealt right now, so the pack was not bought and nothing was charged."
+        return "No cards could be dealt right now, so the pack was not bought and nothing was charged."
     if status == 404 and err == "not_linked":
         return _pc_not_linked(ctx, ctx.author)
     if status == 403 and err == "banned":
-        return "❌ Player Cards are closed to this account."
+        return "Player Cards are closed to this account."
     if status == 409 and err == "in_progress":
-        return "🎴 That pack is being opened right now - `/pack` shows it in a moment."
+        return "That pack is being opened right now - `/pack` shows it in a moment."
     if status == 409 and d.get("status") == "unopened":
-        return "❌ No cards could be dealt right now - the pack stays yours, unopened; `/daily` tries again."
+        return "No cards could be dealt right now - the pack stays yours, unopened; `/daily` tries again."
     if status == 503:
-        return "❌ Card pictures cannot be drawn on the server right now, so nothing was opened - try again later."
+        return "Card pictures cannot be drawn on the server right now, so nothing was opened - try again later."
     if status == 0 and bought:
-        return ("❌ The card service did not answer - if the pack was bought, `/pack` shows it;"
+        return ("The card service did not answer - if the pack was bought, `/pack` shows it;"
                 " look there before buying again.")
     if status == 0:
-        return ("❌ The card service did not answer - `/daily` again opens today's pack,"
+        return ("The card service did not answer - `/daily` again opens today's pack,"
                 " or `/pack` shows it if it opened.")
-    return "❌ Couldn't open the pack right now - try again in a moment."
+    return "Couldn't open the pack right now - try again in a moment."
 
 
 async def _pc_open_and_show(ctx, key, head):
@@ -8895,13 +8895,13 @@ async def cmd_pc_buypack(ctx, pay: Literal["gold", "shards"] = "gold"):
     await _maybe_defer(ctx)
     me = str(ctx.author.id)
     if pay not in ("gold", "shards"):
-        await ctx.send("❌ Pay with `gold` or `shards`."); return
+        await ctx.send("Pay with `gold` or `shards`."); return
     if me in _pc_buying:
         await ctx.send("One moment - your last purchase is still going through."); return
     _pc_buying.add(me)
     try:
         await _pc_open_and_show(ctx, {"nonce": secrets.token_hex(16), "pay": pay},
-                                lambda body: f"🎴 **Pack bought for {body.get('price')} {body.get('pay') or pay}**")
+                                lambda body: f"**Pack bought for {body.get('price')} {body.get('pay') or pay}**")
     finally:
         _pc_buying.discard(me)
 
@@ -9483,7 +9483,7 @@ async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral
                                 {"discord_id": me}, render, ephemeral)
 
 
-_PC_OPENED_UNSHOWN = "🎴 Your pack is open - it could not be shown right now; `/pack` shows it."
+_PC_OPENED_UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it."
 
 
 async def _pc_reveal_opened(ctx, pack_id, head):
