@@ -195,18 +195,18 @@ namespace CompetitiveRounds
                   Num("null", -1f).ToString(INV) + "," + Num(@"""5""", -1f).ToString(INV) + "," + Num("2.5", 0f).ToString(INV));
         }
 
-        // -- board row 30b: the page's search fields under the report -------------
+        // -- board row 30b: the page's own IMGUI under the report -----------------
 
         private static void OverlayCases(SelfTestResult r)
         {
-            bool open = SearchFieldMayDraw(true, true, true);
+            bool open = PageElementMayDraw(true, true, true);
             Check(r, "overlay: an open report stands a search field down", !open, "report open -> " + open);
-            bool shown = SearchFieldMayDraw(true, true, false);
+            bool shown = PageElementMayDraw(true, true, false);
             Check(r, "overlay (control): report closed, page open, field on its surface -> it draws", shown,
                   "report closed -> " + shown);
-            bool off = SearchFieldMayDraw(true, false, false);
+            bool off = PageElementMayDraw(true, false, false);
             Check(r, "overlay: a field off its surface stays down", !off, "off its surface -> " + off);
-            bool shut = SearchFieldMayDraw(false, true, false);
+            bool shut = PageElementMayDraw(false, true, false);
             Check(r, "overlay: the page closed keeps a field down", !shut, "page closed -> " + shut);
         }
 

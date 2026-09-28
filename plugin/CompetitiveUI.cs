@@ -437,9 +437,12 @@ namespace CompetitiveRounds
                 DrawFpsHoverGraph();
                 // Sept 6 item c: above the F5 hover popups. The search fields below
                 // are painted AFTER it (IMGUI stacks by call order), so since board
-                // row 30b each of them - and the picker's field and the admin player
-                // search further down - stands down while the report is open: no
-                // paint, no input, focus flag false (SessionReportRules.SearchFieldMayDraw).
+                // row 30b each of them - and the picker's field, the admin player
+                // search and the ranked callout further down - stands down while the
+                // report is open: no paint, no input, focus flag false
+                // (SessionReportRules.PageElementMayDraw). The rest drawn after it
+                // is a modal, a toast or an alert strip meant to sit on top; that
+                // census is ON_TOP in test_session_report_overlay_guard.py.
                 SessionReportView.Draw();
                 DrawCompareSearch();
                 DrawLeaderboardSearch();
@@ -507,14 +510,16 @@ namespace CompetitiveRounds
         /// label-only). IMGUI so it has ZERO layout footprint; anchor rect
         /// read LIVE per draw (#143); display-only, raycast-free by nature.
         /// Geometry and font scale with the uGUI canvas's width-match factor
-        /// (r2 nit: fixed pixels read ~half-size on ultrawide).</summary>
+        /// (r2 nit: fixed pixels read ~half-size on ultrawide). It stands down
+        /// while the session report is open (board row 30b): drawn after the
+        /// report, it painted over it.</summary>
         private static GUIStyle rankedHintStyle;
         private static void DrawRankedHintCallout()
         {
             try
             {
                 if (Event.current == null || Event.current.type != EventType.Repaint) return;
-                if (!NativeUI.IsOpen || !NativeUI.RankedHintActive) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.RankedHintActive, SessionReportView.Active)) return;
                 var anchor = NativeUI.GetRankedHintAnchorRect();
                 if (anchor.width < 1f) return;
                 float k = Mathf.Clamp(Screen.width / 1920f, 1f, 2f);
@@ -1966,7 +1971,7 @@ namespace CompetitiveRounds
             compareSearchFocused = false;
             try
             {
-                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 9, SessionReportView.Active)) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 9, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetCompareSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2023,7 +2028,7 @@ namespace CompetitiveRounds
             pickerSearchFocused = false;
             try
             {
-                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.PickerOpen, SessionReportView.Active)) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.PickerOpen, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetPickerSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (pickerSearchStyle == null)
@@ -2055,7 +2060,7 @@ namespace CompetitiveRounds
             lbSearchFocused = false;
             try
             {
-                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 1, SessionReportView.Active)) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 1, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetLbSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2090,7 +2095,7 @@ namespace CompetitiveRounds
             cardStatsSearchFocused = false;
             try
             {
-                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 2, SessionReportView.Active)) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 2, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetCardStatsSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2127,7 +2132,7 @@ namespace CompetitiveRounds
             infoSearchFocused = false;
             try
             {
-                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 15, SessionReportView.Active)) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 15, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetInfoSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2167,7 +2172,7 @@ namespace CompetitiveRounds
             histSearchFocused = false;
             try
             {
-                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 0, SessionReportView.Active)) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 0, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetHistorySearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -4784,7 +4789,7 @@ namespace CompetitiveRounds
             if (!NativeUI.IsOpen) { playerSearchOpen = false; playerSearchOnPick = null; return; }
             // Board row 30b: under an open session report the search modal stands
             // down (it stays open and comes back when the report closes).
-            if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, playerSearchOpen, SessionReportView.Active)) return;
+            if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, playerSearchOpen, SessionReportView.Active)) return;
             var ev = Event.current;
             bool cancel = false;
             if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { cancel = true; ev.Use(); }

@@ -308,8 +308,9 @@ def test_the_session_report_parse_has_a_case_per_kind(harness_run, name):
     "overlay: the page closed keeps a field down",
 ])
 def test_the_search_fields_stand_down_under_the_report(harness_run, name):
-    """Board row 30b: SessionReportRules.SearchFieldMayDraw, executed; every
-    F5 search field asks it (test_session_report_overlay_guard.py)."""
+    """Board row 30b: SessionReportRules.PageElementMayDraw, executed; every
+    F5 search field and the ranked callout ask it
+    (test_session_report_overlay_guard.py)."""
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line
 
