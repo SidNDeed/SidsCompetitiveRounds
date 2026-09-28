@@ -5410,6 +5410,45 @@ def test_m1b_a_release_racing_the_start_closes_under_the_lock(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_m2b_a_refused_attest_after_a_keeps_the_expiry(monkeypatch):
+    """Round 3, M2 (N13 entry 7): a 409 that carries committed writes. A
+    lobby started short with seat 4 admissible; at A a member's attest whose
+    roster still lists seat 4 (all five fighters, the roster as it stood
+    before the expiry) runs the expiry in its own COMMIT and is then refused
+    409 roster_mismatch, because the live membership it is compared with no
+    longer holds seat 4. Read from a second session after the 409, the
+    expiry stays committed: seat 4 excluded and departed, its queue row and
+    lease gone, the expired line printed once; no spectate game is listed."""
+    async def body(env):
+        async def session_ok(request, steam_id, db):
+            return True
+        env.mp.setattr(main, "_strict_steam_session_ok", session_ok)
+        lob = await _short(env, 5)
+        room = (await env.lobby_row(lob))["photon_room_id"]
+        stale = sorted(lob.sids)
+        req = main.SpectateAttestBody(
+            steam_id=lob.sids[0], mode="ffa", room_name=room, region=lob.region, actor_number=1,
+            fighter_target=len(stale), room_capacity=5, spectator_protocol=main.SPECTATE_PROTOCOL,
+            phase="transition", roster=",".join(stale))
+
+        async def go():
+            async with env.sm() as db:
+                return await main.spectate_participant_attest(req, None, db=db)
+        await env.at(lob, 140.0)
+        assert (await env.seat(lob, 4))["verdict"] == "admissible", "M2b premise admissible"
+        a = await env._call(go)
+        assert a.status == 409 and a.body == "roster_mismatch", ("M2b refused", a)
+        seat, row = await env.seat(lob, 4), await env.lobby_row(lob)
+        listed = await env.conn.fetchval(
+            "SELECT count(*) FROM spectate_games WHERE room_name = $1", room)
+        line = "lobby %s admission expired slot=4 t=+140000" % str(lob.lid)[:8]
+        assert seat["verdict"] == "excluded" and list(row["departed_ids"] or []) == [lob.pids[4]] \
+            and await env.queue_row(lob, 4) is None and await env.lease(lob, 4) is None \
+            and len(env.asm_lines(line)) == 1 and listed == 0, \
+            ("M2b committed", seat["verdict"], row["departed_ids"], listed)
+    run_env(monkeypatch, body)
+
+
 _N12_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap", "same_card_rule",
              "is_ranked", "settings_known", "settings_changed_at", "password_hash",

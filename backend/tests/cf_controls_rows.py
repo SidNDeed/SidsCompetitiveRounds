@@ -2342,6 +2342,29 @@ row("M2", "test_m2_the_attest_runs_the_expiry_after_a", [
 ], T("members_as_a_set",
      E(MAIN, _M2_MEMBER, '    if pid is None or pid not in set(lob["member_ids"] or []):\n')))
 
+# -- Round 3, M2: a 409 roster_mismatch after A carries the committed expiry ----
+_M2B_ROSTER = ('            raise HTTPException(status_code=409, detail="roster_mismatch")\n'
+               '    await _assert_no_service_subject(db, affected_steam_ids=roster)\n')
+_M2B_COMMIT = ('    expired = await _ffa_expire_admissions(db, lob["id"], lock_rows=True)\n'
+               '    await db.commit()\n')
+_M2B_SHORT = '    if lob is None or lob["short_started_at"] is None:\n'
+row("M2b", "test_m2b_a_refused_attest_after_a_keeps_the_expiry", [
+    M("roster_before_expiry", "M2b refused",
+      E(MAIN, _M2_CALL, ""),
+      E(MAIN, _M2B_ROSTER, '            raise HTTPException(status_code=409, detail="roster_mismatch")\n'
+                           '    if req.mode == "ffa":\n'
+                           '        await _asm_attest_expiry(db, req.room_name, req.steam_id)\n'
+                           '    await _assert_no_service_subject(db, affected_steam_ids=roster)\n'),
+      note="the negative control, the order the brief forbids: the roster comparison runs "
+           "before the expiry, so the roster as it stood before the expiry (seat 4 still a "
+           "member) passes, and the attest is answered 200"),
+    M("expiry_inside_the_refusal", "M2b committed",
+      E(MAIN, _M2B_COMMIT, '    expired = await _ffa_expire_admissions(db, lob["id"], lock_rows=True)\n'),
+      note="the expiry without its own COMMIT: the 409 rolls it back, so the refusal "
+           "leaves no write"),
+], T("started_by_truth",
+     E(MAIN, _M2B_SHORT, '    if lob is None or not lob["short_started_at"]:\n')))
+
 _CLS_COPY = ('    "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap",\n'
              '             "same_card_rule", "is_ranked", "settings_known", "settings_changed_at",\n')
 _CLS_RESET_END = ('              "dissolve_after_ms", "present_at_dissolve", "absent_at_dissolve",\n'
