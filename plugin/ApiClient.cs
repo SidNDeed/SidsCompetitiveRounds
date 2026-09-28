@@ -2369,11 +2369,13 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>After a flip there may be no session yet: the backup refused
-        /// every ticket exchange (PostSteamAuth), and the portal mint accepts a
-        /// verified session only. SteamAuth mints on its own loop; this waits
-        /// for it, bounded, then mints either way (a refusal then shows the
-        /// existing sign-in message).</summary>
+        /// <summary>After a restore there may be no session yet: no ticket is
+        /// requested while the session is on the backup (SteamAuth.MaybeRefresh),
+        /// and the portal mint accepts a verified session only. SteamAuth
+        /// requests one on its own loop once the route returns; this waits for
+        /// it, bounded, then mints either way (a refusal then shows the
+        /// existing sign-in message). Used by the press that restores the
+        /// route and by every press after a restore.</summary>
         private static IEnumerator OpenPortalWhenSessionReady()
         {
             float until = Time.realtimeSinceStartup + PortalSessionWaitSeconds;
@@ -5680,7 +5682,8 @@ namespace CompetitiveRounds
         /// plaintext base URL: the token is a real credential. On the backup
         /// connection the press first checks the secure route (board row 27)
         /// and opens the portal in the same press when it answers; while a
-        /// check is already running the press waits for that one.</summary>
+        /// check is already running the press waits for that one. After a
+        /// restore the press waits for the first secure session.</summary>
         public static void OpenTranslatePortal()
         {
             string sid = MatchTracker.LocalSteamId;
@@ -5705,6 +5708,15 @@ namespace CompetitiveRounds
                 // No route: an explicit plaintext BaseUrl, for which no check
                 // runs, so the gate names the address instead of promising one.
                 CompetitiveUI.ShowNotification(SecureRouteText.PlaintextOverride(baseUrl), Color.yellow, 8f);
+                return;
+            }
+            if (route != null && route.Restored)
+            {
+                // Back from the backup: the first secure session may not have
+                // landed yet (SteamAuth requests one on its own loop once the
+                // route returns), so the press waits for it, bounded, as the
+                // press that restored the route does.
+                Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());
                 return;
             }
             MintPortalSessionAndOpen();
