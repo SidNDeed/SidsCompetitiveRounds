@@ -4444,7 +4444,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:46338 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:46363 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4510,7 +4510,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:46150 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:46175 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4580,7 +4580,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:46053 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:46078 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6934,6 +6934,27 @@ _RJ_TRIAGE_MARKER = 2
 _TICKET_REDACTION_MARKER = 1
 # Release-train verification plumbing, not a design mechanism: the Discord collection lane's one addition.
 _DISCORD_COLLECTION_MARKER = 1
+# JANITOR-SELFTEST, reported on /health as `janitor_selftest`: the verdict of
+# this api process's boot janitor SQL self-test (_run_janitor_query_selftest),
+# DERIVED from the report that run recorded (_janitor_selftest_report), never
+# written down (#342). 1 = it ran and every harvested statement passed its
+# check. 0 = it ran and did not pass (a statement failed its check or went
+# unverified, the database went away, or the self-test itself crashed), and
+# any status the map below does not name. 2 = skipped: the read replica,
+# whose lifespan branch records the skip before the box serves a request
+# because the janitor writers the self-test validates do not run there.
+# 3 = not finished: pending or running, from boot until the self-test ends.
+# The release train fails at once on a falsy word and waits on a truthy one
+# that is not the role's value, so "not finished" must not read 0. Read by
+# nothing but the train (#306). Both arms of the route carry it; a box on
+# the build before answers without the key.
+_JANITOR_SELFTEST_WORDS = {"ok": 1, "skipped": 2, "pending": 3, "running": 3}
+
+
+def _janitor_selftest_marker() -> int:
+    """/health `janitor_selftest`: the word for the verdict this process's
+    boot self-test recorded (see _JANITOR_SELFTEST_WORDS)."""
+    return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6956,6 +6977,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
+                              janitor_selftest=_janitor_selftest_marker(),
                               team_dc_fallback=team_dc_fallback)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
@@ -6965,6 +6987,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # team_dc_fallback needs the database, so this arm answers the last
         # probe on this worker (0 before the first, which the release train
         # reads as not proven); pc_trading answers its own cache-only form.
+        # janitor_selftest is the verdict this process's boot self-test
+        # recorded in memory, so it answers here unchanged.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
@@ -6976,6 +7000,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
+                              janitor_selftest=_janitor_selftest_marker(),
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
 
 

@@ -17,6 +17,11 @@ unchecked) with its first 80 characters, whitespace folded, and the
 function that issues it; `counts` keeps every older key and adds
 executed_rolled_back and unclassified.
 
+THE HEALTH WORD. /api/v1/health carries `janitor_selftest`, read from
+the report the self-test recorded (main._janitor_selftest_marker): 1 it
+ran and every statement passed, 0 it ran and did not pass (or a status
+the map does not name), 2 skipped (the read replica), 3 not finished.
+
 THE DATABASE. The live tests share ONE throwaway schema, built once per run
 of this module in the database JANITOR_SELFTEST_TEST_PG_DSN names (which must
 contain "janitor_selftest"), through ladder_pg_harness: every connection bound
@@ -38,15 +43,18 @@ JANITOR_SELFTEST_TEST_PG_OPTOUT=1 waives them deliberately (named skips). The
 pure tests run either way. There is no pytest-asyncio here: each test is a
 sync function that runs one coroutine.
 """
+import ast
 import asyncio
 import contextlib
 import glob
+import inspect
 import io
 import os
 import re
 import sys
 from types import SimpleNamespace
 
+import pydantic
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.dialects import postgresql
@@ -59,6 +67,7 @@ sys.path.insert(0, HERE)
 import database  # noqa: E402
 import main  # noqa: E402
 import models  # noqa: E402
+import schemas  # noqa: E402
 import ladder_pg_harness as harness  # noqa: E402
 
 try:
@@ -278,6 +287,57 @@ def test_a_statement_the_run_never_reached_reads_unchecked(monkeypatch):
     assert db.sent == ["SET LOCAL statement_timeout = '5s'", "EXPLAIN SELECT 1",
                        "SET LOCAL statement_timeout = '5s'",
                        "SET LOCAL lock_timeout = '2s'"], db.sent
+
+
+class _DownSession:
+    """A session whose server is gone: every statement raises."""
+
+    async def execute(self, *a, **k):
+        raise OSError("janitor_selftest: the database is down")
+
+    async def rollback(self):
+        pass
+
+
+@pytest.mark.parametrize("status, word", [
+    ("ok", 1), ("failed", 0), ("db_unreachable", 0), ("partial", 0), ("error", 0),
+    ("skipped", 2), ("pending", 3), ("running", 3), ("frobnicated", 0), (None, 0),
+])
+def test_the_health_word_is_the_recorded_verdict(monkeypatch, status, word):
+    """/health `janitor_selftest` for every status the self-test records --
+    running, then ok / failed / db_unreachable / partial / error; pending
+    before it starts; skipped on the read replica -- and for a status the map
+    does not name, or none: 0, never a pass."""
+    monkeypatch.setattr(main, "_janitor_selftest_report", {} if status is None else {"status": status})
+    assert main._janitor_selftest_marker() == word
+
+
+def test_both_health_arms_carry_the_word_and_the_schema_requires_it():
+    """Both arms of health_check pass janitor_selftest=_janitor_selftest_marker()
+    and nothing else in main.py passes the key; HealthResponse declares it an
+    int with no default, so an arm that left it out would raise rather than
+    drop the key. The standby's 2 rests on lifespan's replica branch recording
+    the status "skipped"."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    (health,) = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check"]
+    (tried,) = [n for n in ast.walk(health) if isinstance(n, ast.Try)]
+    connected = [ast.unparse(k.value) for s in tried.body for k in ast.walk(s)
+                 if isinstance(k, ast.keyword) and k.arg == "janitor_selftest"]
+    degraded = [ast.unparse(k.value) for h in tried.handlers for k in ast.walk(h)
+                if isinstance(k, ast.keyword) and k.arg == "janitor_selftest"]
+    assert (connected, degraded) == (["_janitor_selftest_marker()"], ["_janitor_selftest_marker()"])
+    everywhere = [k for k in ast.walk(tree) if isinstance(k, ast.keyword) and k.arg == "janitor_selftest"]
+    assert len(everywhere) == 2, len(everywhere)
+    field = schemas.HealthResponse.model_fields.get("janitor_selftest")
+    assert field is not None and field.annotation is int and field.is_required(), field
+    answer = _run(main.health_check(db=_DownSession())).model_dump()
+    assert answer["status"] == "degraded" and "janitor_selftest" in answer, answer
+    answer.pop("janitor_selftest")
+    with pytest.raises(pydantic.ValidationError):
+        schemas.HealthResponse(**answer)
+    assert '"status": "skipped"' in inspect.getsource(main.lifespan)
 
 
 # ------------------------------------------------------- the lane schema
@@ -719,3 +779,56 @@ def test_pg_the_full_self_test_is_green_with_the_trading_schema(lane, monkeypatc
         finally:
             await engine.dispose()
     assert _run(probe()) == "found"
+
+
+async def _health_payload(monkeypatch, schema, down=False):
+    """GET /api/v1/health through the real handler and response model, as a
+    worker serves it: the real get_db over the lane schema, or a session whose
+    server is gone (the degraded arm)."""
+    import httpx
+    from fastapi import FastAPI
+    assert main.get_db is database.get_db
+    engine = _engine(schema)
+    app = FastAPI()
+    app.add_api_route("/api/v1/health", main.health_check, methods=["GET"],
+                      response_model=schemas.HealthResponse)
+    if down:
+        async def gone():
+            yield _DownSession()
+        app.dependency_overrides[database.get_db] = gone
+    monkeypatch.setattr(database, "async_session", async_sessionmaker(engine, expire_on_commit=False))
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://janitor-selftest.test") as client:
+            r = await asyncio.wait_for(client.get("/api/v1/health"), 60)
+        assert r.status_code == 200, (r.status_code, r.text[:300])
+        return r.json()
+    finally:
+        await engine.dispose()
+
+
+def test_pg_the_health_word_reads_the_self_tests_verdict(lane, monkeypatch):
+    """/api/v1/health `janitor_selftest` through the real handler and response
+    model on the lane schema: the self-test run with its per-statement check
+    forced to fail reads 0; the key is in the payload; the same run with the
+    real check restored reads 1, on the degraded arm too (the word needs no
+    database)."""
+    inv = _live_inventory()
+    real = main._janitor_check_statement
+
+    async def forced(db, s):
+        return "failed", "janitor_selftest health control: the check forced to fail"
+    monkeypatch.setattr(main, "_janitor_check_statement", forced)
+    report, _log = _run(_selftest(monkeypatch, lane.schema, inv))
+    assert report["status"] == "failed", report["counts"]
+    assert report["counts"]["failed"] == len(inv["statements"]), report["counts"]
+    body = _run(_health_payload(monkeypatch, lane.schema))
+    assert (body["status"], body.get("janitor_selftest", "absent")) == ("ok", 0), body
+    monkeypatch.setattr(main, "_janitor_check_statement", real)
+    report, _log = _run(_selftest(monkeypatch, lane.schema, inv))
+    assert report["status"] == "ok", report["counts"]
+    body = _run(_health_payload(monkeypatch, lane.schema))
+    assert (body["status"], body.get("janitor_selftest", "absent")) == ("ok", 1), body
+    down = _run(_health_payload(monkeypatch, lane.schema, down=True))
+    assert (down["status"], down.get("janitor_selftest", "absent")) == ("degraded", 1), down
+    print("[janitor-selftest] /health janitor_selftest: forced to fail 0, restored 1, degraded arm 1")

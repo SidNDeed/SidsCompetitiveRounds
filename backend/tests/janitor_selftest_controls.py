@@ -48,6 +48,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 MAIN = "backend/api/main.py"
+SCHEMAS = "backend/api/schemas.py"
 T = "backend/tests/test_janitor_selftest_classes.py::"
 
 L1 = T + "test_pg_the_trading_janitors_set_local_is_executed_and_rolled_back"
@@ -64,6 +65,10 @@ P4 = T + "test_an_unclassified_statement_never_reaches_the_server"
 P5 = T + "test_an_executed_statement_is_rolled_back_before_it_passes"
 L8 = T + "test_pg_the_report_names_each_statements_outcome"
 P6 = T + "test_a_statement_the_run_never_reached_reads_unchecked"
+L9 = T + "test_pg_the_health_word_reads_the_self_tests_verdict"
+P7 = T + "test_the_health_word_is_the_recorded_verdict"
+P8 = T + "test_both_health_arms_carry_the_word_and_the_schema_requires_it"
+WORD_SITE = '    return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)\n'
 
 STMT_SITE = '        stmt = text("EXPLAIN " + s["sql"] if cls == "explain" else s["sql"])\n'
 ROLLBACK_SITE = ("        try:\n"
@@ -180,6 +185,40 @@ PLANTS = [
      "old": "                        n_unclassified += verdict == \"unclassified\"\n",
      "new": "                        n_unclassified += 0\n",
      "red": [L4, L8], "green": [L7]},
+    # The /health word (the addendum's commit).
+    {"name": "M15-health-word-is-a-constant",
+     "why": "the word no longer reads the recorded verdict: the self-test forced to fail "
+            "still reads 1 (the negative control)",
+     "file": MAIN, "old": WORD_SITE,
+     "new": "    return 1\n",
+     "red": [L9, P7], "green": [P8]},
+    {"name": "T3-inert-twin-at-the-word",
+     "why": "the same expression, parenthesised: nothing may redden",
+     "file": MAIN, "old": WORD_SITE,
+     "new": WORD_SITE.replace("return _JANITOR", "return (_JANITOR").replace(", 0)\n", ", 0))\n"),
+     "red": [], "green": [L9, P7, P8]},
+    {"name": "M16-word-dropped-from-the-connected-arm",
+     "why": "the connected arm no longer passes the word: its answer cannot be built",
+     "file": MAIN,
+     "old": ("                              janitor_selftest=_janitor_selftest_marker(),\n"
+             "                              team_dc_fallback=team_dc_fallback)\n"),
+     "new": "                              team_dc_fallback=team_dc_fallback)\n",
+     "red": [L9, P8], "green": [P7]},
+    {"name": "M17-schema-field-dropped",
+     "why": "HealthResponse no longer declares the word: the payload drops the key",
+     "file": SCHEMAS, "old": "    janitor_selftest: int\n", "new": "",
+     "red": [L9, P8], "green": [P7]},
+    {"name": "M18-not-finished-reads-0",
+     "why": "pending and running read 0: the train would fail at once in the seconds after boot",
+     "file": MAIN,
+     "old": '_JANITOR_SELFTEST_WORDS = {"ok": 1, "skipped": 2, "pending": 3, "running": 3}\n',
+     "new": '_JANITOR_SELFTEST_WORDS = {"ok": 1, "skipped": 2}\n',
+     "red": [P7], "green": [L9, P8]},
+    {"name": "M19-unknown-status-reads-1",
+     "why": "a status the map does not name reads as a pass, failed among them",
+     "file": MAIN, "old": WORD_SITE,
+     "new": WORD_SITE.replace(", 0)\n", ", 1)\n"),
+     "red": [L9, P7], "green": [P8]},
 ]
 
 
