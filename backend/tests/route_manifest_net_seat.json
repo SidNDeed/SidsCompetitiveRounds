@@ -1177,7 +1177,7 @@
           ],
           "main",
           "submit_team_match",
-          "02d7cb4a170bd1a7b645eae2e3dc3ea9c6cad9c1"
+          "d0546bf9cac49bd1f9176ffd0b43ab55d5193efe"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "32b67ab40c611227e276fa5307a1670622b729e5"
+          "727f143dcfad8ca26b81f2b5d532bd87e0f1075d"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -2299,7 +2299,7 @@
           ],
           "main",
           "ovt_lobby_resolve",
-          "6ec1c815a29e33dd793e88379f4797d7ebb5bd73"
+          "fc619732c5c8217fb5da0cfc8c737180a766bae6"
         ],
         [
           "/api/v1/ovt/lobby/settings",
@@ -2695,7 +2695,7 @@
           ],
           "main",
           "team_lobby_resolve",
-          "14e4f9c6e4106843740e0d43ab1d5f4a82a5dfce"
+          "dd2a93d6862f0b7aa0ecc22ac087ee3a8f0503b3"
         ],
         [
           "/api/v1/team/lobby/settings",
@@ -2776,7 +2776,7 @@
           ],
           "main",
           "team_queue_poll",
-          "06755b679d71594fbd7fb1f6b14a48bff588b791"
+          "bf837a61bf527fab7f03b2cad34bfb2f57004afb"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3401,7 +3401,7 @@
           ],
           "main",
           "team_series_first_game",
-          "b6476de5aa32711188324cab3716c454f1e416ac"
+          "4495765a87cd5c0e5dfab3e9554473f5a0880ac9"
         ]
       ]
     }
