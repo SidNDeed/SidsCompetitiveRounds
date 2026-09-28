@@ -47,6 +47,19 @@
                         partial class), so the shipped DLL carries no ladder
                         fixture.
 
+      SecureRouteRules.cs   board row 27: the secure-route checks behind the
+                        Translate portal button and the timer that retries
+                        while the session runs on the plaintext backup - the
+                        probe verdicts, the flip, the marks, the claim. Its
+                        cases live in the harness-only SecureRouteRulesSelfTest.cs
+                        with a fake transport and a fake clock.
+                        SecureRouteText.cs (every sentence a player reads on
+                        those paths) and I18nCatalogues.cs (the four shipped
+                        catalogues) compile against I18nHarnessStub.cs, a
+                        harness-only stand-in for plugin/I18n.cs, which reads
+                        Unity; so the sentences checked are the shipped ones,
+                        looked up in the shipped catalogues.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -75,6 +88,11 @@
     <Compile Include="../../plugin/BinderSortRules.cs" />
     <Compile Include="../../plugin/TitleLadderRules.cs" />
     <Compile Include="TitleLadderRulesSelfTest.cs" />
+    <Compile Include="../../plugin/SecureRouteRules.cs" />
+    <Compile Include="../../plugin/SecureRouteText.cs" />
+    <Compile Include="../../plugin/I18nCatalogues.cs" />
+    <Compile Include="SecureRouteRulesSelfTest.cs" />
+    <Compile Include="I18nHarnessStub.cs" />
   </ItemGroup>
 
 </Project>

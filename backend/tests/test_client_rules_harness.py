@@ -255,6 +255,56 @@ def test_the_ladder_shop_guarantees_each_have_a_case(harness_run, name):
         "the case printed no measurement: " + line)
 
 
+def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
+    """Board row 27: the secure-route checks behind the Translate portal
+    button and the timer that retries while the session runs on the plaintext
+    backup. SecureRouteRules decides; its cases live in the harness-only
+    SecureRouteRulesSelfTest.cs with a fake transport and a fake clock, and
+    the sentences come from the shipped SecureRouteText.cs, looked up in the
+    shipped catalogues."""
+    suites = _suites(harness_run)
+    assert "secureroute" in suites, "the SecureRouteRules suite did not report"
+    run, fail, verdict = suites["secureroute"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[secureroute\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 46 cases on the commit that added the suite; the floor is that count,
+    # not one far below it (#342). Raise it when cases are added.
+    assert run >= 46, "the SecureRouteRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # the portal button: on-demand check with a fake transport
+    "P1 on the backup a press begins ONE check of the secure address with the 8 s timeout",
+    "P2 the check answers: the session flips to the secure base and the portal opens in the same press",
+    "P3 control: the check times out: the session stays on the backup and the press reports it",
+    "P4 the failure toast names the host:port and the 8 s timeout, word for word",
+    "P6 no sentence tells the player to restart, and every hole is filled",
+    "P9 a second press while the check runs joins it and starts nothing",
+    # the timer with a fake clock
+    "T1 on the backup the timer checks at the 5-minute marks and at no other second",
+    "T2 control: a session that never left the secure base never checks",
+    "T3 a live check holds the timer past its mark: never a second check beside it",
+    "T3c control: once the check has answered, the mark alone decides",
+    "T5 the timer stops at the first answer and the session is back on the secure base",
+    "T6 off the backup no check of any trigger begins, and a press opens at once",
+    # the flip mid-flight
+    "F1 a request queued on the backup before the flip completes against the backup",
+    "F2 control: a request built after the flip goes to the secure base",
+    # every catalogue
+    "L-es every secure-route sentence is translated in the es catalogue, holes filled",
+    "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",
+    "L-uk every secure-route sentence is translated in the uk catalogue, holes filled",
+    "L-sv every secure-route sentence is translated in the sv catalogue, holes filled",
+])
+def test_the_secure_route_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "secureroute")
+    assert line.startswith("[secureroute] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
 def test_the_binder_order_is_total_under_every_mode_the_button_offers(harness_run):
     """The tail that makes the order total is reached from every branch, so a
     mode added later cannot quietly forget it.
@@ -603,7 +653,8 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "Main.cs" in included
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
-                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs"):
+                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
+                      "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -612,3 +663,11 @@ def test_the_harness_compiles_only_the_rule_files():
     plugin_proj = (REPO / "plugin" / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
     assert "TitleLadderRulesSelfTest" not in plugin_proj
     assert not (REPO / "plugin" / "TitleLadderRulesSelfTest.cs").exists()
+    # Board row 27: the secure-route cases and the I18n stand-in are the
+    # harness's own; the shipped catalogues compile here so the L cases read
+    # them, and neither harness file may exist under plugin/.
+    assert any(p.endswith("plugin/I18nCatalogues.cs") for p in included)
+    for harness_only in ("SecureRouteRulesSelfTest.cs", "I18nHarnessStub.cs"):
+        assert harness_only in included, "%s is not compiled into the harness" % harness_only
+        assert harness_only.replace(".cs", "") not in plugin_proj
+        assert not (REPO / "plugin" / harness_only).exists()
