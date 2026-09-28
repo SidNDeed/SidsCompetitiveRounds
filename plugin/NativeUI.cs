@@ -3695,11 +3695,14 @@ namespace CompetitiveRounds
             row.btnId=UIFactory.CreateButton("ID",header.transform,"ID",12f,C_DIM,C_BTN,
                 ()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(30,21));
             SetFfaLayoutWidth(row.btnId,30f,0f,30f);
-            // Sept 6 batch (Group 4 item c): one-game session report for this FFA
-            // match (FFA has no multi-game sets) -> ?match=. Reads the row's own
-            // binding at click time (#265).
+            // Sept 6 batch (Group 4 item c): the session report for this FFA game.
+            // Sept 28 (board row 30a): ?lobby= - every game of the game's lobby
+            // sitting (the caller's sitting in that lobby); a game alone in its
+            // lobby answers exactly the one-game ?match= envelope, so the row needs
+            // no lobby field it does not carry. Reads the row's own binding at
+            // click time (#265).
             row.btnSession=UIFactory.CreateButton("Ses",header.transform,I18n.Tr("Session"),12f,C_DIM,C_BTN,
-                ()=>OpenSessionReport("match",row.currentMatchId),sizeDelta:new Vector2(66,21));
+                ()=>OpenSessionReport("lobby",row.currentMatchId),sizeDelta:new Vector2(66,21));
             SetFfaLayoutWidth(row.btnSession,66f,0f,66f);
             row.btnSession.SetActive(false);
             row.root.SetActive(false);

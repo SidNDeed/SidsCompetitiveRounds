@@ -12962,64 +12962,36 @@ namespace CompetitiveRounds
         /// FindMatchingBracket is only safe when string values can't contain
         /// brackets; these arrays are mostly USER-CONTROLLED display names
         /// ("[TAG] Bob", ">:[") — learning #61 family.</summary>
+        // Sept 28 (board row 30a): the implementation moved to the Unity-free
+        // SessionReportRules so tools/client-rules-harness EXECUTES it; the one
+        // behaviour change is a null string, which answers -1 instead of throwing.
         internal static int FindMatchingBracketStringAware(string s, int openPos)
-        {
-            if (openPos < 0 || openPos >= s.Length) return -1;
-            int depth = 0; bool inStr = false;
-            for (int i = openPos; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (inStr)
-                {
-                    if (c == '\\') i++;
-                    else if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') { inStr = true; continue; }
-                if (c == '[') depth++;
-                else if (c == ']') { depth--; if (depth == 0) return i; }
-            }
-            return -1;
-        }
+            => SessionReportRules.MatchBracket(s, openPos);
 
         // Curly twin of the above (learning #156: any slice over a region that
         // can carry user-authored strings must be string-aware).
         // internal since Sept 6 item a: ProfileCard slices the H2H response's
         // nested `profile` / `modes` members with it (design v2 A-4).
         internal static int FindMatchingBraceStringAware(string s, int openPos)
-        {
-            if (openPos < 0 || openPos >= s.Length) return -1;
-            int depth = 0; bool inStr = false;
-            for (int i = openPos; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (inStr)
-                {
-                    if (c == '\\') i++;
-                    else if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') { inStr = true; continue; }
-                if (c == '{') depth++;
-                else if (c == '}') { depth--; if (depth == 0) return i; }
-            }
-            return -1;
-        }
+            => SessionReportRules.MatchBrace(s, openPos);
 
         /// <summary>Sept 6 batch (Group 4 item c): GET /api/v1/report — the session
-        /// report envelope for ONE set. `selector` is series / match / session and
-        /// `key` the UUID the history row carries. Strict Steam session endpoint
+        /// report envelope for ONE set. `selector` is series / match / session /
+        /// sitting / lobby and `key` the UUID the history row carries (Sept 28,
+        /// board row 30a: `sitting` resolves its anchor's mode server-side and
+        /// `lobby` is an FFA game's lobby sitting). Strict Steam session endpoint
         /// (no token -> the same early-out the other strict callers use, so the
         /// view can say why); participant-only server side (a non-participant
         /// gets the same 404 as a missing set). Read-only. Parsing lives in
-        /// SessionReportModel.Parse — the raw text is handed to the callback.</summary>
+        /// SessionReportRules.Parse — the raw text is handed to the callback.</summary>
         public static void FetchSessionReport(string selector, string key, Action<bool, string> callback)
         {
             if (callback == null) return;
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { callback(false, "no-identity"); return; }
             if (string.IsNullOrEmpty(SteamAuth.SessionToken)) { callback(false, "session_required"); return; }   // strict-session endpoint
-            if (selector != "series" && selector != "match" && selector != "session" && selector != "sitting") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>
+            if (selector != "series" && selector != "match" && selector != "session" && selector != "sitting"
+                && selector != "lobby") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>; Sept 28 (row 30a): ?lobby=<ffa match uuid>
             Guid parsed;
             if (!Guid.TryParse(key ?? "", out parsed)) { callback(false, "bad-key"); return; }
             string url = $"{baseUrl}/api/v1/report?steam_id={Uri.EscapeDataString(sid)}&{selector}={parsed.ToString("D")}";

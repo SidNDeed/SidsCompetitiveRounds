@@ -1399,8 +1399,10 @@ def test_dividers_and_diagnostics_are_translated():
     assert "I18n.TrF(" in team
     ffa = _cs_body(model, "private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)")
     assert "I18n.TrF(" in ffa
-    # rolled picks: parsed, and kept out of the build list
-    parse = _cs_body(model, "private static Game ParseGame(string obj)")
+    # rolled picks: parsed (the parser lives in the Unity-free rules file since
+    # board row 30a, where the client harness executes it), and kept out of
+    # the build list
+    parse = _cs_body(PLUGIN / "SessionReportRules.cs", "private static Game ParseGame(string obj)")
     assert '"rolled"' in parse and "pk.Rolled" in parse
     assert "Rolled" in build and "GamesOmitted" in build
     view = PLUGIN / "SessionReportView.cs"

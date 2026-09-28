@@ -111,7 +111,7 @@ namespace CompetitiveRounds
             }
             try
             {
-                var env = SessionReportModel.Parse(body);
+                var env = SessionReportRules.Parse(body);
                 if (env == null)
                 {
                     errorText = ERR_PARSE;

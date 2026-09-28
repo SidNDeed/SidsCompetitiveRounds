@@ -255,6 +255,49 @@ def test_the_ladder_shop_guarantees_each_have_a_case(harness_run, name):
         "the case printed no measurement: " + line)
 
 
+def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
+    """Board row 30a: the session report's envelope parser, executed against
+    one envelope per kind that GET /api/v1/report produced for
+    test_session_report_pg.py's seeded world (SessionReportRulesSelfTest.cs)."""
+    suites = _suites(harness_run)
+    assert "sessionreport" in suites, "the SessionReportRules suite did not report"
+    run, fail, verdict = suites["sessionreport"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[sessionreport\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 31 cases on the commit that added it; the floor is that
+    # count (#342). Raise it when cases are added.
+    assert run >= 31, "the SessionReportRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # one envelope per kind, as the server's route produced it
+    "ranked: kind, version and roster order",
+    "ranked: three games in order with their scores",
+    "ranked: game 1 picks in pick order with their pickers",
+    "ranked: set rating before, after and delta",
+    "casual: a truncated set counts the game it left out",
+    "casual: totals are sparse - an unrecorded counter has no key, never a zero",
+    "team: kind and two sides of two",
+    "team: every seat carries its side's rounds",
+    "team: a rating delta without before and after",
+    "1v2: the solo is side 1 and the duo side 2",
+    "1v2: game 2 scores and its one recorded stream",
+    "ffa: kind, three games and the union roster in order",
+    "ffa: a player who sat a game out has no score key in it",
+    "ffa: the set rating and gold over the sitting",
+    # the slicer, with its control
+    "hostile strings: braces and quotes inside a name or card do not split members",
+    "hostile strings (control): a string-blind matcher cuts the first player short",
+])
+def test_the_session_report_parse_has_a_case_per_kind(harness_run, name):
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
 def test_the_binder_order_is_total_under_every_mode_the_button_offers(harness_run):
     """The tail that makes the order total is reached from every branch, so a
     mode added later cannot quietly forget it.
@@ -603,7 +646,8 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "Main.cs" in included
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
-                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs"):
+                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
+                      "plugin/SessionReportRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -612,3 +656,7 @@ def test_the_harness_compiles_only_the_rule_files():
     plugin_proj = (REPO / "plugin" / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
     assert "TitleLadderRulesSelfTest" not in plugin_proj
     assert not (REPO / "plugin" / "TitleLadderRulesSelfTest.cs").exists()
+    # Board row 30a: the session report's envelope fixtures, likewise.
+    assert "SessionReportRulesSelfTest.cs" in included
+    assert "SessionReportRulesSelfTest" not in plugin_proj
+    assert not (REPO / "plugin" / "SessionReportRulesSelfTest.cs").exists()
