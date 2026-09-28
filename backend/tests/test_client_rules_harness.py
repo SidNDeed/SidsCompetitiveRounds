@@ -267,10 +267,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The suite ran 31 cases on the commit that added it, 35 once board row
-    # 30b added the overlay rule's cases, 38 with 30c's builds layout and 59
-    # with 30d's derived numbers; the floor is that count (#342). Raise it
-    # when cases are added.
-    assert run >= 59, "the SessionReportRules suite shrank to %d cases" % run
+    # 30b added the overlay rule's cases, 38 with 30c's builds layout, 59
+    # with 30d's derived numbers and 63 with 30e's race axis; the floor is
+    # that count (#342). Raise it when cases are added.
+    assert run >= 63, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -716,5 +716,19 @@ def test_the_session_report_derives_every_totals_number(harness_run, name):
     """Board row 30d: SessionReportRules.Derive / Replay1v1, executed against
     the envelopes the server tests produced; the model and view only format
     and draw these numbers."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "race: 1v1, 2v2 and 1v2 play to 5 rounds, FFA to its lobby's target",
+    "race: a 1v1 value of rounds*2+points plots its rounds, FFA floors its half points",
+    "race (control): 2v2 and 1v2 streams are not raced (no point events)",
+    "race: every 1v1 game's rounds line ends on its recorded rounds",
+])
+def test_the_race_axis_is_the_modes_win_target(harness_run, name):
+    """Board row 30e: SessionReportRules.WinTarget / RaceDivisor /
+    RoundsSeries, executed - the race panel plots rounds won against the
+    rounds the mode is played to."""
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line

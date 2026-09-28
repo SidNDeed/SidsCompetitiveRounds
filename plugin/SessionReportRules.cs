@@ -79,6 +79,9 @@ namespace CompetitiveRounds
             /// per player (sparse).</summary>
             public readonly Dictionary<string, int> Gold = new Dictionary<string, int>();
             public readonly Dictionary<string, int> Xp = new Dictionary<string, int>();
+            /// <summary>Board row 30e: the rounds this FFA game was played to
+            /// (settings.score_target); 0 when the settings are not known.</summary>
+            public int ScoreTarget;
         }
 
         internal sealed class RatingEntry { public float? Before, After; public float Delta; }
@@ -232,6 +235,10 @@ namespace CompetitiveRounds
                         break;
                     case "gold": Ints(kv.Value, g.Gold); break;
                     case "xp": Ints(kv.Value, g.Xp); break;
+                    case "settings":
+                        foreach (var e in Members(kv.Value))
+                            if (e.Key == "score_target") g.ScoreTarget = Math.Max(0, (int)Num(e.Value, 0f));
+                        break;
                     case "totals":
                         foreach (var pl in Members(kv.Value))
                         {
@@ -861,6 +868,49 @@ namespace CompetitiveRounds
             List<Pt> s;
             if (g.Timelines.TryGetValue(id, out streams) && streams != null && streams.TryGetValue(name, out s)) return s;
             return null;
+        }
+
+        // -- board row 30e: the race axis (pure) --------------------------------
+
+        /// <summary>A game is won at 5 rounds in 1v1, 2v2 and 1v2
+        /// (GameStateWatcher's roundsToWin default, read from GM.roundsToWinGame
+        /// at runtime; the mod changes it for none of them). An FFA game plays
+        /// its lobby's score target (settings.score_target); a lobby that
+        /// predates configurable settings played the engine default
+        /// (FfaMode.RoundsToWin = 5).</summary>
+        internal const int ROUNDS_TO_WIN = 5;
+        internal const int FFA_DEFAULT_TARGET = 5;
+
+        /// <summary>The rounds a game is played to: the top of its race axis.</summary>
+        internal static int WinTarget(string kind, Game g)
+        {
+            if (kind == "ffa") return g != null && g.ScoreTarget > 0 ? g.ScoreTarget : FFA_DEFAULT_TARGET;
+            return ROUNDS_TO_WIN;
+        }
+
+        /// <summary>A score stream's value per round won: 2 in 1v1 (the
+        /// recorder writes rounds * 2 + points in the round), 1 in FFA (rounds
+        /// plus half a point per live half-point); 0 for 2v2 and 1v2, whose
+        /// games carry no point events - their race is the recorded end score.</summary>
+        internal static float RaceDivisor(string kind)
+        {
+            if (kind == "ffa") return 1f;
+            return IsTwoSided(kind) ? 0f : POINTS_PER_ROUND;
+        }
+
+        /// <summary>The rounds won at every sample of a score stream:
+        /// floor(value / per). With `progress` the within-round part is kept
+        /// (value / per) - the race panel's thin secondary line.</summary>
+        internal static List<Pt> RoundsSeries(List<Pt> s, float per, bool progress)
+        {
+            var o = new List<Pt>(s == null ? 0 : s.Count);
+            if (s == null || per <= 0f) return o;
+            foreach (var p in s)
+            {
+                float v = Math.Max(0f, p.Y) / per;
+                o.Add(new Pt(p.X, progress ? v : (float)Math.Floor(v + 0.0001f)));
+            }
+            return o;
         }
 
         // -- series maths (pure) -----------------------------------------------

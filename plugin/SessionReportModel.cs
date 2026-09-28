@@ -59,6 +59,16 @@ namespace CompetitiveRounds
             public string PlayerId;
             public Color Tint;
             public List<Vector2> Pts;    // x = seconds on the SESSION axis
+            public bool Step;            // drawn as steps: a count that jumps, never ramps
+        }
+
+        /// <summary>A recorded end score placed at its game's end (a race whose
+        /// games carry no point events: 2v2, 1v2, or a game with no stream).</summary>
+        internal sealed class Dot
+        {
+            public float X, Y;           // session seconds, rounds
+            public Color Tint;
+            public string Label = "";
         }
 
         internal sealed class Mark
@@ -75,8 +85,15 @@ namespace CompetitiveRounds
             /// <summary>Set when nothing was recorded: the text to show instead of axes.</summary>
             public string Missing;
             public bool Percent;
+            /// <summary>Board row 30e: a rounds race - the y-axis is the rounds
+            /// the mode is played to, one grid line per round.</summary>
+            public bool Rounds;
             public float MaxY = 1f;
             public readonly List<Poly> Lines = new List<Poly>();
+            /// <summary>Secondary thin lines (the race's within-round points);
+            /// the view draws them only where they are legible.</summary>
+            public readonly List<Poly> Thin = new List<Poly>();
+            public readonly List<Dot> Dots = new List<Dot>();
         }
 
         internal sealed class Span
@@ -303,7 +320,8 @@ namespace CompetitiveRounds
 
             // Page 1 — cumulative damage and the score race, per game segment.
             m.Damage = new Panel { Title = I18n.Tr("Damage dealt (cumulative per game)"), Unit = I18n.Tr("dmg") };
-            m.Score = new Panel { Title = I18n.Tr("Score race (points per game)"), Unit = I18n.Tr("pts") };
+            m.Score = new Panel { Title = I18n.Tr("Score race (rounds won per game)"), Unit = I18n.Tr("rounds"), Rounds = true };
+            float racePer = RaceDivisor(m.Kind);
             // Page 2 — rates over a 15 s window, plus the ping / fps strips.
             m.Dps = new Panel { Title = I18n.Tr("Rolling DPS (15 s window)"), Unit = I18n.Tr("dmg/s") };
             m.HitPct = new Panel { Title = I18n.Tr("Rolling hit % (15 s window)"), Unit = "%", Percent = true };
@@ -337,8 +355,21 @@ namespace CompetitiveRounds
                         var dps = Rolling(dmg, WINDOW_S);
                         if (dps.Count > 0) AddLine(m.Dps, pid, m.Tints[pi], Shift(dps, sp.X0, false));
                     }
-                    if (score != null && score.Count > 0)
-                        AddLine(m.Score, pid, m.Tints[pi], Shift(score, sp.X0, true));
+                    if (score != null && score.Count > 0 && racePer > 0f)
+                    {
+                        // Board row 30e: the race plots ROUNDS won (floor(value / per)
+                        // at every sample - SessionReportRules.RoundsSeries, executed
+                        // by the client harness), with the within-round points as a
+                        // thin secondary line.
+                        var rounds = Shift(RoundsSeries(score, racePer, false), sp.X0, true);
+                        AddLine(m.Score, pid, m.Tints[pi], rounds);
+                        m.Score.Lines[m.Score.Lines.Count - 1].Step = true;
+                        m.Score.Thin.Add(new Poly
+                        {
+                            PlayerId = pid, Tint = m.Tints[pi],
+                            Pts = Shift(RoundsSeries(score, racePer, true), sp.X0, true),
+                        });
+                    }
                     if (shots != null && hits != null && shots.Count > 0)
                     {
                         var hp = RollingRatio(hits, shots, WINDOW_S, 3f);
@@ -367,8 +398,9 @@ namespace CompetitiveRounds
                     if (fps != null && fps.Count > 0) AddLine(m.Fps, pid, m.Tints[pi], Shift(fps, sp.X0, false));
                 }
             }
-            foreach (var pn in new[] { m.Damage, m.Score, m.Dps, m.HitPct, m.BlockPct, m.Ping, m.Fps })
+            foreach (var pn in new[] { m.Damage, m.Dps, m.HitPct, m.BlockPct, m.Ping, m.Fps })
                 Finish(pn, missing);
+            FinishRace(m, env, missing);
             if (m.BlockPct.Missing != null && legacyBlocks)
                 m.BlockPct.Missing = I18n.Tr("not recorded (older block format)");
 
@@ -675,6 +707,42 @@ namespace CompetitiveRounds
             if (p.Lines.Count == 0) { p.Missing = missing; return; }
             if (p.Percent) p.MaxY = 100f;
             else p.MaxY = NiceCeil(p.MaxY);
+        }
+
+        /// <summary>The race's end scores where a game has no point events
+        /// (2v2, 1v2, or a player with no stream), and its y-axis: the rounds
+        /// the mode is played to (WinTarget), raised only if a recorded score
+        /// is higher, so nothing is ever clipped. The other panels keep NiceCeil.</summary>
+        private static void FinishRace(Model m, Envelope env, string missing)
+        {
+            var p = m.Score;
+            var raced = new HashSet<string>();
+            int target = 0;
+            for (int gi = 0; gi < env.Games.Count; gi++)
+            {
+                var g = env.Games[gi];
+                target = Math.Max(target, WinTarget(m.Kind, g));
+                var sp = m.Spans[gi];
+                raced.Clear();
+                foreach (var l in p.Lines)
+                    if (l.Pts.Count > 0 && l.Pts[0].x >= sp.X0 - 0.01f && l.Pts[0].x < sp.X1) raced.Add(l.PlayerId);
+                bool sides = m.Kind == "team" || m.Kind == "ovt";
+                var seenSide = new HashSet<int>();
+                for (int pi = 0; pi < m.Players.Count; pi++)
+                {
+                    string pid = m.Players[pi].Id;
+                    int v;
+                    if (raced.Contains(pid) || !g.Scores.TryGetValue(pid, out v)) continue;
+                    // a side's players carry the side's rounds: one dot per side
+                    if (sides && !seenSide.Add(m.Players[pi].Team)) continue;
+                    p.Dots.Add(new Dot { X = sp.X1, Y = v, Tint = m.Tints[pi], Label = Coloured(m, pi, v.ToString(INV)) });
+                }
+            }
+            if (p.Lines.Count == 0 && p.Dots.Count == 0) { p.Missing = missing; return; }
+            float top = Math.Max(1, target);
+            foreach (var l in p.Lines) foreach (var pt in l.Pts) top = Mathf.Max(top, pt.y);
+            foreach (var d in p.Dots) top = Mathf.Max(top, d.Y);
+            p.MaxY = Mathf.Ceil(top);
         }
 
         internal static float NiceCeil(float v)

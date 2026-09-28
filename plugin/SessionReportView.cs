@@ -328,12 +328,15 @@ namespace CompetitiveRounds
             var plot = new Rect(r.x + 60f, r.y + 28f, r.width - 76f, r.height - 28f - 22f);
             if (plot.width < 20f || plot.height < 10f) return;
 
-            // Horizontal grid with axis values.
-            for (int k = 0; k <= 4; k++)
+            // Horizontal grid with axis values: one line per round on a rounds
+            // race (its top is the rounds the mode is played to, board row
+            // 30e), quarters of the NiceCeil top elsewhere.
+            int steps = p.Rounds ? Mathf.Max(1, Mathf.RoundToInt(p.MaxY)) : 4;
+            for (int k = 0; k <= steps; k++)
             {
-                float y = plot.yMax - plot.height * k / 4f;
+                float y = plot.yMax - plot.height * k / steps;
                 CompetitiveUI.GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), GRID, 1f);
-                float v = p.MaxY * k / 4f;
+                float v = p.MaxY * k / steps;
                 string lab = p.Percent ? v.ToString("F0", INV) + "%" : v.ToString(v >= 100f ? "F0" : "0.#", INV);
                 GUI.Label(new Rect(r.x + 4f, y - 10f, 52f, 20f), "<color=#8FA3B8>" + lab + "</color>", stSmallR);
             }
@@ -360,7 +363,21 @@ namespace CompetitiveRounds
                     }
                 }
             }
-            // Polylines: one per player per game, in the player's colour.
+            // The race's thin within-round lines first (under the rounds steps),
+            // and only where they are legible: at least 24 px per round and a
+            // game segment at least 90 px wide.
+            bool thinLegible = p.Thin.Count > 0 && plot.height / Mathf.Max(1f, p.MaxY) >= 24f;
+            for (int li = 0; thinLegible && li < p.Thin.Count; li++)
+            {
+                var line = p.Thin[li];
+                var pts = line.Pts;
+                if (pts.Count < 2 || (pts[pts.Count - 1].x - pts[0].x) * scale < 90f) continue;
+                var tint = new Color(line.Tint.r, line.Tint.g, line.Tint.b, 0.55f);
+                for (int i = 1; i < pts.Count; i++)
+                    CompetitiveUI.GuiLine(Map(pts[i - 1], plot, scale, p.MaxY), Map(pts[i], plot, scale, p.MaxY), tint, 1f);
+            }
+            // Polylines: one per player per game, in the player's colour; a
+            // count (rounds won) is drawn as steps.
             for (int li = 0; li < p.Lines.Count; li++)
             {
                 var line = p.Lines[li];
@@ -369,8 +386,22 @@ namespace CompetitiveRounds
                 {
                     var a = Map(pts[i - 1], plot, scale, p.MaxY);
                     var b = Map(pts[i], plot, scale, p.MaxY);
-                    CompetitiveUI.GuiLine(a, b, line.Tint, 2f);
+                    if (line.Step)
+                    {
+                        var corner = new Vector2(b.x, a.y);
+                        CompetitiveUI.GuiLine(a, corner, line.Tint, 2.5f);
+                        CompetitiveUI.GuiLine(corner, b, line.Tint, 2.5f);
+                    }
+                    else CompetitiveUI.GuiLine(a, b, line.Tint, 2f);
                 }
+            }
+            // End scores of games with no point events, at each game's end.
+            for (int i = 0; i < p.Dots.Count; i++)
+            {
+                var d = p.Dots[i];
+                var c = Map(new Vector2(d.X, d.Y), plot, scale, p.MaxY);
+                Fill(new Rect(c.x - 5f, c.y - 5f, 10f, 10f), d.Tint);
+                GUI.Label(new Rect(c.x - 34f, c.y - 9f, 26f, 18f), d.Label, stSmallR);
             }
             if (marks)
             {

@@ -1666,3 +1666,36 @@ def test_the_totals_pages_draw_one_element_per_data_type():
     pages = _cs_body(model, "private static void BuildTotalsPages(Model m, Envelope env)")
     assert "d.Players[pi].Gold" in pages and "d.Players[pi].Xp" in pages, "gold and XP are the Derive lines' (set totals)"
     assert "RatingCell(env, m, pi, 0)" in pages and "RatingCell(env, m, pi, 2)" in pages
+
+
+# -- board row 30e: the rounds race -------------------------------------------
+
+def test_the_race_plots_rounds_won_on_the_modes_win_target():
+    """Board row 30e: the score race plots ROUNDS won (RoundsSeries over the
+    mode's divisor, executed by the client harness) as steps, the
+    within-round points as a thin secondary line, and a 2v2 / 1v2 game's
+    recorded end score as a dot; its y-axis is the rounds the mode is played
+    to (WinTarget) and only the other panels are NiceCeil'd."""
+    model = PLUGIN / "SessionReportModel.cs"
+    build = _cs_body(model, "internal static Model Build(Envelope env)")
+    assert 'Unit = I18n.Tr("rounds"), Rounds = true' in build
+    assert "float racePer = RaceDivisor(m.Kind);" in build
+    assert "RoundsSeries(score, racePer, false)" in build and "RoundsSeries(score, racePer, true)" in build
+    assert ".Step = true;" in build
+    finish_loop = build[build.index("foreach (var pn in new[]"):build.index("Finish(pn, missing);")]
+    assert "m.Score" not in finish_loop, "the race is not NiceCeil'd"
+    for panel in ("m.Damage", "m.Dps", "m.HitPct", "m.BlockPct", "m.Ping", "m.Fps"):
+        assert panel in finish_loop, panel
+    assert build.count("FinishRace(m, env, missing)") == 1
+    race = _cs_body(model, "private static void FinishRace(Model m, Envelope env, string missing)")
+    assert "WinTarget(m.Kind, g)" in race and "p.Dots.Add(" in race
+    assert "NiceCeil" not in race
+
+
+def test_the_race_grid_is_one_line_per_round_and_the_thin_line_is_gated():
+    view = PLUGIN / "SessionReportView.cs"
+    panel = _cs_body(view, "private static void DrawPanel(Rect r, SessionReportModel.Panel p, SessionReportModel.Model m, bool marks)")
+    assert "p.Rounds ? Mathf.Max(1, Mathf.RoundToInt(p.MaxY)) : 4" in panel
+    assert "bool thinLegible = p.Thin.Count > 0 && plot.height / Mathf.Max(1f, p.MaxY) >= 24f;" in panel
+    assert "thinLegible && li < p.Thin.Count" in panel
+    assert "if (line.Step)" in panel and "p.Dots[i]" in panel

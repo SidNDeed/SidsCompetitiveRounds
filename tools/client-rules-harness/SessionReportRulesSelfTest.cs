@@ -64,6 +64,7 @@ namespace CompetitiveRounds
             OverlayCases(r);
             LayoutCases(r);
             DeriveCases(r);
+            RaceCases(r);
             return r;
         }
 
@@ -329,6 +330,43 @@ namespace CompetitiveRounds
         private static string F(float? v) => v.HasValue ? v.Value.ToString("0.#", INV) : "-";
 
         private static string Seq(List<float?> xs) => string.Join(",", xs.ConvertAll(F).ToArray());
+
+        // -- board row 30e: the race axis ------------------------------------------
+
+        private static void RaceCases(SelfTestResult r)
+        {
+            var f = Parse(FFA_LOBBY);
+            var noTarget = new Game();
+            Check(r, "race: 1v1, 2v2 and 1v2 play to 5 rounds, FFA to its lobby's target",
+                  WinTarget("ranked", null) == 5 && WinTarget("team", null) == 5 && WinTarget("ovt", null) == 5
+                  && WinTarget("ffa", f.Games[0]) == 3 && WinTarget("ffa", noTarget) == 5,
+                  "ffa lobby " + WinTarget("ffa", f.Games[0]) + ", ffa unknown " + WinTarget("ffa", noTarget));
+            var v1 = RoundsSeries(new List<Pt> { new Pt(1f, 1f), new Pt(2f, 2f), new Pt(3f, 3f), new Pt(4f, 4f), new Pt(5f, 9f) }, RaceDivisor("ranked"), false);
+            var ff = RoundsSeries(new List<Pt> { new Pt(1f, 0.5f), new Pt(2f, 1f), new Pt(3f, 1.5f), new Pt(4f, 3f) }, RaceDivisor("ffa"), false);
+            var thin = RoundsSeries(new List<Pt> { new Pt(1f, 1f), new Pt(2f, 3f) }, RaceDivisor("casual"), true);
+            string sv = string.Join(",", v1.ConvertAll(p => p.Y.ToString(INV)).ToArray());
+            string sf = string.Join(",", ff.ConvertAll(p => p.Y.ToString(INV)).ToArray());
+            string st = string.Join(",", thin.ConvertAll(p => p.Y.ToString(INV)).ToArray());
+            Check(r, "race: a 1v1 value of rounds*2+points plots its rounds, FFA floors its half points",
+                  sv == "0,1,1,2,4" && sf == "0,1,1,3" && st == "0.5,1.5",
+                  "1v1 " + sv + " ffa " + sf + " thin " + st);
+            Check(r, "race (control): 2v2 and 1v2 streams are not raced (no point events)",
+                  RaceDivisor("team") == 0f && RaceDivisor("ovt") == 0f && RoundsSeries(new List<Pt> { new Pt(1f, 2f) }, RaceDivisor("team"), false).Count == 0
+                  && RaceDivisor("ranked") == 2f && RaceDivisor("ffa") == 1f,
+                  "team " + RaceDivisor("team").ToString(INV) + ", ovt " + RaceDivisor("ovt").ToString(INV));
+            var e = Parse(RANKED_SERIES);
+            bool ends = e.Games.Count == 3;
+            var got = new List<string>();
+            foreach (var g in e.Games)
+                foreach (var id in new[] { A, B })
+                {
+                    var rs = RoundsSeries(Stream(g, id, "score"), RaceDivisor(e.Kind), false);
+                    int last = rs.Count == 0 ? -1 : (int)rs[rs.Count - 1].Y;
+                    got.Add(last.ToString(INV) + "/" + Score(g, id).ToString(INV));
+                    ends &= last == Score(g, id);
+                }
+            Check(r, "race: every 1v1 game's rounds line ends on its recorded rounds", ends, string.Join(" ", got.ToArray()));
+        }
 
         // -- helpers -------------------------------------------------------------
 
