@@ -551,10 +551,14 @@ async def _admin(sm, key, sid, action, winner_team=None):
 
 async def _team_dc(sm, sid, reporter, dc_player, t1_points, t2_points, room):
     async with sm() as db:
+        # A direct call gets no FastAPI resolution: an omitted is_fallback would be
+        # its Query(False) default object, which is truthy, and the handler would
+        # take the 2v2 fallback deferral. This report is a real one (886bed8 LAND).
         return await _call(main.team_series_report_dc, series_id=str(sid),
                            reporter_steam_id=reporter, dc_player_steam_id=dc_player,
                            t1_points_total=t1_points, t2_points_total=t2_points,
-                           photon_room_id=room, hmac_sig="unsigned", db=db)
+                           photon_room_id=room, is_fallback=False,
+                           hmac_sig="unsigned", db=db)
 
 
 async def _ranked_series_id(sm, ids, a=P1, b=P2):

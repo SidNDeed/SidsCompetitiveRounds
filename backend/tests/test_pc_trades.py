@@ -2428,12 +2428,20 @@ def test_m53_later_migrations_keep_the_traded_value(env):
     flagged Legendary's discard then pays 0 or answers 503 -- never
     shards_for("legendary"), which a file removing the flag column with the
     six would make it pay, and never a failure, which a file dropping the
-    column alone would cause. With no such file this applies nothing."""
+    column alone would cause. With no such file this applies nothing.
+
+    The next test's reset only re-runs 353, which restores 353's own
+    objects and nothing else, so any other change those files make that
+    the schema fingerprint sees fails that reset. Whenever a file was
+    applied, the schema is therefore rebuilt afterwards by the session
+    build's own path, whether or not the leg passed, and the rebuild must
+    reproduce that build's two fingerprints and its empty-table list."""
+    later = _numbered(above=MIGRATION_NUMBER)
+
     async def body(ctx):
         (a, b), s = await _world(ctx)
         p = await _print(ctx, a, s)
         await _executed(ctx, a, b, [p], [await _print(ctx, b, s, "common")])
-        later = _numbered(above=MIGRATION_NUMBER)
         conn = await _connect("later")
         try:
             for path in later:
@@ -2442,7 +2450,14 @@ def test_m53_later_migrations_keep_the_traded_value(env):
             await conn.close()
         env.monkeypatch.setattr(main, "_PC_TRADE_SCHEMA_FOUND", False)
         return [path.name for path in later], await discard(ctx, "disc", b, p)
-    names, ans = scenario(env, body)
+    try:
+        names, ans = scenario(env, body)
+    finally:
+        if later:
+            again = _run(_build())
+            assert [again[k] for k in ("fp_pre", "fp_full", "empty")] == [
+                env.build[k] for k in ("fp_pre", "fp_full", "empty")], (
+                "the rebuild after the later files is not the session's build", again)
     assert ans[0] in (200, 503), (names, ans)
     if ans[0] == 200:
         assert ans[1]["shards_gained"] == 0, (names, ans)
