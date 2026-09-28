@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     ///     viewer-relative field anywhere and nothing here asks "who is me".
     ///
     ///  2. <see cref="Build"/> turns an Envelope into <see cref="Model"/>: the
-    ///     four pages' polylines, tables and labels, pre-composed once (#162)
+    ///     pages' polylines, tables, labels and build blocks, pre-composed once (#162)
     ///     so the IMGUI pager (<see cref="SessionReportView"/>) only draws.
     ///     Games are laid end to end on ONE seconds axis with explicit per-game
     ///     offsets (design C-6); rolling DPS / hit % / block % are computed over
@@ -40,11 +40,15 @@ namespace CompetitiveRounds
         /// <summary>Rolling-window length for DPS / hit % / block %.</summary>
         internal const float WINDOW_S = 15f;
         /// <summary>Pages with a fixed layout (timeline, rates, totals). The
-        /// builds follow as one page per screenful — their count depends on
-        /// the body height, so the VIEW owns it (SessionReportView.PageCount)
-        /// and nothing is ever dropped for not fitting (review r1).</summary>
+        /// builds follow: one block per game, as many blocks per page as fit
+        /// and as many pages as they need - their count depends on the body
+        /// size, so the VIEW owns it (SessionReportView.PageCount) and nothing
+        /// is ever dropped for not fitting (review r1, board row 30c).</summary>
         internal const int FIXED_PAGES = 3;
         private const int NAME_CAP = 18;
+        /// <summary>A card chip's cap: long enough for the longest shipped
+        /// localized card name, short enough that one chip fits a column.</summary>
+        private const int CARD_CAP = 28;
         private static readonly CultureInfo INV = CultureInfo.InvariantCulture;
 
         // ── view model ───────────────────────────────────────────────────────
@@ -81,11 +85,38 @@ namespace CompetitiveRounds
             public readonly List<Mark> Picks = new List<Mark>();
         }
 
-        internal sealed class BuildBlock
+        /// <summary>One card of a builds block: its display name, its rarity
+        /// colour, and whether the FFA rolling cap later pushed it out of the
+        /// build (drawn dimmed, still in pick order).</summary>
+        internal sealed class Chip
         {
-            public string Title = "";    // "Game 2 - Spirit" (name in colour)
-            public string Cards = "";    // comma-joined picks, or the no-build text
-            public string Stats = "";    // BuildStatsTipBlock body, "" when not recorded
+            public string Text = "";         // plain: what the view measures
+            public string Label = "";        // Text in its colour: what the view draws
+            public Color Tint;
+            public bool Rolled;
+        }
+
+        /// <summary>One player's column of a builds block.</summary>
+        internal sealed class BuildCol
+        {
+            public string Name = "";         // in the player's colour
+            public readonly List<Chip> Chips = new List<Chip>();
+            public string Note = "";         // "no cards recorded" when there is no chip
+            /// <summary>The raw end-of-game stat wire ("" when not recorded): the
+            /// view lays it out for its column width (NativeUI.BuildStatsTipBlock).</summary>
+            public string StatsWire = "";
+        }
+
+        /// <summary>Board row 30c: one compact block per game - the header
+        /// (game number, recorded score), the game's length, and one column
+        /// per player who played it, in roster order.</summary>
+        internal sealed class GameBuild
+        {
+            public int Number;               // 1-based position in the set
+            public string Header = "";
+            public string Length = "";       // "" when the game's duration is unknown
+            public bool HasRolled;           // a chip of this block is a rolled-out card
+            public readonly List<BuildCol> Cols = new List<BuildCol>();
         }
 
         internal sealed class Model
@@ -106,21 +137,30 @@ namespace CompetitiveRounds
             public readonly List<string> TotalsHeader = new List<string>();
             public readonly List<List<string>> TotalsRows = new List<List<string>>();
             public readonly List<string> SummaryLines = new List<string>();
-            // page 4, 4b, 4c ... (one page per screenful, paged by the view)
-            public readonly List<BuildBlock> Builds = new List<BuildBlock>();
+            // the builds pages: one block per game, packed onto pages by the view
+            public readonly List<GameBuild> Builds = new List<GameBuild>();
             public string BuildsMissing;
             public readonly string[] PageTitles = new string[FIXED_PAGES];
             public string BuildsTitle = "";
+            /// <summary>The builds pages' key: the rarity colours, and what a
+            /// dimmed chip means (shown only on a page that has one).</summary>
+            public string ChipKey = "", RolledKey = "";
 
-            /// <summary>Footer title for page `pg` given the view's current
-            /// number of build pages: "Builds" alone when one page holds them
-            /// all, "Builds 2/3" on a continuation page.</summary>
-            public string PageTitle(int pg, int buildPages)
+            /// <summary>"Games 3-5 of 12" for a builds page holding blocks
+            /// first..last (0-based), "Game 4 of 12" for a page of one.</summary>
+            public string BuildsRange(int first, int last)
+            {
+                if (last <= first) return I18n.TrF("Game {0} of {1}", first + 1, Builds.Count);
+                return I18n.TrF("Games {0}-{1} of {2}", first + 1, last + 1, Builds.Count);
+            }
+
+            /// <summary>Footer title for page `pg`; a builds page names the
+            /// games it holds (first..last, 0-based, as the view packed them).</summary>
+            public string PageTitle(int pg, int first, int last)
             {
                 if (pg < FIXED_PAGES) return pg >= 0 ? PageTitles[pg] : "";
-                int sub = pg - FIXED_PAGES;
-                if (buildPages <= 1) return BuildsTitle;
-                return I18n.TrF("{0} {1}/{2}", BuildsTitle, sub + 1, buildPages);
+                if (Builds.Count == 0) return BuildsTitle;
+                return BuildsTitle + " - " + BuildsRange(first, last);
             }
         }
 
@@ -296,52 +336,48 @@ namespace CompetitiveRounds
             // and the set summary, taken from set_summary ONCE (C-7).
             BuildTotals(m, env);
 
-            // Page 4 — end-of-game builds.
+            // The builds (board row 30c): one compact block per game - its
+            // number, recorded score and length in the header, then one column
+            // per player who played it (roster order) with the cards as chips
+            // in PICK order, each in its rarity colour. Every game gets a
+            // block; the view packs as many blocks as fit on a page and adds
+            // pages as needed (SessionReportRules.PackPages) - there is no cap.
             for (int gi = 0; gi < env.Games.Count; gi++)
             {
                 var g = env.Games[gi];
+                var gb = new GameBuild { Number = gi + 1, Header = BlockHeader(m, g, gi + 1) };
+                if (g.DurationS > 0f) gb.Length = I18n.TrF("length {0}", Clock(g.DurationS));
                 for (int pi = 0; pi < m.Players.Count; pi++)
                 {
                     string pid = m.Players[pi].Id;
-                    List<string> cards;
-                    string stats;
-                    g.EndBuild.TryGetValue(pid, out cards);
-                    g.EndStats.TryGetValue(pid, out stats);
-                    bool hasCards = cards != null && cards.Count > 0;
-                    string body = "";
-                    if (!string.IsNullOrEmpty(stats))
-                    {
-                        try { body = NativeUI.BuildStatsTipBlock(stats, 34) ?? ""; } catch { body = ""; }
-                    }
-                    // Picks the FFA rolling cap pushed out are NOT the build (the
-                    // server keeps them out of end_build and flags the pick).
-                    var rolled = new List<string>();
+                    if (!g.Scores.ContainsKey(pid) && !HasCards(g, pid)) continue;
+                    var col = new BuildCol { Name = Coloured(m, pi, Safe(m.Players[pi].Name)) };
+                    // Picks the FFA rolling cap later pushed out stay in pick
+                    // order, flagged: the view dims them (they are not the build).
                     foreach (var pk in g.Picks)
-                        if (pk.Rolled && pk.Id == pid) rolled.Add(Safe(pk.Card));
-                    if (!hasCards && body.Length == 0 && rolled.Count == 0) continue;
-                    var cb = new StringBuilder();
-                    if (hasCards)
+                        if (pk.Id == pid) col.Chips.Add(MakeChip(pk.Card, pk.Rolled));
+                    if (col.Chips.Count == 0)
                     {
-                        // The server kept only the newest picks: say so ahead of them.
-                        if (g.PicksCapped) cb.Append("... ");
-                        for (int ci = 0; ci < cards.Count; ci++)
-                        {
-                            if (ci > 0) cb.Append(", ");
-                            cb.Append(Safe(cards[ci]));
-                        }
+                        // No pick list for this player: the end build, in its order.
+                        List<string> cards;
+                        if (g.EndBuild.TryGetValue(pid, out cards) && cards != null)
+                            foreach (var c in cards) col.Chips.Add(MakeChip(c, false));
                     }
-                    else cb.Append(I18n.Tr("no cards recorded"));
-                    if (rolled.Count > 0)
-                        cb.Append("\n<color=#8FA3B8>").Append(I18n.TrF("rolled out: {0}", string.Join(", ", rolled.ToArray()))).Append("</color>");
-                    m.Builds.Add(new BuildBlock
-                    {
-                        Title = I18n.TrF("Game {0}", gi + 1) + " - " + Coloured(m, pi, Safe(m.Players[pi].Name)),
-                        Cards = cb.ToString(),
-                        Stats = body,
-                    });
+                    // The server kept only the newest picks: say so ahead of them.
+                    if (g.PicksCapped && col.Chips.Count > 0)
+                        col.Chips.Insert(0, new Chip { Text = "...", Label = Tinted(RARITY_OTHER, "..."), Tint = RARITY_OTHER });
+                    if (col.Chips.Count == 0) col.Note = I18n.Tr("no cards recorded");
+                    foreach (var ch in col.Chips) gb.HasRolled |= ch.Rolled;
+                    string stats;
+                    if (g.EndStats.TryGetValue(pid, out stats) && !string.IsNullOrEmpty(stats)) col.StatsWire = stats;
+                    gb.Cols.Add(col);
                 }
+                m.Builds.Add(gb);
             }
             if (m.Builds.Count == 0) m.BuildsMissing = I18n.Tr("no build recorded for these games");
+            m.ChipKey = Tinted(RARITY_COMMON, I18n.Tr("Common")) + "   " + Tinted(RARITY_UNCOMMON, I18n.Tr("Uncommon"))
+                        + "   " + Tinted(RARITY_RARE, I18n.Tr("Rare"));
+            m.RolledKey = Tinted(ROLLED_TEXT, I18n.Tr("dimmed: rolled out of the build"));
             return m;
         }
 
@@ -481,6 +517,65 @@ namespace CompetitiveRounds
             return t;
         }
 
+        // -- builds blocks --------------------------------------------------------
+
+        // NativeUI's rarity colours (C_COMMON, C_UNCOMMON, C_RARE, and C_LABEL
+        // for anything else - NativeUI.GetRarityColor), repeated because NativeUI
+        // keeps them private; a source pin holds the two sets equal.
+        private static readonly Color RARITY_COMMON = new Color(0.9f, 0.9f, 0.9f);
+        private static readonly Color RARITY_UNCOMMON = new Color(0.3f, 0.6f, 1f);
+        private static readonly Color RARITY_RARE = new Color(0.95f, 0.35f, 0.65f);
+        private static readonly Color RARITY_OTHER = new Color(0.7f, 0.7f, 0.75f);
+        private static readonly Color ROLLED_TEXT = new Color(0.44f, 0.48f, 0.53f);
+
+        internal static Color RarityTint(string rarity)
+        {
+            switch ((rarity ?? "").ToLowerInvariant())
+            {
+                case "common": return RARITY_COMMON;
+                case "uncommon": return RARITY_UNCOMMON;
+                case "rare": return RARITY_RARE;
+                default: return RARITY_OTHER;
+            }
+        }
+
+        /// <summary>A chip for a card as the server recorded it (either name
+        /// form, learning #19): the localized display name, and the rarity the
+        /// loaded card list gives it (grey while unknown).</summary>
+        private static Chip MakeChip(string card, bool rolled)
+        {
+            string rarity = null, shown = null;
+            try { rarity = CardRarityLookup.GetRarity(card); } catch { rarity = null; }
+            try { shown = CardTextLocalizer.PrettyName(card, card); } catch { shown = null; }
+            string text = Safe(string.IsNullOrEmpty(shown) ? card : shown, CARD_CAP);
+            Color tint = RarityTint(rarity);
+            return new Chip { Text = text, Label = Tinted(rolled ? ROLLED_TEXT : tint, text), Tint = tint, Rolled = rolled };
+        }
+
+        private static string Tinted(Color c, string text)
+            => "<color=#" + ColorUtility.ToHtmlStringRGB(c) + ">" + text + "</color>";
+
+        private static bool HasCards(Game g, string pid)
+        {
+            foreach (var pk in g.Picks) if (pk.Id == pid) return true;
+            List<string> cards;
+            return g.EndBuild.TryGetValue(pid, out cards) && cards != null && cards.Count > 0;
+        }
+
+        /// <summary>A builds block's header: the game's number and its recorded
+        /// score, the winner in colour - the same labels the timeline's game
+        /// dividers use.</summary>
+        private static string BlockHeader(Model m, Game g, int number)
+        {
+            if (m.Players.Count == 2)
+            {
+                int sa = Get(g.Scores, m.Players[0].Id), sb = Get(g.Scores, m.Players[1].Id);
+                return I18n.TrF("Game {0}: {1}", number, ScoreLine(m, 0, sa, 1, sb));
+            }
+            if (m.Kind == "team" || m.Kind == "ovt") return TeamScoreLabel(m, g, number, true);
+            return FfaScoreLabel(m, g, number, true);
+        }
+
         // ── small helpers ────────────────────────────────────────────────────
 
         private static int Get(Dictionary<string, int> d, string k) { int v; return d.TryGetValue(k, out v) ? v : 0; }
@@ -560,15 +655,17 @@ namespace CompetitiveRounds
 
         /// <summary>Server-authored text made safe for a rich-text label: the
         /// tag characters go, control characters go, and the name is capped.</summary>
-        internal static string Safe(string s)
+        internal static string Safe(string s) => Safe(s, NAME_CAP);
+
+        private static string Safe(string s, int cap)
         {
             if (string.IsNullOrEmpty(s)) return "?";
-            var sb = new StringBuilder(Math.Min(s.Length, NAME_CAP));
+            var sb = new StringBuilder(Math.Min(s.Length, cap));
             foreach (char c in s)
             {
                 if (c == '<' || c == '>' || char.IsControl(c)) continue;
                 sb.Append(c);
-                if (sb.Length >= NAME_CAP) break;
+                if (sb.Length >= cap) break;
             }
             return sb.Length == 0 ? "?" : sb.ToString();
         }

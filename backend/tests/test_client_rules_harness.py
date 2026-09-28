@@ -266,10 +266,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[sessionreport\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The suite ran 31 cases on the commit that added it and 35 once board
-    # row 30b added the overlay rule's cases; the floor is that count (#342).
-    # Raise it when cases are added.
-    assert run >= 35, "the SessionReportRules suite shrank to %d cases" % run
+    # The suite ran 31 cases on the commit that added it, 35 once board row
+    # 30b added the overlay rule's cases and 38 with 30c's builds layout; the
+    # floor is that count (#342). Raise it when cases are added.
+    assert run >= 38, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -674,3 +674,15 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "SessionReportRulesSelfTest.cs" in included
     assert "SessionReportRulesSelfTest" not in plugin_proj
     assert not (REPO / "plugin" / "SessionReportRulesSelfTest.cs").exists()
+
+@pytest.mark.parametrize("name", [
+    "builds: pages pack as many games as fit and a tall one alone",
+    "builds (control): no cap - thirty short games share one page when they fit",
+    "builds: chips wrap in pick order and a wide chip takes its own row",
+])
+def test_the_builds_pages_pack_and_flow_by_the_rules(harness_run, name):
+    """Board row 30c: SessionReportRules.PackPages / FlowChips, executed; the
+    view measures the blocks and chips and draws where these rules put them."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+

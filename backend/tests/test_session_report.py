@@ -1387,7 +1387,14 @@ def test_the_builds_page_continues_instead_of_discarding_rows():
     assert "buildPages" in builds and "sub" in builds
     assert "showing {0} of {1}" not in builds, "the discard notice is gone with the discard"
     measure = _cs_body(src, "private static void MeasureBuildPages(Rect body, SessionReportModel.Model m)")
-    assert measure.count("buildStarts.Add(i)") == 1, "the page break is recorded exactly once in the method (#284)"
+    # Board row 30c: the page breaks come from the pure packer the client
+    # harness executes (SessionReportRules.PackPages), called once, over the
+    # heights this method measured.
+    assert measure.count("SessionReportRules.PackPages(blockH") == 1, \
+        "the page breaks are packed exactly once in the method (#284)"
+    rules = _cs_body(PLUGIN / "SessionReportRules.cs",
+                     "internal static List<int> PackPages(IList<float> heights, float usable)")
+    assert rules.count("starts.Add(i)") == 1, "the packer records a page break in one place"
     assert "blockH[" in builds and "blockH.Add(" in measure, "the draw path pages with the heights it measured"
     model = PLUGIN / "SessionReportModel.cs"
     assert "FIXED_PAGES = 3" in strip_comments_only(model.read_text(encoding="utf-8"))
@@ -1447,17 +1454,20 @@ def test_the_bound_is_enforced_not_estimated(session_ok, monkeypatch):
 
 
 def test_build_blocks_measure_their_card_text():
-    """LOW (r2): the card list wraps to the column width and the block height
-    is measured from it, not a fixed 40 px strip; the draw path reads the same
-    measured height it paged with."""
+    """LOW (r2), board row 30c: every chip is measured with the style that
+    draws it and flowed into its column by the pure FlowChips rule the client
+    harness executes; the stat lines are measured at the column width; the
+    draw path reads the same layout it paged with."""
     src = PLUGIN / "SessionReportView.cs"
-    cards = _cs_body(src, "private static float CardsHeight(SessionReportModel.BuildBlock b, float textW)")
-    assert "CalcHeight(" in cards
+    width = _cs_body(src, "private static float ChipWidth(SessionReportModel.Chip chip, float colW)")
+    assert "stChip.CalcSize(" in width
+    block = _cs_body(src, "private static BlockLayout MeasureBlock(SessionReportModel.GameBuild b, float innerW, out float h)")
+    assert block.count("SessionReportRules.FlowChips(") == 1
+    assert "stTiny.CalcHeight(" in block and "NativeUI.BuildStatsTipBlock(" in block
     draw = _cs_body(src, "private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)")
-    assert "blockCardsH[" in draw and "stCards" in draw
-    assert ", 40f), b.Cards" not in draw, "the fixed 40 px card strip is gone"
+    assert "blockLayouts[" in draw and "DrawChip(" in draw and "cl.ChipAt[" in draw
     styles = _cs_body(src, "private static void EnsureStyles()")
-    assert "stCards = Mk(14, TextAnchor.UpperLeft" in styles, "UpperLeft is the wrapping anchor in Mk"
+    assert "stChip = Mk(13, TextAnchor.MiddleLeft" in styles, "a chip is one line: MiddleLeft does not wrap in Mk"
 
 def test_sitting_label_counts_the_games_the_report_omits(session_ok):
     """r1b M2: the ranked/casual label is a claim about the WHOLE sitting. The statement
@@ -1537,3 +1547,61 @@ def test_a_casual_sitting_total_is_its_games_ledger(session_ok):
     assert ss["gold"] == ss["gold_total"] == {CALLER: 7, OPP: 2}
     by = {g["match_id"]: g for g in resp["games"]}
     assert by[C1]["gold"] == {CALLER: 3, OPP: 2} and by[C2]["gold"] == {CALLER: 4}
+
+
+# -- board row 30c: the builds pages -------------------------------------------
+
+def test_builds_are_one_block_per_game_with_chips_in_pick_order():
+    """Board row 30c: one block per game (every game, no cap), a column per
+    player who played it, the cards as chips in PICK order - a rolled-out FFA
+    pick stays in its place, flagged - falling back to the end build only when
+    the player has no pick list."""
+    model = PLUGIN / "SessionReportModel.cs"
+    build = _cs_body(model, "internal static Model Build(Envelope env)")
+    assert build.count("m.Builds.Add(gb)") == 1
+    loop = build[build.index("var gb = new GameBuild"):build.index("m.Builds.Add(gb)")]
+    assert "foreach (var pk in g.Picks)" in loop and "MakeChip(pk.Card, pk.Rolled)" in loop
+    assert loop.index("g.Picks") < loop.index("g.EndBuild"), "the pick list first; the end build is the fallback"
+    assert "g.Scores.ContainsKey(pid)" in loop, "a column per player who played the game"
+    assert "continue;" not in loop.replace("if (!g.Scores.ContainsKey(pid) && !HasCards(g, pid)) continue;", ""), \
+        "no other path skips a game or a player"
+    head = _cs_body(model, "private static string BlockHeader(Model m, Game g, int number)")
+    assert "ScoreLine(" in head and "TeamScoreLabel(" in head and "FfaScoreLabel(" in head
+    assert 'I18n.TrF("length {0}", Clock(g.DurationS))' in build, "the game's length in the block header"
+
+
+def test_chip_rarity_colours_are_the_card_screens_own():
+    """Board row 30c: a chip carries its card's rarity colour - the same
+    colours NativeUI's card screens use (NativeUI keeps them private, so the
+    model repeats them; this pin holds the two sets equal)."""
+    model = PLUGIN / "SessionReportModel.cs"
+    chip = _cs_body(model, "private static Chip MakeChip(string card, bool rolled)")
+    assert "CardRarityLookup.GetRarity(card)" in chip and "RarityTint(rarity)" in chip
+    ui = strip_comments_only((PLUGIN / "NativeUI.cs").read_text(encoding="utf-8")).replace(" ", "")
+    mine = strip_comments_only(model.read_text(encoding="utf-8")).replace(" ", "")
+    pairs = (("C_COMMON", "RARITY_COMMON"), ("C_UNCOMMON", "RARITY_UNCOMMON"),
+             ("C_RARE", "RARITY_RARE"), ("C_LABEL", "RARITY_OTHER"))
+    for theirs, ours in pairs:
+        m1 = re.search(theirs + r"=newColor\(([^)]*)\)", ui)
+        m2 = re.search(ours + r"=newColor\(([^)]*)\)", mine)
+        assert m1 and m2, (theirs, ours)
+        assert m1.group(1) == m2.group(1), (theirs, m1.group(1), ours, m2.group(1))
+    tint = _cs_body(model, "internal static Color RarityTint(string rarity)")
+    for word, name in (('"common"', "RARITY_COMMON"), ('"uncommon"', "RARITY_UNCOMMON"), ('"rare"', "RARITY_RARE")):
+        assert word + ": return " + name in tint
+    assert "default: return RARITY_OTHER" in tint
+
+
+def test_a_builds_page_names_the_games_it_holds():
+    """Board row 30c: the page header and the footer say "Games k-m of n"
+    from the same measured page breaks the draw path uses."""
+    view = PLUGIN / "SessionReportView.cs"
+    draw = _cs_body(view, "private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)")
+    assert "m.BuildsRange(first, end - 1)" in draw
+    footer = _cs_body(view, "private static void DrawFooter(Rect r)")
+    assert "model.PageTitle(page, first, last)" in footer and "buildStarts[" in footer
+    model = PLUGIN / "SessionReportModel.cs"
+    rng = _cs_body(model, "public string BuildsRange(int first, int last)")
+    assert 'I18n.TrF("Games {0}-{1} of {2}", first + 1, last + 1, Builds.Count)' in rng
+    assert 'I18n.TrF("Game {0} of {1}", first + 1, Builds.Count)' in rng
+

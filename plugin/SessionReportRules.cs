@@ -451,6 +451,54 @@ namespace CompetitiveRounds
         internal static bool SearchFieldMayDraw(bool pageOpen, bool onItsSurface, bool reportOpen)
             => pageOpen && onItsSurface && !reportOpen;
 
+        // -- board row 30c: the builds pages' layout (pure) ---------------------
+
+        /// <summary>First block index of every page when blocks of the given
+        /// heights are laid top to bottom in a column `usable` tall: a block that
+        /// does not fit starts the next page, and a block taller than a page
+        /// still gets a page of its own - every block lands on exactly one page,
+        /// none is dropped, and there is no per-page cap (board row 30c).</summary>
+        internal static List<int> PackPages(IList<float> heights, float usable)
+        {
+            var starts = new List<int> { 0 };
+            float used = 0f;
+            for (int i = 0; i < heights.Count; i++)
+            {
+                float h = Math.Max(0f, heights[i]);
+                if (used > 0f && used + h > usable)
+                {
+                    starts.Add(i);
+                    used = 0f;
+                }
+                used += h;
+            }
+            return starts;
+        }
+
+        /// <summary>Chips in the given order (pick order) flowed into a line
+        /// `lineW` wide: a chip that would cross the right edge starts the next
+        /// row, and a chip wider than the line gets a row of its own. Returns
+        /// (x, row) per chip; `rows` is the number of rows used (0 for none).</summary>
+        internal static List<Pt> FlowChips(IList<float> widths, float lineW, float gap, out int rows)
+        {
+            var at = new List<Pt>(widths.Count);
+            float x = 0f;
+            int row = 0;
+            for (int i = 0; i < widths.Count; i++)
+            {
+                float w = Math.Max(0f, widths[i]);
+                if (x > 0f && x + w > lineW)
+                {
+                    row++;
+                    x = 0f;
+                }
+                at.Add(new Pt(x, row));
+                x += w + gap;
+            }
+            rows = widths.Count == 0 ? 0 : row + 1;
+            return at;
+        }
+
         // -- series maths (pure) -----------------------------------------------
 
         /// <summary>Value of a cumulative series at time x: 0 at or before the

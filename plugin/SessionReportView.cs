@@ -8,10 +8,11 @@ namespace CompetitiveRounds
     /// <summary>Sept 6 batch (Group 4 item c) — the F5-owned INTERACTIVE session
     /// report: an IMGUI pager (prev / next / Esc, no auto-advance, no
     /// stream-mode requirement) drawn full-screen over the open F5 overlay.
-    /// Three fixed pages (timeline, rates, totals) and then the builds, one
-    /// page per screenful — the build rows are PAGED, never discarded, so the
-    /// page count is dynamic (<see cref="PageCount"/>) and every key and footer
-    /// path reads it (review r1).
+    /// Three fixed pages (timeline, rates, totals) and then the builds: one
+    /// compact block per game, as many blocks per page as fit and as many
+    /// pages as needed (board row 30c) - the blocks are PAGED, never
+    /// discarded, so the page count is dynamic (<see cref="PageCount"/>) and
+    /// every key and footer path reads it (review r1).
     /// It draws a <see cref="SessionReportModel.Model"/> and nothing else — all
     /// parsing, sanitizing and maths live in the model.
     ///
@@ -62,7 +63,7 @@ namespace CompetitiveRounds
         private static int PageCount() => SessionReportModel.FIXED_PAGES + Mathf.Max(1, buildPages);
 
         private static bool stylesReady;
-        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny, stCards;
+        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny, stChip;
         private static readonly Color BACKDROP = new Color(0.04f, 0.05f, 0.08f, 0.95f);
         private static readonly Color PANEL = new Color(1f, 1f, 1f, 0.05f);
         private static readonly Color GRID = new Color(1f, 1f, 1f, 0.08f);
@@ -262,9 +263,20 @@ namespace CompetitiveRounds
             if (GUI.Button(new Rect(r.x + 16f + bw, y, bw, bh), I18n.Tr("Next >"), stBtn))
                 page = Mathf.Min(pages - 1, page + 1);
             GUI.enabled = wasEnabled;
-            string pageLabel = model != null
-                ? I18n.TrF("Page {0}/{1}", page + 1, pages) + "  -  " + model.PageTitle(page, buildPages)
-                : "";
+            string pageLabel = "";
+            if (model != null)
+            {
+                // A builds page names the games it holds, from the same page
+                // breaks the draw path uses.
+                int first = 0, last = 0;
+                if (page >= SessionReportModel.FIXED_PAGES && buildStarts.Count > 0)
+                {
+                    int sub = Mathf.Clamp(page - SessionReportModel.FIXED_PAGES, 0, buildStarts.Count - 1);
+                    first = buildStarts[sub];
+                    last = (sub + 1 < buildStarts.Count ? buildStarts[sub + 1] : model.Builds.Count) - 1;
+                }
+                pageLabel = I18n.TrF("Page {0}/{1}", page + 1, pages) + "  -  " + model.PageTitle(page, first, last);
+            }
             GUI.Label(new Rect(r.x + 24f + 2f * bw, y, r.width - 48f - 3f * bw, bh), pageLabel, stBody);
             if (GUI.Button(new Rect(r.xMax - bw - 8f, y, bw, bh), I18n.Tr("Close"), stBtn)) Close();
         }
@@ -415,64 +427,115 @@ namespace CompetitiveRounds
             }
         }
 
-        // ── builds page ──────────────────────────────────────────────────────
+        // -- builds pages (board row 30c) ------------------------------------------
 
-        /// <summary>First block index of every builds page, as measured against
-        /// the current body: rows of blocks are laid out top to bottom, a row
-        /// that does not fit starts the next page, and a row taller than the
-        /// body still gets a page of its own — so every block is reachable and
-        /// nothing is discarded. Sets buildPages, which the pager reads.</summary>
+        /// <summary>A measured builds block: its height and, per player
+        /// column, where the column sits in the block, where each chip sits
+        /// (SessionReportRules.FlowChips) and the stat lines laid out for the
+        /// column's width. Measured with the styles that draw it.</summary>
+        private sealed class ColLayout
+        {
+            public float X, Y, W, H;                 // relative to the block's inner top-left
+            public readonly List<float> ChipW = new List<float>();
+            public List<SessionReportRules.Pt> ChipAt = new List<SessionReportRules.Pt>();
+            public float ChipsH;
+            public string Stats = "";
+            public float StatsH;
+        }
+
+        private sealed class BlockLayout
+        {
+            public readonly List<ColLayout> Cols = new List<ColLayout>();
+        }
+
+        // First block of every builds page, each block's measured height (its
+        // gap included) and layout, index-aligned with m.Builds. Re-measured
+        // only when the model or the body size changes; the pager, the footer
+        // and the draw path all read these same numbers.
         private static readonly List<int> buildStarts = new List<int>();
-        // Per-block measured heights, index-aligned with m.Builds and filled by
-        // MeasureBuildPages: the card list wraps to the column width, so its
-        // height is measured with the style that draws it, never assumed
-        // (review r2). Re-measured only when the model or the body size
-        // changes; the pager and the draw path read the same numbers.
         private static readonly List<float> blockH = new List<float>();
-        private static readonly List<float> blockCardsH = new List<float>();
+        private static readonly List<BlockLayout> blockLayouts = new List<BlockLayout>();
         private static SessionReportModel.Model measuredModel;
         private static float measuredW = -1f, measuredH = -1f;
 
+        private const float PAGE_HEAD_H = 30f, BLOCK_GAP = 8f, BLOCK_PAD = 6f, BLOCK_HEAD_H = 26f;
+        private const float COL_GAP = 12f, MIN_COL_W = 190f, NAME_H = 20f;
+        private const float CHIP_H = 20f, CHIP_GAP = 4f, CHIP_ROW_GAP = 3f;
+
+        /// <summary>Measures every game's block against the current body and
+        /// packs them onto pages: as many blocks per page as fit, a block
+        /// taller than a page gets one of its own, none is dropped and there
+        /// is no cap (SessionReportRules.PackPages, executed by the client
+        /// harness). Sets buildPages, which the pager reads.</summary>
         private static void MeasureBuildPages(Rect body, SessionReportModel.Model m)
         {
             if (ReferenceEquals(m, measuredModel) && body.width == measuredW && body.height == measuredH
                 && buildStarts.Count > 0 && blockH.Count == m.Builds.Count)
                 return;
             buildStarts.Clear();
-            buildStarts.Add(0);
             blockH.Clear();
-            blockCardsH.Clear();
+            blockLayouts.Clear();
             measuredModel = m; measuredW = body.width; measuredH = body.height;
-            if (m.BuildsMissing != null || m.Builds.Count == 0) { buildPages = 1; return; }
+            if (m.BuildsMissing != null || m.Builds.Count == 0) { buildStarts.Add(0); buildPages = 1; return; }
             EnsureStyles();
-            int cols = Mathf.Clamp(m.Players.Count, 1, 4);
-            float colW = (body.width - 16f) / cols;
-            float textW = Mathf.Max(40f, colW - 20f);     // the card label's width in DrawBuilds
+            float innerW = body.width - 16f - 2f * BLOCK_PAD;
             for (int i = 0; i < m.Builds.Count; i++)
             {
-                float cardsH = CardsHeight(m.Builds[i], textW);
-                blockCardsH.Add(cardsH);
-                blockH.Add(BlockHeight(m.Builds[i], cardsH));
+                float h;
+                blockLayouts.Add(MeasureBlock(m.Builds[i], innerW, out h));
+                blockH.Add(h);
             }
-            float usable = body.height - 16f;
-            float used = 0f;
-            for (int i = 0; i < m.Builds.Count; i += cols)
-            {
-                float rowH = 0f;
-                for (int c = 0; c < cols && i + c < m.Builds.Count; c++)
-                    rowH = Mathf.Max(rowH, blockH[i + c]);
-                if (used > 0f && used + rowH > usable)
-                {
-                    buildStarts.Add(i);
-                    used = 0f;
-                }
-                used += rowH;
-            }
+            buildStarts.AddRange(SessionReportRules.PackPages(blockH, body.height - PAGE_HEAD_H - 4f));
             buildPages = buildStarts.Count;
         }
 
-        /// <summary>Builds page `sub` (0 = the first), the blocks between two
-        /// measured page breaks.</summary>
+        /// <summary>One block: the header row, then the players' columns side
+        /// by side - as many per row as the width holds at MIN_COL_W (two in
+        /// 1v1, one per player in FFA until the width runs out, then a second
+        /// row). `h` is the block's full height including the gap below it.</summary>
+        private static BlockLayout MeasureBlock(SessionReportModel.GameBuild b, float innerW, out float h)
+        {
+            var lay = new BlockLayout();
+            int n = b.Cols.Count;
+            int perRow = Mathf.Clamp(Mathf.FloorToInt((innerW + COL_GAP) / (MIN_COL_W + COL_GAP)), 1, Mathf.Max(1, n));
+            float colW = (innerW - (perRow - 1) * COL_GAP) / perRow;
+            float y = BLOCK_HEAD_H, rowH = 0f;
+            for (int c = 0; c < n; c++)
+            {
+                if (c > 0 && c % perRow == 0) { y += rowH + 6f; rowH = 0f; }
+                var col = b.Cols[c];
+                var cl = new ColLayout { X = (c % perRow) * (colW + COL_GAP), Y = y, W = colW };
+                foreach (var chip in col.Chips) cl.ChipW.Add(ChipWidth(chip, colW));
+                int rows;
+                cl.ChipAt = SessionReportRules.FlowChips(cl.ChipW, colW, CHIP_GAP, out rows);
+                cl.ChipsH = rows > 0 ? rows * CHIP_H + (rows - 1) * CHIP_ROW_GAP : 18f;
+                if (col.StatsWire.Length > 0)
+                {
+                    // ~7 px per character of the 12 pt stat text: the packer puts
+                    // as many stats on a line as the column holds.
+                    int budget = Mathf.Max(12, Mathf.FloorToInt(colW / 7f));
+                    try { cl.Stats = NativeUI.BuildStatsTipBlock(col.StatsWire, budget) ?? ""; } catch { cl.Stats = ""; }
+                    if (cl.Stats.Length > 0)
+                        cl.StatsH = Mathf.Ceil(stTiny.CalcHeight(new GUIContent(cl.Stats), colW)) + 2f;
+                }
+                cl.H = NAME_H + cl.ChipsH + (cl.StatsH > 0f ? 4f + cl.StatsH : 0f);
+                rowH = Mathf.Max(rowH, cl.H);
+                lay.Cols.Add(cl);
+            }
+            h = y + rowH + 2f * BLOCK_PAD + BLOCK_GAP;
+            return lay;
+        }
+
+        /// <summary>A chip's width: its text measured with the style that
+        /// draws it, plus the colour bar and padding; never wider than the
+        /// column (a chip that wide takes a row of its own).</summary>
+        private static float ChipWidth(SessionReportModel.Chip chip, float colW)
+        {
+            return Mathf.Min(colW, Mathf.Ceil(stChip.CalcSize(new GUIContent(chip.Text)).x) + 14f);
+        }
+
+        /// <summary>Builds page `sub` (0 = the first): the blocks between two
+        /// measured page breaks, under a header naming the games it holds.</summary>
         private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)
         {
             Fill(body, PANEL);
@@ -482,50 +545,54 @@ namespace CompetitiveRounds
                 return;
             }
             MeasureBuildPages(body, m);                 // cached unless the model or the body changed
-            int cols = Mathf.Clamp(m.Players.Count, 1, 4);
-            float colW = (body.width - 16f) / cols;
             sub = Mathf.Clamp(sub, 0, buildPages - 1);
             int first = buildStarts[sub], end = sub + 1 < buildStarts.Count ? buildStarts[sub + 1] : m.Builds.Count;
+            bool rolled = false;
+            for (int i = first; i < end; i++) rolled |= m.Builds[i].HasRolled;
+            GUI.Label(new Rect(body.x + 10f, body.y + 4f, body.width * 0.5f, 22f), m.BuildsRange(first, end - 1), stBody);
+            GUI.Label(new Rect(body.x + body.width * 0.35f, body.y + 4f, body.width * 0.65f - 10f, 22f),
+                rolled ? m.RolledKey + "     " + m.ChipKey : m.ChipKey, stSmallR);
 
-            float y = body.y + 8f;
-            for (int i = first; i < end; i += cols)
+            float y = body.y + PAGE_HEAD_H;
+            for (int i = first; i < end; i++)
             {
-                float rowH = 0f;
-                for (int c = 0; c < cols && i + c < end; c++)
-                    rowH = Mathf.Max(rowH, blockH[i + c]);
-                for (int c = 0; c < cols && i + c < end; c++)
+                var b = m.Builds[i];
+                var lay = blockLayouts[i];
+                var r = new Rect(body.x + 8f, y, body.width - 16f, blockH[i] - BLOCK_GAP);
+                Fill(r, ROW);
+                float ix = r.x + BLOCK_PAD, iy = r.y + BLOCK_PAD, iw = r.width - 2f * BLOCK_PAD;
+                GUI.Label(new Rect(ix, iy, iw - 140f, 22f), b.Header, stBody);
+                if (b.Length.Length > 0)
+                    GUI.Label(new Rect(ix + iw - 140f, iy, 140f, 22f), "<color=#8FA3B8>" + b.Length + "</color>", stSmallR);
+                for (int c = 0; c < b.Cols.Count && c < lay.Cols.Count; c++)
                 {
-                    var b = m.Builds[i + c];
-                    float cardsH = blockCardsH[i + c];
-                    var r = new Rect(body.x + 8f + c * colW, y, colW - 8f, rowH - 6f);
-                    Fill(r, ROW);
-                    GUI.Label(new Rect(r.x + 6f, r.y + 2f, r.width - 12f, 22f), b.Title, stBody);
-                    GUI.Label(new Rect(r.x + 6f, r.y + 24f, r.width - 12f, cardsH), b.Cards, stCards);
-                    if (b.Stats.Length > 0)
-                        GUI.Label(new Rect(r.x + 6f, r.y + 26f + cardsH, r.width - 12f, r.height - 30f - cardsH), b.Stats, stTiny);
+                    var col = b.Cols[c];
+                    var cl = lay.Cols[c];
+                    float cx = ix + cl.X, cy = iy + cl.Y, chipsY = cy + NAME_H;
+                    GUI.Label(new Rect(cx, cy, cl.W, NAME_H), col.Name, stSmall);
+                    if (col.Chips.Count == 0)
+                        GUI.Label(new Rect(cx, chipsY, cl.W, 18f), "<color=#8FA3B8>" + col.Note + "</color>", stSmall);
+                    for (int k = 0; k < col.Chips.Count && k < cl.ChipAt.Count; k++)
+                    {
+                        var at = cl.ChipAt[k];
+                        DrawChip(new Rect(cx + at.X, chipsY + at.Y * (CHIP_H + CHIP_ROW_GAP), cl.ChipW[k], CHIP_H), col.Chips[k]);
+                    }
+                    if (cl.Stats.Length > 0)
+                        GUI.Label(new Rect(cx, chipsY + cl.ChipsH + 4f, cl.W, cl.StatsH), cl.Stats, stTiny);
                 }
-                y += rowH;
+                y += blockH[i];
             }
         }
 
-        /// <summary>The wrapped height of a block's card list at the width the
-        /// draw path gives it, measured with the style that draws it.</summary>
-        private static float CardsHeight(SessionReportModel.BuildBlock b, float textW)
+        /// <summary>A chip: a faint fill and a bar in the card's rarity colour,
+        /// the name (pre-coloured by the model) beside the bar; a rolled-out
+        /// card is drawn dimmed.</summary>
+        private static void DrawChip(Rect r, SessionReportModel.Chip chip)
         {
-            if (string.IsNullOrEmpty(b.Cards)) return 18f;
-            return Mathf.Max(18f, Mathf.Ceil(stCards.CalcHeight(new GUIContent(b.Cards), textW)));
-        }
-
-        private static float BlockHeight(SessionReportModel.BuildBlock b, float cardsH)
-        {
-            int lines = 0;
-            if (b.Stats.Length > 0)
-            {
-                lines = 1;
-                for (int i = 0; i < b.Stats.Length; i++) if (b.Stats[i] == '\n') lines++;
-            }
-            // title row (24) + the measured card list + gap (2) + stats lines + bottom pad (8)
-            return 24f + cardsH + 2f + lines * 15f + 8f;
+            Color t = chip.Tint;
+            Fill(r, new Color(t.r, t.g, t.b, chip.Rolled ? 0.05f : 0.14f));
+            Fill(new Rect(r.x, r.y, 3f, r.height), new Color(t.r, t.g, t.b, chip.Rolled ? 0.35f : 1f));
+            GUI.Label(new Rect(r.x + 7f, r.y, r.width - 8f, r.height), chip.Label, stChip);
         }
 
         // ── primitives / styles ──────────────────────────────────────────────
@@ -542,8 +609,8 @@ namespace CompetitiveRounds
             stSmall = Mk(14, TextAnchor.MiddleLeft, FontStyle.Bold);
             stSmallR = Mk(13, TextAnchor.MiddleRight, FontStyle.Bold);
             stTiny = Mk(12, TextAnchor.UpperLeft, FontStyle.Bold);
-            // The build card list: UpperLeft is the wrapping anchor in Mk.
-            stCards = Mk(14, TextAnchor.UpperLeft, FontStyle.Bold);
+            // A card chip: one line, never wrapped (MiddleLeft does not wrap in Mk).
+            stChip = Mk(13, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCell = Mk(15, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCellHead = Mk(13, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCenter = Mk(18, TextAnchor.MiddleCenter, FontStyle.Bold);

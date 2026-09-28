@@ -62,6 +62,7 @@ namespace CompetitiveRounds
             FfaCases(r);
             RobustnessCases(r);
             OverlayCases(r);
+            LayoutCases(r);
             return r;
         }
 
@@ -204,6 +205,27 @@ namespace CompetitiveRounds
             Check(r, "overlay: a field off its surface stays down", !off, "off its surface -> " + off);
             bool shut = SearchFieldMayDraw(false, true, false);
             Check(r, "overlay: the page closed keeps a field down", !shut, "page closed -> " + shut);
+        }
+
+        // -- board row 30c: the builds pages' layout rules -------------------------
+
+        private static void LayoutCases(SelfTestResult r)
+        {
+            var starts = PackPages(new List<float> { 100f, 100f, 100f, 500f, 50f }, 250f);
+            Check(r, "builds: pages pack as many games as fit and a tall one alone",
+                  string.Join(",", starts.ConvertAll(x => x.ToString(INV)).ToArray()) == "0,2,3,4",
+                  string.Join(",", starts.ConvertAll(x => x.ToString(INV)).ToArray()));
+            var many = new List<float>();
+            for (int i = 0; i < 30; i++) many.Add(10f);
+            var one = PackPages(many, 1000f);
+            Check(r, "builds (control): no cap - thirty short games share one page when they fit",
+                  one.Count == 1 && one[0] == 0, one.Count + " page(s)");
+            int rows;
+            var at = FlowChips(new List<float> { 50f, 60f, 70f, 200f, 10f }, 150f, 4f, out rows);
+            bool flow = rows == 4 && at[0].X == 0f && at[0].Y == 0f && at[1].X == 54f && at[1].Y == 0f
+                        && at[2].X == 0f && at[2].Y == 1f && at[3].Y == 2f && at[4].Y == 3f;
+            Check(r, "builds: chips wrap in pick order and a wide chip takes its own row", flow,
+                  rows + " rows: " + string.Join(" ", at.ConvertAll(p => p.X.ToString(INV) + "@" + p.Y.ToString(INV)).ToArray()));
         }
 
         // -- helpers -------------------------------------------------------------
