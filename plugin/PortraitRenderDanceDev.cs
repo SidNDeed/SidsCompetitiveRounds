@@ -21,6 +21,8 @@ namespace CompetitiveRounds
     ///                     [,selffail]                                  T48 (a local refusal, remembered)
     ///                     [,matteq][,matteqflip]                       the matte equality (matteqflip: its negative arm)
     ///                     [,faultframe=K][,teardownmutant]             T45's job teardown arm, L1's order (teardownmutant: the mutant arm)
+    ///                     [,multi=K][,jobs=N]                          S2F3 evidence: K same-state repeats of each frame's black pass compared; N job workers
+    ///                     [,msaa4]                                     S2F3: T36's mutant arm, the frames and the still through the old 4x MSAA targets
     ///   TestPlayerCards = portrait:dance,t38[,mutant]                  T38's TryGetPose harness
     ///   TestPlayerCards = portrait:dance,decide[,sku=S][,nomemory][,recolor][,stored=dance|base|none]   T48's decision probe
     ///
@@ -71,6 +73,9 @@ namespace CompetitiveRounds
                 else if (p == "matteqflip") { opt.matteq = true; opt.matteqFlip = true; }
                 else if (p.StartsWith("faultframe=") && int.TryParse(p.Substring(11), out iv)) opt.faultFrame = Mathf.Max(0, iv);
                 else if (p == "teardownmutant") opt.teardownMutant = true;
+                else if (p.StartsWith("multi=") && int.TryParse(p.Substring(6), out iv)) opt.multi = Mathf.Clamp(iv, 0, 16);
+                else if (p.StartsWith("jobs=") && int.TryParse(p.Substring(5), out iv)) opt.jobs = Mathf.Max(0, iv);
+                else if (p == "msaa4") opt.msaa4 = true;
                 else Plugin.Log.LogInfo("[DANCE] lever: unknown option '" + p + "'");
             }
             if (sub == "t38") { DanceDevT38(mutant); return; }
@@ -90,7 +95,7 @@ namespace CompetitiveRounds
                 var o = new DanceOpts
                 {
                     local = true, tag = template.tag, holdFrames = template.holdFrames, fps = template.fps, fixedDt = template.fixedDt,
-                    tclock = template.tclock, matteq = template.matteq,
+                    tclock = template.tclock, matteq = template.matteq, multi = template.multi, jobs = template.jobs, msaa4 = template.msaa4,
                 };
                 float waitUntil = Time.realtimeSinceStartup + 30f;
                 while ((Rendering || UploadInFlight) && Time.realtimeSinceStartup < waitUntil) yield return null;
@@ -120,6 +125,107 @@ namespace CompetitiveRounds
             bool pass = owed >= 1 && under == owed && after == 0 && cleared && left == 0;
             return " teardown=" + (pass ? "PASS" : "FAIL") + " td-arm=" + (opt.teardownMutant ? "mutant(clear-first)" : "control")
                  + " owed=" + owed + " undone-under-pose=" + under + " undone-after-clear=" + after + " pose-cleared=" + cleared + " left=" + left;
+        }
+
+        // S2F3 (round two), evidence lever `multi=K`: after a frame's pair, the
+        // black pass rendered K more times in the same Unity frame from the same
+        // state -- nothing runs between those renders -- each resolved into a
+        // slot-sized target by the same blit as the pair's own, read back and
+        // compared byte for byte with the pair's black pass. A frame whose
+        // renders disagree is logged with how many of the K did, where, and how
+        // many distinct images the disagreeing ones made. Under `msaa4` (T36's
+        // mutant arm) the repeats go through the old 4x MSAA target.
+        private static int _danceMulti;
+        private static string _danceMultiTag = "";
+        private static int _danceMultiFrames, _danceMultiDiffer;
+        private static RenderTexture _danceMultiRt;
+        private static Texture2D _danceMultiTex;
+        private static byte[] _danceMultiRef;
+        private static readonly List<uint> _danceMultiSeen = new List<uint>();   // the disagreeing repeats' distinct images
+
+        private static void DanceMultiCheck(Camera cam, RenderTexture target, DanceSlot slot, int k)
+        {
+            int w = slot.B.width, h = slot.B.height;
+            var prev = RenderTexture.active;
+            try
+            {
+                if (_danceMultiRt == null || _danceMultiRt.width != w || _danceMultiRt.height != h)
+                {
+                    if (_danceMultiRt != null) UnityEngine.Object.Destroy(_danceMultiRt);
+                    _danceMultiRt = new RenderTexture(w, h, 0, slot.B.format) { hideFlags = HideFlags.HideAndDontSave };
+                    _danceMultiRt.Create();
+                }
+                if (_danceMultiTex == null || _danceMultiTex.width != w || _danceMultiTex.height != h)
+                {
+                    if (_danceMultiTex != null) UnityEngine.Object.Destroy(_danceMultiTex);
+                    _danceMultiTex = new Texture2D(w, h, TextureFormat.RGBA32, false) { hideFlags = HideFlags.HideAndDontSave };
+                }
+                RenderTexture.active = slot.B;
+                _danceMultiTex.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
+                var raw = _danceMultiTex.GetRawTextureData<byte>();
+                if (_danceMultiRef == null || _danceMultiRef.Length != raw.Length) _danceMultiRef = new byte[raw.Length];
+                raw.CopyTo(_danceMultiRef);
+                int disagree = 0, maxBytes = 0, firstAt = -1;
+                _danceMultiSeen.Clear();
+                for (int i = 0; i < _danceMulti; i++)
+                {
+                    cam.targetTexture = target;
+                    cam.backgroundColor = Color.black; cam.Render(); Graphics.Blit(target, _danceMultiRt);
+                    RenderTexture.active = _danceMultiRt;
+                    _danceMultiTex.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
+                    var b = _danceMultiTex.GetRawTextureData<byte>();
+                    int diff = 0, at = -1; uint hsh = 2166136261u;
+                    for (int j = 0; j < b.Length; j++) { byte bj = b[j]; hsh = (hsh ^ bj) * 16777619u; if (bj != _danceMultiRef[j]) { diff++; if (at < 0) at = j; } }
+                    if (diff > 0 && !_danceMultiSeen.Contains(hsh)) _danceMultiSeen.Add(hsh);
+                    if (diff > 0) { disagree++; if (diff > maxBytes) maxBytes = diff; if (firstAt < 0) firstAt = at; }
+                }
+                _danceMultiFrames++;
+                if (disagree > 0)
+                {
+                    _danceMultiDiffer++;
+                    int px = firstAt / 4;
+                    Plugin.Log.LogInfo("[DANCE-MULTI] tag=" + _danceMultiTag + " k=" + k + " disagree=" + disagree + "/" + _danceMulti
+                                       + " bytes<=" + maxBytes + " first=(" + (px % w) + "," + (px / w) + ",bottom-up) ch=" + (firstAt % 4)
+                                       + " distinct=" + _danceMultiSeen.Count + " jobs=" + Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[DANCE-MULTI] tag=" + _danceMultiTag + " k=" + k + " threw " + ex.GetType().Name + ": " + ex.Message); }
+            finally { RenderTexture.active = prev; cam.targetTexture = target; }
+        }
+
+        // S2F3 (round two), evidence lever `jobs=N`: the job system's worker
+        // count held at N for the capture and put back at its end; jobs=0 runs
+        // the engine jobs of the capture's renders on the main thread.
+        private static int _danceJobsBefore = -1;
+        private static string _danceJobsStat = "-";
+
+        private static void DanceJobsHold(int n)
+        {
+            _danceJobsStat = "-"; _danceJobsBefore = -1;
+            if (n < 0) return;
+            try
+            {
+                int before = Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount;
+                Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount = Mathf.Min(n, Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerMaximumCount);
+                _danceJobsBefore = before;
+                _danceJobsStat = before + ">" + Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount;
+            }
+            catch (Exception ex) { _danceJobsStat = "threw:" + ex.GetType().Name; }
+        }
+
+        private static void DanceJobsRestore()
+        {
+            if (_danceJobsBefore < 0) return;
+            try { Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount = _danceJobsBefore; _danceJobsStat += ">" + Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount; }
+            catch (Exception ex) { _danceJobsStat += "/restore-threw:" + ex.GetType().Name; }
+            _danceJobsBefore = -1;
+        }
+
+        private static void DanceMultiRelease()
+        {
+            if (_danceMultiRt != null) { UnityEngine.Object.Destroy(_danceMultiRt); _danceMultiRt = null; }
+            if (_danceMultiTex != null) { UnityEngine.Object.Destroy(_danceMultiTex); _danceMultiTex = null; }
+            _danceMulti = 0;
         }
 
         /// <summary>T38/M1: a PhotonView added to every holdable the rig
@@ -202,6 +308,9 @@ namespace CompetitiveRounds
                             + " faultat=" + opt.faultAt + " gatestartonly=" + (opt.gateStartOnly ? 1 : 0) + " injectpv=" + (opt.injectPv ? 1 : 0)
                             + " m1=" + (opt.m1CloneOnly ? "cloneonly" : "full") + " selffail=" + (opt.selfFail ? 1 : 0)
                             + (opt.faultFrame >= 0 ? " faultframe=" + opt.faultFrame + (teardown ?? "") : "")
+                            + " aa=" + (opt.msaa4 ? "msaa4" : "ss2x2")
+                            + (opt.multi > 0 ? " multi=" + opt.multi + "/frames=" + _danceMultiFrames + "/disagree=" + _danceMultiDiffer : "")
+                            + (opt.jobs >= 0 ? " jobs=" + _danceJobsStat : "")
                             + (fail != null ? " reason=\"" + fail.Replace('"', '\'') + "\"" : "");
                 Plugin.Log.LogInfo("[DANCE-CAPTURE] " + line);
                 rep.Append("capture: ").Append(line).Append('\n');

@@ -236,6 +236,9 @@ namespace CompetitiveRounds
             internal int fps = -1;        // T36: Application.targetFrameRate for the job (vSync off), restored after
             internal int faultFrame = -1; // L1's order (round two), T45's job teardown arm: the job stops at the first frame >= this whose pose the rig still owes
             internal bool teardownMutant; // ...its mutant arm: the job's finally clears the pose before the inverse apply
+            internal int multi;           // S2F3 (round two), evidence lever only: each frame's black pass rendered this many more times, same state, compared
+            internal int jobs = -1;       // S2F3 (round two), evidence lever only: the job worker count held for the capture (-1: unchanged)
+            internal bool msaa4;          // S2F3 (round two), lever only: T36's mutant arm -- the frames and the still through the old 4x MSAA targets
         }
 
         /// <summary>Starts the dance job; false when it cannot start now (the
@@ -439,8 +442,35 @@ namespace CompetitiveRounds
             _danceTargets.Add(rt);
             // Registered as it is made (finding S2F12), so nothing that runs
             // below can leave a target DanceReleaseTargets does not know.
-            if (aa > 1) rt.antiAliasing = aa;
+            // S2F3 (round two): every resolve and sampling setting is fixed here,
+            // the same on every launch and never the seat's quality level: the
+            // sample count the caller names (1 for the plain targets), point
+            // filtering (a blit between two equal-sized targets reads texel for
+            // texel), no anisotropy, no mips, clamped edges.
+            rt.antiAliasing = aa > 1 ? aa : 1;
+            rt.filterMode = FilterMode.Point;
+            rt.anisoLevel = 0;
+            rt.useMipMap = false;
+            rt.autoGenerateMips = false;
+            rt.wrapMode = TextureWrapMode.Clamp;
             rt.Create();
+            return rt;
+        }
+
+        // S2F3 (round two): the capture's anti-aliasing is 2x2 supersampling,
+        // not hardware MSAA. On the verification seat the same pose rendered
+        // seven times in one Unity frame through the old 4x MSAA target split
+        // into two images 2 or 3 bytes apart (the first at one edge pixel) in
+        // some frames, with every engine job on the main thread as well; with
+        // single-sample targets it did not disagree once (notes section 19,
+        // T36). So each pass renders single-sample into a target of twice the
+        // edge, and the blit into the edge-sized slot samples it bilinearly at
+        // the shared corner of each 2x2 texel block, the mean of its four
+        // samples. DanceTarget registers it and fixes every other setting.
+        private static RenderTexture DanceSsTarget(int edge)
+        {
+            var rt = DanceTarget(edge * 2, 24, 1);
+            rt.filterMode = FilterMode.Bilinear;          // the 2:1 blit's box filter
             return rt;
         }
 
@@ -485,12 +515,13 @@ namespace CompetitiveRounds
         /// <summary>The black and the white pass of the current pose into the
         /// slot's two targets, back to back with no yield between them (S1.4
         /// step 7), and both readbacks requested.</summary>
-        private static void DanceRenderPair(DanceRing ring, Camera cam, RenderTexture msaa, DanceSlot slot, int k)
+        private static void DanceRenderPair(DanceRing ring, Camera cam, RenderTexture target, DanceSlot slot, int k)
         {
             lock (ring.Sync) { slot.State = 1; slot.Arrived = 0; slot.K = k; ring.InFlight++; }
-            cam.targetTexture = msaa;
-            cam.backgroundColor = Color.black; cam.Render(); Graphics.Blit(msaa, slot.B);
-            cam.backgroundColor = Color.white; cam.Render(); Graphics.Blit(msaa, slot.W);
+            cam.targetTexture = target;                           // S2F3: the supersampled target (4x MSAA under msaa4)
+            cam.backgroundColor = Color.black; cam.Render(); Graphics.Blit(target, slot.B);
+            cam.backgroundColor = Color.white; cam.Render(); Graphics.Blit(target, slot.W);
+            if (_danceMulti > 0) DanceMultiCheck(cam, target, slot, k);   // S2F3 evidence lever only
             AsyncGPUReadback.Request(slot.B, 0, TextureFormat.RGBA32, req => DanceOnReadback(ring, slot, 1, req));
             AsyncGPUReadback.Request(slot.W, 0, TextureFormat.RGBA32, req => DanceOnReadback(ring, slot, 2, req));
         }
@@ -668,6 +699,8 @@ namespace CompetitiveRounds
         {
             var rep = new StringBuilder();
             _errCount = 0; _errs.Clear();
+            _danceMulti = opt.multi; _danceMultiTag = opt.tag ?? ""; _danceMultiFrames = 0; _danceMultiDiffer = 0;
+            DanceJobsHold(opt.jobs);                              // S2F3 diagnostic, lever only
             _cleanupOwed = true;
             Application.logMessageReceived -= OnLog;
             Application.logMessageReceived += OnLog;
@@ -795,22 +828,30 @@ namespace CompetitiveRounds
                 // S1.4 step 5: one camera for both products. Finding S2F4: made
                 // all in one frame, the targets and buffers measured 21-61 ms of
                 // main thread on the verification seat, over S1.8's 33 ms
-                // maximum. Now `_rt` is created with the camera (not on the
-                // still's first Render), every other target in a Unity frame of
-                // its own behind the after-yield gate, and the fifteen byte
-                // buffers on a pool thread (a fresh 5.6 MB array alone measured
+                // maximum. Now every target is made in a Unity frame of its own
+                // behind the after-yield gate (S2F3, round two: the frames' and
+                // the still's supersampled targets first; under the msaa4 lever
+                // the still's is `_rt`, created with the camera), and the fifteen
+                // byte buffers on a pool thread (a fresh 5.6 MB array alone measured
                 // up to 26 ms there, its page faults paid by the allocating
                 // thread). The loop ends only when every target is made and the
                 // buffers are in; nothing reads a slot before that.
                 clock.Phase = "alloc";
-                var cam = MakeCamera(fit, DEFAULT_SIZE);          // the still's 1180 MSAA target is _rt
-                _rt.Create();
-                RenderTexture msaa = null;                        // the frames' 590 MSAA target
+                var cam = MakeCamera(fit, DEFAULT_SIZE);          // its _rt (1180, 4x MSAA) is the still's target only under msaa4
+                // S2F3 (round two): the capture camera's settings fixed, the same on
+                // every launch: the samples come only from the targets' own counts,
+                // no HDR, no dynamic resolution, no occlusion culling, the forward
+                // path; no post-processing exists on this camera (a bare Camera).
+                cam.allowMSAA = false; cam.allowHDR = false; cam.allowDynamicResolution = false;
+                cam.useOcclusionCulling = false; cam.renderingPath = RenderingPath.Forward;
+                if (opt.msaa4) { _rt.filterMode = FilterMode.Point; _rt.anisoLevel = 0; _rt.wrapMode = TextureWrapMode.Clamp; _rt.Create(); }
+                RenderTexture frameRt = null;                     // the frames' target: 1180 supersampled (590 4x MSAA under msaa4)
+                RenderTexture stillRt = opt.msaa4 ? _rt : null;   // the still's target: 2360 supersampled (_rt under msaa4)
                 ring = new DanceRing(++_danceGen, n) { Table = GradeTable, Clock = clock };
                 for (int s = 0; s <= DANCE_RING_PAIRS; s++)
                     ring.Slots.Add(new DanceSlot { Edge = s < DANCE_RING_PAIRS ? DANCE_EDGE : DEFAULT_SIZE });
                 DanceQueueBuffers(ring);
-                int targets = 1 + 2 * ring.Slots.Count;
+                int targets = 2 + 2 * ring.Slots.Count;           // S2F3: the frames' and the still's targets, then the slots'
                 for (int step = 0; ; step++)
                 {
                     yield return null; yields++;
@@ -818,11 +859,12 @@ namespace CompetitiveRounds
                     string e; bool done;
                     lock (ring.Sync) { e = ring.Error; done = ring.BuffersDone; }
                     if (e != null) { fail = e; remember = true; yield break; }
-                    if (step == 0) msaa = DanceTarget(DANCE_EDGE, 24, 4);
+                    if (step == 0) frameRt = opt.msaa4 ? DanceTarget(DANCE_EDGE, 24, 4) : DanceSsTarget(DANCE_EDGE);
+                    else if (step == 1) { if (stillRt == null) stillRt = DanceSsTarget(DEFAULT_SIZE); }
                     else if (step < targets)
                     {
-                        var slot = ring.Slots[(step - 1) / 2];
-                        if ((step - 1) % 2 == 0) slot.B = DanceTarget(slot.Edge, 0, 1);
+                        var slot = ring.Slots[(step - 2) / 2];
+                        if ((step - 2) % 2 == 0) slot.B = DanceTarget(slot.Edge, 0, 1);
                         else slot.W = DanceTarget(slot.Edge, 0, 1);
                     }
                     else if (done) break;
@@ -847,7 +889,7 @@ namespace CompetitiveRounds
                     // One synchronous ReadPixels per Unity frame (S2F4): the pair's
                     // two renders, then each reference a frame later. Nothing
                     // renders into `cal` again before the frames' loop.
-                    DanceRenderPair(ring, cam, msaa, cal, -2);
+                    DanceRenderPair(ring, cam, frameRt, cal, -2);
                     yield return null; yields++;
                     if ((fail = DanceAfterYield(gen, key, tRig, opt, yields, ref stale, ref remember)) != null) yield break;
                     refB = DanceReadPixels(cal.B);
@@ -869,9 +911,9 @@ namespace CompetitiveRounds
                     if (opt.matteq) DanceMatteq(rep, ring.CalB, ring.CalW, refB, refW, opt.matteqFlip);
                 }
                 ring.BottomUp = _danceOrientation == 1;
-                cam.targetTexture = _rt;
-                cam.backgroundColor = Color.black; cam.Render(); Graphics.Blit(_rt, stillSlot.B);
-                cam.backgroundColor = Color.white; cam.Render(); Graphics.Blit(_rt, stillSlot.W);
+                cam.targetTexture = stillRt;                      // S2F3: 2360 supersampled into the 1180 slot (_rt under msaa4)
+                cam.backgroundColor = Color.black; cam.Render(); Graphics.Blit(stillRt, stillSlot.B);
+                cam.backgroundColor = Color.white; cam.Render(); Graphics.Blit(stillRt, stillSlot.W);
                 lock (ring.Sync) { stillSlot.State = 1; stillSlot.Arrived = 0; stillSlot.K = -1; ring.InFlight++; }
                 AsyncGPUReadback.Request(stillSlot.B, 0, TextureFormat.RGBA32, req => DanceOnReadback(ring, stillSlot, 1, req));
                 AsyncGPUReadback.Request(stillSlot.W, 0, TextureFormat.RGBA32, req => DanceOnReadback(ring, stillSlot, 2, req));
@@ -902,7 +944,7 @@ namespace CompetitiveRounds
                     if (!DanceRigStill(gunPos, gunRot)) { fail = "the rig moved at frame " + k; remember = true; yield break; }
                     string e2; lock (ring.Sync) e2 = ring.Error;
                     if (e2 != null) { fail = e2; remember = true; yield break; }
-                    DanceRenderPair(ring, cam, msaa, slot, k);
+                    DanceRenderPair(ring, cam, frameRt, slot, k);
                 }
 
                 // S1.4 step 8: the pose cleared (L1 first), every readback and
@@ -950,6 +992,8 @@ namespace CompetitiveRounds
                 finally { DanceEmotes.DevTeardownClearsFirst = false; }
                 string tdLine = opt.faultFrame >= 0 ? DanceTeardownLine(opt, tdOwed) : null;
                 if (ring != null) ring.Close();
+                DanceMultiRelease();                              // S2F3 diagnostic: the multi arm's targets let go
+                DanceJobsRestore();                               // S2F3 diagnostic: the job worker count put back
                 if (timing)
                 {
                     Application.targetFrameRate = prevFps; QualitySettings.vSyncCount = prevVsync;
