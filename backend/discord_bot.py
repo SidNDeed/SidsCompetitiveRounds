@@ -8530,11 +8530,17 @@ async def _pc_api_bytes(path, params=None, timeout=10.0, max_bytes=_PC_FACE_MAX_
                     parsed = {}
                 meta.update(parsed)
                 return r.status, None, meta
+            # Every refused 200 below says why in one line: the drain posts a
+            # 200 without a usable body as "no picture yet", and a silent
+            # refusal is how a text-only post leaves no trace (D3).
+            where = f"API GET {path.split('?')[0]} -> HTTP 200"
             cl = r.headers.get("Content-Length")
             if cl is None:
+                print(f"{where} without a Content-Length: body refused")
                 return r.status, None, meta
             declared = int(cl)
             if declared <= 0 or declared > max_bytes:
+                print(f"{where} declaring {declared} bytes, outside 1..{max_bytes}: body refused")
                 return r.status, None, meta
             # `read(n)` answers UP TO n bytes. A body that arrives in more
             # than one buffer — which is every face over a few kilobytes —
@@ -8544,9 +8550,11 @@ async def _pc_api_bytes(path, params=None, timeout=10.0, max_bytes=_PC_FACE_MAX_
             # the body is not LONGER than declared.
             try:
                 data = await r.content.readexactly(declared)
-            except asyncio.IncompleteReadError:
+            except asyncio.IncompleteReadError as short:
+                print(f"{where} with {len(short.partial)} of its {declared} bytes: body refused")
                 return r.status, None, meta
             if await r.content.read(1):
+                print(f"{where} longer than its {declared} bytes: body refused")
                 return r.status, None, meta
             return r.status, data, meta
     except Exception as e:
@@ -8697,8 +8705,30 @@ async def _pc_leases(subject_refs):
     return None, undeliverable, past_deadline
 
 
+def _pc_receipt(msg, attached, why=None):
+    """One post as Discord stored it, from the Message its API answered with:
+    each attachment's name, content type, size and pixel size, and the first
+    embed's image as Discord resolved it - or, for a post sent without a
+    picture, why. The drain used to discard this answer, so no log could tell
+    a stored picture from none (Discord fix round 1, D3). No URL is printed:
+    Discord's carry the channel."""
+    if not attached:
+        return f"posted without a picture ({why or 'none to attach'})"
+    if msg is None:
+        return "posted; Discord answered without a message to read"
+    atts = []
+    for a in list(getattr(msg, "attachments", None) or []):
+        atts.append(f"{getattr(a, 'filename', None)} {getattr(a, 'content_type', None)} "
+                    f"{getattr(a, 'size', None)} B {getattr(a, 'width', None)}x{getattr(a, 'height', None)}")
+    embeds = list(getattr(msg, "embeds", None) or [])
+    image = getattr(embeds[0], "image", None) if embeds else None
+    shown = (f"{getattr(image, 'width', None)}x{getattr(image, 'height', None)}"
+             if image is not None and getattr(image, "url", None) else "none")
+    return f"stored by Discord: attachments [{'; '.join(atts) or 'none'}], embed image {shown}"
+
+
 async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
-                        require_lease=False):
+                        require_lease=False, receipt=None, no_face=None):
     """ONE send under the lease: the lease is re-validated immediately before
     the send and the bytes are dropped when it is gone; the send runs under
     the lease's deadline; the lease is released afterwards, sent or not.
@@ -8707,6 +8737,8 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
     under a lease that is present, unexpired and still live at the api right
     before the send, and returns False otherwise (r6 H1/M2: a line that names
     people is authorised as a whole, both names re-read, or not posted).
+    With `receipt` (a log label) the send's own answer is logged: what
+    Discord stored (_pc_receipt), or `no_face`, why no picture went (D3).
     Returns True when the send ran."""
     # `lease` is `_pc_lease`'s answer: (lease_id, deadline) and, since the
     # drain needed to know WHY a lease was refused, a third field this does
@@ -8735,7 +8767,13 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
         kwargs["file"] = discord.File(io.BytesIO(face), filename=filename)
     try:
         budget = _pc_lease_left(deadline) if (attach or require_lease) else 45.0   # a required lease bounds the whole send
-        await asyncio.wait_for(sender(**kwargs), timeout=budget)
+        msg = await asyncio.wait_for(sender(**kwargs), timeout=budget)
+        if receipt:
+            try:
+                line = _pc_receipt(msg, attach, no_face)
+            except Exception as ex:   # a log line must never fail a post that went out
+                line = f"posted; the receipt could not be read ({type(ex).__name__})"
+            print(f"{receipt} {line}")
     finally:
         await _pc_lease_release(lease_id)
     return True
@@ -9534,7 +9572,7 @@ async def cmd_pc_binder(ctx, member: discord.Member = None, page: int = 1):
 
 _pc_events_sent = {}   # event id -> True once posted (a failed ack never re-posts; bounded below)
 _pc_face_tries = {}    # first event id of a print group -> ticks spent waiting for its picture
-_PC_FACE_TRIES = 3     # ~90 s at this loop's 30 s period, then the line posts without one
+_PC_FACE_TRIES = 3     # ticks deferred at most: ~3 min at this loop's 60 s period, then the line posts without one
 
 
 def _pc_event_lines(events):
@@ -9629,7 +9667,7 @@ async def poll_pc_events():
                 # handout; a busy subject is leased again).
                 first = by_id.get(ids[0], {})
                 p = first.get("print") or {}
-                face, lease, again = None, (None, None), False
+                face, lease, again, why = None, (None, None), False, None
                 if first.get("subject_ref"):
                     lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)
                     again = bool(lease[2])
@@ -9637,12 +9675,22 @@ async def poll_pc_events():
                 # when the api's sixty-second hold ran out (Steam pictures v3
                 # §8). The line posts without a face rather than attach the
                 # plate for good — an attachment cannot be swapped later.
+                if not p.get("print_id"):
+                    why = "the event names no print"
+                elif not first.get("face_ready", True):
+                    why = "the subject's picture was unresolved when the hold ran out (face_ready false)"
                 if lease[0] and p.get("print_id") and first.get("face_ready", True):
                     st, face, _ = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
                                                    params={"size": "card"})
                     if st != 200:
                         face = None
                         again = st == 0 or st == 409 or st >= 500
+                        why = f"the face route answered HTTP {st}"
+                    elif face is None:
+                        # A 200 whose body the reader refused (it printed why):
+                        # a transport fault, not "this print has no picture" -
+                        # retried like a 5xx, never posted text-only at once (D3).
+                        again, why = True, "the face route answered HTTP 200 without a usable body"
                 # "Busy for two seconds" is not "has no picture". A transient
                 # refusal leaves the group QUEUED and unacked so the next tick
                 # can post it properly — but only so many times: an api that
@@ -9652,8 +9700,16 @@ async def poll_pc_events():
                     await _pc_lease_release(lease[0])
                     print(f"[PC-EVENTS] no picture for {ids[0]} yet (try {_pc_face_tries[ids[0]]}) — next tick")
                     break
-                _pc_face_tries.pop(ids[0], None)
-                if not await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease, require_lease=True):
+                tries = _pc_face_tries.pop(ids[0], None)
+                if face is None and why and tries:
+                    why = f"{why}, retried {tries} times"
+                # v22 section 6: the face is bound INTO an embed (attachment://),
+                # never a loose attachment; the line stays the message text (D3).
+                embed = None
+                if face is not None:
+                    embed = discord.Embed(color=_PC_RARITY_COLOR.get(str(p.get("rarity") or ""), 0x95A5A6))
+                if not await _pc_send_face(ch.send, content=text_line[:2000], embed=embed, face=face, lease=lease,
+                                           require_lease=True, receipt=f"[PC-EVENTS] line for {ids}", no_face=why):
                     # No live lease at the send: not posted, not acked, not
                     # remembered as sent -- the api's next handout resolves a
                     # deleted or banned party, a busy one is leased again.

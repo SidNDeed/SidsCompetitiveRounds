@@ -114,7 +114,9 @@ def test_every_line_that_names_people_is_sent_under_a_live_lease():
     ev = _fn(BOT_SRC, "poll_pc_events")
     assert 'if first.get("subject_ref"):' in ev
     assert 'lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)' in ev
-    assert "if not await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease, require_lease=True):" in ev
+    # fix round 1, D3: the face rides bound into an embed, and the send's receipt is logged
+    assert "if not await _pc_send_face(ch.send, content=text_line[:2000], embed=embed, face=face, lease=lease," in ev
+    assert 'require_lease=True, receipt=f"[PC-EVENTS] line for {ids}", no_face=why):' in ev
     assert "withdrawn before the send (no live lease)" in ev
     assert ev.index("withdrawn before the send") < ev.index("leases.append(lease[0])") < ev.index("_pc_events_sent[i] = True")
     card = _fn(BOT_SRC, "cmd_pc_card")
