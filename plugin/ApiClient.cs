@@ -14,7 +14,10 @@ namespace CompetitiveRounds
 {
     public static class ApiClient
     {
-        private static string baseUrl = "";
+        // volatile: written on the main thread (Initialize, the boot verdict and
+        // the secure-route flip, board row 27) and also read from the chat
+        // socket's thread (FetchRecentChat on a reconnect).
+        private static volatile string baseUrl = "";
         private static float lastFetchTime = 0f;
         private static float fetchCooldown = 5f; // Min seconds between refreshes
 
@@ -656,10 +659,11 @@ namespace CompetitiveRounds
             // `if (Success)` with no else, so LatestModVersion stays null, the
             // F5 Update button stays hidden, and the auto-updater never fires.
             // Probe first and fall back for the session if TLS can't connect.
-            // Board row 27: the probe is SecureRouteRules' one run
-            // (StartBootProbe). Only the compiled default gets a route: an
-            // explicit override is a deliberate choice and nothing re-checks
-            // or replaces it.
+            // Board row 27: the fall-back is no longer for the WHOLE session --
+            // the portal button and a timer re-check the secure route and the
+            // first usable answer returns the session to it (StartBootProbe).
+            // Only the compiled default gets a route: an explicit override is a
+            // deliberate choice and nothing re-checks or replaces it.
             UsingLegacyFallback = false;
             _route = null;
             if (string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
@@ -2075,14 +2079,13 @@ namespace CompetitiveRounds
             }
         }
 
-        // Secure route (board row 27). The boot check, factored into one probe
-        // function (ProbeSecureRoute) driven by SecureRouteRules' run, so the
-        // portal button and a retry timer can run the same probe. A session
-        // whose two boot attempts fail still stays on the plaintext backup
-        // until the game restarts, and a LAN desktop fails them by construction
-        // (the router's hairpin hangs the second connection, #223).
-        // SecureRouteRules decides; this file does the I/O and owns the
-        // base-url field, which it copies from the route after a verdict.
+        // Secure route (board row 27). The boot check used to be the only one: a
+        // session whose two boot attempts failed stayed on the plaintext backup
+        // until the game restarted, and a LAN desktop fails them by construction
+        // (the router's hairpin hangs the second connection, #223). The same
+        // probe now also runs from the portal button and from a timer while on
+        // the backup. SecureRouteRules decides; this file does the I/O and owns
+        // the base-url field, which it copies from the route after a verdict.
         // Deliberately never writes to config: the boot check re-evaluates every
         // launch. DELETE the backup half along with Plugin.LegacyApiUrl in the
         // same release that drops the plaintext port-forward, or a broken TLS
@@ -2091,16 +2094,40 @@ namespace CompetitiveRounds
         /// <summary>This session's route; null when BaseUrl is an explicit
         /// override, for which no check, backup or timer ever runs.</summary>
         private static SecureRouteRules.Route _route;
+        private static float _secureRouteTickRt = -999f;
+        private static bool _loggedBadTestSecureUrl;
+        /// <summary>How long a portal press that just restored the secure route
+        /// waits for SteamAuth to land a session before minting anyway.</summary>
+        private const float PortalSessionWaitSeconds = 15f;
 
-        /// <summary>The address a check probes: the compiled secure default.</summary>
+        /// <summary>The address a check probes: the compiled secure default, or,
+        /// on the broadcast identity only, [Broadcast] TestSecureUrl when it
+        /// names an https address (the witness lever for the backup path). The
+        /// session only ever moves to an address a check has just shown usable.</summary>
         private static string SecureProbeBase()
         {
-            return SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
+            string def = SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
+            try
+            {
+                if (Plugin.BroadcastTestSecureUrl == null || !BroadcastMode.IsBroadcastIdentity) return def;
+                string lever = SecureRouteRules.TrimBase(Plugin.BroadcastTestSecureUrl.Value);
+                if (lever.Length == 0) return def;
+                if (SecureRouteRules.IsSecure(lever)) return lever;
+                if (!_loggedBadTestSecureUrl)
+                {
+                    _loggedBadTestSecureUrl = true;
+                    Plugin.Log.LogWarning($"[SCR] TestSecureUrl ignored: not an https address ({lever})");
+                }
+            }
+            catch { }
+            return def;
         }
 
         private static double SecureRetrySeconds()
         {
-            return SecureRouteRules.RetrySecondsFromMinutes(SecureRouteRules.DefaultRetryMinutes);
+            double minutes = SecureRouteRules.DefaultRetryMinutes;
+            try { if (Plugin.SecureRetryMinutes != null) minutes = Plugin.SecureRetryMinutes.Value; } catch { }
+            return SecureRouteRules.RetrySecondsFromMinutes(minutes);
         }
 
         private static int SecureProbeOwner()
@@ -2111,8 +2138,8 @@ namespace CompetitiveRounds
 
         private static double RealtimeNow() => Time.realtimeSinceStartup;
 
-        /// <summary>The ONE probe every secure-route check runs (the boot check,
-        /// for now): GET mod-version with an 8 s timeout, stamped like every
+        /// <summary>The ONE probe behind the boot check, the portal button and
+        /// the timer: GET mod-version with an 8 s timeout, stamped like every
         /// request. "Reachable" must mean USABLE, not merely "something
         /// answered". An earlier version accepted anything that wasn't a
         /// ConnectionError, on the reasoning that an HTTP status proves the
@@ -2203,6 +2230,23 @@ namespace CompetitiveRounds
                       LogSecureAttempt, c => OnSecureRunConcluded(route, c));
         }
 
+        /// <summary>From the persistent behaviour's Update, beside OutboxTick:
+        /// the timer's check while on the backup. Asked on a tick rather than
+        /// armed once, so a destroyed host cannot silence it (#508); the route
+        /// itself refuses to run beside a live check or off the backup.</summary>
+        internal static void SecureRouteTick()
+        {
+            var route = _route;
+            if (route == null || !route.OnFallback) return;
+            float now = Time.realtimeSinceStartup;
+            if (now - _secureRouteTickRt < 1f) return;
+            _secureRouteTickRt = now;
+            int owner = SecureProbeOwner();
+            if (owner == 0 || !route.AutoDue(now, owner)) return;
+            int gen = route.Begin(SecureRouteRules.Trigger.Timer, SecureProbeBase(), now, owner, SecureRetrySeconds());
+            if (gen != 0) RunSecureCheck(route, gen);
+        }
+
         /// <summary>One log line per attempt. The boot run keeps the survey's
         /// own line, unchanged, so a player's log still shows which route it
         /// took and why (item d, #224); button and timer checks name their
@@ -2236,12 +2280,14 @@ namespace CompetitiveRounds
             // A verdict from a superseded run, or from a route a later
             // Initialize replaced (a respawn re-runs it), changes nothing.
             if (c == null || c.Stale || !ReferenceEquals(route, _route)) return;
-            if (c.Trigger == SecureRouteRules.Trigger.Boot) OnBootProbeConcluded(route, c);
+            if (c.Trigger == SecureRouteRules.Trigger.Boot) { OnBootProbeConcluded(route, c); return; }
+            if (c.Flipped) OnSecureRouteRestored(route, c);
+            FinishPortalPress(c);
         }
 
         /// <summary>The boot run's verdict. On failure the session moves to the
-        /// plaintext backup (the survey's lines below are unchanged); either way
-        /// the version check runs next.</summary>
+        /// plaintext backup (the survey's lines below are unchanged) and the
+        /// timer starts counting; either way the version check runs next.</summary>
         private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
         {
             bool reachable = c.Usable;
@@ -2257,12 +2303,82 @@ namespace CompetitiveRounds
                 // already looping on the dead TLS host has to be pointed at the
                 // fallback explicitly — otherwise chat stays dark all session.
                 try { ChatClient.Retarget(baseUrl); } catch (Exception ex) { Plugin.Log.LogWarning($"[API] chat retarget failed: {ex.Message}"); }
+                string every = (SecureRetrySeconds() / 60.0).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                Plugin.Log.LogInfo($"[SCR] secure route {c.HostPort} failed at boot "
+                                   + $"({SecureRouteRules.Describe(c.Outcome, c.HttpCode, c.TimeoutSeconds)}); the backup "
+                                   + $"carries this session until a check answers: every {every} min, and on the portal button");
             }
             else
             {
                 baseUrl = route.CurrentBase;
+                // A respawn re-runs Initialize, and chat's session override is
+                // static: it can still name the backup from an earlier boot in
+                // this process. Released only if it is still the API's (no-op
+                // otherwise).
+                try { ChatClient.ReleaseApiFallback(Plugin.LegacyApiUrl); } catch { }
             }
+            FinishPortalPress(c);
             CheckModVersion();
+        }
+
+        /// <summary>A check begun on the backup answered: the session returns to
+        /// the address that answered, for good (the route stops its timer).
+        ///
+        /// One field write, on the main thread. A request object built before
+        /// it keeps the backup URL it was built with and completes there: the
+        /// same api answers both ports, and it already carries the backup's
+        /// rules (StampVersionHeader withheld the bearer and
+        /// SensitiveTransportBlocked vetted the route, both against its own
+        /// URL). Every request built after it uses the secure base, bearer
+        /// included. The outbox keeps each queued report's URL, so a report
+        /// queued on the backup is replayed there too.</summary>
+        private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            baseUrl = route.CurrentBase;
+            UsingLegacyFallback = false;
+            int n = c.AttemptsSinceFallback;
+            Plugin.Log.LogInfo($"[SCR] secure route restored after {n} attempt{(n == 1 ? "" : "s")} ({baseUrl})");
+            // Chat was pointed at the backup by the boot verdict. The REST check
+            // says nothing about chat's own TLS stack (#194), so chat is not
+            // forced onto wss: its override is released and its own three-strike
+            // wss fall-back decides from here.
+            try { ChatClient.ReleaseApiFallback(Plugin.LegacyApiUrl); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] chat release failed: {ex.Message}"); }
+        }
+
+        /// <summary>The answer to a portal press that was waiting on a check.</summary>
+        private static void FinishPortalPress(SecureRouteRules.Conclusion c)
+        {
+            if (c.OpenPortal)
+            {
+                if (c.Flipped)
+                    CompetitiveUI.ShowNotification(SecureRouteText.RestoredOpeningPortal(), new Color(0.4f, 1f, 0.5f), 5f);
+                var host = Plugin.Instance;
+                if (host != null) host.StartCoroutine(OpenPortalWhenSessionReady());
+            }
+            else if (c.ReportFailure)
+            {
+                Plugin.Log.LogInfo($"[SCR] portal not opened: the secure route {c.HostPort} "
+                                   + $"{SecureRouteRules.Describe(c.Outcome, c.HttpCode, c.TimeoutSeconds)}; the session stays on the backup");
+                CompetitiveUI.ShowNotification(SecureRouteText.Failure(c.Outcome, c.HostPort, c.TimeoutSeconds, c.HttpCode),
+                                               Color.yellow, 9f);
+            }
+        }
+
+        /// <summary>After a flip there may be no session yet: the backup refused
+        /// every ticket exchange (PostSteamAuth), and the portal mint accepts a
+        /// verified session only. SteamAuth mints on its own loop; this waits
+        /// for it, bounded, then mints either way (a refusal then shows the
+        /// existing sign-in message).</summary>
+        private static IEnumerator OpenPortalWhenSessionReady()
+        {
+            float until = Time.realtimeSinceStartup + PortalSessionWaitSeconds;
+            while (string.IsNullOrEmpty(SteamAuth.SessionToken) && Time.realtimeSinceStartup < until)
+            {
+                try { SteamAuth.MaybeRefresh(); } catch { }
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+            MintPortalSessionAndOpen();
         }
 
         /// <summary>Bug 392 item A step 2: whether the server has said it
@@ -5556,19 +5672,50 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Portal handoff (§2.5): mint a short-TTL portal session and
-        /// open the browser with the token in the URL FRAGMENT. Refused on a
-        /// plaintext base URL — the token is a real credential.</summary>
+        /// open the browser with the token in the URL FRAGMENT. Never over a
+        /// plaintext base URL: the token is a real credential. On the backup
+        /// connection the press first checks the secure route (board row 27)
+        /// and opens the portal in the same press when it answers; while a
+        /// check is already running the press waits for that one.</summary>
         public static void OpenTranslatePortal()
         {
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            var route = _route;
+            if (route != null)
+            {
+                int gen;
+                var press = route.PressPortal(SecureProbeBase(), RealtimeNow(), SecureProbeOwner(), SecureRetrySeconds(), out gen);
+                if (press == SecureRouteRules.Press.Checking || press == SecureRouteRules.Press.Joined)
+                {
+                    CompetitiveUI.ShowNotification(SecureRouteText.Checking(), Color.white, 9f);
+                    Plugin.Log.LogInfo(press == SecureRouteRules.Press.Checking
+                        ? "[SCR] portal button: on the backup connection, checking the secure route before opening"
+                        : "[SCR] portal button: a secure route check is already running; the press waits for it");
+                    if (press == SecureRouteRules.Press.Checking) RunSecureCheck(route, gen);
+                    return;
+                }
+            }
             if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                CompetitiveUI.ShowNotification("Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.", Color.yellow, 6f);
+                // No route: an explicit plaintext BaseUrl, for which no check
+                // runs, so the gate names the address instead of promising one.
+                CompetitiveUI.ShowNotification(SecureRouteText.PlaintextOverride(baseUrl), Color.yellow, 8f);
                 return;
             }
+            MintPortalSessionAndOpen();
+        }
+
+        /// <summary>The mint and the browser hand-off, behind the same gate. The
+        /// base is read once, so the token is minted and opened on one host.</summary>
+        private static void MintPortalSessionAndOpen()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            string portalBase = baseUrl;
+            if (!portalBase.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return;
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/i18n/portal-session",
+                $"{portalBase}/api/v1/i18n/portal-session",
                 $"{{\"steam_id\":\"{Escape(sid)}\"}}",
                 (success, response) =>
                 {
@@ -5578,7 +5725,8 @@ namespace CompetitiveRounds
                         CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
                         return;
                     }
-                    Application.OpenURL($"{baseUrl}/translate#token={token}");
+                    Plugin.Log.LogInfo($"[I18N] portal opened over {portalBase}");
+                    Application.OpenURL($"{portalBase}/translate#token={token}");
                 }));
         }
 
@@ -21738,10 +21886,13 @@ namespace CompetitiveRounds
                 if (!_insecureAuthNotified)
                 {
                     _insecureAuthNotified = true;
-                    Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} — signed-in features disabled this session");
+                    Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} - signed-in features are off until the secure route is back");
                     try
                     {
-                        CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are disabled this session."), new Color(1f, 0.6f, 0.2f), 8f);
+                        // "until it is back", not "this session": on the backup
+                        // connection a secure-route check can restore signed-in
+                        // features mid-session (board row 27).
+                        CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are off until it is back."), new Color(1f, 0.6f, 0.2f), 8f);
                     }
                     catch { }
                 }

@@ -6226,6 +6226,48 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>Board row 27 and 33a witnesses (Plugin.TickTestPress):
+        /// press the named button on the open overlay through the ClickHandler
+        /// a real click runs, ClickGuard included. Only a button a player could
+        /// press counts: active in the hierarchy, and exactly one carrying the
+        /// name. Returns the outcome for the lever's log line, naming the label
+        /// of the button just before it in its row (read from the TMP text).
+        /// Gated by the caller on the broadcast identity.</summary>
+        internal static string DevPressButton(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "no button name given";
+            if (!isOpen || pageGO == null) return "the overlay is closed";
+            ClickHandler found = null;
+            int count = 0;
+            foreach (var t in pageGO.GetComponentsInChildren<Transform>(false))
+            {
+                if (t == null || t.name != name) continue;
+                var ch = t.GetComponent<ClickHandler>();
+                if (ch == null || ch.onClick == null) continue;
+                count++;
+                found = ch;
+            }
+            if (count == 0) return "no such button on the open overlay";
+            if (count > 1) return count + " buttons carry that name; pressed none";
+            var tr = found.transform;
+            string before = "(first in its row)";
+            int i = tr.GetSiblingIndex();
+            if (i > 0 && tr.parent != null)
+            {
+                var prev = tr.parent.GetChild(i - 1).gameObject;
+                string label = null;
+                try
+                {
+                    var tmp = UIFactory.GetButtonText(prev);
+                    label = tmp?.GetType().GetProperty("text", BindingFlags.Public | BindingFlags.Instance)?.GetValue(tmp, null) as string;
+                }
+                catch { }
+                before = string.IsNullOrEmpty(label) ? prev.name : System.Text.RegularExpressions.Regex.Replace(label, "<[^>]+>", "");
+            }
+            found.onClick();
+            return "pressed (after " + before + ")";
+        }
+
         /// <summary>Broadcast-seat verification lever (Aug 23): open the overlay
         /// on a tab and optionally scroll the Shop list, so a seat with nobody at
         /// it can screenshot every tab. Gated by the caller on the broadcast

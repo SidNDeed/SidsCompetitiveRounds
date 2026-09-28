@@ -1654,6 +1654,29 @@ $runWireNullCoalesceInert = Invoke-Suite 'wire-nullcoalesceinert' $seam $wireNul
 if (-not (Assert-Inert 'the null-coalescing classifier, inert edit' $runWireNullCoalesceInert @('W25', 'W1'))) { $overall = 1 }
 Say ''
 
+# ---------- Board row 27: the secure-route flip is a writer R8 names -----------
+# The flip (OnSecureRouteRestored) returns the prefix to the address a check has
+# just shown usable. R8 names it beside Initialize and the boot verdict, so the
+# same conditional form planted there must redden W25 as the boot verdict's does,
+# with W1 the untouched control.
+$wireFlipNullCoalesce = New-WireRoot 'flipnullcoalesce' 'plugin/ApiClient.cs' `
+    'private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)' `
+    '            baseUrl = route.CurrentBase;' `
+    '            baseUrl ??= route.CurrentBase;' ''
+$runWireFlipNullCoalesce = Invoke-Suite 'wire-flipnullcoalesce' $seam $wireFlipNullCoalesce
+if (-not (Assert-Mutation 'a null-coalescing write in the secure-route flip' $runWireFlipNullCoalesce 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+# And a plain write from a member R8 does NOT name - the timer's tick - must
+# redden W25 too: the closed set is what the case asserts, not only the form.
+$wireTickWriter = New-WireRoot 'tickwriter' 'plugin/ApiClient.cs' `
+    'internal static void SecureRouteTick()' `
+    '            _secureRouteTickRt = now;' `
+    '            _secureRouteTickRt = now; baseUrl = Plugin.LegacyApiUrl;' ''
+$runWireTickWriter = Invoke-Suite 'wire-tickwriter' $seam $wireTickWriter
+if (-not (Assert-Mutation 'a request-prefix write from the secure-route timer tick' $runWireTickWriter 'W25' 'W1')) { $overall = 1 }
+Say ''
+
 # ---------- N4: a finding body with no SEVERITY marker -------------------------
 # The census was derived FROM the markers, so a body written without one moved
 # neither the derived number nor the declared one: H1 stayed green and the body

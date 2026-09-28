@@ -718,7 +718,7 @@
   "Calendar",
   "Calm forest-green tint with low saturation.",
   "Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. Off = a perfectly steady camera. Local only.",
-  "Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.",
+  "Can't open the portal - it only opens over a secure connection, and this install's server address is {0}.",
   "Cancel",
   "Cannot spectate: {0}",
   "Cap bullet-hit particles at 2/frame — biggest user-visible win on heavy firefights.",
@@ -780,6 +780,7 @@
   "Chat overlay: MUTED - hidden, and the room is told",
   "Chat overlay: NORMAL - messages fade out",
   "Chat overlay: PINNED - messages stay on screen",
+  "Checking the secure connection...",
   "Choose a metric",
   "Choose cards (left) to compare {0}.",
   "Chromatic aberration: <color=#88FF88>ON</color>",
@@ -2102,7 +2103,8 @@
   "Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
   "Seasonal Spring",
   "Seats full",
-  "Secure connection unavailable - signed-in features are disabled this session.",
+  "Secure connection restored - opening the portal.",
+  "Secure connection unavailable - signed-in features are off until it is back.",
   "Select 2-12 players (left) to see who beats each of them most.",
   "Select 2-12 players to find their common nemesis.",
   "Select players (left) to chart {0}.",
@@ -2410,6 +2412,13 @@
   "The report request could not be started",
   "The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\n\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\n\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\n- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)\n\n<color=#FFD94D><b>RANKED OR CASUAL</b></color>\n\n- Either player's Ranked toggle off in a room-code game - it plays as CASUAL. Still fully recorded with stats and XP; it never touches rating (see <color=#7FD4FF>How games are tracked</color>).\n- Opponent has never run the mod - always casual, never upgraded. (A live unfinished series from an earlier sitting is the one thing that keeps ranked status across a gap.)\n- Toggling Ranked off MID-SERIES does not void the series. The running best-of-3 is your consent record; its games stay ranked.\n- A game reported as casual is UPGRADED to ranked when the server can see both players are modded, both have Ranked on, and the sitting is live.\n- A ranked-banned participant forces a 1v1 casual at report time - even in a queue room, even mid-series. (The other modes shut banned players out at the door instead.)\n- Mod-issued rooms are consented by definition; queueing is consent. The ranked queue, 2v2 and tournaments rate; ranked FFA lobbies rate while casual ones don't; 1v2 records without rating.\n\n<color=#FFD94D><b>DISCONNECTS - 1V1</b></color>\n\n- You leave a game to join a queued ranked match - the game you left is canceled: nothing recorded, no leave logged.\n- Opponent DCs at 4-4 - you get the win, recorded 5-4.\n- Opponent DCs while you hold 4 rounds - you get the win at the standing score.\n- Any other DC - <color=#FF6666>the game is canceled and no result is recorded</color>, even when the leaver was ahead. Nobody gets a free win and nobody eats an unfair loss (the leave itself can still be logged - see below).\n- Ranked leave %: a DC is logged against the leaver when the CURRENT game had meaningful play (2 or more points scored, or a completed round) and neither side was at 4 rounds. One DC per player per series. The stat is your DCs divided by your ranked series played plus your DCs.\n- Casual rage quits: ANY mid-game leave in a casual 1v1 is logged, even at 4-0. It feeds the Rage Quit % stat (how often opponents walk out on you) - never rating. (A survivor already at 4 rounds still takes the casual win and its XP.)\n\n<color=#FFD94D><b>DISCONNECTS - 2V2 AND FFA</b></color>\n\n- 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.\n- Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.\n- FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.\n- FFA early-leave grace: a leaver who left before the field had scored 2 half points, with a zero tally of their own, is unrated for that game - nothing was decided yet.\n- An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.\n\n<color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>\n\n- <color=#7FE87F>An undecided best-of-3 resumes with no time limit.</color> Meet the same opponent tomorrow or next week and game 1 still stands. An expiry existed once - leavers waited it out to bank rating, so it was removed.\n- Rating moves ONLY when a series completes (first to 2 game wins). Games of a series that never completes keep their match rows, XP and gold; the rating change just never happens.\n- A series with no game recorded 30 minutes after it was created is abandoned and its bets are refunded.\n- A mid-series stall of an hour refunds the bets, but the series itself stays active and resumable.\n- Tournament series are exempt from this pruning - the bracket owns their lifecycle. A tournament match decided by forfeit can't be bet on.\n\n<color=#FFD94D><b>THROWN OUT AFTER THE FACT</b></color>\n\n- The one AUTOMATIC invalidation in the whole mod: a repeated pattern of implausibly short matches between the same two players inside a short window. The current match AND the earlier short ones are invalidated together, their gold and XP reversed, their series voided.\n- Admin reversal: an admin can void a series - rating changes subtracted, gold clawed back, every match in it invalidated, unsettled bets refunded. Invalidated matches disappear from every board and stat.\n- Quarantine (2v2 and FFA): a report that arrives for a lobby that's no longer active isn't deleted - it's held for admin review, and an admin can still accept it into the record or discard it.\n\n<color=#FFD94D><b>IF THE REPORT CAN'T SEND</b></color>\n\n- A failed report goes to a persistent outbox: retried in the background and saved to disk, so it's re-sent on your next launch even if you quit right after the game. You'll see 'Couldn't record the match - retrying in the background', then 'Match recorded' when it lands.\n- 1v1 reporter crashes before the report exists - the surviving opponent's disconnect path usually records the result instead.\n- FFA elects its reporter among the players still present, so a crashed reporter is never elected. A winner who quits before the report is still recorded from their frozen tallies.\n- A 2v2 game that ends without its series id retries the lookup and defers the send; if that also fails, the game is not recorded.",
   "The same actions in a different order",
+  "The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection.",
+  "The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keeps working on the backup connection.",
+  "The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the backup connection.",
+  "The secure connection to {0} failed its security check. The portal needs it; the game keeps working on the backup connection.",
+  "The secure connection to {0} failed: the address could not be looked up. The portal needs it; the game keeps working on the backup connection.",
+  "The secure connection to {0} timed out after {1} s. The portal needs it; the game keeps working on the backup connection.",
+  "The secure connection to {0} was refused. The portal needs it; the game keeps working on the backup connection.",
   "The selected cosmetic is still loading.",
   "The server could not answer about your pack - checking again shortly",
   "The server kept asking us to pause - we waited as long as we can; the rest are still in your binder",
@@ -6583,10 +6592,10 @@
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
   },
-  "Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.": {
-   "surface": "ApiClient",
-   "location": "OpenTranslatePortal",
-   "kind": "ShowNotification"
+  "Can't open the portal - it only opens over a secure connection, and this install's server address is {0}.": {
+   "surface": "SecureRouteText",
+   "location": "PlaintextOverride",
+   "kind": "TrF"
   },
   "Cancel": {
    "surface": "CompetitiveUI, MailUI, NativeUI",
@@ -6892,6 +6901,11 @@
    "surface": "CompetitiveUI",
    "location": "CycleChatOverlayMode",
    "kind": "ShowNotification"
+  },
+  "Checking the secure connection...": {
+   "surface": "SecureRouteText",
+   "location": "Checking",
+   "kind": "Tr"
   },
   "Choose a metric": {
    "surface": "NativeUI",
@@ -12140,7 +12154,7 @@
   },
   "Portal session failed - are you signed in to Steam?": {
    "surface": "ApiClient",
-   "location": "OpenTranslatePortal",
+   "location": "MintPortalSessionAndOpen",
    "kind": "ShowNotification"
   },
   "Position": {
@@ -13503,7 +13517,12 @@
    "location": "SpectateReason",
    "kind": "Tr"
   },
-  "Secure connection unavailable - signed-in features are disabled this session.": {
+  "Secure connection restored - opening the portal.": {
+   "surface": "SecureRouteText",
+   "location": "RestoredOpeningPortal",
+   "kind": "Tr"
+  },
+  "Secure connection unavailable - signed-in features are off until it is back.": {
    "surface": "ApiClient",
    "location": "PostSteamAuth",
    "kind": "Tr"
@@ -15042,6 +15061,41 @@
    "surface": "InfoViz",
    "location": "BuildRefreshWindowSequences, TextFallback",
    "kind": "Tr"
+  },
+  "The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection.": {
+   "surface": "SecureRouteText",
+   "location": "Failure",
+   "kind": "TrF"
+  },
+  "The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keeps working on the backup connection.": {
+   "surface": "SecureRouteText",
+   "location": "Failure",
+   "kind": "TrF"
+  },
+  "The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the backup connection.": {
+   "surface": "SecureRouteText",
+   "location": "Failure",
+   "kind": "TrF"
+  },
+  "The secure connection to {0} failed its security check. The portal needs it; the game keeps working on the backup connection.": {
+   "surface": "SecureRouteText",
+   "location": "Failure",
+   "kind": "TrF"
+  },
+  "The secure connection to {0} failed: the address could not be looked up. The portal needs it; the game keeps working on the backup connection.": {
+   "surface": "SecureRouteText",
+   "location": "Failure",
+   "kind": "TrF"
+  },
+  "The secure connection to {0} timed out after {1} s. The portal needs it; the game keeps working on the backup connection.": {
+   "surface": "SecureRouteText",
+   "location": "Failure",
+   "kind": "TrF"
+  },
+  "The secure connection to {0} was refused. The portal needs it; the game keeps working on the backup connection.": {
+   "surface": "SecureRouteText",
+   "location": "Failure",
+   "kind": "TrF"
   },
   "The selected cosmetic is still loading.": {
    "surface": "NativeUI",
