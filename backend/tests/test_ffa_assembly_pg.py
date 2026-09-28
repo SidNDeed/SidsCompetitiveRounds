@@ -5154,6 +5154,71 @@ def test_n10_a_released_seat_never_reaches_the_gone_rule(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_m1_the_release_marker_and_lease_are_one_unit(monkeypatch):
+    """Round 2, M1 (B11, N10): the release's marker and its lease commit
+    together in its pre-step, before the lobby lock. (a) R's FENCE_EXPIRED
+    release commits that unit, then its lock step times out behind a held
+    lobby row: 503 asm_deadline stage=lock, the lease gone and the queue row
+    kept. With no further try, two omission censuses and the reports follow:
+    no gone record, R rated in game 1, R's own game-2 report accepted and
+    rated, no departure written, and the marker is the release's own. (b) A
+    try after such a 503 answers 200, deletes the queue row (lease=0 row=1)
+    and keeps the first marker. (c) A caller holding a lease for the lobby
+    but no seat row in it: 404 and no write, the lease kept (a lease goes
+    only beside a marker)."""
+    async def body(env):
+        async def timed_out(lob, slot):
+            conn, tr, bpid = await _blocker(env, lob)
+            try:
+                task = asyncio.ensure_future(env.release(lob, slot, "fence_expired"))
+                n = await _waiting_on(env, bpid)
+                done, _pend = await asyncio.wait({task}, timeout=6.0)
+            finally:
+                await tr.rollback()
+                await conn.close()
+            a = await task
+            assert n >= 1 and done and a.status == 503 and a.body == {"error": "asm_deadline"} \
+                and env.asm_lines("lobby %s deadline route=release stage=lock" % str(lob.lid)[:8]), \
+                ("M1 premise", n, a)
+            assert await env.lease(lob, slot) is None and await env.queue_row(lob, slot) is not None, \
+                "M1 premise rows"
+
+        lob = await _s64_lobby(env, t=40.0)
+        s, res = lob.sids, _s64_res(lob)
+        await timed_out(lob, 6)
+        await env.at(lob, 60.0)
+        await _omit(env, lob, [2], 6)
+        c = await env.census_of(lob, 0, [0, 1, 2, 3, 4, 5])
+        assert c.status == 200, ("M1 census", c)
+        assert await _gone(env, lob, 6) == (None, None), "M1 no record"
+        await _settled(env, lob, 1, res, "M1 game 1", rated=True, reporter=s[0])
+        await _settled(env, lob, 2, res, "M1 game 2", rated=True, reporter=s[6])
+        row, seat = await env.lobby_row(lob), await env.seat(lob, 6)
+        assert list(row["departed_ids"] or []) == [], ("M1 no departure", row["departed_ids"])
+        assert seat["released_at"] is not None and seat["release_why"] == "fence_expired", \
+            ("M1 marker", seat["release_why"])
+
+        lob = await _s64_lobby(env, t=40.0)
+        await timed_out(lob, 6)
+        first = await env.seat(lob, 6)
+        a = await env.release(lob, 6, "fence_expired")
+        again = await env.seat(lob, 6)
+        assert a.status == 200 and env.asm_lines("release slot=6 why=fence_expired lease=0 row=1") \
+            and await env.queue_row(lob, 6) is None and first["released_at"] is not None \
+            and (again["released_at"], again["release_why"]) == \
+            (first["released_at"], "fence_expired"), ("M1 retry", a, again["release_why"])
+
+        lob = await _s64_lobby(env, t=40.0)
+        await env.conn.execute(
+            "DELETE FROM ffa_assembly_seats WHERE lobby_id = $1 AND slot = 3", lob.lid)
+        lease = await env.lease(lob, 3)
+        before = await env.snapshot()
+        a = await env.release(lob, 3, "fence_expired")
+        assert a.status == 404 and lease is not None and await env.lease(lob, 3) == lease \
+            and await env.snapshot() == before, ("M1 unpaired", a)
+    run_env(monkeypatch, body)
+
+
 _N12_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap", "same_card_rule",
              "is_ranked", "settings_known", "settings_changed_at", "password_hash",

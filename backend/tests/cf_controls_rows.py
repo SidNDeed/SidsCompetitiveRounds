@@ -2125,24 +2125,25 @@ def _n66(part):
 _REL_ROUTE = ('    held = {"lease": 0}\n'
               '    return await _asm_run("release", lobby_id, req.steam_id, request, db,\n'
               '                          _asm_release_work, (req, held),\n'
-              '                          pre=_asm_release_pre(req.steam_id, lobby_id, held))\n')
-_REL_UPD = ('        "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"\n'
-            '        " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL"),\n')
+              '                          pre=_asm_release_pre(req.steam_id, lobby_id, req.why, held))\n')
+_REL_UPD = ('            "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"\n'
+            '            " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL"),\n')
 _REL_DEL = ('    row = (await ctx.db.execute(text(\n'
             '        "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid RETURNING player_id"),\n'
             '        {"pid": pid, "lid": ctx.lid})).scalar()\n')
 _REL_WHY = '    if req.why not in _ASM_RELEASE_WHY or not _pg_text_ok(req.steam_id):\n'
-_REL_PRE = '        await _lease_release_by_steam(db, steam_id, str(lobby_id))\n'
+_REL_PRE = ('            "DELETE FROM queue_leases WHERE player_id = :pid AND mode = \'ffa\''
+            ' AND group_id = :lid"),\n')
 _REL_ME = ('    me = ctx.seat_of(pid)\n'
-           '    await ctx.db.execute(text(\n'
-           '        "UPDATE ffa_assembly_seats SET released_at = NOW()')
+           '    row = (await ctx.db.execute(text(\n'
+           '        "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid')
 _REL_RET = '    return {"release": {"status": "ok"}}\n'
 row("S66", ["test_s66_the_release[%s]" % p for p in ("i-iii", "iv", "v", "check")], [
     M("through_the_leave", "S66 i byte-identical",
       E(MAIN, _REL_ROUTE, '    held = {"lease": 0}\n'
                           '    out = await _asm_run("release", lobby_id, req.steam_id, request, db,\n'
                           '                         _asm_release_work, (req, held),\n'
-                          '                         pre=_asm_release_pre(req.steam_id, lobby_id, held))\n'
+                          '                         pre=_asm_release_pre(req.steam_id, lobby_id, req.why, held))\n'
                           '    await ffa_queue_leave(request, steam_id=req.steam_id,\n'
                           '                          expected_lobby_id=str(lobby_id), cause="", label="",\n'
                           '                          db=db)\n'
@@ -2175,9 +2176,10 @@ row("S66", ["test_s66_the_release[%s]" % p for p in ("i-iii", "iv", "v", "check"
                         '        "DELETE FROM queue_leases WHERE mode = \'ffa\' AND group_id = :lid"),\n'
                         '        {"lid": ctx.lid})\n'),
       nodes=[_n66("i-iii")]),
-    M("lease_by_steam_alone", "S66 v the held lobby's rows",
-      E(MAIN, _REL_PRE, "        await _lease_release_by_steam(db, steam_id)\n"),
-      nodes=[_n66("v")]),
+    M("lease_by_player_alone", "S66 v",
+      E(MAIN, _REL_PRE, _REL_PRE.replace(" AND group_id = :lid", "")), nodes=[_n66("v")],
+      note="the held lobby's lease is deleted: the print says lease=1 (round 2: the "
+           "pre-step's own DELETE, whose row count is the print's lease field)"),
     M("queue_row_by_player_alone", "S66 v",
       E(MAIN, _REL_DEL, _REL_DEL.replace(" AND series_id = :lid", "")), nodes=[_n66("v")],
       note="the held lobby's queue row is deleted: the print says row=1"),
@@ -2222,6 +2224,52 @@ row("N10", "test_n10_a_released_seat_never_reaches_the_gone_rule", [
 ], T("released_by_truth",
      E(MAIN, _SUBJ_REL, '            and s["gone_game"] is None and not s["released_at"]\n'),
      E(MAIN, _WIT_REL, '        if q["gone_game"] is not None or bool(q["released_at"]):\n')))
+
+# -- Round 2, M1: the release's marker and lease, one durable unit -------------
+_M1_UNIT = ('        marked = await db.execute(text(\n'
+            + _REL_UPD +
+            '            {"why": why, "lid": lobby_id, "pid": pid})\n'
+            '        if (marked.rowcount or 0) == 0:\n'
+            '            seat = (await db.execute(text(\n'
+            '                "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),\n'
+            '                {"lid": lobby_id, "pid": pid})).scalar()\n'
+            '            if seat is None:\n'
+            '                return\n'
+            '        freed = await db.execute(text(\n'
+            + _REL_PRE +
+            '            {"pid": pid, "lid": lobby_id})\n'
+            '        held["lease"] = 1 if (freed.rowcount or 0) > 0 else 0\n'
+            '        await db.commit()\n'
+            '        await _asm_begin(db, t0)\n'
+            '    return _pre\n')
+_M1_ROUND1 = ('        q = ("SELECT 1 FROM queue_leases WHERE mode = \'ffa\' AND group_id = :lid"\n'
+              '             "   AND player_id IN (SELECT id FROM players WHERE steam_id = :sid)")\n'
+              '        had = (await db.execute(text(q), {"lid": lobby_id, "sid": steam_id})).scalar()\n'
+              '        await _lease_release_by_steam(db, steam_id, str(lobby_id))\n'
+              '        await _asm_begin(db, t0)\n'
+              '        still = (await db.execute(text(q), {"lid": lobby_id, "sid": steam_id})).scalar()\n'
+              '        held["lease"] = 1 if (had is not None and still is None) else 0\n'
+              '    return _pre\n')
+_M1_WORK1 = ('    me = ctx.seat_of(pid)\n'
+             '    await ctx.db.execute(text(\n'
+             '        "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"\n'
+             '        " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL"),\n'
+             '        {"why": req.why, "lid": ctx.lid, "pid": pid})\n'
+             '    row = (await ctx.db.execute(text(\n'
+             '        "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid')
+_M1_SEAT = ('                {"lid": lobby_id, "pid": pid})).scalar()\n'
+            '            if seat is None:\n'
+            '                return\n')
+_M1_HELD = '        held["lease"] = 1 if (freed.rowcount or 0) > 0 else 0\n'
+row("M1", "test_m1_the_release_marker_and_lease_are_one_unit", [
+    M("round_one_ordering", "M1 no record",
+      E(MAIN, _M1_UNIT, _M1_ROUND1), E(MAIN, _REL_ME, _M1_WORK1),
+      note="round 1 restored (5c6ddcf): the lease through _lease_release_by_steam in its own "
+           "COMMIT before the lock, the marker inside the locked work the deadline rolls back"),
+    M("unpaired_lease", "M1 unpaired",
+      E(MAIN, _M1_SEAT, '                {"lid": lobby_id, "pid": pid})).scalar()\n'),
+      note="with no seat row the lease still goes, so a lease is released with no marker"),
+], T("held_by_int", E(MAIN, _M1_HELD, '        held["lease"] = int((freed.rowcount or 0) > 0)\n')))
 
 _CLS_COPY = ('    "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap",\n'
              '             "same_card_rule", "is_ranked", "settings_known", "settings_changed_at",\n')
