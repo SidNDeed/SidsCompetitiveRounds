@@ -3870,7 +3870,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:45179 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:45222 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3936,7 +3936,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:44991 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:45034 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4006,7 +4006,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:44894 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:44937 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -26319,6 +26319,33 @@ async def _pc_pack_answer(db: AsyncSession, row, ctx=None, prerender: bool = Fal
     return base
 
 
+async def _pc_committed_answer(db: AsyncSession, row, locale: str) -> dict:
+    """The answer for a pack row that is ALREADY COMMITTED: the replay of a
+    nonce or a pack id, and /pc/packs/result. It is the recorded outcome
+    (the pack, its prints, and what it cost: pay and price), whatever became
+    of the request that committed it (Discord fix round 2, M1). First the
+    full answer: a done pack's subjects primed, as the first answer was
+    (v4 section 5), and every print keyed to its face in `locale`. When any part of
+    that raises, the same row is answered with no face context, so the
+    prints carry no face_rev: the mod draws such a print as text (the shape
+    an api without the renderer sends), and the bot reads only the pack id
+    and the charge from an open's answer. The rollback clears
+    a failed statement so that second read can run; it also ends the
+    transaction's locks, which no caller needs past its answer, and it
+    undoes no write, because every caller reaches this with none of its own
+    pending. What can still fail is reading the committed rows themselves,
+    and the caller can simply ask again."""
+    try:
+        if row["status"] == "done":
+            await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))
+        return await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale))
+    except Exception as ex:
+        print(f"[PC-OPEN] pack={row['id']} status={row['status']}: answered without face keys "
+              f"({type(ex).__name__}: {ex})")
+        await db.rollback()
+        return await _pc_pack_answer(db, row, None)
+
+
 def _pc_reject_http(reason: str, extra: dict | None = None):
     code = 402 if reason in ("insufficient_gold", "insufficient_shards") else 409
     detail = {"error": reason, "status": "rejected"}
@@ -26426,7 +26453,7 @@ async def _pc_open_for(db: AsyncSession, player, steam_id: str, *, pack_id, nonc
                     SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
                       FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
                 """), {"pack": pack_id, "pid": pid})).mappings().first()
-                answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale)) if row is not None else {"pack_id": pack_id}
+                answer = await _pc_committed_answer(db, row, locale) if row is not None else {"pack_id": pack_id}
                 print(f"[PC-OPEN] player={steam_id} pack={pack_id}: earned pack of an invalidated "
                       f"{held['mode']} series voided at open via={via}")
                 raise HTTPException(status_code=410, detail={"error": "voided", **answer})
@@ -26442,9 +26469,7 @@ async def _pc_open_for(db: AsyncSession, player, steam_id: str, *, pack_id, nonc
             """), {"pack": pack_id, "pid": pid})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=404, detail="Pack not found")
-            if row["status"] == "done":
-                await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
-            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale))
+            answer = await _pc_committed_answer(db, row, locale)   # the recorded outcome, primed like the first
             if row["status"] == "done":
                 return answer
             if row["status"] == "voided":
@@ -26468,9 +26493,7 @@ async def _pc_open_for(db: AsyncSession, player, steam_id: str, *, pack_id, nonc
             """), {"pid": pid, "nonce": nonce})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=409, detail={"error": "in_progress"})
-            if row["status"] == "done":
-                await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
-            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale))
+            answer = await _pc_committed_answer(db, row, locale)   # the recorded outcome, primed like the first
             if row["status"] == "done":
                 return answer
             if row["status"] == "rejected":
@@ -26560,26 +26583,48 @@ async def _pc_open_for(db: AsyncSession, player, steam_id: str, *, pack_id, nonc
 
     # ── 6. mint, record, commit ──
     stored = await _pc_mint(db, player.id, int(edition), int(snap_id), this_pack, source, prints)
-    await db.execute(text("""
+    row = (await db.execute(text("""
         UPDATE pc_packs SET status = 'done', result = CAST(:result AS jsonb), snapshot_id = CAST(:sid AS integer),
                             opened_at = now()
          WHERE id = CAST(:pack AS uuid)
-    """), {"result": _json.dumps({"prints": stored}), "sid": int(snap_id), "pack": this_pack})
+        RETURNING id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+    """), {"result": _json.dumps({"prints": stored}), "sid": int(snap_id), "pack": this_pack})).mappings().one()
+    # Every input of the answer is read HERE, inside the transaction that
+    # debits and mints (Discord fix round 2, M1): the pack row (RETURNING
+    # above), its subjects, the face context and the answer itself. A failure
+    # among them rolls the whole purchase back, when refusing is still free:
+    # nothing charged, nothing minted, and a replay of the nonce buys afresh.
+    # Once the commit below has returned, the answer is already built and
+    # what follows can only swap in a fresher copy: a committed debit answers
+    # with its pack and its charge, and a caller cut off after the commit
+    # gets the same recorded outcome from a replay of its key.
+    subjects = await _pc_pack_subjects(db, this_pack)
+    ctx = await _pc_face_ctx(db, locale)
+    answer = await _pc_pack_answer(db, row, ctx)
+    opened_line = (f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
+                   f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
+                   f"{' foil' if any(p['foil'] for p in stored) else ''}"
+                   f"{' signed' if any(p['signed'] for p in stored) else ''} via={via}")
     await db.commit()
-    print(f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
-          f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
-          f"{' foil' if any(p['foil'] for p in stored) else ''}{' signed' if any(p['signed'] for p in stored) else ''} via={via}")
-    # Steam pictures v2 §7: the subjects this pack minted for the first time
-    # get their picture fetched NOW (bounded), before the answer's face revs
-    # are computed — so the URLs the client sees already carry it.
-    await _pc_steam_prime(await _pc_pack_subjects(db, this_pack))
-    row = (await db.execute(text("""
-        SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
-          FROM pc_packs WHERE id = CAST(:pack AS uuid)
-    """), {"pack": this_pack})).mappings().one()
-    # The one caller that asks for a pre-render: these prints were minted by
-    # this request, so no one has asked for their faces yet (v4.13 §9).
-    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale), prerender=True)
+    # After the commit: best effort only. Steam pictures v2 section 7: the
+    # subjects this pack minted for the first time get their picture fetched
+    # now (bounded) and the answer is read again, so the face revs the
+    # client sees already carry it. That read is also the one caller that
+    # asks for a pre-render, since these prints were minted by this request
+    # and nobody has asked for their faces yet (v4.13 section 9). Any failure
+    # here keeps the answer built before the commit.
+    try:
+        print(opened_line)
+        await _pc_steam_prime(subjects)
+        answer = await _pc_pack_answer(db, row, ctx, prerender=True)
+    except Exception as ex:
+        print(f"[PC-OPEN] player={steam_id} pack={this_pack}: answered as built before the commit; the "
+              f"refresh after it failed ({type(ex).__name__}: {ex}) via={via}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+    return answer
 
 
 @app.get("/api/v1/pc/packs/result", tags=["Player Cards"])
@@ -26615,9 +26660,7 @@ async def pc_pack_result(
         """), {"pid": str(player.id), "nonce": nonce})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Pack not found")
-    if row["status"] == "done":
-        await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a no-op once attempted (v2 §7)
-    answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+    answer = await _pc_committed_answer(db, row, _pc_locale(request))   # the priming: a no-op once attempted
     if row["status"] == "unopened":
         att = (await db.execute(text(
             "SELECT reject_reason, attempted_at FROM pc_open_attempts WHERE pack_id = CAST(:pack AS uuid)"),

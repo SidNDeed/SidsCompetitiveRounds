@@ -572,7 +572,13 @@ def test_reading_a_pack_again_schedules_no_prerender_and_only_the_mint_asks(monk
     at = mint.index("prerender=True")
     assert mint.count("prerender=True") == 1
     assert mint.rindex("SET status = 'done'") < mint.rindex("await db.commit()") < at
-    assert mint[at:].strip() == "prerender=True)", "the minting request's final answer is the caller"
+    # Discord fix round 2, M1: the answer is built before the commit, and the
+    # read after it - the one that asks - is a best-effort refresh whose
+    # failure keeps that answer; the request answers whichever it holds last
+    after = mint[mint.rindex("await db.commit()"):at]
+    assert after.rstrip().endswith("answer = await _pc_pack_answer(db, row, ctx,"), after
+    assert mint[at:].splitlines()[0] == "prerender=True)"
+    assert mint.rstrip().endswith("return answer"), "the minting request's final answer is the caller's"
 
 
 def test_a_cached_face_is_answered_without_reading_its_picture(monkeypatch, tmp_path):
