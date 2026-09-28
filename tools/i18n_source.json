@@ -574,7 +574,7 @@
   "Aurora",
   "Aurora Gradient",
   "Average FPS",
-  "Average game length: {0}",
+  "Average game",
   "Avg Cards / Game",
   "Avg Cards per Game  (lower = stronger)",
   "Avg FPS",
@@ -634,6 +634,7 @@
   "Big Dog",
   "Bigger Name",
   "Bigger than Bigger, smaller than Huge.",
+  "Biggest comeback (rounds)",
   "Binder",
   "Black Cursor",
   "Blackwood",
@@ -732,6 +733,9 @@
   "Card pool: no snapshot yet",
   "Card pool: {0} players (snapshot {1}) - {2} cards in your binder",
   "Cards",
+  "Cards and points",
+  "Cards picked",
+  "Cards/game",
   "Cards:",
   "Cards: <color=#88FF88>FULL</color>",
   "Cards: <color=#FFCC66>chips</color>",
@@ -755,6 +759,7 @@
   "Cat Mouth",
   "Category:",
   "Century Club",
+  "Change",
   "Change view",
   "Changes the menu cursor's shape. Works alongside an equipped cursor color.",
   "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
@@ -818,6 +823,7 @@
   "Colorize your name in purple.",
   "Colorize your name in red.",
   "Colossus",
+  "Combat",
   "Common",
   "Common\u0004card rarity",
   "Community artist sales - who has items up for sale, and what they've earned",
@@ -925,6 +931,7 @@
   "Daily limit reached - paid packs reset at midnight UTC",
   "Damage",
   "Damage dealt (cumulative per game)",
+  "Damage per game",
   "Damage types & buffs",
   "Dance is on cooldown - try again in a moment.",
   "Dances",
@@ -997,6 +1004,7 @@
   "Discord relay: <color=#FF9966>Off</color>",
   "Dismiss (1 min)",
   "Displays your live rank tier (updates automatically as you rank up or down)",
+  "Dmg/game",
   "Do nothing",
   "Dog",
   "Dog God",
@@ -1138,12 +1146,14 @@
   "Favorite ranked cards",
   "Few reach it. Fewer afford the title.",
   "Field Medic",
+  "Final score",
   "Finish a game with the exact same 5 cards (and copies) as your opponent",
   "Finish or leave your current game before joining the 1v2 queue.",
   "Finish or leave your current game before joining the FFA queue.",
   "Finish or leave your current game first.",
   "Finishing your previous leave first...",
   "Fireflies",
+  "First bloods",
   "First played today · H2H {0}-{1} · Ranked series {2}",
   "First time playing {0}",
   "First to:",
@@ -1192,18 +1202,21 @@
   "Game ?",
   "Game Mechanics",
   "Game ended",
+  "Game lengths",
   "Game over - {0} wins",
   "Game records (all players) - hover a row for the cards",
   "Game {0}",
   "Game {0}   {1} players",
   "Game {0}   {1} {2} {3}",
   "Game {0} - {1} players",
+  "Game {0} of {1}",
   "Game {0} score progression",
   "Game {0}: solo {1}-{2} duo",
   "Game {0}: team 1 {1}-{2} team 2",
   "Game {0}: {1}",
   "Game {0}: {1}-{2}",
   "Games",
+  "Games {0}-{1} of {2}",
   "Gentle soap bubbles float up around you.",
   "Get 10 translations approved (yours, or ones you reviewed)",
   "Get 100 translations approved (yours, or ones you reviewed)",
@@ -1233,6 +1246,8 @@
   "Gold Name",
   "Gold Sources",
   "Gold betting runs on live 1v1, 2v2 and FFA games. This page covers who can bet, how the odds are priced, exactly when windows open and close, and what happens to your stake.\n\n<color=#FFD94D><b>WHO CAN BET</b></color>\n\n- Any registered player, staking 1 to 2000 Gold per bet. The stake is taken the moment the bet is placed.\n- You cannot bet on a match or lobby you are playing in, and banned players cannot bet.\n- <color=#7FE87F>Spectators CAN bet.</color> That is safe by design: the windows below close on early scoring, so watching a game never gets you a bet on a result that is already decided.\n- One bet per series in 1v1 and 2v2; one bet per game in FFA.\n- If any participant runs a mod older than 1.38.1, betting on that game is refused. Older clients cannot report live points, so the scoring cutoff could never fire - <color=#FF6666>the system fails closed rather than leave a window open.</color>\n- A linked Discord account can place the same bets through the bot's commands.\n\n<color=#FFD94D><b>ODDS: 1v1 AND 2v2</b></color>\n\n- Your multiplier is 1 divided by your side's win chance, computed from both sides' ratings AND their RD (see <color=#7FD4FF>Ratings (Glicko-2)</color>). Floor: 1.01x.\n- Uncertainty caps the price. With both sides established (RD 100 or below) the multiplier can reach 3.0x; the cap slides down to 1.0x as the higher RD rises to 300. A fresh account at RD 350 caps the price below the 1.10x acceptance gate - <color=#FF6666>an unknown simply can't be bet on, so a smurf can't be farmed for Gold.</color>\n- A side only accepts bets at 1.10x or better; below that it is locked.\n- 2v2 prices off the pair's average rating. A player's own 2v2 rating counts once they have 10 completed series; before that their 1v1 rating stands in.\n\n<color=#FFD94D><b>ODDS: FFA</b></color>\n\n- The server races every player to the lobby's score target and computes your pick's true chance of banking it first. Your multiplier is half of the fair price - the house keeps the other half.\n- Floors: 2.0x in lobbies of 5 or more, 1.4x at 3-4 players. For heavy favourites the floor gives way to 0.95 divided by their win chance, so a guaranteed-profit bet cannot exist.\n- Cap: 5.0x, or half the lobby size if that is lower, and it shrinks when ratings are uncertain.\n- A player with no FFA games yet is priced off their 1v1 rating at full uncertainty.\n\n<color=#FFD94D><b>WHEN BETS OPEN AND CLOSE</b></color>\n\nThe cutoff is scored points, never a clock:\n\n- <color=#7FD4FF>1v1 and 2v2</color> - open from the moment the series exists. Closed once 2 total points are scored in game 1, or the moment any game of the series is decided. Tournament series stay listed through the whole multi-day wait before the pair actually plays.\n- <color=#7FD4FF>FFA</color> - each bet targets the lobby's NEXT game. The window closes when the field scores 2 points in that game (1 point if the lobby's score target is 3 or lower). A lobby is only listed while a next game is plausible: up to 15 minutes while assembling with no games yet, and up to 30 minutes after its last recorded game. <color=#FF6666>Casual lobbies are never bettable.</color> Departed members are not valid targets.\n- <color=#7FD4FF>Lobby-phase bets</color> - hosted 2v2 and FFA lobbies take wagers while still FILLING. No odds are quoted yet; at Start the bet is priced from the final field and becomes a normal bet - provided your target is still there and the usual checks pass. Anything else (target left, odds too low, lobby never starts within 6 hours) refunds the stake.\n- 1v2 has no betting at all.\n\n<color=#FFD94D><b>PAYOUTS AND THE FIGHTER TAX</b></color>\n\n- A winning payout includes your stake back. 1v1 and 2v2 pay stake x odds rounded to the nearest Gold; FFA rounds DOWN.\n- If your winning bet's stored odds were 1.50x or below, 20% of the PROFIT goes to the fighter or team you backed - being worth betting on pays them too. The potential payout quoted when you place the bet already includes this tax.\n\n<color=#FFD94D><b>REFUNDS, AND WHERE TO SEE IT ALL</b></color>\n\nA refund returns exactly your stake:\n\n- 1v1: a non-tournament series with no game reported in its first 30 minutes is abandoned and refunds its bets. A series stalled for 60 minutes mid-series refunds its bets too, while the series itself stays resumable - <color=#FF6666>a refunded bet stays refunded even if that series is finished later.</color>\n- 2v2: refunds only when a series is cancelled. Disconnect-paused series wait for the admin ruling before anything settles.\n- FFA: refunds only for a game that never produced a recorded result. Played games always settle as won or lost.\n- At tiny stakes a WIN can pay exactly your stake (1g at 1.10x pays 1g). It is still a win: every bet's stored state - open, won, lost or refunded - is what displays, not the arithmetic.\n- Your full bet history across all modes is the bets ledger in the F5 menu. Live bettable games are listed in-game and mirrored in the Discord live-bets channel and its bet commands.",
+  "Gold per game",
+  "Gold this set",
   "Golden Eagle",
   "Goober",
   "Good Dog",
@@ -1375,6 +1390,8 @@
   "Keys/s",
   "Kick",
   "Kills",
+  "Kills per game",
+  "Kills/game",
   "Kingslayer",
   "Kitten",
   "Knight Great-Helm",
@@ -1470,6 +1487,8 @@
   "Locks the map to ROUNDS' Soviet palette (deep red).",
   "Locks the map to ROUNDS' Sweden palette (blue + yellow).",
   "Longest Game",
+  "Longest game",
+  "Longest point streak",
   "Lose a ranked FFA holding 10 or more half points that never became a point",
   "Losers",
   "Loss",
@@ -1768,6 +1787,7 @@
   "Paused: {0} - {1}",
   "Peak Elo",
   "Peak {0}",
+  "Per game",
   "Per-letter bright cyan → deep indigo gradient. Surface to trench.",
   "Per-letter bright red → dark wine gradient.",
   "Per-letter bright yellow → deep red gradient. Flame to coal.",
@@ -1816,9 +1836,12 @@
   "Player Nemesis",
   "Player opted out",
   "Player removed from the lobby.",
+  "Player totals",
   "Player {0}",
   "Players",
   "Point to the sky, point to the floor, sway those hips. Dancing locks your controls for the duration.",
+  "Points lost",
+  "Points won",
   "Poison",
   "Poison & damage over time",
   "Poison has no damage number of its own. The total a poison bullet deals over time equals that bullet's damage stat at the instant it hit you (Toxic Cloud's longer drip rounds a couple percent above it) - which is why the same green bullet sometimes tickles and sometimes one-shots.\n\n<color=#FFD94D><b>WHAT A POISON HIT DOES</b></color>\n\n- The impact itself deals just <color=#7FD4FF>1 damage</color> - but full knockback. Knockback scales with the bullet's damage stat even when that damage is converted to poison, which is why a big poison shot hurls you across the map while your health bar barely moves.\n- Then the poison starts: the bullet's full damage, split into equal ticks spread evenly over the poison's duration. For the <color=#7FD4FF>Poison</color> card that is 10 ticks over 3 seconds - one every 0.3 seconds, 10% of the bullet's damage each, the first landing the instant the bullet connects. <color=#7FD4FF>Toxic Cloud</color>'s poison drips longer and thinner: about 17 ticks across 5 seconds. The cadence runs on game time (slow motion stretches the gaps).\n- <color=#FF6666>Every tick is lethal on its own.</color> There is no 'poison cannot finish you' mercy rule.\n\n<color=#FFD94D><b>WHY IT SOMETIMES ONE-SHOTS</b></color>\n\nThe total is the bullet's damage AFTER everything that pumped it: damage cards, bullet size, growth in flight (see <color=#7FD4FF>Grow</color>), an Empower charge. A bullet pumped to 500 damage becomes ten 50-damage ticks - 500 total into a 100 HP player, dead before the stream is half done. It is never the poison that one-shots you - it is the bullet underneath it, paid in installments.\n\n<color=#FFD94D><b>BLOCKING TICKS - THE EXACT RULE</b></color>\n\nFirst, the free win: block the poison BULLET itself and there is no poison at all - an absorbed bullet spawns none of its on-hit effects (see <color=#7FD4FF>Blocking</color>). The rest of this section is about the ticks after a bullet already got through.\n\nEach tick is an ordinary blockable damage event, checked against your 0.3 second block window.\n\n- <color=#7FE87F>A blocked tick is consumed, not delayed.</color> The poison marks that slice as dealt before it checks your shield, so a blocked slice is erased forever. The stream never extends, never pauses, and never comes back for it.\n- Blocking does not cancel the stream. The remaining ticks still land on schedule.\n- The survival math: every tick is an equal share of the total - 10% for Poison. If a poison's total is exactly enough to kill you, erasing one tick means it can no longer kill you - and each extra blocked tick is another full share you keep.\n- The cadence is on your side: ticks arrive every 0.3 seconds and a block window lasts exactly 0.3 seconds, so <color=#7FE87F>one well-timed press erases one or two ticks - 10-20% of a Poison, 6-12% of a Toxic Cloud</color>. That is the entire mechanism behind 'block a tick or two and you survive'.\n- Echo blocks re-arm the window without restarting the cooldown, so one press can cover more than one tick.\n- <color=#FF6666>The tick sound plays even for blocked ticks.</color> Judge by the health bar, not by the click.\n\n<color=#FFD94D><b>STACKING</b></color>\n\nEvery poison hit starts its own independent stream on its own timeline. Nothing merges and nothing refreshes: two poison bullets are two full streams, damage fully additive, each ticking on its own schedule. Getting tagged twice does not reset the first poison - it doubles the drip.\n\n<color=#FFD94D><b>DEATH, REVIVES, DECAY, LIFESTEAL</b></color>\n\n- Dying or being revived at a round transition cancels every running stream instantly. Poison never carries across a round.\n- Decay-class cards convert EVERY direct hit the holder takes into a spread-out stream ticking every quarter second. The same rules apply: each tick is blockable, and blocked slices are erased.\n- Every unblocked tick feeds the attacker's on-damage effects: a lifesteal build heals off you tick by tick.\n\n<color=#FFD94D><b>THE MOD'S POISON SYNC</b></color>\n\nVanilla poison is broken online. Each machine runs its own private copy of your poison and checks it against its own copy of your shield; your block press reaches different machines at different times; health is never re-synchronized. The screens silently disagree about your HP ('ghost HP') until the next round - and the disagreement can decide a round, because a death fires from whichever machine's copy crosses zero first.\n\nThe mod replaces this with victim authority: <color=#7FE87F>your own client runs the only real tick loop for poison on you</color>, judges every tick against your true shield state, and announces each verdict. Every modded machine - yours included - applies only announced verdicts, so all of them agree on every tick, the totals and cadence follow vanilla's math, and blocking works exactly as written above.\n\nWhere it is active: any online room - queue rooms, private room codes, quickplay - whenever the poisoned player runs a current mod build. Mixed rooms fall back safely:\n\n- In a mod queue room that contains a non-modded or outdated player, modded clients agree that poison ticks ignore blocking - consistency beats the ghost-HP split, but blocking will not reduce poison there.\n- In a private room-code game with a non-modded player, a modded victim's blocks still count; a non-modded victim gets raw vanilla behavior, desync included.\n- Offline and sandbox are pure vanilla - a single simulation has nothing to desync.",
@@ -1862,6 +1885,7 @@
   "Prizes",
   "Prizes & Rules",
   "Prizes are announced when signups open.",
+  "Progress",
   "Pronoun title.",
   "Pup",
   "Pure aggression",
@@ -1958,8 +1982,11 @@
   "Rates",
   "Rating",
   "Rating History  ({0} Elo, {1} rating updates)",
+  "Rating after",
+  "Rating before",
   "Rating position",
   "Rating {0} | peak {1}",
+  "Rating, gold and XP",
   "Ratings & Rewards",
   "Ratings (Glicko-2)",
   "Ratings, gold and the series result all settle when someone takes their 2nd game.",
@@ -2088,7 +2115,8 @@
   "Scarlet",
   "Score",
   "Score progression",
-  "Score race (points per game)",
+  "Score race",
+  "Score race (rounds won per game)",
   "Screen shake: <color={0}>{1}</color>",
   "Search Random",
   "Search Ranked",
@@ -2150,7 +2178,7 @@
   "Set Active",
   "Set RefreshValid to false",
   "Set RefreshValid to true",
-  "Set summary",
+  "Set totals",
   "Settings",
   "Severity:",
   "Shades for those who want to show that they are the true genius of the battlefield",
@@ -2169,6 +2197,7 @@
   "Shop sales",
   "Shop still loading",
   "Shortest Game",
+  "Shortest game",
   "Shots",
   "Show Discord on leaderboard: <color=#888>link Discord first</color>",
   "Show Discord on leaderboard: <color=#88FF88>ON</color>",
@@ -2390,6 +2419,7 @@
   "The host changed the lobby settings: {0}",
   "The host removed you from this lobby.",
   "The host reset the lobby settings to the defaults.",
+  "The lead in rounds changed hands {0} times over the set",
   "The match is already running.",
   "The message contains a word that is not allowed.",
   "The message contains characters that are not allowed.",
@@ -2445,6 +2475,7 @@
   "Tie",
   "Tier",
   "Tier {0}",
+  "Time in lead",
   "Time to show them who is the coolest dude around! A pair of glasses that takes up the eye slot",
   "Time's up - {0} picked automatically.",
   "Timeline",
@@ -2477,8 +2508,8 @@
   "Top of the food chain",
   "Total Mayhem",
   "Total XP",
+  "Total time",
   "Total: {0} ({1}W / {2}L)  <color=#FFD94D>Gold: {3}</color>",
-  "Totals",
   "Touch Grass",
   "Tournament Bets",
   "Tournament in progress - your next match will connect automatically. Keep ROUNDS open.",
@@ -2681,6 +2712,8 @@
   "Wrong password - try again",
   "Wrong password — try again.",
   "XL Name",
+  "XP per game",
+  "XP this set",
   "XP, Gold & levels",
   "YES",
   "YOUR CLIENT",
@@ -2768,6 +2801,7 @@
   "date ->",
   "days since first rating update ->",
   "default orange / blue",
+  "dimmed: rolled out of the build",
   "discarding...",
   "discord.gg/comp-rounds",
   "dmg",
@@ -2796,15 +2830,20 @@
   "game 1 starts",
   "game in last 45 min: wait",
   "game server relay",
+  "game {0}",
+  "gold",
   "impossibly fast series",
   "invalidated outright, gold and XP reversed",
   "is elected reporter",
   "jump within 0.1s: up and away",
   "just now",
   "kill boundary",
+  "kills",
   "legendary",
+  "length {0}",
   "level",
   "local fight simulation",
+  "longest",
   "lost {0} of {1}",
   "macro-pace input windows",
   "match data unavailable",
@@ -2825,7 +2864,7 @@
   "no direct PC link",
   "no opponent has taken 3+ series from them",
   "no profit at these odds",
-  "no rating or gold recorded for this set",
+  "no rating, gold or XP recorded for this set",
   "nobody - your screen only, never networked",
   "nobody yet",
   "none yet",
@@ -2863,7 +2902,6 @@
   "point won",
   "press",
   "private",
-  "pts",
   "ranked 1v1 series vs anyone in the selection, minimum 5 series",
   "ranked or casual",
   "rare",
@@ -2877,19 +2915,22 @@
   "replica age est. {0} ms one-way (peer-reported input)",
   "report version {0} - some panels may be missing",
   "reset if LB wins",
-  "rolled out: {0}",
   "room code",
   "room type?",
+  "rounds",
   "same-card",
   "series created",
   "series ends",
   "short-match farming pattern",
+  "shortest",
   "showing the newest {0} games of this sitting",
   "showing the newest {0} games of this sitting ({1} not shown)",
   "showing {0} of {1}",
+  "solo {0}-{1} duo",
   "solo: the outer-left point",
   "stackable",
   "sudden death",
+  "team 1 {0}-{1} team 2",
   "the base award scales with your opponent's tier; podium and sweep bonuses can add more",
   "the full art",
   "the host",
@@ -2961,6 +3002,8 @@
   "{0} matches ({1}W / {2}L)  WR: {3}%",
   "{0} min ago",
   "{0} months ago",
+  "{0} not shown",
+  "{0} of {1} games timed",
   "{0} of {1} left",
   "{0} of {1} paid packs today - {2} cards each",
   "{0} of {1} players",
@@ -2991,9 +3034,6 @@
   "{0}-player FFA starting in 5 seconds!",
   "{0}: <color=#888>(not bound)</color>",
   "{0}: <color=#FF9966>OFF</color>",
-  "{0}: rating {1}",
-  "{0}: rating {1} -> {2} ({3})",
-  "{0}: {1} gold",
   "{0}h ago",
   "{0}ms opp (peer-reported)"
  ],
@@ -3240,7 +3280,7 @@
   },
   "+{0} more": {
    "surface": "MailUI, SessionReportModel",
-   "location": "AddresseeNames, FfaScoreLabel",
+   "location": "AddresseeNames, FfaScoreLabel, FinalScore",
    "kind": "TrF"
   },
   "+{0} more bets": {
@@ -5863,10 +5903,10 @@
    "location": "BuildCompareBarChart",
    "kind": "Tr"
   },
-  "Average game length: {0}": {
+  "Average game": {
    "surface": "SessionReportModel",
-   "location": "BuildTotals",
-   "kind": "TrF"
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
   },
   "Avg Cards / Game": {
    "surface": "NativeUI",
@@ -6163,6 +6203,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Biggest comeback (rounds)": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Binder": {
    "surface": "PlayerCardsUI",
    "location": "BuildInto",
@@ -6195,7 +6240,7 @@
   },
   "Block %": {
    "surface": "SessionReportModel",
-   "location": "BuildTotals",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Block CD": {
@@ -6270,7 +6315,7 @@
   },
   "Blocks": {
    "surface": "SessionReportModel, TabStatsOverlay",
-   "location": "BuildTotals, EnsureLocaleStrings",
+   "location": "BuildTotalsPages, EnsureLocaleStrings",
    "kind": "Tr"
   },
   "Blood Gradient": {
@@ -6653,6 +6698,21 @@
    "location": "BuildCompareTab, EnsureLocaleStrings",
    "kind": "CreateButton, Tr"
   },
+  "Cards and points": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Cards picked": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Cards/game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Cards:": {
    "surface": "NativeUI",
    "location": "BuildFfaCardsText, FillRow",
@@ -6767,6 +6827,11 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Change": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
   },
   "Change view": {
    "surface": "NativeUI",
@@ -7083,9 +7148,14 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Combat": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Common": {
-   "surface": "NativeUI, PlayerCardsUI",
-   "location": "RarityLabel, RefreshCardStats",
+   "surface": "NativeUI, PlayerCardsUI, SessionReportModel",
+   "location": "Build, RarityLabel, RefreshCardStats",
    "kind": "Tr, TrC fallback"
   },
   "Common\u0004card rarity": {
@@ -7610,12 +7680,17 @@
   },
   "Damage": {
    "surface": "SessionReportModel, TabStatsOverlay",
-   "location": "BuildTotals, EnsureLocaleStrings",
+   "location": "BuildTotalsPages, EnsureLocaleStrings",
    "kind": "Tr"
   },
   "Damage dealt (cumulative per game)": {
    "surface": "SessionReportModel",
    "location": "Build",
+   "kind": "Tr"
+  },
+  "Damage per game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Damage types & buffs": {
@@ -7715,7 +7790,7 @@
   },
   "Deaths": {
    "surface": "SessionReportModel",
-   "location": "BuildTotals",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Decent": {
@@ -7977,6 +8052,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Dmg/game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
   },
   "Do nothing": {
    "surface": "InfoViz",
@@ -8683,6 +8763,11 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Final score": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Finish a game with the exact same 5 cards (and copies) as your opponent": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -8712,6 +8797,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "First bloods": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
   },
   "First played today · H2H {0}-{1} · Ranked series {2}": {
    "surface": "H2HSummary",
@@ -8953,6 +9043,11 @@
    "location": "SpectateReason",
    "kind": "Tr"
   },
+  "Game lengths": {
+   "surface": "SessionReportView",
+   "location": "DrawStrip",
+   "kind": "Tr"
+  },
   "Game over - {0} wins": {
    "surface": "SpectatorSync",
    "location": "PlayPointSequence",
@@ -8965,7 +9060,7 @@
   },
   "Game {0}": {
    "surface": "NativeUI, PostSessionReport, SessionReportModel",
-   "location": "Build, BuildBracketHoverBody, BuildFfaRecentRowText +4",
+   "location": "BuildBracketHoverBody, BuildFfaRecentRowText, BuildOvtRecentRowText +4",
    "kind": "TrF"
   },
   "Game {0}   {1} players": {
@@ -8981,6 +9076,11 @@
   "Game {0} - {1} players": {
    "surface": "NativeUI",
    "location": "RenderFfaBettingSection",
+   "kind": "TrF"
+  },
+  "Game {0} of {1}": {
+   "surface": "SessionReportModel",
+   "location": "BuildsRange",
    "kind": "TrF"
   },
   "Game {0} score progression": {
@@ -9000,7 +9100,7 @@
   },
   "Game {0}: {1}": {
    "surface": "SessionReportModel",
-   "location": "FfaScoreLabel",
+   "location": "BlockHeader, FfaScoreLabel",
    "kind": "TrF"
   },
   "Game {0}: {1}-{2}": {
@@ -9009,9 +9109,14 @@
    "kind": "TrF"
   },
   "Games": {
-   "surface": "NativeUI",
-   "location": "BuildFfaTab, RefreshFfaTab",
+   "surface": "NativeUI, SessionReportModel",
+   "location": "BuildFfaTab, BuildTotalsPages, RefreshFfaTab",
    "kind": "Tr"
+  },
+  "Games {0}-{1} of {2}": {
+   "surface": "SessionReportModel",
+   "location": "BuildsRange",
+   "kind": "TrF"
   },
   "Gentle soap bubbles float up around you.": {
    "surface": "shop catalog",
@@ -9156,6 +9261,16 @@
   "Gold betting runs on live 1v1, 2v2 and FFA games. This page covers who can bet, how the odds are priced, exactly when windows open and close, and what happens to your stake.\n\n<color=#FFD94D><b>WHO CAN BET</b></color>\n\n- Any registered player, staking 1 to 2000 Gold per bet. The stake is taken the moment the bet is placed.\n- You cannot bet on a match or lobby you are playing in, and banned players cannot bet.\n- <color=#7FE87F>Spectators CAN bet.</color> That is safe by design: the windows below close on early scoring, so watching a game never gets you a bet on a result that is already decided.\n- One bet per series in 1v1 and 2v2; one bet per game in FFA.\n- If any participant runs a mod older than 1.38.1, betting on that game is refused. Older clients cannot report live points, so the scoring cutoff could never fire - <color=#FF6666>the system fails closed rather than leave a window open.</color>\n- A linked Discord account can place the same bets through the bot's commands.\n\n<color=#FFD94D><b>ODDS: 1v1 AND 2v2</b></color>\n\n- Your multiplier is 1 divided by your side's win chance, computed from both sides' ratings AND their RD (see <color=#7FD4FF>Ratings (Glicko-2)</color>). Floor: 1.01x.\n- Uncertainty caps the price. With both sides established (RD 100 or below) the multiplier can reach 3.0x; the cap slides down to 1.0x as the higher RD rises to 300. A fresh account at RD 350 caps the price below the 1.10x acceptance gate - <color=#FF6666>an unknown simply can't be bet on, so a smurf can't be farmed for Gold.</color>\n- A side only accepts bets at 1.10x or better; below that it is locked.\n- 2v2 prices off the pair's average rating. A player's own 2v2 rating counts once they have 10 completed series; before that their 1v1 rating stands in.\n\n<color=#FFD94D><b>ODDS: FFA</b></color>\n\n- The server races every player to the lobby's score target and computes your pick's true chance of banking it first. Your multiplier is half of the fair price - the house keeps the other half.\n- Floors: 2.0x in lobbies of 5 or more, 1.4x at 3-4 players. For heavy favourites the floor gives way to 0.95 divided by their win chance, so a guaranteed-profit bet cannot exist.\n- Cap: 5.0x, or half the lobby size if that is lower, and it shrinks when ratings are uncertain.\n- A player with no FFA games yet is priced off their 1v1 rating at full uncertainty.\n\n<color=#FFD94D><b>WHEN BETS OPEN AND CLOSE</b></color>\n\nThe cutoff is scored points, never a clock:\n\n- <color=#7FD4FF>1v1 and 2v2</color> - open from the moment the series exists. Closed once 2 total points are scored in game 1, or the moment any game of the series is decided. Tournament series stay listed through the whole multi-day wait before the pair actually plays.\n- <color=#7FD4FF>FFA</color> - each bet targets the lobby's NEXT game. The window closes when the field scores 2 points in that game (1 point if the lobby's score target is 3 or lower). A lobby is only listed while a next game is plausible: up to 15 minutes while assembling with no games yet, and up to 30 minutes after its last recorded game. <color=#FF6666>Casual lobbies are never bettable.</color> Departed members are not valid targets.\n- <color=#7FD4FF>Lobby-phase bets</color> - hosted 2v2 and FFA lobbies take wagers while still FILLING. No odds are quoted yet; at Start the bet is priced from the final field and becomes a normal bet - provided your target is still there and the usual checks pass. Anything else (target left, odds too low, lobby never starts within 6 hours) refunds the stake.\n- 1v2 has no betting at all.\n\n<color=#FFD94D><b>PAYOUTS AND THE FIGHTER TAX</b></color>\n\n- A winning payout includes your stake back. 1v1 and 2v2 pay stake x odds rounded to the nearest Gold; FFA rounds DOWN.\n- If your winning bet's stored odds were 1.50x or below, 20% of the PROFIT goes to the fighter or team you backed - being worth betting on pays them too. The potential payout quoted when you place the bet already includes this tax.\n\n<color=#FFD94D><b>REFUNDS, AND WHERE TO SEE IT ALL</b></color>\n\nA refund returns exactly your stake:\n\n- 1v1: a non-tournament series with no game reported in its first 30 minutes is abandoned and refunds its bets. A series stalled for 60 minutes mid-series refunds its bets too, while the series itself stays resumable - <color=#FF6666>a refunded bet stays refunded even if that series is finished later.</color>\n- 2v2: refunds only when a series is cancelled. Disconnect-paused series wait for the admin ruling before anything settles.\n- FFA: refunds only for a game that never produced a recorded result. Played games always settle as won or lost.\n- At tiny stakes a WIN can pay exactly your stake (1g at 1.10x pays 1g). It is still a win: every bet's stored state - open, won, lost or refunded - is what displays, not the arithmetic.\n- Your full bet history across all modes is the bets ledger in the F5 menu. Live bettable games are listed in-game and mirrored in the Discord live-bets channel and its bet commands.": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "Gold per game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Gold this set": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Golden Eagle": {
@@ -9470,7 +9585,7 @@
   },
   "Hit %": {
    "surface": "SessionReportModel",
-   "location": "BuildTotals",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Hit % vs Block %": {
@@ -9855,7 +9970,7 @@
   },
   "Keys/s": {
    "surface": "SessionReportModel",
-   "location": "BuildTotals",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Kick": {
@@ -9865,7 +9980,17 @@
   },
   "Kills": {
    "surface": "SessionReportModel",
-   "location": "BuildTotals",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Kills per game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Kills/game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Kingslayer": {
@@ -10341,6 +10466,16 @@
   "Longest Game": {
    "surface": "NativeUI",
    "location": "RecordBoardHeading",
+   "kind": "Tr"
+  },
+  "Longest game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Longest point streak": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Lose a ranked FFA holding 10 or more half points that never became a point": {
@@ -11750,7 +11885,7 @@
   },
   "Page {0}/{1}": {
    "surface": "NativeUI, SessionReportView",
-   "location": "BuildCompareRecordsPanel, DrawFooter",
+   "location": "BuildCompareRecordsPanel, PageLine",
    "kind": "TrF"
   },
   "Pale icy blue, like a winter sky.": {
@@ -11832,6 +11967,11 @@
    "surface": "PostSessionReport",
    "location": "ComposeFfaMiniPanel",
    "kind": "TrF"
+  },
+  "Per game": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
   },
   "Per-letter bright cyan → deep indigo gradient. Surface to trench.": {
    "surface": "shop catalog",
@@ -12073,6 +12213,11 @@
    "location": "FfaKickFromLobby, Kick",
    "kind": "Tr"
   },
+  "Player totals": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "Player {0}": {
    "surface": "TabStatsOverlay",
    "location": "PlayerName",
@@ -12087,6 +12232,16 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Points lost": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Points won": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
   },
   "Poison": {
    "surface": "InfoViz, shop catalog",
@@ -12302,6 +12457,11 @@
    "surface": "NativeUI",
    "location": "BuildTournamentsTab",
    "kind": "ShowInfoPopup"
+  },
+  "Progress": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
   },
   "Pronoun title.": {
    "surface": "shop catalog",
@@ -12714,8 +12874,8 @@
    "kind": "shop"
   },
   "Rare": {
-   "surface": "NativeUI, PlayerCardsUI",
-   "location": "RarityLabel, RefreshCardStats",
+   "surface": "NativeUI, PlayerCardsUI, SessionReportModel",
+   "location": "Build, RarityLabel, RefreshCardStats",
    "kind": "Tr, TrC fallback"
   },
   "Rare\u0004card rarity": {
@@ -12783,6 +12943,16 @@
    "location": "BuildFormGraph",
    "kind": "TrF"
   },
+  "Rating after": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Rating before": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Rating position": {
    "surface": "PlayerCardsUI",
    "location": "SortLabel",
@@ -12792,6 +12962,11 @@
    "surface": "PlayerCardsUI",
    "location": "RatingLine",
    "kind": "TrF"
+  },
+  "Rating, gold and XP": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
   },
   "Ratings & Rewards": {
    "surface": "InfoLibrary",
@@ -13433,7 +13608,12 @@
    "location": "ParseFfaTimeline",
    "kind": "Tr"
   },
-  "Score race (points per game)": {
+  "Score race": {
+   "surface": "SessionReportView",
+   "location": "DrawSetPage",
+   "kind": "Tr"
+  },
+  "Score race (rounds won per game)": {
    "surface": "SessionReportModel",
    "location": "Build",
    "kind": "Tr"
@@ -13700,7 +13880,7 @@
   },
   "Session report": {
    "surface": "SessionReportView",
-   "location": "Draw",
+   "location": "DrawHeader",
    "kind": "Tr"
   },
   "Session series": {
@@ -13743,9 +13923,9 @@
    "location": "BuildRefreshFlow, BuildRefreshGate, TextFallback",
    "kind": "Tr"
   },
-  "Set summary": {
-   "surface": "SessionReportView",
-   "location": "DrawTotals",
+  "Set totals": {
+   "surface": "SessionReportModel",
+   "location": "Build",
    "kind": "Tr"
   },
   "Settings": {
@@ -13838,9 +14018,14 @@
    "location": "RecordBoardHeading",
    "kind": "Tr"
   },
+  "Shortest game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Shots": {
    "surface": "SessionReportModel",
-   "location": "BuildTotals",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "Show Discord on leaderboard: <color=#888>link Discord first</color>": {
@@ -14943,6 +15128,11 @@
    "location": "HandleState",
    "kind": "ShowNotification, Tr"
   },
+  "The lead in rounds changed hands {0} times over the set": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "TrF"
+  },
   "The match is already running.": {
    "surface": "SpectatorHud",
    "location": "DrawBlackout",
@@ -15218,6 +15408,11 @@
    "location": "PaintTierRow",
    "kind": "TrF"
   },
+  "Time in lead": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Time to show them who is the coolest dude around! A pair of glasses that takes up the eye slot": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -15378,15 +15573,15 @@
    "location": "BuildCompareBarChart, TrMetric",
    "kind": "Tr"
   },
+  "Total time": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Total: {0} ({1}W / {2}L)  <color=#FFD94D>Gold: {3}</color>": {
    "surface": "NativeUI",
    "location": "RefreshMyStats",
    "kind": "TrF"
-  },
-  "Totals": {
-   "surface": "SessionReportModel",
-   "location": "Build",
-   "kind": "Tr"
   },
   "Touch Grass": {
    "surface": "ApiClient",
@@ -15614,8 +15809,8 @@
    "kind": "AppendSystemChatLine"
   },
   "Uncommon": {
-   "surface": "NativeUI, PlayerCardsUI",
-   "location": "RarityLabel, RefreshCardStats",
+   "surface": "NativeUI, PlayerCardsUI, SessionReportModel",
+   "location": "Build, RarityLabel, RefreshCardStats",
    "kind": "Tr, TrC fallback"
   },
   "Uncommon\u0004card rarity": {
@@ -16398,6 +16593,16 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "XP per game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "XP this set": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "XP, Gold & levels": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -16833,6 +17038,11 @@
    "location": "BuildVisibilitySeats",
    "kind": "Tr"
   },
+  "dimmed: rolled out of the build": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "discarding...": {
    "surface": "PlayerCardsUI",
    "location": "RefreshBinder",
@@ -16845,7 +17055,7 @@
   },
   "dmg": {
    "surface": "SessionReportModel",
-   "location": "Build",
+   "location": "Build, BuildTotalsPages",
    "kind": "Tr"
   },
   "dmg/s": {
@@ -16973,6 +17183,16 @@
    "location": "BuildNetcodeMap",
    "kind": "Tr"
   },
+  "game {0}": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "TrF"
+  },
+  "gold": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "impossibly fast series": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
@@ -17003,10 +17223,20 @@
    "location": "BuildMovementWindow",
    "kind": "Tr"
   },
+  "kills": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "legendary": {
    "surface": "NativeUI",
    "location": "TrRarity",
    "kind": "Tr"
+  },
+  "length {0}": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "TrF"
   },
   "level": {
    "surface": "InfoViz",
@@ -17016,6 +17246,11 @@
   "local fight simulation": {
    "surface": "InfoViz",
    "location": "BuildNetcodeMap",
+   "kind": "Tr"
+  },
+  "longest": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "lost {0} of {1}": {
@@ -17118,9 +17353,9 @@
    "location": "ApplyBetRow, ApplyTeamBetRow",
    "kind": "Tr"
   },
-  "no rating or gold recorded for this set": {
-   "surface": "SessionReportModel",
-   "location": "BuildTotals",
+  "no rating, gold or XP recorded for this set": {
+   "surface": "SessionReportView",
+   "location": "DrawProgressPage",
    "kind": "Tr"
   },
   "nobody - your screen only, never networked": {
@@ -17154,8 +17389,8 @@
    "kind": "Tr"
   },
   "not recorded for this mode": {
-   "surface": "SessionReportModel",
-   "location": "Build",
+   "surface": "SessionReportModel, SessionReportView",
+   "location": "Build, DrawPlayersPage, DrawStrip +1",
    "kind": "Tr"
   },
   "nothing": {
@@ -17308,11 +17543,6 @@
    "location": "RenderHostLobbySection",
    "kind": "Tr"
   },
-  "pts": {
-   "surface": "SessionReportModel",
-   "location": "Build",
-   "kind": "Tr"
-  },
   "ranked 1v1 series vs anyone in the selection, minimum 5 series": {
    "surface": "NativeUI",
    "location": "BuildCompareNemesisPanel",
@@ -17378,11 +17608,6 @@
    "location": "BuildBracketFlow",
    "kind": "Tr"
   },
-  "rolled out: {0}": {
-   "surface": "SessionReportModel",
-   "location": "Build",
-   "kind": "TrF"
-  },
   "room code": {
    "surface": "InfoViz",
    "location": "BuildWhenCounts",
@@ -17391,6 +17616,11 @@
   "room type?": {
    "surface": "InfoViz",
    "location": "BuildWhenCounts",
+   "kind": "Tr"
+  },
+  "rounds": {
+   "surface": "SessionReportModel",
+   "location": "Build",
    "kind": "Tr"
   },
   "same-card": {
@@ -17413,6 +17643,11 @@
    "location": "BuildAnticheatPipeline",
    "kind": "Tr"
   },
+  "shortest": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "showing the newest {0} games of this sitting": {
    "surface": "SessionReportModel",
    "location": "Build",
@@ -17426,6 +17661,11 @@
   "showing {0} of {1}": {
    "surface": "PostSessionReport",
    "location": "BuildGraphPages, Compose2v2, ComposeFfa +3",
+   "kind": "TrF"
+  },
+  "solo {0}-{1} duo": {
+   "surface": "SessionReportModel",
+   "location": "FinalScore",
    "kind": "TrF"
   },
   "solo: the outer-left point": {
@@ -17442,6 +17682,11 @@
    "surface": "NativeUI",
    "location": "FfaSettingsSummaryBits",
    "kind": "Tr"
+  },
+  "team 1 {0}-{1} team 2": {
+   "surface": "SessionReportModel",
+   "location": "FinalScore",
+   "kind": "TrF"
   },
   "the base award scales with your opponent's tier; podium and sweep bonuses can add more": {
    "surface": "InfoViz",
@@ -17798,6 +18043,16 @@
    "location": "Ago",
    "kind": "TrF"
   },
+  "{0} not shown": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "TrF"
+  },
+  "{0} of {1} games timed": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "TrF"
+  },
   "{0} of {1} left": {
    "surface": "NativeUI",
    "location": "RefreshArtistTab",
@@ -17946,21 +18201,6 @@
   "{0}: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
    "location": "RefreshSettings",
-   "kind": "TrF"
-  },
-  "{0}: rating {1}": {
-   "surface": "SessionReportModel",
-   "location": "BuildTotals",
-   "kind": "TrF"
-  },
-  "{0}: rating {1} -> {2} ({3})": {
-   "surface": "SessionReportModel",
-   "location": "BuildTotals",
-   "kind": "TrF"
-  },
-  "{0}: {1} gold": {
-   "surface": "SessionReportModel",
-   "location": "BuildTotals",
    "kind": "TrF"
   },
   "{0}h ago": {
