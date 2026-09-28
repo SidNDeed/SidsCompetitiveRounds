@@ -5219,6 +5219,65 @@ def test_m1_the_release_marker_and_lease_are_one_unit(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_m2_the_attest_runs_the_expiry_after_a(monkeypatch):
+    """Round 2, M2 (N13): after A, a member's FFA spectate attest runs the
+    admission expiry itself, with no assembly, poll, leave or report request
+    from anyone. A lobby started short with seat 4 admissible: at A - 0.1 s a
+    member's attest of the four fighters is refused 409 roster_mismatch and
+    writes nothing; at A a stranger's attest (a member of another lobby) is
+    refused and writes nothing; a member's attest at A answers 200 and lists
+    the game, seat 4 excluded and departed, its queue row and lease gone, the
+    expired line printed once; at A + 60 s the next attest answers 200 and
+    runs no second expiry."""
+    async def body(env):
+        async def session_ok(request, steam_id, db):
+            return True
+        env.mp.setattr(main, "_strict_steam_session_ok", session_ok)
+        lob = await _short(env, 5)
+        other = await env.lobby(5, t=40.0)
+        room = (await env.lobby_row(lob))["photon_room_id"]
+        live = sorted(lob.sids[:4])
+
+        async def attest(sid, roster):
+            req = main.SpectateAttestBody(
+                steam_id=sid, mode="ffa", room_name=room, region=lob.region, actor_number=1,
+                fighter_target=len(roster), room_capacity=5,
+                spectator_protocol=main.SPECTATE_PROTOCOL, phase="transition",
+                roster=",".join(roster))
+
+            async def go():
+                async with env.sm() as db:
+                    return await main.spectate_participant_attest(req, None, db=db)
+            return await env._call(go)
+
+        await env.at(lob, 139.9)
+        before = await env.snapshot()
+        a = await attest(lob.sids[0], live)
+        assert a.status == 409 and a.body == "roster_mismatch" \
+            and await env.snapshot() == before, ("M2 before A", a)
+        await env.at(lob, 140.0)
+        before = await env.snapshot()
+        a = await attest(other.sids[0], sorted(lob.sids[1:4] + [other.sids[0]]))
+        assert a.status == 409 and a.body == "roster_mismatch" \
+            and await env.snapshot() == before, ("M2 stranger", a)
+        a = await attest(lob.sids[0], live)
+        listed = await env.conn.fetchval(
+            "SELECT count(*) FROM spectate_games WHERE room_name = $1 AND ended_at IS NULL", room)
+        assert a.status == 200 and a.body == {"status": "ok"} and listed == 1, \
+            ("M2 at A", a, listed)
+        seat, row = await env.seat(lob, 4), await env.lobby_row(lob)
+        line = "lobby %s admission expired slot=4 t=+140000" % str(lob.lid)[:8]
+        assert seat["verdict"] == "excluded" and list(row["departed_ids"]) == [lob.pids[4]] \
+            and await env.queue_row(lob, 4) is None and await env.lease(lob, 4) is None \
+            and len(env.asm_lines(line)) == 1, ("M2 excluded", seat["verdict"], row["departed_ids"])
+        await env.at(lob, 200.0)
+        a = await attest(lob.sids[1], live)
+        row = await env.lobby_row(lob)
+        assert a.status == 200 and list(row["departed_ids"]) == [lob.pids[4]] \
+            and len(env.asm_lines("admission expired")) == 1, ("M2 once", a)
+    run_env(monkeypatch, body)
+
+
 _N12_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap", "same_card_rule",
              "is_ranked", "settings_known", "settings_changed_at", "password_hash",
