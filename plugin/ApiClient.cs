@@ -21795,6 +21795,14 @@ namespace CompetitiveRounds
             try
             {
                 if (req.responseCode != 401) return;
+                // A 401 speaks only for a token the request carried, and
+                // StampVersionHeader withholds the token on plaintext-to-public
+                // transport by this same rule on this same URL. A request to
+                // the backup never showed the server a session, so its 401 says
+                // nothing about ours: clearing on it dropped a good session, and
+                // after a secure-route restore (board row 27) a request still
+                // bound for the backup would drop the new one.
+                if (!CredentialedTransportAllowed(req.url)) return;
                 string body = null;
                 try { body = req.downloadHandler?.text; } catch { }
                 if (body == null || !body.Contains("session_required")) return;
