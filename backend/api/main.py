@@ -49841,9 +49841,9 @@ async def _asm_assembly_work(ctx, pid, req) -> dict:
 async def _asm_release_work(ctx, pid, arg) -> dict:
     """The release's locked step: the caller's own queue row for this lobby,
     under the lobby row and its queue rows. The marker and the lease were
-    committed before any lock, by _asm_release_pre (round 2, M1). Nothing
-    else: no departure, cause, verdict, receipt, gone record, status, bet or
-    survivor row, and no rule runs. A deadline answer here rolls back only
+    committed before the lobby lock, by _asm_release_pre (round 2, M1).
+    Nothing else: no departure, cause, verdict, receipt, gone record, status,
+    bet or survivor row, and no rule runs. A deadline answer here rolls back only
     this delete; the row waits for the client's next try (three in all). A
     row the tries never reach holds no lease, so the player's next FFA join
     clears it as an unleased husk (ffa_queue_join), and the janitor's
@@ -49866,9 +49866,10 @@ def _asm_release_pre(steam_id, lobby_id, why, held):
     lobby lock is awaited. The lease goes only beside a marker: with no seat
     row in that lobby nothing is written here and the lock step answers 404.
     A deadline answer before this COMMIT therefore leaves nothing durable,
-    and one after it (the lock, statement or pre-commit arm of _asm_run)
-    leaves a released seat, which the gone rule and writer 7 (d) exclude
-    (N10), and at most the caller's own queue row (_asm_release_work). The
+    and one after it (the pool stage of the checkout that follows it, or the
+    lock, statement or pre-commit arm of _asm_run) leaves a released seat,
+    which the gone rule and writer 7 (d) exclude (N10), and at most the
+    caller's own queue row (_asm_release_work). The
     seat row is written before the lease, the order the post-start writers
     take the two (the expiry; a gone record and its deferred departure).
     `held["lease"]` records whether this request removed the lease. The
@@ -49937,8 +49938,8 @@ async def ffa_lobby_release(lobby_id: uuid.UUID, req: _AsmReleaseReq, request: R
     """I2 writer 8 (V11, N10): the two protocol exits, FENCE_EXPIRED and an
     admitted late seat's own two-boundary bound. Records released_at and
     release_why and frees the caller's lease for this lobby in one committed
-    unit before any lock (round 2, M1), then deletes its own queue row for
-    it, and writes nothing else; idempotent (200 on a repeat)."""
+    unit before the lobby lock (round 2, M1), then deletes its own queue row
+    for it, and writes nothing else; idempotent (200 on a repeat)."""
     if req.why not in _ASM_RELEASE_WHY or not _pg_text_ok(req.steam_id):
         raise HTTPException(422, "invalid release")
     held = {"lease": 0}

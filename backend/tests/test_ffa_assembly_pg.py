@@ -5171,7 +5171,7 @@ def test_m1_the_release_marker_and_lease_are_one_unit(monkeypatch):
             conn, tr, bpid = await _blocker(env, lob)
             try:
                 task = asyncio.ensure_future(env.release(lob, slot, "fence_expired"))
-                n = await _waiting_on(env, bpid)
+                n = await _waiting_on(env, bpid, tries=250)
                 done, _pend = await asyncio.wait({task}, timeout=6.0)
             finally:
                 await tr.rollback()
