@@ -407,6 +407,23 @@ def print_id_ok(print_id):
     return bool(_PRINT_ID_RE.match(print_id or ""))
 
 
+def composite_strip_key(pack_id, digest, locale):
+    """The validated relative cache key of a Discord reveal strip, or None."""
+    if not (_PRINT_ID_RE.match(pack_id or "") and _REV_RE.match(digest or "")
+            and _LOCALE_SEG_RE.match(locale or "")):
+        return None
+    return f"strip/{pack_id}/{digest}/{locale}.png"
+
+
+def composite_binder_key(owner_ref, page, digest, locale):
+    """The validated relative cache key of a Discord reveal binder page (pages
+    1-50), or None."""
+    if not (_PRINT_ID_RE.match(owner_ref or "") and isinstance(page, int) and not isinstance(page, bool)
+            and 1 <= page <= 50 and _REV_RE.match(digest or "") and _LOCALE_SEG_RE.match(locale or "")):
+        return None
+    return f"binder/{owner_ref}/{page}/{digest}/{locale}.png"
+
+
 # ── the render pool (§2.1, r18 M5) ─────────────────────────────────────────
 POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pc-render")
 _DECODE_SLOTS = threading.BoundedSemaphore(2)

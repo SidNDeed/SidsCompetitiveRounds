@@ -27,7 +27,8 @@ def test_every_internal_route_the_bot_calls_is_registered_by_the_api():
     paths = set(re.findall(r'"/internal/pc/[a-z/]+"', BOT_SRC))
     assert paths == {'"/internal/pc/daily"', '"/internal/pc/collection"', '"/internal/pc/card"',
                      '"/internal/pc/events/pending"', '"/internal/pc/events/ack"',
-                     '"/internal/pc/lease"', '"/internal/pc/face/back"'}
+                     '"/internal/pc/lease"', '"/internal/pc/face/back"',
+                     '"/internal/pc/packs"', '"/internal/pc/binder"'}
     for p in paths:
         full = '"/api/v1' + p[1:]
         assert (f"@app.get({full}" in MAIN_SRC) or (f"@app.post({full}" in MAIN_SRC), p
@@ -43,6 +44,13 @@ def test_every_internal_route_the_bot_calls_is_registered_by_the_api():
     assert BOT_SRC.count('f"/internal/pc/face/print/{') == 2 and '@app.get("/api/v1/internal/pc/face/print/{print_id}/{locale}"' in MAIN_SRC
     assert BOT_SRC.count('f"/internal/pc/face/preview/{') == 1 and '@app.get("/api/v1/internal/pc/face/preview/{player_ref}/{locale}"' in MAIN_SRC
     assert '_pc_api_bytes("/internal/pc/face/back")' in BOT_SRC and '@app.get("/api/v1/internal/pc/face/back"' in MAIN_SRC
+    # the Discord reveal: two JSON reads, and the two image routes as f-string paths
+    for read in ("packs", "binder"):
+        assert f'_pc_api("GET", "/internal/pc/{read}"' in BOT_SRC and f'@app.get("/api/v1/internal/pc/{read}"' in MAIN_SRC
+    assert BOT_SRC.count('f"/internal/pc/packs/{pack_id}/strip/{') == 1
+    assert '@app.get("/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png"' in MAIN_SRC
+    assert BOT_SRC.count('f"/internal/pc/binder/{owner_ref}/page/{int(page)}/{locale}.png"') == 1
+    assert '@app.get("/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png"' in MAIN_SRC
 
 
 def test_the_drain_posts_then_acks_and_stops_on_a_failed_send():

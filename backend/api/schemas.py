@@ -817,6 +817,13 @@ class HealthResponse(BaseModel):
     # §8) -- probed by the release train on both roles and read by nothing
     # else. Absent on a build older than v4.13.
     pc_fold: str | None = None
+    # pc_trading: the card-trading word (main._pc_trading_word, migration
+    # 353): ready | off | schema_missing | partial | unknown | broken --
+    # DERIVED from the accept's claim and move literals and the schema
+    # probe, never a constant (#306). The connected arm probes; the
+    # degraded arm reads only this process's cache (broken, the word of a
+    # found schema, else unknown). Absent on a build before trading.
+    pc_trading: str | None = None
     # ffa_hold_fences: which generation of the FFA readmission-hold fences this
     # build carries (main._FFA_HOLD_FENCES; 1 = migration 325's held_until /
     # held_lobby honoured by the janitor lapse sweep, the poll's 3-hour sweep
@@ -844,6 +851,12 @@ class HealthResponse(BaseModel):
     # (#306): the batch adds no route, so this value is what tells its build
     # from the one before it. Absent on any build before it.
     ticket_redaction: int | None = None
+    # discord_collection: release-train verification plumbing, not a design
+    # mechanism (main._DISCORD_COLLECTION_MARKER; 1 = this build serves the
+    # Discord reveal's four internal routes). A code constant, equal on both
+    # boxes by construction, probed by the release train and read by nothing
+    # else (#306). Absent on any build before it.
+    discord_collection: int | None = None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
