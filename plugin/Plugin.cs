@@ -182,6 +182,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
         internal static ConfigEntry<float> BroadcastShowcaseMetricSeconds; // broadcast seat only -- board row 31: the idle showcase's dwell per Compare category
         internal static ConfigEntry<string> BroadcastTestShowcase;         // broadcast seat only -- any new value plays one showcase rotation with the stream-live gate lifted
+        internal static ConfigEntry<float> BroadcastSessionReportPageSeconds; // broadcast seat only -- board row 30g: the post-set session report's dwell per page
+        internal static ConfigEntry<string> BroadcastTestWatchedSet;       // broadcast seat only -- a NEW spectate game id replays that recorded set through the post-set report
         internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
@@ -1170,6 +1172,12 @@ namespace CompetitiveRounds
             BroadcastTestShowcase = Config.Bind(
                 "Broadcast", "TestShowcase", "",
                 "Broadcast seat only: set to any NEW value to play one idle-showcase rotation even when the stream is not live; every other condition still applies (the director idle with nothing to watch, not in an online room, the F5 page free). Each Compare category shown logs a [SHOWCASE] metric line. A value present at startup never runs.");
+            BroadcastSessionReportPageSeconds = Config.Bind(
+                "Broadcast", "SessionReportPageSeconds", 12f,
+                "Broadcast seat only: after a watched set the broadcaster pages through the set's session report; this is how many seconds each page stays up. 0 or less means the default (12); other values are held between 3 and 300. Applies from the next page.");
+            BroadcastTestWatchedSet = Config.Bind(
+                "Broadcast", "TestWatchedSet", "",
+                "Broadcast seat only: set to a NEW spectate game id (a UUID) to replay that recorded set through the post-set report as if the director had just watched it (the server's report status, the settle, the fetches, the session report and its pages), even when the stream is not live. A value present at startup never runs.");
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
@@ -2669,6 +2677,22 @@ namespace CompetitiveRounds
             IdleShowcase.DevRunOneRotation();
         }
 
+        // Board row 30g: [Broadcast] TestWatchedSet - a recorded set replayed
+        // through the post-set report (PostSessionReport.DevWatchSet) for the
+        // in-game witness, a watched set not being available on demand. The
+        // sentinel levers' grammar and identity gate.
+        private static string _lastTestWatchedSet;
+        private void TickTestWatchedSet()
+        {
+            if (Plugin.BroadcastTestWatchedSet == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestWatchedSet.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestWatchedSet == null) { _lastTestWatchedSet = raw; return; }
+            if (raw == _lastTestWatchedSet) return;
+            _lastTestWatchedSet = raw;
+            if (raw.Length == 0) return;
+            PostSessionReport.DevWatchSet(raw);
+        }
+
         // ── [Broadcast] TestSilence: headless silence-indicator verification ──
         // Sets data.silenceTime on a sandbox bot and lets vanilla
         // SilenceHandler.Update discover it — the same code path a real
@@ -3120,6 +3144,7 @@ namespace CompetitiveRounds
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }
             try { TickTestShowcase(); } catch { }
+            try { TickTestWatchedSet(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)

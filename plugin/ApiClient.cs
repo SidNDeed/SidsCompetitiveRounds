@@ -12985,6 +12985,14 @@ namespace CompetitiveRounds
         /// gets the same 404 as a missing set). Read-only. Parsing lives in
         /// SessionReportRules.Parse — the raw text is handed to the callback.</summary>
         public static void FetchSessionReport(string selector, string key, Action<bool, string> callback)
+            => FetchSessionReport(selector, key, null, callback);
+
+        /// <summary>Board row 30g: `viewer` (a 17-digit Steam id) asks for the set
+        /// as that player is served it. The server answers it only for the
+        /// broadcast account (strict session plus its allowlist) and refuses
+        /// every other caller with 403 "broadcast_only"; null or empty is the
+        /// caller's own report, the request the F5 view makes.</summary>
+        public static void FetchSessionReport(string selector, string key, string viewer, Action<bool, string> callback)
         {
             if (callback == null) return;
             string sid = MatchTracker.LocalSteamId;
@@ -12994,7 +13002,14 @@ namespace CompetitiveRounds
                 && selector != "lobby") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>; Sept 28 (row 30a): ?lobby=<ffa match uuid>
             Guid parsed;
             if (!Guid.TryParse(key ?? "", out parsed)) { callback(false, "bad-key"); return; }
+            bool named = !string.IsNullOrEmpty(viewer);
+            if (named)
+            {
+                if (viewer.Length != 17) { callback(false, "bad-viewer"); return; }
+                foreach (char ch in viewer) if (ch < '0' || ch > '9') { callback(false, "bad-viewer"); return; }
+            }
             string url = $"{baseUrl}/api/v1/report?steam_id={Uri.EscapeDataString(sid)}&{selector}={parsed.ToString("D")}";
+            if (named) url += "&viewer=" + viewer;
             Plugin.Instance.StartCoroutine(GetRequest(url, callback, detailedErrors: true, sessionAware: true));
         }
 

@@ -913,6 +913,67 @@ namespace CompetitiveRounds
             return o;
         }
 
+        // -- board row 30g: the broadcaster's playback (pure) ----------------------
+
+        /// <summary>The broadcaster's dwell per session report page when the
+        /// config names none or a value that cannot be a dwell (0 or less,
+        /// NaN, infinite), and the bounds any other value is held to.</summary>
+        internal const float BROADCAST_PAGE_SECONDS = 12f, BROADCAST_PAGE_MIN_SECONDS = 3f, BROADCAST_PAGE_MAX_SECONDS = 300f;
+
+        internal static float BroadcastPageDwell(float configured)
+        {
+            if (float.IsNaN(configured) || float.IsInfinity(configured) || configured <= 0f)
+                return BROADCAST_PAGE_SECONDS;
+            return Math.Min(BROADCAST_PAGE_MAX_SECONDS, Math.Max(BROADCAST_PAGE_MIN_SECONDS, configured));
+        }
+
+        /// <summary>The page after `page` in the broadcaster's walk, or -1 once
+        /// every page has been shown. `pages` is the count the view measured at
+        /// this screen size (the fixed pages plus the builds pages); a count
+        /// that shrank to or below the current page ends the walk rather than
+        /// wrapping.</summary>
+        internal static int BroadcastNextPage(int page, int pages)
+        {
+            int next = page + 1;
+            return next >= 1 && next < pages ? next : -1;
+        }
+
+        /// <summary>A game the broadcaster may anchor the watched set's report
+        /// on: its id, its end (server UTC) and the steam ids of the players
+        /// who PLAYED it (an FFA frozen-roster ghost is not one).</summary>
+        internal sealed class AnchorGame
+        {
+            public string Id = "";
+            public DateTime End;
+            public readonly List<string> Played = new List<string>();
+        }
+
+        /// <summary>The anchor of the watched set's report: the NEWEST game
+        /// ending inside [lo, hi] whose id is a UUID (the route's selectors
+        /// are), and the player to ask for it - `preferred` when they played
+        /// it, else the first player of `roster` who did. Null, with no viewer,
+        /// when no game qualifies or nobody of the roster played the newest.</summary>
+        internal static AnchorGame NewestAnchor(IList<AnchorGame> games, DateTime lo, DateTime hi,
+                                                string preferred, IList<string> roster, out string viewer)
+        {
+            viewer = null;
+            AnchorGame best = null;
+            if (games == null) return null;
+            foreach (var g in games)
+            {
+                if (g == null || g.End < lo || g.End > hi) continue;
+                Guid parsed;
+                if (!Guid.TryParse(g.Id ?? "", out parsed)) continue;
+                if (best == null || g.End > best.End) best = g;
+            }
+            if (best == null) return null;
+            if (!string.IsNullOrEmpty(preferred) && best.Played.Contains(preferred)) { viewer = preferred; return best; }
+            if (roster != null)
+                foreach (var id in roster)
+                    if (!string.IsNullOrEmpty(id) && best.Played.Contains(id)) { viewer = id; return best; }
+            return null;
+        }
+
         // -- series maths (pure) -----------------------------------------------
 
         /// <summary>Value of a cumulative series at time x: 0 at or before the

@@ -61533,6 +61533,7 @@ async def get_set_report(request: Request, steam_id: str = "",
                          session: str | None = None,
                          sitting: str | None = None,
                          lobby: str | None = None,
+                         viewer: str | None = None,
                          db: AsyncSession = Depends(get_db)):
     """The session report envelope (v1) for one set — see the block comment
     above. Errors: 401 "session_required" (fail-closed session check, first
@@ -61568,9 +61569,29 @@ async def get_set_report(request: Request, steam_id: str = "",
     order) and a player's keys are missing from a game they did not play -
     never zero. No game is dropped for its roster: every game is one the
     caller played, so the union names nobody the caller's own per-game `match`
-    requests would not. A game with no lobby row is its own one-game lobby."""
+    requests would not. A game with no lobby row is its own one-game lobby.
+
+    `viewer=<steam id>` (Sept 28, board row 30g): the set as that player is
+    served it. Participation, the sitting boundaries and the roster check are
+    decided for `viewer` instead of the caller, so the answer is exactly the
+    envelope the viewer's own request gets. Only the broadcast account may name
+    a viewer: the session check still applies to the CALLER, then a caller
+    outside SPECTATE_BROADCAST_STEAM_IDS gets 403 "broadcast_only" (the two
+    checks /broadcast/target and /broadcast/report-status make). A viewer that
+    is not a 17-digit Steam id is a 400 "bad_request"; both are decided before
+    any statement runs. A viewer who did not play the set gets the same 404 as
+    every other refusal."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
+    # Board row 30g: whose report this is - the caller's own unless the
+    # broadcast account names a viewer (docstring).
+    reader = str(steam_id)
+    if viewer is not None:
+        if not _is_broadcast_account(steam_id):
+            raise HTTPException(status_code=403, detail="broadcast_only")
+        if not _re.fullmatch(r"[0-9]{17}", viewer):
+            raise HTTPException(status_code=400, detail="bad_request")
+        reader = viewer
     chosen = [(name, val) for name, val in
               (("series", series), ("match", match), ("session", session),
                ("sitting", sitting), ("lobby", lobby)) if val]
@@ -61581,7 +61602,7 @@ async def get_set_report(request: Request, steam_id: str = "",
     if key is None:
         raise HTTPException(status_code=400, detail="bad_request")
 
-    caller = await _report_rows(db, _REPORT_CALLER_SQL, {"sid": str(steam_id)})
+    caller = await _report_rows(db, _REPORT_CALLER_SQL, {"sid": reader})
     if not caller or caller[0]["id"] is None:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
     cpid = str(caller[0]["id"])
@@ -61667,7 +61688,7 @@ async def get_set_report(request: Request, steam_id: str = "",
 
     roster = await _report_roster(db, roster_pids, team_of, color_of)
     # PARTICIPANT-ONLY, and indistinguishable from "no such set" on purpose.
-    if steam_id not in {r["id"] for r in roster}:
+    if reader not in {r["id"] for r in roster}:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
     sid_of = {r["pid"]: r["id"] for r in roster}
 

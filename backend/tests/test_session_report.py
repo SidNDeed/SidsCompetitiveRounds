@@ -1599,7 +1599,9 @@ def test_a_builds_page_names_the_games_it_holds():
     draw = _cs_body(view, "private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)")
     assert "m.BuildsRange(first, end - 1)" in draw
     footer = _cs_body(view, "private static void DrawFooter(Rect r)")
-    assert "model.PageTitle(page, first, last)" in footer and "buildStarts[" in footer
+    assert "PageLine(model, page, pages)" in footer
+    line = _cs_body(view, "private static string PageLine(SessionReportModel.Model m, int pg, int pages)")
+    assert "m.PageTitle(pg, first, last)" in line and "buildStarts[" in line
     model = PLUGIN / "SessionReportModel.cs"
     rng = _cs_body(model, "public string BuildsRange(int first, int last)")
     assert 'I18n.TrF("Games {0}-{1} of {2}", first + 1, last + 1, Builds.Count)' in rng
@@ -1699,3 +1701,171 @@ def test_the_race_grid_is_one_line_per_round_and_the_thin_line_is_gated():
     assert "bool thinLegible = p.Thin.Count > 0 && plot.height / Mathf.Max(1f, p.MaxY) >= 24f;" in panel
     assert "thinLegible && li < p.Thin.Count" in panel
     assert "if (line.Step)" in panel and "p.Dots[i]" in panel
+
+
+# -- board row 30g: the broadcast account names a viewer ------------------------
+
+BROADCAST = next(iter(main.SPECTATE_BROADCAST_STEAM_IDS))
+
+
+@pytest.fixture
+def broadcast_session(monkeypatch):
+    """The fixture identities and the broadcast account hold valid sessions."""
+    async def _ok(request, steam_id, db):
+        return steam_id in (CALLER, OPP, OTHER, XSTEAM, YSTEAM, GHOST, NOBODY, BROADCAST)
+    monkeypatch.setattr(main, "_strict_steam_session_ok", _ok)
+
+
+def test_the_broadcast_account_is_served_the_set_as_its_viewer(broadcast_session):
+    """Board row 30g: the broadcast seat names a player who played the set and
+    gets exactly the envelope that player's own request gets - participation
+    and the roster check are decided for the viewer."""
+    own = _call(FakeDb(), CALLER, series=SERIES)
+    db = FakeDb()
+    assert _call(db, BROADCAST, series=SERIES, viewer=CALLER) == own
+    assert db.statements[0][1] == {"sid": CALLER}, "the caller lookup reads the VIEWER"
+    for sel in ({"match": M1}, {"session": SESSION}):
+        assert _call(FakeDb(), BROADCAST, viewer=CALLER, **sel) == _call(FakeDb(), CALLER, **sel), sel
+
+
+def test_a_viewer_is_refused_to_every_other_caller(broadcast_session):
+    for who in (CALLER, OPP, OTHER):
+        db = FakeDb()
+        with pytest.raises(HTTPException) as ei:
+            _call(db, who, series=SERIES, viewer=CALLER)
+        assert ei.value.status_code == 403 and ei.value.detail == "broadcast_only", who
+        assert db.statements == [], "a refused viewer is decided before any statement"
+    for bad in ("", CALLER[:-1], CALLER + "1", CALLER[:5] + "x" + CALLER[6:], CALLER + " "):
+        db = FakeDb()
+        with pytest.raises(HTTPException) as ei:
+            _call(db, BROADCAST, series=SERIES, viewer=bad)
+        assert ei.value.status_code == 400 and ei.value.detail == "bad_request", repr(bad)
+        assert db.statements == [], repr(bad)
+
+
+def test_the_broadcast_account_gets_nothing_it_did_not_name(broadcast_session):
+    """Control: without a viewer the broadcast account is an ordinary caller
+    (it played nothing: 404), and a viewer who did not play the set gets the
+    404 every refusal gets."""
+    with pytest.raises(HTTPException) as own:
+        _call(FakeDb(), BROADCAST, series=SERIES)
+    with pytest.raises(HTTPException) as bystander:
+        _call(FakeDb(), BROADCAST, series=SERIES, viewer=OTHER)
+    assert own.value.status_code == bystander.value.status_code == 404
+    assert own.value.detail == bystander.value.detail == "not_found"
+
+
+def test_a_viewer_still_needs_the_callers_session(monkeypatch):
+    async def _no(request, steam_id, db):
+        return False
+    monkeypatch.setattr(main, "_strict_steam_session_ok", _no)
+    db = FakeDb()
+    with pytest.raises(HTTPException) as ei:
+        _call(db, BROADCAST, series=SERIES, viewer=CALLER)
+    assert ei.value.status_code == 401 and ei.value.detail == "session_required"
+    assert db.statements == []
+
+
+# -- board row 30g: the broadcaster pages through the session report ------------
+
+POST = PLUGIN / "PostSessionReport.cs"
+
+
+def test_the_broadcaster_asks_for_the_watched_sets_report():
+    """Board row 30g: once the history fetches are done the engine anchors the
+    set's report on the newest game of the screens' own selection
+    (SessionReportRules.NewestAnchor, executed by the client harness) and
+    asks the route for that game's sitting as a player who played it; the
+    screens it built are kept as the fallback."""
+    fetch = _cs_body(POST, "private static void TickFetch(float now)")
+    assert "anchor = SessionAnchor(e, f, out viewer);" in fetch
+    assert "_fallbackPages = pages;" in fetch and "BeginReportFetch(e, anchor, viewer, now);" in fetch
+    assert fetch.index("pages = BuildPages(e, f);") < fetch.index("SessionAnchor(e, f, out viewer)")
+    assert "PlayScreens(e, pages);" in fetch, "no anchor: the screens play"
+    anchor = _cs_body(POST, "private static string SessionAnchor(Entry e, FetchBox f, out string viewer)")
+    assert "SessionReportRules.NewestAnchor(games, lo, hi, idA, e.rosterIds, out viewer)" in anchor
+    assert "GetWindow(e, out lo, out hi);" in anchor
+    for same in ("TeamRosterMatches(s, rosterSet)", "TeamMatchesInWindow(s, lo, hi)",
+                 "FfaSessionMatches(e, f, lo, hi)", "m.opponent_steam_id, idB", "!pl.absent"):
+        assert same in anchor, same
+    begin = _cs_body(POST, "private static void BeginReportFetch(Entry e, string anchor, string viewer, float now)")
+    assert ('ApiClient.FetchSessionReport("sitting", anchor, viewer, (ok, body) => OnReportFetched(gen, ok, body));'
+            in begin)
+    assert "_phase = PHASE_REPORT_FETCH;" in begin
+
+
+def test_the_report_plays_through_the_f5_model_and_view():
+    got = _cs_body(POST, "private static void OnReportFetched(int gen, bool ok, string body)")
+    assert "if (gen != _gen || _phase != PHASE_REPORT_FETCH) return;" in got
+    assert "SessionReportRules.Parse(body)" in got and "SessionReportModel.Build(env)" in got
+    assert "PlaySessionReport(model);" in got
+    draw = _cs_body(POST, "public static void Draw()")
+    assert "SessionReportView.DrawBroadcast(_srModel, _pageIdx)" in draw
+    assert draw.index("NativeUI.IsOpen") < draw.index("DrawBroadcast"), "F5 open still hides the report"
+    view = PLUGIN / "SessionReportView.cs"
+    b = _cs_body(view, "internal static int DrawBroadcast(SessionReportModel.Model m, int pg)")
+    for same in ("DrawHeader(content, m);", "MeasureBuildPages(body, m);", "DrawPage(body, m, pg);",
+                 "PageLine(m, pg, pages)", "SessionReportModel.FIXED_PAGES + Mathf.Max(1, buildPages)"):
+        assert same in b, same
+    for input_ in ("GUI.Button", ".Use()", "HandleKey", "Close()", "NativeUI.IsOpen"):
+        assert input_ not in b, "the broadcast draw takes no input: " + input_
+    f5 = _cs_body(view, "public static void Draw()")
+    assert "DrawHeader(content, model);" in f5 and "BodyRect(content)" in f5
+
+
+def test_every_page_once_one_dwell_each_then_on():
+    tick = _cs_body(POST, "public static void Tick(bool directorIdleNoTicket)")
+    assert "SessionReportRules.BroadcastNextPage(_pageIdx, _srPageCount)" in tick
+    assert "if (next < 0) { Consume(); return; }" in tick
+    assert "SessionReportRules.BroadcastPageDwell(PageSecondsConfigured())" in tick
+    assert "if (_phase == PHASE_REPORT_FETCH) { TickReportFetch(now); return; }" in tick
+    play = _cs_body(POST, "private static void PlaySessionReport(SessionReportModel.Model model)")
+    assert "_pageRemaining = SessionReportRules.BroadcastPageDwell(PageSecondsConfigured());" in play
+    assert "_srPageCount = SessionReportModel.FIXED_PAGES + 1;" in play
+    draw = _cs_body(POST, "public static void Draw()")
+    assert "if (measured > 0) _srPageCount = measured;" in draw
+    cfg = _cs_body(POST, "private static float PageSecondsConfigured()")
+    assert "Plugin.BroadcastSessionReportPageSeconds.Value" in cfg
+    plugin = strip_comments_only((PLUGIN / "Plugin.cs").read_text(encoding="utf-8"))
+    m = re.search(r'Config\.Bind\(\s*"Broadcast", "SessionReportPageSeconds", ([0-9.]+)f,', plugin)
+    rules = strip_comments_only((PLUGIN / "SessionReportRules.cs").read_text(encoding="utf-8"))
+    d = re.search(r"BROADCAST_PAGE_SECONDS = ([0-9.]+)f", rules)
+    assert m and d and float(m.group(1)) == float(d.group(1)) == 12.0
+
+
+def test_the_kind_stays_report_and_the_screens_are_the_fallback():
+    """The director's scene choice (idle_content) and the bot's thumbnail gate
+    (report_screen == "report") key on the kind: every session report page is
+    "report". A report that cannot be had plays the screens instead."""
+    screen = _cs_body(POST, "public static string CurrentScreenKind")
+    assert 'if (_srModel != null) return "report";' in screen
+    assert screen.index('if (_srModel != null) return "report";') < screen.index('"graphs"')
+    fb = _cs_body(POST, "private static void ReportFallback(string why)")
+    assert "PlayScreens(e, pages);" in fb
+    tr = _cs_body(POST, "private static void TickReportFetch(float now)")
+    assert "SR_FETCH_DEADLINE" in tr and "ReportFallback(" in tr
+    got = _cs_body(POST, "private static void OnReportFetched(int gen, bool ok, string body)")
+    assert got.count("ReportFallback(") == 3, "fetch failure, build failure and a non-envelope body"
+
+
+def test_the_viewer_rides_only_when_named_and_well_formed():
+    api = PLUGIN / "ApiClient.cs"
+    body = _cs_body(api, "public static void FetchSessionReport(string selector, string key, string viewer, Action<bool, string> callback)")
+    assert 'if (named) url += "&viewer=" + viewer;' in body
+    assert "viewer.Length != 17" in body and "ch < '0' || ch > '9'" in body
+    whole = strip_comments_only(api.read_text(encoding="utf-8"))
+    assert "=> FetchSessionReport(selector, key, null, callback);" in whole, "the F5 view names no viewer"
+
+
+def test_the_watched_set_lever_replays_a_recorded_set_through_the_pipeline():
+    dev = _cs_body(POST, "internal static void DevWatchSet(string gameId)")
+    assert "NotePairActivated(_devGameId," in dev and "NoteTargetGone(_devGameId);" in dev
+    tick = _cs_body(POST, "public static void Tick(bool directorIdleNoTicket)")
+    assert "if (!streamLive && !IsDevEntry(e)) return;" in tick
+    fetch = _cs_body(POST, "private static void TickFetch(float now)")
+    assert "if (!live && !IsDevEntry(e))" in fetch
+    plugin = PLUGIN / "Plugin.cs"
+    lever = _cs_body(plugin, "private void TickTestWatchedSet()")
+    assert "!BroadcastMode.IsBroadcastIdentity" in lever and "PostSessionReport.DevWatchSet(raw);" in lever
+    assert "if (_lastTestWatchedSet == null) { _lastTestWatchedSet = raw; return; }" in lever
+    assert strip_comments_only(plugin.read_text(encoding="utf-8")).count("try { TickTestWatchedSet(); } catch { }") == 1

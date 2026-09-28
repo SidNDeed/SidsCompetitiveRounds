@@ -84,6 +84,13 @@ namespace CompetitiveRounds
     ///  f7     the 1v1 favorite-card panels (cap 5) and compact 2v2 card
     ///         lines (cap 3) disclose truncation via "showing N of M".
     ///
+    /// Board row 30g (Sept 28): after a watched set the engine pages through
+    /// the set's SESSION REPORT - the F5 report's SessionReportModel and
+    /// SessionReportView pages, one dwell per page ([Broadcast]
+    /// SessionReportPageSeconds, default 12 s) - and then carries on as before
+    /// (the next entry, then the idle showcase). The screens described above
+    /// are its fallback when that report cannot be had.
+    ///
     /// Safety: read-only HTTP + IMGUI only — never Photon, never config writes
     /// (#338 family). All server strings are hostile input (#100/#156): names
     /// are sanitized (SanitizeStyled replica) or tag-stripped before render.
@@ -186,7 +193,7 @@ namespace CompetitiveRounds
 
         // ── playback state ───────────────────────────────────────────────
 
-        private const int PHASE_NONE = 0, PHASE_FETCH = 1, PHASE_PLAY = 2;
+        private const int PHASE_NONE = 0, PHASE_FETCH = 1, PHASE_PLAY = 2, PHASE_REPORT_FETCH = 3;
         private static int _phase = PHASE_NONE;
         /// <summary>Ownership token (#367b): bumped on Interrupt/consume so
         /// every in-flight fetch callback from a superseded run no-ops.</summary>
@@ -196,6 +203,20 @@ namespace CompetitiveRounds
         private static int _pageIdx;
         private static float _pageRemaining;
         private static float _lastTickRt = -1f;
+
+        // -- board row 30g: the session report pages ---------------------------
+        // PHASE_REPORT_FETCH sits between the fetch and the play: the history
+        // fetches are done, the old screens are built (the fallback), and the
+        // set's envelope is being fetched. In PHASE_PLAY a non-null _srModel
+        // means the session report is playing, else the old screens (_pages).
+        private const float SR_FETCH_DEADLINE = 20f;
+        private static SessionReportModel.Model _srModel;
+        private static int _srPageCount;                 // measured by the view at draw time
+        private static float _srFetchStartedRt;
+        private static List<Page> _fallbackPages;
+        /// <summary>The TestWatchedSet lever's entry (a spectate game id), the
+        /// one entry that may play while the stream is down; null otherwise.</summary>
+        private static string _devGameId;
 
         // ── report-status polling state ──────────────────────────────────
 
@@ -251,8 +272,13 @@ namespace CompetitiveRounds
         {
             get
             {
-                if (_phase != PHASE_PLAY || _pages == null || _pages.Count == 0) return null;
+                if (_phase != PHASE_PLAY) return null;
                 if (NativeUI.IsOpen) return null;
+                // Board row 30g: every session report page is the "report" kind,
+                // so the director's scene choice (idle_content) and the bot's
+                // thumbnail gate (report_screen == "report") are unchanged.
+                if (_srModel != null) return "report";
+                if (_pages == null || _pages.Count == 0) return null;
                 return _pageIdx <= 0 ? "report" : "graphs";
             }
         }
@@ -398,6 +424,8 @@ namespace CompetitiveRounds
                 _gen++;              // in-flight fetch callbacks no-op (#367b)
                 _phase = PHASE_NONE;
                 _pages = null;
+                _srModel = null;
+                _fallbackPages = null;
                 _fetch = null;
                 _current = null;     // the Entry object itself remains in _queue
             }
@@ -431,6 +459,16 @@ namespace CompetitiveRounds
                     _pageRemaining -= dt;
                     if (_pageRemaining <= 0f)
                     {
+                        if (_srModel != null)
+                        {
+                            // Board row 30g: every page once, one dwell each, then on.
+                            int next = SessionReportRules.BroadcastNextPage(_pageIdx, _srPageCount);
+                            if (next < 0) { Consume(); return; }
+                            _pageIdx = next;
+                            _pageRemaining = SessionReportRules.BroadcastPageDwell(PageSecondsConfigured());
+                            LogReportPage();
+                            return;
+                        }
                         _pageIdx++;
                         if (_pages == null || _pageIdx >= _pages.Count) { Consume(); return; }
                         _pageRemaining = GRAPH_PAGE_SECONDS;
@@ -439,6 +477,7 @@ namespace CompetitiveRounds
                 }
 
                 if (_phase == PHASE_FETCH) { TickFetch(now); return; }
+                if (_phase == PHASE_REPORT_FETCH) { TickReportFetch(now); return; }
 
                 if (!directorIdleNoTicket) return;
                 // R1 f21: playback (and its fetch) STARTS only while the
@@ -450,8 +489,10 @@ namespace CompetitiveRounds
                 // session/broadcast; entries stay queued under the 2h rule.
                 bool streamLive = false;
                 try { streamLive = BroadcastMode.StreamInfoLive; } catch { }
-                if (!streamLive) return;
                 var e = PickEligible(now);
+                // Board row 30g witness: the TestWatchedSet lever's entry may
+                // play with the stream down; nothing else may.
+                if (!streamLive && !IsDevEntry(e)) return;
                 if (e != null) BeginFetch(e, now);
             }
             catch (Exception ex)
@@ -957,7 +998,7 @@ namespace CompetitiveRounds
             // (the pick gate keeps this from looping).
             bool live = false;
             try { live = BroadcastMode.StreamInfoLive; } catch { }
-            if (!live)
+            if (!live && !IsDevEntry(e))
             {
                 _gen++;
                 _fetch = null;
@@ -972,15 +1013,36 @@ namespace CompetitiveRounds
             try { pages = BuildPages(e, f); }
             catch (Exception ex)
             { try { Plugin.Log?.LogWarning("[REPORT] build failed: " + ex.Message); } catch { } }
+            // Board row 30g: the set's session report plays instead of these
+            // screens when it can be had; they are kept as its fallback.
+            string viewer = null, anchor = null;
+            try { anchor = SessionAnchor(e, f, out viewer); }
+            catch (Exception ex)
+            { try { Plugin.Log?.LogWarning("[REPORT] anchor: " + ex.Message); } catch { } }
             _gen++;          // discard any late fetch callbacks
             _fetch = null;
+            if (anchor != null)
+            {
+                _fallbackPages = pages;
+                BeginReportFetch(e, anchor, viewer, now);
+                return;
+            }
+            try { Plugin.Log?.LogInfo("[REPORT] no game of the set in the fetched history - playing the screens"); } catch { }
+            PlayScreens(e, pages);
+        }
+
+        /// <summary>The screens play (the pre-30g path): the report page, then
+        /// the graph pages. An empty list consumes the entry - a poisoned entry
+        /// must not replay forever (#276: freed-early beats wedged).</summary>
+        private static void PlayScreens(Entry e, List<Page> pages)
+        {
+            _srModel = null;
             if (pages == null || pages.Count == 0)
             {
-                // A poisoned entry must not replay forever (#276: freed-early
-                // beats wedged) — consume it.
                 _queue.Remove(e);
                 _current = null;
                 _phase = PHASE_NONE;
+                if (IsDevEntry(e)) _devGameId = null;
                 try { Plugin.Log?.LogWarning("[REPORT] dropped unbuildable entry " + e.reportId); } catch { }
                 return;
             }
@@ -995,11 +1057,199 @@ namespace CompetitiveRounds
         {
             var e = _current;
             if (e != null) _queue.Remove(e);
+            if (IsDevEntry(e)) _devGameId = null;
             _current = null;
             _pages = null;
+            _srModel = null;
+            _fallbackPages = null;
             _phase = PHASE_NONE;
             _gen++;
             try { Plugin.Log?.LogInfo("[REPORT] consumed" + (e != null ? " " + e.reportId : "")); } catch { }
+        }
+
+        // -- board row 30g: the session report for the watched set --------------
+
+        /// <summary>The game the set's session report is anchored on and the
+        /// player it is asked for: SessionReportRules.NewestAnchor (executed by
+        /// the client harness) over the SAME selection the screens make, so the
+        /// report and the screens it replaces describe one set - 1v1, subject
+        /// A's games against B; 2v2, the roster's series, each game by its own
+        /// end; FFA, FfaSessionMatches with the players who played each game
+        /// (a ghost row is not one). The route's `sitting` selector then answers
+        /// the anchor's set: the pair's 1v1 sitting, the game's 2v2 series, the
+        /// FFA lobby sitting. The viewer is the history's subject (rosterIds[0])
+        /// when they played the anchor, else the first roster player who did.
+        /// Null when the history holds no such game: the screens play.</summary>
+        private static string SessionAnchor(Entry e, FetchBox f, out string viewer)
+        {
+            viewer = null;
+            if (e == null || f == null || !HasIdentity(e)) return null;
+            DateTime lo, hi;
+            GetWindow(e, out lo, out hi);
+            var games = new List<SessionReportRules.AnchorGame>();
+            string idA = e.rosterIds[0];
+            if (e.mode == "2v2")
+            {
+                var rosterSet = new HashSet<string>(e.rosterIds, StringComparer.Ordinal);
+                if (f.teamHistory != null)
+                    foreach (var s in f.teamHistory)
+                    {
+                        if (s == null || !TeamRosterMatches(s, rosterSet)) continue;
+                        foreach (var kv in TeamMatchesInWindow(s, lo, hi))
+                        {
+                            DateTime end;
+                            if (!TryParseUtc(kv.Value.ended_at, out end)) continue;
+                            var g = new SessionReportRules.AnchorGame { Id = kv.Value.match_id ?? "", End = end };
+                            g.Played.AddRange(e.rosterIds);   // TeamRosterMatches: the four seats ARE the roster
+                            games.Add(g);
+                        }
+                    }
+            }
+            else if (e.mode == "ffa")
+            {
+                foreach (var m in FfaSessionMatches(e, f, lo, hi))
+                {
+                    DateTime end;
+                    if (!TryParseUtc(m.ended_at, out end)) continue;
+                    var g = new SessionReportRules.AnchorGame { Id = m.match_id ?? "", End = end };
+                    foreach (var pl in m.players)
+                        if (pl != null && !pl.absent && !string.IsNullOrEmpty(pl.steam_id)) g.Played.Add(pl.steam_id);
+                    games.Add(g);
+                }
+            }
+            else
+            {
+                string idB = e.rosterIds.Length > 1 ? e.rosterIds[1] : "";
+                if (f.history != null && idB.Length > 0)
+                    foreach (var m in f.history)
+                    {
+                        DateTime end;
+                        if (m == null || !string.Equals(m.opponent_steam_id, idB, StringComparison.Ordinal)) continue;
+                        if (!TryParseUtc(m.ended_at, out end)) continue;
+                        var g = new SessionReportRules.AnchorGame { Id = m.match_id ?? "", End = end };
+                        g.Played.Add(idA);
+                        g.Played.Add(idB);
+                        games.Add(g);
+                    }
+            }
+            var anchor = SessionReportRules.NewestAnchor(games, lo, hi, idA, e.rosterIds, out viewer);
+            return anchor != null ? anchor.Id : null;
+        }
+
+        private static void BeginReportFetch(Entry e, string anchor, string viewer, float now)
+        {
+            _gen++;
+            int gen = _gen;
+            _phase = PHASE_REPORT_FETCH;
+            _srFetchStartedRt = now;
+            try { Plugin.Log?.LogInfo($"[REPORT] session report requested: {e.mode} id={e.reportId}, the sitting of the set's newest game, as roster[{Array.IndexOf(e.rosterIds, viewer)}]"); } catch { }
+            try
+            {
+                ApiClient.FetchSessionReport("sitting", anchor, viewer, (ok, body) => OnReportFetched(gen, ok, body));
+            }
+            catch (Exception ex)
+            {
+                ReportFallback("the request could not start: " + ex.Message);
+            }
+        }
+
+        private static void OnReportFetched(int gen, bool ok, string body)
+        {
+            if (gen != _gen || _phase != PHASE_REPORT_FETCH) return;   // superseded or timed out (#367b)
+            if (!ok)
+            {
+                string tail = body ?? "";
+                ReportFallback("fetch failed: " + (tail.Length > 120 ? tail.Substring(0, 120) : tail));
+                return;
+            }
+            SessionReportModel.Model model = null;
+            try
+            {
+                var env = SessionReportRules.Parse(body);
+                if (env != null) model = SessionReportModel.Build(env);
+            }
+            catch (Exception ex)
+            {
+                ReportFallback("the model could not be built: " + ex.Message);
+                return;
+            }
+            if (model == null) { ReportFallback("the body was not an envelope"); return; }
+            PlaySessionReport(model);
+        }
+
+        private static void TickReportFetch(float now)
+        {
+            if (now - _srFetchStartedRt < SR_FETCH_DEADLINE) return;
+            ReportFallback("no answer in " + SR_FETCH_DEADLINE.ToString("0", INV) + " s");
+        }
+
+        /// <summary>The set's report cannot be had: the screens play instead,
+        /// so a watched set is never left unreported.</summary>
+        private static void ReportFallback(string why)
+        {
+            var e = _current;
+            _gen++;
+            var pages = _fallbackPages;
+            _fallbackPages = null;
+            try { Plugin.Log?.LogWarning("[REPORT] session report unavailable (" + why + ") - playing the screens"); } catch { }
+            if (e == null) { _phase = PHASE_NONE; return; }
+            PlayScreens(e, pages);
+        }
+
+        private static void PlaySessionReport(SessionReportModel.Model model)
+        {
+            var e = _current;
+            _gen++;
+            _fallbackPages = null;
+            _pages = null;
+            _srModel = model;
+            _srPageCount = SessionReportModel.FIXED_PAGES + 1;   // until the first draw measures the builds pages
+            _pageIdx = 0;
+            _pageRemaining = SessionReportRules.BroadcastPageDwell(PageSecondsConfigured());
+            _phase = PHASE_PLAY;
+            try { Plugin.Log?.LogInfo($"[REPORT] playing the session report: {(e != null ? e.mode : "?")} id={(e != null ? e.reportId : "")} kind={model.Kind} games={model.Spans.Count}"); } catch { }
+            LogReportPage();
+        }
+
+        private static float PageSecondsConfigured()
+        {
+            try
+            {
+                return Plugin.BroadcastSessionReportPageSeconds != null
+                    ? Plugin.BroadcastSessionReportPageSeconds.Value
+                    : SessionReportRules.BROADCAST_PAGE_SECONDS;
+            }
+            catch { return SessionReportRules.BROADCAST_PAGE_SECONDS; }
+        }
+
+        private static void LogReportPage()
+        {
+            try { Plugin.Log?.LogInfo($"[REPORT] session report page {_pageIdx + 1}/{_srPageCount} for {_pageRemaining.ToString("0.#", INV)} s"); } catch { }
+        }
+
+        private static bool IsDevEntry(Entry e)
+            => e != null && _devGameId != null && string.Equals(e.gameId, _devGameId, StringComparison.Ordinal);
+
+        /// <summary>[Broadcast] TestWatchedSet lever (board row 30g's witness; a
+        /// watched set is not available on demand): queue a RECORDED set by its
+        /// spectate game id exactly as the director's activation edge does and
+        /// mark it gone, so the whole pipeline runs from there - the
+        /// report-status poll fills its roster and end, the settle, the history
+        /// fetches, the anchor, the session report and its pages. The one
+        /// difference: this entry may play while the stream is down (a seat
+        /// under a maintenance pause has none); every other gate holds.</summary>
+        internal static void DevWatchSet(string gameId)
+        {
+            Guid parsed;
+            if (!Guid.TryParse(gameId ?? "", out parsed))
+            {
+                try { Plugin.Log?.LogWarning("[REPORT] test watched set refused: not a game id"); } catch { }
+                return;
+            }
+            _devGameId = parsed.ToString("D");
+            NotePairActivated(_devGameId, "test-watched-set", "", null, null, null);
+            NoteTargetGone(_devGameId);
+            try { Plugin.Log?.LogInfo("[REPORT] test watched set queued: " + _devGameId); } catch { }
         }
 
         // ── page model (everything pre-composed at build time, #162) ─────
@@ -2525,7 +2775,8 @@ namespace CompetitiveRounds
         /// after us in DrawUI (#255), hence the blanket guard.</summary>
         public static void Draw()
         {
-            if (_phase != PHASE_PLAY || _pages == null || _pages.Count == 0) return;
+            if (_phase != PHASE_PLAY) return;
+            if (_srModel == null && (_pages == null || _pages.Count == 0)) return;
             Matrix4x4 savedMatrix = GUI.matrix;
             Color savedColor = GUI.color;
             try
@@ -2537,6 +2788,13 @@ namespace CompetitiveRounds
                 // an Interrupt): stop painting rather than freeze a stale
                 // overlay over the menu forever (#255 family).
                 if (Time.realtimeSinceStartup - _lastTickRt > TICK_STALL_HIDE_SECONDS) return;
+                if (_srModel != null)
+                {
+                    // Board row 30g: the F5 report's own pages, drawn by its view.
+                    int measured = SessionReportView.DrawBroadcast(_srModel, _pageIdx);
+                    if (measured > 0) _srPageCount = measured;
+                    return;
+                }
                 EnsureStyles();
 
                 int pi = Mathf.Clamp(_pageIdx, 0, _pages.Count - 1);

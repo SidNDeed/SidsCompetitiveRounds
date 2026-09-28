@@ -35,9 +35,10 @@ namespace CompetitiveRounds
     ///  - Read-only HTTP (ApiClient.FetchSessionReport, strict Steam session,
     ///    participant-only server side). Responses are generation-fenced: a
     ///    slow reply for a closed or superseded view is dropped.
-    ///  - The broadcast renderer (PostSessionReport) is untouched: its data
-    ///    source is the broadcast seat's own history fetches, not this
-    ///    participant-authenticated envelope.
+    ///  - Board row 30g: the broadcast seat pages through these same pages
+    ///    after a watched set (DrawBroadcast, driven by PostSessionReport, which
+    ///    asks the route for the set as a player who played it through the
+    ///    broadcast-only `viewer`).
     /// Rendering is Repaint-cheap: every string is pre-composed by the model;
     /// styles are built lazily inside OnGUI (GUI.skin is only valid there).</summary>
     internal static class SessionReportView
@@ -159,18 +160,10 @@ namespace CompetitiveRounds
                     HandleKey(ev);
                     return;
                 }
-                float W = Screen.width, H = Screen.height;
-                Fill(new Rect(0f, 0f, W, H), BACKDROP);
-                var content = new Rect(Mathf.Min(40f, W * 0.03f), 22f, W - 2f * Mathf.Min(40f, W * 0.03f), H - 44f);
-
-                // Header block: title, player-neutral score line, legend, sub-line.
-                GUI.Label(new Rect(content.x, content.y, content.width * 0.6f, 30f), I18n.Tr("Session report"), stTitle);
-                GUI.Label(new Rect(content.x, content.y + 30f, content.width, 30f), model != null ? model.Header : "", stHeader);
-                GUI.Label(new Rect(content.x, content.y + 60f, content.width * 0.6f, 22f), model != null ? model.Legend : "", stBody);
-                GUI.Label(new Rect(content.x + content.width * 0.6f, content.y, content.width * 0.4f, 22f), model != null ? model.Sub : "", stSmallR);
-                GUI.Label(new Rect(content.x + content.width * 0.6f, content.y + 22f, content.width * 0.4f, 22f), model != null ? model.Note : "", stSmallR);
-
-                var body = new Rect(content.x, content.y + 90f, content.width, content.height - 90f - 50f);
+                Fill(new Rect(0f, 0f, Screen.width, Screen.height), BACKDROP);
+                var content = ContentRect();
+                DrawHeader(content, model);
+                var body = BodyRect(content);
                 // The build page count follows the body height: measure it every
                 // frame (a few dozen blocks) so the footer and the keys are exact
                 // before the builds are ever visited, and a resize can never leave
@@ -264,22 +257,73 @@ namespace CompetitiveRounds
             if (GUI.Button(new Rect(r.x + 16f + bw, y, bw, bh), I18n.Tr("Next >"), stBtn))
                 page = Mathf.Min(pages - 1, page + 1);
             GUI.enabled = wasEnabled;
-            string pageLabel = "";
-            if (model != null)
-            {
-                // A builds page names the games it holds, from the same page
-                // breaks the draw path uses.
-                int first = 0, last = 0;
-                if (page >= SessionReportModel.FIXED_PAGES && buildStarts.Count > 0)
-                {
-                    int sub = Mathf.Clamp(page - SessionReportModel.FIXED_PAGES, 0, buildStarts.Count - 1);
-                    first = buildStarts[sub];
-                    last = (sub + 1 < buildStarts.Count ? buildStarts[sub + 1] : model.Builds.Count) - 1;
-                }
-                pageLabel = I18n.TrF("Page {0}/{1}", page + 1, pages) + "  -  " + model.PageTitle(page, first, last);
-            }
+            string pageLabel = model != null ? PageLine(model, page, pages) : "";
             GUI.Label(new Rect(r.x + 24f + 2f * bw, y, r.width - 48f - 3f * bw, bh), pageLabel, stBody);
             if (GUI.Button(new Rect(r.xMax - bw - 8f, y, bw, bh), I18n.Tr("Close"), stBtn)) Close();
+        }
+
+        /// <summary>The page line: page k of n and the page's title; a builds
+        /// page names the games it holds, from the same page breaks the draw
+        /// path measured.</summary>
+        private static string PageLine(SessionReportModel.Model m, int pg, int pages)
+        {
+            int first = 0, last = 0;
+            if (pg >= SessionReportModel.FIXED_PAGES && buildStarts.Count > 0)
+            {
+                int sub = Mathf.Clamp(pg - SessionReportModel.FIXED_PAGES, 0, buildStarts.Count - 1);
+                first = buildStarts[sub];
+                last = (sub + 1 < buildStarts.Count ? buildStarts[sub + 1] : m.Builds.Count) - 1;
+            }
+            return I18n.TrF("Page {0}/{1}", pg + 1, pages) + "  -  " + m.PageTitle(pg, first, last);
+        }
+
+        private static Rect ContentRect()
+        {
+            float W = Screen.width, H = Screen.height, side = Mathf.Min(40f, W * 0.03f);
+            return new Rect(side, 22f, W - 2f * side, H - 44f);
+        }
+
+        private static Rect BodyRect(Rect content)
+            => new Rect(content.x, content.y + 90f, content.width, content.height - 90f - 50f);
+
+        /// <summary>Header block: title, player-neutral score line, legend, sub-line.</summary>
+        private static void DrawHeader(Rect content, SessionReportModel.Model m)
+        {
+            GUI.Label(new Rect(content.x, content.y, content.width * 0.6f, 30f), I18n.Tr("Session report"), stTitle);
+            GUI.Label(new Rect(content.x, content.y + 30f, content.width, 30f), m != null ? m.Header : "", stHeader);
+            GUI.Label(new Rect(content.x, content.y + 60f, content.width * 0.6f, 22f), m != null ? m.Legend : "", stBody);
+            GUI.Label(new Rect(content.x + content.width * 0.6f, content.y, content.width * 0.4f, 22f), m != null ? m.Sub : "", stSmallR);
+            GUI.Label(new Rect(content.x + content.width * 0.6f, content.y + 22f, content.width * 0.4f, 22f), m != null ? m.Note : "", stSmallR);
+        }
+
+        // -- broadcast playback (board row 30g) ------------------------------------
+
+        /// <summary>Board row 30g: the broadcast seat's post-set playback draws
+        /// the SAME model and pages as the F5 view (header, DrawPage, the
+        /// measured builds pages, the page line). PostSessionReport owns the
+        /// model, the page index and the dwell clock. What differs is only what
+        /// a seat nobody sits at needs: no buttons, no keys, no input taken
+        /// (it is called on Repaint only), no F5 requirement (the engine hides
+        /// while F5 is open instead) and a footer that is the page line alone.
+        /// Returns the page count at this screen size - the fixed pages plus
+        /// the builds pages measured for this body - which the engine's page
+        /// walk reads.</summary>
+        internal static int DrawBroadcast(SessionReportModel.Model m, int pg)
+        {
+            if (m == null) return 0;
+            EnsureStyles();
+            Fill(new Rect(0f, 0f, Screen.width, Screen.height), BACKDROP);
+            var content = ContentRect();
+            DrawHeader(content, m);
+            var body = BodyRect(content);
+            MeasureBuildPages(body, m);
+            int pages = SessionReportModel.FIXED_PAGES + Mathf.Max(1, buildPages);
+            pg = Mathf.Clamp(pg, 0, pages - 1);
+            DrawPage(body, m, pg);
+            var foot = new Rect(content.x, content.yMax - 42f, content.width, 42f);
+            Fill(foot, PANEL);
+            GUI.Label(new Rect(foot.x + 16f, foot.y + 6f, foot.width - 32f, 30f), PageLine(m, pg, pages), stBody);
+            return pages;
         }
 
         private static void DrawPage(Rect body, SessionReportModel.Model m, int pg)

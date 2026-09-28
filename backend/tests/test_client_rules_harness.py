@@ -268,9 +268,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The suite ran 31 cases on the commit that added it, 35 once board row
     # 30b added the overlay rule's cases, 38 with 30c's builds layout, 59
-    # with 30d's derived numbers and 63 with 30e's race axis; the floor is
-    # that count (#342). Raise it when cases are added.
-    assert run >= 63, "the SessionReportRules suite shrank to %d cases" % run
+    # with 30d's derived numbers, 63 with 30e's race axis and 67 with 30g's
+    # broadcast playback; the floor is that count (#342). Raise it when cases
+    # are added.
+    assert run >= 67, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -762,5 +763,22 @@ def test_the_showcase_suite_ran_every_case_and_none_failed(harness_run):
 def test_the_showcase_walk_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "showcase")
     assert line.startswith("[showcase] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+@pytest.mark.parametrize("name", [
+    "broadcast: the page dwell defaults to 12 s and is held to 3-300 s",
+    "broadcast: the walk shows every page once, in order, then ends",
+    "broadcast: the anchor is the newest in-window game and its viewer played it",
+    "broadcast (control): no anchor when nobody of the roster played the newest game",
+])
+def test_the_broadcaster_pages_through_the_report(harness_run, name):
+    """Board row 30g: SessionReportRules.BroadcastPageDwell / BroadcastNextPage
+    / NewestAnchor, executed - the broadcaster's dwell per page, its walk over
+    every page and the game (and player) the watched set's report is asked
+    for."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)

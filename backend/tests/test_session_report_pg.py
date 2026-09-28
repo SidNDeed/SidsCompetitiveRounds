@@ -609,7 +609,7 @@ def _report(who, **sel):
                                      connect_args={"server_settings": {"search_path": _LAB["schema"]}})
         try:
             async with async_sessionmaker(engine, expire_on_commit=False)() as db:
-                return await main.get_set_report(request=None, steam_id=STEAM[who], db=db, **sel)
+                return await main.get_set_report(request=None, steam_id=STEAM.get(who, who), db=db, **sel)
         finally:
             await engine.dispose()
     env = asyncio.run(_go())
@@ -785,3 +785,19 @@ def test_each_game_and_the_set_carry_what_was_earned(lab):
                 d[k] = d.get(k, 0) + v
     assert env["set_summary"]["gold_total"] == env["set_summary"]["gold"] == tot_g
     assert env["set_summary"]["xp_total"] == tot_x
+
+
+def test_the_broadcast_account_is_served_the_set_as_its_viewer(lab, monkeypatch):
+    """Board row 30g, against the real statements: the broadcast account names
+    a player and is served exactly that player's envelope for each kind the
+    broadcaster reports (a 1v1 sitting, a 2v2 series, an FFA lobby)."""
+    bcast = next(iter(main.SPECTATE_BROADCAST_STEAM_IDS))
+
+    async def _ok(request, steam_id, db):
+        return steam_id in STEAM.values() or steam_id == bcast
+    monkeypatch.setattr(main, "_strict_steam_session_ok", _ok)
+    for sel in ({"sitting": ID["K2"]}, {"sitting": ID["TM2"]}, {"sitting": ID["F2"]}):
+        assert _report(bcast, viewer=STEAM["A"], **sel) == _report("A", **sel), sel
+    assert _refused(bcast, sitting=ID["K2"]) == (404, "not_found"), "no viewer: it played nothing"
+    assert _refused(bcast, viewer=STEAM["C"], lobby=ID["F2"]) == (404, "not_found"), "C sat F2 out"
+    assert _refused("B", viewer=STEAM["A"], sitting=ID["K2"]) == (403, "broadcast_only")

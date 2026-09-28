@@ -65,6 +65,7 @@ namespace CompetitiveRounds
             LayoutCases(r);
             DeriveCases(r);
             RaceCases(r);
+            BroadcastCases(r);
             return r;
         }
 
@@ -366,6 +367,65 @@ namespace CompetitiveRounds
                     ends &= last == Score(g, id);
                 }
             Check(r, "race: every 1v1 game's rounds line ends on its recorded rounds", ends, string.Join(" ", got.ToArray()));
+        }
+
+        // Board row 30g: the broadcaster's page dwell, its walk over every
+        // page, and the anchor of the watched set's report.
+        private static void BroadcastCases(SelfTestResult r)
+        {
+            float a = BroadcastPageDwell(0f), b = BroadcastPageDwell(-2f), c = BroadcastPageDwell(float.NaN);
+            float lo = BroadcastPageDwell(1f), hi = BroadcastPageDwell(1000f), mid = BroadcastPageDwell(20f);
+            Check(r, "broadcast: the page dwell defaults to 12 s and is held to 3-300 s",
+                  a == 12f && b == 12f && c == 12f && lo == 3f && hi == 300f && mid == 20f,
+                  "0->" + a.ToString(INV) + " -2->" + b.ToString(INV) + " NaN->" + c.ToString(INV) + " 1->" + lo.ToString(INV)
+                  + " 1000->" + hi.ToString(INV) + " 20->" + mid.ToString(INV));
+
+            int pages = FIXED_PAGES_FOR_TEST + 3;
+            var seen = new List<string>();
+            int p = 0, guard = 0;
+            seen.Add("0");
+            while (guard++ < 100)
+            {
+                p = BroadcastNextPage(p, pages);
+                if (p < 0) break;
+                seen.Add(p.ToString(INV));
+            }
+            bool every = seen.Count == pages;
+            for (int i = 0; every && i < seen.Count; i++) every = seen[i] == i.ToString(INV);
+            bool shrunk = BroadcastNextPage(7, 5) == -1 && BroadcastNextPage(4, 5) == -1 && BroadcastNextPage(-1, 5) == -1;
+            Check(r, "broadcast: the walk shows every page once, in order, then ends",
+                  every && shrunk, "walked " + string.Join(",", seen.ToArray()) + " of " + pages + "; shrunk " + shrunk);
+
+            var t0 = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+            var roster = new List<string> { "76561190000000001", "76561190000000002", "76561190000000003" };
+            var older = AnchorAt("1b8f0a52-0f27-4c3e-9d57-4d0e3a1c0001", t0.AddMinutes(10), roster[0], roster[1]);
+            var newest = AnchorAt("1b8f0a52-0f27-4c3e-9d57-4d0e3a1c0002", t0.AddMinutes(30), roster[1], roster[2]);
+            var late = AnchorAt("1b8f0a52-0f27-4c3e-9d57-4d0e3a1c0003", t0.AddMinutes(90), roster[0], roster[1]);
+            var notUuid = AnchorAt("123", t0.AddMinutes(40), roster[0], roster[1]);
+            string v1, v2;
+            var pick = NewestAnchor(new List<AnchorGame> { older, notUuid, late, newest }, t0, t0.AddMinutes(60), roster[0], roster, out v1);
+            var pick2 = NewestAnchor(new List<AnchorGame> { older }, t0, t0.AddMinutes(60), roster[0], roster, out v2);
+            Check(r, "broadcast: the anchor is the newest in-window game and its viewer played it",
+                  pick == newest && v1 == roster[1] && pick2 == older && v2 == roster[0],
+                  "anchor " + (pick == null ? "none" : pick.Id.Substring(pick.Id.Length - 4)) + " viewer "
+                  + (v1 == null ? "none" : "roster[" + roster.IndexOf(v1) + "]")
+                  + "; older alone: " + (pick2 == null ? "none" : pick2.Id.Substring(pick2.Id.Length - 4))
+                  + " viewer " + (v2 == null ? "none" : "roster[" + roster.IndexOf(v2) + "]"));
+
+            string v3;
+            var ghost = AnchorAt("1b8f0a52-0f27-4c3e-9d57-4d0e3a1c0004", t0.AddMinutes(20), "76561190000000009");
+            var none = NewestAnchor(new List<AnchorGame> { ghost }, t0, t0.AddMinutes(60), roster[0], roster, out v3);
+            Check(r, "broadcast (control): no anchor when nobody of the roster played the newest game",
+                  none == null && v3 == null, none == null ? "no anchor" : "anchor " + none.Id);
+        }
+
+        private const int FIXED_PAGES_FOR_TEST = 6;
+
+        private static AnchorGame AnchorAt(string id, DateTime end, params string[] played)
+        {
+            var g = new AnchorGame { Id = id, End = end };
+            g.Played.AddRange(played);
+            return g;
         }
 
         // -- helpers -------------------------------------------------------------
