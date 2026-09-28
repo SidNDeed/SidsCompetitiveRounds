@@ -2896,6 +2896,7 @@ namespace CompetitiveRounds
             "room code",
             "room type?",
             "same-card",
+            "scrmod.com",
             "series created",
             "series ends",
             "short-match farming pattern",

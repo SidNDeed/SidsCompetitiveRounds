@@ -2502,6 +2502,14 @@ namespace CompetitiveRounds
             AddFooterBtnIcon(UIFactory.CreateButton("YouTube",bottom.transform,"YouTube",14f,Color.white,new Color(0.80f,0.06f,0.06f,0.92f),()=>{Application.OpenURL("https://www.youtube.com/@SidsCompetitiveRounds");},sizeDelta:new Vector2(102,26)),"icon_youtube.png");
             AddFooterBtnIcon(UIFactory.CreateButton("Twitch",bottom.transform,"Twitch",14f,Color.white,new Color(0.569f,0.275f,1f,0.92f),()=>{Application.OpenURL("https://www.twitch.tv/sidscompetitiverounds");},sizeDelta:new Vector2(92,26)),"icon_twitch.png");
             AddFooterBtnIcon(UIFactory.CreateButton("Thunderstore",bottom.transform,"Thunderstore",14f,Color.white,new Color(0.10f,0.16f,0.24f,0.95f),()=>{Application.OpenURL("https://thunderstore.io/c/rounds/p/Team_Sid/SidsCompetitiveRounds/");},sizeDelta:new Vector2(128,26)),"icon_thunderstore.png");
+            /* Board row 33a: the mod's own site, directly after Thunderstore.
+             * Built by the same factory call as the five links above, so it
+             * opens the way they do (Application.OpenURL behind CreateButton's
+             * per-control ClickGuard debounce). These footer links are the
+             * mod's own buttons, not clones of a ROUNDS menu button, so there
+             * is no QuitButton on them to strip. The label is a proper noun
+             * and reads the same in every catalogue. */
+            UIFactory.CreateButton("ScrMod",bottom.transform,"scrmod.com",14f,Color.white,new Color(0.16f,0.42f,0.36f,0.92f),()=>{Application.OpenURL("https://scrmod.com/");},sizeDelta:new Vector2(110,26));
             var bSp=new GameObject("S");bSp.transform.SetParent(bottom.transform,false);bSp.AddComponent<RectTransform>();UIFactory.AddLE(bSp,flexW:1);
             UIFactory.CreateButton("RefreshBtn",bottom.transform,"Refresh",15f,C_WHITE,C_BTN,()=>{if(Time.unscaledTime>=_nextManualRefreshAt){_nextManualRefreshAt=Time.unscaledTime+2f;RefreshData();dirty=true;}else{CompetitiveUI.ShowNotification("Refreshing too fast - give it a sec",Color.yellow,1.5f);}},sizeDelta:new Vector2(85,26));
             SwitchTab(TAB_HOME);pageBuilt=true;Plugin.Log.LogInfo("[NATIVE] Competitive page built");

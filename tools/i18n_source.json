@@ -2890,6 +2890,7 @@
   "room code",
   "room type?",
   "same-card",
+  "scrmod.com",
   "series created",
   "series ends",
   "short-match farming pattern",
@@ -17451,6 +17452,11 @@
    "surface": "NativeUI",
    "location": "FfaSettingsSummaryBits",
    "kind": "Tr"
+  },
+  "scrmod.com": {
+   "surface": "NativeUI",
+   "location": "BuildPage",
+   "kind": "CreateButton"
   },
   "series created": {
    "surface": "InfoViz",
