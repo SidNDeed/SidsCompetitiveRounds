@@ -5,7 +5,8 @@ POST /api/v1/pc/prints/discard-batch discards up to
 player_cards.PC_DISCARD_BATCH_CAP prints of the caller's in one transaction,
 pays each by the rarity table, credits the total as ONE delta, and records
 its idempotency key (migration 361) so a replay answers the same total and
-credits nothing. Both discard routes pass one refusal gate
+credits nothing. It reads its own body under a byte ceiling before parsing
+it. Both discard routes pass one refusal gate
 (main._pc_discard_gate). The harness below is also the one
 test_pc_settings_preview (board row 24) imports.
 
@@ -48,6 +49,7 @@ import ast
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import re
 import sys
@@ -620,9 +622,31 @@ def _err(answer):
     return status, (body.get("error") if isinstance(body, dict) else body)
 
 
-def _batch(ctx, name, who, key, ids, sig=None):
-    body = main.PcDiscardBatchBody(key=key, print_ids=list(ids))
-    return _call(ctx, name, main.pc_discard_batch, request=REQ, body=body, steam_id=who.steam,
+class _BodyReq:
+    """REQ carrying a body, as Starlette hands one to a route that reads its
+    own: the attributes the actor gate reads, a Content-Length header (the
+    body's own length, `length` when given, none when `declared` is False:
+    a chunked upload) and stream() in `chunk`-byte pieces, counting the
+    bytes the route pulled."""
+
+    def __init__(self, raw, declared=True, chunk=4096, length=None):
+        self.headers = {"content-length": str(len(raw) if length is None else length)} if declared else {}
+        self.client, self.query_params, self.url = REQ.client, REQ.query_params, REQ.url
+        self.raw, self.chunk, self.pulled = raw, chunk, 0
+
+    async def stream(self):
+        for i in range(0, len(self.raw), self.chunk):
+            part = self.raw[i:i + self.chunk]
+            self.pulled += len(part)
+            yield part
+
+
+def _body(key, ids):
+    return json.dumps({"key": key, "print_ids": list(ids)}).encode("ascii")
+
+
+def _batch(ctx, name, who, key, ids, sig=None, req=None):
+    return _call(ctx, name, main.pc_discard_batch, request=req or _BodyReq(_body(key, ids)), steam_id=who.steam,
                  sig=sig if sig is not None else _sign(_pc.canon_discard_batch(who.steam, key, list(ids))))
 
 
@@ -841,6 +865,122 @@ def test_the_body_is_refused_before_the_signature_is_even_checked(env):
         for i, (k, ids, word) in enumerate(cases):
             assert _err(await _batch(ctx, "c%d" % i, me, k, ids, sig="0" * 64)) == (422, word), (k, ids)
             assert ctx.statements("c%d" % i) == []
+    _scenario(env, body)
+
+def test_the_body_is_read_under_its_ceiling_and_parsed_only_then(env):
+    """Rule R12. A declared length past the ceiling is refused before a byte
+    is pulled; a chunked body, or one longer than it declared, the moment it
+    passes the ceiling, the rest never pulled; a length that is not a number
+    is 400; a body of exactly the ceiling is read, parsed and discarded like
+    any other. No refusal sends a statement."""
+    async def body(ctx):
+        cap = _pc.PC_DISCARD_BATCH_BODY_MAX
+        assert cap == 8192
+        me = await _player(1)
+        subject = await _player(2)
+        p = await _print(me, subject, "rare")
+        declared = _BodyReq(b" " * (cap + 1))
+        assert _err(await _batch(ctx, "decl", me, _key(), [p], sig="0" * 64, req=declared)) == (413, "body_too_large")
+        assert declared.pulled == 0, declared.pulled
+        chunked = _BodyReq(b" " * (cap * 4), declared=False, chunk=1024)
+        assert _err(await _batch(ctx, "chunked", me, _key(), [p], sig="0" * 64, req=chunked)) == (413, "body_too_large")
+        assert cap < chunked.pulled <= cap + 1024, chunked.pulled
+        longer = _BodyReq(b" " * (cap * 4), length=10, chunk=1024)
+        assert _err(await _batch(ctx, "longer", me, _key(), [p], sig="0" * 64, req=longer)) == (413, "body_too_large")
+        assert cap < longer.pulled <= cap + 1024, longer.pulled
+        bad_length = _BodyReq(_body(_key(), [p]), length="12x")
+        assert _err(await _batch(ctx, "badlen", me, _key(), [p], sig="0" * 64, req=bad_length)) == (400, "bad_length")
+        assert bad_length.pulled == 0, bad_length.pulled
+        for name in ("decl", "chunked", "longer", "badlen"):
+            assert ctx.statements(name) == [], name
+        key = _key()
+        exact = _body(key, [p])
+        exact += b" " * (cap - len(exact))
+        assert len(exact) == cap
+        status, ans = await _batch(ctx, "exact", me, key, [p], req=_BodyReq(exact))
+        assert status == 200 and ans["prints"] == 1 and ans["shards_gained"] == PAY["rare"], (status, ans)
+        assert (await _discarded([p]))[p] == (True, PAY["rare"])
+    _scenario(env, body)
+
+
+def test_only_a_json_object_with_a_string_key_and_string_ids_is_parsed(env):
+    """Rule R12. Not JSON, not UTF-8, nested past the decoder's depth, not an
+    object, a key that is not a string, print_ids that is not a list or holds
+    a non-string: 422 bad_body each, no statement sent. An absent key or
+    absent print_ids reads as empty, so the route's own words name them."""
+    async def body(ctx):
+        me = await _player(1)
+        subject = await _player(2)
+        p = await _print(me, subject, "common")
+        k = _key()
+        bad = [b"not json", b"\xff\xfe", b"[" * 4000 + b"]" * 4000, b"[1, 2]", b'"text"',
+               json.dumps({"key": 12345678, "print_ids": [p]}).encode("ascii"),
+               json.dumps({"key": k, "print_ids": p}).encode("ascii"),
+               json.dumps({"key": k, "print_ids": [p, 7]}).encode("ascii"),
+               json.dumps({"key": k, "print_ids": [[p]]}).encode("ascii")]
+        for i, raw in enumerate(bad):
+            name = "b%d" % i
+            assert _err(await _batch(ctx, name, me, k, [p], sig="0" * 64, req=_BodyReq(raw))) == (422, "bad_body"), raw[:40]
+            assert ctx.statements(name) == [], name
+        no_key = _BodyReq(json.dumps({"print_ids": [p]}).encode("ascii"))
+        assert _err(await _batch(ctx, "nokey", me, k, [p], sig="0" * 64, req=no_key)) == (422, "bad_key")
+        no_ids = _BodyReq(json.dumps({"key": k}).encode("ascii"))
+        assert _err(await _batch(ctx, "noids", me, k, [p], sig="0" * 64, req=no_ids)) == (422, "no_prints")
+        assert (await _discarded([p]))[p] == (False, None)
+    _scenario(env, body)
+
+
+def test_on_fastapi_s_own_request_path_the_body_is_read_only_by_the_route(env):
+    """Rule R12 on the real request path (#388's method): the route itself,
+    mounted on a throwaway FastAPI app whose one dependency override is this
+    test's database session, driven by httpx over ASGI. The route declares no
+    body parameter, so FastAPI hands the stream on unread: a chunked body far
+    past the ceiling is pulled only until it passes the ceiling, and refused;
+    a declared one is refused; and a signed batch posted as ordinary JSON is
+    served and discards."""
+    import httpx
+    from fastapi import FastAPI
+
+    route = next(r for r in main.app.routes if getattr(r, "path", "") == "/api/v1/pc/prints/discard-batch")
+    assert route.dependant.body_params == [], route.dependant.body_params
+
+    async def body(ctx):
+        cap = _pc.PC_DISCARD_BATCH_BODY_MAX
+        me = await _player(1)
+        subject = await _player(2)
+        p = await _print(me, subject, "epic")
+        maker = await ctx.session("stack")
+
+        async def _db():
+            async with maker() as db:
+                yield db
+
+        app = FastAPI()
+        app.add_api_route("/api/v1/pc/prints/discard-batch", main.pc_discard_batch, methods=["POST"])
+        app.dependency_overrides[main.get_db] = _db
+        pulled = [0]
+
+        async def flood():
+            for _ in range(64):
+                pulled[0] += 1024
+                yield b" " * 1024
+
+        path = "/api/v1/pc/prints/discard-batch"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://stack") as client:
+            unsigned = {"steam_id": me.steam, "sig": "0" * 64}
+            r = await client.post(path, params=unsigned, content=flood())
+            assert r.status_code == 413 and r.json()["detail"]["error"] == "body_too_large", r.text
+            assert cap < pulled[0] <= cap + 1024 < 64 * 1024, pulled[0]
+            r = await client.post(path, params=unsigned, content=b" " * (cap + 1))
+            assert r.status_code == 413 and r.json()["detail"]["error"] == "body_too_large", r.text
+            assert ctx.statements("stack") == []
+            key = _key()
+            signed = {"steam_id": me.steam, "sig": _sign(_pc.canon_discard_batch(me.steam, key, [p]))}
+            r = await client.post(path, params=signed, json={"key": key, "print_ids": [p]})
+            assert r.status_code == 200, r.text
+            assert (r.json()["prints"], r.json()["shards_gained"]) == (1, PAY["epic"]), r.text
+        assert (await _discarded([p]))[p] == (True, PAY["epic"])
+        assert ctx.statements("stack"), "the served request ran on this test's session"
     _scenario(env, body)
 
 

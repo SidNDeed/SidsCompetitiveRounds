@@ -27080,21 +27080,53 @@ async def _pc_discard_gate(db: AsyncSession, pid: str, print_ids: list) -> dict:
     return {r["id"]: r["rarity"] for r in rows}
 
 
-class PcDiscardBatchBody(BaseModel):
-    """The batch shard's body: the idempotency key (the pack id when a pack
-    is sharded from its result, a client nonce for a binder selection) and
-    the prints, in the order the signed line lists them."""
-    key: str = ""
-    print_ids: list[str] = []
-
-
 _PC_BATCH_KEY_RE = _re.compile(r"[A-Za-z0-9-]{8,64}")
+
+
+async def _pc_batch_body(request: Request) -> tuple:
+    """The batch shard's body, {"key": ..., "print_ids": [...]}: the
+    idempotency key (the pack id when a pack is sharded from its result, a
+    client nonce for a binder selection) and the prints, in the order the
+    signed line lists them. The route declares no body parameter, so
+    FastAPI reads and parses nothing before the handler runs (#388); this
+    reads the body under player_cards.PC_DISCARD_BATCH_BODY_MAX and parses
+    it only then. A declared Content-Length past the ceiling is refused
+    before a byte is read, and a streamed body at the first chunk that
+    takes it past the ceiling (413 body_too_large); a Content-Length that
+    is not a number is 400 bad_length. Anything but a JSON object whose key
+    is a string and whose print_ids is a list of strings is 422 bad_body;
+    an absent key reads "" and absent print_ids [], so the route's own
+    checks name them (bad_key, no_prints). Nothing here reads the database
+    or checks the signature."""
+    cap = _pc.PC_DISCARD_BATCH_BODY_MAX
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"error": "bad_length"})
+        if length > cap:
+            raise HTTPException(status_code=413, detail={"error": "body_too_large", "max": cap})
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > cap:
+            raise HTTPException(status_code=413, detail={"error": "body_too_large", "max": cap})
+    try:
+        obj = _json.loads(bytes(raw).decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise HTTPException(status_code=422, detail={"error": "bad_body"})
+    if not isinstance(obj, dict):
+        raise HTTPException(status_code=422, detail={"error": "bad_body"})
+    key, ids = obj.get("key", ""), obj.get("print_ids", [])
+    if not isinstance(key, str) or not isinstance(ids, list) or not all(isinstance(x, str) for x in ids):
+        raise HTTPException(status_code=422, detail={"error": "bad_body"})
+    return key, ids
 
 
 @app.post("/api/v1/pc/prints/discard-batch", tags=["Player Cards"])
 async def pc_discard_batch(
     request: Request,
-    body: PcDiscardBatchBody,
     steam_id: str = Query(...),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -27105,10 +27137,12 @@ async def pc_discard_batch(
     pcdiscardn:{steam}:{key}:{the print ids as the body lists them}, strict
     session: the verified actor the single route uses.
 
-    The body is refused before anything is read (422): a key that is not 8
-    to 64 of [A-Za-z0-9-] (bad_key), no prints (no_prints), more than the cap
-    (too_many), an id that is not a UUID (bad_print_id), one print twice
-    (duplicate_print). Then, under the caller's players-row lock:
+    The body is read under its ceiling and parsed by _pc_batch_body (413
+    body_too_large, 400 bad_length, 422 bad_body), then refused before the
+    database is read (422): a key that is not 8 to 64 of [A-Za-z0-9-]
+    (bad_key), no prints (no_prints), more than the cap (too_many), an id
+    that is not a UUID (bad_print_id), one print twice (duplicate_print).
+    Then, under the caller's players-row lock:
       * a key already committed with the same SET of prints answers the
         stored total again and credits nothing (replayed: true); with a
         different set it is refused, nothing done (409 key_reused);
@@ -27121,8 +27155,7 @@ async def pc_discard_batch(
         absolute write, #326) and the key's row, committed together.
     503 shard_batch_unavailable while migration 361 has not run on this box
     (checked before the first lock or write)."""
-    key = body.key or ""
-    ids = [str(x) for x in (body.print_ids or [])]
+    key, ids = await _pc_batch_body(request)
     if not _PC_BATCH_KEY_RE.fullmatch(key):
         raise HTTPException(status_code=422, detail={"error": "bad_key"})
     if not ids:

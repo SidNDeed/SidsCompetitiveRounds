@@ -181,6 +181,13 @@ def canon_discard(steam_id: str, print_id: str) -> str:
 # too_many), never a partial shard.
 PC_DISCARD_BATCH_CAP = 40
 
+# The batch shard's body ceiling, in bytes. The route reads its body itself
+# and refuses one past this before parsing it (413 body_too_large). A body
+# naming the cap's 40 ids in their 36-character form and a 64-character key
+# is under 1.8 KB of JSON; the ceiling leaves room for whitespace and for the
+# longer spellings of a UUID the route also accepts.
+PC_DISCARD_BATCH_BODY_MAX = 8192
+
 
 def canon_discard_batch(steam_id: str, key: str, print_ids) -> str:
     """The batch shard's signed line: the idempotency key and every print id
