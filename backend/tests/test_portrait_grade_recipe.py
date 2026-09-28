@@ -1065,13 +1065,19 @@ def fence_problems(block: str, fence: str) -> list:
 
 
 def finally_block(block: str) -> str:
-    """The body of the method's `finally` clause (text, braces included)."""
+    """The body of the method's own `finally` clause (text, braces included):
+    the one `finally` that is not inside another finally's block. A
+    try/finally nested in that block (DanceRun's lever reset in its finally)
+    is part of it; two such clauses, or one inside the try, are refused."""
     masked = mask_code(block)
-    hits = [m for m in re.finditer(r"\bfinally\b", masked)]
-    if len(hits) != 1:
-        raise CsParseError(f"want one finally, found {len(hits)}")
-    j = _skip_ws(masked, hits[0].end())
-    return block[j:_close(masked, j, "{", "}")]
+    spans = []
+    for m in re.finditer(r"\bfinally\b", masked):
+        j = _skip_ws(masked, m.end())
+        spans.append((m.start(), j, _close(masked, j, "{", "}")))
+    own = [s for s in spans if not any(o[1] <= s[0] < o[2] for o in spans)]
+    if len(own) != 1:
+        raise CsParseError(f"want one finally outside every finally block, found {len(own)}")
+    return block[own[0][1]:own[0][2]]
 
 
 def _flat(m: str, a: int, b: int) -> str:
@@ -1538,6 +1544,7 @@ DANCE_UPLOAD_MOTION = "public void UploadMotion(string descriptor, byte[] contai
 DANCE_PORT_AFTER = "public void After(int seconds, Action then)"
 DANCE_FINISHED = "private static void DanceFinished(DanceUploadJob job, string key, string rkey, string danceDesc, int ugen, string why)"
 DANCE_DEV_T38 = "private static void DanceDevT38(bool mutant)"
+DANCE_MULTI_CHECK = "private static void DanceMultiCheck(Camera cam, RenderTexture target, DanceSlot slot, int k)"
 
 
 def _masked_norm(source, signature: str) -> str:
@@ -3264,8 +3271,7 @@ MECHANISM_BODIES = {
         "internal void Clear() { _host = null; _until = -1f; } }"),
     ("render", FORCE_ABORT): (
         "{ _renderClaim.Clear(); _cleanupOwed = false; try { Application.logMessageReceived -= OnLog; } catch { } "
-        "try { var pp = DanceEmotes.PortraitPose; DanceEmotes.PortraitPose = null; "
-        "if (pp.HasValue && pp.Value.RigRoot != null) DanceEmotes.RestorePortraitRig(pp.Value.RigRoot); } catch { } "
+        "try { var pp = DanceEmotes.PortraitPose; DanceEmotes.EndPortraitPose(pp.HasValue ? pp.Value.RigRoot : null); } catch { } "
         "try { Teardown(new StringBuilder()); } catch { } try { DestroyGradeObjects(); } catch { } "
         'try { Plugin.Log.LogInfo("[PORTRAIT] force-abort: " + why); } catch { } }'),
     ("render", ON_HOST_DESTROYED): (
@@ -3383,6 +3389,7 @@ DANCE_LIFECYCLE_HITS = {
     ("dance", r"\bnew\s+RenderTexture\s*\("): {DANCE_TARGET: 1},
     ("dance", DANCE_TARGETS_WRITE): {DANCE_TARGET: 1, DANCE_RELEASE_TARGETS: 1},
     ("dancedev", r"\bnew\s+GameObject\s*\("): {DANCE_DEV_T38: 4},
+    ("dancedev", r"\bnew\s+RenderTexture\s*\("): {DANCE_MULTI_CHECK: 1},   # S2F3's multi lever (T36 evidence, local captures only)
 }
 LIFECYCLE_COUNTS[("render", DANCE_TARGETS_WRITE)] = {}
 LIFECYCLE_COUNTS[("grade", DANCE_TARGETS_WRITE)] = {}
@@ -3523,8 +3530,11 @@ def test_the_host_and_a_scene_unload_force_abort_everything():
         ("render", ENSURE_SCENE_HOOK, "if (_sceneHooked) return;", "if (!_sceneHooked) return;"),
         ("render", FORCE_ABORT, "try { DestroyGradeObjects(); } catch { }", "try { if (!_renderClaim.Held) DestroyGradeObjects(); } catch { }"),
         ("render", FORCE_ABORT, "try { Teardown(new StringBuilder()); } catch { }", "try { if (_clone != null) Teardown(new StringBuilder()); } catch { }"),
-        # dance cards: a force-abort that leaves a dance pose set
-        ("render", FORCE_ABORT, "DanceEmotes.PortraitPose = null; if (pp.HasValue", "if (pp.HasValue"),
+        # dance cards: a force-abort that leaves a dance pose set, and one that
+        # clears the pose before the rig's undo (the order L1 replaced)
+        ("render", FORCE_ABORT, "DanceEmotes.EndPortraitPose(pp.HasValue ? pp.Value.RigRoot : null);", ""),
+        ("render", FORCE_ABORT, "DanceEmotes.EndPortraitPose(pp.HasValue ? pp.Value.RigRoot : null);",
+         "DanceEmotes.PortraitPose = null; if (pp.HasValue && pp.Value.RigRoot != null) DanceEmotes.RestorePortraitRig(pp.Value.RigRoot);"),
         ("render", ON_HOST_DESTROYED, "if (_renderClaim.HeldBy(host) || (_cleanupOwed && !_renderClaim.Held))", "if (_renderClaim.HeldBy(host))"),
         ("render", ON_SCENE_UNLOADED, "if (RigLost() || (_cleanupOwed && !_renderClaim.Held))", "if (RigLost())"),
         ("grade", DESTROY_GRADE_OBJECTS, "                    UnityEngine.Object.Destroy(o);\n", ""),
@@ -3568,12 +3578,14 @@ def test_the_host_and_a_scene_unload_force_abort_everything():
         ("render", '            _camGO = new GameObject("CR_PortraitCam");', '            _camGO = new GameObject("CR_PortraitCam"); _camGO = new GameObject("CR_PortraitCam");', MAKE_CAMERA),
         ("render", "            _renderClaim.Clear();\n", '            _renderClaim.Clear();\n            new GameObject("CR_Stray");\n', "in the file"),
         # dance cards: a second claim taken by StartDance, a cleanup forgiven
-        # outside DanceRun, a dev object made outside T38, a target never
-        # registered, the upload claim taken a second time
+        # outside DanceRun, a dev object made outside T38, a dev render target
+        # made outside DanceMultiCheck, a target never registered, the upload
+        # claim taken a second time
         ("dance", "            int gen = _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);\n",
          "            int gen = _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);\n            _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);\n", START_DANCE),
         ("dance", "            _danceTargets.Clear();\n", "            _danceTargets.Clear();\n            _cleanupOwed = false;\n", "in the file"),
         ("dancedev", "            Directory.CreateDirectory(d);\n", '            Directory.CreateDirectory(d);\n            new GameObject("CR_Stray");\n', "in the file"),
+        ("dancedev", "            Directory.CreateDirectory(d);\n", '            Directory.CreateDirectory(d);\n            new RenderTexture(1, 1, 0);\n', "in the file"),
         ("dance", "            _danceTargets.Add(rt);\n", "", DANCE_TARGET),
         ("dance", '            LastResult = "uploading";\n', '            LastResult = "uploading";\n            _uploadClaim.Take(Plugin.Instance, UPLOAD_BUDGET);\n', DANCE_UPLOAD),
     )
@@ -3923,6 +3935,23 @@ def test_a_finally_never_releases_a_successors_objects(signature):
     for new in ("if (true)", "if (_renderClaim.HeldByOther(gen)) { } else", "if (!_renderClaim.HeldByOther(gen)) if (gen > 0)"):
         mutated = _mut(fin, SUCCESSOR_GUARD, new)
         assert any("is not a statement of" in x for x in finally_problems(mutated, releases)), new
+
+
+def test_finally_block_reads_the_methods_own_finally():
+    """The guarded-finally test reads the finally that is not inside another
+    finally's block. DanceRun's lever reset (a try/finally inside its finally)
+    belongs to that block; two such clauses, a finally inside the try, or none
+    at all are refused, so no second finally can sit beside the one the test
+    reads."""
+    nested = "{ a(); try { b(); } finally { try { c(); } finally { d(); } e(); } f(); }"
+    assert finally_block(nested) == "{ try { c(); } finally { d(); } e(); }"
+    for refused in ("{ try { a(); } finally { b(); } try { c(); } finally { d(); } }",
+                    "{ try { try { a(); } finally { b(); } } finally { c(); } }",
+                    "{ a(); }"):
+        with pytest.raises(CsParseError):
+            finally_block(refused)
+    fin = finally_block(cs_block(DANCE_CS, DANCE_RUN))
+    assert "DanceEmotes.EndPortraitPose(rigRoot);" in fin and "Teardown(rep);" in fin
 
 
 # ── the real source: the sweep ──────────────────────────────────────────────
