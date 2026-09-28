@@ -1,6 +1,6 @@
 """Dance cards: the motion pool, admission and the motion cache (design
-S4.6, S4.7; section 12 H1, L8) -- T25, T26, T27 (with H1's extension), T53
-and T62.
+S4.6, S4.7; section 12 H1, L8) -- T25, T26, T27 (with H1's extension), T53,
+T62, and finding S2F14's worker process (S4.6's one-process pool).
 
 Each test is one named assertion; the mutation that must fail it is planted
 by the lane's mutation runner and recorded in its log, and the test's own
@@ -10,12 +10,13 @@ instance main wires) are in the live route tests.
 """
 import asyncio
 import collections
+import concurrent.futures
 import os
 import re
 import shutil
 import sys
-import threading
 import time
+from concurrent.futures.process import BrokenProcessPool
 
 import pytest
 
@@ -134,41 +135,82 @@ def test_motion_cache_root_survives_an_api_rebuild():
 
 # -- T26: the motion worker never holds a static render --------------------------------
 
-def busy_renders(stop, seconds):
-    """CPU work on the motion worker: real faces until `stop` or `seconds`."""
-    end = time.monotonic() + seconds
-    n = 0
-    while not stop.is_set() and time.monotonic() < end:
-        pc_face.render_face(fx.spec(), {}, None, "card")
-        n += 1
-    return n
-
-
 def test_motion_pool_isolation():
     """T26 (S4.6): a static face renders within its budget while the motion
     worker is busy -- two derivations in flight, the second queued behind the
     first on the ONE motion worker. Control: the idle baseline. Mutation:
-    motion jobs submitted to the static pool (both static workers then held)."""
-    assert pcm.MOTION_POOL is not pc_portrait.POOL and pcm.MOTION_POOL._max_workers == 1
+    motion jobs submitted to the static pool (both static workers then held).
+    The busy work is fx.busy_renders for a fixed time: module-level, so it
+    runs on the worker process, which nothing of this process reaches."""
+    pool = pcm.motion_pool()
+    assert isinstance(pool, concurrent.futures.ProcessPoolExecutor) and pool._max_workers == 1
+    assert pool is not pc_portrait.POOL
 
     async def scenario():
         spec = fx.spec(band="epic")
+        await pcm.in_motion_pool(fx.busy_renders, 0.0)                          # the worker is up
         await pc_portrait.in_pool(pc_face.render_face, spec, {}, None, "card")   # warm fonts
         t0 = time.perf_counter()
         await pc_portrait.in_pool(pc_face.render_face, spec, {}, None, "card")
         idle = time.perf_counter() - t0
-        stop = threading.Event()
-        busy = [asyncio.ensure_future(pcm.in_motion_pool(busy_renders, stop, 6.0)) for _ in range(2)]
+        busy = [asyncio.ensure_future(pcm.in_motion_pool(fx.busy_renders, 2.5)) for _ in range(2)]
         await asyncio.sleep(0.3)
         t0 = time.perf_counter()
         await pc_portrait.in_pool(pc_face.render_face, spec, {}, None, "card")
         loaded = time.perf_counter() - t0
-        stop.set()
         await asyncio.gather(*busy)
         return idle, loaded
 
     idle, loaded = asyncio.run(scenario())
     assert loaded < 2.0 * idle + 0.5, (idle, loaded)
+
+
+# -- S2F14: the motion worker is a process of its own ------------------------------------------
+
+def test_motion_derivation_runs_in_its_own_process():
+    """S2F14 (S4.6's one-process pool): a motion job runs in ONE worker
+    process of its own, started by spawn, whose monotonic clock is this
+    process's -- main takes a job's deadline here and derive_atlases checks
+    it there. Control: this test as written. Mutation: the worker a thread
+    of this process (the job then answers this process's id)."""
+    async def scenario():
+        t0 = time.monotonic()
+        there = await pcm.in_motion_pool(time.monotonic)
+        t1 = time.monotonic()
+        return await pcm.in_motion_pool(os.getpid), (t0, there, t1)
+
+    pid, clocks = asyncio.run(scenario())
+    pool = pcm.motion_pool()
+    assert pid != os.getpid(), pid
+    assert pool._mp_context.get_start_method() == "spawn" and pool._max_workers == 1
+    assert clocks[0] <= clocks[1] <= clocks[2], clocks
+
+
+def test_motion_pool_replaces_a_dead_worker():
+    """S2F14: a worker that dies fails the job it held with BrokenProcessPool
+    (the scheduler records a failed job); the next job finds the pool broken
+    and runs on a new worker -- after a death while running a job and after
+    a death while idle. Control: the next jobs' answers. Mutations: the
+    broken pool kept (the next job fails at once); the job that finds it
+    broken failed rather than run on a new worker."""
+    async def scenario():
+        await pcm.in_motion_pool(os.getpid)
+        dead = pcm.motion_pool()
+        with pytest.raises(BrokenProcessPool):
+            await pcm.in_motion_pool(os._exit, 3)             # dies while running a job
+        after_running = await pcm.in_motion_pool(os.getpid)
+        idle = pcm.motion_pool()
+        for proc in list(idle._processes.values()):
+            proc.kill()                                       # dies while idle
+        for _ in range(200):
+            if idle._broken:
+                break
+            await asyncio.sleep(0.05)
+        return dead, idle, after_running, await pcm.in_motion_pool(os.getpid)
+
+    dead, idle, after_running, after_idle = asyncio.run(scenario())
+    assert idle is not dead and pcm.motion_pool() is not idle, (dead, idle)
+    assert os.getpid() not in (after_running, after_idle), (after_running, after_idle)
 
 
 # -- T27: the admission bound (H1) ----------------------------------------------------------
@@ -314,9 +356,7 @@ def test_motion_job_deadline():
         sched = pcm.MotionScheduler(clock=clock)
 
         async def job():
-            return await pcm.in_motion_pool(
-                lambda: pcm.derive_atlases(fx.spec(), {}, body, deadline=clock.t + pcm.JOB_DEADLINE_S,
-                                           clock=clock, render=slow))
+            return await pcm.in_motion_pool(fx.derive_slow, body)    # 70 s a render, on the worker
         out = await sched.submit("atlas/x/r/en", "A", job)
         assert out == ("failed", "MotionDeadline") and sched.held("A") == 0
         left = sched.failed_for("atlas/x/r/en")
@@ -324,8 +364,7 @@ def test_motion_job_deadline():
         clock.t += pcm.FAILED_HOLD_S + 1
         assert sched.failed_for("atlas/x/r/en") == 0
         # control: the worker is free and a fast job completes
-        return await pcm.in_motion_pool(lambda: pcm.derive_atlases(
-            fx.spec(), {}, body, deadline=clock.t + pcm.JOB_DEADLINE_S, clock=clock, render=fx.fake_render))
+        return await pcm.in_motion_pool(fx.derive_fast, body)
 
     card, tile = asyncio.run(scenario())
     assert card is not None and tile is not None

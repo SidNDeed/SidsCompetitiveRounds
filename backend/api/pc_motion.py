@@ -660,11 +660,25 @@ def derive_preview_gif(spec, labels, still, container, *, deadline=None, clock=_
 
 # -- the pool, admission and the cache (S4.6, S4.7; H1, L8) ---------------------
 import collections as _pcm_collections
+import multiprocessing as _pcm_mp
+from concurrent.futures.process import BrokenProcessPool as _BrokenProcessPool
 
 # ONE worker for every motion derivation: separate from pc_portrait's two
 # static render workers and from the decode pool above, so animation work
-# never holds a static face or a charged upload behind it (S4.6, E4.9).
-MOTION_POOL = _futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pc-motion")
+# never holds a static face or a charged upload behind it (S4.6, E4.9). The
+# worker is a PROCESS, the method change S4.6 names (finding S2F14): on a
+# thread of this process a derivation shares one interpreter lock with every
+# static render and with the event loop, and T44 measured the static p95
+# rising past its 10 % bound under that load. The pool is built on first use
+# (motion_pool); a job that finds its worker dead drops it and starts a new
+# one. Its start method is spawn on every platform: the worker begins as
+# a fresh interpreter, not a fork of this threaded one. A job crosses to it
+# pickled, so it is a module-level function with plain arguments.
+_MOTION_POOL = None
+_MOTION_POOL_LOCK = _threading.Lock()
+# Work a job must do in THIS process -- the cache's publish -- runs on its own
+# thread, off the event loop and off the worker process.
+MOTION_IO_POOL = _futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pc-motion-io")
 JOBS_MAX = 16                        # pending or running, every address together
 JOBS_PER_ADDRESS = 2                 # pending or running, per trusted client address (H1)
 FAILED_HOLD_S = 600.0                # a key whose job failed answers 503 this long; memory only
@@ -792,9 +806,44 @@ async def await_job(fut, timeout):
         return None
 
 
+def motion_pool():
+    """The ONE motion worker's executor, built on first use (S4.6, S2F14)."""
+    global _MOTION_POOL
+    with _MOTION_POOL_LOCK:
+        if _MOTION_POOL is None:
+            _MOTION_POOL = _futures.ProcessPoolExecutor(max_workers=1, mp_context=_pcm_mp.get_context("spawn"))
+        return _MOTION_POOL
+
+
+def _drop_motion_pool(pool):
+    """Forget a pool whose worker died; the next job builds a new one."""
+    global _MOTION_POOL
+    with _MOTION_POOL_LOCK:
+        if _MOTION_POOL is pool:
+            _MOTION_POOL = None
+    pool.shutdown(wait=False, cancel_futures=True)
+
+
 async def in_motion_pool(fn, *args):
-    """fn(*args) on the ONE motion worker."""
-    return await _asyncio.get_running_loop().run_in_executor(MOTION_POOL, fn, *args)
+    """fn(*args) on the ONE motion worker process: fn is a module-level
+    function, and fn and args are pickled across. A worker that dies fails
+    the job it held with BrokenProcessPool (the scheduler records a failed
+    job); the next job finds the pool broken, drops it and runs on a new
+    worker -- it was refused at submission, so it had not run."""
+    loop = _asyncio.get_running_loop()
+    pool = motion_pool()
+    try:
+        fut = loop.run_in_executor(pool, fn, *args)
+    except _BrokenProcessPool:
+        _drop_motion_pool(pool)
+        fut = loop.run_in_executor(motion_pool(), fn, *args)
+    return await fut
+
+
+async def in_motion_io(fn, *args):
+    """fn(*args) on the motion I/O thread: a job's work that must stay in
+    this process, such as the cache's publish (S2F14)."""
+    return await _asyncio.get_running_loop().run_in_executor(MOTION_IO_POOL, fn, *args)
 
 
 class KeyMemo:

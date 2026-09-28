@@ -1,14 +1,17 @@
 """Dance cards: the motion reads against a real PostgreSQL (design S4.8-S4.10,
 S5.2; section 12 H1, L5) -- T28, T29, T30 (with T19's live half), T60, T68
 (H1's route half: jobs keyed to the limiter's client address), T69 (the
-motion cache ages on the face cache's clock) and T25's wiring half.
+motion cache ages on the face cache's clock), T25's wiring half and finding
+S2F14's route half (the derivation on the worker process, the publish here).
 
 Each test is one named assertion; the mutation that must fail it is planted
 by the lane's mutation runner and recorded in its log, and the test's own
 passing case is the control (#391). The HMAC key is a random test value, the
 strict session check is replaced, and every player is synthetic. The motion
-cache is a per-test directory and the scheduler a fresh one per test; the
-tests that derive draw with the fixtures' fast stand-in for the renderer.
+cache is a per-test directory and the scheduler a fresh one per test; a
+test that derives runs main's derivation call on the motion worker process
+with the fixtures' fast stand-in for the renderer, or a stand-in for the
+derivation itself.
 """
 import asyncio
 import hashlib
@@ -321,7 +324,7 @@ def test_motion_job_rechecks_at_start(lane, env, monkeypatch):
     revision and the request answers 404. Control: nothing moved while it
     queued, and the job publishes both sizes (200). Mutation: the re-check
     at the job's start skipped."""
-    monkeypatch.setattr(main._pcf, "render_face", fx.fake_render)
+    monkeypatch.setattr(main._pcm, "derive_atlases", fx.derive_fake_render)   # runs on the worker process
     monkeypatch.setattr(main, "_PC_MOTION_WAIT_S", 300.0)
     _so, owner, _ = player(lane, env, dance=None)
 
@@ -353,6 +356,33 @@ def test_motion_job_rechecks_at_start(lane, env, monkeypatch):
     for n, change in enumerate(("still", "motion"), start=2):
         status, detail, published = case(change, n)
         assert status == 404 and published == [], (change, status, detail, published)
+
+
+# -- S2F14 (route half): the derivation on the worker process, the publish here ------------------
+
+def test_motion_atlas_derived_on_the_worker_process(lane, env, monkeypatch):
+    """S2F14 (S4.6's one-process pool): the atlas job hands main's
+    derivation call to the motion worker PROCESS and publishes what it
+    answers in THIS one -- the cache holds bytes stamped with the size and
+    a process id that is not this process's. Control: this test as
+    written. Mutations: the derivation on a thread of this process (the
+    stamp is this process's id); the publish handed to the worker process
+    (the cache cannot be pickled across, the job fails and nothing is
+    published)."""
+    monkeypatch.setattr(main._pcm, "derive_atlases", fx.derive_stamped)
+    monkeypatch.setattr(main, "_PC_MOTION_WAIT_S", 300.0)
+    _so, owner, _ = player(lane, env, dance=None)
+    _steam, pid, still = player(lane, env)
+    lane.run(put_real_motion(lane, pid, still))
+    pr = lane.run(make_print(lane, pid, owner))
+    rev = rev_of(lane, pr)
+    status, resp = lane.run(get_atlas(lane, pr, rev, host="10.9.4.1"))
+    stamps = {size: main._pc_motion_cache.read(pcm.atlas_key(pr, rev, "en", size)) for size in ("card", "tile")}
+    assert status == 200, (status, resp, stamps)
+    for size, data in stamps.items():
+        parts = (data or b"").split(b":")
+        assert parts[:2] == [b"stamp", size.encode()], stamps
+        assert int(parts[2]) != os.getpid(), stamps
 
 
 # -- T68: jobs are keyed to the limiter's client address (H1) --------------------------------------

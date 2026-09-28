@@ -3,13 +3,15 @@ MEASUREMENT whose values the lane notes record against the design's
 estimates (build brief: T37, T44, T50 and RR15 are the acceptance gates).
 
 The S4.6 load: a cold print-atlas derivation of the largest dance
-(dance_robot, 120 frames, both sizes) running on the ONE motion worker,
-and two maximum uploads decoding on the ONE decode worker. Under it, the
-static face renders that share the process -- pc_portrait's two-worker
-render pool, the path every static face route takes -- keep their p95
-within 10 % of the idle baseline, the event loop's lag stays under 50 ms,
-and the process's resident set grows by less than 192 MiB while the job
-runs.
+(dance_robot, 120 frames, both sizes) running on the ONE motion worker --
+a process of its own since finding S2F14, started before the baseline so
+its start-up is outside both phases -- and two maximum uploads decoding on
+the ONE decode worker. Under it, the static face renders that share the
+API process -- pc_portrait's two-worker render pool, the path every static
+face route takes -- keep their p95 within 10 % of the idle baseline, the
+event loop's lag stays under 50 ms, and the resident sets grow by less than
+192 MiB while the job runs: this process's growth plus the worker's whole
+resident set, its idle footprint counted as growth too.
 
 Mutation (must fail): the job run on the event loop (`in_motion_pool`
 calling fn inline) -- the loop-lag bound fails. Control: the executor run,
@@ -43,8 +45,9 @@ LOAD_RENDERS_MIN = 40
 LAG_TICK_S = 0.010
 
 
-def _rss_bytes():
-    """This process's resident set (Windows working set; Linux statm)."""
+def _rss_bytes(pid=None):
+    """A process's resident set (Windows working set; Linux statm): this
+    process's, or the one `pid` names."""
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -60,13 +63,26 @@ def _rss_bytes():
         counters.cb = ctypes.sizeof(_Counters)
         kernel32 = ctypes.WinDLL("kernel32")
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         query = kernel32.K32GetProcessMemoryInfo
         query.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Counters), wintypes.DWORD]
         query.restype = wintypes.BOOL
-        if not query(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
-            raise OSError("K32GetProcessMemoryInfo failed")
+        if pid is None:
+            handle = kernel32.GetCurrentProcess()
+        else:
+            handle = kernel32.OpenProcess(0x1000 | 0x0010, False, int(pid))   # limited query, VM read
+            if not handle:
+                raise OSError("OpenProcess failed for %d" % pid)
+        try:
+            if not query(handle, ctypes.byref(counters), counters.cb):
+                raise OSError("K32GetProcessMemoryInfo failed")
+        finally:
+            if pid is not None:
+                kernel32.CloseHandle(handle)
         return int(counters.WorkingSetSize)
-    with open("/proc/self/statm") as fh:
+    with open("/proc/%s/statm" % ("self" if pid is None else int(pid))) as fh:
         return int(fh.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
 
 
@@ -100,9 +116,21 @@ async def _lag_sampler(stop, out):
         out.append(time.perf_counter() - t0 - LAG_TICK_S)
 
 
-def _rss_sampler(stop, out):
+def _worker_pid():
+    """The motion worker's process id, or None when no worker runs (the
+    inline mutation never starts one)."""
+    procs = getattr(pcm.motion_pool(), "_processes", None) or {}
+    return next(iter(procs), None)
+
+
+def _rss_sampler(stop, out, worker, errors):
+    """This process's resident set plus the worker's, every 50 ms; a sample
+    that cannot be read is counted in `errors`, never replaced by a guess."""
     while not stop.is_set():
-        out.append(_rss_bytes())
+        try:
+            out.append(_rss_bytes() + (_rss_bytes(worker) if worker else 0))
+        except OSError:
+            errors.append(1)
         time.sleep(0.05)
 
 
@@ -111,11 +139,14 @@ async def _measure():
     header, frames = pcm.parse_container(body)
     still = fx.edge_still()
     await _render_once(still, 0)                                  # first-call costs outside both phases
+    await pcm.in_motion_pool(fx.busy_renders, 0.0)                # the worker is up and has drawn once
+    worker = _worker_pid()
+    worker_base = _rss_bytes(worker) if worker else 0
     base = [await _render_once(still, k) for k in range(BASELINE_RENDERS)]
 
-    lags, rss = [], [_rss_bytes()]
+    lags, rss, rss_errors = [], [_rss_bytes()], []                # rss[0]: this process alone
     stop, rss_stop = asyncio.Event(), threading.Event()
-    rss_thread = threading.Thread(target=_rss_sampler, args=(rss_stop, rss), daemon=True)
+    rss_thread = threading.Thread(target=_rss_sampler, args=(rss_stop, rss, worker, rss_errors), daemon=True)
     rss_thread.start()
     lag_task = asyncio.create_task(_lag_sampler(stop, lags))
     await asyncio.sleep(0.05)
@@ -143,6 +174,7 @@ async def _measure():
     await lag_task
     rss_stop.set()
     rss_thread.join(5)
+    worker_after = _rss_bytes(worker) if worker else 0
     base_p95 = _p95(base)
     load_p95 = _p95(load) if load else float("inf")
     return {
@@ -152,7 +184,8 @@ async def _measure():
         "base_p95_ms": base_p95 * 1000.0, "load_p95_ms": load_p95 * 1000.0,
         "rise": load_p95 / base_p95 - 1.0,
         "lag_max_ms": max(lags) * 1000.0 if lags else float("inf"), "lag_n": len(lags),
-        "rss_growth_mib": (max(rss) - rss[0]) / float(1 << 20),
+        "rss_growth_mib": (max(rss) - rss[0]) / float(1 << 20), "rss_errors": len(rss_errors),
+        "worker_base_mib": worker_base / float(1 << 20), "worker_after_mib": worker_after / float(1 << 20),
     }
 
 
@@ -161,9 +194,11 @@ def test_perf_gate_motion_load():
     line = ("[T44] source=%(source)s frames=%(frames)d job_s=%(job_s).1f card_bytes=%(card_bytes)d "
             "tile_bytes=%(tile_bytes)d base_n=%(base_n)d load_n=%(load_n)d base_p95_ms=%(base_p95_ms).1f "
             "load_p95_ms=%(load_p95_ms).1f rise_pct=%(rise_pct).1f lag_max_ms=%(lag_max_ms).1f "
-            "lag_n=%(lag_n)d rss_growth_mib=%(rss_growth_mib).1f") % dict(m, rise_pct=m["rise"] * 100.0)
+            "lag_n=%(lag_n)d rss_growth_mib=%(rss_growth_mib).1f rss_errors=%(rss_errors)d "
+            "worker_base_mib=%(worker_base_mib).1f worker_after_mib=%(worker_after_mib).1f") % dict(
+                m, rise_pct=m["rise"] * 100.0)
     print(line)
     assert m["lag_max_ms"] < LOOP_LAG_MAX_S * 1000.0, line
     assert m["load_n"] >= LOAD_RENDERS_MIN, line
     assert m["rise"] < STATIC_RISE_MAX, line
-    assert m["rss_growth_mib"] * (1 << 20) < JOB_RSS_MAX, line
+    assert m["rss_errors"] == 0 and m["rss_growth_mib"] * (1 << 20) < JOB_RSS_MAX, line

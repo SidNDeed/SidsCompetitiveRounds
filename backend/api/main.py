@@ -29197,6 +29197,9 @@ async def _pc_motion_atlas_job(print_id: str, rev: str, locale: str, expect: tup
     if now_rev is None or now_rev != rev or _pc_motion_expect(row) != expect or row["m_bytes"] is None:
         return ("stale", "moved")
     deadline = time.monotonic() + _pcm.JOB_DEADLINE_S       # the job's own clock starts when it does
+    # The derivation runs on the motion worker PROCESS (S2F14): the partial and
+    # its arguments are pickled across, and the deadline -- a monotonic time,
+    # a clock the worker shares -- is checked there. The publish stays here.
     card, tile = await _pcm.in_motion_pool(_functools.partial(
         _pcm.derive_atlases, spec, ctx["labels"], bytes(row["m_bytes"]), deadline=deadline))
     for size, data in (("card", card), ("tile", tile)):
@@ -29204,7 +29207,7 @@ async def _pc_motion_atlas_job(print_id: str, rev: str, locale: str, expect: tup
         if data is None:
             _pcm.TOO_LARGE.add(key)
         else:
-            await _pcm.in_motion_pool(_pc_motion_cache.publish, key, data)
+            await _pcm.in_motion_io(_pc_motion_cache.publish, key, data)
     return ("done", card is not None, tile is not None)
 
 

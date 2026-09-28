@@ -194,3 +194,66 @@ def noise_frames(count, seed=7, level=1):
         image.paste(Image.frombytes("RGB", (230, 230), rnd.randbytes(230 * 230 * 3)).convert("RGBA"), (180, 180))
         out.append(png_bytes(image, level))
     return out
+
+
+# -- the motion worker process (S2F14) -------------------------------------------
+# The motion worker is a spawned process: a job run there is a module-level
+# function of an importable module, and its arguments are pickled across.
+# _DERIVE_ATLASES is the real derivation, taken when this module is imported,
+# so a route test that monkeypatches main's derive_atlases still reaches it.
+_DERIVE_ATLASES = pcm.derive_atlases
+
+
+def busy_renders(seconds):
+    """Real faces -- one at least -- until `seconds` have passed: CPU work
+    for the motion worker (T26; T44 starts the worker with one)."""
+    import time
+    import pc_face
+    end = time.monotonic() + seconds
+    n = 0
+    while True:
+        pc_face.render_face(spec(), {}, None, "card")
+        n += 1
+        if time.monotonic() >= end:
+            return n
+
+
+class StepClock:
+    """A job clock that moves only when the job's renders move it."""
+
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def derive_slow(body):
+    """derive_atlases with every frame render costing 70 s of the job's own
+    clock: the 120 s deadline stops it at the second step (T53's job)."""
+    clock = StepClock()
+
+    def slow(spec_, labels, png, size):
+        clock.t += 70.0
+        return fake_render(spec_, labels, png, size)
+    return _DERIVE_ATLASES(spec(), {}, body, deadline=clock.t + pcm.JOB_DEADLINE_S, clock=clock, render=slow)
+
+
+def derive_fast(body):
+    """derive_atlases with the fast stand-in renderer and a clock that never
+    moves (T53's control)."""
+    clock = StepClock()
+    return _DERIVE_ATLASES(spec(), {}, body, deadline=clock.t + pcm.JOB_DEADLINE_S, clock=clock,
+                           render=fake_render)
+
+
+def derive_fake_render(spec_, labels, container, *, deadline=None):
+    """main's derivation call drawn with the fast stand-in renderer (T60)."""
+    return _DERIVE_ATLASES(spec_, labels, container, deadline=deadline, render=fake_render)
+
+
+def derive_stamped(spec_, labels, container, *, deadline=None):
+    """main's derivation call answering, for each size, bytes stamped with
+    the size and the id of the process that ran it (S2F14's route test)."""
+    import os
+    return (b"stamp:card:%d" % os.getpid(), b"stamp:tile:%d" % os.getpid())
