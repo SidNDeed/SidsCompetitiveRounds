@@ -61,6 +61,7 @@ namespace CompetitiveRounds
             OvtCases(r);
             FfaCases(r);
             RobustnessCases(r);
+            OverlayCases(r);
             return r;
         }
 
@@ -188,6 +189,21 @@ namespace CompetitiveRounds
             bool num = Num("null", -1f) == -1f && Num(@"""5""", -1f) == -1f && Num("2.5", 0f) == 2.5f && Num("true", 0f) == 1f;
             Check(r, "a null or quoted scalar falls back, a number parses", num,
                   Num("null", -1f).ToString(INV) + "," + Num(@"""5""", -1f).ToString(INV) + "," + Num("2.5", 0f).ToString(INV));
+        }
+
+        // -- board row 30b: the page's search fields under the report -------------
+
+        private static void OverlayCases(SelfTestResult r)
+        {
+            bool open = SearchFieldMayDraw(true, true, true);
+            Check(r, "overlay: an open report stands a search field down", !open, "report open -> " + open);
+            bool shown = SearchFieldMayDraw(true, true, false);
+            Check(r, "overlay (control): report closed, page open, field on its surface -> it draws", shown,
+                  "report closed -> " + shown);
+            bool off = SearchFieldMayDraw(true, false, false);
+            Check(r, "overlay: a field off its surface stays down", !off, "off its surface -> " + off);
+            bool shut = SearchFieldMayDraw(false, true, false);
+            Check(r, "overlay: the page closed keeps a field down", !shut, "page closed -> " + shut);
         }
 
         // -- helpers -------------------------------------------------------------

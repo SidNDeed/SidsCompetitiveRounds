@@ -266,9 +266,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[sessionreport\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The suite ran 31 cases on the commit that added it; the floor is that
-    # count (#342). Raise it when cases are added.
-    assert run >= 31, "the SessionReportRules suite shrank to %d cases" % run
+    # The suite ran 31 cases on the commit that added it and 35 once board
+    # row 30b added the overlay rule's cases; the floor is that count (#342).
+    # Raise it when cases are added.
+    assert run >= 35, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -296,6 +297,19 @@ def test_the_session_report_parse_has_a_case_per_kind(harness_run, name):
     assert line.startswith("[sessionreport] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)
+
+
+@pytest.mark.parametrize("name", [
+    "overlay: an open report stands a search field down",
+    "overlay (control): report closed, page open, field on its surface -> it draws",
+    "overlay: a field off its surface stays down",
+    "overlay: the page closed keeps a field down",
+])
+def test_the_search_fields_stand_down_under_the_report(harness_run, name):
+    """Board row 30b: SessionReportRules.SearchFieldMayDraw, executed; every
+    F5 search field asks it (test_session_report_overlay_guard.py)."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
 
 
 def test_the_binder_order_is_total_under_every_mode_the_button_offers(harness_run):

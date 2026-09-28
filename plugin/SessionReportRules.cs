@@ -435,6 +435,22 @@ namespace CompetitiveRounds
             return float.TryParse(t, NumberStyles.Float, INV, out v) ? v : fallback;
         }
 
+        // -- board row 30b: the page's IMGUI search fields and the report --------
+
+        /// <summary>Whether one of the F5 page's IMGUI search fields (Compare,
+        /// Leaderboard, Card Stats, Info, History, the metric picker's field,
+        /// the admin player search) may paint and take input this frame.
+        /// IMGUI stacks by call order and those fields are drawn AFTER the
+        /// report in CompetitiveUI.DrawUI, so while the report is open a field
+        /// painted over it and a focused one kept taking keystrokes. Every
+        /// field now stands down instead: it neither paints nor takes input,
+        /// and its focus flag (the T-chat mutex) stays false. `onItsSurface` is
+        /// the field's own gate (its tab, the picker open, the modal open). The
+        /// uGUI overlay-canvas pattern does not apply: IMGUI paints above every
+        /// canvas (TmpOverlayPanel.cs).</summary>
+        internal static bool SearchFieldMayDraw(bool pageOpen, bool onItsSurface, bool reportOpen)
+            => pageOpen && onItsSurface && !reportOpen;
+
         // -- series maths (pure) -----------------------------------------------
 
         /// <summary>Value of a cumulative series at time x: 0 at or before the

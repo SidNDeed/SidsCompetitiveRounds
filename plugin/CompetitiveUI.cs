@@ -435,7 +435,12 @@ namespace CompetitiveRounds
                 DrawCardHoverTooltip();
                 DrawScoreHoverGraph();
                 DrawFpsHoverGraph();
-                SessionReportView.Draw();   // Sept 6 item c: above the F5 hover popups, below the search overlays
+                // Sept 6 item c: above the F5 hover popups. The search fields below
+                // are painted AFTER it (IMGUI stacks by call order), so since board
+                // row 30b each of them - and the picker's field and the admin player
+                // search further down - stands down while the report is open: no
+                // paint, no input, focus flag false (SessionReportRules.SearchFieldMayDraw).
+                SessionReportView.Draw();
                 DrawCompareSearch();
                 DrawLeaderboardSearch();
                 DrawCardStatsSearch();   // Aug 31 — Card Stats card search
@@ -1961,7 +1966,7 @@ namespace CompetitiveRounds
             compareSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 9) return;
+                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 9, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetCompareSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2018,7 +2023,7 @@ namespace CompetitiveRounds
             pickerSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || !NativeUI.PickerOpen) return;
+                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.PickerOpen, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetPickerSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (pickerSearchStyle == null)
@@ -2050,7 +2055,7 @@ namespace CompetitiveRounds
             lbSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 1) return;
+                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 1, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetLbSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2085,7 +2090,7 @@ namespace CompetitiveRounds
             cardStatsSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 2) return;
+                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 2, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetCardStatsSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2122,7 +2127,7 @@ namespace CompetitiveRounds
             infoSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 15) return;
+                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 15, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetInfoSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -2162,7 +2167,7 @@ namespace CompetitiveRounds
             histSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 0) return;
+                if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 0, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetHistorySearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -4777,6 +4782,9 @@ namespace CompetitiveRounds
         {
             if (!playerSearchOpen) return;
             if (!NativeUI.IsOpen) { playerSearchOpen = false; playerSearchOnPick = null; return; }
+            // Board row 30b: under an open session report the search modal stands
+            // down (it stays open and comes back when the report closes).
+            if (!SessionReportRules.SearchFieldMayDraw(NativeUI.IsOpen, playerSearchOpen, SessionReportView.Active)) return;
             var ev = Event.current;
             bool cancel = false;
             if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { cancel = true; ev.Use(); }
