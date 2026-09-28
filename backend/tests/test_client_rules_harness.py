@@ -603,7 +603,8 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "Main.cs" in included
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
-                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs"):
+                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
+                      "plugin/RoomRulesStrip.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -612,3 +613,39 @@ def test_the_harness_compiles_only_the_rule_files():
     plugin_proj = (REPO / "plugin" / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
     assert "TitleLadderRulesSelfTest" not in plugin_proj
     assert not (REPO / "plugin" / "TitleLadderRulesSelfTest.cs").exists()
+
+
+# -- v1.41.0 item 22: the standing room-rules strip's line ----------------------
+
+def test_the_room_rules_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "roomrules" in suites, "the RoomRulesStrip suite did not report"
+    run, fail, verdict = suites["roomrules"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[roomrules\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 12 cases on the commit that added it (#342: a floor far
+    # below the real count is a gate that cannot fail).
+    assert run >= 12, "the RoomRulesStrip suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    "default rules paint nothing",
+    "same cards alone names same cards",
+    "a fell-back dealer alone says same cards is off",
+    "friendly fire off alone names friendly fire",
+    "friendly fire off with same cards names both",
+    "friendly fire off with a fell-back dealer names both",
+    "every non-default pair has its own line",
+    "friendly fire is named exactly when it is off",
+    "the cfg key off hides every line",
+    "the cfg key on paints every line but None",
+    "only the fell-back lines are amber",
+    "the same-cards-only chooser says nothing for a friendly-fire-off room (control)",
+])
+def test_the_room_rules_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "roomrules")
+    assert line.startswith("[roomrules] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)

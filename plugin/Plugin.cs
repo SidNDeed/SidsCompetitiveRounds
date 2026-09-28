@@ -58,6 +58,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<int> BroadcastFpsCap;
         internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
+        internal static ConfigEntry<bool> ShowRoomRulesIndicator;   // [UI] item 22: the standing room-rules strip, default on
         internal static ConfigEntry<bool> ShowInactiveOnBoards;   // [UI] item d: default off -- boards hide players inactive 90+ days
         internal static ConfigEntry<bool> LagNoticesEnabled;   // [Network] LagNotices — Release B §4, default off
         // [Data] AutoLogUpload — v1.41.0 item (a). Opt-IN, default off. Named
@@ -180,6 +181,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
+        internal static ConfigEntry<string> BroadcastTestRoomRules;     // broadcast seat only, offline: latch a rules pair (ff=X;sc=Y) so the standing room-rules strip can be verified
         internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
@@ -664,6 +666,17 @@ namespace CompetitiveRounds
                 "UI", "ShowRegionPing",
                 true,
                 "Show Photon ping and region alongside FPS when in a room"
+            );
+
+            // v1.41.0 item 22: the standing room-rules strip names every
+            // game-changing rule a room plays for the whole game. A NEW key with
+            // a TRUE default: Config.Bind writes a default once (#190), so every
+            // install, existing and fresh, shows the strip until the player
+            // turns it off here. Hides the strip only, never the game-start toast.
+            ShowRoomRulesIndicator = Config.Bind(
+                "UI", "ShowRoomRulesIndicator",
+                true,
+                "Show the small top-centre line naming the room's rules (friendly fire off, same cards) for the whole game. The game-start notice is not affected."
             );
 
             // Sept 6 item d: a NEW key with a false default -- Config.Bind writes a
@@ -1162,6 +1175,9 @@ namespace CompetitiveRounds
             BroadcastTestDance = Config.Bind(
                 "Broadcast", "TestDance", "",
                 "Broadcast seat only. 'wheel' pins the dance wheel open, 'preview:<sku>' toggles the shop puppet, 'play:<idx>' dev-installs a dance on the local sandbox body (offline only). Empty closes the wheel + puppet; an installed play simply expires on its own.");
+            BroadcastTestRoomRules = Config.Bind(
+                "Broadcast", "TestRoomRules", "",
+                "Broadcast seat only, outside any online room: a rules pair in the room grammar (ff=0;sc=1, ff=0;sc=0, ff=1;sc=1) latches those rules on this seat so the standing room-rules strip can be checked with nobody at the seat; logged as [ROOM-RULES] test lever lines. Applied once per distinct value; empty releases a latch this lever made. Refused inside a room.");
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
@@ -2606,6 +2622,31 @@ namespace CompetitiveRounds
             else CompetitiveUI.DevReleaseQuickChatWheel();
         }
 
+        // [Broadcast] TestRoomRules (v1.41.0 item 22): latch a rules pair on the
+        // broadcast seat, OFFLINE only, so the standing room-rules strip paints
+        // with nobody at the seat. One application per distinct value; the value
+        // present at startup is applied too (unlike the sentinels, it runs no
+        // test, it only sets a state). Empty releases a latch this lever made
+        // and never one a room made (RoomRules.DevReleaseTest checks the source).
+        private static string _lastTestRoomRules;
+        private void TickTestRoomRules()
+        {
+            if (Plugin.BroadcastTestRoomRules == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestRoomRules.Value ?? "").Trim();
+            if (raw == _lastTestRoomRules) return;
+            _lastTestRoomRules = raw;
+            if (raw.Length == 0)
+            {
+                bool released = RoomRules.DevReleaseTest();
+                Plugin.Log.LogInfo("[ROOM-RULES] test lever: cleared (released=" + released + ")");
+                return;
+            }
+            bool ok = RoomRules.DevLatchForTest(raw);
+            Plugin.Log.LogInfo("[ROOM-RULES] test lever: '" + raw + "' "
+                + (ok ? "latched ff=" + (RoomRules.FriendlyFire ? 1 : 0) + " sc=" + (RoomRules.SameCards ? 1 : 0)
+                      : "refused (inside a room, or not the ff=X;sc=Y grammar)"));
+        }
+
         // ── [Broadcast] TestDance: headless dance verification (Aug 31 item 5) ──
         // "wheel" pins the E wheel open over ALL defined dances (layout
         // screenshot; sends still refuse unowned). "preview:<sku>" toggles
@@ -3094,6 +3135,7 @@ namespace CompetitiveRounds
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }
+            try { TickTestRoomRules(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)

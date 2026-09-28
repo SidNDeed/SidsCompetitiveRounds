@@ -2975,6 +2975,9 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Reglas de sala: fuego amigo DESACTIVADO",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Reglas de sala: fuego amigo DESACTIVADO, mismas cartas para todos",
             ["Room rules: same cards for everyone"] = "Reglas de sala: mismas cartas para todos",
+            // Added 2026-09-28 (v1.41.0 item 22): the standing strip's line when
+            // friendly fire is off and the dealer fell back to private rolls.
+            ["Room rules: friendly fire OFF, same cards is off this game"] = "Reglas de sala: fuego amigo DESACTIVADO, mismas cartas desactivada en esta partida",
 
             // Added 2026-09-20: item 20, the binder's rating-position sort.
             // The wiki block is its own key, composed into the "Reading a card"
@@ -5944,6 +5947,9 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Правила комнаты: огонь по своим ВЫКЛ",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Правила комнаты: огонь по своим ВЫКЛ, одинаковые карты у всех",
             ["Room rules: same cards for everyone"] = "Правила комнаты: одинаковые карты у всех",
+            // Added 2026-09-28 (v1.41.0 item 22): the standing strip's line when
+            // friendly fire is off and the dealer fell back to private rolls.
+            ["Room rules: friendly fire OFF, same cards is off this game"] = "\u041f\u0440\u0430\u0432\u0438\u043b\u0430 \u043a\u043e\u043c\u043d\u0430\u0442\u044b: \u043e\u0433\u043e\u043d\u044c \u043f\u043e \u0441\u0432\u043e\u0438\u043c \u0412\u042b\u041a\u041b, \u043e\u0434\u0438\u043d\u0430\u043a\u043e\u0432\u044b\u0435 \u043a\u0430\u0440\u0442\u044b \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0432 \u044d\u0442\u043e\u0439 \u0438\u0433\u0440\u0435",
 
             // Added 2026-09-20: item 20, the binder's rating-position sort.
             // The wiki block is its own key, composed into the "Reading a card"
@@ -8839,6 +8845,9 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Правила кімнати: вогонь по своїх ВИМК",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Правила кімнати: вогонь по своїх ВИМК, однакові карти у всіх",
             ["Room rules: same cards for everyone"] = "Правила кімнати: однакові карти у всіх",
+            // Added 2026-09-28 (v1.41.0 item 22): the standing strip's line when
+            // friendly fire is off and the dealer fell back to private rolls.
+            ["Room rules: friendly fire OFF, same cards is off this game"] = "\u041f\u0440\u0430\u0432\u0438\u043b\u0430 \u043a\u0456\u043c\u043d\u0430\u0442\u0438: \u0432\u043e\u0433\u043e\u043d\u044c \u043f\u043e \u0441\u0432\u043e\u0457\u0445 \u0412\u0418\u041c\u041a, \u043e\u0434\u043d\u0430\u043a\u043e\u0432\u0456 \u043a\u0430\u0440\u0442\u0438 \u0432\u0438\u043c\u043a\u043d\u0435\u043d\u043e \u0432 \u0446\u0456\u0439 \u0433\u0440\u0456",
 
             // Added 2026-09-20: item 20, the binder's rating-position sort.
             // The wiki block is its own key, composed into the "Reading a card"
@@ -11734,6 +11743,9 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Rumsregler: friendly fire AV",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Rumsregler: friendly fire AV, samma kort för alla",
             ["Room rules: same cards for everyone"] = "Rumsregler: samma kort för alla",
+            // Added 2026-09-28 (v1.41.0 item 22): the standing strip's line when
+            // friendly fire is off and the dealer fell back to private rolls.
+            ["Room rules: friendly fire OFF, same cards is off this game"] = "Rumsregler: friendly fire AV, samma kort \u00e4r avst\u00e4ngt den h\u00e4r matchen",
 
             // Added 2026-09-20: item 20, the binder's rating-position sort.
             // The wiki block is its own key, composed into the "Reading a card"

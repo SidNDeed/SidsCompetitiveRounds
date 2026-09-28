@@ -47,6 +47,13 @@
                         partial class), so the shipped DLL carries no ladder
                         fixture.
 
+      RoomRulesStrip.cs     which line the standing room-rules strip paints
+                        (v1.41.0 item 22): friendly fire when it is off,
+                        the same-cards state when the room has the rule,
+                        both in one line, and nothing when the player's
+                        cfg key hides it. The negative control is the
+                        same-cards-only chooser the strip had before.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -75,6 +82,7 @@
     <Compile Include="../../plugin/BinderSortRules.cs" />
     <Compile Include="../../plugin/TitleLadderRules.cs" />
     <Compile Include="TitleLadderRulesSelfTest.cs" />
+    <Compile Include="../../plugin/RoomRulesStrip.cs" />
   </ItemGroup>
 
 </Project>
