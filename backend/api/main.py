@@ -26365,10 +26365,10 @@ async def _pc_snapshot_janitor_step() -> None:
         # older than a day can never be replayed (its session proof expired).
         await db.execute(text("DELETE FROM pc_delivery_leases WHERE until < NOW() - INTERVAL '1 hour'"))
         await db.execute(text("DELETE FROM pc_portrait_nonces WHERE used_at < NOW() - INTERVAL '1 day'"))
-        # The batch shard's idempotency rows (migration 360) after 30 days: a
+        # The batch shard's idempotency rows (migration 361) after 30 days: a
         # print pays at most once whatever survives here (its discard is
         # conditional), so a replay past the window answers not_owned and
-        # still credits nothing. Skipped only while 360 has not run.
+        # still credits nothing. Skipped only while 361 has not run.
         if (await db.execute(text("SELECT to_regclass('pc_shard_batches') IS NOT NULL"))).scalar_one_or_none():
             await db.execute(text("DELETE FROM pc_shard_batches WHERE created_at < NOW() - INTERVAL '30 days'"))
         # Released portrait blobs (Steam pictures v2 §6): deleted only after
@@ -27119,7 +27119,7 @@ async def pc_discard_batch(
       * each print's conditional discard at its rarity's value, their
         delivery leases dropped, ONE delta credit of the total (never an
         absolute write, #326) and the key's row, committed together.
-    503 shard_batch_unavailable while migration 360 has not run on this box
+    503 shard_batch_unavailable while migration 361 has not run on this box
     (checked before the first lock or write)."""
     key = body.key or ""
     ids = [str(x) for x in (body.print_ids or [])]
@@ -37129,9 +37129,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         print(f"[PC-LEASE] deletion waited {waited:.1f}s for the lines in flight naming the player")
     await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_prints WHERE owner_player_id = :pid"), {"pid": pid})
-    # The batch shard's idempotency record (migration 360), by name: this row
+    # The batch shard's idempotency record (migration 361), by name: this row
     # is anonymised, never deleted, so the table's ON DELETE CASCADE never
-    # fires (#437). Skipped only while 360 has not run (no table, no rows).
+    # fires (#437). Skipped only while 361 has not run (no table, no rows).
     if (await db.execute(text("SELECT to_regclass('pc_shard_batches') IS NOT NULL"))).scalar_one_or_none():
         await db.execute(text("DELETE FROM pc_shard_batches WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})

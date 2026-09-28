@@ -4,7 +4,7 @@ a real PostgreSQL.
 POST /api/v1/pc/prints/discard-batch discards up to
 player_cards.PC_DISCARD_BATCH_CAP prints of the caller's in one transaction,
 pays each by the rarity table, credits the total as ONE delta, and records
-its idempotency key (migration 360) so a replay answers the same total and
+its idempotency key (migration 361) so a replay answers the same total and
 credits nothing. Both discard routes pass one refusal gate
 (main._pc_discard_gate). The harness below is also the one
 test_pc_settings_preview (board row 24) imports.
@@ -15,11 +15,11 @@ break each rule in turn on a copy of the tree and record the named test's
 red output; the tests never know which mutant is applied.
 
 THE DATABASE. One schema, pc_shard_t, in the database PC_SHARD_TEST_PG_DSN
-names. Every migration numbered below 360 is replayed into it statement by
+names. Every migration numbered below 361 is replayed into it statement by
 statement (each file's own transaction honoured; a statement that fails on
 an empty database is recorded, not fatal), the ORM creates the tables no
 migration creates, the replay runs again, the ORM's missing columns are
-added, and 360 is applied whole. The build is reused while the migrations,
+added, and 361 is applied whole. The build is reused while the migrations,
 models.py and this harness are unchanged and the schema still fingerprints
 as built. Before the schema is dropped the harness refuses when an object
 outside pc_shard_t depends on one inside it (what DROP SCHEMA ... CASCADE
@@ -88,8 +88,8 @@ SCHEMA = "pc_shard_t"
 HARNESS_TABLE = "pc_shard_harness"
 HARNESS_VERSION = "1"
 SQL_DIR = BACKEND / "sql"
-MIGRATION = SQL_DIR / "360_pc_shard_batches.sql"
-MIGRATION_NUMBER = 360
+MIGRATION = SQL_DIR / "361_pc_shard_batches.sql"
+MIGRATION_NUMBER = 361
 
 SECRET = "pc-shard-test-mod-secret"
 INTERNAL_KEY = "pc-shard-test-internal-key"
@@ -110,9 +110,9 @@ def _require_pg():
                     "deliberately waived for this run." % (DSN_VAR, OPTOUT_VAR))
     if asyncpg is None:
         pytest.fail("asyncpg is not installed, so no discard route ran against migration "
-                    "360. Install it, or set %s=1 to waive the coverage." % OPTOUT_VAR)
+                    "361. Install it, or set %s=1 to waive the coverage." % OPTOUT_VAR)
     pytest.fail(
-        "%s is unset, so neither discard route, the batch idempotency record (migration 360) "
+        "%s is unset, so neither discard route, the batch idempotency record (migration 361) "
         "nor the Settings preview route ran against a server -- the subject of this file. "
         "Point it at a throwaway database (see the module docstring), or set %s=1 to waive "
         "the coverage deliberately." % (DSN_VAR, OPTOUT_VAR))
@@ -428,10 +428,10 @@ async def _build():
         await _orm(_orm_columns)
         fp_pre = await _fingerprint(conn)
         assert await conn.fetchval("SELECT to_regclass('pc_shard_batches') IS NULL"), (
-            "pc_shard_batches exists before 360 ran: the ORM or an earlier file creates it")
+            "pc_shard_batches exists before 361 ran: the ORM or an earlier file creates it")
         await conn.execute(MIGRATION.read_text(encoding="utf-8"))
         fp_full = await _fingerprint(conn)
-        assert fp_full != fp_pre, "360 changed nothing"
+        assert fp_full != fp_pre, "361 changed nothing"
         empty = []
         for t in await _tables(conn):
             if not await conn.fetchval('SELECT EXISTS (SELECT 1 FROM "%s"."%s")' % (SCHEMA, t)):
@@ -449,7 +449,7 @@ async def _restore(conn, build):
     if await _fingerprint(conn) == build["fp_full"]:
         return
     await conn.execute(MIGRATION.read_text(encoding="utf-8"))
-    assert await _fingerprint(conn) == build["fp_full"], "re-running 360 did not restore the full schema"
+    assert await _fingerprint(conn) == build["fp_full"], "re-running 361 did not restore the full schema"
 
 
 _DRAWN_SEQUENCES_SQL = """
@@ -467,7 +467,7 @@ _DRAWN_SEQUENCES_SQL = """
 
 async def _reset(build):
     """Every table that was empty at build empty again, the sequences they
-    own restarted, the schema full (360 re-run if a test removed it)."""
+    own restarted, the schema full (361 re-run if a test removed it)."""
     conn = await _connect("reset")
     try:
         await _restore(conn, build)
@@ -913,7 +913,7 @@ def test_a_single_discard_racing_a_batch_over_the_same_print_pays_once(env):
 
 
 def test_a_missing_table_answers_503_before_any_lock_or_write(env):
-    """Migration 360 not run on this box (the table dropped for the test and
+    """Migration 361 not run on this box (the table dropped for the test and
     restored by the next reset): 503 shard_batch_unavailable, no players
     lock, nothing discarded (rule R9)."""
     async def body(ctx):

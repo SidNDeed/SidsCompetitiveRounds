@@ -1,4 +1,4 @@
--- 360: pc_shard_batches -- the idempotency record of the batch shard route
+-- 361: pc_shard_batches -- the idempotency record of the batch shard route
 -- (board row 25, whole-pack quick shard): POST /api/v1/pc/prints/discard-batch.
 --
 -- The route discards up to player_cards.PC_DISCARD_BATCH_CAP prints of the
@@ -71,10 +71,10 @@ CREATE INDEX IF NOT EXISTS ix_pc_shard_batches_created ON pc_shard_batches (crea
 DO $$
 BEGIN
     IF to_regclass('pc_shard_batches') IS NULL THEN
-        RAISE EXCEPTION '360: pc_shard_batches was not created';
+        RAISE EXCEPTION '361: pc_shard_batches was not created';
     END IF;
     IF to_regclass('pc_shard_batches_pkey') IS NULL OR to_regclass('ix_pc_shard_batches_created') IS NULL THEN
-        RAISE EXCEPTION '360: an index of pc_shard_batches is missing';
+        RAISE EXCEPTION '361: an index of pc_shard_batches is missing';
     END IF;
 END $$;
 
