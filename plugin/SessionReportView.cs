@@ -82,6 +82,8 @@ namespace CompetitiveRounds
             gen++;
             int g = gen;
             Active = true;
+            openSelector = selector;
+            openKey = key;
             loading = true;
             errorText = null;
             model = null;
@@ -139,12 +141,58 @@ namespace CompetitiveRounds
             Active = false;
             loading = false;
             errorText = null;
+            openSelector = null;
+            openKey = null;
+            devPage = -1;
             model = null;
             page = 0;
             buildPages = 1;
         }
 
         // ── drawing ──────────────────────────────────────────────────────────
+
+        // -- the witness lever (board row 30f) ----------------------------------
+
+        /// <summary>The set the view was opened on (selector and key as given),
+        /// so the lever turns the page of the open set instead of fetching it
+        /// again; null when closed.</summary>
+        private static string openSelector, openKey;
+        /// <summary>The page (0-based) the lever asked for, applied by the next
+        /// Draw once the model is built and the build pages are measured; -1
+        /// when none is pending.</summary>
+        private static int devPage = -1;
+
+        /// <summary>[Broadcast] TestSessionReport (Plugin.TickTestSessionReport,
+        /// broadcast identity only, the F5 page open): "close" closes the
+        /// report; "selector:key[:page]" opens that set unless it is the one
+        /// already open, then asks for the 1-based page (default 1).</summary>
+        internal static void DevDirective(string raw)
+        {
+            string v = (raw ?? "").Trim();
+            if (string.Equals(v, "close", StringComparison.OrdinalIgnoreCase))
+            {
+                Close();
+                Plugin.Log.LogInfo("[SESSION-REPORT] test lever: closed");
+                return;
+            }
+            string[] parts = v.Split(':');
+            if (parts.Length < 2 || parts.Length > 3)
+            {
+                Plugin.Log.LogWarning("[SESSION-REPORT] test lever: expected selector:key[:page] or close");
+                return;
+            }
+            string sel = parts[0].Trim(), key = parts[1].Trim();
+            int want = 1;
+            if (parts.Length == 3 && (!int.TryParse(parts[2].Trim(), NumberStyles.Integer, INV, out want) || want < 1))
+            {
+                Plugin.Log.LogWarning("[SESSION-REPORT] test lever: the page is a whole number from 1");
+                return;
+            }
+            bool same = Active && sel == openSelector && key == openKey;
+            if (!same) NativeUI.OpenSessionReport(sel, key);
+            devPage = want - 1;
+            Plugin.Log.LogInfo("[SESSION-REPORT] test lever: " + (same ? "" : "opened " + sel + " " + key + ", ") + "page " + want + " asked");
+        }
 
         public static void Draw()
         {
@@ -169,6 +217,12 @@ namespace CompetitiveRounds
                 // before the builds are ever visited, and a resize can never leave
                 // the current page past the end.
                 if (model != null) MeasureBuildPages(body, model);
+                if (devPage >= 0 && model != null)
+                {
+                    page = Mathf.Clamp(devPage, 0, PageCount() - 1);
+                    devPage = -1;
+                    Plugin.Log.LogInfo("[SESSION-REPORT] test lever: showing page " + (page + 1) + "/" + PageCount());
+                }
                 page = Mathf.Clamp(page, 0, PageCount() - 1);
                 if (loading) GUI.Label(body, I18n.Tr("Loading..."), stCenter);
                 else if (model == null) GUI.Label(body, ErrorMessage(errorText), stCenter);

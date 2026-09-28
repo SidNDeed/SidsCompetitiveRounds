@@ -1869,3 +1869,42 @@ def test_the_watched_set_lever_replays_a_recorded_set_through_the_pipeline():
     assert "!BroadcastMode.IsBroadcastIdentity" in lever and "PostSessionReport.DevWatchSet(raw);" in lever
     assert "if (_lastTestWatchedSet == null) { _lastTestWatchedSet = raw; return; }" in lever
     assert strip_comments_only(plugin.read_text(encoding="utf-8")).count("try { TickTestWatchedSet(); } catch { }") == 1
+
+
+# -- board row 30f: the witness lever -------------------------------------------
+
+
+def test_the_witness_lever_opens_a_set_at_a_page():
+    """[Broadcast] TestSessionReport opens the F5 session report on a set and
+    turns it to a page for the in-game witness (the history row's Session
+    button is a click the witness cannot give the overlay, #420): broadcast
+    identity only, a NEW value only, and a value that arrives while the F5
+    page is closed waits for it instead of being spent."""
+    plugin = PLUGIN / "Plugin.cs"
+    lever = _cs_body(plugin, "private void TickTestSessionReport()")
+    assert "!BroadcastMode.IsBroadcastIdentity" in lever
+    assert "if (_lastTestSessionReport == null) { _lastTestSessionReport = raw; return; }" in lever
+    wait = lever.index("if (raw.Length > 0 && !NativeUI.IsOpen) return;")
+    assert lever.index("_lastTestSessionReport = raw;", wait) > wait, "the value is spent only once the page is open"
+    assert lever.index("SessionReportView.DevDirective(raw);") > wait
+    whole = strip_comments_only(plugin.read_text(encoding="utf-8"))
+    assert whole.count("try { TickTestSessionReport(); } catch { }") == 1
+    assert '"Broadcast", "TestSessionReport", "",' in whole
+
+
+def test_the_lever_turns_the_open_sets_page_after_the_measure():
+    view = PLUGIN / "SessionReportView.cs"
+    d = _cs_body(view, "internal static void DevDirective(string raw)")
+    assert "Close();" in d
+    assert "bool same = Active && sel == openSelector && key == openKey;" in d
+    assert "if (!same) NativeUI.OpenSessionReport(sel, key);" in d
+    assert d.index("NativeUI.OpenSessionReport(sel, key)") < d.index("devPage = want - 1;"), "Open resets the page: the ask comes after it"
+    draw = _cs_body(view, "public static void Draw()")
+    measure = draw.index("MeasureBuildPages(body, model)")
+    apply = draw.index("if (devPage >= 0 && model != null)")
+    clamp = draw.index("page = Mathf.Clamp(page, 0, PageCount() - 1);")
+    assert measure < apply < clamp, "the page is asked of the measured count and still clamped"
+    op = _cs_body(view, "public static void Open(string selector, string key)")
+    assert "openSelector = selector;" in op and "openKey = key;" in op
+    cl = _cs_body(view, "public static void Close()")
+    assert "devPage = -1;" in cl and "openSelector = null;" in cl

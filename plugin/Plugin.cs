@@ -184,6 +184,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestShowcase;         // broadcast seat only -- any new value plays one showcase rotation with the stream-live gate lifted
         internal static ConfigEntry<float> BroadcastSessionReportPageSeconds; // broadcast seat only -- board row 30g: the post-set session report's dwell per page
         internal static ConfigEntry<string> BroadcastTestWatchedSet;       // broadcast seat only -- a NEW spectate game id replays that recorded set through the post-set report
+        internal static ConfigEntry<string> BroadcastTestSessionReport;    // broadcast seat only -- "<selector>:<key>[:<page>]" opens that set's F5 session report at a page; "close" closes it
         internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
@@ -1178,6 +1179,9 @@ namespace CompetitiveRounds
             BroadcastTestWatchedSet = Config.Bind(
                 "Broadcast", "TestWatchedSet", "",
                 "Broadcast seat only: set to a NEW spectate game id (a UUID) to replay that recorded set through the post-set report as if the director had just watched it (the server's report status, the settle, the fetches, the session report and its pages), even when the stream is not live. A value present at startup never runs.");
+            BroadcastTestSessionReport = Config.Bind(
+                "Broadcast", "TestSessionReport", "",
+                "Broadcast seat only: set to a NEW '<selector>:<key>' (selector sitting, series, match, session or lobby; key the UUID a history row carries) to open that set's session report on the open F5 page; add ':<page>' (1 is the first page) to show that page, and the same set with another page only turns the page. 'close' closes the report and leaves the F5 page open. A value set while the F5 page is closed waits for it (TestOpenTab opens it). A value present at startup never runs.");
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
@@ -2693,6 +2697,26 @@ namespace CompetitiveRounds
             PostSessionReport.DevWatchSet(raw);
         }
 
+        // Board row 30f: [Broadcast] TestSessionReport - the F5 session report
+        // opened on a set and turned to a page for the in-game witness: the
+        // history row's Session button is a click the witness cannot give the
+        // overlay (#420), and a named page ties each screenshot to its page.
+        // The levers' identity gate and new-value grammar; a value that arrives
+        // while the F5 page is closed waits for it instead of being spent.
+        private static string _lastTestSessionReport;
+        private void TickTestSessionReport()
+        {
+            if (Plugin.BroadcastTestSessionReport == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestSessionReport.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestSessionReport == null) { _lastTestSessionReport = raw; return; }
+            if (raw == _lastTestSessionReport) return;
+            if (raw.Length > 0 && !NativeUI.IsOpen) return;   // wait for the F5 page
+            _lastTestSessionReport = raw;
+            if (raw.Length == 0) return;
+            NativeUI.ReleaseShowcaseOwnership();   // as TestOpenTab: the lever takes the page over from the showcase
+            SessionReportView.DevDirective(raw);
+        }
+
         // ── [Broadcast] TestSilence: headless silence-indicator verification ──
         // Sets data.silenceTime on a sandbox bot and lets vanilla
         // SilenceHandler.Update discover it — the same code path a real
@@ -3145,6 +3169,7 @@ namespace CompetitiveRounds
             try { TickTestDance(); } catch { }
             try { TickTestShowcase(); } catch { }
             try { TickTestWatchedSet(); } catch { }
+            try { TickTestSessionReport(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)
