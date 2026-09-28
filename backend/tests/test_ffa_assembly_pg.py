@@ -3943,6 +3943,10 @@ def test_s54_the_lock_deadline_ordered(monkeypatch):
             age = _age_ms(env, await env.ts(lob, 0))
             seat0 = await env.seat(lob, 0)
             sess, db, apid = await _s54_closer(env, lob)
+            # B's route prints its slow_commit line, with its own pre-COMMIT
+            # time, on every answer while the threshold is below zero.
+            slow_ms = main.ASM_SLOW_COMMIT_MS
+            env.mp.setattr(main, "ASM_SLOW_COMMIT_MS", -1)
             try:
                 t0 = _rt.monotonic()
                 task = asyncio.ensure_future(env.census_of(lob, 0, [0, 1, 2, 3], seen_age_ms=age))
@@ -3953,16 +3957,26 @@ def test_s54_the_lock_deadline_ordered(monkeypatch):
                 await sess.__aexit__(None, None, None)
             a = await task
             dt = _rt.monotonic() - t0
+            env.mp.setattr(main, "ASM_SLOW_COMMIT_MS", slow_ms)
+            slow = [dict(kv.split("=", 1) for kv in ln.split() if "=" in kv) for ln in
+                    env.asm_lines("lobby %s slow_commit route=assembly" % str(lob.lid)[:8])]
             row = await env.lobby_row(lob)
             after0 = await env.seat(lob, 0)
             assert n >= 1, (tag + " waits", n)
             assert row["start_granted_at"] is None and row["short_started_at"] is None \
                 and row["status"] != "active", (tag + " no grant", row["status"])
             if tag == "S54 ii" or a.status == 200:
-                assert a.status == 200 and a["status"] == "dissolved" and dt < 3.0, \
-                    (tag + " answer", a, dt)
+                # "Inside the deadline" (V11:2878) is B's own pre-COMMIT time, the
+                # quantity _asm_run bounds by ASM_TXN_DEADLINE_S. The wall clock
+                # also holds the COMMIT and the transport, which nothing bounds
+                # (R39), so it bounds (ii) only, where A's 1 s hold leaves the
+                # margin; at (iii)'s 2.9 s hold it read 3.016 s and 3.171 s on 200
+                # answers under this seat's load.
+                assert a.status == 200 and a["status"] == "dissolved" and len(slow) == 1 \
+                    and int(slow[0]["pre_ms"]) <= main.ASM_TXN_DEADLINE_S * 1000 \
+                    and (tag != "S54 ii" or dt < 3.0), (tag + " answer", a, dt, slow)
             else:
-                assert a.status == 503 and a.body == {"error": "asm_deadline"} and \
+                assert a.status == 503 and a.body == {"error": "asm_deadline"} and not slow and \
                     (after0["writes"], after0["census_at"]) == (seat0["writes"], seat0["census_at"]), \
                     (tag + " no write", a)
     run_env(monkeypatch, body)
