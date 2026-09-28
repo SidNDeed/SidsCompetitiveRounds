@@ -282,6 +282,24 @@ def test_d1_the_identity_lock_is_taken_before_the_claim(monkeypatch, tmp_path):
     e2e(monkeypatch, tmp_path, body, record_app_sql=True)
 
 
+def test_d1_a_service_account_opens_nothing(monkeypatch, tmp_path):
+    """The service check the mod's door makes (_assert_no_service_subject, both
+    ids) is made by the bot's door too: a service account's held pack stays
+    unopened, and nothing is minted or attempted."""
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        monkeypatch.setattr(env.main, "SPECTATE_BROADCAST_STEAM_IDS", {own.steam})
+        monkeypatch.setattr(env.main, "_service_player_uuid_cache", None)
+        r = await open_internal(env, own.discord, pack_id)
+        assert r.status_code == 403 and r.json()["detail"] == "service_account_forbidden", r.text[:300]
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+        assert await minted(env, pack_id) == 0
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_open_attempts WHERE pack_id = CAST(:p AS uuid)",
+                             {"p": pack_id}) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
 # -- /daily in Discord, end to end ---------------------------------------------------------------
 
 def test_d1_daily_claims_opens_and_posts_the_pack_with_its_picture(monkeypatch, tmp_path):
@@ -566,6 +584,39 @@ def test_d2_two_purchases_racing_for_the_last_packs_worth_of_gold_charge_once(mo
     e2e(monkeypatch, tmp_path, body)
 
 
+def test_d2_an_erasure_between_the_lookup_and_the_lock_buys_nothing(monkeypatch, tmp_path):
+    """The account is erased after the route resolved its Discord id and before
+    the identity lock: the re-read under the lock (_pc_bot_actor) answers the
+    mod's 410, and nothing is written for the erased account - no pack row, no
+    print, no debit, no ledger row. The erasure removes the held packs, so a
+    purchase is the form that could still write."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        discord_id = own.discord
+        real = env.main._pc_player_by_discord
+        erased = []
+
+        async def lookup_then_erase(db, did):
+            player = await real(db, did)
+            if not erased:
+                erased.append(True)
+                await env.delete_data(own)
+            return player
+        monkeypatch.setattr(env.main, "_pc_player_by_discord", lookup_then_erase)
+        r = await buy_internal(env, discord_id, "d2-erased-" + secrets.token_hex(8), "gold")
+        assert erased and r.status_code == 410 and r.json()["detail"] == "Account deleted", (
+            r.status_code, r.text[:300])
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_packs WHERE player_id = CAST(:p AS uuid)",
+                             {"p": own.id}) == 0
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_prints WHERE owner_player_id = CAST(:p AS uuid)",
+                             {"p": own.id}) == 0
+        assert (await purse(env, own))["gold_spent"] == 0
+        assert [row for row in await ledger(env, own) if row["reason"] == "pc_pack"] == []
+    e2e(monkeypatch, tmp_path, body)
+
+
 # -- /buypack in Discord, end to end -------------------------------------------------------------
 
 async def buypack(rig, who_discord, pay="gold", ctx=None):
@@ -682,3 +733,42 @@ def test_d2_a_buypack_while_one_is_in_flight_buys_nothing_and_the_guard_always_c
             await buypack(rig, own.discord, "gold", ctx=ctx)
         assert rig.ns["_pc_buying"] == set()
     e2e(monkeypatch, tmp_path, body)
+
+
+# -- the refusal lines -----------------------------------------------------------------------------
+
+REFUSALS = [
+    (402, {"error": "insufficient_gold", "status": "rejected", "price": 100}, True,
+     "Not enough gold - a pack costs 100 gold. Nothing was charged."),
+    (402, {"error": "insufficient_shards", "status": "rejected", "price": 100}, True,
+     "Not enough shards - a pack costs 100 shards. Nothing was charged."),
+    (409, {"error": "daily_cap", "status": "rejected", "cap": 5}, True,
+     "Today's limit of bought packs is 5 - it resets at 00:00 UTC."),
+    (409, {"error": "pool_empty", "status": "rejected"}, True,
+     "the pack was not bought and nothing was charged."),
+    (409, {"error": "pool_empty", "status": "unopened"}, False,
+     "the pack stays yours, unopened; `/daily` tries again."),
+    (409, {"error": "in_progress"}, False, "That pack is being opened right now"),
+    (403, {"error": "banned"}, False, "Player Cards are closed to this account."),
+    (404, {"error": "not_linked"}, False, "Not linked."),
+    (503, {"error": "renderer_unavailable"}, False, "so nothing was opened - try again later."),
+    (0, None, True, "if the pack was bought, `/pack` shows it; look there before buying again."),
+    (0, None, False, "`/daily` again opens today's pack, or `/pack` shows it if it opened."),
+    (500, None, False, "Couldn't open the pack right now - try again in a moment."),
+]
+
+
+@pytest.mark.parametrize("status, detail, bought, line", REFUSALS)
+def test_d2_each_refusal_is_one_line_that_says_what_happened_to_the_pack(status, detail, bought, line):
+    """_pc_open_refusal: the line /daily and /buypack send when the api did not
+    open the pack, read by status and error token. The purchase lines are the
+    ones a player acts on with money: a refused purchase says nothing was
+    charged, and an unanswered one points at /pack before buying again. No
+    request is made."""
+    async def never(call):
+        raise AssertionError(f"no request expected: {call.method} {call.path}")
+    rig = H.BotRig(never, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
+    body = {"detail": detail} if detail is not None else None
+    got = rig.ns["_pc_open_refusal"](rig.ctx(H.discord_of(1)), status, body, bought=bought)
+    assert line in got, got
+    assert rig.calls == []
