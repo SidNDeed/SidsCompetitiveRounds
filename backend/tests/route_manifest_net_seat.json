@@ -3263,6 +3263,15 @@
           "603f83b9ae3573035776a843034f1f93883f9781"
         ],
         [
+          "/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_motion_preview",
+          "unpinned"
+        ],
+        [
           "/api/v1/pc/trades",
           [
             "GET"
@@ -3666,6 +3675,7 @@
     "GET /api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png -> main.pc_face_motion_atlas",
     "GET /api/v1/internal/pc/face/print/{print_id}/{locale} -> main.internal_pc_face_print",
     "GET /api/v1/internal/pc/face/preview/{player_ref}/{locale} -> main.internal_pc_face_preview",
+    "GET /api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif -> main.internal_pc_motion_preview",
     "GET /api/v1/internal/pc/face/back -> main.internal_pc_face_back",
     "GET /api/v1/internal/pc/packs -> main.internal_pc_packs",
     "GET /api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png -> main.internal_pc_pack_strip",

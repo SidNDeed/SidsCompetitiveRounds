@@ -1,11 +1,11 @@
 """The /health word that says this build serves dance-card motion (T34).
 
-Dance cards (design S11.3) adds four routes on this build -- the motion
-upload, the per-visit motion read, the atlas and the selection -- and the
-bot's GIF route (S6.2) once it is built. `pc_motion` is how many of those
-handlers are the endpoint of a route REGISTERED on the app when /health is
-asked: absent on the build before the batch, 4 here, fewer on a build that
-lost a route's registration. It is DERIVED on every request (#306, #342), so
+Dance cards (design S11.3) adds five routes on this build -- the motion
+upload, the per-visit motion read, the atlas, the selection and the bot's
+motion preview GIF route (S6.2). `pc_motion` is how many of those handlers
+are the endpoint of a route REGISTERED on the app when /health is asked:
+absent on the build before the batch, 5 here, fewer on a build that lost a
+route's registration. It is DERIVED on every request (#306, #342), so
 a literal typed in either arm, a count of the tuple (definition rather than
 registration) and a value cached at the first call each fail the unregister
 controls below, which run against BOTH arms.
@@ -24,13 +24,14 @@ import main                                                      # noqa: E402
 import schemas                                                   # noqa: E402
 
 MAIN_PY = pathlib.Path(main.__file__).resolve()
-# The motion routes this build carries, by handler: 4, and 5 once the bot's
-# GIF route (S6.2) is built and joins main._PC_MOTION_ROUTES.
+# The motion routes this build carries, by handler: 5 since the bot's GIF
+# route (S6.2) joined main._PC_MOTION_ROUTES in round 2 (4 before it).
 ROUTES = {
     "pc_motion_upload": ("/api/v1/pc/portrait/motion", "POST"),
     "pc_face_motion_read": ("/api/v1/pc-face/motion", "GET"),
     "pc_face_motion_atlas": ("/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png", "GET"),
     "pc_dance_select": ("/api/v1/pc/dance", "POST"),
+    "internal_pc_motion_preview": ("/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif", "GET"),
 }
 BUILT = len(ROUTES)
 
@@ -64,8 +65,8 @@ def _without(mp, *handlers):
 
 
 def test_health_pc_motion_derived(monkeypatch):
-    """T34. Both arms read the registered motion routes, 4 here; each route
-    taken out of the router reads 3 in both arms, all four out read 0, and
+    """T34. Both arms read the registered motion routes, 5 here; each route
+    taken out of the router reads 4 in both arms, all five out read 0, and
     every value comes back when the router does."""
     assert _words() == (BUILT, BUILT)
     for handler in main._PC_MOTION_ROUTES:
@@ -81,7 +82,7 @@ def test_health_pc_motion_derived(monkeypatch):
 
 def test_registration_counts_and_definition_does_not(monkeypatch):
     """A handler added to the tuple that no route serves leaves both arms at
-    4; the same handler registered on a path reads 5 in both, and the probe
+    5; the same handler registered on a path reads 6 in both, and the probe
     route leaves with the router copy it was added to."""
     async def pc_motion_probe_t34():
         return None
@@ -98,7 +99,7 @@ def test_registration_counts_and_definition_does_not(monkeypatch):
 def test_the_word_is_passed_in_both_arms_and_computed_nowhere_else():
     """The keyword appears exactly twice in main.py, once per arm, each a
     fresh call of the undecorated helper; the helper is called nowhere else
-    (nothing caches it); the tuple is bound once, to exactly the four built
+    (nothing caches it); the tuple is bound once, to exactly the five built
     handlers, and each is registered once, where its route says."""
     tree = ast.parse(MAIN_PY.read_text(encoding="utf-8"))
     health = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check"]

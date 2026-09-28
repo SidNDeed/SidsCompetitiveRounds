@@ -309,15 +309,22 @@ def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
     src = _main_code()
     # FIVE readers decide membership since the merge, and each interpolates the
     # one word: the snapshot's pool CTE, the open's live re-check, the public
-    # pool summary, the bot's /card and that card's face preview. Counted on the
+    # pool summary, the bot's /card and that card's preview read (one helper
+    # since dance cards B13, round 2, which both preview routes call). Counted on the
     # interpolation spelling -- under either quoting, since the preview builds
     # its statement from single-quoted pieces -- so the number IS the reader
     # count and does not move with prose. The preview joined this count on
     # 2026-09-15: it interpolated _PC_POOL_STEAM_ID_SQL, which is one half of
     # the merged word, while answering not_in_pool.
     assert len(re.findall(r'(?:WHERE|AND) (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 5
-    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_read):
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', inspect.getsource(fn))) == 1, fn.__name__
+    # The two preview routes decide membership through that one read and carry
+    # no membership clause of their own, so neither can drift from the other.
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        route = inspect.getsource(fn)
+        assert route.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+        assert "_PC_POOL_MEMBER_SQL" not in route and "_PC_POOL_STEAM_ID_SQL" not in route, fn.__name__
     # Card trading (migration 353) reads the word a sixth time: the trader word
     # opens with it, so a trade party is a pool member by the same fragment,
     # composed once into _PC_TRADER_OK_SQL and nowhere else.
@@ -887,6 +894,7 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/internal/pc/lease/{lease_id}", ("DELETE",)),
         ("/api/v1/internal/pc/face/print/{print_id}/{locale}", ("GET",)),
         ("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", ("GET",)),
+        ("/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif", ("GET",)),   # dance cards: the /card GIF (S6.2)
         ("/api/v1/internal/pc/face/back", ("GET",)),
         # the Discord collection reveal's reads (build notes, FINDING 9)
         ("/api/v1/internal/pc/packs", ("GET",)),
@@ -1014,9 +1022,13 @@ def test_titles_and_rank_names_resolve_against_the_rounded_rating():
     snap = inspect.getsource(main._pc_take_snapshot)
     assert "_pc_board_rating(rating)," in snap
     # pinned per FUNCTION, never file-wide (#279): the tier helper, the bot's /card answer, and the preview
-    # drawing through the helper rather than its own expression
+    # read (both preview routes draw through it since dance cards B13) drawing through the helper rather
+    # than its own expression
     assert inspect.getsource(main._pc_rank_name).count("_rank_name_for(_pc_board_rating(rating))") == 1
     assert inspect.getsource(main.internal_pc_card).count("_rank_name_for(_pc_board_rating(rating))") == 1
-    preview = inspect.getsource(main.internal_pc_face_preview)
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        route = inspect.getsource(fn)
+        assert "_pc_rank_name(" not in route and "_rank_name_for(" not in route, fn.__name__
+    preview = inspect.getsource(main._pc_preview_read)
     assert "rank_name = _pc_rank_name(rating)" in preview and "_rank_name_for(" not in preview
     assert 'subtitle = _pc_shop_title(member["title"], rank_name)' in preview and '"subtitle": subtitle' in preview

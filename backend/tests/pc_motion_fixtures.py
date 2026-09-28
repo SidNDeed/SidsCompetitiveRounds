@@ -199,9 +199,11 @@ def noise_frames(count, seed=7, level=1):
 # -- the motion worker process (S2F14) -------------------------------------------
 # The motion worker is a spawned process: a job run there is a module-level
 # function of an importable module, and its arguments are pickled across.
-# _DERIVE_ATLASES is the real derivation, taken when this module is imported,
-# so a route test that monkeypatches main's derive_atlases still reaches it.
+# _DERIVE_ATLASES and _DERIVE_PREVIEW_GIF are the real derivations, taken when
+# this module is imported, so a route test that monkeypatches main's
+# derive_atlases or derive_preview_gif still reaches them.
 _DERIVE_ATLASES = pcm.derive_atlases
+_DERIVE_PREVIEW_GIF = pcm.derive_preview_gif
 
 
 def busy_renders(seconds):
@@ -250,6 +252,12 @@ def derive_fast(body):
 def derive_fake_render(spec_, labels, container, *, deadline=None):
     """main's derivation call drawn with the fast stand-in renderer (T60)."""
     return _DERIVE_ATLASES(spec_, labels, container, deadline=deadline, render=fake_render)
+
+
+def derive_preview_fake_render(spec_, labels, still, container, *, deadline=None):
+    """main's preview GIF call drawn with the fast stand-in renderer (T33,
+    T60's GIF half, T61)."""
+    return _DERIVE_PREVIEW_GIF(spec_, labels, still, container, deadline=deadline, render=fake_render)
 
 
 def derive_stamped(spec_, labels, container, *, deadline=None):
