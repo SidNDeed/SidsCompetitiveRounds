@@ -11,6 +11,12 @@ exactly as before, a session statement is EXECUTED in a transaction that is
 rolled back, and anything else is "unclassified" and fails without reaching
 the server (main._janitor_check_statement).
 
+THE REPORT. Each statement gets a row in the report's `outcomes`
+(explained, executed_rolled_back, failed, unclassified, timed_out,
+unchecked) with its first 80 characters, whitespace folded, and the
+function that issues it; `counts` keeps every older key and adds
+executed_rolled_back and unclassified.
+
 THE DATABASE. The live tests share ONE throwaway schema, built once per run
 of this module in the database JANITOR_SELFTEST_TEST_PG_DSN names (which must
 contain "janitor_selftest"), through ladder_pg_harness: every connection bound
@@ -33,6 +39,7 @@ pure tests run either way. There is no pytest-asyncio here: each test is a
 sync function that runs one coroutine.
 """
 import asyncio
+import contextlib
 import glob
 import io
 import os
@@ -232,6 +239,45 @@ def test_an_executed_statement_is_rolled_back_before_it_passes():
                       "RuntimeError: connection lost")
     assert _run(main._janitor_check_statement(_ScriptedSession(rollback_raises=True),
                                               dml)) == ("explained", None)
+
+
+class _InfraSession(_ScriptedSession):
+    """A session whose server goes away when `fail_on` reaches it."""
+
+    def __init__(self, fail_on):
+        super().__init__()
+        self.fail_on = fail_on
+
+    async def execute(self, stmt, params=None):
+        await super().execute(stmt, params)
+        if str(stmt) == self.fail_on:
+            raise ConnectionRefusedError("janitor_selftest: the server went away")
+
+
+def test_a_statement_the_run_never_reached_reads_unchecked(monkeypatch):
+    """The server goes away at the second statement: the run stops as
+    db_unreachable, and the statements it never checked still get their
+    rows, 'unchecked', as many as counts.unchecked says."""
+    inv = _planted("SELECT 1", "SET LOCAL lock_timeout = '2s'", "SELECT 2")
+    db = _InfraSession("SET LOCAL lock_timeout = '2s'")
+
+    @contextlib.asynccontextmanager
+    async def factory():
+        yield db
+    monkeypatch.setattr(database, "async_session", factory)
+    monkeypatch.setattr(main, "_janitor_sql_inventory", lambda: inv)
+    monkeypatch.setattr(main, "_janitor_selftest_report", {"status": "pending"})
+    _run(main._run_janitor_query_selftest())
+    report = main._janitor_selftest_report
+    assert report["status"] == "db_unreachable", report
+    assert "ConnectionRefusedError" in report["db_error"], report
+    assert [o["outcome"] for o in report["outcomes"]] == [
+        "explained", "unchecked", "unchecked"], report["outcomes"]
+    assert report["counts"]["unchecked"] == 2, report["counts"]
+    assert report["counts"]["explained_ok"] == 1, report["counts"]
+    assert db.sent == ["SET LOCAL statement_timeout = '5s'", "EXPLAIN SELECT 1",
+                       "SET LOCAL statement_timeout = '5s'",
+                       "SET LOCAL lock_timeout = '2s'"], db.sent
 
 
 # ------------------------------------------------------- the lane schema
@@ -507,6 +553,50 @@ def test_pg_an_unclassified_statement_is_reported_and_fails(lane, monkeypatch):
         "unclassified statement (first keyword 'FROBNICATE')"), failure
     assert failure["sql"] == "FROBNICATE janitor_selftest"
     assert not any("FROBNICATE" in e[1] for e in log if e[0] == "sql"), log
+    assert report["counts"]["unclassified"] == 1, report["counts"]
+    assert [(o["outcome"], o["class"], o["keyword"]) for o in report["outcomes"]] == [
+        ("explained", "explain", "SELECT"),
+        ("unclassified", "unclassified", "FROBNICATE")], report["outcomes"]
+
+
+PLANTED_LONG = ("\n        SELECT 'janitor_selftest' AS first_column,\n"
+                "               'the report keeps the first eighty characters' "
+                "AS second_column\n")
+
+
+def test_pg_the_report_names_each_statements_outcome(lane, monkeypatch, capsys):
+    """One statement of each outcome through the real runner: the report's
+    rows, its counts (every older key kept, two added) and the banner."""
+    inv = _planted(PLANTED_LONG, "SET LOCAL lock_timeout = '2s'",
+                   "SET LOCAL lock_timeout = 'banana'", "FROBNICATE janitor_selftest")
+    report, _log = _run(_selftest(monkeypatch, lane.schema, inv))
+    assert report["status"] == "failed", report
+    assert report["counts"] == {"statements": 4, "explained_ok": 1, "failed": 2,
+                                "timed_out": 0, "dynamic": 0, "unchecked": 0,
+                                "executed_rolled_back": 1,
+                                "unclassified": 1}, report["counts"]
+    rows = report["outcomes"]
+    assert [(o["outcome"], o["class"], o["keyword"]) for o in rows] == [
+        ("explained", "explain", "SELECT"),
+        ("executed_rolled_back", "session", "SET"),
+        ("failed", "session", "SET"),
+        ("unclassified", "unclassified", "FROBNICATE")], rows
+    assert [o["sql80"] for o in rows] == [
+        "SELECT 'janitor_selftest' AS first_column, 'the report keeps the first eighty ch",
+        "SET LOCAL lock_timeout = '2s'", "SET LOCAL lock_timeout = 'banana'",
+        "FROBNICATE janitor_selftest"], rows
+    assert all(o["func"] == "root" and o["roots"] == ["root"] for o in rows), rows
+    assert [f["error"][:7] for f in report["failures"]] == ["[22023]", "unclass"], report
+    banner = capsys.readouterr().out.splitlines()
+    head = [ln for ln in banner if ln.startswith("[JANITOR-SELFTEST] EXPLAINed ")]
+    assert len(head) == 1, banner
+    assert head[0].startswith("[JANITOR-SELFTEST] EXPLAINed 1/1, executed and rolled "
+                              "back 1/2, unclassified 1: 4 janitor statements in "), head
+    assert head[0].endswith("s (2 failed, 0 timed out)"), head
+    assert ("[JANITOR-SELFTEST]   executed and rolled back, not EXPLAINed: "
+            "main.py:%d (root): SET LOCAL lock_timeout = '2s'" % rows[1]["line"]
+            in banner), banner
+    assert any("JANITOR QUERIES FAIL THEIR CHECK" in ln for ln in banner), banner
 
 
 def test_pg_the_rollback_leaves_no_session_setting_behind(lane, monkeypatch):
@@ -605,6 +695,21 @@ def test_pg_the_full_self_test_is_green_with_the_trading_schema(lane, monkeypatc
     assert counts["statements"] == len(inv["statements"]), counts
     assert counts["explained_ok"] == by_class["explain"], (counts, by_class)
     assert counts["failed"] == 0 and counts["unchecked"] == 0, counts
+    # Every older key keeps its meaning; the executed statement is counted
+    # apart, and each statement has its row, in harvest order.
+    assert counts["executed_rolled_back"] == by_class["session"] == 1, (counts, by_class)
+    assert counts["unclassified"] == 0 and "unclassified" not in by_class, counts
+    assert counts["explained_ok"] + counts["executed_rolled_back"] == counts["statements"]
+    rows = report["outcomes"]
+    assert [(o["module"], o["func"], o["line"]) for o in rows] == [
+        (s["module"], s["func"], s["line"]) for s in inv["statements"]]
+    assert {o["outcome"] for o in rows if o["class"] == "explain"} == {"explained"}
+    (trade,) = [o for o in rows if o["outcome"] == "executed_rolled_back"]
+    want = _trade_session_statement()
+    assert (trade["func"], trade["line"], trade["class"], trade["keyword"]) == (
+        TRADE_STEP, want["line"], "session", "SET"), trade
+    assert trade["roots"] == want["roots"] and trade["roots"], trade
+    assert trade["sql80"] == "SET LOCAL lock_timeout = '2s'", trade
 
     async def probe():
         engine = _engine(lane.schema)

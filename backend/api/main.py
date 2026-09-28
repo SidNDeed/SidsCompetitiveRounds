@@ -3223,7 +3223,10 @@ async def _janitor_check_statement(db, s) -> tuple:
 async def _run_janitor_query_selftest():
     """Boot-time check of every janitor SQL statement, each by its class
     (_janitor_check_statement): DML EXPLAINed, session statements executed
-    and rolled back, anything else a failure.
+    and rolled back, anything else a failure. A finished run's report names
+    each statement's result in `outcomes` (explained, executed_rolled_back,
+    failed, unclassified, timed_out, unchecked) with its first 80 characters
+    and the janitor function that issues it; `counts` keeps every older key.
 
     Runs as a DETACHED lifespan task (off the boot path — Sid's call): not
     awaited at startup and NOT under _supervised, whose while-True wrapper
@@ -3240,13 +3243,22 @@ async def _run_janitor_query_selftest():
     try:
         inv = _janitor_sql_inventory()
         stmts = inv["statements"]
-        failures, timed_out = [], []
-        n_ok = n_exec = unchecked = 0
+        failures, timed_out, outcomes = [], [], []
+        n_ok = n_exec = n_unclassified = unchecked = 0
         db_error = None
 
         def _loc(s):
             return {"module": s["module"], "func": s["func"],
                     "line": s["line"], "roots": s["roots"]}
+
+        def _outcome(s, outcome):
+            # One row per harvested statement, in harvest order: its class
+            # and what its check said. sql80 is the statement with each
+            # whitespace run folded to one space, none at either end, cut to
+            # 80 characters (a literal usually opens with a newline + indent).
+            outcomes.append({**_loc(s), "class": s.get("class"),
+                             "keyword": s.get("keyword"), "outcome": outcome,
+                             "sql80": " ".join(s["sql"].split())[:80]})
 
         # A root that reaches zero statements means the call-graph walk broke
         # — a self-test that tests nothing must scream, not pass.
@@ -3281,6 +3293,7 @@ async def _run_janitor_query_selftest():
                         db_error = detail
                         unchecked = len(stmts) - i
                         break
+                    _outcome(s, verdict)
                     if verdict == "explained":
                         n_ok += 1
                     elif verdict == "executed_rolled_back":
@@ -3288,6 +3301,7 @@ async def _run_janitor_query_selftest():
                     elif verdict == "timed_out":
                         timed_out.append({**_loc(s), "error": detail})
                     else:   # 'failed' and 'unclassified': the loud case
+                        n_unclassified += verdict == "unclassified"
                         failures.append({**_loc(s), "error": detail,
                                          "sql": s["sql"]})
         except asyncio.CancelledError:
@@ -3310,6 +3324,11 @@ async def _run_janitor_query_selftest():
             unchecked = max(0, len(stmts) - n_ok - n_exec - n_stmt_failures
                             - len(timed_out))
 
+        # A statement the run did not check (the DB went away at it or before
+        # it, or the session died around the loop) still gets its row.
+        for s in stmts[len(outcomes):]:
+            _outcome(s, "unchecked")
+
         if failures:
             status = "failed"
         elif db_error is not None:
@@ -3325,25 +3344,41 @@ async def _run_janitor_query_selftest():
             "duration_ms": int((time.monotonic() - t0) * 1000),
             "counts": {"statements": len(stmts), "explained_ok": n_ok,
                        "failed": len(failures), "timed_out": len(timed_out),
-                       "dynamic": len(inv["dynamic"]), "unchecked": unchecked},
+                       "dynamic": len(inv["dynamic"]), "unchecked": unchecked,
+                       "executed_rolled_back": n_exec,
+                       "unclassified": n_unclassified},
             "root_counts": inv["root_counts"],
             "failures": failures,
             "timed_out": timed_out,
             "dynamic": inv["dynamic"],
             "db_error": db_error,
+            "outcomes": outcomes,
         }
 
         bar = "=" * 72
+        by_class = {}
+        for s in stmts:
+            by_class[s.get("class")] = by_class.get(s.get("class"), 0) + 1
         lines = [bar,
-                 f"[JANITOR-SELFTEST] EXPLAINed {n_ok}/{len(stmts)} janitor "
-                 f"statements in {time.monotonic() - t0:.1f}s "
+                 f"[JANITOR-SELFTEST] EXPLAINed {n_ok}/"
+                 f"{by_class.get('explain', 0)}, executed and rolled back "
+                 f"{n_exec}/{by_class.get('session', 0)}, unclassified "
+                 f"{n_unclassified}: {len(stmts)} janitor statements in "
+                 f"{time.monotonic() - t0:.1f}s "
                  f"({len(failures)} failed, {len(timed_out)} timed out)",
                  "[JANITOR-SELFTEST] roots: " + "  ".join(
                      f"{k}={v}" for k, v in inv["root_counts"].items())]
+        # An executed statement was run and rolled back, never planned: name
+        # each one, so "plan clean" below is not read as covering it.
+        for o in outcomes:
+            if o["outcome"] == "executed_rolled_back":
+                lines.append(f"[JANITOR-SELFTEST]   executed and rolled back, "
+                             f"not EXPLAINed: {o['module']}.py:{o['line']} "
+                             f"({o['func']}): {o['sql80']}")
         if status == "failed":
             lines.append(f"[JANITOR-SELFTEST] !!! {len(failures)} JANITOR "
-                         "QUERIES FAIL TO PLAN — those sweeps are dead EVERY "
-                         "cycle until fixed !!!")
+                         "QUERIES FAIL THEIR CHECK -- one that fails to plan "
+                         "or run is dead EVERY cycle until fixed !!!")
             for f in failures:
                 lines.append(f"[JANITOR-SELFTEST]   {f['module']}.py:{f['line']}"
                              f" ({f['func']}): {f['error'].splitlines()[0]}")
@@ -4409,7 +4444,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:46303 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:46338 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4475,7 +4510,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:46115 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:46150 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4545,7 +4580,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:46018 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:46053 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -46410,7 +46445,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4514 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4549 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and

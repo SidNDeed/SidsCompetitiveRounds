@@ -9,7 +9,8 @@ summary line (#391, #342).
 Per plant, refusing rather than continuing at each step:
   1. `git status --porcelain` over the worktree must be EMPTY;
   2. `git rev-parse HEAD` is printed (and compared with --expect-head);
-  3. the plant's old text must occur EXACTLY ONCE in its file (#432);
+  3. the plant's old text must occur EXACTLY ONCE in its file (#432),
+     matched in that file's own line ending (the autocrlf checkout, #657);
   4. the target's sha256 is printed before the write;
   5. the edit is applied and printed as a unified diff;
   6. pytest runs the named nodes and each is read from pytest's own summary
@@ -61,6 +62,8 @@ P2 = T + "test_the_walker_stamps_every_statement_with_its_class"
 P3 = T + "test_the_live_inventory_classifies_every_statement"
 P4 = T + "test_an_unclassified_statement_never_reaches_the_server"
 P5 = T + "test_an_executed_statement_is_rolled_back_before_it_passes"
+L8 = T + "test_pg_the_report_names_each_statements_outcome"
+P6 = T + "test_a_statement_the_run_never_reached_reads_unchecked"
 
 STMT_SITE = '        stmt = text("EXPLAIN " + s["sql"] if cls == "explain" else s["sql"])\n'
 ROLLBACK_SITE = ("        try:\n"
@@ -133,6 +136,50 @@ PLANTS = [
      "old": '    if word in _JANITOR_SESSION_WORDS:\n        return "session", word\n',
      "new": '    if word in _JANITOR_SESSION_WORDS:\n        return "explain", word\n',
      "red": [P1, P2, P3, L1, L3, L7], "green": [L4]},
+    # The report shape (commit 2).
+    {"name": "M9-executed-row-mislabelled",
+     "why": "the executed statement's row reads explained: the report hides it",
+     "file": MAIN,
+     "old": "                    _outcome(s, verdict)\n",
+     "new": ("                    _outcome(s, \"explained\" if verdict == "
+             "\"executed_rolled_back\" else verdict)\n"),
+     "red": [L7, L8], "green": [L4, P6]},
+    {"name": "M10-unchecked-tail-not-filled",
+     "why": "a statement the run never reached gets no row",
+     "file": MAIN,
+     "old": "        for s in stmts[len(outcomes):]:\n",
+     "new": "        for s in stmts[len(outcomes):len(outcomes)]:\n",
+     "red": [P6], "green": [L4, L7, L8]},
+    {"name": "M11-sql80-not-folded",
+     "why": "sql80 keeps the literal's opening newline and indent",
+     "file": MAIN,
+     "old": "\"sql80\": \" \".join(s[\"sql\"].split())[:80]})\n",
+     "new": "\"sql80\": s[\"sql\"][:80]})\n",
+     "red": [L8], "green": [L4, L7]},
+    {"name": "T2-inert-twin-at-the-sql80-site",
+     "why": "the same slice written [0:80]: nothing may redden",
+     "file": MAIN,
+     "old": "\"sql80\": \" \".join(s[\"sql\"].split())[:80]})\n",
+     "new": "\"sql80\": \" \".join(s[\"sql\"].split())[0:80]})\n",
+     "red": [], "green": [L4, L7, L8, P6]},
+    {"name": "M12-executed-count-dropped",
+     "why": "counts no longer carries the executed statement",
+     "file": MAIN,
+     "old": "                       \"executed_rolled_back\": n_exec,\n",
+     "new": "                       \"executed_rolled_back\": 0,\n",
+     "red": [L7, L8], "green": [L4, P6]},
+    {"name": "M13-banner-executed-line-dropped",
+     "why": "the banner no longer names the executed statement",
+     "file": MAIN,
+     "old": "            if o[\"outcome\"] == \"executed_rolled_back\":\n",
+     "new": "            if False and o[\"outcome\"] == \"executed_rolled_back\":\n",
+     "red": [L8], "green": [L4, L7]},
+    {"name": "M14-unclassified-count-dropped",
+     "why": "counts no longer carries the unclassified statement",
+     "file": MAIN,
+     "old": "                        n_unclassified += verdict == \"unclassified\"\n",
+     "new": "                        n_unclassified += 0\n",
+     "red": [L4, L8], "green": [L7]},
 ]
 
 
