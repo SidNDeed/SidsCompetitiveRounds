@@ -178,8 +178,14 @@ namespace CompetitiveRounds
         // team_series_first_game: once per series, only while nothing of the
         // series is recorded, only on a Steam session issued before the series
         // was created, so only to a process that was there when the series
-        // began, and asked only while this seat's client has sent and queued
-        // no report of the series). Physical game 1's token
+        // began, and (round 9, finding M1) only while no other session of the
+        // reporter's account was live since the series was created and nothing
+        // is on the series' live-points record, so to ONE process of the
+        // account, whose session the server keeps: a match report sent on
+        // another session voids the issue, and a DC report the reporter's
+        // account sends on another session reads no token; asked only while
+        // this seat's client has sent and queued no report of the series).
+        // Physical game 1's token
         // carries the issued nonce, and the seat it was issued to publishes it
         // in the game's first round whether or not it is the room's host;
         // every later game's host draws its nonce as the issued nonce's first
@@ -782,8 +788,11 @@ namespace CompetitiveRounds
             /// (team_series_first_game), and also refuses an ask whose Steam
             /// session was issued after the series was created, as a restarted
             /// client's is, or one's on another machine or profile, whose
-            /// ledger cannot show that game's reports; nothing here names a
-            /// game.</summary>
+            /// ledger cannot show that game's reports, and (round 9, finding
+            /// M1) any ask while another session of this account was live
+            /// since the series was created, as a second process's is, or while
+            /// anything is on the series' live-points record; nothing here
+            /// names a game.</summary>
             internal bool AskFirstGame(string seriesId, string room, bool reporter, bool reportsClean, out int gen,
                                        out string why)
             {
@@ -1738,6 +1747,16 @@ namespace CompetitiveRounds
         private static readonly Score Continue = Score.Of(4, 2, 0, 0, 5);  // deeper in the same game
         private static readonly Score Final = Score.Of(5, 2, 0, 0, 5);     // its game over
 
+        // Round 9, finding M1: a fresh name for a harness seat's account or
+        // Steam session.
+        private static int harnessNames;
+
+        private static string NewHarnessName(string kind)
+        {
+            harnessNames++;
+            return kind + "-" + harnessNames.ToString(CultureInfo.InvariantCulture);
+        }
+
         private sealed class TokenRec
         {
             public string Room = "";         // the sitting it was filed in
@@ -1763,8 +1782,10 @@ namespace CompetitiveRounds
         // (round 8, F31; main.py, _team_game_first_game_refusal): nor unless
         // the series was issued a physical game 1 (GrantFirst), not voided
         // (Land), and the token's nonce begins with the issued nonce's first 8
-        // digits. Unreachable: the seats' requests fail (a post is not filed,
-        // an ask is not answered).
+        // digits; nor (round 9, M1, ReadsIssued) when the series' reporter's
+        // account reports on another session than the one the issue went to.
+        // Unreachable: the seats' requests fail (a post is not filed, an ask
+        // is not answered).
         private sealed class TokenServer
         {
             public bool ReadsTokens, ReadsOrdinals, ReadsSitting, ReadsAnchor;
@@ -1784,6 +1805,22 @@ namespace CompetitiveRounds
             // asking process was there when the series began); false is a
             // server without that rule.
             public bool ReadsSession = true;
+            // Round 9, M1 (main.py, team_series_first_game and
+            // _team_first_game_void; migration 362): the issue goes to ONE
+            // process of the reporter's account. ReadsOthers: no issue while
+            // another session of the requester's account was live after the
+            // series was created (Issue). ReadsAnyPost: none while anything is
+            // on the series' live-points record (`AnyPost`: a post reached the
+            // server; false is round 8's AnyTwo). ReadsIssued: the session the
+            // issue went to is kept (`FirstSession`); a match report sent on
+            // another session voids the issue (Land), and a DC report the
+            // reporter's account sends on another session reads no token
+            // (Settles). All three false is round 8's issuance.
+            public bool ReadsOthers = true, ReadsAnyPost = true, ReadsIssued = true;
+            public bool AnyPost;
+            public string FirstSession = "";
+            private readonly Dictionary<string, HashSet<string>> sessions =
+                new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             private readonly Dictionary<string, TokenRec> recs = new Dictionary<string, TokenRec>(StringComparer.Ordinal);
 
             private static string Key(int game, string room) { return Num(game) + "@" + room; }
@@ -1795,29 +1832,64 @@ namespace CompetitiveRounds
                 Relocked = true;
             }
 
+            // Round 9, M1: a Steam session of `account` live after the series
+            // was created (issued before it and not expired by then, or issued
+            // since). steam_sessions holds its row whether or not its process
+            // ever sends a request of the series; "" is no session.
+            public void Issue(string account, string session)
+            {
+                if (string.IsNullOrEmpty(session)) return;
+                HashSet<string> held;
+                if (!sessions.TryGetValue(account ?? "", out held))
+                {
+                    held = new HashSet<string>(StringComparer.Ordinal);
+                    sessions[account ?? ""] = held;
+                }
+                held.Add(session);
+            }
+
+            private bool OtherSession(string account, string session)
+            {
+                HashSet<string> held;
+                if (!sessions.TryGetValue(account ?? "", out held)) return false;
+                foreach (string o in held) if (o != session) return true;
+                return false;
+            }
+
             // Round 8, F31: main.py's team_series_first_game. Issued once per
             // series, to the series' reporter, on a session issued before the
             // series was created (`born`: the asking process was there when the
             // series began), only while the series has no recorded game, was
             // never relocked, has no game on record in another room and no pair
             // of two points or more on its record, and only in its stored room;
-            // `reason` says why not.
-            public bool GrantFirst(string room, bool reporter, bool born, out string nonce, out string reason)
+            // `reason` says why not. Round 9, M1: an ask needs a verified
+            // session (`session`; "" is none: a 401, no answer), and is refused
+            // while another session of the requester's `account` was live after
+            // the series was created (ReadsOthers) and while anything is on the
+            // series' live-points record (ReadsAnyPost); the session it went to
+            // is kept.
+            public bool GrantFirst(string room, bool reporter, bool born, string account, string session,
+                                   out string nonce, out string reason)
             {
                 nonce = "";
                 reason = null;
                 if (Unreachable) reason = "no answer: the server cannot be reached";
+                else if (string.IsNullOrEmpty(session)) reason = "no answer: the ask carries no verified session";
                 else if (!reporter) reason = "the requester is not the series' reporter";
                 else if (Recorded > 0) reason = "a game of the series is recorded";
                 else if (Relocked) reason = "the series was relocked";
                 else if (room != Stored) reason = "the requester's room is not the series' stored room";
                 else if (Granted) reason = "physical game 1 was already issued for this series";
                 else if (ReadsSession && !born) reason = "the requester's session was not issued before the series was created";
+                else if (ReadsOthers && OtherSession(account, session))
+                    reason = "another session of the requester's account was live after the series was created";
                 else if (OtherRoom()) reason = "the series has a game on record in another room";
-                else if (AnyTwo) reason = "a pair of two points or more is on the series' record";
+                else if (ReadsAnyPost && AnyPost) reason = "a live-points post is on the series' record";
+                else if (!ReadsAnyPost && AnyTwo) reason = "a pair of two points or more is on the series' record";
                 if (reason != null) return false;
                 Granted = true;
                 FirstNonce = DrawNonce();
+                FirstSession = session;
                 nonce = FirstNonce;
                 return true;
             }
@@ -1825,16 +1897,26 @@ namespace CompetitiveRounds
             // Round 8, F31: main.py's submit_team_match. A match report is
             // recorded; `anchor` is what the reporter's client held for the
             // series when it built the report ("" = none). One without the
-            // issued anchor voids physical game 1 for good.
-            public void Land(string anchor)
+            // issued anchor voids physical game 1 for good. Round 9, M1: so
+            // does one sent on another session than the issued one (`session`:
+            // the session of the process that sends it, "" none; ReadsIssued).
+            public void Land(string anchor, string session)
             {
                 Recorded++;
-                if (Granted && !Voided && (anchor ?? "") != FirstNonce.Substring(0, 8)) Voided = true;
+                if (!Granted || Voided) return;
+                if ((anchor ?? "") != FirstNonce.Substring(0, 8)) Voided = true;
+                else if (ReadsIssued && (session ?? "") != FirstSession) Voided = true;
             }
 
             public void File(int named, string room, string token, int team, bool two, int game)
             {
                 if (Unreachable) return;
+                // Round 9, M1: every post that reaches the server is on the
+                // series' live-points record from then on, whatever game it
+                // names (main.py, _TEAM_FIRST_GAME_ANY_POST_SQL: a row filed
+                // under any game, or a point in its live totals, which are
+                // raised by GREATEST and never reset).
+                AnyPost = true;
                 if (named < 1 || named != Recorded + 1 || room != Stored) return;
                 TokenRec r;
                 string key = Key(named, room);
@@ -1851,8 +1933,16 @@ namespace CompetitiveRounds
             }
 
             // Whether a DC report naming `token`, processed now, settles;
-            // `fromAnother`: from a post of a game other than `game`.
+            // `fromAnother`: from a post of a game other than `game`. The
+            // report comes from a member other than the series' reporter.
             public bool Settles(string token, int game, out bool fromAnother)
+            {
+                return Settles(token, game, false, "", out fromAnother);
+            }
+
+            // Round 9, M1: the same, `byReporter` saying whether the report
+            // comes from the series' reporter's account, sent on `session`.
+            public bool Settles(string token, int game, bool byReporter, string session, out bool fromAnother)
             {
                 fromAnother = false;
                 // main.py's lead-forfeit reads the record only when the
@@ -1874,6 +1964,7 @@ namespace CompetitiveRounds
                     if (ReadsSitting && (Relocked || OtherRoom())) return false;
                     if (ReadsAnchor && (!Granted || Voided || nonce.Substring(0, 8) != FirstNonce.Substring(0, 8)))
                         return false;
+                    if (ReadsAnchor && ReadsIssued && byReporter && (session ?? "") != FirstSession) return false;
                     if (r.Conflict || r.Token != nonce || r.TokTeams != 3) return false;
                     foreach (var kv in recs)
                         if (kv.Key != key && kv.Value.Token == nonce) return false;
@@ -1926,6 +2017,11 @@ namespace CompetitiveRounds
             // created (its Steam session was issued before the series); a
             // restart is a new process, on a session issued after it.
             public bool Born = true;
+            // Round 9, M1: the account this seat plays on (two seats of one
+            // account would be two processes of it) and the Steam session its
+            // process holds ("" = none was ever issued to it); a restart is a
+            // new process on a new session, which the server then holds.
+            public string Account = NewHarnessName("account"), Session = NewHarnessName("session");
 
             public void Read(string room, string v) { View = v; T.ObserveRoomToken(room, v); }
 
@@ -1956,6 +2052,22 @@ namespace CompetitiveRounds
                 View = "";
                 series = "";
                 Born = false;
+                Session = NewHarnessName("session");
+                if (Srv != null) Srv.Issue(Account, Session);
+            }
+
+            // Round 9, M1: this seat's account plays on in another process
+            // that has held its own session (`session`) since before the series
+            // was created, while the first one may live on elsewhere: nothing
+            // the first one held here survives, and its ledger and outbox stay
+            // with it.
+            public void Twin(string session)
+            {
+                T = new Tracker();
+                View = "";
+                series = "";
+                Born = true;
+                Session = session ?? "";
             }
 
             // Round 7, F29: the game itself starts a game on this seat
@@ -1999,7 +2111,7 @@ namespace CompetitiveRounds
                 string why;
                 if (!T.AskFirstGame(series, room, Reporter, Clean(series), out gen, out why)) return;
                 string nonce, reason;
-                bool issued = Srv.GrantFirst(room, Reporter, Born, out nonce, out reason);
+                bool issued = Srv.GrantFirst(room, Reporter, Born, Account, Session, out nonce, out reason);
                 if (issued && Clean(series)) Anchors[series ?? ""] = nonce.Substring(0, 8);
                 T.OnFirstGame(series, room, gen, issued, nonce, reason, Clean(series));
             }
@@ -2197,7 +2309,7 @@ namespace CompetitiveRounds
             if (rep2 == Rep2AfterPosts) srv.Recorded = 2;
             TokenSeat reporter = hostReports ? h : p;
             bool fromAnother;
-            bool settled = srv.Settles(reporter.Token(S, R), 3, out fromAnother);
+            bool settled = srv.Settles(reporter.Token(S, R), 3, reporter.Reporter, reporter.Session, out fromAnother);
             if (settled) tally.Settled++;
             if (settled && (fromAnother || reached < 2)) tally.FromAnother++;
             bool clean = rep2 == Rep2BeforeStart && sent && echo && !missed && reached == 2 && reaches != ReachesNever;
@@ -2920,6 +3032,27 @@ namespace CompetitiveRounds
         // rule, which reads the void, it settles wrongly); with game 1's
         // result never landing and M's own landing, nothing is voided and a
         // leave in game 4 settles wrongly (the session rule alone closes it).
+        //
+        // Round 9, finding M1: the server's rules beyond round 8's (`m1`:
+        // TokenServer.ReadsOthers, ReadsAnyPost and ReadsIssued), and the
+        // reporter's account running a second process (`twin`, which implies
+        // `ledgerLost`): B, on its own session issued before the series was
+        // created, takes M's seat from game 3 (its Tracker and ledger empty,
+        // not a restart: round 8's session rule passes it), while the first
+        // process A, whose outbox holds games 1 and 2, lives on elsewhere and
+        // sends them from there if at all. TwinLive: A held a session since
+        // before the series (the other-session rule refuses B). TwinPosted: A
+        // held none, and its first post of game 1 (one point) reached the
+        // server before the server became unreachable (the any-post rule
+        // refuses B; round 8's pair-of-two-points rule does not). TwinUnseen:
+        // A held none and nothing of it reached the server: no rule this
+        // server can apply sees A, B is issued game 3 as physical game 1, and
+        // with A's results never landing and B's own landing a leave in game 4
+        // settles wrongly (the residual, stated with its integrity class in
+        // the notes, section 20).
+
+        private const int M1Others = 1, M1AnyPost = 2, M1Issued = 4, M1All = 7;
+        private const int TwinNone = 0, TwinLive = 1, TwinPosted = 2, TwinUnseen = 3;
 
         private sealed class F31Tally
         {
@@ -2928,17 +3061,28 @@ namespace CompetitiveRounds
 
         private static bool SimulateF31(int reporter, bool g1Issued, bool restartAll, bool land, int dcIn,
                                         bool keptBoot, bool readsAnchor, bool ledgerLost, bool ownLands,
-                                        bool readsSession, out bool wrong, out int carrying, out int ordinals)
+                                        bool readsSession, int m1, int twin,
+                                        out bool wrong, out int carrying, out int ordinals)
         {
             const string S = "series-f31", R = "room-f31";
             var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true,
-                                        ReadsAnchor = readsAnchor, ReadsSession = readsSession, Stored = R };
+                                        ReadsAnchor = readsAnchor, ReadsSession = readsSession,
+                                        ReadsOthers = (m1 & M1Others) != 0, ReadsAnyPost = (m1 & M1AnyPost) != 0,
+                                        ReadsIssued = (m1 & M1Issued) != 0, Stored = R };
             var h = new TokenSeat { Team = 0, Srv = srv };
             var r = new TokenSeat { Team = 0, Srv = srv };
             var c = new TokenSeat { Team = 1, Srv = srv };
             var all = new[] { h, r, c };
             TokenSeat m = all[reporter];
             m.Reporter = true;
+            // Round 9, M1: every process there when the series was created
+            // holds a session the server keeps, and so does B (`twin`, which
+            // hands M's seat to B with the ledger and outbox left behind).
+            if (twin != TwinNone) ledgerLost = true;
+            if (twin == TwinPosted || twin == TwinUnseen) m.Session = "";
+            string twinSession = twin != TwinNone ? NewHarnessName("session") : "";
+            foreach (var x in all) srv.Issue(x.Account, x.Session);
+            srv.Issue(m.Account, twinSession);
             string value = "";
             foreach (var x in all) x.Enter(R, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
@@ -2949,11 +3093,19 @@ namespace CompetitiveRounds
                 value = HostStart(h, S, R, value, true);
                 foreach (var x in all) if (x != h) SeatStart(x, S, R);
                 value = ReporterPublish(m, value, true);
+                if (twin == TwinPosted && g == 1)
+                {
+                    srv.Unreachable = false;
+                    m.Read(R, value);
+                    m.Tick(R, Played);
+                    m.Post(srv, S, R, false, g);
+                }
                 srv.Unreachable = true;
                 foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); x.Tick(R, Later); }
                 foreach (var x in all) { string rep = x.Over(R); if (rep != null) m.Outbox.Add(rep); }
             }
             List<string> queued = m.Outbox;
+            string sentFrom = m.Session;
             if (ledgerLost)
             {
                 queued = new List<string>(m.Outbox);
@@ -2965,7 +3117,8 @@ namespace CompetitiveRounds
             value = "";
             foreach (var x in all)
             {
-                if (x == h || restartAll || (ledgerLost && x == m)) x.Restart();
+                if (twin != TwinNone && x == m) x.Twin(twinSession);
+                else if (x == h || restartAll || (ledgerLost && x == m)) x.Restart();
                 x.Enter(R, value);
                 x.Fetch(S, srv.Recorded, false, srv.AnyTwo);
             }
@@ -2979,8 +3132,8 @@ namespace CompetitiveRounds
                 foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); }
                 if (g == dcIn) break;
                 foreach (var x in all) { x.Tick(R, Later); string rep = x.Over(R); if (rep != null) m.Outbox.Add(rep); }
-                if (ledgerLost && ownLands && m.Outbox.Count > 0) { srv.Land(m.Outbox[0]); m.Outbox.RemoveAt(0); }
-                if (land && queued.Count > 0) { srv.Land(queued[0]); queued.RemoveAt(0); }
+                if (ledgerLost && ownLands && m.Outbox.Count > 0) { srv.Land(m.Outbox[0], m.Session); m.Outbox.RemoveAt(0); }
+                if (land && queued.Count > 0) { srv.Land(queued[0], ledgerLost ? sentFrom : m.Session); queued.RemoveAt(0); }
                 foreach (var x in all) x.Fetch(S, srv.Recorded, false, srv.AnyTwo);
             }
             carrying = 0;
@@ -2991,14 +3144,15 @@ namespace CompetitiveRounds
                 if (x.T.PhysicalOrdinal() != 0) ordinals++;
             }
             bool fromAnother;
-            bool settled = srv.Settles(r.Token(S, R), dcIn, out fromAnother);
+            bool settled = srv.Settles(r.Token(S, R), dcIn, r.Reporter, r.Session, out fromAnother);
             wrong = settled && (srv.Recorded + 1 != dcIn || fromAnother);
             return settled;
         }
 
         // `lost`: 0 the reporter's ledger kept, 1 lost with its own reports
-        // landing as it plays, 2 lost with its own reports delayed.
-        private static F31Tally SweepF31(bool keptBoot, bool readsAnchor, bool readsSession)
+        // landing as it plays, 2 lost with its own reports delayed (with a
+        // `twin` the ledger is always lost, so 0 is 2 again).
+        private static F31Tally SweepF31(bool keptBoot, bool readsAnchor, bool readsSession, int m1, int twin)
         {
             var tally = new F31Tally();
             for (int rep = 0; rep < 3; rep++)
@@ -3011,7 +3165,7 @@ namespace CompetitiveRounds
                 bool wrong;
                 int carrying, ordinals;
                 bool settled = SimulateF31(rep, g1 != 0, ra != 0, land != 0, dc, keptBoot, readsAnchor, lost != 0,
-                                           lost == 1, readsSession, out wrong, out carrying, out ordinals);
+                                           lost == 1, readsSession, m1, twin, out wrong, out carrying, out ordinals);
                 tally.Timelines++;
                 if (settled) tally.Settled++;
                 if (wrong) tally.Wrong++;
@@ -3029,7 +3183,10 @@ namespace CompetitiveRounds
         // `restartBetween` R and C restart and join the room again before game
         // 2. Game 2 crosses under the host's token (its nonce the anchor and 8
         // fresh digits), a team-2 player leaves and R reports it: it settles,
-        // from game 2's posts, every seat carrying game 2's token.
+        // from game 2's posts, every seat carrying game 2's token. Round 9,
+        // M1: except where R is the reporter and restarted, reporting the leave
+        // on a session the issue did not go to: nothing settles (the cost of
+        // the issued-session rule, counted apart by the sentinel).
         private static bool SimulateF31Fresh(int reporter, bool restartBetween, out bool fromAnother, out int carrying)
         {
             const string S = "series-f31f", R = "room-f31f";
@@ -3041,6 +3198,7 @@ namespace CompetitiveRounds
             var all = new[] { h, r, c };
             TokenSeat m = all[reporter];
             m.Reporter = true;
+            foreach (var x in all) srv.Issue(x.Account, x.Session);
             string value = "";
             foreach (var x in all) x.Enter(R, value);
             foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
@@ -3052,7 +3210,7 @@ namespace CompetitiveRounds
                 value = ReporterPublish(m, value, true);
                 foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); }
                 if (g == 2) break;
-                foreach (var x in all) { x.Tick(R, Later); string rep = x.Over(R); if (rep != null) srv.Land(rep); }
+                foreach (var x in all) { x.Tick(R, Later); string rep = x.Over(R); if (rep != null) srv.Land(rep, x.Session); }
                 if (restartBetween)
                 {
                     r.Restart();
@@ -3064,7 +3222,8 @@ namespace CompetitiveRounds
             }
             carrying = 0;
             foreach (var x in all) if (x.Token(S, R).Length != 0) carrying++;
-            return srv.Settles(r.Token(S, R), 2, out fromAnother) && srv.Recorded == 1 && !srv.Voided;
+            return srv.Settles(r.Token(S, R), 2, r.Reporter, r.Session, out fromAnother) && srv.Recorded == 1
+                   && !srv.Voided;
         }
 
         private static int Begin(Tracker t, string series, string room)
@@ -3396,45 +3555,56 @@ namespace CompetitiveRounds
             // landing; without the session rule the last settles wrongly, and
             // the void alone catches the case where game 1's result lands
             // first, which without the anchor rule settles wrongly); then the
-            // sweep and the genuinely fresh room's control.
+            // sweep and the genuinely fresh room's control. Round 9, finding
+            // M1: every server below applies round 9's rules (M1All) unless a
+            // check says otherwise. The client half runs against none of them.
+            // Round 8's session-rule controls run without the other-session
+            // rule, which alone also closes a restarted reporter
+            // (M1-OTHERS-ALONE: the first process's session stays live on the
+            // server).
             // SimulateF31(reporter, g1Issued, restartAll, land, dcIn,
-            // keptBoot, readsAnchor, ledgerLost, ownLands, readsSession, ...).
+            // keptBoot, readsAnchor, ledgerLost, ownLands, readsSession, m1,
+            // twin, ...).
+            const int NoOthers = M1All & ~M1Others, NoAnyPost = M1All & ~M1AnyPost;
             int f31Named = 0, f31Client = 0, f31Kept = 0, f31Server = 0, f31Lost = 0, f31Unlanded = 0;
-            int f31UnlandedOpen = 0, f31Void = 0, f31VoidOpen = 0;
+            int f31UnlandedOpen = 0, f31Void = 0, f31VoidOpen = 0, f31OthersAlone = 0;
             for (int rep = 0; rep < 3; rep++)
             for (int g1 = 0; g1 < 2; g1++)
             for (int ra = 0; ra < 2; ra++)
             {
                 bool w31;
                 int carry31, ord31;
-                bool st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, false, false, true,
+                bool st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, false, false, true, M1All, TwinNone,
                                         out w31, out carry31, out ord31);
                 if (st31 || carry31 != 0 || ord31 != 0) f31Named++;
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, false, false, false, true,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, false, false, false, true, 0, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (st31 || carry31 != 0 || ord31 != 0) f31Client++;
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, true, false, false, false, true,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, true, false, false, false, true, M1All, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (w31 && carry31 == 3) f31Kept++;
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, true, true, false, false, true,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, true, true, false, false, true, M1All, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (st31) f31Server++;
                 for (int landsOwn = 0; landsOwn < 2; landsOwn++)
                 {
-                    st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, true, landsOwn != 0, true,
-                                       out w31, out carry31, out ord31);
+                    st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, true, landsOwn != 0, true, M1All,
+                                       TwinNone, out w31, out carry31, out ord31);
                     if (st31 || carry31 != 0 || ord31 != 0) f31Lost++;
                 }
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, true,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, true, M1All, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (st31 || carry31 != 0 || ord31 != 0) f31Unlanded++;
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false, NoOthers, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (w31) f31UnlandedOpen++;
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, true, false, false,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false, M1All, TwinNone,
+                                   out w31, out carry31, out ord31);
+                if (st31 || carry31 != 0 || ord31 != 0) f31OthersAlone++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, true, false, false, NoOthers, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (st31) f31Void++;
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, false, true, false, false,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, false, true, false, false, NoOthers, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (w31) f31VoidOpen++;
             }
@@ -3457,15 +3627,18 @@ namespace CompetitiveRounds
             { pass = false; detail += " F31-LEDGER-LOST-UNLANDED:" + f31Unlanded + "-of-12-named-a-game-carried-a-token-or-settled"; }
             checks++;
             if (f31UnlandedOpen == 0)
-            { pass = false; detail += " F31-LEDGER-LOST-WITHOUT-THE-SESSION-RULE:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            { pass = false; detail += " F31-LEDGER-LOST-WITHOUT-THE-SESSION-RULES:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            checks++;
+            if (f31OthersAlone != 0)
+            { pass = false; detail += " M1-OTHERS-ALONE:" + f31OthersAlone + "-of-12-named-a-game-carried-a-token-or-settled"; }
             checks++;
             if (f31Void != 0) { pass = false; detail += " F31-VOID-ALONE:" + f31Void + "-of-12-settled"; }
             checks++;
             if (f31VoidOpen == 0)
             { pass = false; detail += " F31-VOID-UNREAD:none-settled-wrongly(the-scenario-proves-nothing)"; }
-            F31Tally f31 = SweepF31(false, true, true);
-            F31Tally f31boot = SweepF31(true, false, true);
-            F31Tally f31open = SweepF31(false, true, false);
+            F31Tally f31 = SweepF31(false, true, true, M1All, TwinNone);
+            F31Tally f31boot = SweepF31(true, false, true, M1All, TwinNone);
+            F31Tally f31open = SweepF31(false, true, false, NoOthers, TwinNone);
             checks++;
             if (f31.Settled != 0 || f31.Wrong != 0)
             { pass = false; detail += " F31-sweep:" + f31.Settled + "-settled," + f31.Wrong + "-wrongly"; }
@@ -3477,17 +3650,107 @@ namespace CompetitiveRounds
             checks++;
             if (f31open.Wrong == 0)
             { pass = false; detail += " F31-no-session-sweep:none-settled-wrongly(the-sweep-proves-nothing)"; }
-            int f31Fresh = 0;
+
+            // Round 9, finding M1: the reporter's account runs a second process
+            // B from game 3, the required control's shape. Where A held a
+            // session (TwinLive) or a post of game 1 reached the server
+            // (TwinPosted), nothing is named, carried or settled on round 9's
+            // server; with round 8's issuance (none of round 9's rules), or
+            // without the one rule that sees A, B is issued game 3 as physical
+            // game 1 and a leave in game 4 settles wrongly, or the scenario
+            // proves nothing. TwinUnseen, A leaving nothing the server can see,
+            // is the residual: it settles, wrongly, exactly where A's results
+            // never land and B's own do (12 of 48), and nowhere else.
+            int m1Live = 0, m1LiveR8 = 0, m1LiveNoOthers = 0, m1Posted = 0, m1PostedR8 = 0, m1PostedNoAny = 0;
+            int m1Unseen = 0, m1UnseenWrong = 0, m1UnseenOutside = 0;
+            for (int rep = 0; rep < 3; rep++)
+            for (int g1 = 0; g1 < 2; g1++)
+            for (int ra = 0; ra < 2; ra++)
+            for (int lm = 0; lm < 4; lm++)
+            {
+                bool landsM1 = lm < 2, ownM1 = (lm & 1) != 0;
+                bool wM1, sM1;
+                int carryM1, ordM1;
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinLive,
+                                  out wM1, out carryM1, out ordM1);
+                if (sM1 || carryM1 != 0 || ordM1 != 0) m1Live++;
+                SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, 0, TwinLive,
+                            out wM1, out carryM1, out ordM1);
+                if (wM1) m1LiveR8++;
+                SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, NoOthers, TwinLive,
+                            out wM1, out carryM1, out ordM1);
+                if (wM1) m1LiveNoOthers++;
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinPosted,
+                                  out wM1, out carryM1, out ordM1);
+                if (sM1 || carryM1 != 0 || ordM1 != 0) m1Posted++;
+                SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, 0, TwinPosted,
+                            out wM1, out carryM1, out ordM1);
+                if (wM1) m1PostedR8++;
+                SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, NoAnyPost, TwinPosted,
+                            out wM1, out carryM1, out ordM1);
+                if (wM1) m1PostedNoAny++;
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinUnseen,
+                                  out wM1, out carryM1, out ordM1);
+                if (sM1) m1Unseen++;
+                if (wM1) m1UnseenWrong++;
+                if (sM1 && (landsM1 || !ownM1)) m1UnseenOutside++;
+            }
+            checks++;
+            if (m1Live != 0)
+            { pass = false; detail += " M1-TWIN-LIVE:" + m1Live + "-of-48-named-a-game-carried-a-token-or-settled"; }
+            checks++;
+            if (m1LiveR8 == 0)
+            { pass = false; detail += " M1-TWIN-LIVE-ROUND-8-ISSUANCE:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m1LiveNoOthers == 0)
+            { pass = false; detail += " M1-TWIN-LIVE-WITHOUT-THE-OTHER-SESSION-RULE:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m1Posted != 0)
+            { pass = false; detail += " M1-TWIN-POSTED:" + m1Posted + "-of-48-named-a-game-carried-a-token-or-settled"; }
+            checks++;
+            if (m1PostedR8 == 0)
+            { pass = false; detail += " M1-TWIN-POSTED-ROUND-8-ISSUANCE:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m1PostedNoAny == 0)
+            { pass = false; detail += " M1-TWIN-POSTED-WITHOUT-THE-ANY-POST-RULE:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m1Unseen != 12 || m1UnseenWrong != 12 || m1UnseenOutside != 0)
+            {
+                pass = false;
+                detail += " M1-RESIDUAL-UNSEEN:" + m1Unseen + "-settled," + m1UnseenWrong + "-wrongly," + m1UnseenOutside
+                          + "-outside-its-class(expected-12,12,0)";
+            }
+            F31Tally m1LiveSweep = SweepF31(false, true, true, M1All, TwinLive);
+            F31Tally m1PostedSweep = SweepF31(false, true, true, M1All, TwinPosted);
+            F31Tally m1UnseenSweep = SweepF31(false, true, true, M1All, TwinUnseen);
+            checks++;
+            if (m1LiveSweep.Settled + m1LiveSweep.Carrying + m1LiveSweep.Named != 0
+                || m1PostedSweep.Settled + m1PostedSweep.Carrying + m1PostedSweep.Named != 0)
+            {
+                pass = false;
+                detail += " M1-twin-sweep:" + m1LiveSweep.Settled + "/" + m1LiveSweep.Carrying + "/" + m1LiveSweep.Named
+                          + "-live," + m1PostedSweep.Settled + "/" + m1PostedSweep.Carrying + "/" + m1PostedSweep.Named
+                          + "-posted(settled/carried/named)";
+            }
+            checks++;
+            if (m1UnseenSweep.Settled != m1UnseenSweep.Wrong)
+            { pass = false; detail += " M1-unseen-sweep:" + m1UnseenSweep.Settled + "-settled," + m1UnseenSweep.Wrong + "-wrongly"; }
+            int f31Fresh = 0, f31FreshRestarted = 0;
             for (int rep = 0; rep < 3; rep++)
             for (int rb = 0; rb < 2; rb++)
             {
                 bool fa31;
                 int carryF31;
-                if (SimulateF31Fresh(rep, rb != 0, out fa31, out carryF31) && !fa31 && carryF31 == 3) f31Fresh++;
+                bool stF31 = SimulateF31Fresh(rep, rb != 0, out fa31, out carryF31);
+                if (rep == 1 && rb != 0) { if (stF31) f31FreshRestarted++; continue; }
+                if (stF31 && !fa31 && carryF31 == 3) f31Fresh++;
             }
             checks++;
-            if (f31Fresh != 6)
-            { pass = false; detail += " F31-FRESH-ROOM-CONTROL:" + f31Fresh + "-of-6-settled-from-its-own-game-with-every-seat-carrying"; }
+            if (f31Fresh != 5)
+            { pass = false; detail += " F31-FRESH-ROOM-CONTROL:" + f31Fresh + "-of-5-settled-from-its-own-game-with-every-seat-carrying"; }
+            checks++;
+            if (f31FreshRestarted != 0)
+            { pass = false; detail += " M1-RESTARTED-REPORTER:the-leave-reported-on-a-session-the-issue-did-not-go-to-settled"; }
 
             // The score's successor rule (F28).
             checks++;
@@ -4150,15 +4413,24 @@ namespace CompetitiveRounds
                 + f29kept.Wrong + " while queued, " + f29open.Wrong + " without the sitting rule, and "
                 + f29anchored.Wrong + " against the anchor rule; F31 sweep: " + f31.Timelines + " timelines per rule, "
                 + f31.Settled + " settled, " + f31.Wrong + " wrongly, " + f31.Carrying + " tokens carried and "
-                + f31.Named + " games named; without the session rule: " + f31open.Settled + " settled, "
+                + f31.Named + " games named; without the session rules: " + f31open.Settled + " settled, "
                 + f31open.Wrong + " wrongly; round 7's creator boot against a server without the anchor rule: "
                 + f31boot.Settled + " settled, " + f31boot.Wrong + " wrongly; named: " + f31Kept
                 + " of 12 kept-copy timelines settled wrongly, " + f31Server + " against the anchor rule; the"
                 + " reporter's ledger lost: " + f31Lost + " of 24 timelines named a game, carried a token or settled, "
                 + f31Unlanded + " of 12 with game 1's result never landing, and " + f31UnlandedOpen + " of those 12"
-                + " settled wrongly without the session rule; the void alone: " + f31Void + " of 12 settled, "
-                + f31VoidOpen + " of 12 wrongly with the void unread; " + f31Fresh + " of 6 fresh-room DC reports"
-                + " settled)";
+                + " settled wrongly without the session rules, " + f31OthersAlone + " of 12 named a game, carried a token"
+                + " or settled against the other-session rule alone; the void alone: " + f31Void + " of 12 settled, "
+                + f31VoidOpen + " of 12 wrongly with the void unread; " + f31Fresh + " of 5 fresh-room DC reports"
+                + " settled, " + f31FreshRestarted + " where the reporter restarted and reported the leave; M1, the"
+                + " reporter's account in a second process: " + m1Live + " of 48 timelines named a game, carried a token"
+                + " or settled where the first process held a session (" + m1LiveR8 + " settled wrongly with round 8's"
+                + " issuance, " + m1LiveNoOthers + " without the other-session rule), " + m1Posted + " of 48 where its"
+                + " post reached the server (" + m1PostedR8 + " with round 8's issuance, " + m1PostedNoAny
+                + " without the any-post rule), " + m1Unseen + " of 48 settled where nothing of it reached the server"
+                + " (the residual, " + m1UnseenWrong + " wrongly); twin sweeps: " + m1LiveSweep.Timelines
+                + " timelines each, " + m1LiveSweep.Settled + " and " + m1PostedSweep.Settled + " settled, "
+                + m1UnseenSweep.Settled + " unseen)";
             return SentinelTag + " " + (pass ? "PASS" : "FAIL") + ": " + checks + " checks" + sweep + detail;
         }
     }

@@ -43,7 +43,10 @@ TEAM_DC_TESTS_REQUIRED=1 to make "no DSN" a failure instead of a skip.
 
 What runs as written: POST /team/series/{id}/live-points,
 POST /team/series/{id}/report-dc, including the synthetic forfeit row, and
-POST /team/series/{id}/first-game (round 8). What is replaced: for the last,
+POST /team/series/{id}/first-game (round 8; round 9 reads the account's
+other sessions and keeps the issued one) and POST
+/team/series/{id}/spawn-confirm (round 9's room record). What is replaced:
+for the first-game route,
 the Steam session check (the `asking` fixture: whether the session is
 verified is the test request's); for all of them, the transport seat verdict (always "unbound", so no attestation row
 is written) and _complete_team_series_with_ratings (a stub that marks the
@@ -124,6 +127,9 @@ MIGRATION_354 = os.path.join(SQL_DIR, "354_team_series_games_game_token.sql")
 # Applied after 354 when present: the series' physical game 1, issued by the
 # server (beta round 8, F31).
 MIGRATION_359 = os.path.join(SQL_DIR, "359_team_series_first_game_nonce.sql")
+# Applied after 359 when present: the session the series' physical game 1
+# was issued to (beta round 9, M1).
+MIGRATION_362 = os.path.join(SQL_DIR, "362_team_series_first_game_session.sql")
 # Applied to every lab: steam_sessions, which the first-game route reads for
 # the age of the ask's own session (beta round 8, F31).
 MIGRATION_137 = os.path.join(SQL_DIR, "137_steam_sessions.sql")
@@ -282,6 +288,13 @@ _AUTO = object()
 # it read before; the F31 tests below model the tokens that do not.
 LAB_ANCHOR = "5eed1ab0"
 LAB_FIRST = LAB_ANCHOR + "0f1e2d3c"
+# Round 9, finding M1: the issue is answered to one session, kept as the
+# series' first_game_session (migration 362), and a match report, or a DC
+# report the series' reporter (seat 0, the lowest Steam ID) sends, is read
+# against it. A lab series granted LAB_FIRST was granted on LAB_SESSION, and
+# its reporter's reports carry that session unless a test says otherwise.
+LAB_SESSION = "tdc-issued-session"
+LAB_SESSION_HASH = hashlib.sha256(LAB_SESSION.encode()).hexdigest()
 
 
 def _sitting(room):
@@ -338,17 +351,24 @@ class _Lab:
     `with_identity=False` stops after migration 348 (the API-before-351
     deploy order), `with_attested_seats=False` after 351 (the API-before-352
     one), `with_game_token=False` after 352 (the API-before-354 one),
-    `with_first_game=False` after 354 (the API-before-359 one)."""
+    `with_first_game=False` after 354 (the API-before-359 one),
+    `with_first_game_session=False` after 359 (the API-before-362 one)."""
 
     def __init__(self, with_games_table=True, with_identity=True,
-                 with_attested_seats=True, with_game_token=True, with_first_game=True):
+                 with_attested_seats=True, with_game_token=True, with_first_game=True,
+                 with_first_game_session=True):
         self.schema = "teamdc_" + uuid.uuid4().hex[:12]
         self.with_games_table = with_games_table
         self.with_identity = with_identity
         self.with_attested_seats = with_attested_seats
         self.with_game_token = with_game_token
         self.with_first_game = with_first_game
+        self.with_first_game_session = with_first_game_session
         self.first_game_applied = False
+        self.first_game_session_applied = False
+        # Round 9, M1: the session token each series' physical game 1 was
+        # issued to, by series id (its reporter's reports carry it).
+        self.issued_sessions = {}
         self.engine = None
         self.sm = None
         self._n = 0
@@ -386,6 +406,10 @@ class _Lab:
                             if self.with_first_game and os.path.exists(MIGRATION_359):
                                 await conn.execute(_read(MIGRATION_359))
                                 self.first_game_applied = True
+                                if (self.with_first_game_session
+                                        and os.path.exists(MIGRATION_362)):
+                                    await conn.execute(_read(MIGRATION_362))
+                                    self.first_game_session_applied = True
         finally:
             await conn.close()
         return self
@@ -415,7 +439,8 @@ class _Lab:
         `game_recorded_secs_ago` seconds back. The record rule reads no time;
         the date is what the window this rule replaced measured from. Once
         migration 359 is applied the series was issued its physical game 1,
-        LAB_FIRST (round 8, F31), unless `granted` is false."""
+        LAB_FIRST (round 8, F31), and once 362 is, on LAB_SESSION (round 9,
+        M1), unless `granted` is false."""
         if same_four_as is not None:
             steams, pids = same_four_as["steams"], same_four_as["pids"]
         else:
@@ -438,6 +463,10 @@ class _Lab:
         if granted and self.first_game_applied:
             await self.sql("UPDATE team_series SET first_game_nonce = :n WHERE id = :sid",
                            {"sid": sid, "n": LAB_FIRST})
+            if self.first_game_session_applied:
+                await self.sql("UPDATE team_series SET first_game_session = :h WHERE id = :sid",
+                               {"sid": sid, "h": LAB_SESSION_HASH})
+                self.issued_sessions[sid] = LAB_SESSION
         for g in range(t1_wins + t2_wins):
             await self.record_game(sid, pids, winner=1 if g < t1_wins else 2,
                                    secs_ago=game_recorded_secs_ago, n=g + 1)
@@ -478,13 +507,19 @@ class _Lab:
         await self.record_game(ser["sid"], ser["pids"], winner=winner,
                                secs_ago=secs_ago, n=n)
 
-    async def land_report(self, ser, *, winner, anchor, secs_ago=600):
+    async def land_report(self, ser, *, winner, anchor, secs_ago=600, session=_AUTO):
         """A match report the series records, in the order and in the one
         transaction submit_team_match records it in (round 8, F31): the
         series row read under its lock (SELECT *), the game counted and its
         team_matches row written, then main._team_first_game_void with the
-        report's game_anchor (`anchor`, None for a report that carries none).
-        Returns whether it voided."""
+        report's game_anchor (`anchor`, None for a report that carries none)
+        and (round 9, M1) the sha256 of the session token the report arrives
+        on (`session`: by default the one the series' physical game 1 was
+        issued to; None for a report that carries none). Returns whether it
+        voided."""
+        if session is _AUTO:
+            session = self.issued_sessions.get(ser["sid"], LAB_SESSION)
+        seen = hashlib.sha256(session.encode()).hexdigest() if session else ""
         from sqlalchemy import text
         col = "t1_series_wins" if winner == 1 else "t2_series_wins"
         async with self.sm() as db:
@@ -507,7 +542,10 @@ class _Lab:
                  "r1": 5 if winner == 1 else 2, "r2": 2 if winner == 1 else 5,
                  "w": winner, "room": "%s_g%d_%s" % (ROOM, n, str(ser["sid"])[:8]),
                  "ago": int(secs_ago)})
-            voided = await main._team_first_game_void(db, series, ser["sid"], anchor)
+            if _takes(main._team_first_game_void, "session"):
+                voided = await main._team_first_game_void(db, series, ser["sid"], anchor, seen)
+            else:
+                voided = await main._team_first_game_void(db, series, ser["sid"], anchor)
             await db.commit()
             return voided
 
@@ -524,7 +562,9 @@ class _Lab:
         that was there when the series began); "after", one issued now, after
         the series (a process started since, as a restarted client's is, or
         one on another machine or profile); "another-player", one issued
-        before the series to a Steam ID outside it; "none", no row."""
+        before the series to a Steam ID outside it; "none", no row. An issue
+        records the ask's token as the session the series' reports carry
+        (round 9, M1)."""
         requester = steam if steam is not None else ser["steams"][seat]
         named = series_id if series_id is not None else str(ser["sid"])
         token = "tdc-session-" + uuid.uuid4().hex
@@ -543,10 +583,44 @@ class _Lab:
         request = types.SimpleNamespace(state=types.SimpleNamespace(scr_session_verified=verified),
                                         headers={"X-Session-Token": token})
         async with self.sm() as db:
-            return await main.team_series_first_game(
+            answer = await main.team_series_first_game(
                 series_id=named, request=request, requester_steam_id=requester,
                 photon_room_id=room,
                 sig=_first_game_sig(named, requester, room) if sig is _AUTO else sig, db=db)
+        if answer.get("issued"):
+            self.issued_sessions[ser["sid"]] = token
+        return answer
+
+    async def other_session(self, ser, kind, seat=0):
+        """Round 9, M1: another Steam session of seat `seat`'s account (by
+        default the series' reporter), as steam_sessions holds it, beside any
+        the ask makes: "live-since-before", verified, issued two hours before
+        the series was created and expiring a day from now (a process there
+        when the series began, still signed in); "issued-since", verified,
+        issued now; "unverified", as the first but not verified;
+        "expired-before", verified, issued 26 hours before the series and
+        expired an hour before it; "expires-just-after", the same but
+        expiring a second after the series was created. Returns its token."""
+        token = "tdc-other-" + uuid.uuid4().hex
+        issued, expires, verified = {
+            "live-since-before": ("ts.created_at - INTERVAL '2 hours'",
+                                  "NOW() + INTERVAL '1 day'", True),
+            "issued-since": ("NOW()", "NOW() + INTERVAL '1 day'", True),
+            "unverified": ("ts.created_at - INTERVAL '2 hours'",
+                           "NOW() + INTERVAL '1 day'", False),
+            "expired-before": ("ts.created_at - INTERVAL '26 hours'",
+                               "ts.created_at - INTERVAL '1 hour'", True),
+            "expires-just-after": ("ts.created_at - INTERVAL '26 hours'",
+                                   "ts.created_at + INTERVAL '1 second'", True),
+        }[kind]
+        await self.sql(
+            "INSERT INTO steam_sessions (steam_id, token_hash, verified, issued_at, expires_at)"
+            " SELECT CAST(:steam AS varchar), CAST(:th AS char(64)), CAST(:v AS boolean),"
+            "        " + issued + ", " + expires +
+            "   FROM team_series ts WHERE ts.id = :sid",
+            {"steam": ser["steams"][seat], "th": hashlib.sha256(token.encode()).hexdigest(),
+             "v": verified, "sid": ser["sid"]})
+        return token
 
     async def first_game(self, ser):
         """The series' first_game_nonce (migration 359)."""
@@ -589,11 +663,17 @@ class _Lab:
         return _tok(ser["sid"], row["n"] + 1, row["room"]) if row["room"] else None
 
     async def report_dc(self, ser, *, reporter_seat, dc_seat, t1_total, t2_total,
-                        room=ROOM, token=_AUTO, token_sig=_AUTO):
+                        room=ROOM, token=_AUTO, token_sig=_AUTO, session=_AUTO):
         """A DC report through the real endpoint. It names the token of the
         physical game its reporter is in: by default the lab's token of the
         game in progress, None for a client that sends none, or the one
-        given; `token_sig` replaces its signature."""
+        given; `token_sig` replaces its signature. The request carries its
+        own X-Session-Token (round 9, M1), `session`: by default the series'
+        issued session for its reporter (seat 0) and a session of the seat's
+        own for any other seat; None sends none."""
+        if session is _AUTO:
+            session = (self.issued_sessions.get(ser["sid"], LAB_SESSION) if reporter_seat == 0
+                       else "tdc-seat-%d-session" % reporter_seat)
         reporter = ser["steams"][reporter_seat]
         dc = ser["steams"][dc_seat]
         if token is _AUTO:
@@ -603,6 +683,10 @@ class _Lab:
             extra = {"game_token": token,
                      "token_sig": (_dc_token_sig(reporter, str(ser["sid"]), dc, token)
                                    if token_sig is _AUTO else token_sig)}
+        if _takes(main.team_series_report_dc, "request"):
+            extra["request"] = types.SimpleNamespace(
+                state=types.SimpleNamespace(),
+                headers={"X-Session-Token": session} if session else {})
         async with self.sm() as db:
             return await main.team_series_report_dc(
                 series_id=str(ser["sid"]), reporter_steam_id=reporter,
@@ -1039,7 +1123,7 @@ def _token_layer_off(monkeypatch):
     nothing there, so a control that leaves it on could no longer watch its
     test fail. The token rule has its own controls (beta round 5, below)."""
     monkeypatch.setattr(main, "_team_game_token_seats",
-                        lambda rec, token, ordinal: (_ALL_BITS, None))
+                        lambda rec, token, ordinal, session=None: (_ALL_BITS, None))
 
 
 def _wrap_the_evidence(monkeypatch, mutant=None):
@@ -2731,8 +2815,8 @@ def test_the_report_token_game_test_can_fail(wired, monkeypatch, mutant):
     if mutant == "ordinal-unread":
         real = main._team_game_token_seats
         monkeypatch.setattr(main, "_team_game_token_seats",
-                            lambda rec, token, ordinal: real(
-                                rec, token, ordinal if token is None else token[1]))
+                            lambda rec, token, ordinal, session=None: real(
+                                rec, token, ordinal if token is None else token[1], session))
 
     async def go():
         async with _Lab() as lab:
@@ -3558,6 +3642,17 @@ _F31 = ["never-issued", "issued-in-the-lost-game", "ledger-lost", "ledger-lost-u
 # series was created (main.team_series_first_game).
 _SESSION_REASON = ("the requester's session was not issued before the series was created: the "
                    "asking process cannot be shown to have been there for every game of the series")
+# Round 9, finding M1: the route's refusals of an ask while another session
+# of the requester's account was live after the series was created, while
+# anything is on the series' live-points record, and for a series created
+# more than a day before.
+_OTHER_SESSION_REASON = ("another session of the requester's account was live after the series "
+                         "was created: a game of the series may have been played by a process "
+                         "this server cannot tell apart from the asking one")
+_ANY_POST_REASON = ("a live-points post is on the series' record: a game of the series may "
+                    "already have been played")
+_RECENT_REASON = ("the series was created more than a day ago: the sessions of the requester's "
+                  "account since then can no longer all be read")
 
 
 @pytest.fixture
@@ -3703,20 +3798,21 @@ def _apply_f31_mutant(monkeypatch, mutant):
         monkeypatch.setattr(main, "_TEAM_FIRST_GAME_READ_SQL",
                             sql.replace(main._TEAM_FIRST_GAME_SESSION_SQL, "TRUE"))
     if mutant in ("void-off", "session-unread-void-off"):
-        async def _kept(db, series, series_uuid, anchor):
+        async def _kept(db, series, series_uuid, anchor, session=None):
             return False
 
         monkeypatch.setattr(main, "_team_first_game_void", _kept)
     if mutant == "absence-chain-read":
-        monkeypatch.setattr(main, "_team_game_first_game_refusal", lambda rec, token: None)
+        monkeypatch.setattr(main, "_team_game_first_game_refusal",
+                            lambda rec, token, session=None: None)
     elif mutant == "prefix-unread":
         real = main._team_game_first_game_refusal
 
-        def unanchored(rec, token):
+        def unanchored(rec, token, session=None):
             issued = rec["first_game_nonce"]
             if main._team_game_token_valid(issued):
                 token = (issued[:8] + token[0][8:],) + tuple(token[1:])
-            return real(rec, token)
+            return real(rec, token, session)
 
         monkeypatch.setattr(main, "_team_game_first_game_refusal", unanchored)
     else:
@@ -3810,12 +3906,20 @@ _ASK_REASONS = {
     "a-game-recorded": "a game of the series is recorded",
     "relocked": "the series was relocked",
     "another-room": "the requester's room is not the series' stored room",
-    "two-points-on-record": "a pair of two points or more is on the series' record",
+    "two-points-on-record": _ANY_POST_REASON,
     "a-game-in-another-room": "the series has a game on record in another room",
     "not-active": "the series is not active",
     "a-session-after-the-series": _SESSION_REASON,
     "another-players-session": _SESSION_REASON,
     "no-session-on-record": _SESSION_REASON,
+    # Round 9, finding M1.
+    "another-session-live-since-before": _OTHER_SESSION_REASON,
+    "another-session-issued-since": _OTHER_SESSION_REASON,
+    "another-unverified-session": _OTHER_SESSION_REASON,
+    "a-post-below-two-points": _ANY_POST_REASON,
+    "a-zero-zero-post": _ANY_POST_REASON,
+    "live-totals-without-a-record": _ANY_POST_REASON,
+    "a-day-old-series": _RECENT_REASON,
 }
 
 
@@ -3849,6 +3953,21 @@ async def _refused_ask(lab, case):
         kw = {"session": "another-player"}
     elif case == "no-session-on-record":
         kw = {"session": "none"}
+    elif case in ("another-session-live-since-before", "another-session-issued-since",
+                  "another-unverified-session"):
+        await lab.other_session(ser, {"another-session-live-since-before": "live-since-before",
+                                      "another-session-issued-since": "issued-since",
+                                      "another-unverified-session": "unverified"}[case])
+    elif case == "a-post-below-two-points":
+        await lab.post(ser, 3, 1, 0, game=1, room=ROOM, token=None)
+    elif case == "a-zero-zero-post":
+        await lab.post(ser, 2, 0, 0, game=1, room=ROOM, token=None)
+    elif case == "live-totals-without-a-record":
+        await lab.sql("UPDATE team_series SET live_t2_points = 1 WHERE id = :sid",
+                      {"sid": ser["sid"]})
+    elif case == "a-day-old-series":
+        await lab.sql("UPDATE team_series SET created_at = NOW() - INTERVAL '25 hours'"
+                      " WHERE id = :sid", {"sid": ser["sid"]})
     answer = await lab.ask_first_game(ser, **kw)
     return answer, await lab.first_game(ser)
 
@@ -3863,7 +3982,12 @@ def test_the_first_game_is_refused_on_what_the_server_can_prove(asking, case):
     room than its stored one, with a pair of two points on its record, with
     a game on record in another room, or no longer active; and an ask whose
     own session was not issued before the series was created: a later one,
-    another player's, or none on record."""
+    another player's, or none on record. Round 9 (M1): an ask while another
+    session of the requester's account was live after the series was
+    created (one live since before it, one issued since, an unverified one),
+    while anything is on the series' live-points record (a post below two
+    points, a 0-0 post, a point in the live totals filed under no game), or
+    for a series created more than a day before."""
     async def go():
         async with _Lab() as lab:
             return await _refused_ask(lab, case)
@@ -4021,7 +4145,8 @@ def test_the_match_report_carries_the_anchor_and_voids_from_the_row_it_locked():
     """F31: TeamMatchReport carries game_anchor, outside the frozen 11-field
     canonical; submit_team_match reads it once, calling _team_first_game_void
     after the match row is added and flushed, with the series row it read
-    under its lock, and a duplicate report returns before that. The client's
+    under its lock and (round 9, M1) the sha256 of the report's own session
+    token, and a duplicate report returns before that. The client's
     report sends game_anchor from the payload built with the game, only when
     it holds one, before the canonical and without touching it, and writes
     the report ledger before its first send; the watcher asks with the
@@ -4030,7 +4155,8 @@ def test_the_match_report_carries_the_anchor_and_voids_from_the_row_it_locked():
     import schemas
     assert "game_anchor" in schemas.TeamMatchReport.model_fields
     src = inspect.getsource(main.submit_team_match)
-    call = "await _team_first_game_void(db, series, series_uuid, report.game_anchor)"
+    call = ("await _team_first_game_void(db, series, series_uuid, report.game_anchor,\n"
+            "                                _team_first_game_session_hash(request))")
     assert src.count("game_anchor") == 1 and src.count(call) == 1, src.count("game_anchor")
     assert src.index("db.add(new_match)") < src.index(call)
     assert src.index("already recorded (duplicate report)") < src.index(call)
@@ -4106,3 +4232,404 @@ def test_the_clients_first_game_canonical_is_the_one_the_server_checks(asking):
                    '/api/v1/team/series/{Escape(seriesId)}/first-game"'):
         assert body.count(helper) == 1, helper
     assert "team-first-game" not in body, "a canonical built outside TeamGameNumber"
+
+
+# ---- Round 9, finding M1: physical game 1 issued to ONE process -----------
+#
+# Round 8 issued physical game 1 on a session issued before the series was
+# created. That rules out a restarted reporter, but not a second process of
+# the reporter's account alive at the same time (another machine or
+# profile), which may have played an earlier game of the series whose result
+# waits in its own outbox, out of the asking client's reach. Since round 9
+# the route also refuses while any other session of the account was live
+# after the series was created, while anything is on the series' live-points
+# record, and for a series created more than a day before
+# (main._TEAM_FIRST_GAME_OTHER_SESSION_SQL, _TEAM_FIRST_GAME_ANY_POST_SQL,
+# _TEAM_FIRST_GAME_RECENT_SQL), and it keeps the session it issued to
+# (first_game_session, migration 362): a match report on another session
+# voids the issue, and a DC report the reporter's account sends on another
+# session reads no token.
+
+_M1 = ["a-second-live-session", "a-live-points-post", "a-heartbeat", "a-room-record",
+       "a-post-after-its-session-expired"]
+
+
+def _spawn_sig(steam, series_id):
+    return hmac.new(SECRET.encode(), f"{steam}:{series_id}:spawn".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+async def _m1(lab, trace):
+    """The M1 sequence. The series stands 0-0 in ROOM and its reporter's
+    account (seat 0) has TWO sessions, both issued before the series was
+    created: process A's and process B's. Process A plays physical game 1
+    with the other three seats and leaves the server-visible trace `trace`:
+      a-second-live-session             none but its own session, live;
+      a-live-points-post                a 1-0 post naming game 1, on its
+                                        live session;
+      a-heartbeat                       a presence ping (main._presence_touch:
+                                        in memory, keyed by the Steam ID
+                                        alone), on its live session;
+      a-room-record                     its spawn confirmation through the
+                                        real route, on its live session;
+      a-post-after-its-session-expired  a 1-0 post naming game 1, its session
+                                        having expired before the series was
+                                        created (the post is its only trace).
+    Team 2 wins game 1, and its result waits in A's outbox: it never lands.
+    Process B, whose ledger and outbox hold no report of the series, asks at
+    the start of physical game 2 through the real route. If it is issued,
+    every seat carries B's chain: game 2 is named physical game 1 (the issued
+    nonce) and crosses, and B's report of it lands on B's session with the
+    anchor (team 1 the winner); physical game 3's host draws the anchor and
+    8 fresh digits, every seat posts 1-0 and 1-1 naming game 2 with it, seat
+    2 (team 2) leaves, and seats 0 (B) and 1 report it. If it is not issued,
+    every seat stays tokenless. Returns the ask's answer and the settlement."""
+    ser = await lab.series(t1_wins=0, t2_wins=0, granted=False)
+    steam_a = ser["steams"][0]
+    await lab.other_session(ser, "expired-before" if trace == "a-post-after-its-session-expired"
+                            else "live-since-before")
+    if trace in ("a-live-points-post", "a-post-after-its-session-expired"):
+        await lab.post(ser, 0, 1, 0, game=1, room=ROOM, token=None)
+    elif trace == "a-heartbeat":
+        main._presence_touch(steam_a)
+    elif trace == "a-room-record":
+        async with lab.sm() as db:
+            done = await main.team_series_spawn_confirm(
+                series_id=str(ser["sid"]), steam_id=steam_a,
+                hmac_sig=_spawn_sig(steam_a, str(ser["sid"])), db=db)
+        assert done["already_recorded"] is False, done
+    else:
+        assert trace == "a-second-live-session", trace
+    answer = await lab.ask_first_game(ser)
+    main._presence_seen.pop(steam_a, None)
+    one = two = None
+    if answer.get("issued"):
+        nonce = answer["nonce"]
+        one, two = _wire(nonce, 1), _wire(nonce[:8] + "e3e3e3e3", 2)
+    await _post_all(lab, ser, (1, 0), (1, 1), (2, 1), game=1, room=ROOM, token=one)
+    await lab.land_report(ser, winner=1, anchor=answer["nonce"][:8] if one else None)
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM, token=two)
+    await _two_reports(lab, ser, HIGH, HIGH, token=two)
+    return answer, await lab.settlement(ser)
+
+
+@needs_pg
+@pytest.mark.parametrize("trace", _M1)
+def test_a_second_process_of_the_reporters_account_leaves_the_series_tokenless(asking, trace):
+    """M1 (round 9), the required control: two sessions of one account exist,
+    process A has left a server-visible trace of an earlier game of the
+    series (a live-points post, a heartbeat, a room record, or simply a
+    second live session on the account), and process B asks for game 1. The
+    answer is tokenless and nothing settles: the leave in physical game 3
+    goes to an admin (dc_incomplete) and no result, rating or gold moves.
+    A's session refuses the ask wherever it was live after the series was
+    created; where it expired before, A's post on the record does."""
+    async def go():
+        async with _Lab() as lab:
+            return await _m1(lab, trace)
+
+    answer, settled = _run(go())
+    reason = (_ANY_POST_REASON if trace == "a-post-after-its-session-expired"
+              else _OTHER_SESSION_REASON)
+    assert answer == {"issued": False, "reason": reason}, answer
+    assert settled == INCOMPLETE, settled
+    assert asking == [], asking
+
+
+def _apply_m1_mutant(monkeypatch, mutant):
+    """The M1 controls, each a change to the first-game route's read
+    (main._TEAM_FIRST_GAME_READ_SQL; every fragment replaced must occur in it
+    exactly once):
+      round-8-issuance      round 8's issuance restored: no other-session
+                            rule, no age bound, and of the record only a pair
+                            of two points or more refuses;
+      other-session-unread  the other-session rule alone is off;
+      any-post-unread       the record rule alone goes back to round 8's (a
+                            pair of two points or more);
+      pass-through          nothing changes (the inert twin)."""
+    sql = main._TEAM_FIRST_GAME_READ_SQL
+    round8_record = ("EXISTS (SELECT 1 FROM team_series_games g"
+                     " WHERE g.series_id = :sid AND (g.pair_seats & %d) <> 0)"
+                     % main._TEAM_GAME_ANY_TWO_POINTS)
+    swaps = {"round-8-issuance": [(main._TEAM_FIRST_GAME_RECENT_SQL, "TRUE"),
+                                  (main._TEAM_FIRST_GAME_OTHER_SESSION_SQL, "FALSE"),
+                                  (main._TEAM_FIRST_GAME_ANY_POST_SQL, round8_record)],
+             "other-session-unread": [(main._TEAM_FIRST_GAME_OTHER_SESSION_SQL, "FALSE")],
+             "any-post-unread": [(main._TEAM_FIRST_GAME_ANY_POST_SQL, round8_record)],
+             "pass-through": []}[mutant]
+    for frag, replacement in swaps:
+        assert sql.count(frag) == 1, frag
+        sql = sql.replace(frag, replacement)
+    monkeypatch.setattr(main, "_TEAM_FIRST_GAME_READ_SQL", sql)
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["round-8-issuance", "other-session-unread", "any-post-unread",
+                                    "pass-through"])
+def test_the_second_process_test_can_fail(asking, monkeypatch, mutant):
+    """Controls (#391) for the test above: every trace under each mutant,
+    with round 8's fresh room beside them. With round 8's issuance restored,
+    process B is issued physical game 1 in every case and the leave completes
+    the series for team 1, although team 2 won the series' first game (its
+    result still in A's outbox): the defect as reported, and the test above
+    turns red. Each rule is needed by exactly its cases: with the other
+    sessions unread, the three traces A left only while holding a live
+    session; with the record read as round 8 read it, the post of a process
+    whose session expired before the series. The inert twin changes nothing.
+    The fresh room completes under every mutant: the control stays green."""
+    _apply_m1_mutant(monkeypatch, mutant)
+
+    async def go():
+        results = {}
+        for trace in _M1:
+            async with _Lab() as lab:
+                answer, settled = await _m1(lab, trace)
+                results[trace] = (bool(answer.get("issued")), settled)
+        async with _Lab() as lab:
+            results["fresh-room"] = (True, (await _f31_fresh(lab))[0])
+        return results
+
+    completes = {"round-8-issuance": set(_M1),
+                 "other-session-unread": {"a-second-live-session", "a-heartbeat", "a-room-record"},
+                 "any-post-unread": {"a-post-after-its-session-expired"},
+                 "pass-through": set()}[mutant]
+    want = {trace: ((True, COMPLETED) if trace in completes else (False, INCOMPLETE))
+            for trace in _M1}
+    want["fresh-room"] = (True, COMPLETED)
+    assert _run(go()) == want
+    assert len(asking) == len(completes) + 1, asking
+
+
+@needs_pg
+def test_a_session_that_expired_before_the_series_refuses_nothing(asking):
+    """M1: the other-session rule reads a session's expiry against the
+    series' created_at, not the session's existence: a second session of the
+    reporter's account that expired before the series was created was live
+    at no moment of the series' life, and the ask is issued (the series'
+    record being empty). The same session expiring a second after the
+    series' creation refuses it."""
+    async def go():
+        out = {}
+        for kind in ("expired-before", "expires-just-after"):
+            async with _Lab() as lab:
+                ser = await lab.series(t1_wins=0, t2_wins=0, granted=False)
+                await lab.other_session(ser, kind)
+                out[kind] = await lab.ask_first_game(ser)
+        return out
+
+    out = _run(go())
+    assert out["expired-before"]["issued"] is True, out
+    assert out["expires-just-after"] == {"issued": False, "reason": _OTHER_SESSION_REASON}, out
+
+
+@needs_pg
+@pytest.mark.parametrize("case", ["the-issued-session", "another-session", "no-session",
+                                  "no-session-on-record"])
+def test_a_recorded_report_on_another_session_voids_the_first_game(wired, case):
+    """M1: a match report the series records keeps its issued physical game 1
+    only when it carries the anchor AND arrives on the session the issue was
+    answered to (first_game_session). The anchor on another session (another
+    process of the reporter's account, or its own client after a restart or
+    a renewed session), or on none, voids it; so does any report once the
+    issue has no session on record."""
+    async def go():
+        async with _Lab() as lab:
+            ser = await lab.series(t1_wins=0, t2_wins=0)
+            session = _AUTO
+            if case == "another-session":
+                session = "tdc-another-process"
+            elif case == "no-session":
+                session = None
+            elif case == "no-session-on-record":
+                await lab.sql("UPDATE team_series SET first_game_session = NULL WHERE id = :sid",
+                              {"sid": ser["sid"]})
+            voided = await lab.land_report(ser, winner=1, anchor=LAB_ANCHOR, session=session)
+            return voided, await lab.first_game(ser)
+
+    assert _run(go()) == {"the-issued-session": (False, LAB_FIRST),
+                          "another-session": (True, "void"), "no-session": (True, "void"),
+                          "no-session-on-record": (True, "void")}[case]
+
+
+async def _dc_on(lab, reporter_seat, session, bound=True):
+    """A series 1-0 to team 1, issued on LAB_SESSION (or with no session on
+    record: `bound` false); game 2 crosses, every seat posting 1-0 and 1-1
+    naming it with the lab's token, and seat 2 (team 2) leaves; one DC report
+    from `reporter_seat` on `session` (_AUTO: the lab's default for it)."""
+    ser = await lab.series(t1_wins=1, t2_wins=0)
+    if not bound:
+        await lab.sql("UPDATE team_series SET first_game_session = NULL WHERE id = :sid",
+                      {"sid": ser["sid"]})
+    await _post_all(lab, ser, (1, 0), (1, 1), game=2, room=ROOM)
+    await lab.report_dc(ser, reporter_seat=reporter_seat, dc_seat=2, session=session, **HIGH)
+    return await lab.settlement(ser)
+
+
+_DC_SESSION_CASES = {
+    "reporter-on-the-issued-session": (0, _AUTO, True),
+    "reporter-on-another-session": (0, "tdc-another-process", True),
+    "reporter-on-no-session": (0, None, True),
+    "teammate-on-its-own-session": (1, _AUTO, True),
+    "teammate-on-no-session": (1, None, True),
+    "reporter-no-session-on-record": (0, _AUTO, False),
+    "teammate-no-session-on-record": (1, _AUTO, False),
+}
+_DC_SESSION_SETTLES = {"reporter-on-the-issued-session", "teammate-on-its-own-session",
+                       "teammate-on-no-session"}
+
+
+@needs_pg
+@pytest.mark.parametrize("case", list(_DC_SESSION_CASES))
+def test_a_dc_report_the_reporter_sends_on_another_session_reads_no_token(wired, case):
+    """M1: a DC report the series' reporter's account (seat 0) sends is read
+    with its token only on the session physical game 1 was issued to; on
+    another session, or on none, the leave goes to an admin. A report from
+    any other member (seat 1) is read on whatever session it carries. While
+    the issue has no session on record no token is read from anyone."""
+    async def go():
+        async with _Lab() as lab:
+            seat, session, bound = _DC_SESSION_CASES[case]
+            return await _dc_on(lab, seat, session, bound)
+
+    settled = _run(go())
+    settles = case in _DC_SESSION_SETTLES
+    assert settled == (COMPLETED if settles else INCOMPLETE), settled
+    assert len(wired) == (1 if settles else 0), wired
+
+
+@needs_pg
+@pytest.mark.parametrize("mutant", ["reporter-session-unread", "bound-session-unread",
+                                    "pass-through"])
+def test_the_dc_session_test_can_fail(wired, monkeypatch, mutant):
+    """Controls (#391) for the test above. With the reporter's session unread
+    (main._team_game_first_game_refusal handed None for it), the reporter's
+    reports on another session and on none complete; with an issue lacking a
+    session on record read as if it held LAB_SESSION's, both of those cases
+    complete. The inert twin changes nothing; the three reports the test
+    above settles complete under every mutant."""
+    real = main._team_game_first_game_refusal
+    if mutant == "reporter-session-unread":
+        monkeypatch.setattr(main, "_team_game_first_game_refusal",
+                            lambda rec, token, session=None: real(rec, token, None))
+    elif mutant == "bound-session-unread":
+        def unbound(rec, token, session=None):
+            rec = dict(rec)
+            if rec.get("first_game_session") is None:
+                rec["first_game_session"] = LAB_SESSION_HASH
+            return real(rec, token, session)
+
+        monkeypatch.setattr(main, "_team_game_first_game_refusal", unbound)
+    else:
+        assert mutant == "pass-through", mutant
+
+    async def go():
+        out = {}
+        for case, (seat, session, bound) in _DC_SESSION_CASES.items():
+            async with _Lab() as lab:
+                out[case] = await _dc_on(lab, seat, session, bound)
+        return out
+
+    extra = {"reporter-session-unread": {"reporter-on-another-session", "reporter-on-no-session"},
+             "bound-session-unread": {"reporter-no-session-on-record",
+                                      "teammate-no-session-on-record"},
+             "pass-through": set()}[mutant]
+    want = {case: (COMPLETED if case in _DC_SESSION_SETTLES | extra else INCOMPLETE)
+            for case in _DC_SESSION_CASES}
+    assert _run(go()) == want
+
+
+@needs_pg
+def test_migration_362_runs_twice_over_a_359_table(wired):
+    """362 over a 359 series table that already holds a series issued its
+    physical game 1: the series reads no session (NULL); a second run, and
+    359 and then 362 again, change nothing; the column takes 64 lowercase
+    hex digits or NULL and refuses anything else."""
+    async def state(conn):
+        cols = [r["column_name"] for r in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'team_series'"
+            " ORDER BY ordinal_position")]
+        cons = sorted(r["def"] for r in await conn.fetch(
+            "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint"
+            " WHERE conrelid = 'team_series'::regclass AND contype = 'c'"))
+        rows = [tuple(r) for r in await conn.fetch(
+            "SELECT id, first_game_nonce, first_game_session FROM team_series ORDER BY id")]
+        return cols, cons, rows
+
+    async def go():
+        async with _Lab(with_first_game_session=False) as lab:
+            ser = await lab.series(t1_wins=0, t2_wins=0)
+            conn = await asyncpg.connect(PLAIN_DSN)
+            try:
+                await conn.execute('SET search_path TO "%s"' % lab.schema)
+                await conn.execute(_read(MIGRATION_362))
+                first = await state(conn)
+                await conn.execute(_read(MIGRATION_362))
+                again = await state(conn)
+                await conn.execute(_read(MIGRATION_359))
+                await conn.execute(_read(MIGRATION_362))
+                after_359 = await state(conn)
+                refused = []
+                for bad in ("", "void", LAB_SESSION_HASH.upper(), LAB_SESSION_HASH[:63],
+                            LAB_SESSION_HASH + "0", " " + LAB_SESSION_HASH[1:], LAB_FIRST):
+                    try:
+                        await conn.execute("UPDATE team_series SET first_game_session = $1"
+                                           " WHERE id = $2", bad, ser["sid"])
+                    except asyncpg.CheckViolationError:
+                        refused.append(bad)
+                kept = []
+                for good in (LAB_SESSION_HASH, None):
+                    await conn.execute("UPDATE team_series SET first_game_session = $1"
+                                       " WHERE id = $2", good, ser["sid"])
+                    kept.append(await conn.fetchval(
+                        "SELECT first_game_session FROM team_series WHERE id = $1", ser["sid"]))
+                return ser, first, again, after_359, refused, kept
+            finally:
+                await conn.close()
+
+    assert LAB_SESSION_HASH.upper() != LAB_SESSION_HASH
+    ser, first, again, after_359, refused, kept = _run(go())
+    cols, _cons, rows = first
+    assert cols[-2:] == ["first_game_nonce", "first_game_session"], cols
+    assert rows == [(ser["sid"], LAB_FIRST, None)], rows
+    assert again == first and after_359 == first, (first, again, after_359)
+    assert len(refused) == 7, refused
+    assert kept == [LAB_SESSION_HASH, None], kept
+
+
+@needs_pg
+@pytest.mark.parametrize("with_362", [False, True], ids=["before-362", "after-362"])
+def test_before_migration_362_nothing_fails_and_nothing_auto_completes(asking, with_362):
+    """The deploy-order claim in 362's header: this API against a database
+    with 359 but not 362 fails no request. The reporter's ask is answered,
+    not issued (the issue names the missing column inside its savepoint), so
+    no series can hold an issued game and a recorded report voids nothing;
+    every post is recorded; and the DC report settles as dc_incomplete on a
+    game a seat of each team posted 1-1 in, naming it and carrying the lab's
+    token. The twin, once 362 is applied, issues the ask, and the series
+    issued its physical game 1 records its anchored report and completes."""
+    async def go():
+        async with _Lab(with_first_game_session=with_362) as lab:
+            fresh = await lab.series(t1_wins=0, t2_wins=0, granted=False)
+            asked = await lab.ask_first_game(fresh)
+            stored = await lab.first_game(fresh)
+            ser = await lab.series(t1_wins=0, t2_wins=0, granted=with_362)
+            voided = await lab.land_report(ser, winner=1,
+                                           anchor=LAB_ANCHOR if with_362 else None)
+            posted = [await lab.post(ser, seat, 1, 1, game=2, room=ROOM) for seat in (0, 2)]
+            await _two_reports(lab, ser, LOW, LOW)
+            rows = (await lab.sql("SELECT count(*) AS n FROM team_series_games"
+                                  " WHERE series_id = :sid", {"sid": ser["sid"]}))[0]["n"]
+            return asked, stored, voided, posted, rows, await lab.settlement(ser)
+
+    asked, stored, voided, posted, rows, settled = _run(go())
+    if with_362:
+        assert asked["issued"] is True and stored == asked["nonce"], (asked, stored)
+    else:
+        assert asked["issued"] is False, asked
+        assert asked["reason"].startswith("the series' first game cannot be read ("), asked
+        assert stored is None, stored
+    assert voided is False, voided
+    assert [p["status"] for p in posted] == ["ok", "ok"], posted
+    assert rows == 1, rows
+    assert settled == (COMPLETED if with_362 else INCOMPLETE), settled

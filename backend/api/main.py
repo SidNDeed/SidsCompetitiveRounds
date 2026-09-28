@@ -32449,53 +32449,78 @@ async def update_team_live_points(
 # record keeps the nonce (migration 354's game_token); the ordinal and the
 # epoch are checked in the request and not stored.
 #
-# THE FIRST GAME (v1.41.0 beta review round 8, finding F31; migration 359).
-# Every ordinal counts physical games from the one named physical game 1, so
-# the comparison above is only as good as that origin. In round 7 the room's
-# creator named its room's first game physical game 1 from a read of the
-# series showing no recorded game, no relock and no pair of two points on its
-# record. That is absence, and absence does not rule out an earlier game
-# whose live posts all failed while its result still waited in the
-# reporter's outbox: the next game was named 1, and once one queued result
-# landed its ordinal could match the games recorded plus one while another
-# result was still on its way. Physical game 1 is now issued by this server
-# (team_series_first_game), once per series and never again, to the one seat
-# that can hold a result of the series the server has not recorded: its
-# reporter, the lowest Steam ID of its four members (a client sends a series'
-# match report only from that seat, GameStateWatcher.BuildTeamReportPayload,
-# and submit_team_match refuses a report that does not name the series' four
-# members). It is issued only while the series is active, has no recorded
-# game, was never relocked, has no game on record in another room and no
-# pair of two points on its record, only in the series' stored room, and
-# only to a process that already existed when the series was created: the
-# ask's own Steam session must have been issued before the series'
-# created_at. A client holds its session token in memory only, minted at its
-# launch and renewed an hour before its 24-hour expiry (plugin/SteamAuth.cs),
-# so a reporter that restarted, or plays on from another machine or profile,
-# asks on a later session and is refused. The reporter's client asks only
-# while it has sent, queued and deferred no report of the series
+# THE FIRST GAME (v1.41.0 beta review round 8, finding F31, migration 359;
+# round 9, finding M1, migration 362). Every ordinal counts physical games
+# from the one named physical game 1, so the comparison above is only as good
+# as that origin. In round 7 the room's creator named its room's first game
+# physical game 1 from a read of the series showing no recorded game, no
+# relock and no pair of two points on its record. That is absence, and
+# absence does not rule out an earlier game whose live posts all failed while
+# its result still waited in the reporter's outbox: the next game was named
+# 1, and once one queued result landed its ordinal could match the games
+# recorded plus one while another result was still on its way. Physical game
+# 1 is now issued by this server (team_series_first_game), once per series
+# and never again, to the one seat that can hold a result of the series the
+# server has not recorded: its reporter, the lowest Steam ID of its four
+# members (a client sends a series' match report only from that seat,
+# GameStateWatcher.BuildTeamReportPayload, and submit_team_match refuses a
+# report that does not name the series' four members). It is issued only
+# while the series is active, has no recorded game, was never relocked, has
+# no game on record in another room and nothing at all on its live-points
+# record (round 9: no post filed under any game and no point in its live
+# totals; round 8 asked only for no pair of two points), only in the
+# series' stored room, and only to ONE process of the reporter's account:
+#   * the ask's own verified Steam session was issued before the series'
+#     created_at (round 8). A client holds its session token in memory only,
+#     minted at its launch and renewed an hour before its 24-hour expiry
+#     (plugin/SteamAuth.cs), so the asking process was there when the series
+#     began, and a reporter that restarted, or that asks from another
+#     machine or profile on a session minted later, is refused;
+#   * no OTHER Steam session of the reporter's account was live at any
+#     moment after the series was created (round 9, M1): no steam_sessions
+#     row of the account but the ask's own, verified or not, expires after
+#     the series' created_at. A second process of the reporter's account
+#     alive during the series (another machine or profile, whose ledger and
+#     outbox the asking client cannot read) holds a session of its own once
+#     it has signed in, and may have played an earlier game of the series
+#     whose result is still queued there; its session alone refuses the
+#     issue, whatever it posted or did not post;
+#   * the series was created less than a day before the ask (round 9, M1):
+#     a steam_sessions row is deleted only by its own account's prune, once
+#     it expired more than a day ago (steam_auth), or with every row of its
+#     account at a deletion or a ban, the ask's own session included. So no
+#     row the rule above must see can be missing.
+# The session the issue is answered to is kept on the series row
+# (first_game_session, migration 362). The reporter's client asks only while
+# it has sent, queued and deferred no report of the series
 # (plugin/ApiClient.cs keeps the reports it sends in a durable ledger,
 # written before each is sent, beside its durable outbox). Together these
-# are the positive evidence the issue rests on: the reporter's process that
-# was there when the series began has built no report of it, and only the
-# reporter's client builds a series' match report, so no result of the
+# are the positive evidence the issue rests on: the only process of the
+# reporter's account that held a session at any moment of the series' life
+# was there when the series began and has built no report of it, and only
+# the reporter's client builds a series' match report, so no result of the
 # series is waiting to land. The series' record showing nothing proves
-# nothing on its own. A result the server still cannot see (the reporter's
-# game running twice at once, or a client that does not keep these rules)
-# is caught when it lands: the reporter's client writes the issued nonce's
-# first 8 digits (the ANCHOR) to the same ledger when it takes the issue,
-# every match report carries the anchor its client holds for the series
-# (game_anchor), and a match report the series records without the issued
-# anchor VOIDS the series' physical game 1 for good (_team_first_game_void,
-# called by submit_team_match: first_game_nonce becomes 'void'), because the
-# server cannot tell such a report from one of a game outside the issued
-# chain. Physical game 1's token
+# nothing on its own. What the server cannot see is a process of the
+# reporter's account that held no session at all since the series began and
+# whose games put nothing on the series' record. A result the server could
+# not see is caught when it lands (a leave settled before then is not
+# revisited, which is why the issue itself must rule out every process the
+# server can see), and so is a report from any process but the issued one:
+# the reporter's client writes the issued nonce's first 8 digits (the
+# ANCHOR) to the same ledger when it takes the issue, every match report
+# carries the anchor its client holds for the series (game_anchor), and a
+# match report the series records without the issued anchor, or on another
+# session than the one the issue was answered to, VOIDS the series' physical
+# game 1 for good (_team_first_game_void, called by submit_team_match:
+# first_game_nonce becomes 'void'), because the server cannot tell such a
+# report from one of a game outside the issued chain. Physical game 1's token
 # carries the issued nonce; every later game's host draws its nonce as the
 # anchor and 8 fresh digits (plugin/TeamGameNumber.cs). A DC report's token
-# is read only when the series was issued a physical game 1, not voided, and
-# the token's nonce begins with the anchor (_team_game_first_game_refusal): a
-# token counted from any other origin, a round-7 client's included, proves
-# nothing.
+# is read only when the series was issued a physical game 1 with its session
+# on record, not voided, the token's nonce begins with the anchor, and, for a
+# report the reporter's account sends, the report arrives on the issued
+# session (_team_game_first_game_refusal): a token counted from any other
+# origin, a round-7 client's included, proves nothing.
 #
 # What this does NOT change: a live-points post is accepted on the shared mod
 # secret and the series membership of the seat it names in a query parameter,
@@ -32699,19 +32724,28 @@ def _team_game_sitting_refusal(rec):
     return None
 
 
-def _team_game_first_game_refusal(rec, token):
+def _team_game_first_game_refusal(rec, token, session=None):
     """Why the DC report's game `token` ((nonce, ordinal, epoch)) may not be
     read because it is not counted from the series' issued physical game 1,
-    or None (round 8, finding F31: THE FIRST GAME, above _team_game_identity).
-    `rec` is the row _TEAM_GAME_CROSSED_SQL returned; its first_game_nonce is
-    the nonce team_series_first_game issued (migration 359), NULL when none
-    was. Physical game 1's token carries that nonce, and every later game's
-    host draws its nonce as its first 8 digits and 8 fresh ones, so a token
-    counted from the issued game begins with those 8 digits. One that does
-    not -- counted from a game a client named physical game 1 on its own, as
-    a round-7 client does -- is not read, whatever game it names. Nor is any
-    token once the issued game was voided ('void': a match report the series
-    recorded did not carry its anchor, _team_first_game_void)."""
+    or None (round 8, finding F31; round 9, finding M1: THE FIRST GAME,
+    above _team_game_identity). `rec` is the row _TEAM_GAME_CROSSED_SQL
+    returned: its first_game_nonce is the nonce team_series_first_game
+    issued (migration 359), NULL when none was, and its first_game_session
+    the session the issue was answered to (migration 362). `session` is the
+    sha256 of the DC report's own X-Session-Token ("" for none) when the
+    series' reporter's account sent the report, None when any other member
+    did. Physical game 1's token carries the issued nonce, and every later
+    game's host draws its nonce as its first 8 digits and 8 fresh ones, so a
+    token counted from the issued game begins with those 8 digits. One that
+    does not -- counted from a game a client named physical game 1 on its
+    own, as a round-7 client does -- is not read, whatever game it names.
+    Nor is any token once the issued game was voided ('void': a match report
+    the series recorded did not carry its anchor or came on another session,
+    _team_first_game_void), nor while no session of the issue is on record
+    (an issue from before migration 362, which no deployed API made), nor
+    when the reporter's account reports on another session than the issued
+    one: that is not the process the issue was answered to, and what it
+    reports is unproven."""
     issued = rec["first_game_nonce"]
     if issued == "void":
         return ("the series' physical game 1 was voided: a match report it recorded "
@@ -32719,13 +32753,20 @@ def _team_game_first_game_refusal(rec, token):
     if not _team_game_token_valid(issued):
         return ("no physical game 1 was issued for this series: the report's game "
                 "token counts from a game this server did not name")
+    bound = rec["first_game_session"]
+    if not isinstance(bound, str) or not bound:
+        return ("the series' physical game 1 was issued with no session on record: the "
+                "process it was issued to cannot be told")
     if token[0][:8] != issued[:8]:
         return ("the report's game token is not counted from the physical game 1 "
                 "issued for this series")
+    if session is not None and not hmac.compare_digest(session, bound):
+        return ("the report comes from the series' reporter on another session than the "
+                "one its physical game 1 was issued to")
     return None
 
 
-def _team_game_token_seats(rec, token, ordinal):
+def _team_game_token_seats(rec, token, ordinal, session=None):
     """(bits, why_not): the bits of the game's record that were posted with
     the DC report's game `token` -- the only bits a crossing is read from --
     or (0, the reason none may be read). `token` is (nonce, ordinal, epoch)
@@ -32742,7 +32783,9 @@ def _team_game_token_seats(rec, token, ordinal):
     token is not the report's (it is another physical game's record), or
     when the report's token is also on another game of the series, or when
     it is not counted from the series' issued physical game 1 (round 8,
-    finding F31: _team_game_first_game_refusal). Each of those withholds the
+    finding F31; round 9, finding M1: _team_game_first_game_refusal, which
+    also reads `session`: what a report the series' reporter's account sent
+    arrived on). Each of those withholds the
     lead-forfeit; none of them is a verdict that the game was not played."""
     if token is None:
         return 0, "the report names no game token"
@@ -32763,7 +32806,7 @@ def _team_game_token_seats(rec, token, ordinal):
                    "holds another physical game")
     if rec["token_elsewhere"]:
         return 0, "the report's game token is also on another game of this series"
-    first = _team_game_first_game_refusal(rec, token)
+    first = _team_game_first_game_refusal(rec, token, session)
     if first is not None:
         return 0, first
     return int(rec["cur_token_seats"] or 0), None
@@ -32802,8 +32845,9 @@ _TEAM_GAME_POINTS_UPSERT_SQL = (
 # the lowest game on record in this sitting, whether the series has had
 # another sitting (a relock stamp, read as a boolean, or a record in another
 # room), whether the DC report's token is on any other record of the series,
-# and the nonce of the series' issued physical game 1 (migration 359; before
-# it the statement fails inside the caller's savepoint and nothing is read).
+# the nonce of the series' issued physical game 1 (migration 359) and the
+# session it was issued to (migration 362; before either, the statement fails
+# inside the caller's savepoint and nothing is read).
 # Rows written before migration 351 carry sitting_room '' and are never read;
 # rows written before migration 352 hold attested_seats 0, and rows written
 # before 354 hold no token.
@@ -32824,6 +32868,8 @@ _TEAM_GAME_CROSSED_SQL = (
     "         WHERE ts.id = :sid) AS relocked,"
     "       (SELECT ts.first_game_nonce FROM team_series ts"
     "         WHERE ts.id = :sid) AS first_game_nonce,"
+    "       (SELECT ts.first_game_session FROM team_series ts"
+    "         WHERE ts.id = :sid) AS first_game_session,"
     "       EXISTS (SELECT 1 FROM team_series_games o"
     "                WHERE o.series_id = :sid"
     "                  AND o.sitting_room NOT IN (CAST(:room AS text), '')) AS other_room,"
@@ -32908,7 +32954,7 @@ async def _record_team_game_points(db, series_id, t1_points, t2_points, game, se
 
 
 async def _team_game_crossed_two(db, series_id, series_row, reported_points=None,
-                                 token=None) -> bool:
+                                 token=None, session=None) -> bool:
     """Whether the game in progress on this series saw real play, by the
     server's own record: a pair of two points or more from a seat of each
     team (_team_game_both_teams_reached_two) among the posts that count for
@@ -32917,7 +32963,9 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     in any other -- and, of those, only the posts that carried `token`, the
     physical game's token the DC report names, (nonce, ordinal, epoch) as
     _team_dc_game_token returned it, when it names this game
-    (_team_game_token_seats). The
+    (_team_game_token_seats); `session` is what that reader asks of a report
+    the series' reporter's account sent (round 9, finding M1: the sha256 of
+    its own X-Session-Token; None for a report from any other member). The
     caller holds the series row lock and passes the row it read under that
     lock, so the game is named by the same helper, from the same locked
     state, that the posts were filed by.
@@ -32927,13 +32975,15 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     is exactly what this record takes out of the settlement.
 
     False when no room is stored, when the record cannot be read (before
-    migration 348, 351, 352, 354 or 359, or any statement error inside the
+    migration 348, 351, 352, 354, 359 or 362, or any statement error inside the
     savepoint), when no bit of the record may be read for `token` (the report
     names none; the series is outside its original sitting; its token names
     another game; two tokens, or one naming another game, were filed under
     the game; no post there carried one; its token is not the report's; the
     report's token is also on another game of the series; it is not counted
-    from the series' issued physical game 1), and when the
+    from the series' issued physical game 1, or, sent by the series'
+    reporter's account, it came on another session than that game was issued
+    to), and when the
     posts that count and carried the token do not show two points from both
     teams. Each has its own log line, and
     two points from both teams that are on record only without the game's
@@ -32959,7 +33009,7 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     shape = _team_game_shape(original, ordinal, rec["first_ordinal"])
     evidence = _team_game_evidence(shape, int(rec["cur_seats"] or 0),
                                    int(rec["cur_attested"] or 0))
-    carried, why_not = _team_game_token_seats(rec, token, ordinal)
+    carried, why_not = _team_game_token_seats(rec, token, ordinal, session)
     crossed = _team_game_both_teams_reached_two(evidence & carried)
     if not crossed:
         if why_not is not None:
@@ -32999,19 +33049,50 @@ _TEAM_FIRST_GAME_SESSION_SQL = (
     "  WHERE s.token_hash = CAST(:th AS char(64))"
     "    AND s.steam_id = CAST(:steam AS varchar) AND s.verified)")
 
+# Round 9, finding M1: whether the series was created less than a day before
+# this statement runs (its clock, not the transaction's). A steam_sessions
+# row that expires after the series' created_at is pruned no earlier than a
+# day after it (steam_auth prunes an account's rows once they expired more
+# than a day ago), so while this holds, the next read sees every such row.
+_TEAM_FIRST_GAME_RECENT_SQL = "(ts.created_at > clock_timestamp() - INTERVAL '1 day')"
+
+# Round 9, finding M1: whether any OTHER session of the requester's account
+# (a steam_sessions row of its Steam ID but the ask's own, verified or not)
+# was live at any moment after the series was created: it expires after the
+# series' created_at. One issued since the series began is such a session,
+# and so is one issued before it that outlived its creation.
+_TEAM_FIRST_GAME_OTHER_SESSION_SQL = (
+    "EXISTS (SELECT 1 FROM steam_sessions o"
+    "         WHERE o.steam_id = CAST(:steam AS varchar)"
+    "           AND o.token_hash <> CAST(:th AS char(64))"
+    "           AND o.expires_at > ts.created_at)")
+
+# Round 9, finding M1: whether anything at all is on the series' live-points
+# record: a post filed under any game of any sitting, of any pair from any
+# seat, or a point in the series' live totals (every accepted post raises
+# them, filed or not). Round 8 asked only for no pair of two points or more.
+_TEAM_FIRST_GAME_ANY_POST_SQL = (
+    "(EXISTS (SELECT 1 FROM team_series_games g WHERE g.series_id = :sid)"
+    " OR COALESCE(ts.live_t1_points, 0) + COALESCE(ts.live_t2_points, 0) <> 0)")
+
 _TEAM_FIRST_GAME_READ_SQL = (
     "SELECT ts.first_game_nonce,"
     "       " + _TEAM_FIRST_GAME_SESSION_SQL + " AS predates,"
+    "       " + _TEAM_FIRST_GAME_RECENT_SQL + " AS recent,"
+    "       " + _TEAM_FIRST_GAME_OTHER_SESSION_SQL + " AS other_session,"
     "       EXISTS (SELECT 1 FROM team_series_games o"
     "                WHERE o.series_id = :sid"
     "                  AND o.sitting_room NOT IN (CAST(:room AS text), '')) AS other_room,"
-    "       EXISTS (SELECT 1 FROM team_series_games g"
-    "                WHERE g.series_id = :sid"
-    "                  AND (g.pair_seats & CAST(:two AS bigint)) <> 0) AS two_points"
+    "       " + _TEAM_FIRST_GAME_ANY_POST_SQL + " AS any_post"
     "  FROM team_series ts WHERE ts.id = :sid")
 
+# The issue, and (round 9, finding M1; migration 362) the sha256 of the
+# session it is answered to, in one statement under the series row lock.
+# Before 362 it names a missing column and fails inside the caller's
+# savepoint, so nothing is issued.
 _TEAM_FIRST_GAME_ISSUE_SQL = (
-    "UPDATE team_series SET first_game_nonce = CAST(:nonce AS text)"
+    "UPDATE team_series SET first_game_nonce = CAST(:nonce AS text),"
+    "       first_game_session = CAST(:th AS text)"
     " WHERE id = :sid AND first_game_nonce IS NULL"
     " RETURNING first_game_nonce")
 
@@ -33021,47 +33102,76 @@ _TEAM_FIRST_GAME_VOID_SQL = (
     " RETURNING id")
 
 
-async def _team_first_game_void(db, series, series_uuid, anchor) -> bool:
-    """Round 8, finding F31 (THE FIRST GAME, above _team_game_identity): a
-    match report the series is recording voids the series' issued physical
-    game 1 for good unless it carries that game's anchor, the issued nonce's
-    first 8 digits (`anchor`, the report's game_anchor: what the reporter's
-    client holds for the series in its ledger). A report that does not was
-    built by a client that did not hold the issue: the reporter playing on
-    from another machine or profile after the issue, or a result from
-    outside the issued chain that the session rule could not see (THE FIRST
-    GAME). The server cannot tell the two apart, so the chain's ordinals may
-    no longer count the recorded games, and no game token of the series is
-    read again (first_game_nonce becomes 'void';
-    _team_game_first_game_refusal). `series` is the row
-    submit_team_match read under its lock. Nothing is voided while none was
-    issued (NULL), once it is void, or before migration 359 (the row has no
-    such column). Not savepointed on purpose: a void that must happen and
-    cannot fails the report with it (its client's outbox sends it again), so
-    the series never records a game outside the chain while the issued game
-    is still read. Returns whether it voided."""
+async def _team_first_game_void(db, series, series_uuid, anchor, session) -> bool:
+    """Round 8, finding F31, and round 9, finding M1 (THE FIRST GAME, above
+    _team_game_identity): a match report the series is recording voids the
+    series' issued physical game 1 for good unless it carries that game's
+    anchor, the issued nonce's first 8 digits (`anchor`, the report's
+    game_anchor: what the reporter's client holds for the series in its
+    ledger), AND arrives on the session the issue was answered to (`session`,
+    the sha256 of the report's own X-Session-Token, "" for none, against the
+    row's first_game_session, migration 362). A report that does not was
+    built or sent by another process than the one the issue was answered to:
+    the reporter playing on from another machine or profile after the issue,
+    the same client after a restart or a renewal of its session, or a result
+    from outside the issued chain that the issue's rules could not see (THE
+    FIRST GAME). The server cannot tell these apart, so the chain's ordinals
+    may no longer count the recorded games, and no game token of the series
+    is read again (first_game_nonce becomes 'void';
+    _team_game_first_game_refusal). `series` is the row submit_team_match
+    read under its lock. Nothing is voided while none was issued (NULL), once
+    it is void, or before migration 359 (the row has no such column); an
+    issue with no session on record (none can be made before 362) is voided
+    by the first report recorded. Not savepointed on purpose: a void that
+    must happen and cannot fails the report with it (its client's outbox
+    sends it again), so the series never records a game outside the chain
+    while the issued game is still read. Returns whether it voided."""
     if "first_game_nonce" not in series:
         return False
     issued = series["first_game_nonce"]
     if not _team_game_token_valid(issued):
         return False
-    if isinstance(anchor, str) and anchor == issued[:8]:
+    bound = series["first_game_session"] if "first_game_session" in series else None
+    anchored = isinstance(anchor, str) and anchor == issued[:8]
+    on_issue = (isinstance(bound, str) and isinstance(session, str) and bool(session)
+                and hmac.compare_digest(session, bound))
+    if anchored and on_issue:
         return False
     await db.execute(text(_TEAM_FIRST_GAME_VOID_SQL), {"sid": series_uuid, "issued": issued})
+    why = (("no anchor" if not anchor else "another anchor") if not anchored
+           else "the anchor on another session than the issued one")
     print(f"[TEAM-FIRST-GAME] series={series_uuid}: physical game 1 voided: a recorded match "
-          f"report carries {'no anchor' if not anchor else 'another anchor'}")
+          f"report carries {why}")
     return True
 
 
 def _team_first_game_session_hash(request) -> str:
     """The sha256 of the request's own X-Session-Token, the form steam_sessions
     keeps, or "" when the request carries none (round 8, finding F31:
-    team_series_first_game reads when that session was issued)."""
+    team_series_first_game reads when that session was issued; round 9,
+    finding M1: it keeps it as first_game_session, and a match report or a
+    DC report of the reporter's is read against it)."""
     try:
         token = request.headers.get("X-Session-Token") if request is not None else None
     except Exception:
         token = None
     return hashlib.sha256(token.encode()).hexdigest() if token else ""
+
+
+async def _team_series_member_steams(db, members):
+    """The Steam IDs of a series' four members (`members`: its t1a, t1b, t2a
+    and t2b player ids), in that order, or None when any of them cannot be
+    read as one. The series' reporter is the lowest of them (round 8,
+    finding F31: team_series_first_game; round 9, finding M1:
+    team_series_report_dc)."""
+    if any(m is None for m in members) or len(set(members)) != 4:
+        return None
+    found = (await db.execute(text(
+        "SELECT id, steam_id FROM players WHERE id IN (:a, :b, :c, :d)"),
+        {"a": members[0], "b": members[1], "c": members[2], "d": members[3]})).all()
+    steam = {r[0]: (r[1] or "").strip() for r in found}
+    ids = [steam.get(m, "") for m in members]
+    return ids if all(i.isdigit() for i in ids) else None
 
 
 @app.post("/api/v1/team/series/{series_id}/first-game", tags=["Team Matches"])
@@ -33074,7 +33184,8 @@ async def team_series_first_game(
     db: AsyncSession = Depends(get_db),
 ):
     """Issue the series' physical game 1 to its reporter, or refuse (v1.41.0
-    beta review, round 8, finding F31; migration 359).
+    beta review, round 8, finding F31, migration 359; round 9, finding M1,
+    migration 362).
 
     HMAC signs 'team-first-game:{series_id}:{requester_steam_id}:{photon_room_id}'
     (plugin/TeamGameNumber.cs, FirstGameCanonical), and the request needs a
@@ -33086,14 +33197,21 @@ async def team_series_first_game(
     requester's room is the series' stored room; no physical game 1 was
     issued before; the request's own verified session was issued before the
     series was created (the asking process already existed when the series
-    began: a client holds its session in memory only); no game of it is on
-    record in another room; and no pair of two points or more is on its
-    record. The client asks only while it has sent and queued no report of
-    the series, the one condition read from the client (THE FIRST GAME,
-    above _team_game_identity). A refusal is an
+    began: a client holds its session in memory only); the series was
+    created less than a day ago and no other session of the requester's
+    account was live at any moment since (round 9: the asking process is
+    the only process of the account that held a session during the series);
+    no game of it is on record in another room; and nothing is on its
+    live-points record (round 9: no post filed under any game and no point
+    in its live totals). The issue writes the nonce and the sha256 of the
+    request's own session token together (first_game_session), and every
+    later match report of the series, and every DC report its reporter's
+    account sends, is read against both. The client asks only while it has
+    sent and queued no report of the series, the one condition read from
+    the client (THE FIRST GAME, above _team_game_identity). A refusal is an
     answer, not an error: 200 with issued false and the reason, logged.
-    Before migration 359 the read fails inside its savepoint and every ask is
-    refused."""
+    Before migration 359 the read fails inside its savepoint, and before 362
+    the issue does, so every ask is refused."""
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     if not hmac.compare_digest(sig, _team_game_token_mac(
@@ -33126,15 +33244,9 @@ async def team_series_first_game(
     why = None
     if row["status"] != "active" or row["invalidated_at"] is not None:
         why = "the series is not active"
-    elif any(m is None for m in members) or len(set(members)) != 4:
-        why = "the series' four members cannot be read"
     else:
-        found = (await db.execute(text(
-            "SELECT id, steam_id FROM players WHERE id IN (:a, :b, :c, :d)"),
-            {"a": members[0], "b": members[1], "c": members[2], "d": members[3]})).all()
-        steam = {r[0]: (r[1] or "").strip() for r in found}
-        ids = [steam.get(m, "") for m in members]
-        if not all(i.isdigit() for i in ids):
+        ids = await _team_series_member_steams(db, members)
+        if ids is None:
             why = "the series' four members cannot be read"
         elif requester_steam_id not in ids:
             why = "the requester is not a member of the series"
@@ -33148,28 +33260,35 @@ async def team_series_first_game(
         elif not room or not _team_game_same_sitting(room, stored):
             why = "the requester's room is not the series' stored room"
     nonce = None
+    asker = _team_first_game_session_hash(request)
     if why is None:
         try:
             async with db.begin_nested():
                 seen = (await db.execute(text(_TEAM_FIRST_GAME_READ_SQL), {
-                    "sid": sid, "room": stored,
-                    "th": _team_first_game_session_hash(request),
-                    "steam": requester_steam_id,
-                    "two": _TEAM_GAME_ANY_TWO_POINTS})).mappings().first()
+                    "sid": sid, "room": stored, "th": asker,
+                    "steam": requester_steam_id})).mappings().first()
                 if seen["first_game_nonce"] is not None:
                     why = "physical game 1 was already issued for this series"
                 elif seen["predates"] is not True:
                     why = ("the requester's session was not issued before the series was "
                            "created: the asking process cannot be shown to have been there "
                            "for every game of the series")
+                elif seen["recent"] is not True:
+                    why = ("the series was created more than a day ago: the sessions of the "
+                           "requester's account since then can no longer all be read")
+                elif seen["other_session"]:
+                    why = ("another session of the requester's account was live after the "
+                           "series was created: a game of the series may have been played "
+                           "by a process this server cannot tell apart from the asking one")
                 elif seen["other_room"]:
                     why = "the series has a game on record in another room"
-                elif seen["two_points"]:
-                    why = "a pair of two points or more is on the series' record"
+                elif seen["any_post"]:
+                    why = ("a live-points post is on the series' record: a game of the series "
+                           "may already have been played")
                 else:
                     drawn = secrets.token_hex(8)
                     got = (await db.execute(text(_TEAM_FIRST_GAME_ISSUE_SQL), {
-                        "sid": sid, "nonce": drawn})).first()
+                        "sid": sid, "nonce": drawn, "th": asker})).first()
                     if got is None:
                         why = "physical game 1 was already issued for this series"
                     else:
@@ -43363,6 +43482,7 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
 @app.post("/api/v1/team/series/{series_id}/report-dc", tags=["Team Matches"])
 async def team_series_report_dc(
     series_id: str,
+    request: Request,
     reporter_steam_id: str = Query(...),
     dc_player_steam_id: str = Query(...),
     t1_points_total: int = Query(0, ge=0),
@@ -43380,7 +43500,11 @@ async def team_series_report_dc(
     points, read only from posts that carried the physical game's token the
     report names (game_token, signed apart from hmac_sig by token_sig; see
     _team_dc_game_token), and only when that token names the game being
-    settled (round 6, finding F27), the whole series completes to them with full
+    settled (round 6, finding F27) and is counted from the series' issued
+    physical game 1 on the terms _team_game_first_game_refusal reads (round 8,
+    finding F31; round 9, finding M1: a report the series' reporter's account
+    sends counts only on the session that game was issued to), the whole
+    series completes to them with full
     ratings/economy;
     (2) otherwise the series flips to status='dc_incomplete'
     (invalidation_reason='dc_manual_pending') for manual admin resolution —
@@ -43521,6 +43645,18 @@ async def team_series_report_dc(
     # its game is then not eligible for a lead-forfeit.
     dc_game_token = _team_dc_game_token(series_id, reporter_steam_id, dc_player_steam_id,
                                         game_token, token_sig)
+    # Round 9, finding M1 (THE FIRST GAME, above _team_game_identity): a report
+    # the series' reporter's account sends is read with its token only on the
+    # session physical game 1 was issued to (_team_game_first_game_refusal).
+    # Which member is the reporter is read only when there is a token to read,
+    # and members that cannot be read count as the reporter: the session is
+    # then asked of whoever sent the report.
+    dc_session = None
+    if dc_game_token is not None:
+        dc_ids = await _team_series_member_steams(
+            db, [s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]])
+        if dc_ids is None or reporter_steam_id == min(dc_ids, key=int):
+            dc_session = _team_first_game_session_hash(request)
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
     # If the NON-DC (remaining) team has ALREADY won at least one game of this
@@ -43545,7 +43681,7 @@ async def team_series_report_dc(
     # that breaks and needs a restart never auto-penalizes anyone.
     if ((other_team_existing_wins or 0) >= 1
             and await _team_game_crossed_two(db, sid_uuid, s, total_points,
-                                             token=dc_game_token)):
+                                             token=dc_game_token, session=dc_session)):
         # Record a synthetic forfeit game for history parity.
         #
         # The synthetic room id is PER SERIES, never the bare literal it used to
@@ -55567,11 +55703,13 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     )
     db.add(new_match)
     await db.flush()
-    # v1.41.0 beta round 8, finding F31: a recorded report without the issued
-    # physical game 1's anchor voids that game (THE FIRST GAME, above
-    # _team_game_identity). Same transaction, under the series row lock taken
-    # above; a failure fails the report.
-    await _team_first_game_void(db, series, series_uuid, report.game_anchor)
+    # v1.41.0 beta round 8, finding F31, and round 9, finding M1: a recorded
+    # report without the issued physical game 1's anchor, or on another
+    # session than the one the issue was answered to, voids that game (THE
+    # FIRST GAME, above _team_game_identity). Same transaction, under the
+    # series row lock taken above; a failure fails the report.
+    await _team_first_game_void(db, series, series_uuid, report.game_anchor,
+                                _team_first_game_session_hash(request))
 
     # Card picks (4 lists)
     for player_obj, side in (

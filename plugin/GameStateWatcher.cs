@@ -5503,7 +5503,12 @@ namespace CompetitiveRounds
         /// while its client has sent, queued and deferred no report of the
         /// series (ApiClient.TeamReportsClean, TeamReportDeferred); the server
         /// issues it only on a Steam session issued before the series was
-        /// created (a restarted client's never is). The answer
+        /// created (a restarted client's never is), and (round 9, finding M1)
+        /// only while no other session of this account was live since the
+        /// series was created and nothing is on the series' live-points record:
+        /// to one process of the account, whose session it keeps (a match
+        /// report sent on another session voids the issue, and a DC report this
+        /// account sends on another session reads no token). The answer
         /// is taken only if that still holds and the client can first keep
         /// the issued nonce's first 8 digits in its report ledger
         /// (ApiClient.NoteTeamAnchor): every match report it sends for the
