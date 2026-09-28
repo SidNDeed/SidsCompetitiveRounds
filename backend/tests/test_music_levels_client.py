@@ -15,7 +15,7 @@ import io
 import os
 import re
 
-from _cs_structure import code_of
+from _cs_structure import code_of, mask_code
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -255,6 +255,23 @@ def test_the_note_never_goes_through_i18n_and_is_shown_nowhere_else():
     assert code_of(_plugin("NativeUI.cs")).count(NOTE) == 1
     assert NOTE not in _read("tools/i18n_source.json")
     assert NOTE not in _read("plugin/I18nCatalogues.cs")
+    # Nor through the constant or either helper: none of them sits inside an
+    # I18n.Tr/TrF argument list (balanced parentheses, literals and comments
+    # masked), so the translation layer never sees the note at all.
+    masked = mask_code(_plugin("NativeUI.cs"))
+    wrapped = []
+    calls = 0
+    for m in re.finditer(r"\bI18n\.Tr\w*\(", masked):
+        calls += 1
+        depth, i = 1, m.end()
+        while depth and i < len(masked):
+            depth += {"(": 1, ")": -1}.get(masked[i], 0)
+            i += 1
+        args = masked[m.end():i - 1]
+        wrapped += [(ident, masked[m.start():i][:120]) for ident in
+                    ("MUSIC_ALBUM_NOTE", "MusicAlbumNote(", "NowPlayingAlbumNote(") if ident in args]
+    assert calls > 100, "the I18n call scan found only %d calls" % calls
+    assert not wrapped, wrapped
 
 
 def test_the_readout_names_no_album_the_now_playing_line_does_not():
