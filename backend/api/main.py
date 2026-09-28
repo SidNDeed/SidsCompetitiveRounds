@@ -60324,6 +60324,8 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 #   GET /api/v1/report?steam_id=<caller>&series=<uuid>
 #                                       | &match=<uuid>
 #                                       | &session=<uuid>
+#                                       | &sitting=<game uuid>
+#                                       | &lobby=<ffa game uuid>
 #
 # ONE versioned envelope behind the client's interactive "Session" report.
 # It replaces nothing: the history endpoints keep their rows and the broadcast
@@ -60343,7 +60345,11 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 #     team_series or ovt_series id; `match` one game in any of the four match
 #     tables; `session` the games sharing a reporter-minted
 #     matches.session_uuid (migration 298). Grouping is by that column ONLY —
-#     never by room, never by room+date;
+#     never by room, never by room+date. `sitting` resolves its anchor game's
+#     KIND (Sept 28, board row 30a): a 1v1 game gives that pair's games inside
+#     the caller's sitting, a 2v2 or 1v2 game its series, an FFA game its
+#     lobby sitting; `lobby` names that FFA set directly (the route's
+#     docstring has the rules);
 #   - NO room identifier of any kind is selected, let alone serialised (#463):
 #     every statement below names its columns and the serialiser builds each
 #     object field by field (test_session_report.py pins both);
@@ -60587,7 +60593,7 @@ _REPORT_FFA_SQL = f"""
                       AND NOT fpx.absent)
 """
 _REPORT_FFA_PLAYERS_SQL = """
-    SELECT fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
+    SELECT fp.match_id, fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
            fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained,
            fp.fps_timeline, fp.ping_timeline, fp.hit_timeline, fp.block_timeline,
            fp.damage_dealt_timeline, fp.kill_timeline, fp.damage_dealt,
@@ -60595,8 +60601,85 @@ _REPORT_FFA_PLAYERS_SQL = """
            fp.bullets_fired, fp.bullets_hit, fp.blocks_activated, fp.blocks_successful,
            fp.keys_pressed, fp.active_seconds, fp.kills
       FROM ffa_match_players fp
-     WHERE fp.match_id = CAST(:key AS uuid) AND NOT fp.absent
-     ORDER BY fp.placement ASC, fp.slot ASC
+     WHERE fp.match_id = ANY(CAST(:mids AS uuid[])) AND NOT fp.absent
+     ORDER BY fp.match_id, fp.placement ASC, fp.slot ASC
+"""
+# Sept 28 (board row 30a): what KIND of game a `sitting` anchor is. One
+# statement, four arms, each carrying its own mode's caller predicate, so the
+# dispatch never branches on a game the caller did not play: an unknown,
+# invalidated or unplayed id resolves to no row and the route answers its one
+# 404. The aliases are deliberately not the games statements' own (m, tm, om,
+# fm, fp) so neither a reader nor a test can take one statement for another.
+_REPORT_KIND_SQL = """
+    SELECT 'v1' AS report_kind, CAST(NULL AS text) AS series_id
+      FROM matches km
+     WHERE km.id = CAST(:key AS uuid) AND km.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (km.player1_id, km.player2_id)
+    UNION ALL
+    SELECT 'team', CAST(kt.series_id AS text)
+      FROM team_matches kt
+     WHERE kt.id = CAST(:key AS uuid) AND kt.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (kt.t1a_id, kt.t1b_id, kt.t2a_id, kt.t2b_id)
+    UNION ALL
+    SELECT 'ovt', CAST(ko.series_id AS text)
+      FROM ovt_matches ko
+     WHERE ko.id = CAST(:key AS uuid) AND ko.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (ko.solo_id, ko.duo_a_id, ko.duo_b_id)
+    UNION ALL
+    SELECT 'ffa', CAST(NULL AS text)
+      FROM ffa_matches kf
+     WHERE kf.id = CAST(:key AS uuid) AND kf.invalidated_at IS NULL
+       AND EXISTS (SELECT 1 FROM ffa_match_players kx
+                    WHERE kx.match_id = kf.id
+                      AND kx.player_id = CAST(:cpid AS uuid)
+                      AND NOT kx.absent)
+     LIMIT 1
+"""
+# Sept 28 (board row 30a): the FFA LOBBY SITTING of an anchor game: every game
+# of the anchor's lobby whose end falls inside the caller's sitting that
+# contains the anchor (_SITTING_CTES, the 3 h gap rule the 1v1 `sitting` set
+# uses), each one the caller PLAYED (not absent, #227) - the per-game
+# participant predicate is the same one _REPORT_FFA_SQL carries. A game with
+# no lobby row is its own one-game lobby (`g.id = an.id`). `total_rows` is the
+# participant-filtered size of the whole lobby sitting, as in the 1v1
+# statement, so `games_omitted` is exact whatever the LIMIT hides.
+_REPORT_FFA_LOBBY_SQL = """
+    SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
+           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s,
+           """ + _FFA_SETTINGS_COLS + """,
+           COUNT(*) OVER () AS total_rows
+      FROM ffa_matches fm
+      LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id
+     WHERE fm.id IN (
+        WITH """ + _sitting_ctes(":cpid") + """,
+        anchor AS (
+            SELECT a.id, a.lobby_id, a.ended_at FROM ffa_matches a
+             WHERE a.id = CAST(:key AS uuid) AND a.invalidated_at IS NULL
+               AND EXISTS (SELECT 1 FROM ffa_match_players ax
+                            WHERE ax.match_id = a.id
+                              AND ax.player_id = CAST(:cpid AS uuid)
+                              AND NOT ax.absent)
+        ),
+        span AS (
+            SELECT MIN(s.ended_at) AS lo, MAX(s.ended_at) AS hi
+              FROM sit s
+             WHERE s.sn = (SELECT s1.sn FROM sit s1 JOIN anchor an ON an.ended_at = s1.ended_at)
+        )
+        SELECT g.id FROM ffa_matches g
+          JOIN anchor an ON TRUE
+          LEFT JOIN span sp ON TRUE
+         WHERE g.invalidated_at IS NULL
+           AND (g.id = an.id
+                OR (g.lobby_id = an.lobby_id
+                    AND g.ended_at >= sp.lo AND g.ended_at <= sp.hi))
+     )
+       AND fm.invalidated_at IS NULL
+       AND EXISTS (SELECT 1 FROM ffa_match_players fpx
+                    WHERE fpx.match_id = fm.id
+                      AND fpx.player_id = CAST(:cpid AS uuid)
+                      AND NOT fpx.absent)
+     ORDER BY COALESCE(fm.started_at, fm.ended_at) DESC, fm.id DESC
+     LIMIT :lim
 """
 _REPORT_ROSTER_SQL = """
     SELECT p.id, p.steam_id, p.display_name
@@ -61071,36 +61154,111 @@ async def _report_load_ovt(db, selector, key, cpid):
     return games, total
 
 
+async def _report_ffa_games(db, rows):
+    """FFA match rows (oldest first) -> games, with each game's PLAYING roster
+    rows read by ONE statement for every game: `absent` rows are frozen-roster
+    ghosts and are not participants, not slots, not telemetry (#227)."""
+    if not rows:
+        return []
+    fps = await _report_rows(db, _REPORT_FFA_PLAYERS_SQL,
+                             {"mids": [str(r["id"]) for r in rows]})
+    by_match = {}
+    for fp in fps:
+        by_match.setdefault(str(fp["match_id"]), []).append(fp)
+    games = []
+    for r in rows:
+        games.append({"id": r["id"], "started_at": r["started_at"],
+                      "duration_s": r["duration_s"], "ffa_timeline": r["timeline"],
+                      "settings": _ffa_settings_block(r),
+                      "slots": [_report_ffa_slot(fp) for fp in by_match.get(str(r["id"]), [])]})
+    return games
+
+
 async def _report_load_ffa(db, key, cpid):
-    """One FFA game — the match row (only when the caller PLAYED it) and its
-    PLAYING roster rows: `absent` rows are frozen-roster ghosts and are not
-    participants, not slots, not telemetry (#227)."""
+    """One FFA game - the match row, only when the caller PLAYED it."""
     rows = await _report_rows(db, _REPORT_FFA_SQL, {"key": key, "cpid": cpid})
     if not rows:
         return [], []
-    r = rows[0]
-    fps = await _report_rows(db, _REPORT_FFA_PLAYERS_SQL, {"key": key})
-    slots = []
-    for fp in fps:
-        s = _report_slot(fp["player_id"], fp["rounds_won"], fp["points_total"],
-                         fp["fps_timeline"], fp["ping_timeline"], fp["hit_timeline"],
-                         fp["block_timeline"], fp["damage_dealt_timeline"], fp["end_stats"],
-                         _report_totals(fp["bullets_fired"], fp["bullets_hit"],
-                                        fp["blocks_activated"], fp["blocks_successful"],
-                                        fp["keys_pressed"], fp["active_seconds"],
-                                        damage=fp["damage_dealt"], kills=fp["kills"]),
-                         killtl=fp["kill_timeline"])
-        s["slot"] = fp["slot"]
-        s["placement"] = fp["placement"]
-        s["rating_before"] = fp["rating_before"]
-        s["rating_after"] = fp["rating_after"]
-        s["rating_change"] = fp["rating_change"]
-        s["gold_gained"] = fp["gold_gained"]
-        s["color_hex"] = fp["color_hex"]
-        slots.append(s)
-    game = {"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-            "ffa_timeline": r["timeline"], "settings": _ffa_settings_block(r), "slots": slots}
-    return [game], slots
+    games = await _report_ffa_games(db, rows[:1])
+    return games, games[0]["slots"]
+
+
+async def _report_load_ffa_lobby(db, key, cpid):
+    """The FFA lobby sitting of the anchor game (_REPORT_FFA_LOBBY_SQL) ->
+    (oldest-first games, total, roster pids, colours). Players join and leave
+    between the games of a lobby, so the roster is the UNION of the games'
+    playing rosters: the newest game's players in placement order, then each
+    older game's newcomers. A player is absent from the games they did not
+    play - their keys are missing there, never zero."""
+    rows = await _report_rows(db, _REPORT_FFA_LOBBY_SQL,
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
+    games = await _report_ffa_games(db, rows)
+    order, color_of = [], {}
+    for g in reversed(games):
+        for s in g["slots"]:
+            if s["pid"] not in order:
+                order.append(s["pid"])
+            if s.get("color_hex") and s["pid"] not in color_of:
+                color_of[s["pid"]] = s["color_hex"]
+    return games, total, order, color_of
+
+
+def _report_ffa_slot(fp):
+    """One PLAYING ffa_match_players row -> a slot."""
+    s = _report_slot(fp["player_id"], fp["rounds_won"], fp["points_total"],
+                     fp["fps_timeline"], fp["ping_timeline"], fp["hit_timeline"],
+                     fp["block_timeline"], fp["damage_dealt_timeline"], fp["end_stats"],
+                     _report_totals(fp["bullets_fired"], fp["bullets_hit"],
+                                    fp["blocks_activated"], fp["blocks_successful"],
+                                    fp["keys_pressed"], fp["active_seconds"],
+                                    damage=fp["damage_dealt"], kills=fp["kills"]),
+                     killtl=fp["kill_timeline"])
+    s["slot"] = fp["slot"]
+    s["placement"] = fp["placement"]
+    s["rating_before"] = fp["rating_before"]
+    s["rating_after"] = fp["rating_after"]
+    s["rating_change"] = fp["rating_change"]
+    s["gold_gained"] = fp["gold_gained"]
+    s["color_hex"] = fp["color_hex"]
+    return s
+
+
+async def _report_series_set(db, key, cpid):
+    """A series id -> (kind, mode, games, total, set_row, roster_pids, team_of).
+    ranked_series first, then team_series, then ovt_series: the first table
+    that has the id owns it. An unknown or invalidated series raises the
+    route's one 404."""
+    rs = await _report_rows(db, _REPORT_RS_SQL, {"key": key})
+    if rs:
+        set_row = rs[0]
+        if set_row["invalidated_at"] is not None:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+        games, total, _ = await _report_load_1v1(db, "series", key, cpid)
+        return ("ranked", "1v1", games, total, set_row,
+                [set_row["player1_id"], set_row["player2_id"]], {})
+    ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
+    if ts:
+        set_row = ts[0]
+        if set_row["invalidated_at"] is not None:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+        games, total = await _report_load_team(db, "series", key, cpid)
+        team_of = {str(set_row["t1a_id"]): 1, str(set_row["t1b_id"]): 1,
+                   str(set_row["t2a_id"]): 2, str(set_row["t2b_id"]): 2}
+        return ("team", "team", games, total, set_row,
+                [set_row["t1a_id"], set_row["t1b_id"], set_row["t2a_id"], set_row["t2b_id"]],
+                team_of)
+    os_ = await _report_rows(db, _REPORT_OS_SQL, {"key": key})
+    if not os_:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    set_row = os_[0]
+    if set_row["invalidated_at"] is not None:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    games, total = await _report_load_ovt(db, "series", key, cpid)
+    team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
+               str(set_row["duo_b_id"]): 2}
+    return ("ovt", "ovt", games, total, set_row,
+            [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]], team_of)
 
 
 def _report_consistent(games, anchor):
@@ -61247,19 +61405,29 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
                 rating[sid] = _report_rating_entry(None, d)
             gold[sid] = int(set_row[f"{slot}_gold_earned"] or 0)
     elif kind == "ffa":
-        for s in (games[0]["slots"] if games else []):
-            sid = sid_of.get(s["pid"])
-            if sid is None:
-                continue
-            if s.get("rating_change") is not None:
-                d = round(float(s["rating_change"]), 1)
-                rb = s.get("rating_before")
-                ra = s.get("rating_after")
-                rating[sid] = {"before": round(float(rb), 1) if rb is not None else None,
-                               "after": round(float(ra), 1) if ra is not None else None,
-                               "delta": d}
-            if s.get("gold_gained") is not None:
-                gold[sid] = int(s["gold_gained"])
+        # FFA rates every game on its own (ffa_match_players.rating_*): over a
+        # lobby sitting the delta is the SUM of the player's per-game changes,
+        # `before` the rating recorded at their first rated game of the set and
+        # `after` the one recorded at their last. One game reads exactly as it
+        # always did. Gold is the sum of the per-game gold_gained.
+        first_before, last_after, delta_sum = {}, {}, {}
+        for g in games:                          # oldest first
+            for s in g["slots"]:
+                sid = sid_of.get(s["pid"])
+                if sid is None:
+                    continue
+                if s.get("rating_change") is not None:
+                    delta_sum[sid] = delta_sum.get(sid, 0.0) + float(s["rating_change"])
+                    if sid not in first_before:
+                        first_before[sid] = s.get("rating_before")
+                    last_after[sid] = s.get("rating_after")
+                if s.get("gold_gained") is not None:
+                    gold[sid] = gold.get(sid, 0) + int(s["gold_gained"])
+        for sid, d in delta_sum.items():
+            rb, ra = first_before.get(sid), last_after.get(sid)
+            rating[sid] = {"before": round(float(rb), 1) if rb is not None else None,
+                           "after": round(float(ra), 1) if ra is not None else None,
+                           "delta": round(d, 1)}
     else:
         # One game or a casual sitting: no rating is at stake; gold is the
         # per-game XP/level ledger, fetched ONCE for every game id in the set.
@@ -61276,6 +61444,7 @@ async def get_set_report(request: Request, steam_id: str = "",
                          series: str | None = None, match: str | None = None,
                          session: str | None = None,
                          sitting: str | None = None,
+                         lobby: str | None = None,
                          db: AsyncSession = Depends(get_db)):
     """The session report envelope (v1) for one set — see the block comment
     above. Errors: 401 "session_required" (fail-closed session check, first
@@ -61290,16 +61459,33 @@ async def get_set_report(request: Request, steam_id: str = "",
     of the set the envelope does not carry — dropped for a different roster
     or beyond _REPORT_MAX_GAMES — and `truncated` is its boolean.
 
-    `sitting=<match uuid>` (Sept 8 item 5): the 1v1 games between that game's
-    two players whose end time falls inside the CALLER's sitting containing it
-    (_SITTING_CTES: the viewer's finished games in any mode, split at gaps over
-    SITTING_GAP_HOURS). Kind and summary follow the `session` rules: ranked only
-    when every game is, per-game gold, no rating."""
+    `sitting=<game uuid>` (Sept 8 item 5; resolved by KIND since Sept 28,
+    board row 30a). _REPORT_KIND_SQL decides what the anchor is, each arm
+    carrying its mode's caller predicate, so an id the caller did not play
+    resolves to nothing and 404s like every other refusal:
+      - a 1v1 game: the 1v1 games between that game's two players whose end
+        time falls inside the CALLER's sitting containing it (_SITTING_CTES:
+        the viewer's finished games in any mode, split at gaps over
+        SITTING_GAP_HOURS). Kind and summary follow the `session` rules:
+        ranked only when every game is, per-game gold, no rating;
+      - a 2v2 or 1v2 game: its series, exactly the `series` envelope (set row,
+        rating and series gold included), or the one game when it has none;
+      - an FFA game: its lobby sitting, exactly the `lobby` envelope.
+
+    `lobby=<ffa game uuid>` (Sept 28, board row 30a): every FFA game of the
+    anchor game's lobby whose end falls inside the caller's sitting containing
+    the anchor, each one the caller PLAYED (not absent). Players join and leave
+    between the games of a lobby, so this is the one envelope whose roster is
+    the UNION of its games' playing rosters (newest game first, placement
+    order) and a player's keys are missing from a game they did not play -
+    never zero. No game is dropped for its roster: every game is one the
+    caller played, so the union names nobody the caller's own per-game `match`
+    requests would not. A game with no lobby row is its own one-game lobby."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     chosen = [(name, val) for name, val in
               (("series", series), ("match", match), ("session", session),
-               ("sitting", sitting)) if val]
+               ("sitting", sitting), ("lobby", lobby)) if val]
     if len(chosen) != 1:
         raise HTTPException(status_code=400, detail="bad_request")
     selector, raw = chosen[0]
@@ -61314,44 +61500,36 @@ async def get_set_report(request: Request, steam_id: str = "",
 
     kind, mode, games, total = None, None, [], 0
     set_row, roster_pids, team_of, color_of = None, [], {}, {}
+    # The selector and key the SET is identified by from here on: a `sitting`
+    # anchored on a 2v2/1v2 game IS that game's series (its summary reads the
+    # series row and that id's series gold), one on an FFA game its lobby.
+    eff_selector, eff_key = selector, key
+    union_roster = False
 
-    if selector == "series":
-        rs = await _report_rows(db, _REPORT_RS_SQL, {"key": key})
-        if rs:
-            set_row = rs[0]
-            if set_row["invalidated_at"] is not None:
-                raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-            kind, mode = "ranked", "1v1"
-            games, total, _ = await _report_load_1v1(db, "series", key, cpid)
-            roster_pids = [set_row["player1_id"], set_row["player2_id"]]
-        else:
-            ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
-            if ts:
-                set_row = ts[0]
-                if set_row["invalidated_at"] is not None:
-                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-                kind, mode = "team", "team"
-                games, total = await _report_load_team(db, "series", key, cpid)
-                roster_pids = [set_row["t1a_id"], set_row["t1b_id"], set_row["t2a_id"], set_row["t2b_id"]]
-                team_of = {str(set_row["t1a_id"]): 1, str(set_row["t1b_id"]): 1,
-                           str(set_row["t2a_id"]): 2, str(set_row["t2b_id"]): 2}
-            else:
-                os_ = await _report_rows(db, _REPORT_OS_SQL, {"key": key})
-                if not os_:
-                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-                set_row = os_[0]
-                if set_row["invalidated_at"] is not None:
-                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-                kind, mode = "ovt", "ovt"
-                games, total = await _report_load_ovt(db, "series", key, cpid)
-                roster_pids = [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]]
-                team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
-                           str(set_row["duo_b_id"]): 2}
-    elif selector in ("session", "sitting"):
+    if selector == "sitting":
+        kinds = await _report_rows(db, _REPORT_KIND_SQL, {"key": key, "cpid": cpid})
+        what = kinds[0]["report_kind"] if kinds else None
+        if what in ("team", "ovt"):
+            series_of = _report_parse_uuid(kinds[0]["series_id"]) if kinds[0]["series_id"] else None
+            eff_selector, eff_key = ("series", series_of) if series_of else ("match", key)
+        elif what == "ffa":
+            eff_selector = "lobby"
+        elif what != "v1":
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+
+    if eff_selector == "series":
+        (kind, mode, games, total, set_row,
+         roster_pids, team_of) = await _report_series_set(db, eff_key, cpid)
+    elif eff_selector in ("session", "sitting"):
         kind, mode = "casual", "1v1"
-        games, total, all_ranked = await _report_load_1v1(db, selector, key, cpid)
+        games, total, all_ranked = await _report_load_1v1(db, eff_selector, eff_key, cpid)
         if games and all_ranked:
             kind = "ranked"
+    elif eff_selector == "lobby":
+        games, total, roster_pids, color_of = await _report_load_ffa_lobby(db, eff_key, cpid)
+        if games:
+            kind, mode = "ffa", "ffa"
+            union_roster = True
     else:  # match
         games, total, _ = await _report_load_1v1(db, "match", key, cpid)
         if games:
@@ -61379,15 +61557,22 @@ async def get_set_report(request: Request, steam_id: str = "",
     # ONE roster per envelope: the set row's when there is one, else the
     # newest game the caller played. Games with any other roster are dropped
     # and counted in `games_omitted` — a session uuid groups only the caller's
-    # own games with the same people.
+    # own games with the same people. The FFA lobby sitting is the one set
+    # whose roster is the union of its games' (see the docstring): nothing is
+    # dropped for its roster, and the caller is in it by the statement.
     if set_row is not None:
         anchor = frozenset(str(p) for p in roster_pids if p is not None)
+    elif union_roster:
+        anchor = None
     else:
         anchor = _report_roster_key(games[-1]["slots"])
         roster_pids = [s["pid"] for s in games[-1]["slots"]]
-    if cpid not in anchor:
+    if anchor is not None:
+        if cpid not in anchor:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+        games, _dropped = _report_consistent(games, anchor)
+    elif cpid not in {str(p) for p in roster_pids}:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-    games, _dropped = _report_consistent(games, anchor)
     if not games:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
     games_omitted = max(0, int(total) - len(games))
@@ -61402,7 +61587,7 @@ async def get_set_report(request: Request, steam_id: str = "",
     card_cap = _report_card_cap(len(games), len(roster))
     cards = await _report_load_cards(db, mode, [g["id"] for g in games])
     games_json = [_report_game_json(g, sid_of, cards, sample_cap, card_cap) for g in games]
-    set_summary = await _report_set_summary(db, kind, selector, key, set_row, games, roster)
+    set_summary = await _report_set_summary(db, kind, eff_selector, eff_key, set_row, games, roster)
     return _report_fit({
         "v": 1,
         "kind": kind,

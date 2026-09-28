@@ -296,6 +296,43 @@ class FakeDb:
         sql = " ".join(str(stmt).split())
         params = params or {}
         self.statements.append((sql, params))
+        if "AS report_kind" in sql:
+            # Sept 28 (board row 30a): the `sitting` anchor's kind. Every arm
+            # carries its own mode's caller predicate.
+            for needle in ("CAST(:cpid AS uuid) IN (km.player1_id, km.player2_id)",
+                           "CAST(:cpid AS uuid) IN (kt.t1a_id, kt.t1b_id, kt.t2a_id, kt.t2b_id)",
+                           "CAST(:cpid AS uuid) IN (ko.solo_id, ko.duo_a_id, ko.duo_b_id)",
+                           "kx.player_id = CAST(:cpid AS uuid) AND NOT kx.absent"):
+                assert needle in sql, "the kind statement lost a caller predicate: " + needle
+            key, cpid = params["key"], params["cpid"]
+            for m in self.matches:
+                if (str(m["id"]) == key and m["invalidated_at"] is None
+                        and cpid in (str(m["player1_id"]), str(m["player2_id"]))):
+                    return _Res([{"report_kind": "v1", "series_id": None}])
+            for m in self.team_matches:
+                seats = {str(m[k]) for k in ("t1a_id", "t1b_id", "t2a_id", "t2b_id") if m[k] is not None}
+                if str(m["id"]) == key and m["invalidated_at"] is None and cpid in seats:
+                    sid_ = str(m["series_id"]) if m["series_id"] is not None else None
+                    return _Res([{"report_kind": "team", "series_id": sid_}])
+            if (str(self.ffa_match["id"]) == key and self.ffa_match["invalidated_at"] is None
+                    and any(str(p["player_id"]) == cpid and not p["absent"] for p in self.ffa_players)):
+                return _Res([{"report_kind": "ffa", "series_id": None}])
+            return _Res([])
+        if "FROM ffa_matches fm" in sql and "g.lobby_id = an.lobby_id" in sql:
+            # Sept 28 (board row 30a): the FFA lobby sitting. The fake's one
+            # FFA game is a one-game lobby.
+            assert "fm.invalidated_at IS NULL" in sql
+            assert ("EXISTS (SELECT 1 FROM ffa_match_players fpx WHERE fpx.match_id = fm.id "
+                    "AND fpx.player_id = CAST(:cpid AS uuid) AND NOT fpx.absent)") in sql, \
+                "the lobby statement lost the played-this-game participant predicate"
+            assert f"make_interval(hours => {main.SITTING_GAP_HOURS})" in sql, \
+                "the lobby statement lost the sitting rule"
+            assert "COUNT(*) OVER () AS total_rows" in sql
+            if str(self.ffa_match["id"]) != params["key"]:
+                return _Res([])
+            played = any(str(p["player_id"]) == params["cpid"] and not p["absent"]
+                         for p in self.ffa_players)
+            return _Res(self._with_total([self.ffa_match])[: int(params["lim"])] if played else [])
         if "FROM players p WHERE p.steam_id = :sid" in sql:
             return _Res([{"id": p["id"]} for p in self.players if p["steam_id"] == params["sid"]])
         if "FROM matches m" in sql:
@@ -382,7 +419,10 @@ class FakeDb:
             return _Res([self.ffa_match] if played else [])
         if "FROM ffa_match_players fp" in sql:
             assert "AND NOT fp.absent" in sql, "FFA roster statement lost the absent filter"
-            return _Res([p for p in self.ffa_players if not p["absent"]] if params["key"] == FFA1 else [])
+            assert "fp.match_id = ANY(CAST(:mids AS uuid[]))" in sql, "one roster statement per envelope"
+            mids = {str(x) for x in params["mids"]}
+            return _Res([dict(p, match_id=p.get("match_id", FFA1)) for p in self.ffa_players
+                         if not p["absent"] and str(p.get("match_id", FFA1)) in mids])
         if "FROM players p" in sql:
             pids = set(params["pids"])
             return _Res([p for p in self.players if str(p["id"]) in pids])
@@ -506,6 +546,64 @@ def test_caller_is_resolved_first_and_required_in_every_games_statement(session_
                              ("_REPORT_OVT_SQL", "CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)"),
                              ("_REPORT_FFA_SQL", "AND NOT fpx.absent")):
         assert needle in " ".join(getattr(main, src_name).split()), src_name
+
+
+def test_sitting_resolves_its_anchor_kind(session_ok):
+    """Board row 30a: `sitting` resolves the anchor game's KIND instead of
+    assuming 1v1 - a 2v2 game gives its series (the `series` envelope
+    exactly), an FFA game its lobby sitting (the `lobby` envelope exactly) -
+    and the kind is decided by the statement right after the caller's."""
+    db = FakeDb()
+    by_sitting = _call(db, CALLER, sitting=TM1)
+    assert "AS report_kind" in db.statements[1][0], "the kind is resolved right after the caller"
+    assert db.statements[1][1] == {"key": TM1, "cpid": PID_A}
+    assert by_sitting["kind"] == "team"
+    assert by_sitting == _call(FakeDb(), CALLER, series=TEAM_SERIES)
+    by_sitting = _call(FakeDb(), CALLER, sitting=FFA1)
+    assert by_sitting["kind"] == "ffa"
+    assert by_sitting == _call(FakeDb(), CALLER, lobby=FFA1)
+    # a 1v1 anchor keeps the 1v1 sitting set (the Sept 8 tests pin its games)
+    assert _call(FakeDb(), CALLER, sitting=C1)["kind"] in ("casual", "ranked")
+
+
+def test_sitting_on_a_game_the_caller_did_not_play_is_the_one_404(session_ok):
+    for who, anchor in ((OTHER, FFA1), (XSTEAM, TM1), (GHOST, FFA1), (CALLER, str(uuid.uuid4()))):
+        db = FakeDb()
+        with pytest.raises(HTTPException) as ei:
+            _call(db, who, sitting=anchor)
+        assert ei.value.status_code == 404 and ei.value.detail == "not_found", (who, anchor)
+        assert not any("FROM team_matches tm" in s or "FROM ffa_matches fm" in s
+                       for s, _ in db.statements), "no games statement runs for an unresolved kind"
+
+
+def test_a_one_game_lobby_reads_like_its_game(session_ok):
+    """The FFA tab sends `lobby` for every game: a game alone in its lobby
+    sitting must read exactly as `match` does."""
+    one = _call(FakeDb(), CALLER, match=FFA1)
+    lob = _call(FakeDb(), CALLER, lobby=FFA1)
+    assert [g["match_id"] for g in lob["games"]] == [FFA1]
+    assert lob["players"] == one["players"] and lob["set_summary"] == one["set_summary"]
+    assert lob["games"] == one["games"]
+    with pytest.raises(HTTPException) as ei:
+        _call(FakeDb(), GHOST, lobby=FFA1)
+    assert ei.value.status_code == 404
+
+
+def test_the_kind_and_lobby_statements_carry_the_caller_predicate():
+    kind = " ".join(main._REPORT_KIND_SQL.split())
+    for needle in ("CAST(:cpid AS uuid) IN (km.player1_id, km.player2_id)",
+                   "CAST(:cpid AS uuid) IN (kt.t1a_id, kt.t1b_id, kt.t2a_id, kt.t2b_id)",
+                   "CAST(:cpid AS uuid) IN (ko.solo_id, ko.duo_a_id, ko.duo_b_id)",
+                   "kx.player_id = CAST(:cpid AS uuid) AND NOT kx.absent"):
+        assert needle in kind, needle
+    assert kind.count("invalidated_at IS NULL") == 4, "every arm excludes invalidated games"
+    lobby = " ".join(main._REPORT_FFA_LOBBY_SQL.split())
+    assert ("fpx.player_id = CAST(:cpid AS uuid) AND NOT fpx.absent") in lobby
+    assert "ax.player_id = CAST(:cpid AS uuid) AND NOT ax.absent" in lobby, "the anchor is a game the caller played"
+    assert "g.lobby_id = an.lobby_id" in lobby and "g.ended_at >= sp.lo AND g.ended_at <= sp.hi" in lobby
+    # room-free like every other report statement (#463)
+    for src in (kind, lobby):
+        assert "room" not in src.lower()
 
 
 def test_ranked_series_envelope(session_ok):
@@ -967,8 +1065,11 @@ def test_no_room_column_in_any_report_statement():
                 inspect.getsource(main._report_load_1v1), inspect.getsource(main._report_load_team),
                 inspect.getsource(main._report_load_ovt), inspect.getsource(main._report_load_ffa),
                 inspect.getsource(main._report_ffa_scores), inspect.getsource(main._report_consistent),
-                inspect.getsource(main._report_roster)]
-    assert len(sources) >= 14
+                inspect.getsource(main._report_roster),
+                # Sept 28 (board row 30a): the lobby sitting and the series/kind dispatch
+                inspect.getsource(main._report_load_ffa_lobby), inspect.getsource(main._report_ffa_games),
+                inspect.getsource(main._report_ffa_slot), inspect.getsource(main._report_series_set)]
+    assert len(sources) >= 20
     for src in sources:
         low = src.lower()
         for bad in ("photon_room", "room_id", "room_name", "select *", "select m.*"):
