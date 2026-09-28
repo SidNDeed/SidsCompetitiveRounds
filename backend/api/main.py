@@ -59011,20 +59011,21 @@ def _broadcast_public(candidate: dict) -> dict:
 
 async def _asm_attest_expiry(db: AsyncSession, room: str, steam_id: str) -> None:
     """The admission expiry on the FFA spectate attest (connect-failure round
-    2, M2): the cleanup the attest's exact roster check needs after A. While
-    an admissible seat is still a member, the room's live roster (members
-    minus departed) holds it, so every attest of the fighters in the room is
-    refused 409 roster_mismatch until the expiry runs; the other triggers are
-    requests (connect, assembly, leave, rowless gate, poll, report), and the
-    client's presence posts end at A. For the lobby
+    2, M2). The attest below compares the fighters' roster with the lobby's
+    live membership (members minus departed). An admissible seat is in that
+    set, so an attest whose roster leaves it out (the seat is not among the
+    fighters) answers 409 roster_mismatch; after A this step excludes the
+    seat at the first attest of a member, without waiting on one of the
+    expiry's other triggers (the lock step of connect and assembly, the
+    leave, the rowless gate, the poll, the report). For the lobby
     _spectate_authoritative_roster reads (the room's newest active lobby),
-    once A has passed on a short-started lobby that still holds an admissible
-    seat, and only for a caller who is one of its members: the lobby row FOR
-    NO KEY UPDATE, then its queue rows in UUID order (lock_rows), the expiry
-    and its own COMMIT, before the roster is read; the expired lines print
-    after it. Otherwise it takes no lock and writes nothing. The expiry
-    re-checks A, the status and the admissible seats under the lock, so a
-    second run writes nothing."""
+    once A has passed on a short-started lobby that still holds an
+    admissible seat, and only for a caller who is one of its members: the
+    lobby row FOR NO KEY UPDATE, then its queue rows in UUID order
+    (lock_rows), the expiry and its own COMMIT, before the roster is read;
+    the expired lines print after it. Otherwise it takes no lock and writes
+    nothing. The expiry re-checks A, the status and the admissible seats
+    under the lock, so a second run writes nothing."""
     lob = (await db.execute(text("""
         SELECT id, created_at, short_started_at, member_ids FROM ffa_lobbies
          WHERE photon_room_id = :room AND status = 'active'
@@ -59033,7 +59034,8 @@ async def _asm_attest_expiry(db: AsyncSession, room: str, steam_id: str) -> None
     if lob is None or lob["short_started_at"] is None:
         return
     now, _mono = await _asm_clock(db)
-    if now < lob["created_at"] + timedelta(seconds=ASM_ADMIT_LATE_S):
+    a_at = lob["created_at"] + timedelta(seconds=ASM_ADMIT_LATE_S)
+    if now < a_at:
         return
     pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
                             {"sid": steam_id})).scalar()
@@ -59186,8 +59188,8 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     if req.mode == "ffa":
         # After A an admissible seat is excluded here too (connect-failure
-        # round 2, M2), so the roster check below does not wait on a
-        # request nobody may send.
+        # round 2, M2), so the roster check below does not wait on another
+        # route's request.
         await _asm_attest_expiry(db, req.room_name, req.steam_id)
 
     # Server-authoritative roster check (fail CLOSED when a mapping should

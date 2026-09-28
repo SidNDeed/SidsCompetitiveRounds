@@ -2273,14 +2273,18 @@ row("M1", "test_m1_the_release_marker_and_lease_are_one_unit", [
 
 _M2_CALL = ('    if req.mode == "ffa":\n'
             '        # After A an admissible seat is excluded here too (connect-failure\n'
-            '        # round 2, M2), so the roster check below does not wait on a\n'
-            '        # request nobody may send.\n'
+            '        # round 2, M2), so the roster check below does not wait on another\n'
+            '        # route\'s request.\n'
             '        await _asm_attest_expiry(db, req.room_name, req.steam_id)\n')
 _M2_MEMBER = '    if pid is None or pid not in (lob["member_ids"] or []):\n'
+_M2_A = '    if now < a_at:\n'
 row("M2", "test_m2_the_attest_runs_the_expiry_after_a", [
     M("round_one_attest", "M2 at A", E(MAIN, _M2_CALL, ""),
       note="round 1 restored (5c6ddcf): the attest runs no expiry, so after A it answers 409 "
            "roster_mismatch until another route's request runs it"),
+    M("pre_check_past_a", "M2 at A", E(MAIN, _M2_A, '    if now <= a_at:\n'),
+      note="the attest's own A check one instant late: at exactly A it takes no lock and "
+           "runs no expiry, so that attest is refused"),
     M("any_caller", "M2 stranger", E(MAIN, _M2_MEMBER, '    if pid is None:\n'),
       note="a caller who is no member of that lobby runs its expiry"),
 ], T("members_as_a_set",
