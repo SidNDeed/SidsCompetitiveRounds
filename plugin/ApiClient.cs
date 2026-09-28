@@ -21875,6 +21875,28 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>Whether the api would exchange a Steam ticket now: the
+        /// transport rule the bearer rides on (F1), asked of the current base.
+        /// SteamAuth asks it before requesting a ticket and PostSteamAuth before
+        /// exchanging one: one rule, asked at both ends.</summary>
+        internal static bool TicketExchangeAllowed() => CredentialedTransportAllowed(baseUrl);
+
+        /// <summary>The refusal notice, once per session: a log line and a
+        /// toast. "Until it is back", not "this session": on the backup
+        /// connection a secure-route check can restore signed-in features
+        /// mid-session (board row 27).</summary>
+        internal static void NoteTicketExchangeRefused()
+        {
+            if (_insecureAuthNotified) return;
+            _insecureAuthNotified = true;
+            Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} - signed-in features are off until the secure route is back");
+            try
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are off until it is back."), new Color(1f, 0.6f, 0.2f), 8f);
+            }
+            catch { }
+        }
+
         /// <summary>July 21 item 4: exchange a Steam web-API auth ticket for a
         /// server session token. Called from SteamAuth's ticket callback.</summary>
         public static void PostSteamAuth(string ticketHex)
@@ -21883,23 +21905,13 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
             // F1 (Codex r3): never exchange a Steam ticket over plaintext to a
             // PUBLIC host — the returned 24h bearer would be capturable in
-            // transit. SteamAuth keeps minting tickets on a 4s backoff while
-            // no session lands, so the log + toast are once-per-session.
-            if (!CredentialedTransportAllowed(baseUrl))
+            // transit. SteamAuth asks TicketExchangeAllowed before it requests
+            // a ticket, so this refusal is reached only by a ticket requested
+            // on a secure base whose callback lands after the session moved to
+            // the backup.
+            if (!TicketExchangeAllowed())
             {
-                if (!_insecureAuthNotified)
-                {
-                    _insecureAuthNotified = true;
-                    Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} - signed-in features are off until the secure route is back");
-                    try
-                    {
-                        // "until it is back", not "this session": on the backup
-                        // connection a secure-route check can restore signed-in
-                        // features mid-session (board row 27).
-                        CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are off until it is back."), new Color(1f, 0.6f, 0.2f), 8f);
-                    }
-                    catch { }
-                }
+                NoteTicketExchangeRefused();
                 return;
             }
             string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"ticket_hex\":\"{Escape(ticketHex)}\",\"mod_version\":\"{Escape(Plugin.ModVersion ?? "0.0.0")}\"}}";

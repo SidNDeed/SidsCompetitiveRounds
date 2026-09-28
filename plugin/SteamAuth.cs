@@ -33,8 +33,10 @@ namespace CompetitiveRounds
             !string.IsNullOrEmpty(SessionToken)
             && Time.realtimeSinceStartup < _sessionExpiresAt - 3600f;   // refresh 1h before expiry
 
-        /// <summary>Ticked from ApiClient's heartbeat loop (~20s). Mints a new
-        /// ticket whenever no fresh session is held, with a 60s retry backoff.</summary>
+        /// <summary>Ticked from ApiClient's loops (SteamAuthLoop every 3 s, the
+        /// presence loop, the portal's session wait). Requests a ticket whenever
+        /// no fresh session is held and the api would exchange it: 4 s apart
+        /// while no session is held, 60 s apart while one nears expiry.</summary>
         public static void MaybeRefresh()
         {
             try
@@ -51,6 +53,18 @@ namespace CompetitiveRounds
                 if (Time.realtimeSinceStartup - _lastAttemptAt < backoff) return;
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown" || sid.StartsWith("photon_")) return;
+                // No ticket while the api would refuse to exchange it (the
+                // plaintext backup; PostSteamAuth asks the same question). On
+                // the broadcast seat (2026-09-28) twenty unexchanged tickets
+                // were followed by no further ticket for the rest of that
+                // session, so a session back on the secure route (board row
+                // 27) could not sign in again. No attempt is spent here, so
+                // the first tick after the route returns can request one.
+                if (!ApiClient.TicketExchangeAllowed())
+                {
+                    ApiClient.NoteTicketExchangeRefused();
+                    return;
+                }
                 _lastAttemptAt = Time.realtimeSinceStartup;
                 if (_webTicketCb == null)
                     _webTicketCb = Callback<GetTicketForWebApiResponse_t>.Create(OnWebTicket);

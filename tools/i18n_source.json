@@ -13525,7 +13525,7 @@
   },
   "Secure connection unavailable - signed-in features are off until it is back.": {
    "surface": "ApiClient",
-   "location": "PostSteamAuth",
+   "location": "NoteTicketExchangeRefused",
    "kind": "Tr"
   },
   "Select 2-12 players (left) to see who beats each of them most.": {
