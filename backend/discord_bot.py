@@ -477,6 +477,9 @@ async def on_ready():
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
+    # The Discord fix's witness (round 2), read by the release train: the
+    # purchase journal's volume and the fixed behaviour, stamped with gen.
+    print(_pc_fix_ready_line())
     # The deploy train's witness (r6 M6): its only job is to be probed. The
     # stamp binds the line to THIS process (r7 M2): a retained log tail can
     # carry an earlier incarnation's line after a crash-restart.
@@ -9007,6 +9010,26 @@ def _pc_buy_pending_write(pending):
         print("[PC-BUY] the purchase journal read back different from what was written")
         return False
     return True
+
+
+def _pc_fix_ready_line():
+    """The bot's startup witness for the Discord fix (round 2): the purchase
+    journal's volume as THIS process finds it - a folder that is not a mount
+    point refuses every purchase, so "NOT mounted" is the reading a release
+    must stop on - and how many purchases the journal holds unsettled; the
+    replay policy; the sync availability-check rule (board row 32). Stamped
+    with the process's gen, as [BOT-READY] is (r7 M2). Its only job is to be
+    read by the release train. It never raises: a witness that cannot be
+    built says so in its own line, and on_ready still reaches [BOT-READY]."""
+    try:
+        mounted = os.path.ismount(os.path.dirname(_PC_BUY_PENDING_FILE))
+        pending = _pc_buy_pending()
+        held = "unreadable" if pending is None else f"{len(pending)} unsettled"
+        return (f"[DISCORD-FIX] gen={_BOT_GEN} purchase journal {_PC_BUY_PENDING_FILE}: "
+                f"{'mounted' if mounted else 'NOT mounted'}, {held}; an unanswered open sends its key "
+                f"{_PC_OPEN_SENDS} times; sync availability checks wait for a start time with min_players votes")
+    except Exception as ex:
+        return f"[DISCORD-FIX] gen={_BOT_GEN} witness failed: {type(ex).__name__}: {ex}"
 
 
 async def _pc_buy_and_show(ctx, me, pay):

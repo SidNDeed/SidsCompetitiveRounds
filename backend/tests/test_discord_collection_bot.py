@@ -2213,6 +2213,7 @@ def ready_rig(env):
         "bot": SimpleNamespace(tree=SimpleNamespace(sync=tree_sync), user="fixture-bot", guilds=[],
                                get_user=get_user, fetch_user=fetch_user),
         "_bridge_readers_started": False, "CHAT_CHANNEL_ID": 1, "ADMIN_CHANNEL_ID": 2, "_BOT_GEN": "fixture",
+        "_pc_fix_ready_line": lambda: "[DISCORD-FIX] gen=fixture (the witness is test_health_discord_fix_marker's)",
     }
 
     async def noop():

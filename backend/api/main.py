@@ -3870,7 +3870,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:45222 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:45340 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3936,7 +3936,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:45034 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:45152 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4006,7 +4006,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:44937 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:45055 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6373,7 +6373,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
-                              pc_trading=await _pc_trading_word(db))
+                              pc_trading=await _pc_trading_word(db),
+                              discord_fix=await _discord_fix_probe(db))
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -6389,7 +6390,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ladder_hook=_LADDER_HOOK,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
-                              pc_trading=_pc_trading_word_cached())
+                              pc_trading=_pc_trading_word_cached(),
+                              discord_fix=_DISCORD_FIX_LAST)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -28432,6 +28434,122 @@ async def internal_pc_open_pack(
                                   expected_price=None, locale=loc, via="discord")
     return await _pc_open_for(db, player, player.steam_id, pack_id=None, nonce=nonce, pay=pay,
                               expected_price=expected_price, locale=loc, via="discord")
+
+
+# -- The Discord fix marker (/health `discord_fix`) ----------------------------
+# Release-train verification plumbing for the Discord fix (rounds 1 and 2),
+# read by nothing else (#306). 1 when both halves hold: this app routes the
+# bot's pack opener, POST /api/v1/internal/pc/packs/open, to
+# internal_pc_open_pack; and the read a replay of a purchase key runs --
+# _pc_open_for's read of the pack row by player and nonce, whose columns are
+# the recorded outcome the replay answers (round 2, M1) -- runs on the
+# database this box uses. 0 when the route is not bound so, when
+# _pc_open_for carries no such read (exactly one), or when the database
+# lacks a column or the table that read names. Absent on any build before
+# the fix, which is how the release train reads the old build: the route
+# alone cannot tell the builds apart on the standby, whose replica gate
+# answers 503 to every POST before any handler runs.
+#
+# DERIVED, never written down (#342): the probe is that read itself, found
+# among _pc_open_for's compiled string constants (nested code included), and
+# it binds a player id no row carries, so it reads no row and writes nothing
+# -- a plain read, which the standby serves too. It runs on the connected arm
+# only, after SELECT 1, and catches ONE class of error: the read named a
+# column or a table this database does not have (SQLSTATE 42703 or 42P01),
+# found on the error's own wrapping chain (.orig and __cause__). That error
+# aborts the transaction, so the probe rolls back before it answers 0. Any
+# other error is left to health_check's own catch, which reports the box
+# degraded: a probe that fails for any other reason is a database fault, not
+# a schema answer. The degraded arm cannot probe, so it answers the last
+# value a probe on this worker wrote -- 0 until one has run, which the train
+# reads as not proven.
+import asyncpg.exceptions as _discord_fix_apg_exc
+
+_DISCORD_FIX_ROUTE = ("POST", "/api/v1/internal/pc/packs/open")
+# The handler the route must reach, held in a DATA binding: the route
+# manifest's closure walk follows a data binding only into other data
+# bindings, so /health's reviewed surface gains this line, not the pack
+# opener's whole closure (which naming the def inside _discord_fix_bound
+# would fold in, making /health the app's largest route).
+_DISCORD_FIX_ENDPOINT = internal_pc_open_pack
+_DISCORD_FIX_READ = _re.compile(
+    r"^\s*SELECT\b.*\bFROM pc_packs WHERE player_id = CAST\(:pid AS uuid\) AND nonce = CAST\(:nonce AS text\)\s*$",
+    _re.S)
+_DISCORD_FIX_SQLSTATES = frozenset({"42703", "42P01"})   # undefined_column, undefined_table
+_DISCORD_FIX_BINDS = {"pid": "00000000-0000-0000-0000-000000000000", "nonce": ""}
+
+
+def _discord_fix_read(fn) -> str:
+    """The statement among `fn`'s compiled string constants (nested code
+    included) that reads a pack row by player and nonce, when there is
+    exactly one; else "". The function's own docstring is skipped."""
+    found = []
+    todo = [fn.__code__]
+    while todo:
+        code = todo.pop()
+        for const in code.co_consts:
+            if isinstance(const, type(code)):
+                todo.append(const)
+            elif isinstance(const, str) and const is not fn.__doc__ and _DISCORD_FIX_READ.match(const):
+                found.append(const)
+    return found[0] if len(found) == 1 else ""
+
+
+_DISCORD_FIX_PROBE = _discord_fix_read(_pc_open_for)
+_DISCORD_FIX_LAST = 0
+
+
+def _discord_fix_bound() -> bool:
+    """True when this app routes POST /api/v1/internal/pc/packs/open to
+    internal_pc_open_pack (_DISCORD_FIX_ENDPOINT)."""
+    method, path = _DISCORD_FIX_ROUTE
+    return any(getattr(r, "path", None) == path and method in (getattr(r, "methods", None) or ())
+               and getattr(r, "endpoint", None) is _DISCORD_FIX_ENDPOINT
+               for r in app.router.routes)
+
+
+def _discord_fix_schema_missing(exc) -> bool:
+    """True when the statement named a column or a table the database does
+    not have: the driver's own class for either, or SQLSTATE 42703 / 42P01,
+    on `exc` or on its wrapping chain (.orig and __cause__). An exception
+    merely raised while another was being handled (__context__) is not
+    wrapping it, and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, (_discord_fix_apg_exc.UndefinedColumnError,
+                            _discord_fix_apg_exc.UndefinedTableError)):
+            return True
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if str(state or "") in _DISCORD_FIX_SQLSTATES:
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+async def _discord_fix_probe(db) -> int:
+    """/health `discord_fix` on the connected arm, written through to the
+    cache the degraded arm reads: 1 when the route is bound and the replay
+    read ran, 0 when the route is not bound, the read is not found, or the
+    database lacks a column or the table it names. Any other error is raised
+    to health_check's own catch."""
+    global _DISCORD_FIX_LAST
+    if not _DISCORD_FIX_PROBE or not _discord_fix_bound():
+        _DISCORD_FIX_LAST = 0
+        return 0
+    try:
+        await db.execute(text(_DISCORD_FIX_PROBE), dict(_DISCORD_FIX_BINDS))
+    except Exception as exc:
+        if not _discord_fix_schema_missing(exc):
+            raise
+        await db.rollback()
+        _DISCORD_FIX_LAST = 0
+        return 0
+    _DISCORD_FIX_LAST = 1
+    return 1
 
 
 @app.get("/api/v1/internal/pc/collection", tags=["Internal"])
