@@ -1777,7 +1777,7 @@
           ],
           "main",
           "ffa_lobby_release",
-          "ef338cf6d2ce36f7a7ab9c1240189f7b18aaefab"
+          "0852a2f6a644e0d9a8b9878fbdc47ea5348e57c3"
         ],
         [
           "/api/v1/ffa/queue/join",
@@ -2650,7 +2650,7 @@
           ],
           "main",
           "spectate_participant_attest",
-          "d609e2edf20a974a0c07a58b21ab1120f7e54ac6"
+          "2b91d7c6fa2f298f2822e724beca08ea4ee46890"
         ],
         [
           "/api/v1/spectate/validate",
