@@ -511,7 +511,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "842b55114fce393098f693ac27fe7c534d4df2c0"
+          "96189d9e494ff9a96dcdff9e4a1453b40e92cb94"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
