@@ -230,6 +230,20 @@ def test_one_cfg_key_hides_the_strip_and_it_defaults_to_shown():
                    "private static void DrawRoomRulesBanner()")
     assert "Plugin.ShowRoomRulesIndicator" in body
     assert body.count("RoomRulesStrip.Paints(") == 1
+    # The key's VALUE is what the gate is handed, and the gate returns before
+    # the strip claims its band: a Paints call fed a constant, or one whose
+    # refusal falls through to the paint, reads the key and ignores it (the
+    # mutation Paints(true, line) passed every assertion above).
+    m = re.search(r"(\w+)\s*=\s*Plugin\.ShowRoomRulesIndicator\s*==\s*null\s*"
+                  r"\|\|\s*Plugin\.ShowRoomRulesIndicator\.Value\s*;", body)
+    assert m, "the cfg value is not read into a local the gate can be handed"
+    gate = "if (!RoomRulesStrip.Paints(%s, line))" % m.group(1)
+    assert body.count(gate) == 1, "the gate is not handed the key's value: " + gate
+    refusal = body.split(gate, 1)[1]
+    refusal = refusal[:refusal.index("roomRuleSuppressed = RoomRulesStrip.Line.None;")]
+    assert "return;" in refusal, "a refused strip falls through to the paint"
+    assert body.index(gate) < body.index("ClaimTopStrip("), \
+        "the strip claims its band before the key is consulted"
     # The key hides the strip only: the game-start toast is not behind it.
     toast = code_of(_plugin("RoomRules.cs"), "public static void OnGameStart()")
     assert "ShowRoomRulesIndicator" not in toast
