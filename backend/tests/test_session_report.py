@@ -191,7 +191,10 @@ FFA_MATCH = {"id": FFA1, "started_at": T0, "ended_at": T0 + timedelta(seconds=40
              # the lobby settings columns the games statement LEFT JOINs (a
              # lobby that predates configurable settings: nothing known)
              "score_target": None, "card_cap": None, "initial_picks": None, "card_candidates": None,
-             "same_card_rule": None, "sudden_death": None, "settings_known": False}
+             "same_card_rule": None, "sudden_death": None, "settings_known": False,
+             # the game's own frozen settings block (migration 360); NULL = a
+             # game recorded before 360, so the lobby columns above answer
+             "settings_frozen": None}
 # An FFA lobby played under a known configuration.
 FFA_SETTINGS_ROW = dict(FFA_MATCH, score_target=7, card_cap=5, initial_picks=1, card_candidates=5,
                         same_card_rule=True, sudden_death=False, settings_known=True)
@@ -807,8 +810,9 @@ def test_envelope_carries_the_room_rules_record(session_ok):
     """Migration 306: every game carries the record it was played under, read
     from the ONE games statement per set (no second lookup): `rules` from the
     series row for 1v1 / 2v2 / 1v2 — null for a series born before the record
-    or a casual game with no series — and `settings` for FFA from the lobby
-    (null when the lobby predates configurable settings)."""
+    or a casual game with no series — and `settings` for FFA from the
+    block the game froze when it was recorded (migration 360), else from the
+    lobby (null when the lobby predates configurable settings)."""
     rec = {"ff": False, "sc": True, "src": "prefs"}
     db = FakeDb(matches=[match_row(M1, PID_A, PID_B, minute=0, series_id=SERIES, rules=rec),
                          match_row(M2, PID_B, PID_A, minute=5, series_id=SERIES)])
@@ -828,6 +832,15 @@ def test_envelope_carries_the_room_rules_record(session_ok):
         "score_target": 7, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
         "same_card_rule": True, "sudden_death": False}
     assert "LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id" in " ".join(main._REPORT_FFA_SQL.split())
+    # Migration 360: the block the game froze wins over the lobby's current
+    # row, and the loader selects it (the row must carry it: a KeyError, not
+    # a silent fall back to the lobby, when a surface forgets).
+    frozen = {"score_target": 9, "card_cap": 3, "initial_picks": 2, "card_candidates": 4,
+              "same_card_rule": False, "sudden_death": True}
+    resp = _call(FakeDb(ffa_match=dict(FFA_SETTINGS_ROW, settings_frozen=json.dumps(frozen))),
+                 CALLER, match=FFA1)
+    assert resp["games"][0]["settings"] == frozen, "the game's frozen block, not the lobby's current row"
+    assert "fm.settings_frozen" in main._REPORT_FFA_SQL
 
     resp = _call(FakeDb(), CALLER, series=TEAM_SERIES)
     assert all(g["rules"] is None for g in resp["games"]) and resp["games"]
