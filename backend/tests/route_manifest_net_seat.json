@@ -1177,7 +1177,7 @@
           ],
           "main",
           "submit_team_match",
-          "a270eaa963bbb4052c7b0ca67cda0f8ad29db903"
+          "02d7cb4a170bd1a7b645eae2e3dc3ea9c6cad9c1"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "327f79694e71bf00ffc73aec0406ee3665c5c60b"
+          "32b67ab40c611227e276fa5307a1670622b729e5"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -3401,7 +3401,7 @@
           ],
           "main",
           "team_series_first_game",
-          "4b97dd80776c6a327e7b41226b7fc2544054df51"
+          "b6476de5aa32711188324cab3716c454f1e416ac"
         ]
       ]
     }
