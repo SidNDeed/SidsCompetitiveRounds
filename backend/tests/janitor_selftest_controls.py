@@ -68,6 +68,10 @@ P6 = T + "test_a_statement_the_run_never_reached_reads_unchecked"
 L9 = T + "test_pg_the_health_word_reads_the_self_tests_verdict"
 P7 = T + "test_the_health_word_is_the_recorded_verdict"
 P8 = T + "test_both_health_arms_carry_the_word_and_the_schema_requires_it"
+P9 = T + "test_both_arms_carry_the_build_marker_both_roles_answer_alike"
+BUILD_SITE = "_JANITOR_SELFTEST_BUILD = 1\n"
+BUILD_ARG = "                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,\n"
+CACHED_ARM = "                              pc_trading=_pc_trading_word_cached(),\n"
 WORD_SITE = '    return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)\n'
 
 STMT_SITE = '        stmt = text("EXPLAIN " + s["sql"] if cls == "explain" else s["sql"])\n'
@@ -219,6 +223,30 @@ PLANTS = [
      "file": MAIN, "old": WORD_SITE,
      "new": WORD_SITE.replace(", 0)\n", ", 1)\n"),
      "red": [L9, P7], "green": [P8]},
+    # The build marker the train reads through the edge.
+    {"name": "M20-build-marker-reads-the-verdict",
+     "why": "the connected arm reports the verdict word as the build marker: it then "
+            "differs by role, the train's edge refusal (the negative control)",
+     "file": MAIN, "old": "                              pc_trading=await _pc_trading_word(db),\n" + BUILD_ARG,
+     "new": ("                              pc_trading=await _pc_trading_word(db),\n"
+             "                              janitor_selftest_build=_janitor_selftest_marker(),\n"),
+     "red": [L9, P9], "green": [P7, P8]},
+    {"name": "T4-inert-twin-at-the-build-marker",
+     "why": "the same constant, parenthesised: nothing may redden",
+     "file": MAIN, "old": BUILD_SITE, "new": "_JANITOR_SELFTEST_BUILD = (1)\n",
+     "red": [], "green": [L9, P7, P8, P9]},
+    {"name": "M21-build-marker-falsy",
+     "why": "the build marker reads 0: the train fails at once on a falsy word",
+     "file": MAIN, "old": BUILD_SITE, "new": "_JANITOR_SELFTEST_BUILD = 0\n",
+     "red": [L9, P9], "green": [P7, P8]},
+    {"name": "M22-build-marker-dropped-from-the-degraded-arm",
+     "why": "the degraded arm no longer passes the build marker: its answer cannot be built",
+     "file": MAIN, "old": CACHED_ARM + BUILD_ARG, "new": CACHED_ARM,
+     "red": [L9, P8, P9], "green": [P7]},
+    {"name": "M23-schema-build-field-dropped",
+     "why": "HealthResponse no longer declares the build marker: the payload drops the key",
+     "file": SCHEMAS, "old": "    janitor_selftest_build: int\n", "new": "",
+     "red": [L9, P9], "green": [P7, P8]},
 ]
 
 

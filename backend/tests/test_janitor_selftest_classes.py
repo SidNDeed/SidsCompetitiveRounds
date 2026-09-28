@@ -21,6 +21,8 @@ THE HEALTH WORD. /api/v1/health carries `janitor_selftest`, read from
 the report the self-test recorded (main._janitor_selftest_marker): 1 it
 ran and every statement passed, 0 it ran and did not pass (or a status
 the map does not name), 2 skipped (the read replica), 3 not finished.
+Beside it, `janitor_selftest_build` is a code constant, 1 on both roles:
+the one janitor key the release train can read through the edge.
 
 THE DATABASE. The live tests share ONE throwaway schema, built once per run
 of this module in the database JANITOR_SELFTEST_TEST_PG_DSN names (which must
@@ -338,6 +340,40 @@ def test_both_health_arms_carry_the_word_and_the_schema_requires_it():
     with pytest.raises(pydantic.ValidationError):
         schemas.HealthResponse(**answer)
     assert '"status": "skipped"' in inspect.getsource(main.lifespan)
+
+
+def test_both_arms_carry_the_build_marker_both_roles_answer_alike():
+    """/health `janitor_selftest_build`: both arms pass the module constant and
+    nothing else in main.py passes the key; the constant is bound once, to 1
+    (the release train fails at once on a falsy word); HealthResponse requires
+    it. It reads neither the self-test's verdict nor the role, so the primary
+    and the standby answer it alike -- the janitor key the train can read
+    through the edge, where janitor_selftest differs by role."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    (health,) = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check"]
+    (tried,) = [n for n in ast.walk(health) if isinstance(n, ast.Try)]
+    connected = [ast.unparse(k.value) for s in tried.body for k in ast.walk(s)
+                 if isinstance(k, ast.keyword) and k.arg == "janitor_selftest_build"]
+    degraded = [ast.unparse(k.value) for h in tried.handlers for k in ast.walk(h)
+                if isinstance(k, ast.keyword) and k.arg == "janitor_selftest_build"]
+    assert (connected, degraded) == (["_JANITOR_SELFTEST_BUILD"], ["_JANITOR_SELFTEST_BUILD"])
+    everywhere = [k for k in ast.walk(tree)
+                  if isinstance(k, ast.keyword) and k.arg == "janitor_selftest_build"]
+    assert len(everywhere) == 2, len(everywhere)
+    stores = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+              and n.id == "_JANITOR_SELFTEST_BUILD" and isinstance(n.ctx, ast.Store)]
+    (binding,) = [n for n in tree.body if isinstance(n, ast.Assign)
+                  and [ast.unparse(t) for t in n.targets] == ["_JANITOR_SELFTEST_BUILD"]]
+    assert len(stores) == 1 and ast.unparse(binding.value) == "1", ast.unparse(binding)
+    field = schemas.HealthResponse.model_fields.get("janitor_selftest_build")
+    assert field is not None and field.annotation is int and field.is_required(), field
+    answer = _run(main.health_check(db=_DownSession())).model_dump()
+    assert answer["janitor_selftest_build"] == 1, answer
+    answer.pop("janitor_selftest_build")
+    with pytest.raises(pydantic.ValidationError):
+        schemas.HealthResponse(**answer)
 
 
 # ------------------------------------------------------- the lane schema
@@ -807,12 +843,19 @@ async def _health_payload(monkeypatch, schema, down=False):
         await engine.dispose()
 
 
+def _words(body):
+    return (body["status"], body.get("janitor_selftest", "absent"),
+            body.get("janitor_selftest_build", "absent"))
+
+
 def test_pg_the_health_word_reads_the_self_tests_verdict(lane, monkeypatch):
-    """/api/v1/health `janitor_selftest` through the real handler and response
-    model on the lane schema: the self-test run with its per-statement check
-    forced to fail reads 0; the key is in the payload; the same run with the
-    real check restored reads 1, on the degraded arm too (the word needs no
-    database)."""
+    """/api/v1/health `janitor_selftest` (and `janitor_selftest_build`) through
+    the real handler and response model on the lane schema: the self-test run
+    with its per-statement check forced to fail reads 0; the key is in the
+    payload; the same run with the real check restored reads 1, on the
+    degraded arm too (the word needs no database); the report the replica's
+    lifespan branch records reads 2, with replica true -- what the standby
+    answers. The build marker reads 1 in every one of those answers."""
     inv = _live_inventory()
     real = main._janitor_check_statement
 
@@ -823,12 +866,20 @@ def test_pg_the_health_word_reads_the_self_tests_verdict(lane, monkeypatch):
     assert report["status"] == "failed", report["counts"]
     assert report["counts"]["failed"] == len(inv["statements"]), report["counts"]
     body = _run(_health_payload(monkeypatch, lane.schema))
-    assert (body["status"], body.get("janitor_selftest", "absent")) == ("ok", 0), body
+    assert _words(body) == ("ok", 0, 1), body
     monkeypatch.setattr(main, "_janitor_check_statement", real)
     report, _log = _run(_selftest(monkeypatch, lane.schema, inv))
     assert report["status"] == "ok", report["counts"]
     body = _run(_health_payload(monkeypatch, lane.schema))
-    assert (body["status"], body.get("janitor_selftest", "absent")) == ("ok", 1), body
+    assert _words(body) == ("ok", 1, 1), body
     down = _run(_health_payload(monkeypatch, lane.schema, down=True))
-    assert (down["status"], down.get("janitor_selftest", "absent")) == ("degraded", 1), down
-    print("[janitor-selftest] /health janitor_selftest: forced to fail 0, restored 1, degraded arm 1")
+    assert _words(down) == ("degraded", 1, 1), down
+    monkeypatch.setattr(main, "IS_REPLICA", True)
+    monkeypatch.setattr(main, "_janitor_selftest_report", {
+        "status": "skipped",
+        "reason": "read replica: the janitor writers this validates do not run here"})
+    standby = _run(_health_payload(monkeypatch, lane.schema))
+    assert _words(standby) + (standby["replica"],) == ("ok", 2, 1, True), standby
+    print("[janitor-selftest] /health (janitor_selftest, janitor_selftest_build): "
+          "forced to fail (0, 1), restored (1, 1), degraded arm (1, 1), "
+          "the replica's recorded skip (2, 1)")

@@ -4444,7 +4444,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:46363 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:46376 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4510,7 +4510,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:46175 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:46188 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4580,7 +4580,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:46078 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:46091 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6957,6 +6957,17 @@ def _janitor_selftest_marker() -> int:
     return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)
 
 
+# Release-train verification plumbing, not a design mechanism: the
+# JANITOR-SELFTEST lane's build marker, reported on /health as
+# `janitor_selftest_build`. A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else
+# (#306). janitor_selftest above differs by role (the primary reads 1, the
+# standby 2), and the train reads a batch that adds no route through the
+# edge only by a marker both roles answer alike, because no probe says
+# which box answered. Absent on any build before it.
+_JANITOR_SELFTEST_BUILD = 1
+
+
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
 async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
@@ -6977,6 +6988,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
+                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               team_dc_fallback=team_dc_fallback)
     except Exception:
@@ -7000,6 +7012,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
+                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
 

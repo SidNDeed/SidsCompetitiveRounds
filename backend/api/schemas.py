@@ -948,6 +948,15 @@ class HealthResponse(BaseModel):
     # leaving the key out. Absent on any build before it, which is how the
     # train reads the old build.
     janitor_selftest: int
+    # janitor_selftest_build: release-train verification plumbing, not a
+    # design mechanism (main._JANITOR_SELFTEST_BUILD; 1 = this build checks
+    # each janitor statement by its class and reports janitor_selftest). A
+    # code constant, equal on both boxes by construction, so the train can
+    # read it through the edge where janitor_selftest differs by role;
+    # probed by the release train and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead
+    # of silently leaving the key out. Absent on any build before it.
+    janitor_selftest_build: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
