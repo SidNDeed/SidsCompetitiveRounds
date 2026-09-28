@@ -3143,11 +3143,14 @@ namespace CompetitiveRounds
         // held none, and its first post of game 1 (one point) reached the
         // server before the server became unreachable (the any-post rule
         // refuses B; round 8's pair-of-two-points rule does not). TwinUnseen:
-        // A held none and nothing of it reached the server: no rule this
-        // server can apply sees A, B is issued game 3 as physical game 1, and
-        // with A's results never landing and B's own landing a leave in game 4
-        // settles wrongly (the residual, stated with its integrity class in
-        // the notes, section 20).
+        // A held none, nothing of it that names a process reached the server
+        // (its spawn confirmation and its presence, which this model leaves
+        // out, name only the account, as B's own do), and every seat enters
+        // the room again after the outage, which drops the ordinal it held:
+        // no rule this server can apply sees A, B is issued game 3 as
+        // physical game 1, and with A's results never landing and B's own
+        // landing a leave in game 4 settles wrongly (the residual, stated with
+        // its integrity class in the notes, section 20).
 
         private const int M1Others = 1, M1AnyPost = 2, M1Issued = 4, M1All = 7;
         private const int TwinNone = 0, TwinLive = 1, TwinPosted = 2, TwinUnseen = 3;
@@ -3274,7 +3277,7 @@ namespace CompetitiveRounds
         }
 
         // Round 9: how game 1's report lands in the fresh room (SimulateF31Fresh).
-        private const int LandOwn = 0, LandShort = 1, LandTwin = 2;
+        private const int LandOwn = 0, LandShort = 1, LandTwin = 2, LandRestarted = 3;
 
         // Round 8, finding F31: the genuinely fresh room, the control. The same
         // seats and reporter, the server answering throughout. Game 1: M asks
@@ -3297,14 +3300,21 @@ namespace CompetitiveRounds
         // nonce, an anchor sharing only its first 8 digits (LandShort: a
         // round-8 client's 8-digit anchor; LandTwin: 16 digits): the issue is
         // void and nothing settles, unless the server is round 8's copy that
-        // holds an anchor to those 8 digits (`readsPrefixAnchor`).
+        // holds an anchor to those 8 digits (`readsPrefixAnchor`). Round 9,
+        // M1 (LandRestarted): the reporter's process restarts after game 1's
+        // game over, before its report lands, and the new process sends the
+        // queued report on its own session: the issue is void and nothing
+        // settles, unless the server is round 8's issuance (`readsIssued`
+        // false). With the reporter the host, its restart loses the root and
+        // no token is published for game 2 on either server.
         private static bool SimulateF31Fresh(int reporter, bool restartBetween, bool prefixOnly, bool readsPrefix,
-                                             int landMode, bool readsPrefixAnchor,
+                                             int landMode, bool readsPrefixAnchor, bool readsIssued,
                                              out bool fromAnother, out int carrying)
         {
             const string S = "series-f31f", R = "room-f31f";
             var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true,
-                                        ReadsPrefix = readsPrefix, ReadsPrefixAnchor = readsPrefixAnchor, Stored = R };
+                                        ReadsPrefix = readsPrefix, ReadsPrefixAnchor = readsPrefixAnchor,
+                                        ReadsIssued = readsIssued, Stored = R };
             var h = new TokenSeat { Team = 0, Srv = srv };
             var r = new TokenSeat { Team = 0, Srv = srv };
             var c = new TokenSeat { Team = 1, Srv = srv };
@@ -3325,13 +3335,21 @@ namespace CompetitiveRounds
                 value = ReporterPublish(m, value, true);
                 foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); }
                 if (g == 2) break;
+                string queued = null;
                 foreach (var x in all)
                 {
                     x.Tick(R, Later);
                     string rep = x.Over(R);
                     if (rep == null) continue;
-                    srv.Land(landMode == LandShort ? ShortNonce(srv.FirstNonce)
-                             : landMode == LandTwin ? PrefixTwin(srv.FirstNonce) : rep, x.Session);
+                    if (landMode == LandRestarted) queued = rep;
+                    else srv.Land(landMode == LandShort ? ShortNonce(srv.FirstNonce)
+                                  : landMode == LandTwin ? PrefixTwin(srv.FirstNonce) : rep, x.Session);
+                }
+                if (queued != null)
+                {
+                    m.Restart();
+                    m.Enter(R, value);
+                    srv.Land(queued, m.Session);
                 }
                 if (restartBetween)
                 {
@@ -3839,9 +3857,10 @@ namespace CompetitiveRounds
             // server; with round 8's issuance (none of round 9's rules), or
             // without the one rule that sees A, B is issued game 3 as physical
             // game 1 and a leave in game 4 settles wrongly, or the scenario
-            // proves nothing. TwinUnseen, A leaving nothing the server can see,
-            // is the residual: it settles, wrongly, exactly where A's results
-            // never land and B's own do (12 of 48), and nowhere else.
+            // proves nothing. TwinUnseen, A leaving nothing the server can
+            // tell from B's own, is the residual: it settles, wrongly, exactly
+            // where A's results never land and B's own do (12 of 48), and
+            // nowhere else.
             int m1Live = 0, m1LiveR8 = 0, m1LiveNoOthers = 0, m1Posted = 0, m1PostedR8 = 0, m1PostedNoAny = 0;
             int m1Unseen = 0, m1UnseenWrong = 0, m1UnseenOutside = 0;
             for (int rep = 0; rep < 3; rep++)
@@ -3924,24 +3943,37 @@ namespace CompetitiveRounds
             // sharing only those 8 digits (8 of them, or 16): round 9's server
             // voids the issue; round 8's comparison keeps it, and the five
             // timelines the control settles settle (or the scenario proves
-            // nothing).
+            // nothing). Round 9, finding M1: the reporter restarts before game
+            // 1's report lands and its new process sends it: round 9's server
+            // voids the issue; round 8's issuance keeps it, and with the
+            // reporter not the host (the host's restart loses the root) game 2
+            // settles with every seat carrying (or the scenario proves nothing).
             int f31Fresh = 0, f31FreshRestarted = 0, m2Prefix = 0, m2PrefixRead = 0, m2Anchor = 0, m2AnchorRead = 0;
+            int m1Relanded = 0, m1RelandedR8 = 0;
             for (int rep = 0; rep < 3; rep++)
             for (int rb = 0; rb < 2; rb++)
             {
                 bool fa31, faP;
                 int carryF31, carryP;
-                bool stF31 = SimulateF31Fresh(rep, rb != 0, false, false, LandOwn, false, out fa31, out carryF31);
-                if (SimulateF31Fresh(rep, rb != 0, true, false, LandOwn, false, out faP, out carryP)) m2Prefix++;
-                if (SimulateF31Fresh(rep, rb != 0, true, true, LandOwn, false, out faP, out carryP) && carryP == 3)
+                bool stF31 = SimulateF31Fresh(rep, rb != 0, false, false, LandOwn, false, true, out fa31, out carryF31);
+                if (SimulateF31Fresh(rep, rb != 0, true, false, LandOwn, false, true, out faP, out carryP)) m2Prefix++;
+                if (SimulateF31Fresh(rep, rb != 0, true, true, LandOwn, false, true, out faP, out carryP) && carryP == 3)
                     m2PrefixRead++;
                 for (int form = LandShort; form <= LandTwin; form++)
                 {
-                    if (SimulateF31Fresh(rep, rb != 0, false, false, form, false, out faP, out carryP)) m2Anchor++;
+                    if (SimulateF31Fresh(rep, rb != 0, false, false, form, false, true, out faP, out carryP)) m2Anchor++;
                     if (!(rep == 1 && rb != 0)
-                        && SimulateF31Fresh(rep, rb != 0, false, false, form, true, out faP, out carryP)
+                        && SimulateF31Fresh(rep, rb != 0, false, false, form, true, true, out faP, out carryP)
                         && !faP && carryP == 3)
                         m2AnchorRead++;
+                }
+                if (rb == 0)
+                {
+                    if (SimulateF31Fresh(rep, false, false, false, LandRestarted, false, true, out faP, out carryP))
+                        m1Relanded++;
+                    if (rep != 0 && SimulateF31Fresh(rep, false, false, false, LandRestarted, false, false, out faP, out carryP)
+                        && !faP && carryP == 3)
+                        m1RelandedR8++;
                 }
                 if (rep == 1 && rb != 0) { if (stF31) f31FreshRestarted++; continue; }
                 if (stF31 && !fa31 && carryF31 == 3) f31Fresh++;
@@ -3962,6 +3994,12 @@ namespace CompetitiveRounds
             checks++;
             if (m2AnchorRead != 10)
             { pass = false; detail += " M2-PREFIX-ANCHOR-ROUND-8-COMPARE:" + m2AnchorRead + "-of-10-settled-with-every-seat-carrying(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m1Relanded != 0)
+            { pass = false; detail += " M1-REPORT-FROM-A-RESTART:" + m1Relanded + "-of-3-settled"; }
+            checks++;
+            if (m1RelandedR8 != 2)
+            { pass = false; detail += " M1-REPORT-FROM-A-RESTART-ROUND-8-ISSUANCE:" + m1RelandedR8 + "-of-2-settled-with-every-seat-carrying(the-scenario-proves-nothing)"; }
             // Round 9, finding M2: the derivation's pin vector (the four values
             // the server's test checks against main._team_game_chain_nonce);
             // game 1's nonce is the root itself, and another ordinal or epoch
@@ -4681,12 +4719,14 @@ namespace CompetitiveRounds
                 + " of 6 fresh rooms settled from game-2 tokens sharing only the issued nonce's first 8 digits, "
                 + m2PrefixRead + " of 5 with round 8's comparison; " + m2Anchor + " of 12 settled where game 1's report"
                 + " carried an anchor sharing only those 8 digits, " + m2AnchorRead + " of 10 with round 8's comparison;"
-                + " M1, the"
+                + " M1: " + m1Relanded + " of 3 settled where the reporter restarted before game 1's report landed, "
+                + m1RelandedR8 + " of 2 with round 8's issuance; M1, the"
                 + " reporter's account in a second process: " + m1Live + " of 48 timelines named a game, carried a token"
                 + " or settled where the first process held a session (" + m1LiveR8 + " settled wrongly with round 8's"
                 + " issuance, " + m1LiveNoOthers + " without the other-session rule), " + m1Posted + " of 48 where its"
                 + " post reached the server (" + m1PostedR8 + " with round 8's issuance, " + m1PostedNoAny
-                + " without the any-post rule), " + m1Unseen + " of 48 settled where nothing of it reached the server"
+                + " without the any-post rule), " + m1Unseen + " of 48 settled where nothing of it that names a process"
+                + " reached the server"
                 + " (the residual, " + m1UnseenWrong + " wrongly); twin sweeps: " + m1LiveSweep.Timelines
                 + " timelines each, " + m1LiveSweep.Settled + " and " + m1PostedSweep.Settled + " settled, "
                 + m1UnseenSweep.Settled + " unseen)";

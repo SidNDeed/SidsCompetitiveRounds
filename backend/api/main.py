@@ -32499,13 +32499,19 @@ async def update_team_live_points(
 # reporter's account that held a session at any moment of the series' life
 # was there when the series began and has built no report of it, and only
 # the reporter's client builds a series' match report, so no result of the
-# series is waiting to land. The series' record showing nothing proves
-# nothing on its own. What the server cannot see is a process of the
-# reporter's account that held no session at all since the series began and
-# whose games put nothing on the series' record. A result the server could
-# not see is caught when it lands (a leave settled before then is not
-# revisited, which is why the issue itself must rule out every process the
-# server can see), and so is a report from any process but the issued one:
+# series is waiting to land from any process of the account that held a
+# session. The series' record showing nothing proves nothing on its own.
+# What the server cannot see is a process of the reporter's account that
+# held no session at all since the series began and whose games left
+# nothing on the series' record that names a process: its spawn
+# confirmation (team_series.spawn_confirmed_by, which
+# team_series_spawn_confirm writes on HMAC alone, once per member) and its
+# presence name only the account, as the asking process's own spawn does,
+# so no rule can read them to tell the two processes apart. A result the
+# server could not see is caught when it lands (a leave settled before then
+# is not revisited, which is why the issue itself must rule out every
+# process the server can see), and so is a report from any process but the
+# issued one:
 # the reporter's client writes the whole issued nonce (the ANCHOR; round 8
 # kept only its first 8 digits) to the same ledger when it takes the issue,
 # every match report carries the anchor its client holds for the series
