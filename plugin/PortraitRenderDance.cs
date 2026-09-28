@@ -236,9 +236,44 @@ namespace CompetitiveRounds
             internal int fps = -1;        // T36: Application.targetFrameRate for the job (vSync off), restored after
             internal int faultFrame = -1; // L1's order (round two), T45's job teardown arm: the job stops at the first frame >= this whose pose the rig still owes
             internal bool teardownMutant; // ...its mutant arm: the job's finally clears the pose before the inverse apply
+            internal bool warmup;         // S2F5 (round two): the boot warm-up -- every phase once, two frames, then stop; nothing kept
             internal int multi;           // S2F3 (round two), evidence lever only: each frame's black pass rendered this many more times, same state, compared
             internal int jobs = -1;       // S2F3 (round two), evidence lever only: the job worker count held for the capture (-1: unchanged)
             internal bool msaa4;          // S2F3 (round two), lever only: T36's mutant arm -- the frames and the still through the old 4x MSAA targets
+        }
+
+        // S2F5 (round two): the capture path's one-time costs in a process --
+        // the start frame (the first capture's costliest) and the first rig,
+        // targets, renders and readbacks of the prepass, alloc and still phases
+        // -- paid by a discarded warm-up capture from boot, so a real capture
+        // that starts after the warm-up has run does not carry them.
+        private static bool _danceWarmed;
+        private static int _danceWarmTries;
+        private static float _danceWarmAt;
+        private const int DANCE_WARM_TRIES = 12;
+        private const int DANCE_WARM_FRAMES = 2;
+
+        /// <summary>The persistent object's tick (the poller's Update in
+        /// Plugin.cs, every frame from boot, whatever tab or page is open):
+        /// until one warm-up has run to its end, at most every five seconds and
+        /// at most DANCE_WARM_TRIES starts, a warm-up capture under StartDance's
+        /// own refusals (a match, a room, no prefab or identity, a seat that
+        /// cannot dance, a render already running). It is the capture job
+        /// itself -- the start frame, the rig and its settle, the prepass, the
+        /// targets, the calibration, the still and the first DANCE_WARM_FRAMES
+        /// frames with their readbacks, then the drain and the teardown -- and it
+        /// stops before the self-check: nothing written, remembered, shown or
+        /// uploaded, no refusal remembered, no abandon asked (DanceOpts.warmup).
+        /// A real capture asked for meanwhile is refused as busy and its caller
+        /// retries five seconds later, as for any render.</summary>
+        internal static void DanceWarmTick()
+        {
+            if (_danceWarmed || _danceWarmTries >= DANCE_WARM_TRIES || Time.realtimeSinceStartup < _danceWarmAt) return;
+            _danceWarmAt = Time.realtimeSinceStartup + 5f;
+            if (DanceEmotes.Defs.Length == 0) return;
+            string last = LastResult, danceLast = DanceLastResult;   // a refused warm-up leaves both as they were
+            if (StartDance("warm-up", DanceEmotes.Defs[0].Sku, 0, new DanceOpts { local = true, warmup = true, tag = "warm-up" })) _danceWarmTries++;
+            else { LastResult = last; DanceLastResult = danceLast; }
         }
 
         /// <summary>Starts the dance job; false when it cannot start now (the
@@ -921,7 +956,8 @@ namespace CompetitiveRounds
                 // S1.4 step 7: the frames, through the ring
                 clock.Phase = "frames";
                 loopStart = Time.time;
-                for (int k = 0; k < n; k++)
+                int nRun = opt.warmup ? Math.Min(DANCE_WARM_FRAMES, n) : n;   // S2F5: the warm-up renders two frames
+                for (int k = 0; k < nRun; k++)
                 {
                     DanceSlot slot;
                     while ((slot = ring.Free()) == null)
@@ -970,6 +1006,9 @@ namespace CompetitiveRounds
                 CompareRoots(rootsNow, rootsBefore);
                 rootsLine = rootsNow.ToString().Trim();
                 rep.Append(rootsLine).Append('\n');
+                // S2F5 (round two): the boot warm-up has run every phase once and
+                // stops here, before the self-check -- nothing kept, nothing remembered
+                if (opt.warmup) { _danceWarmed = true; fail = "warm-up (discarded)"; yield break; }
 
                 // S1.6: the client's copy of the server's checks, and the still's gate
                 if (still == null || still.Png == null) { fail = "the still is missing"; remember = true; yield break; }
@@ -1005,8 +1044,9 @@ namespace CompetitiveRounds
                     Application.logMessageReceived -= OnLog;
                     Teardown(rep);
                 }
-                if (fail != null && remember && danceDesc != null) _danceRemembered.Add(rkey);
-                DanceLastResult = fail == null ? "captured" : (stale ? "abandoned: " : remember ? "failed (remembered): " : "stopped: ") + fail;
+                if (fail != null && remember && danceDesc != null && !opt.warmup) _danceRemembered.Add(rkey);
+                string outcome = fail == null ? "captured" : (stale ? "abandoned: " : remember ? "failed (remembered): " : "stopped: ") + fail;
+                if (!opt.warmup) DanceLastResult = outcome;       // the boot warm-up (S2F5) leaves what the player sees
                 if (fail != null && !opt.local) LastResult = stale ? "aborted" : "dance capture failed";
                 long bytes = 0; double covMin = 1, covMax = 0;
                 if (frames != null) foreach (var f in frames) if (f != null && f.Png != null) { bytes += f.Png.Length; covMin = Math.Min(covMin, f.Coverage); covMax = Math.Max(covMax, f.Coverage); }
@@ -1020,10 +1060,10 @@ namespace CompetitiveRounds
                                    + "; drain " + clock.Summary("drain") + "] top[" + clock.Top(6) + "] gc=" + clock.Collections
                                    + " rig=" + _gunSummary + " legs=" + _legSummary + " errors=" + _errCount
                                    + " elapsed=" + (Time.realtimeSinceStartup - t0).ToString("F2") + "s"
-                                   + (fail != null ? " result=" + DanceLastResult : ""));
+                                   + (fail != null ? " result=" + outcome : ""));
                 foreach (var e in _errs) Plugin.Log.LogWarning("[DANCE]   " + e);
-                if (opt.local) DanceDevReport(opt, sku, rep, fail, still, frames, n, ms, clock, rootsBefore, remember, tdLine);
-                if (stale) Abandon(key);
+                if (opt.local && !opt.warmup) DanceDevReport(opt, sku, rep, fail, still, frames, n, ms, clock, rootsBefore, remember, tdLine);
+                if (stale && !opt.warmup) Abandon(key);
                 _renderClaim.Drop(gen);
                 try { NativeUI.MarkDirty(); } catch { }
             }

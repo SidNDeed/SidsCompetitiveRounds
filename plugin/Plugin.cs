@@ -2854,6 +2854,11 @@ namespace CompetitiveRounds
             // id Poll's TryResolveOpponent just resolved; self-gated to one
             // request per room incarnation.
             try { H2HSummary.Tick(); } catch { }
+            // Dance cards S2F5 (round two): the capture path's one discarded
+            // warm-up per process, from boot. Driven from THIS persistent tick,
+            // not NativeUI.Tick (which returns at once unless a page is open),
+            // so it can run before the first real capture wherever the player goes.
+            try { PortraitRender.DanceWarmTick(); } catch { }
 
             /* [FONT] HeavyTextSelfTest (bug #351). Driven from THIS persistent
              * tick and not from NativeUI.Tick, which early-returns unless the
