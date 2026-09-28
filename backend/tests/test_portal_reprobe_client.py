@@ -4,8 +4,11 @@ The secure-route decisions and every sentence they show a player are EXECUTED
 by tools/client-rules-harness (suite "secureroute", wrapped by
 test_client_rules_harness.py). This module holds what only the source can
 show: where the scrmod.com button sits in the F5 footer row and how it opens,
-that its label and the new sentence keys are in every catalogue, and that the
-witness lever reaches the boot check on the broadcast account only.
+that its label and the new sentence keys are in every catalogue, that the
+witness lever reaches the boot check on the broadcast account only, and how a
+session back from the backup signs in again (no ticket spent on the backup, a
+401 clearing only a token the request carried, a press after a restore
+waiting for the first secure session).
 """
 import io
 import json
@@ -20,6 +23,7 @@ NATIVE = os.path.join(ROOT, "plugin", "NativeUI.cs")
 API = Path(ROOT) / "plugin" / "ApiClient.cs"
 BROADCAST = Path(ROOT) / "plugin" / "BroadcastMode.cs"
 PLUGIN_CS = Path(ROOT) / "plugin" / "Plugin.cs"
+STEAMAUTH = Path(ROOT) / "plugin" / "SteamAuth.cs"
 CATALOGUES = os.path.join(ROOT, "plugin", "I18nCatalogues.cs")
 SOURCE = os.path.join(ROOT, "tools", "i18n_source.json")
 LOCALES = ("ES", "RU", "UK", "SV")
@@ -122,7 +126,8 @@ def test_every_secure_route_sentence_is_a_key_in_every_catalogue():
     contexts = json.load(io.open(SOURCE, encoding="utf-8"))["contexts"]
     keys = sorted(k for k, v in contexts.items() if "SecureRouteText" in v.get("surface", ""))
     # The ten sentences of plugin/SecureRouteText.cs, plus the sign-in toast
-    # whose "until it is back" the checks made true (ApiClient.PostSteamAuth).
+    # whose "until it is back" the checks made true
+    # (ApiClient.NoteTicketExchangeRefused).
     keys.append("Secure connection unavailable - signed-in features are off until it is back.")
     assert len(keys) == 11, keys
     src = _read(CATALOGUES)
@@ -160,3 +165,85 @@ def test_the_witness_lever_reaches_the_boot_check_on_the_broadcast_account_only(
     assert "Steamworks.SteamUser.GetSteamID()" in boot, boot
     assert "BroadcastAccounts" in boot and "_identityLatched" not in boot, boot
     assert not re.search(r'"\d{17}"', boot), "an account id belongs in BroadcastAccounts, not in the check"
+
+
+SIGN_IN_TOAST = 'I18n.Tr("Secure connection unavailable - signed-in features are off until it is back.")'
+
+
+def test_no_steam_ticket_is_requested_while_the_api_would_refuse_to_exchange_it():
+    """On the backup the api refuses every ticket exchange (F1), yet SteamAuth
+    kept requesting a ticket every few seconds. On the broadcast seat twenty
+    unexchanged tickets were followed by no further ticket for the rest of the
+    session, so after the secure route came back (witness W3) the session could
+    not sign in and the portal button met the sign-in refusal. SteamAuth now
+    asks the exchange's own question before it requests a ticket and spends no
+    attempt when refused; PostSteamAuth asks the same one; the notice both
+    show lives in one place and stays once per session."""
+    refresh = code_of(STEAMAUTH, "public static void MaybeRefresh()")
+    gate = "if (!ApiClient.TicketExchangeAllowed())"
+    assert refresh.count(gate) == 1, refresh
+    at = refresh.index(gate)
+    assert at < refresh.index("_lastAttemptAt = Time.realtimeSinceStartup;"), refresh
+    assert at < refresh.index('SteamUser.GetAuthTicketForWebApi("competitive-rounds");'), refresh
+    branch = refresh[at:refresh.index("}", at)]
+    assert "ApiClient.NoteTicketExchangeRefused();" in branch and "return;" in branch, branch
+    whole = code_of(API)
+    assert whole.count(
+        "internal static bool TicketExchangeAllowed() => CredentialedTransportAllowed(baseUrl);") == 1
+    post = code_of(API, "public static void PostSteamAuth(string ticketHex)")
+    refuse = "if (!TicketExchangeAllowed())"
+    assert post.count(refuse) == 1, post
+    assert "CredentialedTransportAllowed(" not in post, "PostSteamAuth asks a second rule"
+    refused = post[post.index(refuse):post.index("}", post.index(refuse))]
+    assert "NoteTicketExchangeRefused();" in refused and "return;" in refused, refused
+    assert post.index(refuse) < post.index("/api/v1/auth/steam"), post
+    note = code_of(API, "internal static void NoteTicketExchangeRefused()")
+    first = note.index("if (_insecureAuthNotified) return;")
+    assert first < note.index("_insecureAuthNotified = true;") < note.index(SIGN_IN_TOAST), note
+    assert "[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint" in note, note
+    assert whole.count(SIGN_IN_TOAST) == 1, "the sign-in notice is shown from more than one place"
+
+
+def test_a_401_clears_only_a_session_token_the_request_carried():
+    """StampVersionHeader withholds the session token on plaintext-to-public
+    transport (the backup), and a 401 to such a request said nothing about the
+    session yet cleared it: W3's session lost the good token it held before the
+    fallback that way, and after a restore a request still bound for the
+    backup (one built before the restore, or a queued report, which keeps its
+    URL) would clear the new one. The reject handler asks the stamping rule of
+    the same URL before it clears anything."""
+    reject = code_of(API, "private static void HandleSessionReject(UnityWebRequest req, string sentToken)")
+    guard = "if (!CredentialedTransportAllowed(req.url)) return;"
+    assert reject.count(guard) == 1, reject
+    assert reject.index("if (req.responseCode != 401) return;") < reject.index(guard), reject
+    assert reject.index(guard) < reject.index("SteamAuth.InvalidateSessionIf(sentToken);"), reject
+    stamp = code_of(API, "private static void StampVersionHeader(UnityWebRequest req)")
+    rule = "if (CredentialedTransportAllowed(req.url))"
+    carry = 'req.SetRequestHeader("X-Session-Token", SteamAuth.SessionToken);'
+    assert stamp.count(rule) == 1 and stamp.count(carry) == 1, stamp
+    between = stamp[stamp.index(rule) + len(rule):stamp.index(carry)]
+    assert between.strip() == "", "the token is no longer stamped by that rule alone: %r" % between
+
+
+def test_a_press_after_a_restore_waits_for_the_first_secure_session():
+    """After a restore the session may hold no token yet: no ticket was
+    requested on the backup, and SteamAuth requests the first secure one on
+    its own loop. The press that restores the route already waited for it
+    (FinishPortalPress); a press after a restore took the OpenNow branch and
+    minted at once, which the server refuses without a session (W3's press got
+    401 session_required and the sign-in message). Once the route has been
+    restored the OpenNow branch waits the same way; before any restore it
+    mints at once, as it always did."""
+    press = code_of(API, "public static void OpenTranslatePortal()")
+    cond = "if (route != null && route.Restored)"
+    assert press.count(cond) == 1, press
+    at = press.index(cond)
+    block = press[at:press.index("}", at)]
+    assert "Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());" in block and "return;" in block, block
+    assert press.index('if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))') < at, press
+    assert press.count("MintPortalSessionAndOpen();") == 1 and press.index("MintPortalSessionAndOpen();") > at, press
+    wait = code_of(API, "private static IEnumerator OpenPortalWhenSessionReady()")
+    assert "while (string.IsNullOrEmpty(SteamAuth.SessionToken) && Time.realtimeSinceStartup < until)" in wait, wait
+    assert wait.index("MintPortalSessionAndOpen();") > wait.index("while ("), wait
+    finish = code_of(API, "private static void FinishPortalPress(SecureRouteRules.Conclusion c)")
+    assert "host.StartCoroutine(OpenPortalWhenSessionReady());" in finish, finish
