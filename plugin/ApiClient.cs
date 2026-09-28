@@ -2103,15 +2103,19 @@ namespace CompetitiveRounds
         /// <summary>The address a check probes: the compiled secure default, or,
         /// on the broadcast identity only, [Broadcast] TestSecureUrl when it
         /// names an https address (the witness lever for the backup path). The
-        /// session only ever moves to an address a check has just shown usable.</summary>
+        /// session only ever moves to an address a check has just shown usable.
+        /// The boot check asks too: it starts in Initialize, which DoInitialize
+        /// calls before GameStateWatcher.Initialize resolves the local id, so the
+        /// identity is asked in its boot-safe form, and only when the lever is set.</summary>
         private static string SecureProbeBase()
         {
             string def = SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
             try
             {
-                if (Plugin.BroadcastTestSecureUrl == null || !BroadcastMode.IsBroadcastIdentity) return def;
+                if (Plugin.BroadcastTestSecureUrl == null) return def;
                 string lever = SecureRouteRules.TrimBase(Plugin.BroadcastTestSecureUrl.Value);
                 if (lever.Length == 0) return def;
+                if (!BroadcastMode.IsBroadcastIdentityAtBoot()) return def;
                 if (SecureRouteRules.IsSecure(lever)) return lever;
                 if (!_loggedBadTestSecureUrl)
                 {

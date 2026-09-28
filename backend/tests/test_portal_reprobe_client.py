@@ -4,15 +4,22 @@ The secure-route decisions and every sentence they show a player are EXECUTED
 by tools/client-rules-harness (suite "secureroute", wrapped by
 test_client_rules_harness.py). This module holds what only the source can
 show: where the scrmod.com button sits in the F5 footer row and how it opens,
-and that its label and the new sentence keys are in every catalogue.
+that its label and the new sentence keys are in every catalogue, and that the
+witness lever reaches the boot check on the broadcast account only.
 """
 import io
 import json
 import os
 import re
+from pathlib import Path
+
+from _cs_structure import code_of
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NATIVE = os.path.join(ROOT, "plugin", "NativeUI.cs")
+API = Path(ROOT) / "plugin" / "ApiClient.cs"
+BROADCAST = Path(ROOT) / "plugin" / "BroadcastMode.cs"
+PLUGIN_CS = Path(ROOT) / "plugin" / "Plugin.cs"
 CATALOGUES = os.path.join(ROOT, "plugin", "I18nCatalogues.cs")
 SOURCE = os.path.join(ROOT, "tools", "i18n_source.json")
 LOCALES = ("ES", "RU", "UK", "SV")
@@ -128,3 +135,28 @@ def test_every_secure_route_sentence_is_a_key_in_every_catalogue():
             assert value.strip() and value != key, "%s: %r is not translated" % (locale, key)
             assert sorted(HOLE.findall(value)) == sorted(HOLE.findall(key)), (
                 "%s: the holes of %r moved: %r" % (locale, key, value))
+
+
+def test_the_witness_lever_reaches_the_boot_check_on_the_broadcast_account_only():
+    """[Broadcast] TestSecureUrl steers a secure check only on the broadcast
+    account, and it has to steer the BOOT check as well: a failed boot check
+    is the only way a session reaches the backup, which is what witnesses W2
+    and W3 start from. The boot check begins in ApiClient.Initialize, which
+    DoInitialize calls before GameStateWatcher.Initialize resolves the local
+    id, so the plain identity property still reads false there (the first
+    witness run on the broadcast seat showed exactly that). The gate is the
+    boot-safe form, which reads Steamworks when the resolved id is missing and
+    admits only the listed broadcast accounts."""
+    init = code_of(PLUGIN_CS, "private void DoInitialize()")
+    api_at = init.index("ApiClient.Initialize(Plugin.ApiBaseUrl.Value);")
+    assert api_at < init.index("GameStateWatcher.Initialize();"), (
+        "DoInitialize no longer starts the api before the watcher; the boot-safe "
+        "identity and its comments describe an order that is gone")
+    probe = code_of(API, "private static string SecureProbeBase()")
+    assert probe.count("BroadcastMode.IsBroadcastIdentityAtBoot()") == 1, probe
+    assert not re.search(r"IsBroadcastIdentity(?!AtBoot)", probe), probe
+    assert probe.index("IsBroadcastIdentityAtBoot()") < probe.index("return lever;"), probe
+    boot = code_of(BROADCAST, "internal static bool IsBroadcastIdentityAtBoot()")
+    assert "Steamworks.SteamUser.GetSteamID()" in boot, boot
+    assert "BroadcastAccounts" in boot and "_identityLatched" not in boot, boot
+    assert not re.search(r'"\d{17}"', boot), "an account id belongs in BroadcastAccounts, not in the check"
