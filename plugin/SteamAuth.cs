@@ -45,12 +45,6 @@ namespace CompetitiveRounds
                 // flight >30s is presumed dead, allow a fresh mint.
                 if (_requestInFlight && Time.realtimeSinceStartup - _requestStartedAt > 30f)
                     _requestInFlight = false;
-                if (HasFreshToken || _requestInFlight) return;
-                // Hammer until the FIRST session lands (enforced actions 401
-                // without one, so the startup window must be short); relax to
-                // a 60s pre-expiry refresh cadence once established.
-                float backoff = string.IsNullOrEmpty(SessionToken) ? 4f : 60f;
-                if (Time.realtimeSinceStartup - _lastAttemptAt < backoff) return;
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown" || sid.StartsWith("photon_")) return;
                 // No ticket while the api would refuse to exchange it (the
@@ -58,13 +52,23 @@ namespace CompetitiveRounds
                 // the broadcast seat (2026-09-28) twenty unexchanged tickets
                 // were followed by no further ticket for the rest of that
                 // session, so a session back on the secure route (board row
-                // 27) could not sign in again. No attempt is spent here, so
-                // the first tick after the route returns can request one.
+                // 27) could not sign in again. Asked before the session
+                // checks, so the refusal notice also reaches a player who
+                // holds a session (the backup withholds its token, so
+                // signed-in features are off either way); no attempt is spent
+                // here, so the first tick after the route returns can request
+                // one.
                 if (!ApiClient.TicketExchangeAllowed())
                 {
                     ApiClient.NoteTicketExchangeRefused();
                     return;
                 }
+                if (HasFreshToken || _requestInFlight) return;
+                // Hammer until the FIRST session lands (enforced actions 401
+                // without one, so the startup window must be short); relax to
+                // a 60s pre-expiry refresh cadence once established.
+                float backoff = string.IsNullOrEmpty(SessionToken) ? 4f : 60f;
+                if (Time.realtimeSinceStartup - _lastAttemptAt < backoff) return;
                 _lastAttemptAt = Time.realtimeSinceStartup;
                 if (_webTicketCb == null)
                     _webTicketCb = Callback<GetTicketForWebApiResponse_t>.Create(OnWebTicket);
