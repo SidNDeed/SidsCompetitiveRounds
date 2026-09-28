@@ -17,7 +17,7 @@ def _fn(src, name):
 
 
 def test_the_three_commands_and_the_drain_loop_exist_once():
-    for name in ("daily", "collection", "card"):
+    for name in ("daily", "collection", "card", "buypack"):   # buypack: fix round 1, D2
         assert BOT_SRC.count(f'@bot.hybrid_command(name="{name}"') == 1, name
     assert BOT_SRC.count("@tasks.loop(seconds=60)\nasync def poll_pc_events():") == 1
     assert BOT_SRC.count("if not poll_pc_events.is_running(): poll_pc_events.start()") == 1
@@ -71,7 +71,7 @@ def test_the_drain_posts_then_acks_and_stops_on_a_failed_send():
 
 
 def test_identity_is_the_callers_discord_id_never_a_steam_id():
-    for name in ("cmd_pc_daily", "cmd_pc_collection", "cmd_pc_card"):
+    for name in ("cmd_pc_daily", "cmd_pc_collection", "cmd_pc_card", "cmd_pc_buypack"):
         src = _fn(BOT_SRC, name)
         assert "steam_id" not in src, name
         assert "await _maybe_defer(ctx)" in src, name

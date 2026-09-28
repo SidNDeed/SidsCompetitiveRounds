@@ -26514,7 +26514,9 @@ async def _pc_open_for(db: AsyncSession, player, steam_id: str, *, pack_id, nonc
         await _reject("no_edition")
 
     # ── 3. predicates, re-read under the locks ──
-    if source == "bought" and int(expected_price) != price:
+    # The mod always sends the price it showed (its route requires it); the
+    # bot's /buypack may send none, and its answer states the price paid (D2).
+    if source == "bought" and expected_price is not None and int(expected_price) != price:
         await _reject("price_changed", {"price": price})
     snap_id = (await db.execute(text(
         "SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).scalar_one_or_none()
@@ -28343,20 +28345,37 @@ async def _pc_bot_actor(db: AsyncSession, player, discord_id: str) -> None:
 @app.post("/api/v1/internal/pc/packs/open", tags=["Internal"])
 async def internal_pc_open_pack(
     discord_id: str = Query(..., max_length=32),
-    pack_id: str = Query(..., min_length=8, max_length=64),
+    pack_id: str | None = Query(None, min_length=8, max_length=64),
+    nonce: str | None = Query(None, min_length=8, max_length=64),
+    pay: str | None = Query(None),
+    expected_price: int | None = Query(None, ge=0),
     locale: str | None = Query(None, max_length=16),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """The bot's pack opener (D1, 2026-09-28): one of the linked player's held
-    packs - today's daily, from /daily - opened through the mod's own body
-    (_pc_open_for), so the answer, the refusals (409 / 410 carrying the
-    pack's own state) and the replay of a pack already opened are exactly
-    the mod's. The renderer gate comes first, before any write, as on the
-    mod's route; the identity is the Discord link, as on every internal
-    route, and _pc_bot_actor takes the identity lock before the claim."""
+    """The bot's pack opener, through the mod's own body (_pc_open_for), so the
+    answer, the refusals (409 / 410 / 402, each carrying the pack's own state)
+    and the replay of a key already used are exactly the mod's. Two forms, as
+    on /pc/packs/open:
+    - a held pack of the linked player, by `pack_id`: today's daily, from
+      /daily (D1, 2026-09-28);
+    - a purchase, by `nonce` + `pay` (gold | shards): /buypack (D2, a scope
+      addition Sid asked for on 2026-09-28). The price is the api's own
+      (PC_ECONOMY, the mod's price) and the answer states it; an
+      `expected_price`, when sent, must equal it (409 price_changed). The
+      daily paid-pack cap, the conditional delta debit under the players
+      row lock and the gold ledger row are the mod's; the nonce is the
+      idempotency key, so a resend answers the committed row.
+    The renderer gate comes first, before any write, as on the mod's route;
+    the identity is the Discord link, as on every internal route, and
+    _pc_bot_actor takes the identity lock before the claim."""
     _require_internal_key(x_internal_key)
     _pc_require_renderer()
+    if pack_id:
+        if nonce or pay or expected_price is not None:
+            raise HTTPException(status_code=422, detail="a held pack takes no nonce, pay or expected_price")
+    elif not nonce or pay not in _pc.PACK_PAY:
+        raise HTTPException(status_code=422, detail="pack_id, or nonce and pay (gold | shards), is required")
     player = await _pc_player_by_discord(db, discord_id)
     # both ids, as the mod's door checks them (_pc_verified_actor)
     await _assert_no_service_subject(db, affected_player_ids=[player.id], affected_steam_ids=[player.steam_id])
@@ -28365,8 +28384,11 @@ async def internal_pc_open_pack(
         loc = _pcp.effective_locale(locale, _pc_served_locales())
     except Exception:
         loc = "en"
-    return await _pc_open_for(db, player, player.steam_id, pack_id=pack_id, nonce=None, pay=None,
-                              expected_price=None, locale=loc, via="discord")
+    if pack_id:
+        return await _pc_open_for(db, player, player.steam_id, pack_id=pack_id, nonce=None, pay=None,
+                                  expected_price=None, locale=loc, via="discord")
+    return await _pc_open_for(db, player, player.steam_id, pack_id=None, nonce=nonce, pay=pay,
+                              expected_price=expected_price, locale=loc, via="discord")
 
 
 @app.get("/api/v1/internal/pc/collection", tags=["Internal"])

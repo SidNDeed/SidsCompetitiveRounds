@@ -5,6 +5,11 @@ D1: /daily claims today's pack, opens it through POST /internal/pc/packs/open
 and shows the cards it dealt - before this round it only claimed and told the
 player to open the pack in the mod, and no internal route could open a pack.
 
+D2 (a scope addition Sid asked for on 2026-09-28): /buypack buys one pack with
+gold or shards through the same route - the api's price (the mod's), its daily
+cap, its conditional delta debit and gold ledger row, keyed on a nonce the bot
+draws - and shows it the same way.
+
 Server rows call the real app on the lane database (discord_collection_harness's
 Env); bot rows lift discord_bot.py's own functions (the harness's BotRig) over
 that same app, so every request the bot makes is answered by the production
@@ -16,6 +21,9 @@ collection suites:
 
 import asyncio
 import os
+import re
+import secrets
+from typing import Literal
 
 import pytest
 
@@ -31,8 +39,8 @@ PACKS = "/internal/pc/packs"
 UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it."
 
 OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_refusal", "_pc_open_and_show",
-                               "_pc_reveal_opened"}
-OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN"}
+                               "_pc_reveal_opened", "cmd_pc_buypack"}
+OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying"}
 
 
 def e2e(monkeypatch, tmp_path, fn, **kw):
@@ -110,7 +118,8 @@ def rig_over(env, stub=None):
             reply = await base(call)
         call.reply = reply
         return reply
-    rig = H.BotRig(handler, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS)
+    rig = H.BotRig(handler, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS,
+                   extra={"secrets": secrets, "Literal": Literal})
     rig.ns["asyncio"].wait_for = _fake_wait_for(rig.clock)
     rig.base = base
     return rig
@@ -392,4 +401,284 @@ def test_d1_an_opened_pack_that_cannot_be_shown_says_it_is_open(monkeypatch, tmp
         assert len(rig.sent) == 1 and rig.sent[0].file is None
         assert rig.sent[0].content.endswith(UNSHOWN), rig.sent[0].content
         assert any("opened, not shown: the read answered HTTP 500" in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- D2: buying a pack through Discord, server side ----------------------------------------------
+
+PRICE_KEY = {"gold": "pack_price_gold", "shards": "pack_price_shards"}
+
+
+def price_of(env, pay):
+    return int(env.main._pc.PC_ECONOMY[PRICE_KEY[pay]])
+
+
+async def set_gold(env, who, earned, spent=0):
+    await env.ex(f"UPDATE {SCHEMA}.players SET gold_earned = :e, gold_spent = :s WHERE id = CAST(:p AS uuid)",
+                 {"e": int(earned), "s": int(spent), "p": who.id})
+
+
+async def purse(env, who):
+    rows = await env.rows(f"SELECT gold_earned, gold_spent, pc_shards FROM {SCHEMA}.players"
+                          " WHERE id = CAST(:p AS uuid)", {"p": who.id})
+    return rows[0]
+
+
+async def ledger(env, who):
+    return await env.rows(f"SELECT amount, reason, reference_id FROM {SCHEMA}.gold_transactions"
+                          " WHERE player_id = CAST(:p AS uuid) ORDER BY id", {"p": who.id})
+
+
+async def buy_internal(env, discord_id, nonce, pay, **extra):
+    params = {"discord_id": str(discord_id), "nonce": nonce, "pay": pay}
+    params.update(extra)
+    return await env.client.post("/api/v1" + OPEN, headers=env.ihead(), params=params)
+
+
+def test_d2_a_gold_purchase_debits_the_price_as_a_delta_and_writes_the_ledger_row(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 1000 + price, 150)
+        r = await buy_internal(env, own.discord, "d2-gold-" + secrets.token_hex(8), "gold")
+        assert r.status_code == 200, (r.status_code, r.text[:400])
+        got = r.json()
+        assert (got["source"], got["pay"], got["price"], got["status"]) == ("bought", "gold", price, "done")
+        assert await purse(env, own) == {"gold_earned": 1000 + price, "gold_spent": 150 + price, "pc_shards": 10000}
+        assert await ledger(env, own) == [{"amount": -price, "reason": "pc_pack", "reference_id": got["pack_id"]}]
+        assert await minted(env, got["pack_id"]) == 5
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_shards_purchase_debits_the_shards_and_no_gold(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "shards")
+        await set_gold(env, own, 500)
+        r = await buy_internal(env, own.discord, "d2-shards-" + secrets.token_hex(8), "shards")
+        assert r.status_code == 200, (r.status_code, r.text[:400])
+        assert await purse(env, own) == {"gold_earned": 500, "gold_spent": 0, "pc_shards": 10000 - price}
+        assert await ledger(env, own) == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_purchase_without_enough_gold_is_refused_and_moves_nothing(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)   # the roll (reads only) comes before the debit, as on the mod's route
+        price = price_of(env, "gold")
+        await set_gold(env, own, price - 1)
+        r = await buy_internal(env, own.discord, "d2-poor-" + secrets.token_hex(8), "gold")
+        assert r.status_code == 402, (r.status_code, r.text[:400])
+        d = r.json()["detail"]
+        assert (d["error"], d["status"], d["price"]) == ("insufficient_gold", "rejected", price)
+        assert await purse(env, own) == {"gold_earned": price - 1, "gold_spent": 0, "pc_shards": 10000}
+        assert await ledger(env, own) == []
+        assert (await pack_row(env, d["pack_id"]))["status"] == "rejected"
+        assert await minted(env, d["pack_id"]) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_the_daily_cap_refuses_the_purchase_past_it(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        monkeypatch.setitem(env.main._pc.PC_ECONOMY, "paid_packs_per_day", 1)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        first = await buy_internal(env, own.discord, "d2-cap-a-" + secrets.token_hex(8), "gold")
+        assert first.status_code == 200, first.text[:300]
+        second = await buy_internal(env, own.discord, "d2-cap-b-" + secrets.token_hex(8), "gold")
+        assert second.status_code == 409, (second.status_code, second.text[:300])
+        assert (second.json()["detail"]["error"], second.json()["detail"]["cap"]) == ("daily_cap", 1)
+        assert (await purse(env, own))["gold_spent"] == price
+        assert len(await ledger(env, own)) == 1
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_replayed_nonce_answers_the_committed_purchase_and_charges_once(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        nonce = "d2-replay-" + secrets.token_hex(8)
+        first = await buy_internal(env, own.discord, nonce, "gold")
+        again = await buy_internal(env, own.discord, nonce, "gold")
+        assert first.status_code == 200 and again.status_code == 200, (first.text[:200], again.text[:200])
+        assert again.json()["pack_id"] == first.json()["pack_id"]
+        assert [p["print_id"] for p in again.json()["prints"]] == [p["print_id"] for p in first.json()["prints"]]
+        assert (await purse(env, own))["gold_spent"] == price
+        assert len(await ledger(env, own)) == 1 and env._plans == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_sent_price_must_be_the_apis_and_a_different_one_is_refused_before_any_debit(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        wrong = await buy_internal(env, own.discord, "d2-price-a-" + secrets.token_hex(8), "gold",
+                                   expected_price=price + 1)
+        assert wrong.status_code == 409, (wrong.status_code, wrong.text[:300])
+        assert (wrong.json()["detail"]["error"], wrong.json()["detail"]["price"]) == ("price_changed", price)
+        assert (await purse(env, own))["gold_spent"] == 0 and await ledger(env, own) == []
+        right = await buy_internal(env, own.discord, "d2-price-b-" + secrets.token_hex(8), "gold",
+                                   expected_price=price)
+        assert right.status_code == 200, right.text[:300]
+        assert (await purse(env, own))["gold_spent"] == price
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_the_route_takes_a_held_pack_or_a_purchase_and_nothing_else(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env, plan=False)
+        pack_id = await claim(env, own)
+        before = await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_packs")
+        head = env.ihead()
+        cases = [
+            {"discord_id": own.discord},                                               # neither form
+            {"discord_id": own.discord, "nonce": "d2-form-" + secrets.token_hex(8)},   # a nonce without pay
+            {"discord_id": own.discord, "nonce": "d2-form-" + secrets.token_hex(8), "pay": "rubies"},
+            {"discord_id": own.discord, "pack_id": pack_id, "nonce": "d2-form-" + secrets.token_hex(8),
+             "pay": "gold"},                                                           # both forms
+            {"discord_id": own.discord, "pack_id": pack_id, "expected_price": 1},
+        ]
+        for params in cases:
+            r = await env.client.post("/api/v1" + OPEN, headers=head, params=params)
+            assert r.status_code == 422, (params, r.status_code, r.text[:200])
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_packs") == before
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_two_purchases_racing_for_the_last_packs_worth_of_gold_charge_once(monkeypatch, tmp_path):
+    """Two different nonces at once with gold for exactly one pack: the players
+    row lock orders them and the conditional delta debit refuses the second,
+    so the balance never goes below zero and one ledger row is written."""
+    async def body(env):
+        own, subs = await world(env)
+        env.plan([(s, False, False) for s in subs])
+        price = price_of(env, "gold")
+        await set_gold(env, own, price)
+        a, b = await asyncio.gather(buy_internal(env, own.discord, "d2-race-a-" + secrets.token_hex(8), "gold"),
+                                    buy_internal(env, own.discord, "d2-race-b-" + secrets.token_hex(8), "gold"))
+        assert sorted([a.status_code, b.status_code]) == [200, 402], (a.text[:200], b.text[:200])
+        assert await purse(env, own) == {"gold_earned": price, "gold_spent": price, "pc_shards": 10000}
+        assert len(await ledger(env, own)) == 1
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- /buypack in Discord, end to end -------------------------------------------------------------
+
+async def buypack(rig, who_discord, pay="gold", ctx=None):
+    await rig.ns["cmd_pc_buypack"](ctx or rig.ctx(who_discord), pay)
+
+
+def test_d2_buypack_buys_opens_and_posts_the_pack(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 1000 + price)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert len(opens) == 1, [(c.method, c.path) for c in rig.calls]
+        params = opens[0].params
+        assert set(params) == {"discord_id", "locale", "nonce", "pay"}, params
+        assert params["discord_id"] == own.discord and params["pay"] == "gold"
+        assert re.fullmatch(r"[0-9a-f]{32}", params["nonce"]), params["nonce"]
+        assert len(rig.sent) == 1, [s.content for s in rig.sent]
+        post = rig.sent[0]
+        assert post.file is not None and H.image_of(post.file.data).size == (1947, 549)
+        assert f"**Pack bought for {price} gold** - bought, opened <t:" in post.content, post.content
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert rig.ns["_pc_buying"] == set()
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_buypack_with_shards_pays_shards(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "shards")
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "shards")
+        assert calls_to(rig, OPEN)[0].params["pay"] == "shards"
+        assert len(rig.sent) == 1 and f"**Pack bought for {price} shards**" in rig.sent[0].content
+        assert (await purse(env, own))["pc_shards"] == 10000 - price and await ledger(env, own) == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_buypack_without_enough_gold_says_so_and_charges_nothing(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 0)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        assert len(rig.sent) == 1 and rig.sent[0].file is None
+        assert f"Not enough gold - a pack costs {price} gold. Nothing was charged." in rig.sent[0].content
+        assert await purse(env, own) == {"gold_earned": 0, "gold_spent": 0, "pc_shards": 10000}
+        assert await ledger(env, own) == [] and rig.ns["_pc_buying"] == set()
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_buypack_past_the_daily_cap_says_so(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        monkeypatch.setitem(env.main._pc.PC_ECONOMY, "paid_packs_per_day", 1)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        await buypack(rig, own.discord, "gold")
+        assert [c.status for c in calls_to(rig, OPEN)] == [200, 409]
+        assert len(rig.sent) == 2 and rig.sent[1].file is None
+        assert "Today's limit of bought packs is 1 - it resets at 00:00 UTC." in rig.sent[1].content
+        assert (await purse(env, own))["gold_spent"] == price
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_lost_purchase_answer_is_resent_with_the_same_nonce_and_charges_once(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+
+        async def stub(call):
+            if call.method == "POST" and call.path == OPEN and call.n == 1:
+                reply = await holder["rig"].base(call)
+                reply.delay = 25.0
+                return reply
+            return None
+        rig = rig_over(env, stub)
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [0, 200], [c.status for c in opens]
+        assert opens[0].params["nonce"] == opens[1].params["nonce"]
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert env._plans == []
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None, [s.content for s in rig.sent]
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_buypack_while_one_is_in_flight_buys_nothing_and_the_guard_always_clears(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        rig.ns["_pc_buying"].add(own.discord)
+        await buypack(rig, own.discord, "gold")
+        assert calls_to(rig, OPEN) == [] and len(rig.sent) == 1
+        assert "your last purchase is still going through" in rig.sent[0].content
+        rig.ns["_pc_buying"].clear()
+        # a send that raises still clears the guard (the finally)
+        ctx = rig.ctx(own.discord)
+
+        async def broken_send(*a, **k):
+            raise RuntimeError("gateway gone")
+        ctx.send = broken_send
+        with pytest.raises(RuntimeError):
+            await buypack(rig, own.discord, "gold", ctx=ctx)
+        assert rig.ns["_pc_buying"] == set()
     e2e(monkeypatch, tmp_path, body)

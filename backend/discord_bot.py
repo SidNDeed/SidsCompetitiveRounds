@@ -63,6 +63,7 @@ if not _gen_os.environ.get("BOT_GEN"):
 import os, asyncio, aiohttp, discord, json, io, threading, re, time
 import random, ssl as ssl_mod
 import urllib.parse
+import secrets
 from typing import Literal
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -8789,11 +8790,25 @@ async def _pc_open_pack_api(params):
     return status, body
 
 
-def _pc_open_refusal(ctx, status, body):
+def _pc_open_refusal(ctx, status, body, bought=False):
     """The one line for an open the api refused, read by status and token. A
-    held pack the api could not open stays the player's, unopened."""
+    held pack the api could not open stays the player's, unopened; a
+    purchase the api refused was not charged (its rejections all come
+    before the debit)."""
     d = _pc_detail(body)
     err = d.get("error")
+    price = d.get("price")
+    if status == 402 and err in ("insufficient_gold", "insufficient_shards"):
+        what = "gold" if err == "insufficient_gold" else "shards"
+        cost = f" - a pack costs {price} {what}" if isinstance(price, int) and not isinstance(price, bool) else ""
+        return f"❌ Not enough {what}{cost}. Nothing was charged."
+    if status == 409 and err == "daily_cap":
+        cap = d.get("cap")
+        return (f"❌ Today's limit of bought packs is {cap} - it resets at 00:00 UTC."
+                if isinstance(cap, int) and not isinstance(cap, bool) else
+                "❌ Today's limit of bought packs is reached - it resets at 00:00 UTC.")
+    if status == 409 and d.get("status") == "rejected":
+        return "❌ No cards could be dealt right now, so the pack was not bought and nothing was charged."
     if status == 404 and err == "not_linked":
         return _pc_not_linked(ctx, ctx.author)
     if status == 403 and err == "banned":
@@ -8804,6 +8819,9 @@ def _pc_open_refusal(ctx, status, body):
         return "❌ No cards could be dealt right now - the pack stays yours, unopened; `/daily` tries again."
     if status == 503:
         return "❌ Card pictures cannot be drawn on the server right now, so nothing was opened - try again later."
+    if status == 0 and bought:
+        return ("❌ The card service did not answer - if the pack was bought, `/pack` shows it;"
+                " look there before buying again.")
     if status == 0:
         return ("❌ The card service did not answer - `/daily` again opens today's pack,"
                 " or `/pack` shows it if it opened.")
@@ -8811,14 +8829,43 @@ def _pc_open_refusal(ctx, status, body):
 
 
 async def _pc_open_and_show(ctx, key, head):
-    """Open one of the caller's held packs - `key` is {"pack_id": ...} - and
-    show what it dealt under `head`, or say in one line why it did not open."""
+    """Open one pack for the caller - `key` is {"pack_id": ...} for a held
+    pack, or {"nonce": ..., "pay": ...} for a purchase - and show what it
+    dealt under `head` (a callable is handed the api's answer: a purchase
+    names the price the api charged), or say in one line why it did not
+    open."""
     me, locale = str(ctx.author.id), _pc_locale_of(ctx)
     status, body = await _pc_open_pack_api({"discord_id": me, "locale": locale, **key})
     if status == 200 and isinstance(body, dict) and body.get("pack_id"):
-        await _pc_reveal_opened(ctx, str(body["pack_id"]), head)
+        await _pc_reveal_opened(ctx, str(body["pack_id"]), head(body) if callable(head) else head)
         return
-    await ctx.send(_pc_open_refusal(ctx, status, body))
+    await ctx.send(_pc_open_refusal(ctx, status, body, bought="nonce" in key))
+
+
+_pc_buying = set()   # Discord user ids with a /buypack in flight: a double send buys once, not twice
+
+
+@bot.hybrid_command(name="buypack", description="Buy a Player Cards pack with gold or shards, and open it")
+@app_commands.describe(pay="What to pay with (default: gold)")
+async def cmd_pc_buypack(ctx, pay: Literal["gold", "shards"] = "gold"):
+    """One paid pack (Discord fix round 1, D2 - a scope addition Sid asked for
+    on 2026-09-28): the mod's own purchase through /internal/pc/packs/open -
+    the api's price (the mod's), its daily cap, its conditional delta debit
+    and gold ledger row - keyed on a nonce drawn here, so the one resend
+    _pc_open_pack_api makes answers the committed purchase instead of
+    buying again; then the same reveal as /daily."""
+    await _maybe_defer(ctx)
+    me = str(ctx.author.id)
+    if pay not in ("gold", "shards"):
+        await ctx.send("❌ Pay with `gold` or `shards`."); return
+    if me in _pc_buying:
+        await ctx.send("One moment - your last purchase is still going through."); return
+    _pc_buying.add(me)
+    try:
+        await _pc_open_and_show(ctx, {"nonce": secrets.token_hex(16), "pay": pay},
+                                lambda body: f"🎴 **Pack bought for {body.get('price')} {body.get('pay') or pay}**")
+    finally:
+        _pc_buying.discard(me)
 
 
 @bot.hybrid_command(name="collection", description="A Player Cards binder: counts by rarity and the best prints")
@@ -9179,7 +9226,7 @@ def _pc_reveal_pack_text(answer, index, note, head=None):
     line per slot - slot number, rarity, name, marks, NEW or duplicate. A slot
     whose print is gone reads the roster's rarity and the neutral label the
     api supplies for it. `head`, when given, names the pack in place of its
-    index: the reveal of a pack /daily just opened (D1)."""
+    index: the reveal of a pack /daily (D1) or /buypack (D2) just opened."""
     pack = answer["packs"][0]
     label = f"**Pack {int(index)}**" if head is None else head
     head = f"{label} - {_pc_name(pack.get('source'))}, opened {_pc_when(pack.get('opened_at'))}"
@@ -9385,9 +9432,9 @@ async def _pc_reveal_pack(ctx, index, private):
 
 async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral):
     """Steps 2-7 of a pack reveal whose step 1 answered `first` for `pack_id`:
-    /pack's, and the reveal of a pack /daily just opened. The final re-read
-    names the pack, never the index: a pack opened in between moves every
-    index by one."""
+    /pack's, and the reveal of a pack /daily or /buypack just opened. The
+    final re-read names the pack, never the index: a pack opened in between
+    moves every index by one."""
     params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
 
     async def _reread():
@@ -9402,11 +9449,11 @@ _PC_OPENED_UNSHOWN = "🎴 Your pack is open - it could not be shown right now; 
 
 
 async def _pc_reveal_opened(ctx, pack_id, head):
-    """The reveal of a pack this command just opened (D1): /pack's steps, with
-    step 1 reading that pack by its id - never by an index, which a pack
-    opened meanwhile would move - and `head` in place of the index. Whatever
-    keeps it from posting, the pack is already the player's: the one line
-    says so and points at /pack."""
+    """The reveal of a pack this command just opened (/daily, D1; /buypack,
+    D2): /pack's steps, with step 1 reading that pack by its id - never by an
+    index, which a pack opened meanwhile would move - and `head` in place of
+    the index. Whatever keeps it from posting, the pack is already the
+    player's: the one line says so and points at /pack."""
     me, locale = str(ctx.author.id), _pc_locale_of(ctx)
     status, first = await _pc_api("GET", "/internal/pc/packs",
                                   params={"discord_id": me, "pack_id": pack_id, "locale": locale})
