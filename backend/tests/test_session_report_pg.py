@@ -801,3 +801,48 @@ def test_the_broadcast_account_is_served_the_set_as_its_viewer(lab, monkeypatch)
     assert _refused(bcast, sitting=ID["K2"]) == (404, "not_found"), "no viewer: it played nothing"
     assert _refused(bcast, viewer=STEAM["C"], lobby=ID["F2"]) == (404, "not_found"), "C sat F2 out"
     assert _refused("B", viewer=STEAM["A"], sitting=ID["K2"]) == (403, "broadcast_only")
+
+
+# -- /health `session_report` against the lab database ---------------------------
+
+def test_the_health_word_reads_what_the_labs_database_has(lab):
+    """/health `session_report` on the lab database: 1 with every column the
+    report's statements name; 0 with one of them renamed (the ledger's
+    `reason`, which only the gold statement names), after which the session
+    still answers and the rename is gone; and 1 with a column no statement
+    names renamed instead (the control: the ledger's `created_at`)."""
+    from sqlalchemy import text as _text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    for s in main._SESSION_REPORT_STATEMENTS:
+        assert "gt.created_at" not in s, "the control column must be one no statement names"
+    assert any("gt.reason" in s for s in main._SESSION_REPORT_STATEMENTS)
+    has_column = ("SELECT count(*) FROM information_schema.columns"
+                  " WHERE table_schema = current_schema() AND table_name = 'gold_transactions'"
+                  " AND column_name = :c")
+
+    async def _go():
+        engine = create_async_engine(ASYNC_DSN, poolclass=NullPool,
+                                     connect_args={"server_settings": {"search_path": _LAB["schema"]}})
+        out = {}
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+                out["intact"] = await main._session_report_probe(db)
+                for column in ("reason", "created_at"):
+                    await db.execute(_text("ALTER TABLE gold_transactions RENAME COLUMN %s TO %s_gone"
+                                           % (column, column)))
+                    out[column + "_renamed"] = (await db.execute(_text(has_column),
+                                                                 {"c": column + "_gone"})).scalar()
+                    out[column] = await main._session_report_probe(db)
+                    await db.rollback()   # undoes the control's rename; the probe undid the other
+                    out[column + "_back"] = (await db.execute(_text(has_column), {"c": column})).scalar()
+                    await db.rollback()
+        finally:
+            await engine.dispose()
+        return out
+
+    got = asyncio.run(_go())
+    assert got == {"intact": 1,
+                   "reason_renamed": 1, "reason": 0, "reason_back": 1,
+                   "created_at_renamed": 1, "created_at": 1, "created_at_back": 1}, got

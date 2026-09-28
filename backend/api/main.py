@@ -5937,6 +5937,11 @@ _FFA_HOLD_FENCES = 1
 # route carry it; a box on the build before round 2 answers without the key.
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
+# Its sibling _SESSION_REPORT_LAST (the /health `session_report` word) asks
+# the DATABASE whether it has every table and column the report route's
+# statements name, and the app whether that route is bound. Its statements are
+# DERIVED from the report's own constants, so it is defined after
+# get_set_report.
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -5944,6 +5949,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
     try:
         await db.execute(text("SELECT 1"))
+        session_report = await _session_report_probe(db)
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
@@ -5952,18 +5958,22 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER,
-                              pc_card_themes=_pc_card_themes_word())
+                              pc_card_themes=_pc_card_themes_word(),
+                              session_report=session_report)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
+        # session_report needs the database, so this arm answers the last
+        # probe on this worker (0 before the first: not proven).
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER,
-                              pc_card_themes=_pc_card_themes_word())
+                              pc_card_themes=_pc_card_themes_word(),
+                              session_report=_SESSION_REPORT_LAST)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -60726,6 +60736,26 @@ _REPORT_CARD_TABLES = {
 }
 
 
+def _report_card_sql(table, with_round, with_rolled):
+    """The card statement for one _REPORT_CARD_TABLES entry: every pick of
+    the games named by :mids, in pick order (round first where the table
+    records one)."""
+    round_col = "c.round_number" if with_round else "NULL AS round_number"
+    rolled_col = "c.rolled" if with_rolled else "FALSE AS rolled"
+    order = "c.round_number NULLS FIRST, c.pick_order" if with_round else "c.pick_order"
+    return f"""
+        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}, {rolled_col}
+          FROM {table} c
+         WHERE c.match_id = ANY(CAST(:mids AS uuid[]))
+         ORDER BY c.match_id, {order}"""
+
+
+# Each mode's card statement, built once so that it is a constant like the
+# report's other statements (the /health `session_report` probe analyses
+# every one of them). The text is the one the loader used to build per call.
+_REPORT_CARD_STATEMENTS = {mode: _report_card_sql(*spec) for mode, spec in _REPORT_CARD_TABLES.items()}
+
+
 def _report_parse_uuid(raw):
     """Canonical lowercase UUID string, or None for anything that is not one."""
     try:
@@ -61299,15 +61329,7 @@ async def _report_load_cards(db, mode, mids):
     False for every table but FFA's, which is the only one that records it."""
     if not mids:
         return {}
-    table, with_round, with_rolled = _REPORT_CARD_TABLES[mode]
-    round_col = "c.round_number" if with_round else "NULL AS round_number"
-    rolled_col = "c.rolled" if with_rolled else "FALSE AS rolled"
-    order = "c.round_number NULLS FIRST, c.pick_order" if with_round else "c.pick_order"
-    rows = await _report_rows(db, f"""
-        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}, {rolled_col}
-          FROM {table} c
-         WHERE c.match_id = ANY(CAST(:mids AS uuid[]))
-         ORDER BY c.match_id, {order}""", {"mids": [str(m) for m in mids]})
+    rows = await _report_rows(db, _REPORT_CARD_STATEMENTS[mode], {"mids": [str(m) for m in mids]})
     out = {}
     for r in rows:
         out.setdefault(str(r["match_id"]), []).append(
@@ -61714,6 +61736,133 @@ async def get_set_report(request: Request, steam_id: str = "",
         "truncated": games_omitted > 0,
         "games_omitted": games_omitted,
     })
+
+
+# -- The session report marker (/health `session_report`) -------------------
+# Board rows 30a, 30d and 30g change what GET /api/v1/report answers (the
+# `sitting` selector dispatched by the anchor's mode, the FFA `lobby`
+# selector, each game's gold and XP and the set's totals, the broadcast
+# account's `viewer`) and add no route: every request they change is one the
+# build before answers too. So this word is the release train's build
+# discriminator for them. 1 when this app routes GET /api/v1/report to
+# get_set_report AND the database this box is connected to has every table
+# and column that the route's statements name; 0 when either is not so. A
+# box on the build before answers without the key. Nothing reads it (#306).
+# The caller's session check is the shared path every signed route runs, not
+# a read of this feature, and is not asked about.
+#
+# DERIVED, never written down (#342): the statements are the report's own
+# `_REPORT_*` constants, the ones the _report_rows call sites run (a test
+# holds the two sets equal, and another that nothing else in the report code
+# runs a statement). A string that opens with SELECT or WITH is a statement,
+# and one carrying `{where}` is a template, expanded with every fragment of
+# the `_WHERE` table of the same stem, as its loader formats it; a table whose
+# values are all statements (the card statements) gives each of them. A
+# template without its table leaves the set incomplete, and an incomplete set
+# reads 0 without asking.
+#
+# The database is asked to ANALYSE the statements, never to run them: one
+# statement, SELECT 1 WHERE false AND EXISTS (<statement>) AND ..., every
+# bind NULL. PostgreSQL resolves every table and column name of every
+# subquery before it plans, and the constant-false filter is folded before any
+# subquery is planned, so no row is read. A refusal in SQLSTATE class 42 (an
+# undefined column or table, and any other statement the analysis rejects)
+# rolls the transaction back and reads 0: not proven, the train's
+# conservative reading. That is wider than `team_dc_fallback`'s two codes on
+# purpose: this probe is composed from many statements, and a composed
+# statement the analysis cannot take must not turn the whole answer into
+# "database disconnected" on a healthy box. Anything else is left to
+# health_check's own catch, as a failed SELECT 1 is. The degraded arm cannot
+# ask, so it answers the last value a probe on this worker wrote -- 0 until
+# one has run, which the train reads as not proven.
+_SESSION_REPORT_STATEMENT = _re.compile(r"^\s*(?:SELECT|WITH)\b")
+
+
+def _session_report_statements(namespace) -> tuple:
+    """Every statement GET /api/v1/report runs, from the `_REPORT_*`
+    constants in `namespace` (this module's globals), sorted, each once; ()
+    when a `{where}` template has no `_WHERE` table of its stem."""
+    found = set()
+    for name, value in namespace.items():
+        if not name.startswith("_REPORT_"):
+            continue
+        if isinstance(value, str) and _SESSION_REPORT_STATEMENT.match(value):
+            if "{where}" not in value:
+                found.add(value)
+                continue
+            table = namespace.get(name[:-len("_SQL")] + "_WHERE") if name.endswith("_SQL") else None
+            if not isinstance(table, dict) or not table:
+                return ()
+            found.update(value.format(where=fragment) for fragment in table.values())
+        elif (isinstance(value, dict) and value
+              and all(isinstance(v, str) and _SESSION_REPORT_STATEMENT.match(v)
+                      for v in value.values())):
+            found.update(value.values())
+    return tuple(sorted(found))
+
+
+def _session_report_probe_sql(statements) -> str:
+    """One statement that has every one of `statements` analysed and reads
+    no row; "" when there are none."""
+    if not statements:
+        return ""
+    return "SELECT 1 WHERE false" + "".join(" AND EXISTS (" + s + ")" for s in statements)
+
+
+def _session_report_bound() -> bool:
+    """True when this app routes GET /api/v1/report to get_set_report, once."""
+    hits = [r for r in app.routes
+            if getattr(r, "path", None) == "/api/v1/report"
+            and "GET" in (getattr(r, "methods", None) or ())]
+    return len(hits) == 1 and getattr(hits[0], "endpoint", None) is get_set_report
+
+
+def _session_report_refused(exc) -> bool:
+    """True when the analysis refused the statement: SQLSTATE class 42 on
+    `exc` or on its wrapping chain (.orig and __cause__). An exception merely
+    raised while another was being handled (__context__) is not wrapping it,
+    and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        state = str(getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None) or "")
+        if len(state) == 5 and state.startswith("42"):
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+_SESSION_REPORT_STATEMENTS = _session_report_statements(globals())
+_SESSION_REPORT_PROBE = _session_report_probe_sql(_SESSION_REPORT_STATEMENTS)
+_SESSION_REPORT_BINDS = (tuple(sorted(text(_SESSION_REPORT_PROBE).compile().params))
+                         if _SESSION_REPORT_PROBE else ())
+_SESSION_REPORT_LAST = 0
+
+
+async def _session_report_probe(db) -> int:
+    """/health `session_report` on the connected arm, written through to the
+    cache the degraded arm reads: 1 when the route is bound and the analysis
+    took every statement, 0 when the route is not bound, the set is
+    incomplete or the analysis refused (class 42). Any other error is raised
+    to health_check's own catch."""
+    global _SESSION_REPORT_LAST
+    if not _SESSION_REPORT_PROBE or not _session_report_bound():
+        _SESSION_REPORT_LAST = 0
+        return 0
+    try:
+        await db.execute(text(_SESSION_REPORT_PROBE),
+                         {name: None for name in _SESSION_REPORT_BINDS})
+    except Exception as exc:
+        if not _session_report_refused(exc):
+            raise
+        await db.rollback()
+        _SESSION_REPORT_LAST = 0
+        return 0
+    _SESSION_REPORT_LAST = 1
+    return 1
 
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
 
