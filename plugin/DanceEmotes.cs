@@ -852,8 +852,8 @@ namespace CompetitiveRounds
         /// <summary>Finding L1, the teardown order (round two): the rig's
         /// remembered deltas are inverse-applied FIRST, while PortraitPose still
         /// names the rig, and PortraitPose is cleared AFTER, in a finally -- so
-        /// an exception in the inverse apply still clears the pose, and no
-        /// teardown clears the pose over entries the rig still owes. The three
+        /// the rig's entries are undone while the pose names it, and the pose
+        /// is cleared even when an undo throws (over what is left). The three
         /// teardowns that end a pose call it: the capture job's finally
         /// (PortraitRenderDance.cs), ForceAbort and T45's own finally
         /// (PortraitRender.cs). A null or destroyed rig undoes nothing
