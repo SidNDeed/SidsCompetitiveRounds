@@ -442,7 +442,10 @@ namespace CompetitiveRounds
                 // report is open: no paint, no input, focus flag false
                 // (SessionReportRules.PageElementMayDraw). The rest drawn after it
                 // is a modal, a toast or an alert strip meant to sit on top; that
-                // census is ON_TOP in test_session_report_overlay_guard.py.
+                // census is ON_TOP in test_session_report_overlay_guard.py. The FFA
+                // and 1v2 tabs' row hover tooltips paint from their own behaviours'
+                // OnGUI, outside this order, and ask the same rule; that test also
+                // classifies every behaviour with an OnGUI.
                 SessionReportView.Draw();
                 DrawCompareSearch();
                 DrawLeaderboardSearch();

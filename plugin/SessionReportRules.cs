@@ -464,12 +464,16 @@ namespace CompetitiveRounds
         /// <summary>Whether one of the F5 page's own IMGUI elements may paint
         /// and take input this frame: its search fields (Compare, Leaderboard,
         /// Card Stats, Info, History, the metric picker's field, the admin
-        /// player search) and the first-timer ranked callout that points at a
-        /// page button. IMGUI stacks by call order and those elements are drawn
-        /// AFTER the report in CompetitiveUI.DrawUI, so while the report was
-        /// open they painted over it and a focused field kept taking
-        /// keystrokes. Each now stands down instead: it neither paints nor
-        /// takes input, and a field's focus flag (the T-chat mutex) stays
+        /// player search), the first-timer ranked callout that points at a
+        /// page button, and the FFA and 1v2 tabs' row hover tooltips. IMGUI
+        /// stacks by call order and the fields and the callout are drawn AFTER
+        /// the report in CompetitiveUI.DrawUI, so while the report was open
+        /// they painted over it and a focused field kept taking keystrokes. The
+        /// two tooltips paint from their tabs' own behaviours
+        /// (FfaRecentGraphDrawer, OneVTwoHoverDrawer), whose OnGUI Unity orders
+        /// against DrawUI's by GUI.depth, not by DrawUI's call order, and they
+        /// ask to be on top. Each now stands down instead: it neither paints
+        /// nor takes input, and a field's focus flag (the T-chat mutex) stays
         /// false. `onItsSurface` is the element's own gate (its tab, the picker
         /// open, the modal open, the callout wanted). The uGUI overlay-canvas
         /// pattern does not apply: IMGUI paints above every canvas

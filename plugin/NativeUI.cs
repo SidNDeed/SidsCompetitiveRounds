@@ -4381,7 +4381,12 @@ namespace CompetitiveRounds
             try
             {
                 if(Event.current==null||Event.current.type!=EventType.Repaint)return;
-                if(!isOpen||currentTab!=12||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
+                /* Board row 30b: this tooltip is page IMGUI painted from the FFA
+                 * tab's own behaviour (FfaRecentGraphDrawer), outside DrawUI's
+                 * call order and asking to be on top (GUI.depth below), so it
+                 * asks the page elements' rule and stands down while the
+                 * session report is open. */
+                if(!SessionReportRules.PageElementMayDraw(isOpen,currentTab==12,SessionReportView.Active)||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
                 Vector2 mouse=Event.current.mousePosition;
                 // Cards-line tooltips first (a cards line is more specific
                 // than its row's header; the rects never overlap). Both row
@@ -5961,7 +5966,11 @@ namespace CompetitiveRounds
             try
             {
                 if(Event.current==null||Event.current.type!=EventType.Repaint)return;
-                if(!isOpen||currentTab!=11||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
+                /* Board row 30b: page IMGUI from the 1v2 tab's own behaviour
+                 * (OneVTwoHoverDrawer), as on the FFA tab: it asks the page
+                 * elements' rule and stands down while the session report is
+                 * open. */
+                if(!SessionReportRules.PageElementMayDraw(isOpen,currentTab==11,SessionReportView.Active)||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
                 Vector2 mouse=Event.current.mousePosition;
                 string tip=null;
                 for(int i=0;i<ovtRecentRows.Count&&tip==null;i++)
