@@ -8740,28 +8740,85 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
     return True
 
 
-@bot.hybrid_command(name="daily", description="Claim today's free Player Cards pack (it opens in the mod)")
+@bot.hybrid_command(name="daily", description="Claim and open today's free Player Cards pack")
 async def cmd_pc_daily(ctx):
     """One claim per UTC day, decided by the api's clock (the same claim the
-    mod's own Daily button makes); the pack itself opens in-game."""
+    mod's own Daily button makes), then the pack opens here and the cards it
+    dealt are shown (Discord fix round 1, D1). The claim and the open are two
+    requests, each idempotent: a /daily that stopped between them leaves
+    today's pack unopened, and the next /daily opens it."""
     await _maybe_defer(ctx)
     status, body = await _pc_api("POST", "/internal/pc/daily", params={"discord_id": str(ctx.author.id)})
-    if status == 200 and isinstance(body, dict):
-        text_line = (f"🎴 Today's pack is yours — open it in-game (F5 → Collection). "
-                     f"Next one {_pc_when(body.get('next_reset_utc'))}.")
-        back = await _pc_back_bytes()   # the canonical back rides along (§6); no lease: it is nobody's picture
-        if back:
-            await ctx.send(content=text_line, file=discord.File(io.BytesIO(back), filename="pack.png"))
-        else:
-            await ctx.send(text_line)
-        return
     d = _pc_detail(body)
-    if status == 404 and d.get("error") == "not_linked":
+    if status == 200 and isinstance(body, dict):
+        reset, pack_id = body.get("next_reset_utc"), body.get("pack_id")
+    elif status == 409 and d.get("error") == "already_claimed" and d.get("pack_status") == "unopened":
+        # Claimed today and never opened - by a /daily that stopped before its
+        # open, or in the mod by a claim whose open did not go through: it is
+        # still today's pack, and it opens now.
+        reset, pack_id = d.get("next_reset_utc"), d.get("pack_id")
+    elif status == 404 and d.get("error") == "not_linked":
         await ctx.send(_pc_not_linked(ctx, ctx.author)); return
-    if status == 409 and d.get("error") == "already_claimed":
-        await ctx.send(f"🎴 Already claimed today — the next pack unlocks {_pc_when(d.get('next_reset_utc'))}.")
+    elif status == 409 and d.get("error") == "already_claimed":
+        await ctx.send(f"🎴 Already claimed today — the next pack unlocks {_pc_when(d.get('next_reset_utc'))}."
+                       " `/pack` shows your latest pack.")
         return
-    await ctx.send("❌ Couldn't claim today's pack right now — try again in a moment.")
+    else:
+        await ctx.send("❌ Couldn't claim today's pack right now — try again in a moment."); return
+    if not pack_id:
+        await ctx.send("🎴 Today's pack is claimed but could not be opened right now - `/daily` again opens it.")
+        return
+    await _pc_open_and_show(ctx, {"pack_id": str(pack_id)},
+                            f"🎴 **Today's pack** (the next one unlocks {_pc_when(reset)})")
+
+
+_PC_OPEN_TIMEOUT_S = 20.0   # the open rolls, mints and pre-renders: the api's own work, not a picture read
+
+
+async def _pc_open_pack_api(params):
+    """(status, body) of POST /internal/pc/packs/open. A request the api did
+    not answer at all (status 0: refused, or cut short by the timeout) is sent
+    ONCE more with the same key. The key is the claim (pc_packs' status, or a
+    purchase's nonce): a key whose first request committed answers with that
+    committed row, and one whose first request is still running waits for it
+    at the claim, so the second send never opens a pack a second time."""
+    for _attempt in range(2):
+        status, body = await _pc_api("POST", "/internal/pc/packs/open", params=params, timeout=_PC_OPEN_TIMEOUT_S)
+        if status != 0:
+            break
+    return status, body
+
+
+def _pc_open_refusal(ctx, status, body):
+    """The one line for an open the api refused, read by status and token. A
+    held pack the api could not open stays the player's, unopened."""
+    d = _pc_detail(body)
+    err = d.get("error")
+    if status == 404 and err == "not_linked":
+        return _pc_not_linked(ctx, ctx.author)
+    if status == 403 and err == "banned":
+        return "❌ Player Cards are closed to this account."
+    if status == 409 and err == "in_progress":
+        return "🎴 That pack is being opened right now - `/pack` shows it in a moment."
+    if status == 409 and d.get("status") == "unopened":
+        return "❌ No cards could be dealt right now - the pack stays yours, unopened; `/daily` tries again."
+    if status == 503:
+        return "❌ Card pictures cannot be drawn on the server right now, so nothing was opened - try again later."
+    if status == 0:
+        return ("❌ The card service did not answer - `/daily` again opens today's pack,"
+                " or `/pack` shows it if it opened.")
+    return "❌ Couldn't open the pack right now - try again in a moment."
+
+
+async def _pc_open_and_show(ctx, key, head):
+    """Open one of the caller's held packs - `key` is {"pack_id": ...} - and
+    show what it dealt under `head`, or say in one line why it did not open."""
+    me, locale = str(ctx.author.id), _pc_locale_of(ctx)
+    status, body = await _pc_open_pack_api({"discord_id": me, "locale": locale, **key})
+    if status == 200 and isinstance(body, dict) and body.get("pack_id"):
+        await _pc_reveal_opened(ctx, str(body["pack_id"]), head)
+        return
+    await ctx.send(_pc_open_refusal(ctx, status, body))
 
 
 @bot.hybrid_command(name="collection", description="A Player Cards binder: counts by rarity and the best prints")
@@ -9117,13 +9174,15 @@ def _pc_reveal_compose(head, lines, note, what):
     return head + "\n" + _pc_fit_field(lines, cap=max(1, room)) + tail
 
 
-def _pc_reveal_pack_text(answer, index, note):
+def _pc_reveal_pack_text(answer, index, note, head=None):
     """The /pack post, rendered from the re-read alone: the pack line, then one
     line per slot - slot number, rarity, name, marks, NEW or duplicate. A slot
     whose print is gone reads the roster's rarity and the neutral label the
-    api supplies for it."""
+    api supplies for it. `head`, when given, names the pack in place of its
+    index: the reveal of a pack /daily just opened (D1)."""
     pack = answer["packs"][0]
-    head = f"**Pack {int(index)}** - {_pc_name(pack.get('source'))}, opened {_pc_when(pack.get('opened_at'))}"
+    label = f"**Pack {int(index)}**" if head is None else head
+    head = f"{label} - {_pc_name(pack.get('source'))}, opened {_pc_when(pack.get('opened_at'))}"
     lines = []
     for p in pack.get("prints") or []:
         if p.get("gone"):
@@ -9304,8 +9363,8 @@ async def _pc_reveal_pack(ctx, index, private):
         return
     total = int(first.get("total") or 0)
     if total == 0:
-        await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims today's free pack, and it opens"
-                                  " in the mod.", ephemeral)
+        await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims and opens today's free pack.",
+                             ephemeral)
         return
     if index > total:
         await _pc_reveal_say(ctx, f"You have {total} opened pack{'s' if total != 1 else ''}:"
@@ -9318,19 +9377,47 @@ async def _pc_reveal_pack(ctx, index, private):
         await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "pack"), ephemeral)
         return
     pack_id = str(first["packs"][0].get("pack_id"))
-    # The final re-read names the pack, never the index: a pack opened in
-    # between moves every index by one.
+    outcome = await _pc_reveal_pack_run(ctx, me, locale, pack_id, first,
+                                        lambda answer, note: _pc_reveal_pack_text(answer, index, note), ephemeral)
+    if outcome != "posted":
+        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
+
+
+async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral):
+    """Steps 2-7 of a pack reveal whose step 1 answered `first` for `pack_id`:
+    /pack's, and the reveal of a pack /daily just opened. The final re-read
+    names the pack, never the index: a pack opened in between moves every
+    index by one."""
     params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
 
     async def _reread():
         return await _pc_api("GET", "/internal/pc/packs", params=params, timeout=5.0)
 
-    outcome = await _pc_reveal_run(ctx, "pack", pack_id, first, _reread,
-                                   f"/internal/pc/packs/{pack_id}/strip/{str(first.get('locale') or locale)}.png",
-                                   {"discord_id": me}, lambda answer, note: _pc_reveal_pack_text(answer, index, note),
-                                   ephemeral)
+    return await _pc_reveal_run(ctx, "pack", pack_id, first, _reread,
+                                f"/internal/pc/packs/{pack_id}/strip/{str(first.get('locale') or locale)}.png",
+                                {"discord_id": me}, render, ephemeral)
+
+
+_PC_OPENED_UNSHOWN = "🎴 Your pack is open - it could not be shown right now; `/pack` shows it."
+
+
+async def _pc_reveal_opened(ctx, pack_id, head):
+    """The reveal of a pack this command just opened (D1): /pack's steps, with
+    step 1 reading that pack by its id - never by an index, which a pack
+    opened meanwhile would move - and `head` in place of the index. Whatever
+    keeps it from posting, the pack is already the player's: the one line
+    says so and points at /pack."""
+    me, locale = str(ctx.author.id), _pc_locale_of(ctx)
+    status, first = await _pc_api("GET", "/internal/pc/packs",
+                                  params={"discord_id": me, "pack_id": pack_id, "locale": locale})
+    if status != 200 or _pc_reveal_prints(first, "pack") is None:
+        print(f"[PC-OPEN] pack={pack_id} opened, not shown: the read answered HTTP {status}")
+        await _pc_reveal_say(ctx, _PC_OPENED_UNSHOWN)
+        return
+    outcome = await _pc_reveal_pack_run(ctx, me, locale, pack_id, first,
+                                        lambda answer, note: _pc_reveal_pack_text(answer, 1, note, head=head), False)
     if outcome != "posted":
-        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
+        await _pc_reveal_say(ctx, _PC_OPENED_UNSHOWN)
 
 
 async def _pc_reveal_binder(ctx, member, page):

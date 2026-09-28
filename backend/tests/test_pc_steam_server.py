@@ -616,7 +616,7 @@ def test_priming_waits_for_its_deadline_and_the_attempt_finishes_behind_it(monke
     assert claims == []
     # pack open, its two completed-open replays (a repeated pack id, a repeated nonce), pack result, the /card preview
     assert MAIN_SRC.count("await _pc_steam_prime(") == 5
-    opened = inspect.getsource(main.pc_open_pack)
+    opened = inspect.getsource(main._pc_open_for)
     replay = 'await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))'
     assert opened.count(replay) == 2
     at = 0

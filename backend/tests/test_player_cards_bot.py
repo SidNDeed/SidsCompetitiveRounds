@@ -28,13 +28,16 @@ def test_every_internal_route_the_bot_calls_is_registered_by_the_api():
     assert paths == {'"/internal/pc/daily"', '"/internal/pc/collection"', '"/internal/pc/card"',
                      '"/internal/pc/events/pending"', '"/internal/pc/events/ack"',
                      '"/internal/pc/lease"', '"/internal/pc/face/back"',
-                     '"/internal/pc/packs"', '"/internal/pc/binder"'}
+                     '"/internal/pc/packs"', '"/internal/pc/binder"', '"/internal/pc/packs/open"'}
     for p in paths:
         full = '"/api/v1' + p[1:]
         assert (f"@app.get({full}" in MAIN_SRC) or (f"@app.post({full}" in MAIN_SRC), p
     # the two mutating routes are POSTs on both sides, the reads are GETs
     assert '_pc_api("POST", "/internal/pc/daily"' in BOT_SRC and '@app.post("/api/v1/internal/pc/daily"' in MAIN_SRC
     assert '_pc_api("POST", "/internal/pc/events/ack"' in BOT_SRC and '@app.post("/api/v1/internal/pc/events/ack"' in MAIN_SRC
+    # the bot's pack opener (fix round 1, D1): a POST on both sides, and one call site
+    assert BOT_SRC.count('_pc_api("POST", "/internal/pc/packs/open"') == 1
+    assert '@app.post("/api/v1/internal/pc/packs/open"' in MAIN_SRC
     for read in ("collection", "card", "events/pending"):
         assert f'_pc_api("GET", "/internal/pc/{read}"' in BOT_SRC and f'@app.get("/api/v1/internal/pc/{read}"' in MAIN_SRC
     # the lease and face routes (v22 section 6): the bot's f-string paths against the api's registrations

@@ -26373,6 +26373,21 @@ async def pc_open_pack(
             raise HTTPException(status_code=422, detail="nonce, pay and expected_price are required for a purchase")
         canon = _pc.canon_open_purchase(steam_id, nonce, pay, int(expected_price))
     player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    return await _pc_open_for(db, player, steam_id, pack_id=pack_id, nonce=nonce, pay=pay,
+                              expected_price=expected_price, locale=_pc_locale(request), via="mod")
+
+
+async def _pc_open_for(db: AsyncSession, player, steam_id: str, *, pack_id, nonce, pay, expected_price,
+                       locale: str, via: str) -> dict:
+    """The open itself, for an actor already resolved and holding the shared
+    identity lock: the mod's /pc/packs/open after _pc_verified_actor (HMAC and
+    a strict Steam session), the bot's /internal/pc/packs/open after
+    _pc_bot_actor (the Discord link). ONE body for both doors, so the claim,
+    the locks, the predicates, the conditional delta debit and the mint
+    cannot drift apart between them (#279). `steam_id` is the actor's own id
+    (the cap exemption and the log line read it), `locale` keys the answer's
+    faces and the minting request's pre-render, `via` names the door in the
+    log line."""
     pid = str(player.id)
 
     # ── 1. the claim (first write) ──
@@ -26411,9 +26426,9 @@ async def pc_open_pack(
                     SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
                       FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
                 """), {"pack": pack_id, "pid": pid})).mappings().first()
-                answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request))) if row is not None else {"pack_id": pack_id}
+                answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale)) if row is not None else {"pack_id": pack_id}
                 print(f"[PC-OPEN] player={steam_id} pack={pack_id}: earned pack of an invalidated "
-                      f"{held['mode']} series voided at open")
+                      f"{held['mode']} series voided at open via={via}")
                 raise HTTPException(status_code=410, detail={"error": "voided", **answer})
         claim = (await db.execute(text("""
             UPDATE pc_packs SET status = 'opening'
@@ -26429,7 +26444,7 @@ async def pc_open_pack(
                 raise HTTPException(status_code=404, detail="Pack not found")
             if row["status"] == "done":
                 await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
-            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale))
             if row["status"] == "done":
                 return answer
             if row["status"] == "voided":
@@ -26455,7 +26470,7 @@ async def pc_open_pack(
                 raise HTTPException(status_code=409, detail={"error": "in_progress"})
             if row["status"] == "done":
                 await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
-            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale))
             if row["status"] == "done":
                 return answer
             if row["status"] == "rejected":
@@ -26551,7 +26566,7 @@ async def pc_open_pack(
     await db.commit()
     print(f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
           f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
-          f"{' foil' if any(p['foil'] for p in stored) else ''}{' signed' if any(p['signed'] for p in stored) else ''}")
+          f"{' foil' if any(p['foil'] for p in stored) else ''}{' signed' if any(p['signed'] for p in stored) else ''} via={via}")
     # Steam pictures v2 §7: the subjects this pack minted for the first time
     # get their picture fetched NOW (bounded), before the answer's face revs
     # are computed — so the URLs the client sees already carry it.
@@ -26562,7 +26577,7 @@ async def pc_open_pack(
     """), {"pack": this_pack})).mappings().one()
     # The one caller that asks for a pre-render: these prints were minted by
     # this request, so no one has asked for their faces yet (v4.13 §9).
-    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)), prerender=True)
+    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale), prerender=True)
 
 
 @app.get("/api/v1/pc/packs/result", tags=["Player Cards"])
@@ -28292,12 +28307,66 @@ async def internal_pc_daily(
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """The bot's /daily: claim today's pack for the linked player (the pack
-    opens in the mod). Same claim as /pc/daily."""
+    """The bot's /daily: claim today's pack for the linked player - the same
+    claim as /pc/daily. The bot then opens it through
+    /internal/pc/packs/open (D1, 2026-09-28)."""
     _require_internal_key(x_internal_key)
     player = await _pc_player_by_discord(db, discord_id)
     await _assert_no_service_subject(db, affected_player_ids=[player.id])
     return await _pc_claim_daily(db, player, via="discord")
+
+
+async def _pc_bot_actor(db: AsyncSession, player, discord_id: str) -> None:
+    """The bot's door into a Player Cards write, for a player resolved by
+    Discord id (_pc_player_by_discord): the shared identity lock the mod's
+    _pc_verified_actor takes, taken here before the first write, then a
+    re-read under it - the row still live and the Discord id still linked to
+    it (a rebind between the lookup and the lock refuses rather than acting
+    for the account the id just left) - and no active ban: the Discord path
+    has no session for a ban to purge, so it refuses a ban itself, as
+    _pc_claim_daily does (c5)."""
+    steam_id = player.steam_id
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    row = (await db.execute(text("SELECT deleted_at, discord_id FROM players WHERE id = CAST(:pid AS uuid)"),
+                            {"pid": str(player.id)})).mappings().first()
+    if row is None or row["deleted_at"] is not None:
+        await db.rollback()
+        raise HTTPException(status_code=410, detail="Account deleted")
+    if str(row["discord_id"] or "") != str(discord_id):
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_linked"})
+    if (await _is_banned(db, steam_id)) is not None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "banned"})
+
+
+@app.post("/api/v1/internal/pc/packs/open", tags=["Internal"])
+async def internal_pc_open_pack(
+    discord_id: str = Query(..., max_length=32),
+    pack_id: str = Query(..., min_length=8, max_length=64),
+    locale: str | None = Query(None, max_length=16),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's pack opener (D1, 2026-09-28): one of the linked player's held
+    packs - today's daily, from /daily - opened through the mod's own body
+    (_pc_open_for), so the answer, the refusals (409 / 410 carrying the
+    pack's own state) and the replay of a pack already opened are exactly
+    the mod's. The renderer gate comes first, before any write, as on the
+    mod's route; the identity is the Discord link, as on every internal
+    route, and _pc_bot_actor takes the identity lock before the claim."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    player = await _pc_player_by_discord(db, discord_id)
+    # both ids, as the mod's door checks them (_pc_verified_actor)
+    await _assert_no_service_subject(db, affected_player_ids=[player.id], affected_steam_ids=[player.steam_id])
+    await _pc_bot_actor(db, player, discord_id)
+    try:
+        loc = _pcp.effective_locale(locale, _pc_served_locales())
+    except Exception:
+        loc = "en"
+    return await _pc_open_for(db, player, player.steam_id, pack_id=pack_id, nonce=None, pay=None,
+                              expected_price=None, locale=loc, via="discord")
 
 
 @app.get("/api/v1/internal/pc/collection", tags=["Internal"])

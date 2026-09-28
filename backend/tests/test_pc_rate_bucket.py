@@ -568,7 +568,7 @@ def test_reading_a_pack_again_schedules_no_prerender_and_only_the_mint_asks(monk
     # ...and the one caller that tells it is the minting request, after its commit
     src = Path(main.__file__).read_text(encoding="utf-8")
     assert src.count("prerender=True") == 1
-    mint = inspect.getsource(main.pc_open_pack)
+    mint = inspect.getsource(main._pc_open_for)
     at = mint.index("prerender=True")
     assert mint.count("prerender=True") == 1
     assert mint.rindex("SET status = 'done'") < mint.rindex("await db.commit()") < at

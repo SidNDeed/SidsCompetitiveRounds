@@ -703,7 +703,7 @@ def test_every_mutation_and_private_read_goes_through_the_verified_actor():
 
 
 def test_the_pack_open_claims_first_rolls_before_the_debit_and_mints_last():
-    src = inspect.getsource(main.pc_open_pack)
+    src = inspect.getsource(main._pc_open_for)
     claim_purchase = src.index("ON CONFLICT (player_id, nonce) WHERE nonce IS NOT NULL DO NOTHING")
     claim_pack = src.index("AND status = 'unopened'")
     lock = src.index("FOR NO KEY UPDATE")
@@ -889,6 +889,8 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png", ("GET",)),
         ("/api/v1/internal/pc/binder", ("GET",)),
         ("/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png", ("GET",)),
+        # the bot's pack opener (Discord fix round 1, D1): /daily opens its pack here
+        ("/api/v1/internal/pc/packs/open", ("POST",)),
     }
 
 
@@ -917,7 +919,7 @@ def test_every_player_route_takes_the_shared_identity_lock_before_the_player_rea
 
 
 def test_a_held_packs_failed_open_answers_its_own_unopened_state():
-    src = inspect.getsource(main.pc_open_pack)
+    src = inspect.getsource(main._pc_open_for)
     rej = src[src.index("async def _reject("):src.index("# ── 2. locks")]
     assert 'if source == "bought":\n            raise _pc_reject_http(reason, {"pack_id": this_pack' in rej
     assert '"status": "unopened", "pack_id": this_pack, "source": source' in rej and '"last_attempt"' in rej
@@ -952,7 +954,7 @@ def test_a_ban_withdraws_the_binder_and_the_announcements():
 def test_an_earned_packs_series_must_still_stand_at_open():
     # c5 B: a plain read (no lock, no new lock-order edge) before the claim;
     # an invalidated or missing series voids the pack and answers 410 voided
-    src = inspect.getsource(main.pc_open_pack)
+    src = inspect.getsource(main._pc_open_for)
     claim = src.index("UPDATE pc_packs SET status = 'opening'")
     guard = src.index("_PC_SERIES_STANDING_SQL.items()")
     assert guard < claim
