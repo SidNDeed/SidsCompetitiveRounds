@@ -243,6 +243,16 @@ namespace CompetitiveRounds
             public bool fadeActive;
             public float fadeProgress = 1f;
             public int fadeArmFrame = -1;
+            // v1.41.0 item 23b: the first start after a silent main menu takes
+            // the long perceptual envelope (MusicLevels.LONG_FADE_SECONDS).
+            // menuAudible is refreshed every volume tick while the context is
+            // the menu; the menu-to-game edge in NotePrefixContext turns it
+            // into longFadePending, which the next ArmFade consumes.
+            public bool fadeLong;
+            public bool menuAudible;
+            public bool longFadePending;
+            public float fadeSampleNext;                // next long-fade progress that logs a [MUSIC-FADE] sample
+            public float fadeAudibleSec;                // audible seconds the current envelope has counted
             // previewSlot Pending bookkeeping (r1 MEDIUM 9): a pending preview
             // that never becomes resident is dropped after this many seconds.
             public float previewPendingRt = -1f;
@@ -700,10 +710,11 @@ namespace CompetitiveRounds
 
         /// <summary>Engine-local multiplier percent, 0..100 — any value is
         /// valid (the slider is continuous; VolumeUp/Down step ±10 from
-        /// wherever the config sits, without snapping to a grid [I17]). A
-        /// multiplier above 100 has no physical channel (AudioSource.volume
-        /// clamps at 1 and the vanilla mixer already applies its own gain), so
-        /// 100 is the vanilla-equivalent loudness ceiling.</summary>
+        /// wherever the config sits, without snapping to a grid [I17]). The
+        /// percent feeds MusicLevels.SliderGain: the squared law times
+        /// VOLUME_CEILING, so 100 is at most half of the pre-1.41 output
+        /// (v1.41.0 item 23a); the game's own music slider applies on top, on
+        /// the mixer group.</summary>
         internal static int VolumeStepPercent
         {
             get { try { return Mathf.Clamp(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100, 0, 100); } catch { return 100; } }
@@ -821,6 +832,22 @@ namespace CompetitiveRounds
                 return "";
             }
             catch { return ""; }
+        }
+
+        /// <summary>v1.41.0 item 23c: the album sku of the track NowPlayingLine
+        /// names (a started preview, or the started current track, playing or
+        /// paused), or null. The Music tab's readout reads it for the album's
+        /// note; it names nothing NowPlayingLine does not.</summary>
+        internal static string NowPlayingAlbumSku()
+        {
+            try
+            {
+                var s = S;
+                if (s.mode == MusicMode.Preview && s.previewTrack.HasValue && s.previewStarted) return s.previewTrack.Value.Sku;
+                if (s.mode == MusicMode.Custom && s.current.HasValue && s.currentStarted) return s.current.Value.Sku;
+                return null;
+            }
+            catch { return null; }
         }
 
         /// <summary>True while a track is actually sounding (Custom playing, or
@@ -1548,6 +1575,13 @@ namespace CompetitiveRounds
                 {
                     // v6 §2.2: a Pending preview intent does not survive the menu.
                     if (s.previewPending.HasValue) { s.previewPending = null; }
+                    // v1.41.0 item 23b: leaving a menu in which the engine's
+                    // music was not audible makes the next start the long fade.
+                    s.longFadePending = !s.menuAudible;
+                }
+                else if (c == Ctx.Menu)
+                {
+                    s.longFadePending = false;   // re-decided at the next menu exit
                 }
             }
             // [I14] menu entry clears any stale pick-phase duck — a disconnect
@@ -2003,10 +2037,15 @@ namespace CompetitiveRounds
             // Perceptual volume: gain = (percent/100)² approximates
             // equal-loudness steps, so mid-slider is audibly mid-volume
             // instead of near-full — composes with the duck below.
-            float pctFrac = VolumeStepPercent / 100f;
-            float mult = pctFrac * pctFrac;
+            // v1.41.0 item 23a: times MusicLevels.VOLUME_CEILING, on the
+            // source, so the slider's 100 is at most half of the pre-1.41
+            // output and the game's own music slider still applies downstream.
+            float mult = MusicLevels.SliderGain(VolumeStepPercent);
             float baseGain = s.mixerRouted ? 1f : s.fallbackGain;
             var m = h.Main;
+            bool mainAudible = m != null && m.isPlaying && !s.mainPausedByUs && !s.paused;
+            // Item 23b: what the next menu exit decides the fade from.
+            if (s.ctx == Ctx.Menu) s.menuAudible = mainAudible;
             // v4 §2.5 fade-in: progress-based (0.6 s), advancing ONLY while
             // Main is audibly playing (never while paused / paused-by-us). A
             // RESUME re-arms it (impl note 45, r9 LOW 2 — accepted): the track
@@ -2015,16 +2054,23 @@ namespace CompetitiveRounds
             float fade = 1f;
             if (s.fadeActive)
             {
-                bool audible = m != null && m.isPlaying && !s.mainPausedByUs && !s.paused;
                 // Skip the arming frame AND the one after it: frame N+1's
                 // unscaledDeltaTime is frame N's wall time, which carried the
                 // open that preceded Play() (r1 LOW 20 / r2 LOW 18 — a 2-5 ms
                 // handle under streaming, so the skip is now merely conservative).
-                if (audible && dt > 0f && Time.frameCount > s.fadeArmFrame + 1) s.fadeProgress += Mathf.Min(dt, 0.1f) / 0.6f;
+                // Item 23b: the envelope math is MusicLevels (the short one
+                // unchanged; the long one 2.5 s on the squared curve).
+                if (mainAudible && dt > 0f && Time.frameCount > s.fadeArmFrame + 1)
+                {
+                    s.fadeProgress = MusicLevels.AdvanceFade(s.fadeProgress, dt, s.fadeLong);
+                    s.fadeAudibleSec += Mathf.Min(dt, MusicLevels.MAX_FRAME_SECONDS);
+                }
                 if (s.fadeProgress >= 1f) { s.fadeProgress = 1f; s.fadeActive = false; }
-                fade = Mathf.Clamp01(s.fadeProgress);
+                fade = MusicLevels.FadeGain(s.fadeProgress, s.fadeLong);
             }
-            if (m != null) m.volume = mult * baseGain * Mathf.Lerp(1f, DUCK_VOLUME, s.duckLevel) * fade;
+            float mainVolume = mult * baseGain * Mathf.Lerp(1f, DUCK_VOLUME, s.duckLevel) * fade;
+            if (m != null) m.volume = mainVolume;
+            if (s.fadeLong && s.fadeProgress >= s.fadeSampleNext) LogLongFadeSample(mainVolume, fade);
             var p = h.Preview;
             if (p != null) p.volume = mult * baseGain;
             var lpf = h.Lpf;
@@ -2611,6 +2657,35 @@ namespace CompetitiveRounds
             // r1 LOW 20: the frame that called Play() may have carried the
             // open (2-5 ms streamed); its delta is not counted as audible time.
             s.fadeArmFrame = Time.frameCount;
+            // v1.41.0 item 23b: the first start after a silent main menu takes
+            // the long perceptual envelope, once; every other start and resume
+            // keeps the 0.6 s one. A start while the context is still the menu
+            // (the menu's own music) never consumes it.
+            s.fadeLong = s.longFadePending && s.ctx != Ctx.Menu;
+            if (s.fadeLong) s.longFadePending = false;
+            s.fadeAudibleSec = 0f;
+            s.fadeSampleNext = 0f;
+            SafeLog(LogLevel.Info, s.fadeLong
+                ? "[MUSIC-FADE] armed long " + MusicLevels.LONG_FADE_SECONDS.ToString("0.0", LvlInv)
+                  + " s perceptual (first track after a silent main menu) ctx=" + s.ctx
+                : "[MUSIC-FADE] armed short " + MusicLevels.SHORT_FADE_SECONDS.ToString("0.0", LvlInv) + " s ctx=" + s.ctx);
+        }
+
+        /// <summary>Item 23b witness: one [MUSIC-FADE] line per tenth of the
+        /// long envelope's progress (about every 0.25 s of audible time), the
+        /// first on the arming tick at zero gain and the last at full gain.
+        /// A short envelope logs only its arming line.</summary>
+        private static void LogLongFadeSample(float mainVolume, float fade)
+        {
+            var s = S;
+            bool done = !s.fadeActive;
+            SafeLog(LogLevel.Info, "[MUSIC-FADE] long t=" + s.fadeAudibleSec.ToString("0.00", LvlInv)
+                + "s progress=" + s.fadeProgress.ToString("0.00", LvlInv)
+                + " fade=" + fade.ToString("0.0000", LvlInv)
+                + " volume=" + mainVolume.ToString("0.0000", LvlInv)
+                + (done ? " (envelope done: full gain)" : ""));
+            if (done) { s.fadeLong = false; return; }
+            s.fadeSampleNext = Mathf.Floor(s.fadeProgress * 10f + 1f) / 10f;
         }
 
         // ── clip loading (UnityWebRequest, streamed OGG — design v2 §2.3) ─────────────────
@@ -4612,6 +4687,157 @@ namespace CompetitiveRounds
             return true;
         }
 
+        // -- v1.41.0 item 23a: the level measurement step ---------------------
+
+        private static readonly System.Globalization.CultureInfo LvlInv = System.Globalization.CultureInfo.InvariantCulture;
+        private static float[] _lvlBuf;
+        private static double _lvlSumSq;
+        private static long _lvlCount;
+        private static float _lvlPeak;
+        private static int _lvlFrames;
+
+        /// <summary>Samples the listener's mixed output every tick for the
+        /// step's seconds (AudioListener.GetOutputData, both channels), then
+        /// logs its RMS and peak in dBFS beside the engine's own source gain,
+        /// every playing music voice's AudioSource gain and mixer group, and
+        /// the game's two music events' configured volumes. Reads only.</summary>
+        private static void TsRunLevel(float rt)
+        {
+            if (_lvlBuf == null) _lvlBuf = new float[4096];
+            for (int ch = 0; ch < 2; ch++)
+            {
+                try { AudioListener.GetOutputData(_lvlBuf, ch); }
+                catch { continue; }
+                for (int i = 0; i < _lvlBuf.Length; i++)
+                {
+                    float v = _lvlBuf[i];
+                    _lvlSumSq += (double)v * v;
+                    float a = v < 0f ? -v : v;
+                    if (a > _lvlPeak) _lvlPeak = a;
+                }
+                _lvlCount += _lvlBuf.Length;
+            }
+            _lvlFrames++;
+            if (rt - _tsT0 < _tsF0) return;
+            double rms = _lvlCount > 0 ? Math.Sqrt(_lvlSumSq / _lvlCount) : 0d;
+            string rmsDb = rms > 1e-9 ? (20d * Math.Log10(rms)).ToString("0.00", LvlInv) : "-inf";
+            string peakDb = _lvlPeak > 1e-9f ? (20d * Math.Log10(_lvlPeak)).ToString("0.00", LvlInv) : "-inf";
+            string main = "none";
+            try
+            {
+                var h = _host;
+                if (h != null && h.Main != null)
+                    main = "playing=" + h.Main.isPlaying + " volume=" + h.Main.volume.ToString("0.0000", LvlInv)
+                         + " clip=" + (h.Main.clip != null ? h.Main.clip.name : "none")
+                         + " group=" + (h.Main.outputAudioMixerGroup != null ? h.Main.outputAudioMixerGroup.name : "none");
+            }
+            catch { }
+            SafeLog(LogLevel.Info, "[MUSIC-LEVEL] window=" + _tsF0.ToString("0.0", LvlInv) + "s frames=" + _lvlFrames
+                + " rms_dbfs=" + rmsDb + " peak_dbfs=" + peakDb + " ctx=" + S.ctx + " mode=" + S.mode
+                + " slider=" + VolumeStepPercent + " ceiling=" + MusicLevels.VOLUME_CEILING.ToString("0.00", LvlInv)
+                + " mixerRouted=" + S.mixerRouted + " main{" + main + "} voices{" + TsMusicVoices() + " }");
+            SafeLog(LogLevel.Info, "[MUSIC-LEVEL] events " + TsMusicEvents());
+            TsEnd(true, "rms_dbfs=" + rmsDb + " peak_dbfs=" + peakDb);
+        }
+
+        private static string TsMusicVoices()
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                var h = _host;
+                int n = 0;
+                foreach (var a in UnityEngine.Object.FindObjectsOfType<AudioSource>())
+                {
+                    if (a == null || !a.isPlaying || a.clip == null) continue;
+                    if (h != null && (a == h.Main || a == h.Preview)) continue;
+                    string clip = a.clip.name ?? "";
+                    bool music = clip.StartsWith("MUS_", StringComparison.Ordinal)
+                                 || (S.musicGroup != null && a.outputAudioMixerGroup == S.musicGroup);
+                    if (!music) continue;
+                    if (++n > 6) { sb.Append(" +more"); break; }
+                    sb.Append(" [").Append(a.gameObject != null ? a.gameObject.name : "?").Append(' ').Append(clip)
+                      .Append(" volume=").Append(a.volume.ToString("0.0000", LvlInv))
+                      .Append(" mute=").Append(a.mute)
+                      .Append(" group=").Append(a.outputAudioMixerGroup != null ? a.outputAudioMixerGroup.name : "none")
+                      .Append(']');
+                }
+                if (n == 0) sb.Append(" none");
+            }
+            catch (Exception ex) { sb.Append(" threw ").Append(ex.GetType().Name); }
+            return sb.ToString();
+        }
+
+        private static string TsMusicEvents()
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                var mgr = SoundMusicManager.Instance;
+                if (mgr == null) return "no-manager";
+                ResolveOracle();
+                sb.Append("menu{").Append(TsEventDump(_wrapperMenuEvent != null ? _wrapperMenuEvent.GetValue(mgr) : null)).Append('}');
+                sb.Append(" ingame{").Append(TsEventDump(_wrapperIngameEvent != null ? _wrapperIngameEvent.GetValue(mgr) : null)).Append('}');
+            }
+            catch (Exception ex) { sb.Append(" threw ").Append(ex.GetType().Name); }
+            return sb.ToString();
+        }
+
+        private static string TsEventDump(object ev)
+        {
+            var uo = ev as UnityEngine.Object;
+            if (uo == null) return "null";
+            var sb = new StringBuilder(uo.name);
+            object vars = TsField(ev, "variables");
+            if (vars != null)
+            {
+                var grp = TsField(vars, "audioMixerGroup") as AudioMixerGroup;
+                sb.Append(" group=").Append(grp != null ? grp.name : "none");
+                sb.Append(" modifier(").Append(TsVolumes(TsField(vars, "soundEventModifier"))).Append(')');
+                var mix = TsField(vars, "soundMix") as UnityEngine.Object;
+                for (int guard = 0; mix != null && guard < 4; guard++)
+                {
+                    sb.Append(" mix ").Append(mix.name).Append('(').Append(TsVolumes(TsField(mix, "soundEventModifier"))).Append(')');
+                    mix = TsField(mix, "soundMixParent") as UnityEngine.Object;
+                }
+                if (TsField(vars, "timelineSoundContainerSetting") is Array tl)
+                    for (int i = 0; i < tl.Length && i < 8; i++)
+                        sb.Append(" timeline[").Append(i).Append("](").Append(TsVolumes(tl.GetValue(i))).Append(')');
+            }
+            if (TsField(ev, "soundContainerArray") is Array cs)
+                for (int i = 0; i < cs.Length && i < 8; i++)
+                {
+                    var c = cs.GetValue(i) as UnityEngine.Object;
+                    sb.Append(" container[").Append(i).Append("] ");
+                    if (c == null) { sb.Append("null"); continue; }
+                    sb.Append(c.name).Append('(').Append(TsVolumes(TsField(c, "setting"))).Append(')');
+                }
+            return sb.ToString();
+        }
+
+        private static object TsField(object o, string name)
+        {
+            if (o == null) return null;
+            var f = o.GetType().GetField(name, System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            return f != null ? f.GetValue(o) : null;
+        }
+
+        private static string TsVolumes(object o)
+        {
+            if (o == null) return "null";
+            var sb = new StringBuilder();
+            foreach (var name in new[] { "volumeUse", "volumeDecibel", "volumeRatio", "volumeRandomEnable", "volumeRandomRangeDb" })
+            {
+                var f = o.GetType().GetField(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (f == null) continue;
+                object v = f.GetValue(o);
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append(name).Append('=').Append(v is float fv ? fv.ToString("0.####", LvlInv) : Convert.ToString(v, LvlInv));
+            }
+            return sb.Length > 0 ? sb.ToString() : "no-volume-fields";
+        }
+
         private static void TsBegin()
         {
             string step = _tsSteps[_tsIdx];
@@ -4666,6 +4892,13 @@ namespace CompetitiveRounds
                 case "wait":
                     if (!float.TryParse(_tsArg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _tsF0)) _tsF0 = 1f;
                     return;   // TsRun ends it
+                case "level":
+                    // v1.41.0 item 23a measurement: <sec> seconds of the
+                    // listener's output level beside every music voice's gain.
+                    if (!float.TryParse(_tsArg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _tsF0)) _tsF0 = 10f;
+                    _tsF0 = Mathf.Clamp(_tsF0, 1f, 60f);
+                    _lvlSumSq = 0d; _lvlCount = 0; _lvlPeak = 0f; _lvlFrames = 0;
+                    return;   // TsRun samples and ends it
                 case "s1": case "s2": case "s3": case "s4": case "s4neg": case "s5": case "s6": case "s6neg": case "openall":
                     return;   // multi-tick: TsRun drives the phases from phase 0
                 default:
@@ -4681,6 +4914,7 @@ namespace CompetitiveRounds
                 case "wait":
                     if (rt - _tsT0 >= _tsF0) TsEnd(true, $"{_tsF0:F1}s " + TsState());
                     return;
+                case "level": TsRunLevel(rt); return;
                 case "s1": TsRunS1(rt); return;
                 case "s2": TsRunS2(rt); return;
                 case "s3": TsRunS3(rt); return;

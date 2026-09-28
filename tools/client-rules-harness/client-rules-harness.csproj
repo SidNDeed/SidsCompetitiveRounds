@@ -54,6 +54,13 @@
                         cfg key hides it. The negative control is the
                         same-cards-only chooser the strip had before.
 
+      MusicLevels.cs        the custom-music level math (v1.41.0 item 23):
+                        the slider's ceiling (100 maps to at most half of
+                        the old output, one factor for every stored value)
+                        and the two fade-in envelopes, driven frame by
+                        frame at 60 and at 10 fps. The negative controls
+                        are the pre-1.41 slider law and the short envelope.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -83,6 +90,7 @@
     <Compile Include="../../plugin/TitleLadderRules.cs" />
     <Compile Include="TitleLadderRulesSelfTest.cs" />
     <Compile Include="../../plugin/RoomRulesStrip.cs" />
+    <Compile Include="../../plugin/MusicLevels.cs" />
   </ItemGroup>
 
 </Project>

@@ -24,6 +24,10 @@ namespace CompetitiveRounds
         public string Genre;
         public string CoverPngFile;  // file inside the PREVIEWS asset tier
         public MusicTrackDef[] Tracks;
+        /// <summary>v1.41.0 item 23c: true only on Sid's custom albums; the
+        /// Music tab then shows the note "machine-generated" beside the album's
+        /// by-line and in the now-playing readout. Default false.</summary>
+        public bool MachineGenerated;
     }
 
     internal sealed class MusicTrackDef
@@ -59,6 +63,7 @@ namespace CompetitiveRounds
                 ArtistName = "Sid",
                 Genre = "Metal / Phonk",
                 CoverPngFile = "music_album_another_round.png",
+                MachineGenerated = true,
                 Tracks = new[]
                 {
                     new MusicTrackDef { Title = "A Very Heavy Vintage Indeed", OggFile = "mus_ar_01_a_very_heavy_vintage_indeed.ogg", PreviewFile = "mus_ar_01_a_very_heavy_vintage_indeed_preview.ogg",
@@ -98,6 +103,7 @@ namespace CompetitiveRounds
                 ArtistName = "Sid",
                 Genre = "Flamenco Metal",
                 CoverPngFile = "music_album_clavar_la_bala.png",
+                MachineGenerated = true,
                 Tracks = new[]
                 {
                     new MusicTrackDef { Title = "Clavar la Bala", OggFile = "mus_cb_01_clavar_la_bala.ogg", PreviewFile = "mus_cb_01_clavar_la_bala_preview.ogg",

@@ -12976,6 +12976,24 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return "";
         }
 
+        // v1.41.0 item 23c: the album note. AUTHORED text like the by-line
+        // itself (MusicCatalog.cs header, #368): rendered raw and never
+        // translated, so its words read the same in every locale.
+        // Shown beside the album by-line and in the now-playing readout only.
+        private const string MUSIC_ALBUM_NOTE = "  <size=85%><color=#888>(machine-generated)</color></size>";
+
+        private static string MusicAlbumNote(MusicAlbumDef alb)
+        {
+            return alb != null && alb.MachineGenerated ? MUSIC_ALBUM_NOTE : "";
+        }
+
+        private static string NowPlayingAlbumNote()
+        {
+            string sku = null;
+            try { sku = MusicEngine.NowPlayingAlbumSku(); } catch { }
+            return sku == null ? "" : MusicAlbumNote(MusicCatalog.Get(sku));
+        }
+
         private static void RefreshMusicTab()
         {
             // Transport dock paints — the engine is the single source of truth (§4).
@@ -12986,7 +13004,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (txtMusicNow != null)
                 UIFactory.SetTextRaw(txtMusicNow, string.IsNullOrEmpty(np)
                     ? $"<color=#888><i>{I18n.Tr("Nothing playing")}</i></color>"
-                    : np);
+                    : np + NowPlayingAlbumNote());
             // Play/pause is ONE toggling icon driven by IsPlayingNow (audibly
             // playing) — paused-in-Custom shows the play glyph again.
             bool playing = false; try { playing = MusicEngine.IsPlayingNow; } catch { }
@@ -13107,7 +13125,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
                 catch { }
                 UIFactory.SetTextRaw(h.txtMeta,
-                    I18n.TrF("by {0}", HomeSan(alb.ArtistName ?? "")) + $"  -  {HomeSan(alb.Genre ?? "")}  -  "
+                    I18n.TrF("by {0}", HomeSan(alb.ArtistName ?? "")) + MusicAlbumNote(alb) + $"  -  {HomeSan(alb.Genre ?? "")}  -  "
                     + I18n.TrF("{0} tracks", n) + $"  -  {FmtTrackLen(MusicAlbumTotalSeconds(alb))}" + albAgg);
                 h.root.SetActive(true);
                 h.root.transform.SetSiblingIndex(sibling++);
