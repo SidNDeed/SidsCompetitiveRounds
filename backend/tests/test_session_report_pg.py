@@ -742,3 +742,46 @@ def test_lobby_selector_refusals_and_edges(lab):
     assert _refused("A", sitting=ID["F7"]) == (404, "not_found")
     assert _refused("Z", lobby=ID["F2"]) == (404, "not_found")
     assert _refused("A", lobby=str(uuid.uuid4())) == (404, "not_found")
+
+def test_each_game_and_the_set_carry_what_was_earned(lab):
+    """Board row 30d on the real schema: each game's own ledger gold and XP
+    record, and the set totals, per mode."""
+    env = _report("A", series=ID["RS1"])
+    ss = env["set_summary"]
+    exp_gold, exp_xp = {STEAM["A"]: 25, STEAM["B"]: 5}, {}
+    for g in env["games"]:
+        key = next(k for k in V1_GAMES if ID[k] == g["match_id"])
+        p1, p2, _minute, rounds = V1_GAMES[key][:4]
+        ra = sum(1 for w, _ in rounds if w == "a")
+        rb = len(rounds) - ra
+        assert g["gold"] == {STEAM[p1]: 2}, key
+        assert g["xp"] == {STEAM[p1]: 40 + ra, STEAM[p2]: 30 + rb}, key
+        exp_gold[STEAM[p1]] += 2
+        for who, v in ((p1, 40 + ra), (p2, 30 + rb)):
+            exp_xp[STEAM[who]] = exp_xp.get(STEAM[who], 0) + v
+    assert ss["gold"] == {STEAM["A"]: 25, STEAM["B"]: 5}, "the award alone"
+    assert ss["gold_total"] == exp_gold and ss["xp_total"] == exp_xp
+
+    env = _report("A", series=ID["TS1"])
+    assert [g["gold"] for g in env["games"]] == [{STEAM["A"]: 1}, {STEAM["A"]: 1}]
+    assert all(g["xp"] == {} for g in env["games"]), "2v2 keeps no per-game XP record"
+    assert env["set_summary"]["xp_total"] == {STEAM["A"]: 120, STEAM["C"]: 110,
+                                               STEAM["B"]: 90, STEAM["D"]: 95}
+
+    env = _report("A", series=ID["OS1"])
+    assert env["set_summary"]["gold_total"] == {STEAM["A"]: 3, STEAM["B"]: 1, STEAM["C"]: 1}
+    assert env["set_summary"]["xp_total"] == {STEAM["A"]: 70, STEAM["B"]: 50, STEAM["C"]: 55}
+
+    env = _report("A", lobby=ID["F2"])
+    tot_g, tot_x = {}, {}
+    for g in env["games"]:
+        key = next(k for k in FFA_GAMES if ID[k] == g["match_id"])
+        rows = FFA_GAMES[key][3]
+        want_g = {STEAM[w]: (3 if pl == 1 else 1) for w, _s, pl, _r in rows}
+        want_x = {STEAM[w]: 20 + r for w, _s, _pl, r in rows}
+        assert g["gold"] == want_g and g["xp"] == want_x, key
+        for d, src in ((tot_g, want_g), (tot_x, want_x)):
+            for k, v in src.items():
+                d[k] = d.get(k, 0) + v
+    assert env["set_summary"]["gold_total"] == env["set_summary"]["gold"] == tot_g
+    assert env["set_summary"]["xp_total"] == tot_x

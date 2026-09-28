@@ -60367,8 +60367,15 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 #   - the rating snapshot is joined by IDENTITY (rating_history.series_id,
 #     migration 299, linked by the series-completion writer), never by a time
 #     window — two series completing seconds apart stay distinct;
-#   - set_summary is computed ONCE per set from the set's own row(s), never
-#     summed over match rows (C-7);
+#   - set_summary is computed ONCE per set (C-7): rating and the series award
+#     from the set's own row(s), and the set's gold ledger in ONE statement
+#     whatever the number of games. Since board row 30d (Sept 28) the same
+#     pass also gives each game its own `gold` and `xp` ({steam id: n}, only
+#     where a ledger row or an XP record exists) and the summary its
+#     `gold_total` / `xp_total` (what the set earned: the series row's own
+#     totals for 2v2 and 1v2 series, the award plus the games' ledger for a
+#     ranked series, the games' ledger and XP records otherwise). `gold`
+#     keeps its old meaning for older clients;
 #   - the envelope is BOUNDED (_REPORT_MAX_BYTES, asserted by
 #     test_session_report.py against worst-case fixtures): sample pairs,
 #     picks, deaths and names are budgeted per report, see the constants.
@@ -60470,6 +60477,7 @@ _REPORT_1V1_SQL = """
            m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
            m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
            m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           m.p1_xp_gained, m.p2_xp_gained,
            rs.rules AS rules,
            BOOL_AND(m.is_ranked) OVER () AS all_ranked,
            COUNT(*) OVER () AS total_rows
@@ -60518,7 +60526,9 @@ _REPORT_TS_SQL = """
     SELECT ts.id, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id, ts.status,
            ts.completed_at, ts.invalidated_at,
            ts.t1a_rating_change, ts.t1b_rating_change,
-           ts.t2a_rating_change, ts.t2b_rating_change
+           ts.t2a_rating_change, ts.t2b_rating_change,
+           ts.t1a_gold_earned, ts.t1b_gold_earned, ts.t2a_gold_earned, ts.t2b_gold_earned,
+           ts.t1a_xp_earned, ts.t1b_xp_earned, ts.t2a_xp_earned, ts.t2b_xp_earned
       FROM team_series ts
      WHERE ts.id = CAST(:key AS uuid)
 """
@@ -60553,7 +60563,8 @@ _REPORT_OS_SQL = """
     SELECT os.id, os.solo_id, os.duo_a_id, os.duo_b_id, os.status,
            os.completed_at, os.invalidated_at,
            os.solo_rating_change, os.duo_a_rating_change, os.duo_b_rating_change,
-           os.solo_gold_earned, os.duo_a_gold_earned, os.duo_b_gold_earned
+           os.solo_gold_earned, os.duo_a_gold_earned, os.duo_b_gold_earned,
+           os.solo_xp_earned, os.duo_a_xp_earned, os.duo_b_xp_earned
       FROM ovt_series os
      WHERE os.id = CAST(:key AS uuid)
 """
@@ -60594,7 +60605,7 @@ _REPORT_FFA_SQL = f"""
 """
 _REPORT_FFA_PLAYERS_SQL = """
     SELECT fp.match_id, fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
-           fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained,
+           fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained, fp.xp_gained,
            fp.fps_timeline, fp.ping_timeline, fp.hit_timeline, fp.block_timeline,
            fp.damage_dealt_timeline, fp.kill_timeline, fp.damage_dealt,
            fp.end_stats, fp.color_hex,
@@ -60687,11 +60698,11 @@ _REPORT_ROSTER_SQL = """
      WHERE p.id = ANY(CAST(:pids AS uuid[]))
 """
 _REPORT_GOLD_SQL = """
-    SELECT gt.player_id, SUM(gt.amount) AS amount
+    SELECT gt.player_id, gt.reference_id, gt.reason, SUM(gt.amount) AS amount
       FROM gold_transactions gt
      WHERE gt.reason = ANY(CAST(:reasons AS text[]))
        AND gt.reference_id = ANY(CAST(:refs AS text[]))
-     GROUP BY gt.player_id
+     GROUP BY gt.player_id, gt.reference_id, gt.reason
 """
 # Identity join (migration 299): the snapshot the series-completion writer
 # linked to THIS series. No time window — a snapshot written for a series
@@ -60873,10 +60884,10 @@ def _report_ffa_scores(timeline, slots, duration_s, cap=_REPORT_SAMPLES_MAX):
 
 
 def _report_slot(pid, rounds, points, fps=None, ping=None, hit=None, block=None,
-                 dmg=None, end_stats=None, totals=None, killtl=None):
+                 dmg=None, end_stats=None, totals=None, killtl=None, xp=None):
     return {"pid": str(pid) if pid is not None else None, "rounds": rounds, "points": points,
             "fps": fps, "ping": ping, "hit": hit, "block": block, "dmg": dmg, "killtl": killtl,
-            "end_stats": end_stats, "totals": totals or {}}
+            "end_stats": end_stats, "totals": totals or {}, "xp": xp}
 
 
 def _report_totals(shots=None, hits=None, blocks=None, blocks_ok=None, keys=None,
@@ -60912,6 +60923,7 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
     duration_s = int(game.get("duration_s") or 0)
     slots = game["slots"]
     scores, points, timelines, end_build, end_stats, totals = {}, {}, {}, {}, {}, {}
+    gold, xp = {}, {}
     available = set()
     for s in slots:
         sid = sid_of.get(s["pid"])
@@ -60932,6 +60944,15 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
         es = _clean_end_stats(s.get("end_stats"))
         if es:
             end_stats[sid] = es
+        if s.get("xp") is not None:
+            try:
+                xp[sid] = int(s["xp"])
+            except (TypeError, ValueError):
+                pass
+    for pid, amt in (game.get("gold") or {}).items():
+        sid = sid_of.get(str(pid))
+        if sid is not None:
+            gold[sid] = int(amt)
     deaths = []
     if game.get("point_times") and len(slots) == 2:
         sid_a, sid_b = sid_of.get(slots[0]["pid"]), sid_of.get(slots[1]["pid"])
@@ -60995,6 +61016,8 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
         "end_build": end_build,
         "end_stats": end_stats,
         "totals": totals,
+        "gold": gold,
+        "xp": xp,
     }
     if picks_capped:
         out["picks_capped"] = True
@@ -61082,14 +61105,16 @@ async def _report_load_1v1(db, selector, key, cpid):
                              _report_totals(r["p1_bullets_fired"], r["p1_bullets_hit"],
                                             r["p1_blocks_activated"], r["p1_blocks_successful"],
                                             r["p1_keys_pressed"], r["p1_active_seconds"],
-                                            r["p1_damage_dealt"], r["p1_deaths"])),
+                                            r["p1_damage_dealt"], r["p1_deaths"]),
+                             xp=r.get("p1_xp_gained")),
                 _report_slot(r["player2_id"], r["p2_rounds_won"], r["p2_points_total"],
                              r["p2_fps_timeline"], r["p2_ping_timeline"], r["p2_hit_timeline"],
                              r["p2_block_timeline"], r["p2_damage_timeline"], r["p2_end_stats"],
                              _report_totals(r["p2_bullets_fired"], r["p2_bullets_hit"],
                                             r["p2_blocks_activated"], r["p2_blocks_successful"],
                                             r["p2_keys_pressed"], r["p2_active_seconds"],
-                                            r["p2_damage_dealt"], r["p2_deaths"])),
+                                            r["p2_damage_dealt"], r["p2_deaths"]),
+                             xp=r.get("p2_xp_gained")),
             ],
         })
     return games, total, all_ranked
@@ -61213,7 +61238,7 @@ def _report_ffa_slot(fp):
                                     fp["blocks_activated"], fp["blocks_successful"],
                                     fp["keys_pressed"], fp["active_seconds"],
                                     damage=fp["damage_dealt"], kills=fp["kills"]),
-                     killtl=fp["kill_timeline"])
+                     killtl=fp["kill_timeline"], xp=fp.get("xp_gained"))
     s["slot"] = fp["slot"]
     s["placement"] = fp["placement"]
     s["rating_before"] = fp["rating_before"]
@@ -61317,14 +61342,45 @@ async def _report_roster(db, pids_in_order, team_of=None, color_of=None):
     return roster
 
 
-async def _report_gold(db, reasons, refs):
-    """{player_id str: gold} for the named reasons against the named references
-    — one statement per set, whatever the number of games."""
+# Sept 28 (board row 30d): the reasons a GAME's own economy is written under
+# (its XP gold and level rewards, reference_id = the game's id) and the ones a
+# SERIES award is written under (reference_id = the series id). A 1v2 series
+# row carries its own totals and FFA rows their own gold_gained, so neither
+# has a series entry here.
+_REPORT_GAME_GOLD_REASONS = {"1v1": ("xp", "level_reward"),
+                             "team": ("team_xp", "level_reward"),
+                             "ovt": ("ovt_xp", "level_reward")}
+_REPORT_SERIES_GOLD_REASONS = {"ranked": ("series_win", "series_loss"),
+                               "team": ("team_series_win", "team_series_loss")}
+
+
+async def _report_ledger(db, kind, mode, selector, key, set_row, games):
+    """The set's gold ledger in ONE statement, whatever the number of games:
+    ({game id: {player id: gold}}, {player id: series award}). A game's gold is
+    every row written under its mode's per-game reasons against its id; the
+    award every row under the series reasons against the series id (ranked
+    and 2v2 series only). Rows are split by reference AND reason, so a row
+    can never count for the wrong one. An absent key means no ledger row,
+    never zero."""
+    game_reasons = _REPORT_GAME_GOLD_REASONS.get(mode, ())
+    series_reasons = (_REPORT_SERIES_GOLD_REASONS.get(kind, ())
+                      if selector == "series" and set_row is not None else ())
+    game_ids = {str(g["id"]) for g in games} if game_reasons else set()
+    refs = sorted(game_ids) + ([str(key)] if series_reasons else [])
     if not refs:
-        return {}
+        return {}, {}
     rows = await _report_rows(db, _REPORT_GOLD_SQL,
-                              {"reasons": list(reasons), "refs": [str(x) for x in refs]})
-    return {str(r["player_id"]): int(r["amount"] or 0) for r in rows}
+                              {"reasons": list(game_reasons) + list(series_reasons), "refs": refs})
+    per_game, award = {}, {}
+    for r in rows:
+        ref, reason, pid = str(r["reference_id"]), str(r["reason"]), str(r["player_id"])
+        amt = int(r["amount"] or 0)
+        if ref in game_ids and reason in game_reasons:
+            bucket = per_game.setdefault(ref, {})
+            bucket[pid] = bucket.get(pid, 0) + amt
+        elif series_reasons and ref == str(key) and reason in series_reasons:
+            award[pid] = award.get(pid, 0) + amt
+    return per_game, award
 
 
 async def _report_rating_after(db, pids, series_id):
@@ -61362,11 +61418,15 @@ def _report_rating_entry(after, delta):
     return {"before": round(a - d, 1), "after": a, "delta": d}
 
 
-async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
+async def _report_set_summary(db, kind, selector, key, set_row, games, roster, award=None):
     """rating {sid: {before, after, delta}} and gold {sid: n}, computed ONCE
     per set from the set's own row(s) (C-7). Rating entries exist only where
     the set is rated and completed; gold entries only where a ledger row
-    exists — an absent key means "not recorded", never zero."""
+    exists — an absent key means "not recorded", never zero. `award` is the
+    series award _report_ledger read in the set's one ledger statement; each
+    game's own ledger gold is already on it (`gold`, player-id keyed).
+    Board row 30d adds gold_total / xp_total: what the set EARNED (see the
+    block comment above), sparse the same way."""
     rating, gold = {}, {}
     sid_of = {r["pid"]: r["id"] for r in roster}
     if kind == "ranked" and selector == "series" and set_row is not None:
@@ -61380,8 +61440,7 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
             if sid is None or d is None:
                 continue
             rating[sid] = _report_rating_entry(after.get(pid), d)
-        g = await _report_gold(db, ("series_win", "series_loss"), [key])
-        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+        gold = {sid_of[p]: v for p, v in (award or {}).items() if p in sid_of}
     elif kind == "team" and selector == "series" and set_row is not None:
         for slot in ("t1a", "t1b", "t2a", "t2b"):
             pid = set_row[f"{slot}_id"]
@@ -61392,8 +61451,7 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
             # 2v2 ratings keep no history snapshots: the delta is the only
             # authoritative number, before/after stay null ("not recorded").
             rating[sid] = _report_rating_entry(None, d)
-        g = await _report_gold(db, ("team_series_win", "team_series_loss"), [key])
-        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+        gold = {sid_of[p]: v for p, v in (award or {}).items() if p in sid_of}
     elif kind == "ovt" and selector == "series" and set_row is not None:
         for slot in ("solo", "duo_a", "duo_b"):
             pid = set_row[f"{slot}_id"]
@@ -61428,15 +61486,45 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
             rating[sid] = {"before": round(float(rb), 1) if rb is not None else None,
                            "after": round(float(ra), 1) if ra is not None else None,
                            "delta": round(d, 1)}
-    else:
+    # What each game recorded on its own: its ledger gold (_report_ledger, or
+    # FFA's gold_gained) and its XP record (1v1 and FFA rows keep one).
+    games_gold, games_xp = {}, {}
+    for gm in games:
+        for p, v in (gm.get("gold") or {}).items():
+            sid = sid_of.get(str(p))
+            if sid is not None:
+                games_gold[sid] = games_gold.get(sid, 0) + int(v)
+        for s in gm["slots"]:
+            sid = sid_of.get(s["pid"])
+            if sid is not None and s.get("xp") is not None:
+                try:
+                    games_xp[sid] = games_xp.get(sid, 0) + int(s["xp"])
+                except (TypeError, ValueError):
+                    pass
+    if kind in ("ranked", "casual", "ovt", "team") and not (selector == "series" and set_row is not None):
         # One game or a casual sitting: no rating is at stake; gold is the
-        # per-game XP/level ledger, fetched ONCE for every game id in the set.
-        reasons = {"ovt": ("ovt_xp", "level_reward"),
-                   "team": ("team_xp", "level_reward")}.get(kind, ("xp", "level_reward"))
-        if kind in ("ranked", "casual", "ovt", "team"):
-            g = await _report_gold(db, reasons, [str(gm["id"]) for gm in games])
-            gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
-    return {"rating": rating, "gold": gold}
+        # per-game XP/level ledger, read in the set's ONE ledger statement.
+        gold = dict(games_gold)
+    gold_total, xp_total = dict(games_gold), dict(games_xp)
+    if kind == "ranked" and selector == "series" and set_row is not None:
+        # the award is written against the series, each game's own gold against the game
+        for sid, v in gold.items():
+            gold_total[sid] = gold_total.get(sid, 0) + v
+    elif kind in ("team", "ovt") and selector == "series" and set_row is not None:
+        # these series rows accumulate every game's economy AND the award
+        gold_total, xp_total = {}, {}
+        slots = ("t1a", "t1b", "t2a", "t2b") if kind == "team" else ("solo", "duo_a", "duo_b")
+        for slot in slots:
+            pid = set_row[f"{slot}_id"]
+            sid = sid_of.get(str(pid)) if pid is not None else None
+            if sid is None:
+                continue
+            g_, x_ = set_row.get(f"{slot}_gold_earned"), set_row.get(f"{slot}_xp_earned")
+            if g_ is not None:
+                gold_total[sid] = int(g_)
+            if x_ is not None:
+                xp_total[sid] = int(x_)
+    return {"rating": rating, "gold": gold, "gold_total": gold_total, "xp_total": xp_total}
 
 
 @app.get("/api/v1/report", tags=["Players"])
@@ -61586,8 +61674,15 @@ async def get_set_report(request: Request, steam_id: str = "",
     sample_cap = _report_sample_cap(len(games), len(roster))
     card_cap = _report_card_cap(len(games), len(roster))
     cards = await _report_load_cards(db, mode, [g["id"] for g in games])
+    per_game_gold, award = await _report_ledger(db, kind, mode, eff_selector, eff_key, set_row, games)
+    for g in games:
+        if mode == "ffa":
+            g["gold"] = {s["pid"]: int(s["gold_gained"]) for s in g["slots"]
+                         if s.get("gold_gained") is not None and s["pid"] is not None}
+        else:
+            g["gold"] = per_game_gold.get(str(g["id"]), {})
     games_json = [_report_game_json(g, sid_of, cards, sample_cap, card_cap) for g in games]
-    set_summary = await _report_set_summary(db, kind, eff_selector, eff_key, set_row, games, roster)
+    set_summary = await _report_set_summary(db, kind, eff_selector, eff_key, set_row, games, roster, award)
     return _report_fit({
         "v": 1,
         "kind": kind,

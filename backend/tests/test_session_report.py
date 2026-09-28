@@ -438,12 +438,18 @@ class FakeDb:
             source = {"match_cards": self.cards, "ffa_match_cards": self.ffa_cards}.get(table, [])
             return _Res([c for c in source if str(c["match_id"]) in mids])
         if "FROM gold_transactions gt" in sql:
+            # Board row 30d: one row per (player, reference, reason), so the
+            # route can tell a game's own gold from a series award.
+            assert "GROUP BY gt.player_id, gt.reference_id, gt.reason" in sql, \
+                "the ledger statement must keep each row's reference and reason apart"
             reasons, refs = set(params["reasons"]), set(params["refs"])
             agg = {}
             for g in self.gold:
                 if g["reason"] in reasons and str(g["reference_id"]) in refs:
-                    agg[g["player_id"]] = agg.get(g["player_id"], 0) + g["amount"]
-            return _Res([{"player_id": p, "amount": a} for p, a in agg.items()])
+                    k = (g["player_id"], str(g["reference_id"]), g["reason"])
+                    agg[k] = agg.get(k, 0) + g["amount"]
+            return _Res([{"player_id": p, "reference_id": r, "reason": why, "amount": a}
+                         for (p, r, why), a in agg.items()])
         if "FROM rating_history rh" in sql:
             if self.fail_rating:
                 raise RuntimeError('column rh.series_id does not exist')
@@ -1468,3 +1474,66 @@ def test_sitting_label_counts_the_games_the_report_omits(session_ok):
     world[0] = match_row(ids[0], PID_A, PID_B, minute=0, ranked=True)
     resp2 = _call(FakeDb(matches=world), CALLER, sitting=ids[-1])
     assert resp2["truncated"] is True and resp2["kind"] == "ranked", "negative control"
+
+# -- board row 30d: what each game and the set earned ------------------------
+
+def test_each_game_carries_its_own_ledger_gold_and_xp_record(session_ok):
+    """A game's own gold (every ledger row written against its id under its
+    mode's per-game reasons) and its XP record, keyed by steam id and sparse;
+    the series award stays the summary's `gold` and the totals add the two."""
+    matches = [dict(m, p1_xp_gained=40, p2_xp_gained=25) if m["id"] == M1 else m for m in MATCHES]
+    db = FakeDb(matches=matches)
+    resp = _call(db, CALLER, series=SERIES)
+    by = {g["match_id"]: g for g in resp["games"]}
+    assert by[M1]["gold"] == {CALLER: 5}
+    assert by[M2]["gold"] == {} and by[M3]["gold"] == {}, "no ledger row: no key, never a zero"
+    assert by[M1]["xp"] == {CALLER: 40, OPP: 25}
+    assert by[M2]["xp"] == {} and by[M3]["xp"] == {}, "no XP record: no key"
+    ss = resp["set_summary"]
+    assert ss["gold"] == {CALLER: 12, OPP: 4}, "the award alone, as older clients read it"
+    assert ss["gold_total"] == {CALLER: 17, OPP: 4}
+    assert ss["xp_total"] == {CALLER: 40, OPP: 25}
+    assert db.count("FROM gold_transactions gt") == 1, "one ledger statement per set"
+
+
+def test_ledger_rows_are_split_by_reference_and_reason(session_ok):
+    gold = GOLD + [
+        {"player_id": PID_A, "amount": 1000, "reason": "series_win", "reference_id": M2},
+        {"player_id": PID_B, "amount": 1000, "reason": "xp", "reference_id": SERIES},
+    ]
+    resp = _call(FakeDb(gold=gold), CALLER, series=SERIES)
+    by = {g["match_id"]: g for g in resp["games"]}
+    assert by[M2]["gold"] == {}, "an award reason written against a game is not that game's gold"
+    assert resp["set_summary"]["gold"] == {CALLER: 12, OPP: 4}, \
+        "a per-game reason written against the series is not the award"
+
+
+def test_a_2v2_series_total_is_its_own_row(session_ok):
+    row = dict(TEAM_SERIES_ROW, t1a_gold_earned=80, t1b_gold_earned=70, t2a_gold_earned=20,
+               t2b_gold_earned=None, t1a_xp_earned=300, t1b_xp_earned=290, t2a_xp_earned=120,
+               t2b_xp_earned=None)
+    resp = _call(FakeDb(team_series_row=row), CALLER, series=TEAM_SERIES)
+    ss = resp["set_summary"]
+    assert ss["gold_total"] == {CALLER: 80, OTHER: 70, OPP: 20}
+    assert ss["xp_total"] == {CALLER: 300, OTHER: 290, OPP: 120}
+    assert resp["games"][0]["gold"] == {CALLER: 6, OTHER: 6}, "the game's own team_xp rows"
+    assert resp["games"][0]["xp"] == {}, "2v2 keeps no per-game XP record"
+
+
+def test_an_ffa_game_carries_its_gold_gained_and_xp_gained(session_ok):
+    fps = [dict(p, xp_gained=xp) for p, xp in zip(FFA_PLAYERS, (120, 60, 0))]
+    resp = _call(FakeDb(ffa_players=fps), CALLER, match=FFA1)
+    g = resp["games"][0]
+    assert g["gold"] == {CALLER: 30, OPP: 10}
+    assert g["xp"] == {CALLER: 120, OPP: 60}, "the absent ghost never reaches the game"
+    ss = resp["set_summary"]
+    assert ss["gold"] == ss["gold_total"] == {CALLER: 30, OPP: 10}
+    assert ss["xp_total"] == {CALLER: 120, OPP: 60}
+
+
+def test_a_casual_sitting_total_is_its_games_ledger(session_ok):
+    resp = _call(FakeDb(), CALLER, session=SESSION)
+    ss = resp["set_summary"]
+    assert ss["gold"] == ss["gold_total"] == {CALLER: 7, OPP: 2}
+    by = {g["match_id"]: g for g in resp["games"]}
+    assert by[C1]["gold"] == {CALLER: 3, OPP: 2} and by[C2]["gold"] == {CALLER: 4}
