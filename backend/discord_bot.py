@@ -8812,27 +8812,83 @@ async def cmd_pc_daily(ctx):
 
 
 _PC_OPEN_TIMEOUT_S = 20.0   # the open rolls, mints and pre-renders: the api's own work, not a picture read
+_PC_OPEN_SENDS = 3          # one open request and up to two replays of the same key (Discord fix round 2, M1)
+_PC_OPEN_REPLAY_PAUSE_S = (2.0, 5.0)   # the pause before each replay
+# The purchases /buypack has sent and the api has not settled, by Discord id:
+# {"<id>": {"nonce": ..., "pay": ...}}. It lives on the volume compose mounts
+# for the bot's state, so a purchase left unconfirmed outlasts a restart and a
+# rebuild, and the next /buypack completes it with its own nonce (M1).
+_PC_BUY_PENDING_FILE = "/opt/bot-state/pc_buy_pending.json"
+_PC_BUY_UNCONFIRMED = ("Your purchase is still being confirmed. `/pack` shows the pack once it has gone through,"
+                       " and your next `/buypack` completes this same purchase instead of buying another.")
+_PC_BUY_PAUSED = "Buying packs here is paused right now - nothing was charged."
 
 
-async def _pc_open_pack_api(params):
-    """(status, body) of POST /internal/pc/packs/open. A request the api did
-    not answer at all (status 0: refused, or cut short by the timeout) is sent
-    ONCE more with the same key. The key is the claim (pc_packs' status, or a
-    purchase's nonce): a key whose first request committed answers with that
-    committed row, and one whose first request is still running waits for it
-    at the claim, so the second send never opens a pack a second time."""
-    for _attempt in range(2):
+def _pc_open_verdict(status, body, replayed=False):
+    """What one answer of POST /internal/pc/packs/open settles (Discord fix
+    round 2, M1). "opened": a 200 carrying the pack. "refused": a refusal
+    with a known reason that the key cannot outlive - a purchase the api
+    rejected before its debit, which it records on the nonce (402, or 409
+    with status "rejected": the daily cap, no cards to deal), a held pack's
+    recorded state (409 with status "unopened", 410 voided), and a refusal
+    of the caller (not linked, banned, a service account, a deleted
+    account). The caller's refusals come before the api reads the key, so
+    they settle it only when no earlier send of it went unanswered
+    (`replayed` False): after one, that send may have committed.
+    "unconfirmed": everything else - no answer at all (status 0: refused,
+    or cut short by the timeout), any 5xx, a 200 without a usable body, a
+    key still in progress, any other status or token."""
+    if status == 200:
+        return "opened" if isinstance(body, dict) and body.get("pack_id") else "unconfirmed"
+    d = _pc_detail(body)
+    err = d.get("error")
+    if err == "in_progress":
+        return "unconfirmed"
+    if status == 402 and err in ("insufficient_gold", "insufficient_shards"):
+        return "refused"
+    if status == 409 and d.get("status") in ("rejected", "unopened"):
+        return "refused"
+    if status == 410 and err == "voided":
+        return "refused"
+    caller = ((status == 404 and err == "not_linked") or (status == 410 and err == "Account deleted")
+              or (status == 403 and err in ("banned", "service_account_forbidden")))
+    if caller and not replayed:
+        return "refused"
+    return "unconfirmed"
+
+
+async def _pc_open_pack_api(params, replayed=False):
+    """(verdict, status, body) of POST /internal/pc/packs/open, under the one
+    retry policy both doors share (Discord fix round 2, M1): an answer
+    _pc_open_verdict calls unconfirmed is followed by a replay of the SAME
+    key - the pack id, or the purchase's nonce and pay - after a pause, up
+    to _PC_OPEN_SENDS sends in all. The key is the claim (pc_packs' status,
+    or the purchase's nonce): a key whose earlier send committed is answered
+    with that committed row - the pack and what it cost - and one whose
+    earlier send is still running waits for it at the claim, so a replay
+    never opens or buys a second pack. `replayed` says a send of this key
+    went unanswered before this call (a purchase an earlier /buypack left
+    unconfirmed)."""
+    status, body = 0, None
+    what = f"pack {params['pack_id']}" if params.get("pack_id") else f"purchase {str(params.get('nonce'))[:8]}"
+    for attempt in range(_PC_OPEN_SENDS):
+        if attempt:
+            await asyncio.sleep(_PC_OPEN_REPLAY_PAUSE_S[attempt - 1])
         status, body = await _pc_api("POST", "/internal/pc/packs/open", params=params, timeout=_PC_OPEN_TIMEOUT_S)
-        if status != 0:
-            break
-    return status, body
+        verdict = _pc_open_verdict(status, body, replayed)
+        if verdict != "unconfirmed":
+            return verdict, status, body
+        replayed = True
+        print(f"[PC-OPEN] {what}: unconfirmed (HTTP {status}) after send {attempt + 1} of {_PC_OPEN_SENDS}")
+    return "unconfirmed", status, body
 
 
 def _pc_open_refusal(ctx, status, body, bought=False):
-    """The one line for an open the api refused, read by status and token. A
-    held pack the api could not open stays the player's, unopened; a
+    """The one line for an open that did not open, read by status and token.
+    A held pack the api could not open stays the player's, unopened; a
     purchase the api refused was not charged (its rejections all come
-    before the debit)."""
+    before the debit), and any other answer to a purchase leaves it
+    unconfirmed, which its line says (M1)."""
     d = _pc_detail(body)
     err = d.get("error")
     price = d.get("price")
@@ -8847,19 +8903,18 @@ def _pc_open_refusal(ctx, status, body, bought=False):
                 "Today's limit of bought packs is reached - it resets at 00:00 UTC.")
     if status == 409 and d.get("status") == "rejected":
         return "No cards could be dealt right now, so the pack was not bought and nothing was charged."
-    if status == 404 and err == "not_linked":
+    if (status == 404 and err == "not_linked") or (status == 410 and err == "Account deleted"):
         return _pc_not_linked(ctx, ctx.author)
-    if status == 403 and err == "banned":
+    if status == 403 and err in ("banned", "service_account_forbidden"):
         return "Player Cards are closed to this account."
+    if bought:
+        return _PC_BUY_UNCONFIRMED
     if status == 409 and err == "in_progress":
         return "That pack is being opened right now - `/pack` shows it in a moment."
     if status == 409 and d.get("status") == "unopened":
         return "No cards could be dealt right now - the pack stays yours, unopened; `/daily` tries again."
     if status == 503:
         return "Card pictures cannot be drawn on the server right now, so nothing was opened - try again later."
-    if status == 0 and bought:
-        return ("The card service did not answer - if the pack was bought, `/pack` shows it;"
-                " look there before buying again.")
     if status == 0:
         return ("The card service did not answer - `/daily` again opens today's pack,"
                 " or `/pack` shows it if it opened.")
@@ -8867,17 +8922,107 @@ def _pc_open_refusal(ctx, status, body, bought=False):
 
 
 async def _pc_open_and_show(ctx, key, head):
-    """Open one pack for the caller - `key` is {"pack_id": ...} for a held
-    pack, or {"nonce": ..., "pay": ...} for a purchase - and show what it
-    dealt under `head` (a callable is handed the api's answer: a purchase
-    names the price the api charged), or say in one line why it did not
-    open."""
+    """Open one held pack for the caller - `key` is {"pack_id": ...} - and
+    show what it dealt under `head`, or say in one line why it did not open.
+    A purchase goes through _pc_buy_and_show, which keeps its nonce until
+    the api settles it."""
     me, locale = str(ctx.author.id), _pc_locale_of(ctx)
-    status, body = await _pc_open_pack_api({"discord_id": me, "locale": locale, **key})
-    if status == 200 and isinstance(body, dict) and body.get("pack_id"):
-        await _pc_reveal_opened(ctx, str(body["pack_id"]), head(body) if callable(head) else head)
+    verdict, status, body = await _pc_open_pack_api({"discord_id": me, "locale": locale, **key})
+    if verdict == "opened":
+        await _pc_reveal_opened(ctx, str(body["pack_id"]), head)
         return
-    await ctx.send(_pc_open_refusal(ctx, status, body, bought="nonce" in key))
+    await ctx.send(_pc_open_refusal(ctx, status, body))
+
+
+def _pc_buy_pending():
+    """The unsettled purchases (_PC_BUY_PENDING_FILE) as {discord id: {"nonce",
+    "pay"}}: {} when there is no file yet, None when it cannot be read or
+    holds anything else - /buypack then buys nothing, since a purchase it
+    cannot see might be one it would buy a second time."""
+    try:
+        with open(_PC_BUY_PENDING_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as ex:
+        print(f"[PC-BUY] the purchase journal could not be read ({type(ex).__name__}: {ex})")
+        return None
+    if not (isinstance(data, dict) and all(
+            isinstance(k, str) and isinstance(v, dict) and set(v) == {"nonce", "pay"}
+            and isinstance(v["nonce"], str) and v["nonce"] and v["pay"] in ("gold", "shards")
+            for k, v in data.items())):
+        print("[PC-BUY] the purchase journal holds something other than purchases")
+        return None
+    return data
+
+
+def _pc_buy_pending_write(pending):
+    """Write the purchase journal whole - a temporary file, fsync, os.replace
+    - and read it back: True only when the file now holds `pending` on the
+    mounted volume. A folder that is not a mount point is the container's
+    own layer, which a rebuild deletes, so a journal there would only look
+    durable: it is refused. Synchronous, so no other command runs between a
+    caller's read of the journal and this write."""
+    folder = os.path.dirname(_PC_BUY_PENDING_FILE)
+    if not os.path.ismount(folder):
+        print(f"[PC-BUY] {folder} is not a mounted volume: the purchase journal would not survive a rebuild")
+        return False
+    tmp = _PC_BUY_PENDING_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(pending, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _PC_BUY_PENDING_FILE)
+    except Exception as ex:
+        print(f"[PC-BUY] the purchase journal could not be written ({type(ex).__name__}: {ex})")
+        return False
+    if _pc_buy_pending() != pending:
+        print("[PC-BUY] the purchase journal read back different from what was written")
+        return False
+    return True
+
+
+async def _pc_buy_and_show(ctx, me, pay):
+    """/buypack's purchase (Discord fix round 2, M1). A purchase an earlier
+    /buypack left unconfirmed is completed first, with its own nonce and pay,
+    and this command buys nothing else; otherwise a fresh nonce is drawn and
+    written to the journal BEFORE the first send, and nothing is sent when
+    that write fails. The nonce leaves the journal only when the api settles
+    it - the pack (the reveal follows) or a refusal (its line follows). An
+    unconfirmed purchase stays in the journal, and the player is told it is
+    being confirmed and where to see it."""
+    pending = _pc_buy_pending()
+    if pending is None:
+        await ctx.send(_PC_BUY_PAUSED)
+        return
+    held = pending.get(me)
+    if held is not None:
+        key = {"nonce": held["nonce"], "pay": held["pay"]}
+    else:
+        key = {"nonce": secrets.token_hex(16), "pay": pay}
+        if not _pc_buy_pending_write({**pending, me: dict(key)}):
+            await ctx.send(_PC_BUY_PAUSED)
+            return
+    verdict, status, body = await _pc_open_pack_api(
+        {"discord_id": me, "locale": _pc_locale_of(ctx), **key}, replayed=held is not None)
+    if verdict == "unconfirmed":
+        print(f"[PC-BUY] purchase {key['nonce'][:8]} stays in the journal, unconfirmed (HTTP {status})")
+        await ctx.send(_PC_BUY_UNCONFIRMED)
+        return
+    now = _pc_buy_pending()
+    if now is not None and (now.get(me) or {}).get("nonce") == key["nonce"]:
+        del now[me]
+        if not _pc_buy_pending_write(now):
+            print(f"[PC-BUY] purchase {key['nonce'][:8]} is settled but still in the journal:"
+                  " the next /buypack reads its outcome again")
+    if verdict == "opened":
+        head = f"**Pack bought for {body.get('price')} {body.get('pay') or key['pay']}**"
+        await _pc_reveal_opened(ctx, str(body["pack_id"]),
+                                ("Your earlier purchase went through - " + head) if held is not None else head)
+        return
+    line = _pc_open_refusal(ctx, status, body, bought=True)
+    await ctx.send(("Your earlier purchase did not go through: " + line) if held is not None else line)
 
 
 _pc_buying = set()   # Discord user ids with a /buypack in flight: a double send buys once, not twice
@@ -8889,9 +9034,10 @@ async def cmd_pc_buypack(ctx, pay: Literal["gold", "shards"] = "gold"):
     """One paid pack (Discord fix round 1, D2 - a scope addition Sid asked for
     on 2026-09-28): the mod's own purchase through /internal/pc/packs/open -
     the api's price (the mod's), its daily cap, its conditional delta debit
-    and gold ledger row - keyed on a nonce drawn here, so the one resend
-    _pc_open_pack_api makes answers the committed purchase instead of
-    buying again; then the same reveal as /daily."""
+    and gold ledger row - keyed on a nonce drawn here and kept until the api
+    settles it (round 2, M1: _pc_buy_and_show), so a purchase whose answer
+    went missing is completed with its own nonce rather than bought again;
+    then the same reveal as /daily."""
     await _maybe_defer(ctx)
     me = str(ctx.author.id)
     if pay not in ("gold", "shards"):
@@ -8900,8 +9046,7 @@ async def cmd_pc_buypack(ctx, pay: Literal["gold", "shards"] = "gold"):
         await ctx.send("One moment - your last purchase is still going through."); return
     _pc_buying.add(me)
     try:
-        await _pc_open_and_show(ctx, {"nonce": secrets.token_hex(16), "pay": pay},
-                                lambda body: f"**Pack bought for {body.get('price')} {body.get('pay') or pay}**")
+        await _pc_buy_and_show(ctx, me, pay)
     finally:
         _pc_buying.discard(me)
 

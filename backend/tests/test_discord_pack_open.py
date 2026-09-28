@@ -12,7 +12,11 @@ draws - and shows it the same way.
 
 Round 2, M1 (Codex round 1 MEDIUM 1): a purchase that committed is answered
 with its recorded outcome - the pack and its charge - whatever fails after
-the commit, on its first answer and on every replay of its key.
+the commit, on its first answer and on every replay of its key. The bot half:
+every answer that settles nothing is replayed with the same key, a bounded
+number of times, and a purchase still unconfirmed stays in the bot's journal
+until the api settles it, so the next /buypack completes it with its own
+nonce instead of buying a second pack.
 
 Server rows call the real app on the lane database (discord_collection_harness's
 Env); bot rows lift discord_bot.py's own functions (the harness's BotRig) over
@@ -24,10 +28,12 @@ collection suites:
 """
 
 import asyncio
+import json
 import os
 import re
 import secrets
 import uuid
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -44,8 +50,12 @@ PACKS = "/internal/pc/packs"
 UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it."
 
 OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_refusal", "_pc_open_and_show",
-                               "_pc_reveal_opened", "cmd_pc_buypack"}
-OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying"}
+                               "_pc_reveal_opened", "cmd_pc_buypack", "_pc_open_verdict", "_pc_buy_pending",
+                               "_pc_buy_pending_write", "_pc_buy_and_show"}
+# _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
+# the test's own folder instead of the container's /opt/bot-state
+OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
+                                   "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED"}
 
 
 def e2e(monkeypatch, tmp_path, fn, **kw):
@@ -112,9 +122,23 @@ def _fake_wait_for(clock):
     return wait_for
 
 
-def rig_over(env, stub=None):
+def bot_os(mounted):
+    """The bot's `os`, with os.path.ismount answering `mounted`: in the
+    container the journal's folder is the compose-mounted state volume, and
+    here it is a plain folder of the test's own."""
+    path = SimpleNamespace(**{k: getattr(os.path, k) for k in dir(os.path) if not k.startswith("_")})
+    path.ismount = lambda folder: mounted
+    fake = SimpleNamespace(**{k: getattr(os, k) for k in dir(os) if not k.startswith("_")})
+    fake.path = path
+    return fake
+
+
+def rig_over(env, stub=None, mounted=True):
     """The lifted bot over the real app; `stub(call)` may answer a request
-    itself (a Reply) or return None to forward it."""
+    itself (a Reply) or return None to forward it. The bot's purchase journal
+    is bot-state/pc_buy_pending.json in the test's folder - the same file for
+    every rig of one test, as the volume is for every bot process - on what
+    the bot takes for a mounted volume unless `mounted` is False."""
     base = H.asgi_handler(env)
 
     async def handler(call):
@@ -123,8 +147,11 @@ def rig_over(env, stub=None):
             reply = await base(call)
         call.reply = reply
         return reply
+    state = env.tmp / "bot-state"
+    state.mkdir(exist_ok=True)
     rig = H.BotRig(handler, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS,
-                   extra={"secrets": secrets, "Literal": Literal})
+                   extra={"secrets": secrets, "Literal": Literal, "os": bot_os(mounted),
+                          "_PC_BUY_PENDING_FILE": str(state / "pc_buy_pending.json")})
     rig.ns["asyncio"].wait_for = _fake_wait_for(rig.clock)
     rig.base = base
     return rig
@@ -755,9 +782,16 @@ REFUSALS = [
      "the pack stays yours, unopened; `/daily` tries again."),
     (409, {"error": "in_progress"}, False, "That pack is being opened right now"),
     (403, {"error": "banned"}, False, "Player Cards are closed to this account."),
+    (403, "service_account_forbidden", False, "Player Cards are closed to this account."),
     (404, {"error": "not_linked"}, False, "Not linked."),
+    (410, "Account deleted", True, "Not linked."),
     (503, {"error": "renderer_unavailable"}, False, "so nothing was opened - try again later."),
-    (0, None, True, "if the pack was bought, `/pack` shows it; look there before buying again."),
+    # Round 2, M1: every purchase answer that settles nothing reads the same:
+    # being confirmed, where to see it, and that the next /buypack completes it
+    (0, None, True, "your next `/buypack` completes this same purchase instead of buying another."),
+    (500, None, True, "your next `/buypack` completes this same purchase instead of buying another."),
+    (503, {"error": "renderer_unavailable"}, True,
+     "your next `/buypack` completes this same purchase instead of buying another."),
     (0, None, False, "`/daily` again opens today's pack, or `/pack` shows it if it opened."),
     (500, None, False, "Couldn't open the pack right now - try again in a moment."),
 ]
@@ -768,8 +802,8 @@ def test_d2_each_refusal_is_one_line_that_says_what_happened_to_the_pack(status,
     """_pc_open_refusal: the line /daily and /buypack send when the api did not
     open the pack, read by status and error token. The purchase lines are the
     ones a player acts on with money: a refused purchase says nothing was
-    charged, and an unanswered one points at /pack before buying again. No
-    request is made."""
+    charged, and one left unconfirmed says so, where to see it, and that the
+    next /buypack completes it (round 2, M1). No request is made."""
     async def never(call):
         raise AssertionError(f"no request expected: {call.method} {call.path}")
     rig = H.BotRig(never, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
@@ -958,3 +992,291 @@ def test_m1_an_earned_pack_voided_at_open_answers_410_with_its_row_when_its_face
         assert (d["error"], d["pack_id"], d["status"], d["source"]) == ("voided", pack_id, "voided", "earned"), d
         assert (await pack_row(env, pack_id))["status"] == "voided"
     e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 2, M1 (bot): one retry policy, and a nonce kept until the api settles it --------------
+#
+# Codex round 1 MEDIUM 1, the bot half: /buypack retried its nonce only on
+# status 0, answered "try again" to a 500, and the next /buypack drew a fresh
+# nonce, so a purchase that committed behind a 500 was bought twice. Now every
+# answer _pc_open_verdict calls unconfirmed is replayed with the SAME key, a
+# purchase still unconfirmed after the replays stays in the bot's journal, and
+# the next /buypack completes it with its own nonce; a fresh nonce is drawn
+# only after the api settles the last one.
+
+def journal(rig):
+    """The bot's purchase journal as it is on disk ({} when there is no file)."""
+    path = rig.ns["_PC_BUY_PENDING_FILE"]
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def lose_first_answers(holder, answers):
+    """A stub under which the first purchase nonce the api sees commits on
+    every send, and its first len(answers) answers are replaced on the way
+    back: a Reply is returned instead of the api's, None means the answer
+    never arrives (the bot's 20 s timeout). Later nonces, and later sends,
+    get the api's own answer."""
+    seen = {}
+
+    async def stub(call):
+        if call.method == "POST" and call.path == OPEN and call.params.get("nonce"):
+            nonce = call.params["nonce"]
+            n = seen[nonce] = seen.get(nonce, 0) + 1
+            if len(seen) == 1 and n <= len(answers):
+                reply = await holder["rig"].base(call)
+                lost = answers[n - 1]
+                if lost is None:
+                    reply.delay = 25.0
+                    return reply
+                return lost
+        return None
+    return stub
+
+
+def test_m1_a_purchase_answered_500_after_its_commit_is_replayed_with_the_same_nonce_and_charged_once(
+        monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+        rig = rig_over(env, lose_first_answers(holder, [H.Reply(500, json={"detail": "Internal Server Error"})]))
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 200], [c.status for c in opens]
+        assert opens[0].params == opens[1].params and rig.sleeps[:1] == [2.0], (opens, rig.sleeps)
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert await bought_packs(env, own) == 1
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None, [s.content for s in rig.sent]
+        assert f"**Pack bought for {price} gold** - bought, opened <t:" in rig.sent[0].content
+        assert journal(rig) == {}
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_purchase_left_unconfirmed_is_completed_by_the_next_buypack_and_never_bought_twice(
+        monkeypatch, tmp_path):
+    """The reviewer's scenario to its end. Every answer of the first /buypack
+    is lost after its purchase committed - a 500, a 200 without a body, then
+    no answer at all: the bot sends the same nonce three times, says the
+    purchase is being confirmed and where to see it, and keeps the nonce. The
+    player's next /buypack sends that same nonce, is answered with the
+    recorded purchase, shows it, and buys nothing else. The decisive line is
+    the first assertion: one debit and one pack after both commands."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+        rig = rig_over(env, lose_first_answers(holder, [H.Reply(500, json={"detail": "Internal Server Error"}),
+                                                       H.Reply(200, b""), None]))
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        after_first = list(rig.sent)
+        env.plan([(s, False, False) for s in subs])   # a deal for a second purchase, should one be made
+        await buypack(rig, own.discord, "gold")
+        spent, packs = (await purse(env, own))["gold_spent"], await bought_packs(env, own)
+        assert (spent, packs) == (price, 1), f"charged {spent // price} times for {packs} packs"
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 200, 0, 200], [c.status for c in opens]
+        assert len({c.params["nonce"] for c in opens}) == 1 and all(c.params["pay"] == "gold" for c in opens)
+        assert [s.content for s in after_first] == [rig.ns["_PC_BUY_UNCONFIRMED"]], [s.content for s in after_first]
+        assert "`/pack` shows the pack" in after_first[0].content
+        assert "your next `/buypack` completes this same purchase" in after_first[0].content
+        assert len(rig.sent) == 2 and rig.sent[1].file is not None, [s.content for s in rig.sent]
+        assert rig.sent[1].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert len(await ledger(env, own)) == 1 and journal(rig) == {}
+        assert any("stays in the journal, unconfirmed (HTTP 0)" in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_purchase_left_unconfirmed_outlasts_a_restart_of_the_bot(monkeypatch, tmp_path):
+    """The journal is a file on the bot's state volume: a new bot process
+    (a fresh namespace, a fresh in-flight guard) completes the purchase the
+    old one left unconfirmed, with its nonce, and charges nothing more."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+        lost = [H.Reply(502, b"<html>bad gateway</html>")] * 3
+        before = rig_over(env, lose_first_answers(holder, lost))
+        holder["rig"] = before
+        await buypack(before, own.discord, "gold")
+        nonce = calls_to(before, OPEN)[0].params["nonce"]
+        assert journal(before) == {own.discord: {"nonce": nonce, "pay": "gold"}}
+        env.plan([(s, False, False) for s in subs])
+        after = rig_over(env)
+        assert after.ns["_PC_BUY_PENDING_FILE"] == before.ns["_PC_BUY_PENDING_FILE"]
+        await buypack(after, own.discord, "shards")
+        spent, packs = (await purse(env, own))["gold_spent"], await bought_packs(env, own)
+        assert (spent, packs) == (price, 1), f"charged {spent // price} times for {packs} packs"
+        again = calls_to(after, OPEN)
+        assert [(c.params["nonce"], c.params["pay"], c.status) for c in again] == [(nonce, "gold", 200)]
+        assert (await purse(env, own))["pc_shards"] == 10000
+        assert after.sent[0].content.startswith("Your earlier purchase went through")
+        assert journal(after) == {}
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_refused_purchase_is_settled_and_the_next_buypack_draws_a_fresh_nonce(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 0)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        assert rig.sent[0].content == f"Not enough gold - a pack costs {price} gold. Nothing was charged."
+        assert journal(rig) == {} and rig.sleeps == []
+        await set_gold(env, own, 10 * price)
+        env.plan([(s, False, False) for s in subs])
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [402, 200], [c.status for c in opens]
+        assert opens[0].params["nonce"] != opens[1].params["nonce"]
+        assert (await purse(env, own))["gold_spent"] == price and journal(rig) == {}
+        assert rig.sent[1].content.startswith(f"**Pack bought for {price} gold**"), rig.sent[1].content
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_the_nonce_is_in_the_journal_before_the_purchase_is_sent(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        await set_gold(env, own, 10 * price_of(env, "gold"))
+        holder, at_send = {}, []
+
+        async def stub(call):
+            if call.method == "POST" and call.path == OPEN:
+                at_send.append((call.params["nonce"], journal(holder["rig"])))
+            return None
+        rig = rig_over(env, stub)
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        (nonce, on_disk), = at_send
+        assert on_disk == {own.discord: {"nonce": nonce, "pay": "gold"}}, on_disk
+        assert journal(rig) == {} and len(rig.sent) == 1 and rig.sent[0].file is not None
+    e2e(monkeypatch, tmp_path, body)
+
+
+@pytest.mark.parametrize("state", ["not on a mounted volume", "unreadable", "not purchases"])
+def test_m1_a_journal_that_cannot_hold_the_nonce_buys_nothing(state, monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        await set_gold(env, own, 10 * price_of(env, "gold"))
+        rig = rig_over(env, mounted=state != "not on a mounted volume")
+        path = rig.ns["_PC_BUY_PENDING_FILE"]
+        if state == "unreadable":
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{half a journal")
+        elif state == "not purchases":
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({own.discord: {"nonce": "", "pay": "gold"}}, f)
+        await buypack(rig, own.discord, "gold")
+        assert calls_to(rig, OPEN) == [], [(c.method, c.path) for c in rig.calls]
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_BUY_PAUSED"]]
+        assert (await purse(env, own))["gold_spent"] == 0 and await ledger(env, own) == []
+        why = {"not on a mounted volume": "is not a mounted volume", "unreadable": "could not be read",
+               "not purchases": "holds something other than purchases"}[state]
+        assert any(line.startswith("[PC-BUY]") and why in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_daily_open_answered_500_after_its_commit_is_replayed_with_the_same_pack_id_and_shown(
+        monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        holder = {}
+
+        async def stub(call):
+            if call.method == "POST" and call.path == OPEN and call.n == 1:
+                await holder["rig"].base(call)
+                return H.Reply(500, json={"detail": "Internal Server Error"})
+            return None
+        rig = rig_over(env, stub)
+        holder["rig"] = rig
+        await daily(rig, own.discord)
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 200], [c.status for c in opens]
+        assert opens[0].params == opens[1].params
+        assert await minted(env, opens[0].params["pack_id"]) == 5 and env._plans == []
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None
+        assert "**Today's pack** (the next one unlocks <t:" in rig.sent[0].content
+    e2e(monkeypatch, tmp_path, body)
+
+
+def _ambiguous(kind):
+    return {
+        "no answer": H.Reply(200, b"", delay=25.0),
+        "500": H.Reply(500, json={"detail": "Internal Server Error"}),
+        "502 from the edge": H.Reply(502, b"<html>bad gateway</html>"),
+        "503 renderer gate": H.Reply(503, json={"detail": {"error": "renderer_unavailable"}}),
+        "200 without a body": H.Reply(200, b""),
+        "200 without a pack": H.Reply(200, json={"status": "done"}),
+        "409 in progress": H.Reply(409, json={"detail": {"error": "in_progress", "status": "pending"}}),
+        "422": H.Reply(422, json={"detail": [{"msg": "field required"}]}),
+        "429": H.Reply(429, json={"detail": "Too many requests"}),
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", ["no answer", "500", "502 from the edge", "503 renderer gate", "200 without a body",
+                                  "200 without a pack", "409 in progress", "422", "429"])
+def test_m1_every_unconfirmed_answer_is_replayed_with_the_same_key_a_bounded_number_of_times(kind):
+    """_pc_open_pack_api, both doors' one policy: each kind of answer that
+    settles nothing is followed by a replay of the SAME key after a pause,
+    three sends in all, and the verdict stays unconfirmed. No database."""
+    async def handler(call):
+        return _ambiguous(kind)
+    rig = H.BotRig(handler, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
+    params = {"discord_id": H.discord_of(1), "locale": "en", "nonce": "n" * 32, "pay": "gold"}
+    verdict, status, _body = H.run(rig.ns["_pc_open_pack_api"](dict(params)))
+    assert verdict == "unconfirmed", (verdict, status)
+    assert [c.params for c in rig.calls] == [params] * 3 and rig.sleeps == [2.0, 5.0], (rig.calls, rig.sleeps)
+    assert sum("unconfirmed (HTTP" in line for line in rig.logs) == 3, rig.logs
+
+
+VERDICTS = [
+    (200, {"pack_id": "p", "status": "done"}, False, "opened"),
+    (200, {"pack_id": "p", "status": "done"}, True, "opened"),
+    (200, None, False, "unconfirmed"),
+    (200, "", False, "unconfirmed"),
+    (200, {"status": "done"}, False, "unconfirmed"),
+    (402, {"detail": {"error": "insufficient_gold", "status": "rejected", "price": 100}}, True, "refused"),
+    (402, {"detail": {"error": "insufficient_shards", "status": "rejected", "price": 100}}, False, "refused"),
+    (409, {"detail": {"error": "daily_cap", "status": "rejected", "cap": 5}}, True, "refused"),
+    (409, {"detail": {"error": "pool_empty", "status": "rejected"}}, True, "refused"),
+    (409, {"detail": {"error": "pool_empty", "status": "unopened"}}, False, "refused"),
+    (410, {"detail": {"error": "voided", "status": "voided"}}, False, "refused"),
+    (409, {"detail": {"error": "in_progress", "status": "pending"}}, False, "unconfirmed"),
+    (409, {"detail": {"error": "in_progress"}}, False, "unconfirmed"),
+    (404, {"detail": {"error": "not_linked"}}, False, "refused"),
+    (404, {"detail": {"error": "not_linked"}}, True, "unconfirmed"),
+    (403, {"detail": {"error": "banned"}}, False, "refused"),
+    (403, {"detail": {"error": "banned"}}, True, "unconfirmed"),
+    (403, {"detail": "service_account_forbidden"}, False, "refused"),
+    (410, {"detail": "Account deleted"}, False, "refused"),
+    (410, {"detail": "Account deleted"}, True, "unconfirmed"),
+    (404, {"detail": "Not Found"}, False, "unconfirmed"),
+    (0, None, False, "unconfirmed"),
+    (500, {"detail": "Internal Server Error"}, False, "unconfirmed"),
+    (502, "<html>bad gateway</html>", False, "unconfirmed"),
+    (503, {"detail": {"error": "renderer_unavailable"}}, False, "unconfirmed"),
+    (401, {"detail": "Invalid internal key"}, False, "unconfirmed"),
+    (422, {"detail": [{"msg": "field required"}]}, False, "unconfirmed"),
+    (429, {"detail": "Too many requests"}, False, "unconfirmed"),
+]
+
+
+@pytest.mark.parametrize("status, body, replayed, verdict", VERDICTS)
+def test_m1_each_answer_is_read_as_opened_refused_or_unconfirmed(status, body, replayed, verdict):
+    """_pc_open_verdict: only a 200 carrying the pack opens; a refusal with a
+    known reason settles the key (a caller's refusal only when no earlier
+    send of the key went unanswered); everything else leaves it
+    unconfirmed. No request is made."""
+    async def never(call):
+        raise AssertionError(f"no request expected: {call.method} {call.path}")
+    rig = H.BotRig(never, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
+    assert rig.ns["_pc_open_verdict"](status, body, replayed) == verdict
+    assert rig.calls == []
