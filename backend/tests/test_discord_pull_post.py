@@ -17,6 +17,10 @@ round changes three things, each pinned here:
     embed.set_image(url="attachment://card.png")), never a loose attachment;
     the line stays the message text.
 
+Round 2, L1 (Codex round 1 LOW 1): a face route answering 404 - the print was
+discarded between the handout and the GET - posts NOTHING, acks NOTHING and
+releases the lease (v22 section 6 (2)); the groups behind it still post.
+
 Stubbed rows: the drain's requests are answered by a stub on the harness
 BotRig's clock; no database is read.
 """
@@ -257,3 +261,76 @@ def test_d3_the_byte_reader_names_every_200_it_refuses(make, tail):
     assert (st, data) == (200, None)
     want = "API GET " + FACE_PATH + "x/en " + tail.format(n=len(face))
     assert want in rig.logs, rig.logs
+
+
+# -- round 2, L1: a face 404 posts nothing ------------------------------------------------------
+#
+# Codex round 1 LOW 1: a face route answering 404 posted the line text-only
+# and acked it. Look design v22 section 6 (2): a 404 (the print was discarded
+# between the pending answer and the GET) sends NOTHING, acks NOTHING and
+# releases the lease - the pending query excludes discarded prints, so the
+# event is not offered again - and any other failure stops the batch.
+
+GONE_PRINT = "33333333-3333-3333-3333-333333333333"
+
+
+def released(rig):
+    """The lease ids the drain gave back with DELETE /internal/pc/lease/<id>."""
+    return [c.path.rsplit("/", 1)[1] for c in rig.calls
+            if c.method == "DELETE" and c.path.startswith("/internal/pc/lease/")]
+
+
+def test_l1_a_face_404_posts_nothing_acks_nothing_and_releases_the_lease():
+    drain = Drain([H.Reply(404, json={"detail": "Not Found"})])
+    rig = rig_for(drain)
+    tick(rig)
+    assert rig.sent == [], [s.content for s in rig.sent]
+    assert [c.path for c in rig.calls if c.path == "/internal/pc/events/ack"] == [] and drain.acked == []
+    assert released(rig) == ["lease-1"], [(c.method, c.path) for c in rig.calls]
+    assert ("[PC-EVENTS] face for [7] answered HTTP 404 (the print is gone) - nothing posted, nothing acked,"
+            " lease released") in rig.logs, rig.logs
+    assert rig.ns["_pc_events_sent"] == {} and rig.ns["_pc_face_tries"] == {}
+
+
+class TwoPrints(Drain):
+    """Two pending events of two prints, each with its own lease: the face
+    route answers `gone` for the first print and a picture for the second."""
+
+    def __init__(self, gone, kept):
+        super().__init__([kept])
+        self.gone, self.leases = gone, 0
+
+    async def __call__(self, call):
+        p, m = call.path, call.method
+        if m == "GET" and p == "/internal/pc/events/pending":
+            return H.Reply(200, json={"events": [
+                {"id": 7, "kind": "legendary", "puller_name": "First puller", "subject_name": "First subject",
+                 "subject_ref": self.subject, "face_ready": True, "dup_at_pull": 0,
+                 "print": {"print_id": GONE_PRINT, "rarity": "legendary", "pool_rank": 1}},
+                {"id": 8, "kind": "epic", "puller_name": "Second puller", "subject_name": "Second subject",
+                 "subject_ref": self.subject, "face_ready": True, "dup_at_pull": 0,
+                 "print": {"print_id": self.print_id, "rarity": "epic", "pool_rank": 4}}]})
+        if m == "POST" and p == "/internal/pc/lease":
+            self.leases += 1
+            until = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+            return H.Reply(200, json={"lease_id": f"lease-{self.leases}", "until": until})
+        if m == "GET" and p.startswith(FACE_PATH + GONE_PRINT):
+            return self.gone
+        return await super().__call__(call)
+
+
+def test_l1_a_face_404_skips_only_its_own_group_and_the_groups_behind_it_still_post():
+    face = png()
+    drain = TwoPrints(H.Reply(404, json={"detail": "Not Found"}), good_face(face))
+    rig = rig_for(drain)
+    tick(rig)
+    assert len(rig.sent) == 1, [s.content for s in rig.sent]
+    assert rig.sent[0].content.startswith("**Second puller** pulled a ")
+    assert rig.sent[0].file is not None and rig.sent[0].file.data == face
+    assert drain.acked == [{"ids": "8", "leases": "lease-2"}]
+    # the 404's own release, before the next group is leased; then the post's (_pc_send_face)
+    assert released(rig) == ["lease-1", "lease-2"], [(c.method, c.path) for c in rig.calls]
+    gave_back = next(i for i, c in enumerate(rig.calls) if c.method == "DELETE" and c.path.endswith("/lease-1"))
+    leased = [i for i, c in enumerate(rig.calls) if c.method == "POST" and c.path == "/internal/pc/lease"]
+    assert len(leased) == 2 and gave_back < leased[1]
+    assert any(line.startswith("[PC-EVENTS] face for [7] answered HTTP 404") for line in rig.logs), rig.logs

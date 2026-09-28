@@ -9812,7 +9812,7 @@ async def poll_pc_events():
                 # handout; a busy subject is leased again).
                 first = by_id.get(ids[0], {})
                 p = first.get("print") or {}
-                face, lease, again, why = None, (None, None), False, None
+                face, lease, again, why, gone = None, (None, None), False, None, False
                 if first.get("subject_ref"):
                     lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)
                     again = bool(lease[2])
@@ -9830,12 +9830,24 @@ async def poll_pc_events():
                     if st != 200:
                         face = None
                         again = st == 0 or st == 409 or st >= 500
+                        gone = st == 404
                         why = f"the face route answered HTTP {st}"
                     elif face is None:
                         # A 200 whose body the reader refused (it printed why):
                         # a transport fault, not "this print has no picture" -
                         # retried like a 5xx, never posted text-only at once (D3).
                         again, why = True, "the face route answered HTTP 200 without a usable body"
+                # A 404 is the print discarded between the handout and the GET
+                # (look design v22 section 6 (2)): post NOTHING, ack NOTHING and
+                # release the lease. The pending query leaves discarded prints
+                # out, so the group is not handed out again; the groups behind
+                # it are still posted this tick (Discord fix round 2, L1).
+                if gone:
+                    _pc_face_tries.pop(ids[0], None)
+                    await _pc_lease_release(lease[0])
+                    print(f"[PC-EVENTS] face for {ids} answered HTTP 404 (the print is gone) - nothing posted,"
+                          " nothing acked, lease released")
+                    continue
                 # "Busy for two seconds" is not "has no picture". A transient
                 # refusal leaves the group QUEUED and unacked so the next tick
                 # can post it properly — but only so many times: an api that
