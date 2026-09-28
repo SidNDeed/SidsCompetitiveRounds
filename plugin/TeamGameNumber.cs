@@ -1899,6 +1899,22 @@ namespace CompetitiveRounds
             // (ReadsPrefixAnchor).
             public bool ReadsPrefix, ReadsPrefixAnchor;
             public string FirstSession = "";
+            // Round 10, M1 (main.py, _team_room_handed_out and
+            // _team_first_game_bound_refusal): the queue poll's answer is the
+            // only thing that hands a 2v2 room to a client (HandOut), and the
+            // poll records it under the series row's lock before the answer
+            // leaves. Of a hand-out to the series' reporter's account before
+            // the issue or the void, the first on a verified session binds
+            // physical game 1 to that session (`Bound`), and one on no
+            // verified session, or on another session than the bound one,
+            // voids physical game 1 (HandoutVoids; false: the void is not
+            // written). HandoutBinds: the issue goes only to an ask on the
+            // bound session. Both false is round 9's issuance, whose issue
+            // kept the ask's own session (`FirstSession`); the binding is
+            // recorded while either is true. `GrantedTo`: the session the
+            // issue answered.
+            public bool HandoutVoids = true, HandoutBinds = true;
+            public string Bound = "", GrantedTo = "";
             private readonly Dictionary<string, HashSet<string>> sessions =
                 new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             private readonly Dictionary<string, TokenRec> recs = new Dictionary<string, TokenRec>(StringComparer.Ordinal);
@@ -1947,7 +1963,10 @@ namespace CompetitiveRounds
             // while another session of the requester's `account` was live after
             // the series was created (ReadsOthers) and while anything is on the
             // series' live-points record (ReadsAnyPost); the session it went to
-            // is kept.
+            // is kept. Round 10, M1: refused once physical game 1 was voided
+            // (by a hand-out as by a report), and (HandoutBinds) unless the
+            // ask's session is the one the room's first hand-out to the
+            // account bound.
             public bool GrantFirst(string room, bool reporter, bool born, string account, string session,
                                    out string nonce, out string reason)
             {
@@ -1959,6 +1978,7 @@ namespace CompetitiveRounds
                 else if (Recorded > 0) reason = "a game of the series is recorded";
                 else if (Relocked) reason = "the series was relocked";
                 else if (room != Stored) reason = "the requester's room is not the series' stored room";
+                else if (Voided) reason = "physical game 1 of this series was voided";
                 else if (Granted) reason = "physical game 1 was already issued for this series";
                 else if (ReadsSession && !born) reason = "the requester's session was not issued before the series was created";
                 else if (ReadsOthers && OtherSession(account, session))
@@ -1966,12 +1986,37 @@ namespace CompetitiveRounds
                 else if (OtherRoom()) reason = "the series has a game on record in another room";
                 else if (ReadsAnyPost && AnyPost) reason = "a live-points post is on the series' record";
                 else if (!ReadsAnyPost && AnyTwo) reason = "a pair of two points or more is on the series' record";
+                else if (HandoutBinds && Bound.Length == 0)
+                    reason = "the series' room was never handed to its reporter's account by the queue poll";
+                else if (HandoutBinds && session != Bound)
+                    reason = "the requester's session is not the one the series' room was first handed to";
                 if (reason != null) return false;
                 Granted = true;
                 FirstNonce = DrawNonce();
-                FirstSession = session;
+                // Round 10: the issue writes no session; the reports are read
+                // against the bound one (main.py: first_game_session, written
+                // by the hand-out), or, with no binding recorded, the ask's own
+                // (round 9's issue wrote it).
+                FirstSession = Bound.Length != 0 ? Bound : session;
+                GrantedTo = session;
                 nonce = FirstNonce;
                 return true;
+            }
+
+            // Round 10, M1: main.py's _team_room_handed_out. The queue poll
+            // hands the series' room to a process (`reporter`: of the series'
+            // reporter's account; `session`: its verified session, "" none).
+            // Nothing is recorded for another account, after the issue or
+            // after the void. Returns what it recorded: "bound", "void" or "".
+            public string HandOut(bool reporter, string session)
+            {
+                if (!(HandoutVoids || HandoutBinds) || !reporter || Granted || Voided) return "";
+                bool verified = !string.IsNullOrEmpty(session);
+                if (verified && Bound.Length == 0) { Bound = session; return "bound"; }
+                if (verified && session == Bound) return "";
+                if (!HandoutVoids) return "";
+                Voided = true;
+                return "void";
             }
 
             // Round 8, F31: main.py's submit_team_match. A match report is
@@ -2120,14 +2165,27 @@ namespace CompetitiveRounds
             // process holds ("" = none was ever issued to it); a restart is a
             // new process on a new session, which the server then holds.
             public string Account = NewHarnessName("account"), Session = NewHarnessName("session");
+            // Round 10, M1: this seat's process was handed the room (`Handed`).
+            // A client joins a 2v2 room only from the queue poll's answer
+            // (ApiClient.cs, ParseTeamQueuePoll), so a process's first entry
+            // follows the poll's hand-out to it (TokenServer.HandOut), and a
+            // restarted or twin process is handed the room again. `OffPoll`:
+            // this process enters without one (no client path does: the
+            // residual's shape, TwinOffPoll, and a room no poll handed out,
+            // FreshOffPoll). `Handout`: what its hand-out recorded.
+            public bool Handed, OffPoll;
+            public string Handout = "";
 
             public void Read(string room, string v) { View = v; T.ObserveRoomToken(room, v); }
 
             // Round 7, F29: Photon's OnJoinedRoom, then this seat's first read
             // of the room's value `v`. Round 8, F31: which seat created the
-            // room names nothing.
+            // room names nothing. Round 10, M1: a process's first entry is
+            // preceded by the poll's hand-out of the room to it.
             public void Enter(string room, string v)
             {
+                if (!Handed && !OffPoll && Srv != null) Handout = Srv.HandOut(Reporter, Session);
+                Handed = true;
                 T.NoteRoomJoined(room);
                 Read(room, v);
             }
@@ -2152,6 +2210,9 @@ namespace CompetitiveRounds
                 Born = false;
                 Session = NewHarnessName("session");
                 if (Srv != null) Srv.Issue(Account, Session);
+                Handed = false;
+                OffPoll = false;
+                Handout = "";
             }
 
             // Round 9, M1: this seat's account plays on in another process
@@ -2166,6 +2227,9 @@ namespace CompetitiveRounds
                 series = "";
                 Born = true;
                 Session = session ?? "";
+                Handed = false;
+                OffPoll = false;
+                Handout = "";
             }
 
             // Round 7, F29: the game itself starts a game on this seat
@@ -3151,13 +3215,38 @@ namespace CompetitiveRounds
         // physical game 1, and with A's results never landing and B's own
         // landing a leave in game 4 settles wrongly (the residual, stated with
         // its integrity class in the notes, section 20).
+        //
+        // Round 10, finding M1: the server's hand-out rule (`m1`'s
+        // M1HandoutVoids and M1HandoutBinds: TokenServer.HandoutVoids and
+        // HandoutBinds; R9All is round 9's server). Every process enters the
+        // room after the queue poll hands it the room (TokenSeat.Enter); the
+        // poll binds physical game 1 to the first process of the reporter's
+        // account it hands the room to on a verified session, and voids it
+        // at a hand-out to that account on no session or on another one.
+        // TwinUnseen: A's own hand-out, on no session, voids physical game 1
+        // before any game of the series is played, so B is issued nothing
+        // and nothing settles. TwinOffPoll: TwinUnseen with A entering
+        // without a hand-out (no client path does: a 2v2 room is armed only
+        // from the poll's answer, ApiClient.cs's ParseTeamQueuePoll), so B
+        // is the first process the poll hands the room to, is bound, is
+        // issued game 3 as physical game 1, and a leave in game 4 settles
+        // wrongly where A's results never land and B's own do: the premise
+        // the rule rests on, stated with its residual in the notes, section
+        // 21. `issued` (the overload): physical game 1 was issued; `toLater`:
+        // to a process of the reporter's account other than its first.
 
-        private const int M1Others = 1, M1AnyPost = 2, M1Issued = 4, M1All = 7;
-        private const int TwinNone = 0, TwinLive = 1, TwinPosted = 2, TwinUnseen = 3;
+        private const int M1Others = 1, M1AnyPost = 2, M1Issued = 4, M1HandoutVoids = 8, M1HandoutBinds = 16;
+        private const int R9All = M1Others | M1AnyPost | M1Issued, M1Handout = M1HandoutVoids | M1HandoutBinds;
+        private const int M1All = R9All | M1Handout;
+        private const int TwinNone = 0, TwinLive = 1, TwinPosted = 2, TwinUnseen = 3, TwinOffPoll = 4;
 
         private sealed class F31Tally
         {
             public int Timelines, Settled, Wrong, Carrying, Named;
+            // Round 10, M1: timelines in which physical game 1 was issued, and
+            // of them those issued to a process of the reporter's account
+            // other than its first.
+            public int Issued, IssuedToLater;
         }
 
         private static bool SimulateF31(int reporter, bool g1Issued, bool restartAll, bool land, int dcIn,
@@ -3165,11 +3254,24 @@ namespace CompetitiveRounds
                                         bool readsSession, int m1, int twin,
                                         out bool wrong, out int carrying, out int ordinals)
         {
+            bool issued, toLater;
+            return SimulateF31(reporter, g1Issued, restartAll, land, dcIn, keptBoot, readsAnchor, ledgerLost, ownLands,
+                               readsSession, m1, twin, out wrong, out carrying, out ordinals, out issued, out toLater);
+        }
+
+        private static bool SimulateF31(int reporter, bool g1Issued, bool restartAll, bool land, int dcIn,
+                                        bool keptBoot, bool readsAnchor, bool ledgerLost, bool ownLands,
+                                        bool readsSession, int m1, int twin,
+                                        out bool wrong, out int carrying, out int ordinals,
+                                        out bool issued, out bool toLater)
+        {
             const string S = "series-f31", R = "room-f31";
             var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true,
                                         ReadsAnchor = readsAnchor, ReadsSession = readsSession,
                                         ReadsOthers = (m1 & M1Others) != 0, ReadsAnyPost = (m1 & M1AnyPost) != 0,
-                                        ReadsIssued = (m1 & M1Issued) != 0, Stored = R };
+                                        ReadsIssued = (m1 & M1Issued) != 0,
+                                        HandoutVoids = (m1 & M1HandoutVoids) != 0,
+                                        HandoutBinds = (m1 & M1HandoutBinds) != 0, Stored = R };
             var h = new TokenSeat { Team = 0, Srv = srv };
             var r = new TokenSeat { Team = 0, Srv = srv };
             var c = new TokenSeat { Team = 1, Srv = srv };
@@ -3179,8 +3281,11 @@ namespace CompetitiveRounds
             // Round 9, M1: every process there when the series was created
             // holds a session the server keeps, and so does B (`twin`, which
             // hands M's seat to B with the ledger and outbox left behind).
+            // Round 10, M1: with TwinOffPoll, A enters without a hand-out.
             if (twin != TwinNone) ledgerLost = true;
-            if (twin == TwinPosted || twin == TwinUnseen) m.Session = "";
+            if (twin == TwinPosted || twin == TwinUnseen || twin == TwinOffPoll) m.Session = "";
+            if (twin == TwinOffPoll) m.OffPoll = true;
+            string firstSession = m.Session;
             string twinSession = twin != TwinNone ? NewHarnessName("session") : "";
             foreach (var x in all) srv.Issue(x.Account, x.Session);
             srv.Issue(m.Account, twinSession);
@@ -3247,6 +3352,8 @@ namespace CompetitiveRounds
             bool fromAnother;
             bool settled = srv.Settles(r.Token(S, R), dcIn, r.Reporter, r.Session, out fromAnother);
             wrong = settled && (srv.Recorded + 1 != dcIn || fromAnother);
+            issued = srv.Granted;
+            toLater = srv.Granted && srv.GrantedTo != firstSession;
             return settled;
         }
 
@@ -3263,13 +3370,16 @@ namespace CompetitiveRounds
             for (int dc = 3; dc <= 4; dc++)
             for (int lost = 0; lost < 3; lost++)
             {
-                bool wrong;
+                bool wrong, issued, toLater;
                 int carrying, ordinals;
                 bool settled = SimulateF31(rep, g1 != 0, ra != 0, land != 0, dc, keptBoot, readsAnchor, lost != 0,
-                                           lost == 1, readsSession, m1, twin, out wrong, out carrying, out ordinals);
+                                           lost == 1, readsSession, m1, twin, out wrong, out carrying, out ordinals,
+                                           out issued, out toLater);
                 tally.Timelines++;
                 if (settled) tally.Settled++;
                 if (wrong) tally.Wrong++;
+                if (issued) tally.Issued++;
+                if (toLater) tally.IssuedToLater++;
                 tally.Carrying += carrying;
                 tally.Named += ordinals;
             }
@@ -3360,6 +3470,73 @@ namespace CompetitiveRounds
                 }
                 foreach (var x in all) x.Fetch(S, srv.Recorded, false, srv.AnyTwo);
             }
+            carrying = 0;
+            foreach (var x in all) if (x.Token(S, R).Length != 0) carrying++;
+            return srv.Settles(r.Token(S, R), 2, r.Reporter, r.Session, out fromAnother) && srv.Recorded == 1
+                   && !srv.Voided;
+        }
+
+        // Round 10: how the processes of SimulateF31Entry's fresh room came to
+        // be in it.
+        private const int EntryPoll = 0, EntryRestarted = 1, EntryOffPoll = 2;
+
+        // Round 10, finding M1: the fresh room of SimulateF31Fresh (the same
+        // seats and reporter, the server answering throughout; game 1 asked
+        // for, crossed and reported; game 2 crossed, a team-2 player leaves
+        // and R reports it), with the server's rules in `m1` and round 8's
+        // session rule in `readsSession`. EntryPoll: every process entered
+        // after the poll handed it the room, the control: the reporter's
+        // process is bound, is issued physical game 1, and game 2's leave
+        // settles. EntryRestarted: the reporter's process is handed the room
+        // and dies before game 1, and its restart, a new process on its own
+        // session, is handed the room and asks at game 1 (the required
+        // control's restarted process). EntryOffPoll: no process was handed
+        // the room (a room that reached its players by no hand-out, as a
+        // continuation series' room does). Returns whether game 2's leave
+        // settles, from game 2's posts; `issued`: physical game 1 was issued.
+        private static bool SimulateF31Entry(int reporter, int entry, int m1, bool readsSession,
+                                             out bool issued, out bool fromAnother, out int carrying)
+        {
+            const string S = "series-f31e", R = "room-f31e";
+            var srv = new TokenServer { ReadsTokens = true, ReadsOrdinals = true, ReadsSitting = true, ReadsAnchor = true,
+                                        ReadsSession = readsSession,
+                                        ReadsOthers = (m1 & M1Others) != 0, ReadsAnyPost = (m1 & M1AnyPost) != 0,
+                                        ReadsIssued = (m1 & M1Issued) != 0,
+                                        HandoutVoids = (m1 & M1HandoutVoids) != 0,
+                                        HandoutBinds = (m1 & M1HandoutBinds) != 0, Stored = R };
+            var h = new TokenSeat { Team = 0, Srv = srv };
+            var r = new TokenSeat { Team = 0, Srv = srv };
+            var c = new TokenSeat { Team = 1, Srv = srv };
+            var all = new[] { h, r, c };
+            TokenSeat m = all[reporter];
+            m.Reporter = true;
+            foreach (var x in all) srv.Issue(x.Account, x.Session);
+            if (entry == EntryOffPoll) foreach (var x in all) x.OffPoll = true;
+            string value = "";
+            foreach (var x in all) x.Enter(R, value);
+            if (entry == EntryRestarted)
+            {
+                m.Restart();
+                m.Enter(R, value);
+            }
+            foreach (var x in all) x.Fetch(S, 0, false, srv.AnyTwo);
+            for (int g = 1; g <= 2; g++)
+            {
+                Rematch(R, all);
+                value = HostStart(h, S, R, value, true);
+                foreach (var x in all) if (x != h) SeatStart(x, S, R);
+                value = ReporterPublish(m, value, true);
+                foreach (var x in all) { x.Read(R, value); x.Tick(R, TwoEach); x.Post(srv, S, R, true, g); }
+                if (g == 2) break;
+                foreach (var x in all)
+                {
+                    x.Tick(R, Later);
+                    string rep = x.Over(R);
+                    if (rep != null) srv.Land(rep, x.Session);
+                }
+                foreach (var x in all) x.Fetch(S, srv.Recorded, false, srv.AnyTwo);
+            }
+            issued = srv.Granted;
             carrying = 0;
             foreach (var x in all) if (x.Token(S, R).Length != 0) carrying++;
             return srv.Settles(r.Token(S, R), 2, r.Reporter, r.Session, out fromAnother) && srv.Recorded == 1
@@ -3760,13 +3937,20 @@ namespace CompetitiveRounds
             // Round 8's session-rule controls run without the other-session
             // rule, which alone also closes a restarted reporter
             // (M1-OTHERS-ALONE: the first process's session stays live on the
-            // server).
+            // server). Round 10, finding M1: every server below applies the
+            // hand-out rule as well (M1All); the round-8 and round-9 controls
+            // that remove a rule remove it from round 9's server (R9All, the
+            // hand-out rule absent), and the hand-out rule alone closes the
+            // reporter playing on from a new process
+            // (F31-LEDGER-LOST-HANDOUT-ALONE: its hand-out voids physical game
+            // 1, or comes after the issue and records nothing).
             // SimulateF31(reporter, g1Issued, restartAll, land, dcIn,
             // keptBoot, readsAnchor, ledgerLost, ownLands, readsSession, m1,
             // twin, ...).
-            const int NoOthers = M1All & ~M1Others, NoAnyPost = M1All & ~M1AnyPost;
+            const int NoOthers = R9All & ~M1Others, NoAnyPost = R9All & ~M1AnyPost;
+            const int HandoutNoOthers = M1All & ~M1Others;
             int f31Named = 0, f31Client = 0, f31Kept = 0, f31Server = 0, f31Lost = 0, f31Unlanded = 0;
-            int f31UnlandedOpen = 0, f31Void = 0, f31VoidOpen = 0, f31OthersAlone = 0;
+            int f31UnlandedOpen = 0, f31Void = 0, f31VoidOpen = 0, f31OthersAlone = 0, f31HandoutAlone = 0;
             for (int rep = 0; rep < 3; rep++)
             for (int g1 = 0; g1 < 2; g1++)
             for (int ra = 0; ra < 2; ra++)
@@ -3797,9 +3981,12 @@ namespace CompetitiveRounds
                 st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false, NoOthers, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (w31) f31UnlandedOpen++;
-                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false, M1All, TwinNone,
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false, R9All, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (st31 || carry31 != 0 || ord31 != 0) f31OthersAlone++;
+                st31 = SimulateF31(rep, g1 != 0, ra != 0, false, 4, false, true, true, true, false, HandoutNoOthers,
+                                   TwinNone, out w31, out carry31, out ord31);
+                if (st31 || carry31 != 0 || ord31 != 0) f31HandoutAlone++;
                 st31 = SimulateF31(rep, g1 != 0, ra != 0, true, 4, false, true, true, false, false, NoOthers, TwinNone,
                                    out w31, out carry31, out ord31);
                 if (st31) f31Void++;
@@ -3831,6 +4018,12 @@ namespace CompetitiveRounds
             if (f31OthersAlone != 0)
             { pass = false; detail += " M1-OTHERS-ALONE:" + f31OthersAlone + "-of-12-named-a-game-carried-a-token-or-settled"; }
             checks++;
+            if (f31HandoutAlone != 0)
+            {
+                pass = false;
+                detail += " F31-LEDGER-LOST-HANDOUT-ALONE:" + f31HandoutAlone + "-of-12-named-a-game-carried-a-token-or-settled";
+            }
+            checks++;
             if (f31Void != 0) { pass = false; detail += " F31-VOID-ALONE:" + f31Void + "-of-12-settled"; }
             checks++;
             if (f31VoidOpen == 0)
@@ -3857,12 +4050,34 @@ namespace CompetitiveRounds
             // server; with round 8's issuance (none of round 9's rules), or
             // without the one rule that sees A, B is issued game 3 as physical
             // game 1 and a leave in game 4 settles wrongly, or the scenario
-            // proves nothing. TwinUnseen, A leaving nothing the server can
-            // tell from B's own, is the residual: it settles, wrongly, exactly
-            // where A's results never land and B's own do (12 of 48), and
-            // nowhere else.
+            // proves nothing. Round 10, finding M1: TwinUnseen, A leaving
+            // nothing round 9's rules can tell from B's own, was round 9's
+            // residual (12 of 48 settled, wrongly, exactly where A's results
+            // never land and B's own do). On round 10's server A's own
+            // hand-out, on no session, voids physical game 1 before any game
+            // is played, and nothing is named, carried or settled
+            // (M1-TWIN-UNSEEN). Round 9's issuance restored (R9All, the
+            // hand-out rule absent) settles those 12 wrongly again and nothing
+            // else (M1-TWIN-UNSEEN-ROUND-9-ISSUANCE, the negative control);
+            // with the hand-out's void unread B's own hand-out binds B, B is
+            // issued, and a leave settles wrongly again
+            // (M1-TWIN-UNSEEN-HANDOUT-VOID-UNREAD). The hand-out rule alone,
+            // round 9's three rules absent, names, carries and settles nothing
+            // in any of the three twin shapes (M1-TWIN-HANDOUT-ALONE).
+            // TwinOffPoll, A entering without a hand-out (no client path does),
+            // is the premise the rule rests on: it settles wrongly exactly
+            // where round 9's residual did, 12 of 48, and nowhere else
+            // (M1-OFF-POLL-PREMISE). Round 9's live and posted checks keep
+            // round 9's server (R9All), so that each of its rules is still
+            // shown alone: on round 10's the hand-out rule answers for both
+            // shapes as well, and a rule it masks would be tested by nothing.
+            // Round 10's own server is checked in both shapes beside them
+            // (M1-TWIN-ROUND-10, M1-twin-sweep-round-10).
             int m1Live = 0, m1LiveR8 = 0, m1LiveNoOthers = 0, m1Posted = 0, m1PostedR8 = 0, m1PostedNoAny = 0;
-            int m1Unseen = 0, m1UnseenWrong = 0, m1UnseenOutside = 0;
+            int m1LiveR10 = 0, m1PostedR10 = 0;
+            int m1Unseen = 0, m1UnseenSettled = 0, m1UnseenWrong = 0;
+            int m1UnseenR9 = 0, m1UnseenR9Wrong = 0, m1UnseenR9Outside = 0, m1UnseenNoVoid = 0;
+            int m1HandoutAlone = 0, m1OffPoll = 0, m1OffPollWrong = 0, m1OffPollOutside = 0;
             for (int rep = 0; rep < 3; rep++)
             for (int g1 = 0; g1 < 2; g1++)
             for (int ra = 0; ra < 2; ra++)
@@ -3871,18 +4086,24 @@ namespace CompetitiveRounds
                 bool landsM1 = lm < 2, ownM1 = (lm & 1) != 0;
                 bool wM1, sM1;
                 int carryM1, ordM1;
-                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinLive,
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, R9All, TwinLive,
                                   out wM1, out carryM1, out ordM1);
                 if (sM1 || carryM1 != 0 || ordM1 != 0) m1Live++;
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinLive,
+                                  out wM1, out carryM1, out ordM1);
+                if (sM1 || carryM1 != 0 || ordM1 != 0) m1LiveR10++;
                 SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, 0, TwinLive,
                             out wM1, out carryM1, out ordM1);
                 if (wM1) m1LiveR8++;
                 SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, NoOthers, TwinLive,
                             out wM1, out carryM1, out ordM1);
                 if (wM1) m1LiveNoOthers++;
-                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinPosted,
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, R9All, TwinPosted,
                                   out wM1, out carryM1, out ordM1);
                 if (sM1 || carryM1 != 0 || ordM1 != 0) m1Posted++;
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinPosted,
+                                  out wM1, out carryM1, out ordM1);
+                if (sM1 || carryM1 != 0 || ordM1 != 0) m1PostedR10++;
                 SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, 0, TwinPosted,
                             out wM1, out carryM1, out ordM1);
                 if (wM1) m1PostedR8++;
@@ -3891,9 +4112,28 @@ namespace CompetitiveRounds
                 if (wM1) m1PostedNoAny++;
                 sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinUnseen,
                                   out wM1, out carryM1, out ordM1);
-                if (sM1) m1Unseen++;
+                if (sM1 || carryM1 != 0 || ordM1 != 0) m1Unseen++;
+                if (sM1) m1UnseenSettled++;
                 if (wM1) m1UnseenWrong++;
-                if (sM1 && (landsM1 || !ownM1)) m1UnseenOutside++;
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, R9All, TwinUnseen,
+                                  out wM1, out carryM1, out ordM1);
+                if (sM1) m1UnseenR9++;
+                if (wM1) m1UnseenR9Wrong++;
+                if (sM1 && (landsM1 || !ownM1)) m1UnseenR9Outside++;
+                SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, R9All | M1HandoutBinds,
+                            TwinUnseen, out wM1, out carryM1, out ordM1);
+                if (wM1) m1UnseenNoVoid++;
+                for (int tw = TwinLive; tw <= TwinUnseen; tw++)
+                {
+                    sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1Handout, tw,
+                                      out wM1, out carryM1, out ordM1);
+                    if (sM1 || carryM1 != 0 || ordM1 != 0) m1HandoutAlone++;
+                }
+                sM1 = SimulateF31(rep, g1 != 0, ra != 0, landsM1, 4, false, true, true, ownM1, true, M1All, TwinOffPoll,
+                                  out wM1, out carryM1, out ordM1);
+                if (sM1) m1OffPoll++;
+                if (wM1) m1OffPollWrong++;
+                if (sM1 && (landsM1 || !ownM1)) m1OffPollOutside++;
             }
             checks++;
             if (m1Live != 0)
@@ -3914,15 +4154,46 @@ namespace CompetitiveRounds
             if (m1PostedNoAny == 0)
             { pass = false; detail += " M1-TWIN-POSTED-WITHOUT-THE-ANY-POST-RULE:none-settled-wrongly(the-scenario-proves-nothing)"; }
             checks++;
-            if (m1Unseen != 12 || m1UnseenWrong != 12 || m1UnseenOutside != 0)
+            if (m1LiveR10 + m1PostedR10 != 0)
             {
                 pass = false;
-                detail += " M1-RESIDUAL-UNSEEN:" + m1Unseen + "-settled," + m1UnseenWrong + "-wrongly," + m1UnseenOutside
+                detail += " M1-TWIN-ROUND-10:" + m1LiveR10 + "-live," + m1PostedR10
+                          + "-posted-of-48-named-a-game-carried-a-token-or-settled";
+            }
+            checks++;
+            if (m1Unseen + m1UnseenSettled + m1UnseenWrong != 0)
+            {
+                pass = false;
+                detail += " M1-TWIN-UNSEEN:" + m1UnseenSettled + "-of-48-settled," + m1UnseenWrong + "-wrongly," + m1Unseen
+                          + "-of-48-named-a-game-carried-a-token-or-settled";
+            }
+            checks++;
+            if (m1UnseenR9 != 12 || m1UnseenR9Wrong != 12 || m1UnseenR9Outside != 0)
+            {
+                pass = false;
+                detail += " M1-TWIN-UNSEEN-ROUND-9-ISSUANCE:" + m1UnseenR9 + "-settled," + m1UnseenR9Wrong + "-wrongly,"
+                          + m1UnseenR9Outside + "-outside-its-class(expected-12,12,0)";
+            }
+            checks++;
+            if (m1UnseenNoVoid == 0)
+            { pass = false; detail += " M1-TWIN-UNSEEN-HANDOUT-VOID-UNREAD:none-settled-wrongly(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m1HandoutAlone != 0)
+            { pass = false; detail += " M1-TWIN-HANDOUT-ALONE:" + m1HandoutAlone + "-of-144-named-a-game-carried-a-token-or-settled"; }
+            checks++;
+            if (m1OffPoll != 12 || m1OffPollWrong != 12 || m1OffPollOutside != 0)
+            {
+                pass = false;
+                detail += " M1-OFF-POLL-PREMISE:" + m1OffPoll + "-settled," + m1OffPollWrong + "-wrongly," + m1OffPollOutside
                           + "-outside-its-class(expected-12,12,0)";
             }
-            F31Tally m1LiveSweep = SweepF31(false, true, true, M1All, TwinLive);
-            F31Tally m1PostedSweep = SweepF31(false, true, true, M1All, TwinPosted);
+            F31Tally m1LiveSweep = SweepF31(false, true, true, R9All, TwinLive);
+            F31Tally m1PostedSweep = SweepF31(false, true, true, R9All, TwinPosted);
+            F31Tally m1LiveSweepR10 = SweepF31(false, true, true, M1All, TwinLive);
+            F31Tally m1PostedSweepR10 = SweepF31(false, true, true, M1All, TwinPosted);
             F31Tally m1UnseenSweep = SweepF31(false, true, true, M1All, TwinUnseen);
+            F31Tally m1UnseenSweepR9 = SweepF31(false, true, true, R9All, TwinUnseen);
+            F31Tally m1OffPollSweep = SweepF31(false, true, true, M1All, TwinOffPoll);
             checks++;
             if (m1LiveSweep.Settled + m1LiveSweep.Carrying + m1LiveSweep.Named != 0
                 || m1PostedSweep.Settled + m1PostedSweep.Carrying + m1PostedSweep.Named != 0)
@@ -3933,8 +4204,122 @@ namespace CompetitiveRounds
                           + "-posted(settled/carried/named)";
             }
             checks++;
-            if (m1UnseenSweep.Settled != m1UnseenSweep.Wrong)
-            { pass = false; detail += " M1-unseen-sweep:" + m1UnseenSweep.Settled + "-settled," + m1UnseenSweep.Wrong + "-wrongly"; }
+            if (m1LiveSweepR10.Settled + m1LiveSweepR10.Carrying + m1LiveSweepR10.Named != 0
+                || m1PostedSweepR10.Settled + m1PostedSweepR10.Carrying + m1PostedSweepR10.Named != 0)
+            {
+                pass = false;
+                detail += " M1-twin-sweep-round-10:" + m1LiveSweepR10.Settled + "/" + m1LiveSweepR10.Carrying + "/"
+                          + m1LiveSweepR10.Named + "-live," + m1PostedSweepR10.Settled + "/" + m1PostedSweepR10.Carrying
+                          + "/" + m1PostedSweepR10.Named + "-posted(settled/carried/named)";
+            }
+            checks++;
+            if (m1UnseenSweep.Settled + m1UnseenSweep.Wrong + m1UnseenSweep.Carrying + m1UnseenSweep.Named != 0)
+            {
+                pass = false;
+                detail += " M1-unseen-sweep:" + m1UnseenSweep.Settled + "-settled," + m1UnseenSweep.Wrong + "-wrongly,"
+                          + m1UnseenSweep.Carrying + "-tokens-carried," + m1UnseenSweep.Named + "-games-named";
+            }
+            checks++;
+            if (m1UnseenSweepR9.Wrong == 0 || m1UnseenSweepR9.Settled != m1UnseenSweepR9.Wrong)
+            {
+                pass = false;
+                detail += " M1-unseen-sweep-round-9-issuance:" + m1UnseenSweepR9.Settled + "-settled,"
+                          + m1UnseenSweepR9.Wrong + "-wrongly(expected-some,-every-one-wrong)";
+            }
+            checks++;
+            if (m1OffPollSweep.Wrong == 0 || m1OffPollSweep.Settled != m1OffPollSweep.Wrong)
+            {
+                pass = false;
+                detail += " M1-off-poll-sweep:" + m1OffPollSweep.Settled + "-settled," + m1OffPollSweep.Wrong
+                          + "-wrongly(expected-some,-every-one-wrong)";
+            }
+
+            // Round 10, finding M1: the required control's restarted process
+            // and the recorded process, in the fresh room (SimulateF31Entry),
+            // for every reporter. EntryRestarted: the reporter's process is
+            // handed the room and dies before game 1, and its restart asks
+            // for game 1: nothing is issued, carried or settled on round 10's
+            // server (M1-RESTARTED-PROCESS), nor on the hand-out rule alone,
+            // round 8's and round 9's session rules absent
+            // (M1-RESTARTED-HANDOUT-ALONE); without the hand-out rule and
+            // those session rules the restart is issued and game 2's leave
+            // settles (M1-RESTARTED-WITHOUT-THEM, or the scenario proves
+            // nothing). EntryPoll: the process the room was first handed to
+            // is issued physical game 1 and game 2's leave settles, from game
+            // 2's posts, with every seat carrying (M1-RECORDED-PROCESS).
+            // EntryOffPoll: a room no poll handed out is issued nothing
+            // (M1-NEVER-HANDED-OUT); with the binding unread it is issued and
+            // settles (M1-NEVER-HANDED-OUT-BINDING-UNREAD).
+            const int NoSessionRules = M1AnyPost | M1Issued;
+            int m1Restarted = 0, m1RestartedAlone = 0, m1RestartedOpen = 0, m1Recorded = 0;
+            int m1NeverHanded = 0, m1NeverHandedOpen = 0, m1EntryIssuedR9 = 0, m1EntryIssued = 0;
+            for (int rep = 0; rep < 3; rep++)
+            {
+                bool iE, faE;
+                int carryE;
+                bool sE = SimulateF31Entry(rep, EntryRestarted, M1All, true, out iE, out faE, out carryE);
+                if (sE || iE || carryE != 0) m1Restarted++;
+                sE = SimulateF31Entry(rep, EntryRestarted, NoSessionRules | M1Handout, false, out iE, out faE, out carryE);
+                if (sE || iE || carryE != 0) m1RestartedAlone++;
+                sE = SimulateF31Entry(rep, EntryRestarted, NoSessionRules, false, out iE, out faE, out carryE);
+                if (sE && iE) m1RestartedOpen++;
+                sE = SimulateF31Entry(rep, EntryPoll, M1All, true, out iE, out faE, out carryE);
+                if (sE && iE && !faE && carryE == 3) m1Recorded++;
+                if (iE) m1EntryIssued++;
+                SimulateF31Entry(rep, EntryPoll, R9All, true, out iE, out faE, out carryE);
+                if (iE) m1EntryIssuedR9++;
+                sE = SimulateF31Entry(rep, EntryOffPoll, M1All, true, out iE, out faE, out carryE);
+                if (sE || iE || carryE != 0) m1NeverHanded++;
+                sE = SimulateF31Entry(rep, EntryOffPoll, M1All & ~M1HandoutBinds, true, out iE, out faE, out carryE);
+                if (sE && iE) m1NeverHandedOpen++;
+            }
+            checks++;
+            if (m1Restarted != 0)
+            { pass = false; detail += " M1-RESTARTED-PROCESS:" + m1Restarted + "-of-3-issued-carried-or-settled"; }
+            checks++;
+            if (m1RestartedAlone != 0)
+            { pass = false; detail += " M1-RESTARTED-HANDOUT-ALONE:" + m1RestartedAlone + "-of-3-issued-carried-or-settled"; }
+            checks++;
+            if (m1RestartedOpen != 3)
+            { pass = false; detail += " M1-RESTARTED-WITHOUT-THEM:" + m1RestartedOpen + "-of-3-issued-and-settled(the-scenario-proves-nothing)"; }
+            checks++;
+            if (m1Recorded != 3)
+            { pass = false; detail += " M1-RECORDED-PROCESS:" + m1Recorded + "-of-3-issued-and-settled-from-its-own-game-with-every-seat-carrying"; }
+            checks++;
+            if (m1NeverHanded != 0)
+            { pass = false; detail += " M1-NEVER-HANDED-OUT:" + m1NeverHanded + "-of-3-issued-carried-or-settled"; }
+            checks++;
+            if (m1NeverHandedOpen != 3)
+            { pass = false; detail += " M1-NEVER-HANDED-OUT-BINDING-UNREAD:" + m1NeverHandedOpen + "-of-3-issued-and-settled(the-scenario-proves-nothing)"; }
+
+            // Round 10, finding M1 (R10-D1, the liveness cost): the timelines
+            // of every sweep in which physical game 1 is issued, round 9's
+            // server (R9All) against round 10's (M1All). Round 10 withholds
+            // no issue round 9 made to the reporter's first process, and makes
+            // none to any other process of the account; every issue it
+            // withholds is one round 9 made to a later process.
+            F31Tally[] livR9 = { SweepF31(false, true, true, R9All, TwinNone), m1LiveSweep, m1PostedSweep, m1UnseenSweepR9 };
+            F31Tally[] livR10 = { f31, m1LiveSweepR10, m1PostedSweepR10, m1UnseenSweep };
+            int livIssuedR9 = 0, livIssued = 0, livLaterR9 = 0, livLater = 0, livTimelines = 0;
+            bool livFirstKept = true;
+            for (int lv = 0; lv < livR9.Length; lv++)
+            {
+                livTimelines += livR10[lv].Timelines;
+                livIssuedR9 += livR9[lv].Issued;
+                livIssued += livR10[lv].Issued;
+                livLaterR9 += livR9[lv].IssuedToLater;
+                livLater += livR10[lv].IssuedToLater;
+                if (livR9[lv].Issued - livR9[lv].IssuedToLater != livR10[lv].Issued - livR10[lv].IssuedToLater)
+                    livFirstKept = false;
+            }
+            checks++;
+            if (!livFirstKept || livLater != 0 || m1EntryIssued != m1EntryIssuedR9)
+            {
+                pass = false;
+                detail += " R10-D1-LIVENESS:" + (livIssuedR9 - livLaterR9) + "->" + (livIssued - livLater)
+                          + "-issued-to-the-first-process," + livLaterR9 + "->" + livLater + "-to-a-later-one,"
+                          + m1EntryIssuedR9 + "->" + m1EntryIssued + "-fresh-room";
+            }
             // Round 9, finding M2: the fresh room with game 2's token replaced
             // by one sharing only the issued nonce's first 8 digits, which
             // every seat takes: round 9's server reads it nowhere; round 8's
@@ -4713,7 +5098,8 @@ namespace CompetitiveRounds
                 + " reporter's ledger lost: " + f31Lost + " of 24 timelines named a game, carried a token or settled, "
                 + f31Unlanded + " of 12 with game 1's result never landing, and " + f31UnlandedOpen + " of those 12"
                 + " settled wrongly without the session rules, " + f31OthersAlone + " of 12 named a game, carried a token"
-                + " or settled against the other-session rule alone; the void alone: " + f31Void + " of 12 settled, "
+                + " or settled against the other-session rule alone, " + f31HandoutAlone + " of 12 against the hand-out"
+                + " rule alone; the void alone: " + f31Void + " of 12 settled, "
                 + f31VoidOpen + " of 12 wrongly with the void unread; " + f31Fresh + " of 5 fresh-room DC reports"
                 + " settled, " + f31FreshRestarted + " where the reporter restarted and reported the leave; M2: " + m2Prefix
                 + " of 6 fresh rooms settled from game-2 tokens sharing only the issued nonce's first 8 digits, "
@@ -4722,14 +5108,29 @@ namespace CompetitiveRounds
                 + " M1: " + m1Relanded + " of 3 settled where the reporter restarted before game 1's report landed, "
                 + m1RelandedR8 + " of 2 with round 8's issuance; M1, the"
                 + " reporter's account in a second process: " + m1Live + " of 48 timelines named a game, carried a token"
-                + " or settled where the first process held a session (" + m1LiveR8 + " settled wrongly with round 8's"
-                + " issuance, " + m1LiveNoOthers + " without the other-session rule), " + m1Posted + " of 48 where its"
-                + " post reached the server (" + m1PostedR8 + " with round 8's issuance, " + m1PostedNoAny
-                + " without the any-post rule), " + m1Unseen + " of 48 settled where nothing of it that names a process"
-                + " reached the server"
-                + " (the residual, " + m1UnseenWrong + " wrongly); twin sweeps: " + m1LiveSweep.Timelines
-                + " timelines each, " + m1LiveSweep.Settled + " and " + m1PostedSweep.Settled + " settled, "
-                + m1UnseenSweep.Settled + " unseen)";
+                + " or settled on round 9's server where the first process held a session (" + m1LiveR8 + " settled"
+                + " wrongly with round 8's issuance, " + m1LiveNoOthers + " without the other-session rule), " + m1Posted
+                + " of 48 where its post reached the server (" + m1PostedR8 + " with round 8's issuance, " + m1PostedNoAny
+                + " without the any-post rule), " + m1LiveR10 + " and " + m1PostedR10 + " of 48 on round 10's, "
+                + m1Unseen + " of 48 where nothing of it that names a process reached"
+                + " the server (" + m1UnseenSettled + " settled, " + m1UnseenWrong + " wrongly; " + m1UnseenR9 + " settled, " + m1UnseenR9Wrong + " wrongly, " + m1UnseenR9Outside
+                + " outside its class with round 9's issuance; " + m1UnseenNoVoid + " wrongly with the hand-out's void"
+                + " unread), " + m1HandoutAlone + " of 144 in the three shapes on the hand-out rule alone, and "
+                + m1OffPoll + " settled, " + m1OffPollWrong + " wrongly, " + m1OffPollOutside + " outside its class of 48"
+                + " where the first process entered without a hand-out (the premise); twin sweeps: "
+                + m1LiveSweep.Timelines + " timelines each, " + m1LiveSweep.Settled + " live and " + m1PostedSweep.Settled
+                + " posted settled on round 9's server, " + m1LiveSweepR10.Settled + " live, " + m1PostedSweepR10.Settled
+                + " posted and " + m1UnseenSweep.Settled + " unseen on round 10's, " + m1UnseenSweep.Wrong + " unseen wrongly ("
+                + m1UnseenSweepR9.Settled + " settled, " + m1UnseenSweepR9.Wrong + " wrongly with round 9's issuance), "
+                + m1OffPollSweep.Settled + " settled, " + m1OffPollSweep.Wrong + " wrongly off the poll; the restarted"
+                + " process: " + m1Restarted + " of 3 issued, carried or settled, " + m1RestartedAlone + " on the hand-out"
+                + " rule alone, " + m1RestartedOpen + " of 3 issued and settled without it and the session rules; the"
+                + " recorded process: " + m1Recorded + " of 3 issued and settled with every seat carrying; a room no poll"
+                + " handed out: " + m1NeverHanded + " of 3 issued, carried or settled, " + m1NeverHandedOpen + " of 3"
+                + " issued and settled with the binding unread; R10-D1: physical game 1 issued in " + livIssuedR9
+                + " of " + livTimelines + " sweep timelines on round 9's server (" + livLaterR9 + " to a later process)"
+                + " and " + livIssued + " on round 10's (" + livLater + " to a later process), " + m1EntryIssuedR9
+                + " and " + m1EntryIssued + " of 3 fresh rooms)";
             return SentinelTag + " " + (pass ? "PASS" : "FAIL") + ": " + checks + " checks" + sweep + detail;
         }
     }

@@ -32450,19 +32450,19 @@ async def update_team_live_points(
 # epoch are checked in the request and not stored.
 #
 # THE FIRST GAME (v1.41.0 beta review round 8, finding F31, migration 359;
-# round 9, finding M1, migration 362). Every ordinal counts physical games
-# from the one named physical game 1, so the comparison above is only as good
-# as that origin. In round 7 the room's creator named its room's first game
-# physical game 1 from a read of the series showing no recorded game, no
-# relock and no pair of two points on its record. That is absence, and
-# absence does not rule out an earlier game whose live posts all failed while
-# its result still waited in the reporter's outbox: the next game was named
-# 1, and once one queued result landed its ordinal could match the games
-# recorded plus one while another result was still on its way. Physical game
-# 1 is now issued by this server (team_series_first_game), once per series
-# and never again, to the one seat that can hold a result of the series the
-# server has not recorded: its reporter, the lowest Steam ID of its four
-# members (a client sends a series' match report only from that seat,
+# round 9, finding M1, migration 362; round 10, finding M1). Every ordinal
+# counts physical games from the one named physical game 1, so the comparison
+# above is only as good as that origin. In round 7 the room's creator named
+# its room's first game physical game 1 from a read of the series showing no
+# recorded game, no relock and no pair of two points on its record. That is
+# absence, and absence does not rule out an earlier game whose live posts all
+# failed while its result still waited in the reporter's outbox: the next
+# game was named 1, and once one queued result landed its ordinal could match
+# the games recorded plus one while another result was still on its way.
+# Physical game 1 is now issued by this server (team_series_first_game), once
+# per series and never again, to the one seat that can hold a result of the
+# series the server has not recorded: its reporter, the lowest Steam ID of its
+# four members (a client sends a series' match report only from that seat,
 # GameStateWatcher.BuildTeamReportPayload, and submit_team_match refuses a
 # report that does not name the series' four members). It is issued only
 # while the series is active, has no recorded game, was never relocked, has
@@ -32489,29 +32489,53 @@ async def update_team_live_points(
 #     a steam_sessions row is deleted only by its own account's prune, once
 #     it expired more than a day ago (steam_auth), or with every row of its
 #     account at a deletion or a ban, the ask's own session included. So no
-#     row the rule above must see can be missing.
-# The session the issue is answered to is kept on the series row
-# (first_game_session, migration 362). The reporter's client asks only while
-# it has sent, queued and deferred no report of the series
-# (plugin/ApiClient.cs keeps the reports it sends in a durable ledger,
-# written before each is sent, beside its durable outbox). Together these
-# are the positive evidence the issue rests on: the only process of the
-# reporter's account that held a session at any moment of the series' life
-# was there when the series began and has built no report of it, and only
-# the reporter's client builds a series' match report, so no result of the
-# series is waiting to land from any process of the account that held a
-# session. The series' record showing nothing proves nothing on its own.
-# What the server cannot see is a process of the reporter's account that
+#     row the rule above must see can be missing;
+#   * the ask's own session is the one the series' room was first handed to
+#     on the reporter's account, and no hand-out to the account on any other
+#     session, or on none, came since (round 10, M1: _team_room_handed_out,
+#     which team_queue_poll calls with every answer that carries the room,
+#     binds first_game_session at the first hand-out and voids physical game
+#     1 at any other; the issue compares).
+# The session the issue is answered to is on the series row
+# (first_game_session, migration 362; since round 10 it is written when the
+# room is first handed out, and the issue goes only to a request on it). The
+# reporter's client asks only while it has sent, queued and deferred no
+# report of the series (plugin/ApiClient.cs keeps the reports it sends in a
+# durable ledger, written before each is sent, beside its durable outbox).
+# Together these are the positive evidence the issue rests on: the only
+# process of the reporter's account that held a session at any moment of the
+# series' life was there when the series began and has built no report of
+# it, and only the reporter's client builds a series' match report, so no
+# result of the series is waiting to land from any process of the account
+# that held a session. The series' record showing nothing proves nothing on
+# its own.
+# What round 9 could not see is a process of the reporter's account that
 # held no session at all since the series began and whose games left
 # nothing on the series' record that names a process: its spawn
 # confirmation (team_series.spawn_confirmed_by, which
 # team_series_spawn_confirm writes on HMAC alone, once per member) and its
-# presence name only the account, as the asking process's own spawn does,
-# so no rule can read them to tell the two processes apart. A result the
+# presence name only the account, as the asking process's own spawn does.
+# Round 10 closes that class with evidence a process must produce before it
+# can play at all: a physical game of the series is played in the series'
+# room, a queue room's name is minted here after the series row exists and
+# only a member's queue poll is ever answered with it (team_queue_poll's
+# ready_join; the team lobby resolve withholds it and a spectate grant
+# refuses every member of the room's roster), and each such answer to the
+# reporter's account is recorded under the series row lock before it
+# leaves. A client joins a 2v2 room only from that answer (plugin/ApiClient.cs,
+# the team poll's ready_join), so a process of the account that played any
+# game of the series was handed the room here first, unless another client
+# passed its name on outside this server: the first one handed it on a
+# verified session is the only one the issue can go to, and any other handed
+# it before the issue, a sessionless one included, voided physical game 1
+# then, before it could play (one handed it after the issue meets the report
+# rules below). A series whose room reached its players by no hand-out (a
+# continuation series, created in the room its predecessor was handed:
+# team_series_continuation) is never issued physical game 1. A result the
 # server could not see is caught when it lands (a leave settled before then
 # is not revisited, which is why the issue itself must rule out every
-# process the server can see), and so is a report from any process but the
-# issued one:
+# process of the account that could have played), and so is a report from
+# any process but the issued one:
 # the reporter's client writes the whole issued nonce (the ANCHOR; round 8
 # kept only its first 8 digits) to the same ledger when it takes the issue,
 # every match report carries the anchor its client holds for the series
@@ -33116,7 +33140,7 @@ _TEAM_FIRST_GAME_ANY_POST_SQL = (
     " OR COALESCE(ts.live_t1_points, 0) + COALESCE(ts.live_t2_points, 0) <> 0)")
 
 _TEAM_FIRST_GAME_READ_SQL = (
-    "SELECT ts.first_game_nonce,"
+    "SELECT ts.first_game_nonce, ts.first_game_session,"
     "       " + _TEAM_FIRST_GAME_SESSION_SQL + " AS predates,"
     "       " + _TEAM_FIRST_GAME_RECENT_SQL + " AS recent,"
     "       " + _TEAM_FIRST_GAME_OTHER_SESSION_SQL + " AS other_session,"
@@ -33126,14 +33150,18 @@ _TEAM_FIRST_GAME_READ_SQL = (
     "       " + _TEAM_FIRST_GAME_ANY_POST_SQL + " AS any_post"
     "  FROM team_series ts WHERE ts.id = :sid")
 
-# The issue, and (round 9, finding M1; migration 362) the sha256 of the
-# session it is answered to, in one statement under the series row lock.
-# Before 362 it names a missing column and fails inside the caller's
-# savepoint, so nothing is issued.
+# The issue, in one statement under the series row lock, written only while
+# the series' first_game_session (migration 362) is the sha256 of the ask's
+# own session: round 10, finding M1, the session the series' room was first
+# handed to on its reporter's account (_team_room_handed_out). Round 9 wrote
+# that session here, at the issue; since round 10 the queue poll records it
+# when it hands the room out, before any game of the series can start, and
+# the issue only compares. Before 362 the read above names a missing column
+# and fails inside the caller's savepoint, so nothing is issued.
 _TEAM_FIRST_GAME_ISSUE_SQL = (
-    "UPDATE team_series SET first_game_nonce = CAST(:nonce AS text),"
-    "       first_game_session = CAST(:th AS text)"
+    "UPDATE team_series SET first_game_nonce = CAST(:nonce AS text)"
     " WHERE id = :sid AND first_game_nonce IS NULL"
+    "   AND first_game_session = CAST(:th AS text)"
     " RETURNING first_game_nonce")
 
 _TEAM_FIRST_GAME_VOID_SQL = (
@@ -33191,8 +33219,10 @@ def _team_first_game_session_hash(request) -> str:
     """The sha256 of the request's own X-Session-Token, the form steam_sessions
     keeps, or "" when the request carries none (round 8, finding F31:
     team_series_first_game reads when that session was issued; round 9,
-    finding M1: it keeps it as first_game_session, and a match report or a
-    DC report of the reporter's is read against it)."""
+    finding M1: a match report or a DC report of the reporter's is read
+    against first_game_session; round 10, finding M1: the queue poll's
+    hand-out of the series' room writes it there, _team_room_handed_out, and
+    the issue goes only to a request on it)."""
     try:
         token = request.headers.get("X-Session-Token") if request is not None else None
     except Exception:
@@ -33216,6 +33246,145 @@ async def _team_series_member_steams(db, members):
     return ids if all(i.isdigit() for i in ids) else None
 
 
+# Round 10, finding M1 (THE FIRST GAME, above _team_game_identity): physical
+# game 1 is issued only to the process of the series' reporter's account that
+# the series' room was first handed to. A 2v2 room's name is its join
+# credential (hidden, never listed, joined by exact name only), and the queue
+# poll's ready_join answer is the one response that hands it to a member of
+# the series (team_queue_poll; the team lobby resolve withholds it, and a
+# spectate grant refuses every member of the room's roster). Every such
+# hand-out to the reporter's account is recorded on the series row, under the
+# series row lock the poll already holds and in the poll's own transaction,
+# so the record is committed before the answer that carries the room leaves
+# this server.
+_TEAM_ROOM_HANDOUT_READ_SQL = (
+    "SELECT t1a_id, t1b_id, t2a_id, t2b_id, first_game_nonce, first_game_session"
+    "  FROM team_series WHERE id = :sid")
+
+# The first hand-out to the reporter's account on a verified session of its
+# Steam ID binds physical game 1 to that session (first_game_session,
+# migration 362) ...
+_TEAM_ROOM_HANDOUT_BIND_SQL = (
+    "UPDATE team_series SET first_game_session = CAST(:th AS text)"
+    " WHERE id = :sid AND first_game_nonce IS NULL AND first_game_session IS NULL"
+    " RETURNING id")
+
+# ... and a hand-out to that account on any other session, or on none, while
+# no physical game 1 is issued voids it for good (first_game_nonce 'void',
+# migration 359).
+_TEAM_ROOM_HANDOUT_VOID_SQL = (
+    "UPDATE team_series SET first_game_nonce = 'void'"
+    " WHERE id = :sid AND first_game_nonce IS NULL"
+    " RETURNING id")
+
+
+def _team_first_game_schema_absent(ex) -> bool:
+    """Round 10, M1: whether `ex`, raised by the hand-out's read of
+    team_series' first-game columns, is PostgreSQL saying that a column or
+    the table does not exist (SQLSTATE 42703 undefined_column, 42P01
+    undefined_table): a database migration 362 (or 359) has not reached,
+    where the first-game route's own read of the same columns fails the same
+    way and nothing can be issued. The SQLSTATE is looked for along the
+    exception's chain (SQLAlchemy's wrapper, then the driver's error); any
+    other failure is not that state."""
+    cur, seen = ex, set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if state:
+            return str(state) in ("42703", "42P01")
+        cur = getattr(cur, "orig", None) or cur.__cause__
+    return False
+
+
+async def _team_room_handed_out(db, series_id, steam_id, request) -> str:
+    """Round 10, finding M1: record that the queue poll is handing series
+    `series_id`'s room to `steam_id` on `request` (THE FIRST GAME, above
+    _team_game_identity). The caller holds the series row lock (the group
+    snapshot team_queue_poll takes locks it first), has run
+    _check_steam_session for `steam_id` on `request`, and commits this
+    transaction before its answer, which carries the room, is sent.
+
+    Nothing is recorded for another member than the series' reporter (the
+    lowest Steam ID of its four members), once physical game 1 was issued or
+    voided (a later hand-out is then the report rules' business: a report
+    from another session voids the issue, and a DC report the reporter's
+    account sends from one reads no token), or before migration 362 (the
+    read fails inside its savepoint; the first-game route's own read fails
+    the same way, so nothing can be issued there either). Otherwise the first
+    hand-out on a verified session of the reporter's Steam ID binds physical
+    game 1 to that session (first_game_session, the sha256 of its
+    X-Session-Token), a later one on the same session changes nothing, and
+    one on any other session, or on none (a soft-failed session check lets
+    such a poll through), voids physical game 1 for good: another process of
+    the account now holds the room, and this server cannot tell whether it
+    plays a game of the series before the bound one asks. While the four
+    members cannot be read, any hand-out voids (the route refuses such a
+    series anyway). The writes are not savepointed, on purpose, as
+    _team_first_game_void's is not: one that must happen and cannot fails
+    the poll with it, so the room is never handed out unrecorded (the client
+    polls again). The read is savepointed only so that the columns' absence
+    can be told apart: a read that fails for any other reason fails the poll
+    the same way. Returns "bound", "void", or "" when nothing was written."""
+    try:
+        async with db.begin_nested():
+            row = (await db.execute(text(_TEAM_ROOM_HANDOUT_READ_SQL),
+                                    {"sid": series_id})).mappings().first()
+    except Exception as ex:
+        if not _team_first_game_schema_absent(ex):
+            raise
+        print(f"[TEAM-FIRST-GAME] series={series_id}: the room's hand-out to {steam_id} is not "
+              f"recorded: the series' first-game columns do not exist yet ({type(ex).__name__})")
+        return ""
+    if row is None or row["first_game_nonce"] is not None:
+        return ""
+    ids = await _team_series_member_steams(
+        db, [row["t1a_id"], row["t1b_id"], row["t2a_id"], row["t2b_id"]])
+    if ids is not None and steam_id != min(ids, key=int):
+        return ""
+    session = _team_first_game_session_hash(request) if _session_was_verified(request) else ""
+    bound = row["first_game_session"]
+    if ids is None:
+        why = "while the series' four members cannot be read"
+    elif not session:
+        why = "to its reporter on no verified session"
+    elif bound is None:
+        got = (await db.execute(text(_TEAM_ROOM_HANDOUT_BIND_SQL),
+                                {"sid": series_id, "th": session})).first()
+        if got is not None:
+            print(f"[TEAM-FIRST-GAME] series={series_id}: room handed to its reporter "
+                  f"{steam_id} on session {session[:8]}: physical game 1 bound to it")
+            return "bound"
+        why = "to its reporter, and the binding was not written"
+    elif hmac.compare_digest(session, bound):
+        return ""
+    else:
+        why = (f"to its reporter on session {session[:8]}, not the one it was first "
+               f"handed on ({bound[:8]})")
+    await db.execute(text(_TEAM_ROOM_HANDOUT_VOID_SQL), {"sid": series_id})
+    print(f"[TEAM-FIRST-GAME] series={series_id}: room handed {why} ({steam_id}): "
+          f"physical game 1 voided")
+    return "void"
+
+
+def _team_first_game_bound_refusal(bound, asker):
+    """Round 10, finding M1: why an ask on session `asker` (the sha256 of its
+    X-Session-Token, "" for none) is not issued physical game 1 given the
+    series' first_game_session `bound` (the session _team_room_handed_out
+    bound it to, None while none is), or None when `asker` is that session:
+    the process the series' room was first handed to on the reporter's
+    account, and while the issue is not void, the only one of the account
+    that was ever handed it (THE FIRST GAME, above _team_game_identity)."""
+    if not isinstance(bound, str) or not bound:
+        return ("the series' room was never handed to its reporter's account by the queue "
+                "poll: no process of the account can be shown to have held it first")
+    if not asker or not hmac.compare_digest(asker, bound):
+        return ("the requester's session is not the one the series' room was first handed "
+                "to on the reporter's account: the asking process cannot be shown to be the "
+                "only one of the account that held the room")
+    return None
+
+
 @app.post("/api/v1/team/series/{series_id}/first-game", tags=["Team Matches"])
 async def team_series_first_game(
     series_id: str,
@@ -33227,7 +33396,7 @@ async def team_series_first_game(
 ):
     """Issue the series' physical game 1 to its reporter, or refuse (v1.41.0
     beta review, round 8, finding F31, migration 359; round 9, finding M1,
-    migration 362).
+    migration 362; round 10, finding M1).
 
     HMAC signs 'team-first-game:{series_id}:{requester_steam_id}:{photon_room_id}'
     (plugin/TeamGameNumber.cs, FirstGameCanonical), and the request needs a
@@ -33243,17 +33412,21 @@ async def team_series_first_game(
     created less than a day ago and no other session of the requester's
     account was live at any moment since (round 9: the asking process is
     the only process of the account that held a session during the series);
-    no game of it is on record in another room; and nothing is on its
+    no game of it is on record in another room; nothing is on its
     live-points record (round 9: no post filed under any game and no point
-    in its live totals). The issue writes the nonce and the sha256 of the
-    request's own session token together (first_game_session), and every
-    later match report of the series, and every DC report its reporter's
-    account sends, is read against both. The client asks only while it has
-    sent and queued no report of the series, the one condition read from
-    the client (THE FIRST GAME, above _team_game_identity). A refusal is an
-    answer, not an error: 200 with issued false and the reason, logged.
-    Before migration 359 the read fails inside its savepoint, and before 362
-    the issue does, so every ask is refused."""
+    in its live totals); and (round 10) the request's own session is the one
+    the queue poll bound physical game 1 to when it first handed the series'
+    room to the reporter's account (first_game_session, written by
+    _team_room_handed_out, the sha256 of that request's session token), with
+    no hand-out to the account on any other session since (which voids it).
+    The issue writes the nonce only while first_game_session is still the
+    request's own session, and every later match report of the series, and
+    every DC report its reporter's account sends, is read against both. The
+    client asks only while it has sent and queued no report of the series,
+    the one condition read from the client (THE FIRST GAME, above
+    _team_game_identity). A refusal is an answer, not an error: 200 with
+    issued false and the reason, logged. Before migration 359 or 362 the
+    read fails inside its savepoint, so every ask is refused."""
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     if not hmac.compare_digest(sig, _team_game_token_mac(
@@ -33309,7 +33482,9 @@ async def team_series_first_game(
                 seen = (await db.execute(text(_TEAM_FIRST_GAME_READ_SQL), {
                     "sid": sid, "room": stored, "th": asker,
                     "steam": requester_steam_id})).mappings().first()
-                if seen["first_game_nonce"] is not None:
+                if seen["first_game_nonce"] == "void":
+                    why = "physical game 1 of this series was voided"
+                elif seen["first_game_nonce"] is not None:
                     why = "physical game 1 was already issued for this series"
                 elif seen["predates"] is not True:
                     why = ("the requester's session was not issued before the series was "
@@ -33328,6 +33503,10 @@ async def team_series_first_game(
                     why = ("a live-points post is on the series' record: a game of the series "
                            "may already have been played")
                 else:
+                    # Round 10, finding M1: the asking process must be the one
+                    # the series' room was first handed to on this account.
+                    why = _team_first_game_bound_refusal(seen["first_game_session"], asker)
+                if why is None:
                     drawn = secrets.token_hex(8)
                     got = (await db.execute(text(_TEAM_FIRST_GAME_ISSUE_SQL), {
                         "sid": sid, "nonce": drawn, "th": asker})).first()
@@ -41350,6 +41529,14 @@ async def team_queue_poll(steam_id: str, request: Request,
                 region_out = me["room_region"]
                 rules = _rules_normalize(me["rules"])
 
+            # Round 10, finding M1 (THE FIRST GAME, above _team_game_identity):
+            # this answer hands the series' room to the caller, so its hand-out
+            # to the series' reporter's account is recorded now, under the
+            # series row lock the group snapshot took and in this transaction,
+            # before the commit below lets the answer leave: the first one, on
+            # a verified session, binds physical game 1 to that session, and
+            # one on another session or none voids it.
+            await _team_room_handed_out(db, me["series_id"], steam_id, request)
             await db.commit()
             # Room just issued — all four are committed to a 2v2 game; drop
             # their searching rows in the other queues. Post-commit, own
@@ -47892,8 +48079,10 @@ async def _lobby_resolve_impl(mode: str, steam_id: str, request: Request,
     not_in_lobby recovery used the MUTATING /queue/poll as its probe — and a
     poll against a 'searching' row can LOCK the caller into a match with
     unrelated public-queue players. This endpoint reports the caller's row
-    verbatim and changes NOTHING: no last_polled write, no lease renewal, no
-    state transition, no locks. The client decides from the answer:
+    verbatim (but a 2v2 row's room, which only the team queue poll hands
+    out: round 10, below) and changes NOTHING: no last_polled write, no
+    lease renewal, no state transition, no locks. The client decides from
+    the answer:
       not_in_queue          -> lobby disbanded / seat gone: clear local state
       lobby (+lobby_status) -> still seated; 'open' = keep, else disbanded
       matched/ready/ready_join (+series_id) -> Start happened: enter the
@@ -47907,6 +48096,8 @@ async def _lobby_resolve_impl(mode: str, steam_id: str, request: Request,
     # names a room — 2v2 rows carry it themselves; a 1v2 'ready_join' row's
     # series_id names the ovt_series row that does (a 'lobby' row's
     # series_id names a lobby, so the subselect is NULL there, harmlessly).
+    # Since round 10 a 2v2 row's room is not revealed here, so no record
+    # rides along for it (below).
     _rules_col = ("q.rules" if mode == "team"
                   else "(SELECT s.rules FROM ovt_series s WHERE s.id = q.series_id)")
     row = (await db.execute(text(
@@ -47918,14 +48109,22 @@ async def _lobby_resolve_impl(mode: str, steam_id: str, request: Request,
     if row is None:
         await db.commit()
         return {"status": "not_in_queue"}
+    # v1.41.0 beta review round 10, finding M1 (THE FIRST GAME, above
+    # _team_game_identity): a 2v2 room's name is handed to a member by the
+    # team queue poll alone, which records every hand-out to the series'
+    # reporter's account (_team_room_handed_out). This probe records nothing,
+    # so it never carries a 2v2 room: the client adopts a started 2v2 lobby
+    # from the status and the series_id and joins from the poll's ready_join
+    # answer (plugin/ApiClient.cs, HandleResolveProbe).
+    reveal = row["room_name"] if mode != "team" else None
     out = {
         "status": row["status"],
         "series_id": str(row["series_id"]) if row["series_id"] else None,
-        "room_name": row["room_name"],
-        "room_region": row["room_region"],
+        "room_name": reveal,
+        "room_region": row["room_region"] if mode != "team" else None,
         ("team_assigned" if mode == "team" else "side_assigned"): row["assigned"],
     }
-    if row["room_name"]:
+    if reveal:
         # A reveal of a room name is gated like every other (§4.5) and
         # carries the record the client must stamp / compare.
         _rr = _rules_normalize(row["rules"])
