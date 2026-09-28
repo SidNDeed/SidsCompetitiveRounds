@@ -759,6 +759,20 @@ namespace CompetitiveRounds
         /// False everywhere else.</summary>
         internal static bool DevRestoreIgnoresPortrait;
 
+        /// <summary>T45's teardown mutant arms only (`l1=forceabortmutant`,
+        /// `l1=finallymutant` and the dance lever's `teardownmutant`; each sets
+        /// it for one teardown and clears it in a finally): EndPortraitPose
+        /// clears PortraitPose BEFORE the inverse apply, the order L1 forbids.
+        /// False everywhere else.</summary>
+        internal static bool DevTeardownClearsFirst;
+
+        /// <summary>T45's teardown arms only (an arm zeroes them just before one
+        /// teardown and reads them just after; nothing in the product reads
+        /// them): the entries RestorePortraitRig undid while PortraitPose named
+        /// the rig it was given, and the entries it undid with the pose cleared
+        /// or naming another rig.</summary>
+        internal static int DevUndoneUnderPose, DevUndoneAfterClear;
+
         /// <summary>TryGetPose for the T38 harness (dev lever only): the exact
         /// function both frame patches call.</summary>
         internal static bool DevTryGetPose(Component c, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
@@ -802,6 +816,9 @@ namespace CompetitiveRounds
         internal static int RestorePortraitRig(Transform rigRoot)
         {
             int n = 0;
+            bool posed = false;
+            try { var cur = PortraitPose; posed = cur.HasValue && rigRoot != null && cur.Value.RigRoot == rigRoot; }
+            catch { posed = false; }
             try
             {
                 var armKeys = new List<Transform>(armApplied.Keys);
@@ -828,7 +845,29 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+            if (posed) DevUndoneUnderPose += n; else DevUndoneAfterClear += n;
             return n;
+        }
+
+        /// <summary>Finding L1, the teardown order (round two): the rig's
+        /// remembered deltas are inverse-applied FIRST, while PortraitPose still
+        /// names the rig, and PortraitPose is cleared AFTER, in a finally -- so
+        /// an exception in the inverse apply still clears the pose, and no
+        /// teardown clears the pose over entries the rig still owes. The three
+        /// teardowns that end a pose call it: the capture job's finally
+        /// (PortraitRenderDance.cs), ForceAbort and T45's own finally
+        /// (PortraitRender.cs). A null or destroyed rig undoes nothing
+        /// (RestorePortraitRig only drops dead entries) and the pose is still
+        /// cleared.</summary>
+        internal static void EndPortraitPose(Transform rigRoot)
+        {
+            try
+            {
+                if (DevTeardownClearsFirst) PortraitPose = null;   // T45's teardown mutant arms only: the order swapped
+                RestorePortraitRig(rigRoot);
+            }
+            catch { }
+            finally { PortraitPose = null; }
         }
 
         /// <summary>Remembered arm deltas and body tilts, for the capture's

@@ -397,9 +397,10 @@ namespace CompetitiveRounds
             _renderClaim.Clear();
             _cleanupOwed = false;
             try { Application.logMessageReceived -= OnLog; } catch { }
-            // A dance job that never unwound left its pose set: cleared before
-            // the rig goes (design S1.3), with its remembered deltas undone (L1).
-            try { var pp = DanceEmotes.PortraitPose; DanceEmotes.PortraitPose = null; if (pp.HasValue && pp.Value.RigRoot != null) DanceEmotes.RestorePortraitRig(pp.Value.RigRoot); } catch { }
+            // A dance job that never unwound left its pose set: its rig's
+            // remembered deltas undone first, then the pose cleared, before the
+            // rig goes (design S1.3; L1's order, DanceEmotes.EndPortraitPose).
+            try { var pp = DanceEmotes.PortraitPose; DanceEmotes.EndPortraitPose(pp.HasValue ? pp.Value.RigRoot : null); } catch { }
             try { Teardown(new StringBuilder()); } catch { }
             try { DestroyGradeObjects(); } catch { }
             try { Plugin.Log.LogInfo("[PORTRAIT] force-abort: " + why); } catch { }
@@ -1146,7 +1147,8 @@ namespace CompetitiveRounds
                 else if (p.StartsWith("tag=")) tag = SafeTag(p.Substring(4));
                 else if (p == "dances") dances = true;                                  // step 0 / T45: pose every dance after the still
                 else if (p == "dancemode=pose" || p == "dancemode=nopose" || p == "dancemode=still") danceMode = p.Substring(10);
-                else if (p == "l1=guarded" || p == "l1=unguarded" || p == "l1=roomexit" || p == "l1=roomexitmutant") l1Mode = p.Substring(3);
+                else if (p == "l1=guarded" || p == "l1=unguarded" || p == "l1=roomexit" || p == "l1=roomexitmutant"
+                         || p == "l1=forceabort" || p == "l1=forceabortmutant" || p == "l1=finally" || p == "l1=finallymutant") l1Mode = p.Substring(3);
                 else if (p.StartsWith("only=")) danceOnly = ParseInts(p.Substring(5), 0, DanceEmotes.Defs.Length - 1, DanceEmotes.Defs.Length, rep);
                 else if (p.StartsWith("lag=") && int.TryParse(p.Substring(4), out iv)) danceLag = Mathf.Clamp(iv, 0, 3);
                 else if (p.StartsWith("hold=") && int.TryParse(p.Substring(5), out iv)) danceHold = Mathf.Clamp(iv, 1, 4);   // whole frames each pose is held before its render
@@ -3351,9 +3353,16 @@ namespace CompetitiveRounds
     /// `l1=unguarded` (L1's mutant: Tick's pre-L1 hard restore instead),
     /// `l1=roomexit` (L1's sibling sites: the product room exit,
     /// DanceEmotes.OnRoomLeft, lands between the Arm Postfix and the render,
-    /// then the frame's Tick; the rig's pose must survive it) or
+    /// then the frame's Tick; the rig's pose must survive it),
     /// `l1=roomexitmutant` (the same with RestoreAllApplied's rig scope
-    /// switched off by DanceEmotes.DevRestoreIgnoresPortrait: must FAIL);
+    /// switched off by DanceEmotes.DevRestoreIgnoresPortrait: must FAIL),
+    /// `l1=forceabort` or `l1=finally` (L1's teardown order, round two: at
+    /// the first nonzero pose whose deltas the rig still owes, the product
+    /// ForceAbort, or this probe's own finally, ends the pose; every owed
+    /// entry must be undone while PortraitPose still names the rig and none
+    /// after it is cleared, [DANCE-T45] teardown=) or `l1=forceabortmutant` /
+    /// `l1=finallymutant` (the same teardown with
+    /// DanceEmotes.DevTeardownClearsFirst set, the order swapped: must FAIL);
     /// `only=I:J:..` a subset of dance indexes; `lag=N` re-renders N frames
     /// per dance one frame later (does one frame settle a pose?).
     ///
@@ -3394,12 +3403,44 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>T45's teardown arms (L1's order, round two): the verdict on
+        /// the one teardown the arm zeroed the counters for. PASS when the rig
+        /// owed at least one entry, every owed entry was undone while
+        /// PortraitPose still named the rig and none after it was cleared, the
+        /// pose is cleared, no entry is left and both arm targets are back on
+        /// their baselines. The swapped order passes every term but the
+        /// counters.</summary>
+        private static void DanceTeardownVerdict(string tag, string path, bool mutant, int owed, IKArmMove armL, IKArmMove armR,
+                                                 Vector3 baseL, Vector3 baseR, string sku, int k)
+        {
+            int under = DanceEmotes.DevUndoneUnderPose, after = DanceEmotes.DevUndoneAfterClear, left = DanceEmotes.AppliedEntryCount;
+            bool cleared = !DanceEmotes.PortraitPose.HasValue;
+            bool atBase = false;
+            try
+            {
+                Vector3 dL = armL.target.position - baseL, dR = armR.target.position - baseR;
+                atBase = Mathf.Abs(dL.x) < DANCE_PROBE_EPS && Mathf.Abs(dL.y) < DANCE_PROBE_EPS && Mathf.Abs(dL.z) < DANCE_PROBE_EPS
+                      && Mathf.Abs(dR.x) < DANCE_PROBE_EPS && Mathf.Abs(dR.y) < DANCE_PROBE_EPS && Mathf.Abs(dR.z) < DANCE_PROBE_EPS;
+            }
+            catch { atBase = false; }
+            bool pass = owed >= 1 && under == owed && after == 0 && cleared && left == 0 && atBase;
+            Plugin.Log.LogInfo("[DANCE-T45] teardown=" + (pass ? "PASS" : "FAIL") + " tag=" + tag + " path=" + path
+                               + " arm=" + (mutant ? "mutant(clear-first)" : "control") + " owed=" + owed + " undone-under-pose=" + under
+                               + " undone-after-clear=" + after + " pose-cleared=" + cleared + " left=" + left + " at-base=" + atBase
+                               + " dance=" + sku + " k=" + k);
+        }
+
         private static IEnumerator DanceProbeFrames(StringBuilder rep, GameObject clone, Camera cam, int size, string tag,
                                                     string mode, string l1, List<int> only, int lagN, int hold, int gen)
         {
             bool setPose = mode == "pose";
             bool unguarded = l1 == "unguarded";
             bool roomExit = l1 == "roomexit" || l1 == "roomexitmutant";
+            // L1's teardown order (round two): which teardown ends the pose, and its mutant
+            string teardown = l1 == "forceabort" || l1 == "forceabortmutant" ? "forceabort"
+                            : l1 == "finally" || l1 == "finallymutant" ? "finally" : null;
+            bool tdMutant = teardown != null && l1.EndsWith("mutant", StringComparison.Ordinal);
+            bool tdFinally = false; int tdOwed = -1, tdK = -1; string tdSku = "-";
             Transform rigRoot = clone != null ? clone.transform : null;
             IKArmMove armL = null, armR = null;
             if (clone != null)
@@ -3490,6 +3531,22 @@ namespace CompetitiveRounds
                             prevNonzeroOk = l1ok;
                         }
                         else if (!l1ok) l1Fail++;
+                        if (teardown != null && setPose && nonzero && l1ok && DanceEmotes.AppliedEntryCount > 0)
+                        {
+                            // L1's teardown order (round two): this pose's deltas are still owed
+                            tdOwed = DanceEmotes.AppliedEntryCount; tdK = k; tdSku = DanceEmotes.Defs[idx].Sku;
+                            if (teardown == "forceabort")
+                            {
+                                // the product ForceAbort ends the pose (and the run: its claim goes)
+                                DanceEmotes.DevUndoneUnderPose = 0; DanceEmotes.DevUndoneAfterClear = 0;
+                                DanceEmotes.DevTeardownClearsFirst = tdMutant;
+                                try { ForceAbort("T45 teardown arm " + tag); }
+                                finally { DanceEmotes.DevTeardownClearsFirst = false; }
+                                DanceTeardownVerdict(tag, "forceabort", tdMutant, tdOwed, armL, armR, baseL, baseR, tdSku, tdK);
+                            }
+                            else tdFinally = true;                   // this probe's own finally ends the pose, below
+                            yield break;
+                        }
                         var tex = Grab(cam, Color.black, size);
                         var px = tex.GetPixels32();
                         UnityEngine.Object.Destroy(tex);
@@ -3544,8 +3601,13 @@ namespace CompetitiveRounds
             finally
             {
                 DanceEmotes.DevRestoreIgnoresPortrait = false;
-                DanceEmotes.PortraitPose = null;
-                DanceEmotes.RestorePortraitRig(rigRoot);
+                // L1's order (round two): the rig's deltas undone while the pose still
+                // names it, then the pose cleared (EndPortraitPose); the `finally` arms
+                // zero the counters for this one teardown and read them after it
+                if (tdFinally) { DanceEmotes.DevUndoneUnderPose = 0; DanceEmotes.DevUndoneAfterClear = 0; DanceEmotes.DevTeardownClearsFirst = tdMutant; }
+                try { DanceEmotes.EndPortraitPose(rigRoot); }
+                finally { DanceEmotes.DevTeardownClearsFirst = false; }
+                if (tdFinally) DanceTeardownVerdict(tag, "finally", tdMutant, tdOwed, armL, armR, baseL, baseR, tdSku, tdK);
             }
             rep.Append(perDance);
             bool motionPass = set.Count > 0 && dancesNoMotion == 0 && unmovedNonzero == 0 && nonzeroFrames > 0;

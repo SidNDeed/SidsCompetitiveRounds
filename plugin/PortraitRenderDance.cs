@@ -234,6 +234,8 @@ namespace CompetitiveRounds
             internal int holdFrames = DANCE_HOLD_FRAMES;
             internal float fixedDt = -1f; // T36: Time.fixedDeltaTime for the job, restored after
             internal int fps = -1;        // T36: Application.targetFrameRate for the job (vSync off), restored after
+            internal int faultFrame = -1; // L1's order (round two), T45's job teardown arm: the job stops at the first frame >= this whose pose the rig still owes
+            internal bool teardownMutant; // ...its mutant arm: the job's finally clears the pose before the inverse apply
         }
 
         /// <summary>Starts the dance job; false when it cannot start now (the
@@ -894,6 +896,8 @@ namespace CompetitiveRounds
                         yield return new WaitForEndOfFrame(); yields++;
                         if ((fail = DanceAfterYield(gen, key, tRig, opt, yields, ref stale, ref remember)) != null) yield break;
                     }
+                    if (opt.faultFrame >= 0 && k >= opt.faultFrame && DanceEmotes.AppliedEntryCount > 0)
+                    { fail = "dev: the teardown arm stops the job at frame " + k; yield break; }   // L1's order (round two), lever only
                     if (!LegsPlanted(out _legSummary)) { fail = "legs not planted at frame " + k + " " + _legSummary; remember = true; yield break; }
                     if (!DanceRigStill(gunPos, gunRot)) { fail = "the rig moved at frame " + k; remember = true; yield break; }
                     string e2; lock (ring.Sync) e2 = ring.Error;
@@ -936,8 +940,15 @@ namespace CompetitiveRounds
             }
             finally
             {
-                DanceEmotes.PortraitPose = null;                  // S1.3: cleared again in the job's finally
-                try { if (rigRoot != null) DanceEmotes.RestorePortraitRig(rigRoot); } catch { }
+                // S1.3 and L1's order (round two): the rig's remembered deltas undone
+                // while the pose still names it, then the pose cleared, in a finally
+                // (EndPortraitPose). The lever's teardown arm (faultframe) reads this
+                // one teardown; its mutant (teardownmutant) swaps the order.
+                int tdOwed = DanceEmotes.AppliedEntryCount;
+                if (opt.faultFrame >= 0) { DanceEmotes.DevUndoneUnderPose = 0; DanceEmotes.DevUndoneAfterClear = 0; DanceEmotes.DevTeardownClearsFirst = opt.teardownMutant; }
+                try { DanceEmotes.EndPortraitPose(rigRoot); }
+                finally { DanceEmotes.DevTeardownClearsFirst = false; }
+                string tdLine = opt.faultFrame >= 0 ? DanceTeardownLine(opt, tdOwed) : null;
                 if (ring != null) ring.Close();
                 if (timing)
                 {
@@ -967,7 +978,7 @@ namespace CompetitiveRounds
                                    + " elapsed=" + (Time.realtimeSinceStartup - t0).ToString("F2") + "s"
                                    + (fail != null ? " result=" + DanceLastResult : ""));
                 foreach (var e in _errs) Plugin.Log.LogWarning("[DANCE]   " + e);
-                if (opt.local) DanceDevReport(opt, sku, rep, fail, still, frames, n, ms, clock, rootsBefore, remember);
+                if (opt.local) DanceDevReport(opt, sku, rep, fail, still, frames, n, ms, clock, rootsBefore, remember, tdLine);
                 if (stale) Abandon(key);
                 _renderClaim.Drop(gen);
                 try { NativeUI.MarkDirty(); } catch { }

@@ -20,6 +20,7 @@ namespace CompetitiveRounds
     ///                     [,injectpv][,m1=cloneonly]                   T38/M1 (cloneonly: the mutant arm)
     ///                     [,selffail]                                  T48 (a local refusal, remembered)
     ///                     [,matteq][,matteqflip]                       the matte equality (matteqflip: its negative arm)
+    ///                     [,faultframe=K][,teardownmutant]             T45's job teardown arm, L1's order (teardownmutant: the mutant arm)
     ///   TestPlayerCards = portrait:dance,t38[,mutant]                  T38's TryGetPose harness
     ///   TestPlayerCards = portrait:dance,decide[,sku=S][,nomemory][,recolor][,stored=dance|base|none]   T48's decision probe
     ///
@@ -68,6 +69,8 @@ namespace CompetitiveRounds
                 else if (p == "selffail") opt.selfFail = true;
                 else if (p == "matteq") opt.matteq = true;
                 else if (p == "matteqflip") { opt.matteq = true; opt.matteqFlip = true; }
+                else if (p.StartsWith("faultframe=") && int.TryParse(p.Substring(11), out iv)) opt.faultFrame = Mathf.Max(0, iv);
+                else if (p == "teardownmutant") opt.teardownMutant = true;
                 else Plugin.Log.LogInfo("[DANCE] lever: unknown option '" + p + "'");
             }
             if (sub == "t38") { DanceDevT38(mutant); return; }
@@ -103,6 +106,20 @@ namespace CompetitiveRounds
                 while (Rendering && Time.realtimeSinceStartup < cap) yield return null;
             }
             Plugin.Log.LogInfo("[DANCE-CAPTURE] tag=" + template.tag + " all: done");
+        }
+
+        /// <summary>The lever's job teardown arm (L1's order, round two): the
+        /// verdict on the job finally's one teardown. PASS when the rig owed at
+        /// least one entry, every owed entry was undone while PortraitPose still
+        /// named the rig and none after it was cleared, the pose is cleared and
+        /// no entry is left.</summary>
+        private static string DanceTeardownLine(DanceOpts opt, int owed)
+        {
+            int under = DanceEmotes.DevUndoneUnderPose, after = DanceEmotes.DevUndoneAfterClear, left = DanceEmotes.AppliedEntryCount;
+            bool cleared = !DanceEmotes.PortraitPose.HasValue;
+            bool pass = owed >= 1 && under == owed && after == 0 && cleared && left == 0;
+            return " teardown=" + (pass ? "PASS" : "FAIL") + " td-arm=" + (opt.teardownMutant ? "mutant(clear-first)" : "control")
+                 + " owed=" + owed + " undone-under-pose=" + under + " undone-after-clear=" + after + " pose-cleared=" + cleared + " left=" + left;
         }
 
         /// <summary>T38/M1: a PhotonView added to every holdable the rig
@@ -163,7 +180,8 @@ namespace CompetitiveRounds
         /// <summary>The lever's report and sentinel, and a root census two
         /// frames after the teardown (T37: "root counts at baseline").</summary>
         private static void DanceDevReport(DanceOpts opt, string sku, StringBuilder rep, string fail, DanceMotionCore.FrameOut still,
-                                           DanceMotionCore.FrameOut[] frames, int n, int ms, DanceClock clock, GameObject[] rootsBefore, bool remember)
+                                           DanceMotionCore.FrameOut[] frames, int n, int ms, DanceClock clock, GameObject[] rootsBefore, bool remember,
+                                           string teardown)
         {
             try
             {
@@ -183,6 +201,7 @@ namespace CompetitiveRounds
                             + " hold=" + opt.holdFrames + " fps=" + opt.fps + " fdt=" + opt.fixedDt.ToString("R") + " tclock=" + (opt.tclock ? 1 : 0)
                             + " faultat=" + opt.faultAt + " gatestartonly=" + (opt.gateStartOnly ? 1 : 0) + " injectpv=" + (opt.injectPv ? 1 : 0)
                             + " m1=" + (opt.m1CloneOnly ? "cloneonly" : "full") + " selffail=" + (opt.selfFail ? 1 : 0)
+                            + (opt.faultFrame >= 0 ? " faultframe=" + opt.faultFrame + (teardown ?? "") : "")
                             + (fail != null ? " reason=\"" + fail.Replace('"', '\'') + "\"" : "");
                 Plugin.Log.LogInfo("[DANCE-CAPTURE] " + line);
                 rep.Append("capture: ").Append(line).Append('\n');
