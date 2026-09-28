@@ -52495,6 +52495,56 @@ def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, lis
     return ghosts, graced, log
 
 
+def _ffa_finishing_count(member_ids, departed_ids, report) -> tuple[int, int, int]:
+    """How many players FINISHED the game a report describes, for every
+    "N or more players" FFA achievement. Returns (count, server, attested).
+
+    Sid's ruling (2026-09-28, the same rule for everyone): the tier reads the
+    players present at the end of THIS game, not the sitting's seated roster.
+    The seated roster (`ffa_lobbies.member_ids`, frozen at lock) keeps every
+    seat for the whole sitting, so a seat that left in an earlier game, or
+    earlier in this one, used to count toward Clean House / Party Crasher /
+    Hostile Takeover: a 5-seat sitting with 2 players left at the end paid all
+    three tiers.
+
+    The count is the MINIMUM of two independent accounts:
+
+      * server   -- seated members minus the seats the server itself recorded
+                    as departed (`ffa_lobbies.departed_ids`, migration 159,
+                    append-only). The caller passes the array off the lobby row
+                    it locked before reading the report, and every departure
+                    writer updates that same row, so the set is exactly the
+                    departures recorded BEFORE this report; one recorded after
+                    it waits on the lock and cannot change this game's count.
+      * attested -- seats the report marks neither `left_early` nor `absent`.
+
+    WHY THE MINIMUM. `left_early` and `absent` are outside the FFA HMAC
+    canonical (_ffa_hmac_canonical), which is why the tier used to be pinned to
+    member_ids (Codex Aug-7): a count read off those flags alone would let two
+    unsigned flags turn a 3-player 5-0 into the 4- and 5-player tiers. Under
+    the minimum the flags can only LOWER the count: a seat the server recorded
+    as departed stays out whatever the report says about it, so the count
+    never exceeds the server's own account and never exceeds the old
+    `len(member_ids)`. A report that understates the count changes nothing its
+    reporter does not already decide, because the signed tallies that decide
+    the shutout at all are reporter-attested too (the signature authenticates
+    the reporting build, not gameplay truth).
+
+    Direction of the residuals, all toward FEWER tiers: a report delivered
+    late, after a seat that finished it has since departed, counts that seat
+    out (the lobby records no time or game index per departure); and a seat a
+    future readmission puts back stays counted out while departed_ids keeps no
+    removal path (#686). A seat that vanished without any recorded departure
+    counts only while the report says it stayed, and never beyond `server`.
+    """
+    seated = set(member_ids or ())
+    departed = seated & set(departed_ids or ())
+    server = len(seated) - len(departed)
+    attested = sum(1 for p in report.players
+                   if not p.left_early and not bool(getattr(p, "absent", False)))
+    return min(server, attested), server, attested
+
+
 def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
                               kills_signed: bool) -> str | None:
     """None when an incoming report says the same thing about a game as the row
@@ -53741,21 +53791,31 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 _ach_players = sorted(
                     (p for p in report.players if p.steam_id not in unrated),
                     key=lambda q: str(id_by_steam[q.steam_id]))
-                # Codex Aug-7 (HIGH): the shutout TIER must not be decided by
-                # `absent`/`left_early`, which are UNSIGNED client flags. A
-                # modified reporter could flip two carried ghosts to
-                # absent=false and turn a genuine 3-player 5-0 into the 4- and
-                # 5-player badges. `members` is the lobby's LOCK-TIME roster
-                # read from ffa_lobbies.member_ids under the lobby lock — server
-                # state the client cannot author — so the tier is decided by
-                # how many people the server SEATED, not by how many the
-                # reporter says stayed.
+                # THE TIER COUNTS THE PLAYERS WHO FINISHED THIS GAME (Sid,
+                # 2026-09-28: the same rule for everyone). Until then it was
+                # `len(members)`, the sitting's seated roster, so seats that
+                # had left counted: a 5-seat sitting with 2 players at the end
+                # paid all three tiers.
                 #
-                # This is deliberately the stricter reading of "an FFA of N
-                # people": a 5-seat lobby whose players quit is still a
-                # 5-person FFA that the winner won. The reverse (tiering on
-                # survivors) is both forgeable and rewards attrition.
-                _n_played = len(members)
+                # Why it was pinned to the roster, and still is as a BOUND:
+                # Codex Aug-7 (HIGH) -- `absent`/`left_early` are UNSIGNED
+                # client flags, outside the FFA HMAC canonical, so a count read
+                # off them alone would let two flags turn a genuine 3-player
+                # 5-0 into the 4- and 5-player badges. The count is now the
+                # MINIMUM of the server's own account (the seated roster minus
+                # the departures recorded on the row locked above, before this
+                # report) and the report's account (seats marked neither
+                # left_early nor absent), so those flags can only lower it and
+                # no flag raises a tier. The rule and its residuals live in
+                # _ffa_finishing_count.
+                #
+                # A lobby row without departed_ids cannot vouch for anyone, so
+                # it counts every seat as departed: no tier rather than a guess
+                # (every production row carries it, migration 159).
+                _n_played, _n_server, _n_attested = _ffa_finishing_count(
+                    member_set,
+                    lobby["departed_ids"] if "departed_ids" in lobby else member_set,
+                    report)
 
                 # 1-3: shutout tiers, WINNER only, nested (a 5-player 5-0
                 # unlocks all three). "5-0" = the winner converted 5 full
@@ -53781,6 +53841,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                         (5, "ffa_shutout_5")):
                         if _n_played >= _need:
                             await _grant_achievement_inline(db, _win_pid, _key)
+                    print(f"[FFA-ACH] shutout tier count {_n_played} in room "
+                          f"{report.photon_room_id}: server {_n_server} of "
+                          f"{len(member_set)} seated not recorded departed before "
+                          f"this report, reporter {report.reported_by_steam_id} "
+                          f"attests {_n_attested} present")
 
                 for _p in _ach_players:
                     _ach_pid = id_by_steam[_p.steam_id]
