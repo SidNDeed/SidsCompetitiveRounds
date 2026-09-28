@@ -700,7 +700,7 @@
           ],
           "main",
           "pc_me",
-          "unpinned"
+          "19e16d4b781a31dbf530e21e65305a63ef584364"
         ],
         [
           "/api/v1/pc/packs/open",
@@ -943,7 +943,7 @@
           ],
           "main",
           "delete_player_data",
-          "unpinned"
+          "4a40cea98f2438adc94d8f88149e2e8e55b4c0ec"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "unpinned"
+          "205794af49479488295fd069533c002fcb148151"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3134,7 +3134,7 @@
           ],
           "main",
           "admin_pc_portrait_clear",
-          "unpinned"
+          "0d331a62302f70e17aba7766405b4fb026d512b3"
         ],
         [
           "/api/v1/internal/pc/face/back",
@@ -3152,7 +3152,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "251b1540cd3549c03415a2f4612bf86d0fe425ec"
+          "60602ca7b32d9985d9703a46fbf1b2d612161257"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3224,7 +3224,7 @@
           ],
           "main",
           "pc_portrait_upload",
-          "unpinned"
+          "73aa3478177ec22db7bb1f5db6544b31a38902cf"
         ],
         [
           "/api/v1/pc/portrait/motion",
@@ -3233,7 +3233,7 @@
           ],
           "main",
           "pc_motion_upload",
-          "22e1cc98e7d069c86c2b6bf3ed4c96f3447e4171"
+          "08c44597fb40ab16e4372db7914c4f3546a54c25"
         ],
         [
           "/api/v1/pc/dance",
@@ -3242,7 +3242,7 @@
           ],
           "main",
           "pc_dance_select",
-          "61f6181b5d6fc81dc5895eff0aade4eaf1e164cf"
+          "99f4ebf1b76f96053f4b3e62aefc71e318ac1ca3"
         ],
         [
           "/api/v1/pc-face/motion",
@@ -3251,7 +3251,7 @@
           ],
           "main",
           "pc_face_motion_read",
-          "b054de672967d435e8579c380a9cc528cf82c816"
+          "25953dce9db676a497e4db0f8d9c51388ddf78d4"
         ],
         [
           "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
@@ -3260,7 +3260,7 @@
           ],
           "main",
           "pc_face_motion_atlas",
-          "603f83b9ae3573035776a843034f1f93883f9781"
+          "f33bd745c31d95d9ac62b1131d99ed83369011ec"
         ],
         [
           "/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif",
@@ -3269,7 +3269,7 @@
           ],
           "main",
           "internal_pc_motion_preview",
-          "unpinned"
+          "f6846732a2e7b00b5d79bdf6963234fc910deea0"
         ],
         [
           "/api/v1/pc/trades",
@@ -3509,7 +3509,7 @@
       [
         "main",
         "lifespan",
-        "unpinned"
+        "c2aea3a4aa83c1b982618b3b4c32e7d7dce4b1ee"
       ]
     ]
   },
