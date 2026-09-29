@@ -445,6 +445,61 @@ namespace CompetitiveRounds
             }
         }
 
+        // -- The report outbox and the route (Codex round 1, HIGH 1) -----------
+
+        /// <summary>The address a queued report is sent to NOW. A report is
+        /// queued with the base the session used at the time; when that base is
+        /// one of this route's own (the secure address, the backup, a witness
+        /// lever's), the report follows the route and goes to the base the
+        /// session uses at the moment of the send, in either direction. A
+        /// report queued on the backup therefore goes to the secure base with
+        /// the session token once the route is restored, instead of repeating
+        /// an unauthenticated post the server refuses until the budget deletes
+        /// it. Any other address (an explicit override from an earlier launch)
+        /// is kept as it was. The caller resolves once per send and keeps the
+        /// result for that send: a request already in flight keeps its URL.</summary>
+        internal static string OutboxTarget(string storedUrl, string currentBase, string[] routeBases)
+        {
+            if (string.IsNullOrEmpty(storedUrl) || routeBases == null) return storedUrl;
+            string cur = TrimBase(currentBase);
+            if (cur.Length == 0) return storedUrl;
+            foreach (string b in routeBases)
+            {
+                string t = TrimBase(b);
+                if (t.Length == 0) continue;
+                if (storedUrl.Length > t.Length
+                    && storedUrl.StartsWith(t, StringComparison.OrdinalIgnoreCase)
+                    && storedUrl[t.Length] == '/')
+                    return cur + storedUrl.Substring(t.Length);
+            }
+            return storedUrl;
+        }
+
+        /// <summary>Whether a failed outbox attempt spends one of the report's
+        /// attempts. A 401 to a request that could not carry the session (the
+        /// transport withheld the token: plaintext to a public host) says
+        /// nothing about the report, and while the session is on the backup the
+        /// secure route can still return and deliver it with the token; so that
+        /// answer does not count toward the budget that deletes a report. Every
+        /// other failure counts as before, and so does this one when the route
+        /// cannot return (no route, or already restored).</summary>
+        internal static bool OutboxAttemptSpent(bool routeCanReturn, bool requestCouldCarrySession, bool answered401)
+        {
+            return !(routeCanReturn && !requestCouldCarrySession && answered401);
+        }
+
+        /// <summary>The local witness harness's stand-in for the secure route:
+        /// plaintext to loopback only (127.0.0.1 or localhost), no user info.
+        /// A Route accepts it only when built for that harness.</summary>
+        internal static bool IsLoopbackPlaintext(string url)
+        {
+            string u = TrimBase(url);
+            if (!u.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) return false;
+            Uri parsed;
+            if (!Uri.TryCreate(u, UriKind.Absolute, out parsed) || !string.IsNullOrEmpty(parsed.UserInfo)) return false;
+            return parsed.Host == "127.0.0.1" || string.Equals(parsed.Host, "localhost", StringComparison.OrdinalIgnoreCase);
+        }
+
         /// <summary>
         /// One session's route state. ApiClient builds one per Initialize, and
         /// only for the compiled secure default: an explicit BaseUrl override
@@ -458,11 +513,37 @@ namespace CompetitiveRounds
         /// </summary>
         internal sealed class Route
         {
-            internal Route(string configuredBase, string fallbackBase)
+            /// <param name="acceptLoopbackPlaintext">The local witness harness
+            /// only (ApiClient passes true on the broadcast identity with the
+            /// TestBackupUrl lever set): a check may also probe a plaintext
+            /// loopback address, which stands in for the secure route there.
+            /// False for every player, so every check probes https only.</param>
+            internal Route(string configuredBase, string fallbackBase, bool acceptLoopbackPlaintext = false)
             {
                 CurrentBase = TrimBase(configuredBase);
+                _configuredBase = CurrentBase;
                 FallbackBase = TrimBase(fallbackBase);
                 NextAutoAt = double.MaxValue;
+                AcceptsLoopbackPlaintext = acceptLoopbackPlaintext;
+            }
+
+            private readonly string _configuredBase;
+
+            internal bool AcceptsLoopbackPlaintext { get; }
+
+            /// <summary>An address a check may probe: https, or (harness
+            /// routes only) plaintext loopback.</summary>
+            internal bool Probeable(string url)
+            {
+                return IsSecure(url) || (AcceptsLoopbackPlaintext && IsLoopbackPlaintext(url));
+            }
+
+            /// <summary>The bases a queued report may have been queued under on
+            /// this route (OutboxTarget): the configured one, the backup, the
+            /// current one and the address the last check probed.</summary>
+            internal string[] Bases(string probeBase)
+            {
+                return new[] { _configuredBase, FallbackBase, CurrentBase, TrimBase(probeBase) };
             }
 
             /// <summary>The base every request built from now on uses.</summary>
@@ -472,6 +553,9 @@ namespace CompetitiveRounds
             /// <summary>Back on a secure base after the backup. Terminal for
             /// this Route: no timer and no button check runs again.</summary>
             internal bool Restored { get; private set; }
+            /// <summary>On the backup with a check still able to restore the
+            /// secure route (OutboxAttemptSpent).</summary>
+            internal bool CanReturn => OnFallback && !Restored;
             internal int AttemptsSinceFallback { get; private set; }
             /// <summary>Realtime second at which the timer's next check is due
             /// (MaxValue when no check is scheduled).</summary>
@@ -508,7 +592,7 @@ namespace CompetitiveRounds
             /// started them.</summary>
             internal int Begin(Trigger trigger, string probeBase, double now, int owner, double retrySeconds)
             {
-                if (!IsSecure(probeBase)) return 0;
+                if (!Probeable(probeBase)) return 0;
                 if (ProbeLive(now, owner)) return 0;
                 if (trigger == Trigger.Boot)
                 {

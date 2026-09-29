@@ -508,9 +508,10 @@ namespace CompetitiveRounds
 
             // -- F: the flip mid-flight -------------------------------------------
             // ApiClient builds every request from its base-url field at the
-            // moment it builds it, and the outbox keeps each queued report's
-            // URL; the flip writes the field once and rewrites nothing already
-            // built. Modelled here as URLs built from CurrentBase.
+            // moment it builds it; the flip writes the field once and rewrites
+            // nothing already built or in flight. Modelled here as URLs built
+            // from CurrentBase. The outbox resolves a queued report's address
+            // at each send instead (the O cases below).
             {
                 var clock = new FakeClock();
                 var route = BackupRoute(clock, TRetry);
@@ -594,6 +595,105 @@ namespace CompetitiveRounds
                     if (!IsModVersionBody(w)) { refused = w; break; }
                 Check(r, "J6 control: well-formed bodies with nested members, escapes, suffixes and any member order are accepted",
                       refused == null, refused == null ? "accepted=" + wellFormed.Length : "refused=" + refused);
+            }
+
+            // -- O: the report outbox follows the route (Codex round 1 HIGH 1) ------
+            // ApiClient.OutboxPass resolves each queued report's address with
+            // OutboxTarget at every send, over the route's own bases, and asks
+            // OutboxAttemptSpent after a failed one. Modelled with the real
+            // route and the real rules; the send is the fake.
+            {
+                const string path = "/api/v1/matches";
+                var clock = new FakeClock();
+                var route = BackupRoute(clock, TRetry);
+                string queued = route.CurrentBase + path;
+                string before = OutboxTarget(queued, route.CurrentBase, route.Bases(TSecure));
+                var t = new FakeTransport { AutoAnswer = true, AutoReading = ROk() };
+                var log = new RunLog();
+                TickTimer(route, clock, t, 300, 300, TRetry, log);
+                bool flipped = log.Last != null && log.Last.Flipped;
+                string after = OutboxTarget(queued, route.CurrentBase, route.Bases(TSecure));
+                Check(r, "O1 a report queued on the backup is sent to the secure base from the first send after the flip",
+                      flipped && queued == TBackup + path && after == TSecure + path, "queued=" + queued + " after=" + after);
+                Check(r, "O1c control: before the flip the same report is sent to the backup",
+                      before == TBackup + path, "before=" + before);
+
+                var boot = new FakeClock();
+                var backupNow = BackupRoute(boot, TRetry);
+                string earlier = TSecure + path;
+                string other = OutboxTarget(earlier, backupNow.CurrentBase, backupNow.Bases(TSecure));
+                Check(r, "O2 the other direction: a report queued on the secure base goes to the backup while the session is on it",
+                      other == TBackup + path, "sent=" + other);
+                string lan = TLanOverride + path;
+                string keptLan = OutboxTarget(lan, route.CurrentBase, route.Bases(TSecure));
+                string lookalike = "https://competitive-rounds.duckdns.org:84440" + path;
+                string keptLook = OutboxTarget(lookalike, backupNow.CurrentBase, backupNow.Bases(TSecure));
+                string upper = OutboxTarget("HTTP://Competitive-Rounds.DuckDNS.org:8443" + path, route.CurrentBase, route.Bases(TSecure));
+                Check(r, "O2b the scheme and host are matched without regard to case",
+                      upper == TSecure + path, "upper=" + upper);
+                Check(r, "O3 control: an address that is not one of the route's bases is kept as queued, a longer port included",
+                      keptLan == lan && keptLook == lookalike,
+                      "lan=" + keptLan + " lookalike=" + keptLook);
+
+                bool spentBackup = OutboxAttemptSpent(true, false, true);
+                Check(r, "O4 a 401 to an unauthenticated retry on the backup spends no attempt while the secure route can return",
+                      !spentBackup, "spent=" + spentBackup);
+                bool c1 = OutboxAttemptSpent(false, false, true), c2 = OutboxAttemptSpent(true, true, true),
+                     c3 = OutboxAttemptSpent(true, false, false);
+                Check(r, "O4c control: it spends one when the route cannot return, when the token rode along, or when it was not a 401",
+                      c1 && c2 && c3, "noReturn=" + c1 + " carried=" + c2 + " not401=" + c3);
+
+                // The outbox's ladder against a server that answers 401 to any
+                // request without the token (enforcement armed): 94 counted
+                // attempts delete a report.
+                Func<bool, bool, string> ladder = (followRoute, restoreAt10) =>
+                {
+                    var c = new FakeClock();
+                    var rt = BackupRoute(c, TRetry);
+                    string url = rt.CurrentBase + path;
+                    int attempts = 0, sends = 0;
+                    for (int i = 1; i <= 400; i++)
+                    {
+                        if (restoreAt10 && i == 10)
+                        {
+                            var tt = new FakeTransport { AutoAnswer = true, AutoReading = ROk() };
+                            TickTimer(rt, c, tt, 300, 300, TRetry, new RunLog());
+                        }
+                        string target = followRoute ? OutboxTarget(url, rt.CurrentBase, rt.Bases(TSecure)) : url;
+                        url = target;
+                        attempts++;
+                        sends++;
+                        bool carried = target.StartsWith("https://", StringComparison.Ordinal);
+                        if (carried) return "delivered at send " + sends + " to " + target;
+                        if (!OutboxAttemptSpent(rt.CanReturn, false, true)) attempts--;
+                        if (attempts >= 94) return "deleted at send " + sends + " (attempt " + attempts + ")";
+                    }
+                    return "still queued after 400 sends, attempt " + attempts;
+                };
+                string fixedRun = ladder(true, true);
+                string oldRun = ladder(false, true);
+                string neverRun = ladder(true, false);
+                Check(r, "O5 with enforcement armed a report queued on the backup is delivered once, with the token, after the restore",
+                      fixedRun == "delivered at send 10 to " + TSecure + path, fixedRun);
+                Check(r, "O5c control: the queued URL kept, as in round 1, posts to the backup until attempt 94 deletes the report",
+                      oldRun == "deleted at send 103 (attempt 94)", oldRun);
+                Check(r, "O6 a session that never leaves the backup keeps the report queued instead of deleting it at 94",
+                      neverRun == "still queued after 400 sends, attempt 0", neverRun);
+            }
+
+            // -- H: the local witness harness's route ------------------------------
+            {
+                const string loop = "http://127.0.0.1:18555";
+                var player = new Route(TSecure, TBackup);
+                int gp = player.Begin(Trigger.Boot, loop, 0, TOwner, TRetry);
+                var harness = new Route(loop, "http://[::1]:18555", acceptLoopbackPlaintext: true);
+                int gh = harness.Begin(Trigger.Boot, loop, 0, TOwner, TRetry);
+                var harness2 = new Route(loop, "http://[::1]:18555", acceptLoopbackPlaintext: true);
+                int gl = harness2.Begin(Trigger.Boot, "http://192.168.72.102:8443", 0, TOwner, TRetry);
+                Check(r, "H1 a player's route never checks a plaintext address, loopback included",
+                      gp == 0, "generation=" + gp);
+                Check(r, "H1c control: the witness harness's route checks plaintext loopback and nothing else plaintext",
+                      gh != 0 && gl == 0, "loopback=" + gh + " lan=" + gl);
             }
 
             // -- L: every catalogue, executed ---------------------------------------

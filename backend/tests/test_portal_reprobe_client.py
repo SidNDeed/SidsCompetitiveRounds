@@ -254,6 +254,47 @@ def test_a_press_after_a_restore_waits_for_the_first_secure_session():
 
 # -- Round 2 (Codex round 1: HIGH 1, MEDIUM 1, LOW 1, LOW 2) ------------------
 # The decisions are executed by the harness (secureroute J, O, R, K, H cases);
+# these check that ApiClient asks them where the finding said it must.
+
+def test_a_queued_report_is_sent_where_the_route_is_at_the_send():
+    """HIGH 1: a report queued on the backup kept the backup's URL after a
+    restore, every retry went out without the session token, the enforced
+    sink answered 401 and the outbox deleted the report at attempt 94. The
+    pass now resolves the address once per send (OutboxSendUrl over the route's
+    bases), keeps it in a local for the whole request, and asks the spend rule
+    with what the request could carry and whether the route could still return,
+    both captured before the network yield."""
+    body = code_of(API, "private static IEnumerator OutboxPass()")
+    resolve = "string target = OutboxSendUrl(p.url);"
+    send = "yield return PostRequest(target, p.json,"
+    assert body.count(resolve) == 1 and body.count(send) == 1, body
+    assert body.count("PostRequest(") == 1, "a second send in the pass: %s" % body
+    carry = "bool couldCarrySession = CredentialedTransportAllowed(target);"
+    ret = "bool routeCanReturn = routeAtSend != null && routeAtSend.CanReturn;"
+    assert body.index(resolve) < body.index(carry) < body.index(send), body
+    assert body.index(ret) < body.index(send), body
+    spend = "if (!SecureRouteRules.OutboxAttemptSpent(routeCanReturn, couldCarrySession, answered401))"
+    assert body.count(spend) == 1, body
+    assert body.index(spend) < body.index("bool permanent ="), body
+    assert body.index(spend) < body.index("p.attempts >= OUTBOX_MAX_ATTEMPTS"), body
+    given_back = body[body.index(spend):body.index("continue;", body.index(spend))]
+    assert "p.attempts--;" in given_back, given_back
+    target = code_of(API, "private static string OutboxSendUrl(string storedUrl)")
+    assert "if (route == null || string.IsNullOrEmpty(storedUrl)) return storedUrl;" in target, target
+    assert "return SecureRouteRules.OutboxTarget(storedUrl, baseUrl, bases);" in target, target
+    compiled = target[target.index("if (_routeHarnessBackup == null)"):]
+    assert "Plugin.DefaultApiUrl" in compiled and "Plugin.LegacyApiUrl" in compiled, target
+    whole = code_of(API)
+    for sig in ("private static bool OutboxAlreadyQueued(string url, string json)",
+                "public static void EnqueueFailedReport(string url, string json)",
+                "private static void RemovePendingReport(string url, string json)",
+                "private static OutboxGeneration Union(OutboxGeneration newer, OutboxGeneration older)"):
+        fn = code_of(API, sig)
+        assert "SameQueuedReport(" in fn, "%s compares reports without the route: %s" % (sig, fn)
+    assert not re.search(r"\.url\s*==\s*\w+\.url\s*&&|\.url\s*==\s*url\s*&&|\.url\s*!=\s*url\s*\|\|", whole), (
+        "a report identity compares raw URLs somewhere")
+    restored = code_of(API, "private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)")
+    assert "OutboxRouteRestored();" in restored, restored
 
 
 def test_the_probe_reads_the_whole_body_strictly():
@@ -264,3 +305,29 @@ def test_the_probe_reads_the_whole_body_strictly():
     probe = code_of(API, "private static IEnumerator ProbeSecureRoute(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)")
     assert "reading.VersionParsed = SecureRouteRules.IsModVersionBody(body);" in probe, probe
     assert "ExtractJsonString" not in probe, probe
+
+
+def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
+    """The local harness (TestBackupUrl, TestQueueReport) changes nothing
+    for a player: the harness is armed only when the
+    boot-safe broadcast identity holds, the report lever does nothing unless
+    the harness is armed, both levers are ticked only from the broadcast lever
+    tick, and a harness session never sends a report queued under the
+    compiled addresses (OutboxSendUrl adds them only outside the harness)."""
+    arm = code_of(API, "private static string RouteHarnessBackup()")
+    assert arm.index("BroadcastMode.IsBroadcastIdentityAtBoot()") < arm.index("return lever;"), arm
+    queue = code_of(API, "internal static void TickTestQueueReport()")
+    assert "if (_routeHarnessBackup == null || Plugin.Instance == null)" in queue, queue
+    assert queue.index("_routeHarnessBackup == null") < queue.index("PostRequestWithRetry("), queue
+    tick = code_of(PLUGIN_CS, "private void TickTestOpenTab()")
+    gate = "if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;"
+    assert tick.count(gate) == 1, tick
+    for lever in ("ApiClient.TickTestQueueReport();",):
+        assert tick.count(lever) == 1 and tick.index(gate) < tick.index(lever), tick
+    plugin = code_of(PLUGIN_CS)
+    for lever in ("TickTestQueueReport()",):
+        assert plugin.count(lever) == 1, "%s is called from somewhere else too" % lever
+    init = code_of(API, "public static void Initialize(string url)")
+    assert init.index("_routeHarnessBackup = RouteHarnessBackup();") < init.index("StartBootProbe();"), init
+    for key in ("\"TestBackupUrl\", \"\"", "\"TestQueueReport\", \"\""):
+        assert key in plugin, "%s is not empty by default" % key

@@ -170,6 +170,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestPress;          // broadcast seat only -- "ObjectName[:nonce]" presses a named F5 overlay button once per new value (board row 27 witnesses)
         internal static ConfigEntry<string> BroadcastTestSecureUrl;      // broadcast seat only -- an https address the secure-route check probes instead of the default one (board row 27 witnesses)
+        internal static ConfigEntry<string> BroadcastTestBackupUrl;      // broadcast seat only -- a plaintext address that replaces the backup for one launch: the local witness harness of board row 27 round 2
+        internal static ConfigEntry<string> BroadcastTestQueueReport;    // broadcast seat only -- each new value posts BepInEx/config/scr-portal-report.json as a match report through the real send and outbox path (board row 27 round 2 harness)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<string> BroadcastTestReporterElectionSentinel; // broadcast seat only — any new value runs the 2v2 DC reporter-election self-test once
         internal static ConfigEntry<string> BroadcastTestAutoLogConsentSentinel; // broadcast seat only — any new value runs the automatic-log consent-abort self-test once
@@ -1111,6 +1113,14 @@ namespace CompetitiveRounds
             BroadcastTestSecureUrl = Config.Bind(
                 "Broadcast", "TestSecureUrl", "",
                 "Broadcast seat only: an https address the secure-connection check probes instead of the default one, so a witness can make the secure route unreachable (a closed port or an unroutable host) without touching BaseUrl. Empty = the default address. Read at every check; clear it when done."
+            );
+            BroadcastTestBackupUrl = Config.Bind(
+                "Broadcast", "TestBackupUrl", "",
+                "Broadcast seat only, local witness harness: a plaintext http address that replaces the backup connection for this launch. While set, BaseUrl is the route's own address even when it is not the default, TestSecureUrl may also name a plaintext loopback address (http://127.0.0.1:port), and empty TestSecureUrl means BaseUrl. Point BaseUrl at a local api when using it. Read once at launch; clear it when done."
+            );
+            BroadcastTestQueueReport = Config.Bind(
+                "Broadcast", "TestQueueReport", "",
+                "Broadcast seat only, local witness harness: each new non-empty value (the value at launch never fires) posts the match report in BepInEx/config/scr-portal-report.json to the current api through the same send, failure and outbox path a finished 1v1 game uses. Only while TestBackupUrl is set. Clear it when done."
             );
             BroadcastTestPlayerCards = Config.Bind(
                 "Broadcast", "TestPlayerCards", "",
@@ -2583,6 +2593,7 @@ namespace CompetitiveRounds
             }
             TickTestQuit();
             TickTestPress();
+            ApiClient.TickTestQueueReport();
             string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
             if (raw == _lastTestOpenTab) return;
             if (Time.realtimeSinceStartup < 6f) return;   // let the menu and the overlay's page build settle

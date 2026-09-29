@@ -666,7 +666,9 @@ namespace CompetitiveRounds
             // deliberate choice and nothing re-checks or replaces it.
             UsingLegacyFallback = false;
             _route = null;
-            if (string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+            _routeHarnessBackup = RouteHarnessBackup();
+            if (_routeHarnessBackup != null
+                || string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
                 StartBootProbe();
             else
                 CheckModVersion();
@@ -773,16 +775,78 @@ namespace CompetitiveRounds
         private static bool _outboxLoaded;
 
         /// <summary>Whether this exact report is already queued. Identity is
-        /// the url and the body, which is what RemovePendingReport already
-        /// matches on, so the two agree about what "the same report" means.</summary>
+        /// the body and the address it resolves to (SameQueuedReport), which is
+        /// what RemovePendingReport also matches on, so the two agree about
+        /// what "the same report" means.</summary>
         private static bool OutboxAlreadyQueued(string url, string json)
         {
             for (int i = 0; i < _pendingReports.Count; i++)
             {
                 var p = _pendingReports[i];
-                if (p.url == url && p.json == json) return true;
+                if (SameQueuedReport(p.url, p.json, url, json)) return true;
             }
             return false;
+        }
+
+        /// <summary>Where a queued report is sent NOW (Codex round 1 HIGH 1).
+        /// A report keeps the address it was queued with, and that address
+        /// named the base of the moment; when the base is one of this session's
+        /// route (the secure address, the backup, a witness lever's), the report
+        /// follows the route to the base in use at the send. So a report queued
+        /// on the backup goes to the secure base, with the session token, from
+        /// the first retry after a restore, and a report queued on the secure
+        /// base in an earlier launch goes where this launch's route goes. No
+        /// route (an explicit BaseUrl override) changes nothing. Resolved once
+        /// per send: a request already in flight keeps its URL.</summary>
+        private static string OutboxSendUrl(string storedUrl)
+        {
+            var route = _route;
+            if (route == null || string.IsNullOrEmpty(storedUrl)) return storedUrl;
+            string[] bases = route.Bases(SecureProbeBase());
+            if (_routeHarnessBackup == null)
+            {
+                // The compiled pair too, for a report queued in an earlier
+                // launch whose route answered differently. Never in the witness
+                // harness: a real report on disk must not be sent to it.
+                var all = new string[bases.Length + 2];
+                bases.CopyTo(all, 0);
+                all[bases.Length] = Plugin.DefaultApiUrl;
+                all[bases.Length + 1] = Plugin.LegacyApiUrl;
+                bases = all;
+            }
+            return SecureRouteRules.OutboxTarget(storedUrl, baseUrl, bases);
+        }
+
+        /// <summary>The route has just returned to the secure base: every
+        /// queued report falls due within OUTBOX_RESTORE_DELAY, so a report that
+        /// waited on the backup (at the capped interval) is delivered with the
+        /// token promptly. The delay leaves SteamAuth time to land the first
+        /// secure session, which it requests on its own loop once the route
+        /// returns. Nothing is sent from here: the supervisor's next pass sends,
+        /// resolving each address as always.</summary>
+        private static void OutboxRouteRestored()
+        {
+            if (_pendingReports.Count == 0) return;
+            float soon = Time.realtimeSinceStartup + OUTBOX_RESTORE_DELAY;
+            int pulled = 0;
+            foreach (var p in _pendingReports)
+                if (p.nextAt > soon) { p.nextAt = soon; pulled++; }
+            Plugin.Log.LogInfo($"[OUTBOX] secure route restored: {_pendingReports.Count} queued report(s) due within "
+                               + $"{OUTBOX_RESTORE_DELAY:0} s ({pulled} brought forward)");
+            EnsureOutboxLoop();
+        }
+
+        private const float OUTBOX_RESTORE_DELAY = 20f;
+
+        /// <summary>One report, whichever of the route's bases it was queued
+        /// under: the same body bound for the same place once resolved. Without
+        /// the resolution a report queued on the backup and queued again on the
+        /// secure base after a restore would be two entries and two sends.</summary>
+        private static bool SameQueuedReport(string urlA, string jsonA, string urlB, string jsonB)
+        {
+            if (jsonA != jsonB) return false;
+            if (urlA == urlB) return true;
+            return string.Equals(OutboxSendUrl(urlA), OutboxSendUrl(urlB), StringComparison.Ordinal);
         }
         /// <summary>DERIVED from the window the server will still accept a
         /// report in, not chosen. At the capped backoff below this ladder has
@@ -1151,7 +1215,7 @@ namespace CompetitiveRounds
                 // was the one call that could not restart the driver.
                 EnsureOutboxLoop();
                 foreach (var pending in _pendingReports)
-                    if (pending.url == url && pending.json == json)
+                    if (SameQueuedReport(pending.url, pending.json, url, json))
                         return;
                 float initialDelay = OutboxInitialDelay(url);
                 _pendingReports.Add(new PendingReport
@@ -1332,7 +1396,7 @@ namespace CompetitiveRounds
             for (int i = _pendingReports.Count - 1; i >= 0; i--)
             {
                 var pending = _pendingReports[i];
-                if (pending.url != url || pending.json != json) continue;
+                if (!SameQueuedReport(pending.url, pending.json, url, json)) continue;
                 _pendingReports.RemoveAt(i);
                 removed = true;
             }
@@ -1537,7 +1601,7 @@ namespace CompetitiveRounds
             {
                 bool seen = false;
                 foreach (var n in merged.entries)
-                    if (n.url == e.url && n.json == e.json) { seen = true; break; }
+                    if (SameQueuedReport(n.url, n.json, e.url, e.json)) { seen = true; break; }
                 if (!seen) merged.entries.Add(e);
             }
             return merged;
@@ -1830,8 +1894,23 @@ namespace CompetitiveRounds
                 p.nextAt = Time.realtimeSinceStartup
                            + OUTBOX_RETRY_SECONDS
                              * Math.Min(OUTBOX_RETRY_MAX_MULTIPLIER, (float)p.attempts);
+                // Codex round 1 HIGH 1: the address is resolved for THIS send
+                // and kept in a local, so a flip during the request changes
+                // nothing about it; the entry is rewritten (and persisted) only
+                // when the route has moved since it was queued.
+                string target = OutboxSendUrl(p.url);
+                if (!string.Equals(target, p.url, StringComparison.Ordinal))
+                {
+                    Plugin.Log.LogInfo($"[OUTBOX] queued report follows the route: {SecureRouteRules.HostPort(p.url)} -> "
+                                       + $"{SecureRouteRules.HostPort(target)}");
+                    p.url = target;
+                    PersistOutbox();
+                }
+                bool couldCarrySession = CredentialedTransportAllowed(target);
+                var routeAtSend = _route;
+                bool routeCanReturn = routeAtSend != null && routeAtSend.CanReturn;
                 bool done = false, ok = false; string resp = null;
-                yield return PostRequest(p.url, p.json, (s, r) => { done = true; ok = s; resp = r; });
+                yield return PostRequest(target, p.json, (s, r) => { done = true; ok = s; resp = r; });
                 while (!done) yield return null;
                 if (ok)
                 {
@@ -1938,6 +2017,21 @@ namespace CompetitiveRounds
                     // retires one is the server, which turns the same refusal
                     // into a 403 once the sitting has been idle past its live
                     // window.
+                    bool answered401 = resp != null
+                        && (resp.StartsWith("HTTP 401", StringComparison.Ordinal) || resp.Contains("HTTP/1.1 401"));
+                    if (!SecureRouteRules.OutboxAttemptSpent(routeCanReturn, couldCarrySession, answered401))
+                    {
+                        // Sent without the session over the backup while the
+                        // secure route can still return: the 401 is about the
+                        // transport, not the report, so it does not spend the
+                        // budget that deletes a report. The attempt is given
+                        // back and the next one waits the capped interval.
+                        p.attempts--;
+                        p.nextAt = Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER;
+                        Plugin.Log.LogInfo("[OUTBOX] unauthenticated retry on the backup answered 401; not counted "
+                                           + "while the secure route can return");
+                        continue;
+                    }
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
@@ -2096,6 +2190,83 @@ namespace CompetitiveRounds
         private static SecureRouteRules.Route _route;
         private static float _secureRouteTickRt = -999f;
         private static bool _loggedBadTestSecureUrl;
+        /// <summary>The local witness harness's backup address, or null (every
+        /// player, and this seat whenever the lever is empty). Set once per
+        /// Initialize from [Broadcast] TestBackupUrl.</summary>
+        private static string _routeHarnessBackup;
+
+        /// <summary>The local witness harness (Codex round 1 HIGH 1's control):
+        /// on the broadcast identity only, [Broadcast] TestBackupUrl names a
+        /// plaintext address that replaces the backup for this launch, the
+        /// configured BaseUrl is the route's own address even when it is not
+        /// the compiled default, and a check may probe a plaintext loopback
+        /// address (the harness has no certificate a client trusts). The
+        /// harness runs every request against a local api; a player's route is
+        /// untouched, since the lever is read only on the broadcast identity
+        /// and is empty by default.</summary>
+        private static string RouteHarnessBackup()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestBackupUrl == null) return null;
+                string lever = SecureRouteRules.TrimBase(Plugin.BroadcastTestBackupUrl.Value);
+                if (lever.Length == 0) return null;
+                if (!BroadcastMode.IsBroadcastIdentityAtBoot()) return null;
+                Uri parsed;
+                if (!lever.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || !Uri.TryCreate(lever, UriKind.Absolute, out parsed) || !string.IsNullOrEmpty(parsed.UserInfo))
+                {
+                    Plugin.Log.LogWarning($"[SCR] TestBackupUrl ignored: not a plaintext http address ({lever})");
+                    return null;
+                }
+                Plugin.Log.LogWarning($"[SCR] witness harness: the backup is {lever} and the route's address is {baseUrl} for this launch");
+                return lever;
+            }
+            catch { return null; }
+        }
+
+        private static string _testQueueReportLast;
+
+        /// <summary>The harness's report (Codex round 1 HIGH 1's control): each
+        /// new value of [Broadcast] TestQueueReport posts the body in
+        /// BepInEx/config/scr-portal-report.json to the current base exactly as
+        /// ReportMatch posts a finished 1v1 game (PostRequestWithRetry, then
+        /// EnqueueFailedReport on failure), so the outbox that carries it is
+        /// the real one. ReportMatch itself is fenced off the broadcast
+        /// identity, which is why the body comes from a file. Called from the
+        /// broadcast lever tick; does nothing unless the harness is armed.</summary>
+        internal static void TickTestQueueReport()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestQueueReport == null) return;
+                string want = (Plugin.BroadcastTestQueueReport.Value ?? "").Trim();
+                if (_testQueueReportLast == null) { _testQueueReportLast = want; return; }
+                if (string.Equals(want, _testQueueReportLast, StringComparison.Ordinal)) return;
+                _testQueueReportLast = want;
+                if (want.Length == 0) return;
+                if (_routeHarnessBackup == null || Plugin.Instance == null)
+                {
+                    Plugin.Log.LogWarning("[SCR] TestQueueReport ignored: the witness harness is not armed (TestBackupUrl)");
+                    return;
+                }
+                string path = Path.Combine(BepInEx.Paths.ConfigPath, "scr-portal-report.json");
+                string json = File.ReadAllText(path).Trim();
+                string url = $"{baseUrl}/api/v1/matches";
+                Plugin.Log.LogInfo($"[SCR] TestQueueReport ({want}): posting the harness report to {url} ({json.Length} bytes)");
+                Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, json, (success, response) =>
+                {
+                    if (success)
+                    {
+                        Plugin.Log.LogInfo($"[SCR] TestQueueReport: reported at once: {Trunc(response, 160)}");
+                        return;
+                    }
+                    Plugin.Log.LogWarning($"[SCR] TestQueueReport: the send failed ({Trunc(response ?? "", 160)}); queued as a game's report is");
+                    EnqueueFailedReport($"{baseUrl}/api/v1/matches", json);   // as ReportMatch's failure branch
+                }));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestQueueReport failed: {ex.Message}"); }
+        }
         /// <summary>How long a portal press that just restored the secure route
         /// waits for SteamAuth to land a session before minting anyway.</summary>
         private const float PortalSessionWaitSeconds = 15f;
@@ -2109,7 +2280,10 @@ namespace CompetitiveRounds
         /// identity is asked in its boot-safe form, and only when the lever is set.</summary>
         private static string SecureProbeBase()
         {
-            string def = SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
+            // The harness's own address stands in for the compiled default,
+            // so an emptied lever never sends a harness check to the real one.
+            bool harness = _routeHarnessBackup != null && _route != null;
+            string def = harness ? _route.Bases(null)[0] : SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
             try
             {
                 if (Plugin.BroadcastTestSecureUrl == null) return def;
@@ -2117,6 +2291,7 @@ namespace CompetitiveRounds
                 if (lever.Length == 0) return def;
                 if (!BroadcastMode.IsBroadcastIdentityAtBoot()) return def;
                 if (SecureRouteRules.IsSecure(lever)) return lever;
+                if (harness && SecureRouteRules.IsLoopbackPlaintext(lever)) return lever;
                 if (!_loggedBadTestSecureUrl)
                 {
                     _loggedBadTestSecureUrl = true;
@@ -2224,7 +2399,9 @@ namespace CompetitiveRounds
         /// then OnBootProbeConcluded, then the version check (as before).</summary>
         private static void StartBootProbe()
         {
-            var route = new SecureRouteRules.Route(Plugin.DefaultApiUrl, Plugin.LegacyApiUrl);
+            var route = _routeHarnessBackup != null
+                ? new SecureRouteRules.Route(baseUrl, _routeHarnessBackup, acceptLoopbackPlaintext: true)
+                : new SecureRouteRules.Route(Plugin.DefaultApiUrl, Plugin.LegacyApiUrl);
             _route = route;
             int gen = route.Begin(SecureRouteRules.Trigger.Boot, SecureProbeBase(), RealtimeNow(),
                                   SecureProbeOwner(), SecureRetrySeconds());
@@ -2302,7 +2479,7 @@ namespace CompetitiveRounds
 
             if (!reachable)
             {
-                baseUrl = Plugin.LegacyApiUrl.TrimEnd('/');
+                baseUrl = route.CurrentBase;
                 UsingLegacyFallback = true;
                 Plugin.Log.LogWarning(
                     $"[API] {Plugin.DefaultApiUrl} unreachable — falling back to {baseUrl} for this session. " +
@@ -2338,8 +2515,10 @@ namespace CompetitiveRounds
         /// rules (StampVersionHeader withheld the bearer and
         /// SensitiveTransportBlocked vetted the route, both against its own
         /// URL). Every request built after it uses the secure base, bearer
-        /// included. The outbox keeps each queued report's URL, so a report
-        /// queued on the backup is replayed there too.</summary>
+        /// included. The report outbox resolves each queued report's address
+        /// when it sends it (OutboxSendUrl), so a report queued on the backup
+        /// goes to the restored base, with the token, from its next retry on;
+        /// a retry already in flight keeps the URL it was sent with.</summary>
         private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
         {
             baseUrl = route.CurrentBase;
@@ -2352,6 +2531,8 @@ namespace CompetitiveRounds
             // wss fall-back decides from here.
             try { ChatClient.ReleaseApiFallback(Plugin.LegacyApiUrl); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] chat release failed: {ex.Message}"); }
+            try { OutboxRouteRestored(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] route-restore pass failed: {ex.Message}"); }
         }
 
         /// <summary>The answer to a portal press that was waiting on a check.</summary>

@@ -269,10 +269,10 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[secureroute\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # 46 cases on the commit that added the suite, 52 since round 2 added
-    # the J cases; the floor is that count, not one far below it (#342).
-    # Raise it when cases are added.
-    assert run >= 52, "the SecureRouteRules suite shrank to %d cases" % run
+    # 46 cases on the commit that added the suite, 64 since round 2 added
+    # the J, O and H cases; the floor is that count, not one far below it
+    # (#342). Raise it when cases are added.
+    assert run >= 64, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -298,6 +298,13 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     "J2 a mod-version body with whitespace between its tokens is usable and restores the secure route",
     "J3 control: a JSON body without the version member is not the SCR server and keeps the backup",
     "J4 control: a body cut off inside the version string is not the SCR server and keeps the backup",
+    # round 2: the outbox follows the route (HIGH 1)
+    "O1 a report queued on the backup is sent to the secure base from the first send after the flip",
+    "O1c control: before the flip the same report is sent to the backup",
+    "O4 a 401 to an unauthenticated retry on the backup spends no attempt while the secure route can return",
+    "O5 with enforcement armed a report queued on the backup is delivered once, with the token, after the restore",
+    "O5c control: the queued URL kept, as in round 1, posts to the backup until attempt 94 deletes the report",
+    "H1 a player's route never checks a plaintext address, loopback included",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",
     "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",
