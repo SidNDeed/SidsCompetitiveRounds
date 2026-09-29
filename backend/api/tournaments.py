@@ -681,13 +681,56 @@ async def _confirmed_mentions(db: AsyncSession, tournament_id: uuid.UUID) -> str
     return " ".join(f"<@{d}>" for d in rows if d)
 
 
-def _signup_count_line(t: Tournament, confirmed: int) -> str:
+# Row 32's start rule, the server's half (Discord fix round 3, item 6). A
+# sync tournament starts only when min_players players agree on ONE offered
+# start time - signing up is not agreeing - so every channel line the server
+# composes about a sync tournament in voting (the signup-count line and the
+# push-back) carries the one sentence below, built by _tsync_rule from the
+# lock's own eligible tally (_eligible_slot_tallies). The bot builds the same
+# sentence for the lines it composes (discord_bot.py _tsync_rule; the bot
+# image carries discord_bot.py alone, so it cannot import this module):
+# test_row32_e pins the two byte-equal over every progress shape. ASCII only.
+TSYNC_VOTE_HOW = "Vote for every time you can make in F5 -> Tournaments."
+
+
+def _tsync_times(slots: list) -> str:
+    """The tied top slots (unix seconds, in order) as one phrase: '<A>',
+    '<A> or <B>', or '<A> or N other times'."""
+    shown = [f"<t:{slot}:F>" for slot in slots]
+    if len(shown) <= 2:
+        return " or ".join(shown)
+    return f"{shown[0]} or {len(shown) - 1} other times"
+
+
+def _tsync_rule(min_players: int, tallies: Optional[list] = None) -> str:
+    """The start rule in one sentence and, given the eligible tally
+    [(slot_ts, votes)], how far the vote has got."""
+    rule = f"It starts when {min_players} players agree on one start time"
+    if tallies is None:
+        return f"{rule}."
+    top = max((votes for _slot, votes in tallies), default=0)
+    slots = sorted(int(slot.timestamp()) for slot, votes in tallies if top and votes == top)
+    if top <= 0 or not slots:
+        progress = f"0 of {min_players} agree on a time so far"
+    elif top < min_players:
+        progress = f"{top} of {min_players} agree on {_tsync_times(slots)} so far"
+    else:
+        progress = f"{top} players agree on {_tsync_times(slots)} so far - enough to lock it"
+    return f"{rule}: {progress}."
+
+
+def _signup_count_line(t: Tournament, confirmed: int, tallies: Optional[list] = None) -> str:
     """The shared '( n / max ) players have entered ...' feed line. Async
     tournaments start the moment signups close, so they get the signup-close
-    time instead of a start time."""
+    time instead of a start time. A sync tournament still in voting states
+    the start rule with its eligible tally (`tallies`, row 32) and how to
+    vote; once locked it names the start time the vote decided."""
     line = (f"( {confirmed} / {t.max_players} ) players have entered the "
-            f"{_kind_label(t.kind)} tournament. "
-            f"{t.min_players} players required to start. ")
+            f"{_kind_label(t.kind)} tournament. ")
+    if t.kind != "async" and t.status == "voting":
+        return (line + f"{_tsync_rule(t.min_players, tallies)} {TSYNC_VOTE_HOW} "
+                f"Default start: {_dts(t.default_start_ts)}.")
+    line += f"{t.min_players} players required to start. "
     if t.kind == "async":
         line += f"Signups close {_dts(t.lock_at)}."
     else:
@@ -696,6 +739,15 @@ def _signup_count_line(t: Tournament, confirmed: int) -> str:
         # actually play at (adversarial review fix).
         line += f"Current start time is {_dts(t.scheduled_start_ts or t.default_start_ts)}."
     return line
+
+
+async def _signup_count_line_now(db: AsyncSession, t: Tournament, confirmed: int) -> str:
+    """_signup_count_line with the eligible tally read now when the line
+    states the start rule (a sync tournament in voting)."""
+    tallies = None
+    if t.kind != "async" and t.status == "voting":
+        tallies = await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))
+    return _signup_count_line(t, confirmed, tallies)
 
 
 def _bracket_tag(side: Optional[str]) -> str:
@@ -1098,7 +1150,11 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             pushback_reason = (f"no upcoming start time reached {t.min_players} "
                                f"votes (the best slot had {agree_count})")
 
-    async def _push_back(reason: str) -> None:
+    async def _push_back(reason: str, consensus: Optional[str] = None) -> None:
+        # `reason` goes to the log; a sync tournament's channel post names
+        # the consensus instead (`consensus`, row 32: "no start time had 8
+        # players agreeing on it") and states the start rule with the tally
+        # its carried votes hold at the new times.
         # Pushback path. Status stays "voting" so the cron re-enters this
         # function next week. (Round-20 find 1: factored into a closure so
         # the post-kick eligible-minimum recheck can push back too.)
@@ -1155,10 +1211,15 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             carried = (" Your time votes carried over to the same times next "
                        "week — update them in the F5 tab if that no longer "
                        "works for you." if t.kind == "sync" else "")
+            said = reason
+            if t.kind == "sync":
+                said = consensus or f"no start time had {t.min_players} players agreeing on it"
+                rule = _tsync_rule(t.min_players, await _eligible_slot_tallies(db, t.id, now))
+                when_sentence = f"{when_sentence} {rule} {TSYNC_VOTE_HOW}"
             await _queue_channel_post(
                 db,
                 f"{prefix} {_kind_label(t.kind)} tournament has been pushed "
-                f"back: {reason}. {when_sentence}{carried}")
+                f"back: {said}. {when_sentence}{carried}")
         except Exception as e:
             print(f"[TOURNAMENT] pushback feed post failed: {e}")
         # Adversarial review fix: the availability-check notices are deduped by
@@ -1256,7 +1317,8 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         if len(signups) < t.min_players:
             await _push_back(
                 f"not enough eligible players after lock filtering "
-                f"({len(signups)} of {t.min_players} required)")
+                f"({len(signups)} of {t.min_players} required)",
+                f"fewer than {t.min_players} eligible players agreed on the start time")
             return
 
     # Prizes scale with the locked player count (item 2). prize_tier is kept
@@ -4284,7 +4346,7 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     # posts ride the signup's transaction — no orphan announcements.
     try:
         confirmed = await _confirmed_count(db, tournament_id)
-        await _queue_channel_post(db, _signup_count_line(t, confirmed))
+        await _queue_channel_post(db, await _signup_count_line_now(db, t, confirmed))
         if t.kind == "async":
             # Async genuinely IS ready at a signup count: it starts when signups
             # close, so there is no time to agree on and lock_at is the truth.
@@ -4443,7 +4505,7 @@ async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: A
         await _queue_channel_post(
             db,
             f"A player left the {_kind_label(t.kind)} tournament — "
-            + _signup_count_line(t, confirmed))
+            + await _signup_count_line_now(db, t, confirmed))
     except Exception as e:
         print(f"[TOURNAMENT] unsignup feed post failed: {e}")
     await db.commit()

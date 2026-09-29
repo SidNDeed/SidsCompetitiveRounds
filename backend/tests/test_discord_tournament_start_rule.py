@@ -448,3 +448,88 @@ def test_row32_d_without_a_sync_tournament_in_voting_the_faq_answer_is_static():
     answer = H.run(rig.ns["_faq_resolve_answer"](entry, {"content": "how do tournaments work"}))
     assert answer == entry["answer"]
     assert api.current_reads == []
+
+
+# -- (e) and (f): the server-composed lines (Discord fix round 3, item 6) ---------------------------
+#
+# tournaments.py composes two channel lines about a sync tournament that the
+# bot only relays: the signup-count line (every signup and unsignup) and the
+# push-back. Both now carry the start rule with the lock's eligible tally and
+# how to vote, and the push-back names the consensus, not the count. The
+# sentence is tournaments._tsync_rule, one function for both lines, and it is
+# byte-equal to the bot's _tsync_rule (the bot image carries discord_bot.py
+# alone, so the two cannot share an import): (e) pins that equality over every
+# progress shape, the bot's side read through its own tally parse.
+
+def _server_tallies(tallies):
+    return [(datetime.fromtimestamp(slot, timezone.utc), votes) for slot, votes in tallies]
+
+
+@pytest.mark.parametrize("tallies", [
+    None, [], [(S1, 3), (S2, 1)], [(S1, 4), (S2, 4)], [(S1, 4), (S2, 4), (S3, 4)],
+    [(S1, 8), (S2, 8), (S3, 2)], [(S1, 9), (S2, 3)],
+], ids=["unread", "no-votes", "below", "tie-2", "tie-3", "at-quorum-tie", "above"])
+def test_row32_e_the_server_states_the_bots_start_rule_sentence_byte_for_byte(tallies):
+    import tournaments as T
+    rig = rig_for(Api(tallies=tallies or []))
+    bot_tally = None if tallies is None else H.run(rig.ns["_tsync_tally"](H.steam_of(1)))
+    server = T._tsync_rule(8, None if tallies is None else _server_tallies(tallies))
+    assert server == rig.ns["_tsync_rule"](8, bot_tally), server
+    assert server.startswith(RULE) and server.isascii()
+    assert T.TSYNC_VOTE_HOW == rig.ns["_TSYNC_VOTE_HOW"] == HOW_TO_VOTE
+
+
+def test_row32_e_the_signup_count_line_states_the_rule_not_a_signup_count_to_start():
+    """A sync tournament in voting: the count of entrants stays, "8 players
+    required to start" goes, the rule with the tally and how to vote come in.
+    Locked sync and async lines are unchanged (guards)."""
+    import tournaments as T
+    t = SimpleNamespace(kind="sync", status="voting", max_players=16, min_players=8,
+                        default_start_ts=datetime.fromtimestamp(DEFAULT, timezone.utc),
+                        scheduled_start_ts=None, lock_at=datetime.fromtimestamp(LOCK, timezone.utc))
+    line = T._signup_count_line(t, 8, _server_tallies([(S1, 3), (S2, 1)]))
+    assert line == (f"( 8 / 16 ) players have entered the Synchronized tournament. {RULE}: 3 of 8 agree on"
+                    f" <t:{S1}:F> so far. {HOW_TO_VOTE} Default start: <t:{DEFAULT}:F>."), line
+    assert "required to start" not in line and line.isascii()
+    t.status, t.scheduled_start_ts = "locked", datetime.fromtimestamp(S1, timezone.utc)
+    assert T._signup_count_line(t, 8) == ("( 8 / 16 ) players have entered the Synchronized tournament. 8 players"
+                                          f" required to start. Current start time is <t:{S1}:F>.")
+    t.kind, t.status = "async", "voting"
+    assert T._signup_count_line(t, 3) == ("( 3 / 16 ) players have entered the Asynchronous tournament. 8 players"
+                                          f" required to start. Signups close <t:{LOCK}:F>.")
+
+
+def test_row32_f_the_unsignup_line_and_the_push_back_state_the_rule_and_name_the_consensus(monkeypatch, tmp_path):
+    """The real app on the lane database: eight entrants, five vote for the
+    one slot; a voter leaves through the unsignup route - its channel line
+    states the rule at 4 of 8 on that slot; the lock pushes back - its post
+    names the consensus ("no start time had 8 players agreeing on it", not
+    the best slot's count), the new start, the rule with the carried votes at
+    their new time (4 of 8, a week later) and how to vote."""
+    import test_discord_tournament_quorum as Q
+    from datetime import timedelta
+
+    async def body(env):
+        people = await Q.entrants_of(env, 8)
+        tid, slot = await Q.sync_tournament(env, people, 5)
+        unix = int(slot.timestamp())
+        leaver = people[1]
+        r = await env.client.post(f"/api/v1/tournaments/{tid}/unsignup", json={"steam_id": leaver.steam},
+                                  headers=env.mod_headers(leaver))
+        assert r.status_code == 200, (r.status_code, r.text[:300])
+        posts = lambda: env.rows(f"SELECT content FROM {Q.SCHEMA}.pending_channel_posts ORDER BY created_at, id")
+        left = [p["content"] for p in await posts()]
+        assert left[-1] == ("A player left the Synchronized tournament \u2014 ( 7 / 16 ) players have entered the"
+                            f" Synchronized tournament. {RULE}: 4 of 8 agree on <t:{unix}:F> so far. {HOW_TO_VOTE}"
+                            f" Default start: <t:{unix}:F>."), left[-1]
+        status, _start = await Q.lock(env, tid)
+        assert status == "voting"
+        pushed = (await posts())[-1]["content"]
+        later = unix + 7 * 86400
+        tail = pushed.split(" \u2014 the ", 1)[-1]
+        assert tail == ("Synchronized tournament has been pushed back: no start time had 8 players agreeing on"
+                        f" it. New start time is <t:{later}:F>. {RULE}: 4 of 8 agree on <t:{later}:F> so far."
+                        f" {HOW_TO_VOTE} Your time votes carried over to the same times next week \u2014 update"
+                        " them in the F5 tab if that no longer works for you."), pushed
+        assert "best slot had" not in pushed
+    Q.e2e(monkeypatch, tmp_path, body)
