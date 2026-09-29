@@ -737,12 +737,33 @@ namespace CompetitiveRounds
         /// <summary>The one log line a portal press refused for a plaintext
         /// base writes (Codex round 2 LOW 3): the base as scheme://host:port
         /// (CredentialFreeBase) and the reason. The address may carry user
-        /// info, a path or a query; none of them reaches the log.</summary>
+        /// info, a path or a query; none of them reaches the log. The whole
+        /// line is at most PlaintextRefusalLineMax characters.</summary>
         internal static string PlaintextRefusalLine(string baseUrl)
         {
-            return "[SCR] portal button: not opened; the server address " + CredentialFreeBase(baseUrl)
-                 + " is plaintext, and the portal token is only sent over https";
+            // The whole line is bounded (Codex round 3 LOW 2): a valid DNS name
+            // runs to 253 characters, so the host is shortened, with a marker,
+            // to what the fixed text leaves; the scheme and the port are kept.
+            string addr = CredentialFreeBase(baseUrl);
+            int room = PlaintextRefusalLineMax - PlaintextRefusalHead.Length - PlaintextRefusalTail.Length;
+            if (addr.Length > room)
+            {
+                int hostAt = addr.IndexOf("://", StringComparison.Ordinal) + 3;
+                int portAt = addr.LastIndexOf(':');
+                string port = portAt > hostAt ? addr.Substring(portAt) : "";
+                int keep = Math.Max(0, room - hostAt - port.Length - 3);
+                addr = addr.Substring(0, Math.Min(addr.Length, hostAt + keep)) + "..." + port;
+            }
+            string line = PlaintextRefusalHead + addr + PlaintextRefusalTail;
+            return line.Length <= PlaintextRefusalLineMax ? line : line.Substring(0, PlaintextRefusalLineMax - 3) + "...";
         }
+
+        /// <summary>The declared whole-line maximum of the plaintext refusal's
+        /// log line: under 160 characters, the bar it inherited.</summary>
+        internal const int PlaintextRefusalLineMax = 159;
+
+        private const string PlaintextRefusalHead = "[SCR] portal button: not opened; the server address ";
+        private const string PlaintextRefusalTail = " is plaintext, and the portal token is only sent over https";
 
         /// <summary>An address reduced to scheme://host:port: no user info,
         /// path, query or fragment. An address that does not parse is not

@@ -1062,6 +1062,23 @@ namespace CompetitiveRounds
                 Check(r, "N1c control: a plain LAN base is named as it is, and an address that does not parse is not echoed",
                       lan.Contains("http://192.168.72.102:8443 ") && junk.IndexOf("sentinel-7781", StringComparison.Ordinal) < 0,
                       lan + " || " + junk);
+
+                // N1d (Codex round 3 LOW 2's falsifier): a valid 253-character
+                // DNS name of four legal labels (63.63.63.61).
+                string host253 = new string('a', 63) + "." + new string('b', 63) + "." + new string('c', 63) + "." + new string('d', 61);
+                string longLine = PlaintextRefusalLine("http://" + host253 + ":8443/api");
+                bool longOk = host253.Length == 253
+                              && longLine.Length <= PlaintextRefusalLineMax && PlaintextRefusalLineMax < 160
+                              && longLine.StartsWith("[SCR] portal button: not opened; the server address http://aaaa", StringComparison.Ordinal)
+                              && longLine.Contains("...:8443 is plaintext")
+                              && longLine.EndsWith(" is plaintext, and the portal token is only sent over https", StringComparison.Ordinal)
+                              && longLine.IndexOf('\n') < 0 && longLine.IndexOf('\r') < 0;
+                Check(r, "N1d a valid 253-character host: the whole line stays within its declared maximum, the host cut with a marker",
+                      longOk, "len=" + longLine.Length + "/" + PlaintextRefusalLineMax + " line=" + longLine);
+                Check(r, "N1dc control: an address that fits is not cut, and its line is within the maximum too",
+                      lan.IndexOf("...", StringComparison.Ordinal) < 0 && lan.Length <= PlaintextRefusalLineMax
+                          && PlaintextRefusalLine("http://competitive-rounds.duckdns.org:8443").Contains("http://competitive-rounds.duckdns.org:8443 "),
+                      "len=" + lan.Length + " line=" + lan);
             }
 
             // -- M: the mint failure line is bounded and token-safe (Codex round 2 LOW 4)
