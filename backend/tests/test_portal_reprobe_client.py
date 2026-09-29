@@ -412,7 +412,7 @@ def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spe
     assert "p.nextAt = Time.realtimeSinceStartup + (float)SecureRouteRules.OutboxSessionPollSeconds;" in waiting, waiting
     assert not re.search(r"p\.attempts\s*(\+\+|--|[-+]?=)", waiting), "the wait spends or sets attempts: " + waiting
     assert "PostRequest(" not in waiting and "Remove(" not in waiting, waiting
-    assert "stamped => carried = stamped);" in body[send:send + 200], body[send:send + 200]
+    assert "stamped => carried = stamped, redactErrorText: true);" in body[send:send + 200], body[send:send + 200]
     assert "CredentialedTransportAllowed(" not in body[spend_attempt:], "the spend rule reads the address again"
     spend = body.index("if (answer == SecureRouteRules.OutboxAnswer.GiveBack)")
     given_back = body[spend:body.index("continue;", spend)]
@@ -708,6 +708,31 @@ def test_the_mint_failure_text_is_scrubbed_whole_before_any_cut():
         decl = scrubsrc[scrubsrc.index("private static readonly Regex " + name):]
         decl = decl[:decl.index(";")]
         assert "(?:%s)" % keys in decl, "%s does not name the documented key set: %s" % (name, decl)
+
+def test_the_outbox_give_back_line_is_flattened_scrubbed_then_bounded():
+    """Codex round 3 LOW 5: the outbox's line for a failed retry without the
+    session token interpolated the raw failure text (Trunc(resp, 60)): a
+    server's body, its CR/LF and any credential in it went into LogOutput.log.
+    The line is now built by one rule (SecureRouteRules.OutboxTokenlessFailureLine,
+    harness M4, M4b, M4c, M4d): control characters become spaces, the WHOLE text
+    is passed through LogScrub.RedactCredentials, and only then is it cut so the
+    whole line is at most OutboxGiveBackLineMax; and the outbox asks PostRequest
+    for redacted error text, so the upstream 300 cut also follows a scrub."""
+    body = code_of(API, "private static IEnumerator OutboxPass()")
+    give = "if (answer == SecureRouteRules.OutboxAnswer.GiveBack)"
+    given = body[body.index(give):body.index("continue;", body.index(give))]
+    line = "Plugin.Log.LogInfo(SecureRouteRules.OutboxTokenlessFailureLine(resp, p.attempts, OUTBOX_MAX_ATTEMPTS));"
+    assert given.count(line) == 1, given
+    # The failure text reaches the give-back's log only through the rule.
+    assert "resp" not in given.replace(line, ""), "the give-back logs the failure text raw: " + given
+    send = body[:body.index("while (!done) yield return null;")]
+    assert send.count("stamped => carried = stamped, redactErrorText: true);") == 1, send
+    rule = code_of(RULES, "internal static string OutboxTokenlessFailureLine(string response, int spent, int max)")
+    flat = rule.index("char.IsControl(c)")
+    scrub = rule.index("LogScrub.RedactCredentials(")
+    cut = rule.index("Substring(")
+    assert flat < scrub < cut and rule.count("Substring(") == 1 and rule.count("RedactCredentials(") == 1, rule
+    assert "internal const int OutboxGiveBackLineMax = 200;" in code_of(RULES)
 
 def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
     """The local harness (TestBackupUrl, TestQueueReport) and the stale-token

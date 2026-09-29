@@ -1138,6 +1138,68 @@ namespace CompetitiveRounds
                       plain + " || " + noTok);
             }
 
+            // -- M4: the outbox's give-back line for a failed retry without the
+            // session token is flattened, scrubbed whole, then bounded (Codex
+            // round 3 LOW 5). Sentinels: a JSON member, a header, a key=value
+            // pair, a bare token-shaped run and a Steam ticket.
+            {
+                string[] sentinels = { "JSONSENT4a1", "HDRSENT4b2", "KVSENT4c3", "BARESENT4d4", "9F3C77D1E5B2" };
+                string json = "{\"detail\":\"no session\",\"token\":\"JSONSENT4a1q\"}";
+                string hdr = "X-Session-Token: HDRSENT4b2z";
+                string kv = "portal_token=KVSENT4c3y";
+                string bare = "BARESENT4d4" + "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d";
+                string tkt = "Session Ticket: 140000009F3C77D1E5B2" + "0A0B0C0D0E0F10111213141516171819";
+                Func<string, bool> clean = l =>
+                {
+                    foreach (var s in sentinels) if (l.IndexOf(s, StringComparison.Ordinal) >= 0) return false;
+                    return true;
+                };
+                Func<string, bool> oneLine = l =>
+                {
+                    foreach (char c in l) if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029) return false;
+                    return true;
+                };
+                // M4 (the composition the outbox runs): a tokenless 401 whose
+                // body carries CR/LF and all five, through RequestErrorText
+                // (redact, as the outbox asks) into the line.
+                string body = json + "\r\n" + hdr + "\r\n" + kv + "\r\n" + bare + "\r\n" + tkt + "\r\n";
+                string text = RequestErrorText(401, body, "HTTP/1.1 401 Unauthorized", null, true);
+                string line = OutboxTokenlessFailureLine(text, 7, 94);
+                bool m4 = clean(line) && oneLine(line) && line.Length <= OutboxGiveBackLineMax
+                          && line.StartsWith("[OUTBOX] a retry without the session token failed (HTTP 401: ", StringComparison.Ordinal)
+                          && line.EndsWith("); not counted, the report stays queued (7 of 94 spent)", StringComparison.Ordinal);
+                Check(r, "M4 a tokenless 401 with CR/LF and JSON, header, key=value, bare-token and Steam-ticket sentinels: one bounded line, none of them",
+                      body.IndexOf('\r') >= 0 && m4, "len=" + line.Length + "/" + OutboxGiveBackLineMax + " line=" + line);
+                // M4b: the line's own scrub and flattening, each sentinel first
+                // in the window after a line break, handed the RAW text (the
+                // line may not rely on its caller having scrubbed).
+                string[] leads = { json, hdr, kv, bare, tkt };
+                bool each = true; string worst = "";
+                foreach (var lead in leads)
+                {
+                    string l = OutboxTokenlessFailureLine("HTTP 401: \r\n" + lead + "\r\n" + (char)0x2028 + "tail", 1, 94);
+                    if (!(clean(l) && oneLine(l) && l.Length <= OutboxGiveBackLineMax)) { each = false; worst = l; }
+                }
+                Check(r, "M4b each sentinel first after a CR/LF, raw text: the line scrubs and flattens by itself",
+                      each, worst);
+                // M4c: a JSON token member opening inside the line's room and
+                // closing after it: cut first, its closing quote is gone and
+                // the pattern cannot see it.
+                string pre = "HTTP 401: {\"detail\":\"" + new string('d', 40) + "\",\"token\":\"";
+                string m4c = OutboxTokenlessFailureLine(pre + "JSONSENT4a1" + new string('w', 60) + "\"}", 94, 94);
+                int room = OutboxGiveBackLineMax - "[OUTBOX] a retry without the session token failed (".Length
+                           - "); not counted, the report stays queued (94 of 94 spent)".Length;
+                Check(r, "M4c a credential straddling the line's own cut is scrubbed before the cut",
+                      pre.Length < room && pre.Length + 71 > room && clean(m4c) && m4c.Length <= OutboxGiveBackLineMax,
+                      "pre=" + pre.Length + " room=" + room + " line=" + m4c);
+                string shortL = OutboxTokenlessFailureLine("HTTP 503: upstream down", 3, 94);
+                string noneL = OutboxTokenlessFailureLine(null, 0, 94);
+                Check(r, "M4d control: a short credential-free answer is logged whole in the old wording, and no answer is named",
+                      shortL == "[OUTBOX] a retry without the session token failed (HTTP 503: upstream down); not counted, the report stays queued (3 of 94 spent)"
+                          && noneL == "[OUTBOX] a retry without the session token failed ((no response)); not counted, the report stays queued (0 of 94 spent)",
+                      shortL + " || " + noneL);
+            }
+
             // -- MT: the one-ticket latch (Codex round 2 LOW 5) ---------------------
             // A refresh tick is modelled as SteamAuth.MaybeRefresh runs it: the
             // latch's Tick first, then a successor only when MayRequest.

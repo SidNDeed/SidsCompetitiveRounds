@@ -859,6 +859,37 @@ namespace CompetitiveRounds
             return line;
         }
 
+        /// <summary>The declared whole-line maximum of the outbox's line for a
+        /// retry without the session token that failed (Codex round 3 LOW
+        /// 5).</summary>
+        internal const int OutboxGiveBackLineMax = 200;
+
+        private const string OutboxGiveBackHead = "[OUTBOX] a retry without the session token failed (";
+
+        /// <summary>The one log line the outbox writes when a retry that did
+        /// not carry the session token failed. The failure text is a remote
+        /// answer, so it is flattened first (every control character and line
+        /// separator becomes a space: one line per event), then passed WHOLE
+        /// through LogScrub.RedactCredentials, and only then cut so the line,
+        /// fixed tail included, is at most OutboxGiveBackLineMax characters;
+        /// a cut can never split a credential out of the scrub's sight. The
+        /// outbox asks PostRequest for redacted error text as well, so the
+        /// 300-character body cut upstream is also taken after a scrub.
+        /// </summary>
+        internal static string OutboxTokenlessFailureLine(string response, int spent, int max)
+        {
+            string why = string.IsNullOrEmpty(response) ? "(no response)" : response;
+            var flat = new System.Text.StringBuilder(why.Length);
+            foreach (char c in why)
+                flat.Append(char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029 ? ' ' : c);
+            why = LogScrub.RedactCredentials(flat.ToString().Trim());
+            if (why.Length == 0) why = "(no response)";
+            string tail = "); not counted, the report stays queued (" + spent + " of " + max + " spent)";
+            int room = OutboxGiveBackLineMax - OutboxGiveBackHead.Length - tail.Length;
+            if (why.Length > room) why = why.Substring(0, Math.Max(0, room - 3)) + "...";
+            return OutboxGiveBackHead + why + tail;
+        }
+
         internal enum MintAction { Open, RemintOnce, Fail }
 
         /// <summary>What the portal mint's answer means. A token opens the

@@ -1953,8 +1953,10 @@ namespace CompetitiveRounds
                 // session dropped between the gate and the stamp leaves an
                 // https request without one).
                 bool done = false, ok = false, carried = false; string resp = null;
+                // redactErrorText: a failure's text can reach the log below,
+                // so its body is scrubbed whole before the 300 cut.
                 yield return PostRequest(target, p.json, (s, r) => { done = true; ok = s; resp = r; },
-                                         stamped => carried = stamped);
+                                         stamped => carried = stamped, redactErrorText: true);
                 while (!done) yield return null;
                 // Codex round 3 HIGH 1: what the request CARRIED decides
                 // removal as well as spend, and it is asked before the status.
@@ -1978,8 +1980,9 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo("[OUTBOX] a retry without the session token was answered 2xx; not taken as delivered, "
                                            + $"the report stays queued for a send with the token ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
                     else
-                        Plugin.Log.LogInfo($"[OUTBOX] a retry without the session token failed ({Trunc(resp ?? "(no response)", 60)}); "
-                                           + $"not counted, the report stays queued ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                        // The failure text is a remote answer: flattened,
+                        // scrubbed whole, then bounded (Codex round 3 LOW 5).
+                        Plugin.Log.LogInfo(SecureRouteRules.OutboxTokenlessFailureLine(resp, p.attempts, OUTBOX_MAX_ATTEMPTS));
                     continue;
                 }
                 if (answer == SecureRouteRules.OutboxAnswer.Settle)
