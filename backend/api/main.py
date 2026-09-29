@@ -61751,10 +61751,16 @@ async def get_set_report(request: Request, steam_id: str = "",
 # The caller's session check is the shared path every signed route runs, not
 # a read of this feature, and is not asked about.
 #
-# DERIVED, never written down (#342): the statements are the report's own
-# `_REPORT_*` constants, the ones the _report_rows call sites run (a test
-# holds the two sets equal, and another that nothing else in the report code
-# runs a statement). A string that opens with SELECT or WITH is a statement,
+# NAMED one by one in _SESSION_REPORT_NAMED, and held complete by tests
+# (#342): the statements are the report's own `_REPORT_*` constants, the ones
+# the _report_rows call sites run (a test holds the two sets equal, one holds
+# the named set equal to the same rules run over every `_REPORT_*` constant of
+# the module, and another that nothing else in the report code runs a
+# statement). Named, never collected from globals(): the janitor SQL walker
+# refuses the whole module when its namespace is handed to a call (#613), and
+# every `text(_X_SQL)` janitor site then fails the boot self-test (this
+# probe's first form did: 11 sites). A string that opens with SELECT or WITH
+# is a statement,
 # and one carrying `{where}` is a template, expanded with every fragment of
 # the `_WHERE` table of the same stem, as its loader formats it; a table whose
 # values are all statements (the card statements) gives each of them. A
@@ -61780,8 +61786,9 @@ _SESSION_REPORT_STATEMENT = _re.compile(r"^\s*(?:SELECT|WITH)\b")
 
 def _session_report_statements(namespace) -> tuple:
     """Every statement GET /api/v1/report runs, from the `_REPORT_*`
-    constants in `namespace` (this module's globals), sorted, each once; ()
-    when a `{where}` template has no `_WHERE` table of its stem."""
+    constants in `namespace` (_SESSION_REPORT_NAMED; a test runs it over the
+    module's whole namespace too), sorted, each once; () when a `{where}`
+    template has no `_WHERE` table of its stem."""
     found = set()
     for name, value in namespace.items():
         if not name.startswith("_REPORT_"):
@@ -61835,7 +61842,30 @@ def _session_report_refused(exc) -> bool:
     return False
 
 
-_SESSION_REPORT_STATEMENTS = _session_report_statements(globals())
+# The report's statement constants and their tables, by name (the block
+# comment above: named, never collected from globals()).
+_SESSION_REPORT_NAMED = {
+    "_REPORT_CALLER_SQL": _REPORT_CALLER_SQL,
+    "_REPORT_1V1_SQL": _REPORT_1V1_SQL,
+    "_REPORT_1V1_WHERE": _REPORT_1V1_WHERE,
+    "_REPORT_RS_SQL": _REPORT_RS_SQL,
+    "_REPORT_TS_SQL": _REPORT_TS_SQL,
+    "_REPORT_TEAM_SQL": _REPORT_TEAM_SQL,
+    "_REPORT_TEAM_WHERE": _REPORT_TEAM_WHERE,
+    "_REPORT_TEAM_TELE_SQL": _REPORT_TEAM_TELE_SQL,
+    "_REPORT_OS_SQL": _REPORT_OS_SQL,
+    "_REPORT_OVT_SQL": _REPORT_OVT_SQL,
+    "_REPORT_OVT_WHERE": _REPORT_OVT_WHERE,
+    "_REPORT_FFA_SQL": _REPORT_FFA_SQL,
+    "_REPORT_FFA_PLAYERS_SQL": _REPORT_FFA_PLAYERS_SQL,
+    "_REPORT_KIND_SQL": _REPORT_KIND_SQL,
+    "_REPORT_FFA_LOBBY_SQL": _REPORT_FFA_LOBBY_SQL,
+    "_REPORT_ROSTER_SQL": _REPORT_ROSTER_SQL,
+    "_REPORT_GOLD_SQL": _REPORT_GOLD_SQL,
+    "_REPORT_RATING_SQL": _REPORT_RATING_SQL,
+    "_REPORT_CARD_STATEMENTS": _REPORT_CARD_STATEMENTS,
+}
+_SESSION_REPORT_STATEMENTS = _session_report_statements(_SESSION_REPORT_NAMED)
 _SESSION_REPORT_PROBE = _session_report_probe_sql(_SESSION_REPORT_STATEMENTS)
 _SESSION_REPORT_BINDS = (tuple(sorted(text(_SESSION_REPORT_PROBE).compile().params))
                          if _SESSION_REPORT_PROBE else ())

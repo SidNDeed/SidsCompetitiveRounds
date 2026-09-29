@@ -6,10 +6,13 @@ route, so `session_report` is the release train's build discriminator for
 them: absent on the build before, and on this build 1 on both roles when the
 database has every table and column that the route's statements name.
 
-DERIVED (#342): the statements come from the report's own `_REPORT_*`
-constants. The first tests hold that set equal to what the _report_rows call
-sites run and check that nothing else in the report code runs a statement, so
-a statement added outside the derivation fails here. The probe's error
+NAMED and held complete (#342): the statements are the report's own
+`_REPORT_*` constants, named in main._SESSION_REPORT_NAMED - never collected
+from globals(), which makes the janitor SQL walker refuse the whole module
+(#613). The first tests hold that set equal to what the _report_rows call
+sites run and to the same rules run over every `_REPORT_*` constant of the
+module, and check that nothing else in the report code runs a statement, so
+a statement added outside the named set fails here. The probe's error
 mapping runs against fakes below; the live half (the lab database, one
 column the gold statement names renamed, and a control rename of a column no
 statement names) is test_the_health_word_reads_what_the_labs_database_has in
@@ -94,6 +97,22 @@ def test_the_derived_statements_are_exactly_what_the_route_runs():
     assert len(main._REPORT_CARD_STATEMENTS) == len(main._REPORT_CARD_TABLES) == 4
     for s in main._REPORT_CARD_STATEMENTS.values():
         assert s in run
+
+
+def test_the_named_set_is_every_report_constant_of_the_module():
+    """_SESSION_REPORT_NAMED names the module's own objects, report constants
+    only, and the same rules run over EVERY `_REPORT_*` constant of the module
+    give exactly the named set: a statement left out of the names fails here,
+    and so does a table (a template without its table empties the set)."""
+    named = main._SESSION_REPORT_NAMED
+    assert len(named) >= 19, len(named)
+    for name, value in named.items():
+        assert name.startswith("_REPORT_"), name
+        assert value is getattr(main, name), name
+    everything = {k: v for k, v in vars(main).items() if k.startswith("_REPORT_")}
+    assert main._SESSION_REPORT_STATEMENTS
+    assert main._SESSION_REPORT_STATEMENTS == main._session_report_statements(named)
+    assert main._session_report_statements(everything) == main._SESSION_REPORT_STATEMENTS
 
 
 def test_only_report_rows_runs_a_statement_in_the_report_code():

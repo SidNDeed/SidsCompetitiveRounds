@@ -413,8 +413,12 @@ def test_a1_issuance_relock_and_grant_shapes():
     for fn, needle in (("_report_load_1v1", '"rules": _rules_history(r["rules"])'),
                        ("_report_load_team", '"rules": _rules_history(r["rules"])'),
                        ("_report_load_ovt", '"rules": _rules_history(r["rules"], r["solo_extra_pick"])'),
-                       ("_report_load_ffa", '"settings": _ffa_settings_block(r)')):
+                       ("_report_ffa_games", '"settings": _ffa_settings_block(r)')):
         assert _src(fn).count(needle) == 1, fn
+    # Both FFA selectors (match= and the lobby= of board row 30a) build their
+    # games through that one builder, so each carries the settings record.
+    for fn in ("_report_load_ffa", "_report_load_ffa_lobby"):
+        assert _src(fn).count("await _report_ffa_games(db, ") == 1, fn
     assert _src("_report_game_json").count('for _k in ("rules", "settings"):') == 1
     for sql, join in ((main._REPORT_1V1_SQL, "LEFT JOIN ranked_series rs ON rs.id = m.series_id"),
                       (main._REPORT_TEAM_SQL, "LEFT JOIN team_series ts ON ts.id = tm.series_id"),

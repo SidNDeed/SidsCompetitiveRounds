@@ -861,9 +861,10 @@ class HealthResponse(BaseModel):
     # session_report: whether GET /api/v1/report is bound on this app AND the
     # database this box is connected to has every table and column the route's
     # statements name (main._session_report_probe: 1 yes, 0 no; the degraded
-    # arm answers the last probe). The statements are DERIVED from the report's
-    # own constants (#342). The release train's build discriminator for board
-    # rows 30a/30d/30g, which add no route; read by nothing else (#306).
+    # arm answers the last probe). The statements are the report's own
+    # constants, named and held complete by tests (#342). The release train's
+    # build discriminator for board rows 30a/30d/30g, which add no route; read
+    # by nothing else (#306).
     # Declared without a default, so building the answer without it raises
     # instead of silently leaving the key out. Absent on any build before
     # those rows, which is how the train reads the old build.
