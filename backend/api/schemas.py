@@ -817,6 +817,13 @@ class HealthResponse(BaseModel):
     # §8) -- probed by the release train on both roles and read by nothing
     # else. Absent on a build older than v4.13.
     pc_fold: str | None = None
+    # pc_trading: the card-trading word (main._pc_trading_word, migration
+    # 353): ready | off | schema_missing | partial | unknown | broken --
+    # DERIVED from the accept's claim and move literals and the schema
+    # probe, never a constant (#306). The connected arm probes; the
+    # degraded arm reads only this process's cache (broken, the word of a
+    # found schema, else unknown). Absent on a build before trading.
+    pc_trading: str | None = None
     # ffa_hold_fences: which generation of the FFA readmission-hold fences this
     # build carries (main._FFA_HOLD_FENCES; 1 = migration 325's held_until /
     # held_lobby honoured by the janitor lapse sweep, the poll's 3-hour sweep
@@ -844,6 +851,12 @@ class HealthResponse(BaseModel):
     # (#306): the batch adds no route, so this value is what tells its build
     # from the one before it. Absent on any build before it.
     ticket_redaction: int | None = None
+    # discord_collection: release-train verification plumbing, not a design
+    # mechanism (main._DISCORD_COLLECTION_MARKER; 1 = this build serves the
+    # Discord reveal's four internal routes). A code constant, equal on both
+    # boxes by construction, probed by the release train and read by nothing
+    # else (#306). Absent on any build before it.
+    discord_collection: int | None = None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
@@ -910,6 +923,20 @@ class HealthResponse(BaseModel):
     # it raises instead of silently leaving the key out. Absent on any build
     # before that batch, which is how the train reads the old build.
     ladder_hook: int
+    # team_dc_fallback: whether the database this box is connected to has the
+    # two columns migration 356 adds, which the 2v2 disconnect deferral reads
+    # and writes (main._team_dc_fallback_probe). 1 when a probe naming every
+    # dc_fallback_* column the deferral's SQL names runs, 0 when it fails for
+    # a missing column or table. The column list is DERIVED from that SQL
+    # when main is imported, never written down (#342). It asks the
+    # database: the connected arm probes, the degraded arm answers the last
+    # probe's value (0 before any). The release train's discriminator for
+    # the migration as the api sees it, on both roles (the standby's schema
+    # arrives by replication); read by nothing else (#306). Declared without a
+    # default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before the 2v2 deferral batch,
+    # which is how the train reads the old build.
+    team_dc_fallback: int
     # connect_failure: how many of the connect-failure design's eight I2
     # writers (the lock, the poll, connect, assembly, the leave, the verdict,
     # the report and the release) are wired to their seat-row write in this

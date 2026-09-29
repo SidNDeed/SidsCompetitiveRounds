@@ -8465,6 +8465,11 @@ def _pc_not_linked(ctx, target):
 # bytes: the text still goes out, the picture does not.
 _PC_FACE_MAX_BYTES = 4 * 1024 * 1024
 _PC_LEASE_RESERVE_S = 3.0
+# The composite byte route's refusals that mean "a healthy box, come back
+# shortly": a portrait released mid-render, the composite gate full, the cold
+# composite at the api's 30 s ceiling. The retry predicate is membership in
+# this one constant; every other answer is final.
+_PC_COMPOSITE_RETRYABLE = ("portrait_pending", "composite_busy", "composite_timeout")
 # The lease-ENDING requests (the release, the ack) are admitted by the api
 # itself (main._pc_release_slot, a slot per reserved-pool connection, review
 # r12): a client-side gate here (review r11) returned its permit on a timeout
@@ -8490,22 +8495,46 @@ def _pc_locale_of(ctx):
     return primary or "en"
 
 
-async def _pc_api_bytes(path, params=None, timeout=10.0):
-    """(status, bytes|None) for an internal byte route: an exact Content-Length
-    is required, the body is refused over _PC_FACE_MAX_BYTES or when shorter
-    or longer than declared."""
+async def _pc_api_bytes(path, params=None, timeout=10.0, max_bytes=_PC_FACE_MAX_BYTES):
+    """(status, bytes|None, meta) for an internal byte route: an exact
+    Content-Length is required, the body is refused over `max_bytes` (the
+    face cap unless the caller names another) or when shorter or longer than
+    declared. `meta` is the response headers, names lower-cased, plus `error`
+    (at most 64 characters) and `retry_after` (0-30 s) when a non-200 carried
+    a small JSON body - read off its `detail` first, as _pc_detail reads a
+    JSON refusal, with the Retry-After header standing in for a missing
+    retry_after; {} when the api did not answer at all. The bytes slot is
+    None for every non-200: an error body is never handed back as a
+    picture."""
     try:
         async with http_session.get(f"{API_BASE_URL}/api/v1{path}", params=params,
                                     timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            meta = {str(k).lower(): v for k, v in r.headers.items()}
             if r.status != 200:
                 print(f"API GET {path.split('?')[0]} -> HTTP {r.status}")
-                return r.status, None
+                # A refusal names its reason in a small JSON body: read it,
+                # bounded, so "come back in two seconds" is not mistaken for
+                # "no such route". Anything unparseable carries neither field.
+                parsed = {}
+                try:
+                    size = int(meta.get("content-length", "0"))
+                    if str(meta.get("content-type", "")).startswith("application/json") and 0 < size <= 4096:
+                        d = _pc_detail(json.loads(await r.content.readexactly(size)))
+                        if isinstance(d.get("error"), str):
+                            parsed["error"] = d["error"][:64]
+                        wait = d.get("retry_after", meta.get("retry-after"))
+                        if wait is not None:
+                            parsed["retry_after"] = max(0, min(30, int(wait)))
+                except Exception:
+                    parsed = {}
+                meta.update(parsed)
+                return r.status, None, meta
             cl = r.headers.get("Content-Length")
             if cl is None:
-                return r.status, None
+                return r.status, None, meta
             declared = int(cl)
-            if declared <= 0 or declared > _PC_FACE_MAX_BYTES:
-                return r.status, None
+            if declared <= 0 or declared > max_bytes:
+                return r.status, None, meta
             # `read(n)` answers UP TO n bytes. A body that arrives in more
             # than one buffer — which is every face over a few kilobytes —
             # returns its first chunk, and the exact-length check then throws
@@ -8515,45 +8544,49 @@ async def _pc_api_bytes(path, params=None, timeout=10.0):
             try:
                 data = await r.content.readexactly(declared)
             except asyncio.IncompleteReadError:
-                return r.status, None
+                return r.status, None, meta
             if await r.content.read(1):
-                return r.status, None
-            return r.status, data
+                return r.status, None, meta
+            return r.status, data, meta
     except Exception as e:
         print(f"API bytes error: {e}")
-        return 0, None
+        return 0, None, {}
 
 
 async def _pc_back_bytes():
     """The canonical back from the api, cached for an hour."""
     now = time.monotonic()
     if _pc_back_bytes_cache["bytes"] is None or now - _pc_back_bytes_cache["at"] > 3600:
-        st, data = await _pc_api_bytes("/internal/pc/face/back")
+        st, data, _ = await _pc_api_bytes("/internal/pc/face/back")
         if st == 200 and data:
             _pc_back_bytes_cache["bytes"], _pc_back_bytes_cache["at"] = data, now
     return _pc_back_bytes_cache["bytes"]
 
 
-async def _pc_lease(subject_ref, print_id=None, event_ids=None):
-    """(lease_id, deadline, transient) — deadline on the monotonic clock,
-    `until` minus the reserve — or (None, None, transient) when no lease could
+async def _pc_lease(subject_ref, print_id=None, event_ids=None, *, timeout=None):
+    """(lease_id, deadline, transient, status) - deadline on the monotonic clock,
+    `until` minus the reserve - or (None, None, transient, status) when no lease could
     be taken: the send then carries no picture.
 
     `transient` distinguishes "not right now" from "not ever". 409 means the
     subject's identity lock is held by a writer for a moment; 0 means the api
     did not answer at all; a 5xx is the api's own problem. A caller that can
     come back later should. 404 and 422 are answers about the subject or the
-    pair itself and do not improve with waiting."""
+    pair itself and do not improve with waiting. `status` is the acquire's
+    HTTP status (None when no request was made), for a caller that must tell
+    a 404 from a 422. `timeout`, when given, is that request's ceiling;
+    absent, the request is exactly the one every shipped caller makes."""
     if not subject_ref:
-        return None, None, False
+        return None, None, False, None
     payload = {"subject_ref": str(subject_ref)}
     if print_id:
         payload["print_id"] = str(print_id)
     if event_ids:
         payload["event_ids"] = [int(i) for i in event_ids]
-    st, body = await _pc_api("POST", "/internal/pc/lease", payload=payload)
+    st, body = await _pc_api("POST", "/internal/pc/lease", payload=payload,
+                             **({} if timeout is None else {"timeout": float(timeout)}))
     if st != 200 or not isinstance(body, dict) or not body.get("lease_id"):
-        return None, None, (st == 409 or st == 0 or st >= 500)
+        return None, None, (st == 409 or st == 0 or st >= 500), st
     try:
         until = datetime.fromisoformat(str(body.get("until")).replace("Z", "+00:00"))
         if until.tzinfo is None:
@@ -8561,7 +8594,7 @@ async def _pc_lease(subject_ref, print_id=None, event_ids=None):
         left = (until - datetime.now(timezone.utc)).total_seconds()
     except Exception:
         left = 30.0
-    return str(body["lease_id"]), time.monotonic() + (left - _PC_LEASE_RESERVE_S), False
+    return str(body["lease_id"]), time.monotonic() + (left - _PC_LEASE_RESERVE_S), False, st
 
 
 def _pc_lease_left(deadline):
@@ -8587,7 +8620,7 @@ async def _pc_best_face(body, locale):
     lease = await _pc_lease(best[0]["subject_player_id"], print_id=best[0]["print_id"])
     if not lease[0]:
         return None, lease
-    st, face = await _pc_api_bytes(f"/internal/pc/face/print/{best[0]['print_id']}/{locale}",
+    st, face, _ = await _pc_api_bytes(f"/internal/pc/face/print/{best[0]['print_id']}/{locale}",
                                    params={"size": "card"})
     if st != 200:
         await _pc_lease_release(lease[0])
@@ -8595,14 +8628,72 @@ async def _pc_best_face(body, locale):
     return face, lease
 
 
-async def _pc_lease_live(lease_id):
-    st, _ = await _pc_api("GET", f"/internal/pc/lease/{lease_id}", timeout=4.0)
+async def _pc_lease_live(lease_id, *, timeout=None):
+    st, _ = await _pc_api("GET", f"/internal/pc/lease/{lease_id}", timeout=4.0 if timeout is None else float(timeout))
     return st == 200
 
 
 async def _pc_lease_release(lease_id):
     if lease_id:
         await _pc_api("DELETE", f"/internal/pc/lease/{lease_id}", timeout=4.0)
+
+
+async def _pc_lease_release_all(lease_ids):
+    """Release every lease in `lease_ids`, at most four at a time: one reveal
+    holds up to ten, and the api admits a release on its reserved pool, where
+    ten at once would queue at that admission gate rather than at the pool."""
+    gate = asyncio.Semaphore(4)
+
+    async def _one(lease_id):
+        async with gate:
+            await _pc_lease_release(lease_id)
+
+    await asyncio.gather(*(_one(lease_id) for lease_id in lease_ids if lease_id))
+
+
+async def _pc_leases(subject_refs):
+    """(leased, undeliverable, past_deadline) - the leases a composite send
+    needs: one per DISTINCT subject, in ascending canonical order, each naming
+    the subject only (a lease naming a print re-checks that the print is live,
+    and would refuse every discarded print a pack still shows).
+
+    Every ref is attempted whatever an earlier one answered: a 200 adds that
+    ref to `leased`, which maps each ref to its (lease_id, deadline) - keyed
+    by the ref asked for, never by the lease id; a 404 adds it to
+    `undeliverable`; any other status - 409, 422, a 5xx, or 0 for a request
+    its timeout cut short - fails the call. The phase runs under ONE
+    monotonic deadline, 20 s from the first acquire: each acquire is handed
+    min(2.0, remaining), and once nothing remains every later ref goes to
+    `past_deadline` with no request (aiohttp arms no timer for a total that is
+    not above zero, so a request started then would run unbounded). A call
+    with every ref answered 200 returns (leased, set(), set()); any other
+    releases every lease it took and returns (None, undeliverable,
+    past_deadline). More than ten refs is refused outright, before any
+    request."""
+    refs = sorted({str(ref) for ref in subject_refs if ref})
+    if len(refs) > 10:
+        print(f"[PC-REVEAL] leases refused: {len(refs)} subjects, at most 10")
+        return None, set(), set()
+    leased, undeliverable, past_deadline, other = {}, set(), set(), []
+    started = time.monotonic()
+    for ref in refs:
+        remaining = 20.0 - (time.monotonic() - started)
+        if remaining <= 0:
+            past_deadline.add(ref)
+            continue
+        lease_id, deadline, _transient, status = await _pc_lease(ref, timeout=min(2.0, remaining))
+        if status == 200 and lease_id:
+            leased[ref] = (lease_id, deadline)
+        elif status == 404:
+            undeliverable.add(ref)
+        else:
+            other.append(status)
+    if not (other or undeliverable or past_deadline):
+        return leased, set(), set()
+    print(f"[PC-REVEAL] leases failed: taken={len(leased)} undeliverable={len(undeliverable)} "
+          f"past_deadline={len(past_deadline)} other={len(other)}")
+    await _pc_lease_release_all([lease_id for lease_id, _deadline in leased.values()])
+    return None, undeliverable, past_deadline
 
 
 async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
@@ -8796,11 +8887,515 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
     lease = await _pc_lease(ref)
     if not lease[0]:
         await ctx.send("❌ That card isn't available right now — try again in a moment."); return
-    st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{ref}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
+    st, face, _ = await _pc_api_bytes(f"/internal/pc/face/preview/{ref}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
     if st != 200:
         face = None
     if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=True):
         await ctx.send("❌ That card isn't available right now — try again in a moment.")
+
+
+def _pc_reveal_hex32(ref):
+    """A uuid as the reveal manifests write it: 32 lower-case hex digits."""
+    return str(ref or "").replace("-", "").lower()
+
+
+# -- Player Cards: the Discord reveal (/pack, /binder) -----------------------
+# One message: the text list and, when every check below holds, ONE picture of
+# the whole pack or binder page - one attachment, so the picture goes out
+# whole or not at all. Per invocation:
+#   1. the JSON read: the list, each entry's tile decision, the actor/owner.
+#      It renders nothing - no name or caption fragment from it reaches Discord;
+#   2. the picture, a byte GET carrying a manifest - only when some entry is a
+#      face; retried only on a code in _PC_COMPOSITE_RETRYABLE;
+#   3. one subject-only lease per distinct face subject (_pc_leases), taken
+#      AFTER the picture so the 57 s a lease authorises starts as late as
+#      possible; the leased set must be exactly step 1's face subjects;
+#   4. the manifest must equal the list, entry by entry, in list order;
+#   5. every lease re-validated, together, inside the tightest one's time;
+#   6. the RE-READ - always, and last before anything posts: a moved view
+#      (actor, owner, consent revision, or the binder's print list) posts
+#      nothing but one line; a moved drawn member drops the picture; the post
+#      is rendered from this read alone;
+#   7. one send inside min(20 s, 57 s - elapsed since the first acquire), then
+#      every lease released, sent or not.
+# Any failed step drops the picture and the list still posts from the re-read.
+_PC_COMPOSITE_MAX_BYTES = 8 * 1024 * 1024   # the api's own composite cap: one number on both sides
+_PC_COMPOSITE_RETRIES = 2                   # retries after the first byte GET: three GETs at most
+_PC_COMPOSITE_WAIT_CAP_S = 5                # each retry waits the answer's retry_after, at most this
+# A lease authorises a send until 57 s after it was written (the api's 60 s
+# lease less the reserve _pc_lease keeps), and the send itself gets 20 s.
+_PC_REVEAL_SPAN_S = 57.0
+_PC_REVEAL_SEND_S = 20.0
+# What the picture draws: a move between steps 1 and 6 drops the picture.
+_PC_DRAWN_MEMBERS = ("subject_name", "print_id", "subject_player_id", "edition_id", "rarity", "foil",
+                     "signed", "slot", "gone", "tile", "reason", "face_rev", "discarded")
+# Who the answer is about and whether it may be shown: a move posts nothing.
+_PC_VIEW_MEMBERS = ("actor_ref", "owner_ref", "settings_rev")
+_PC_REVEAL_BACK_REASONS = ("no_steam_id", "print_gone", "subject_banned")
+_PC_REVEAL_COOLDOWN_S = 5.0   # per Discord user, UX only: the api's pacing is the authority
+_pc_reveal_last = {}
+_PC_REVEAL_NOTES = {
+    "unavailable": "The picture is not available for this {what} right now.",
+    "busy": "The picture queue is busy - the picture is left out this time.",
+    "renderer": "Card pictures cannot be drawn on the server right now.",
+    "pacing": "One moment - too many pictures were asked for in the last minute.",
+    "too_large": "The picture is too large for this channel.",
+    "unreachable": "The card service did not answer for the picture.",
+}
+
+
+def _pc_reveal_cooldown(ctx):
+    """False when this Discord user started a reveal under five seconds ago -
+    a double-click reads as "one moment" rather than as the api's 429."""
+    now = time.monotonic()
+    key = getattr(ctx.author, "id", None)
+    last = _pc_reveal_last.get(key)
+    if last is not None and now - last < _PC_REVEAL_COOLDOWN_S:
+        return False
+    if len(_pc_reveal_last) > 4096:
+        _pc_reveal_last.clear()
+    _pc_reveal_last[key] = now
+    return True
+
+
+async def _pc_reveal_say(ctx, text, ephemeral=False):
+    """One line, no mentions; ephemeral only on the slash form's private answer."""
+    kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
+    if ephemeral:
+        kwargs["ephemeral"] = True
+    await ctx.send(text, **kwargs)
+
+
+def _pc_reveal_prints(answer, kind):
+    """The entry list of a reveal answer, in the order the route returned it,
+    or None when the answer does not have the reveal's shape."""
+    if not isinstance(answer, dict):
+        return None
+    if kind == "pack":
+        packs = answer.get("packs")
+        if not (isinstance(packs, list) and len(packs) == 1 and isinstance(packs[0], dict)):
+            return None
+        prints = packs[0].get("prints")
+    else:
+        prints = answer.get("prints")
+    if not isinstance(prints, list) or not all(isinstance(p, dict) for p in prints):
+        return None
+    return prints
+
+
+def _pc_reveal_view(answer):
+    return tuple(answer.get(m) for m in _PC_VIEW_MEMBERS)
+
+
+def _pc_reveal_drawn(prints):
+    return [tuple(p.get(m) for m in _PC_DRAWN_MEMBERS) for p in prints]
+
+
+def _pc_reveal_moved(before, after):
+    """The drawn members that differ between two entry lists. Position is the
+    list index, so a different length moves everything ("count")."""
+    if len(before) != len(after):
+        return ["count"]
+    return [m for i, m in enumerate(_PC_DRAWN_MEMBERS) if any(b[i] != a[i] for b, a in zip(before, after))]
+
+
+def _pc_reveal_manifest(meta, kind):
+    """The image route's manifest header as tuples, or None when it is absent
+    or malformed. Strip: (slot, print32, subject32, tile, word, state); grid:
+    (pos, print32, subject32, tile, word) - `word` is a face's face_rev or a
+    back's reason."""
+    raw = (meta or {}).get("x-strip-slots" if kind == "pack" else "x-grid-slots")
+    if not isinstance(raw, str) or not raw:
+        return None
+    width = 6 if kind == "pack" else 5
+    out = []
+    for item in raw.split(","):
+        parts = item.split(":")
+        if len(parts) != width or not re.fullmatch("[0-9]{1,3}", parts[0]):
+            return None
+        out.append((int(parts[0]),) + tuple(parts[1:]))
+    return out
+
+
+def _pc_reveal_expected(prints, kind):
+    """What the manifest must say, built from step 1's list in list order: the
+    strip leads with the print's pack slot, the grid with its 1-based
+    position in the list."""
+    out = []
+    for i, p in enumerate(prints):
+        word = p.get("face_rev") if p.get("tile") == "face" else p.get("reason")
+        ids = (_pc_reveal_hex32(p.get("print_id")), _pc_reveal_hex32(p.get("subject_player_id")))
+        if kind == "pack":
+            state = "gone" if p.get("gone") else ("discarded" if p.get("discarded") else "live")
+            out.append((p.get("slot"),) + ids + (p.get("tile"), word, state))
+        else:
+            out.append((i + 1,) + ids + (p.get("tile"), word))
+    return out
+
+
+def _pc_reveal_check(kind, first, prints, meta):
+    """Step 4: None when the picture's manifest matches the list it would be
+    posted under, else the name of the first assertion that failed."""
+    manifest = _pc_reveal_manifest(meta, kind)
+    if manifest is None:
+        return "manifest"
+    if len(manifest) != len(prints):
+        return "count"
+    for got, want in zip(manifest, _pc_reveal_expected(prints, kind)):
+        if got[0] != want[0]:
+            return "slot" if kind == "pack" else "position"
+        if (got[1], got[2]) != (want[1], want[2]):
+            return "ids"
+        if got[3] != want[3]:
+            return "tile"
+        if got[4] != want[4]:
+            return "face_rev" if want[3] == "face" else "reason"
+        if kind == "pack" and got[5] != want[5]:
+            return "state"
+    if kind == "pack":
+        if meta.get("x-strip-actor") != first.get("actor_ref"):
+            return "actor"
+    else:
+        if meta.get("x-grid-owner") != first.get("owner_ref"):
+            return "owner"
+        if str(meta.get("x-grid-consent-rev")) != str(first.get("settings_rev")):
+            return "consent_rev"
+    for got in manifest:
+        if got[3] == "back" and got[4] not in _PC_REVEAL_BACK_REASONS:
+            return "back_reason"
+    return None
+
+
+async def _pc_reveal_bytes(path, params):
+    """Step 2: (png|None, meta, note). A 503 whose code is in
+    _PC_COMPOSITE_RETRYABLE waits its retry_after (at most five seconds) and
+    is asked again, at most _PC_COMPOSITE_RETRIES times; every other answer is
+    final. `note` names why the picture is missing."""
+    attempt = 0
+    while True:
+        st, data, meta = await _pc_api_bytes(path, params=params, timeout=35.0, max_bytes=_PC_COMPOSITE_MAX_BYTES)
+        if st == 200 and data is not None:
+            return data, meta, None
+        code = meta.get("error")
+        if st == 503 and code in _PC_COMPOSITE_RETRYABLE and attempt < _PC_COMPOSITE_RETRIES:
+            attempt += 1
+            await asyncio.sleep(min(_PC_COMPOSITE_WAIT_CAP_S, meta.get("retry_after", _PC_COMPOSITE_WAIT_CAP_S)))
+            continue
+        break
+    print(f"[PC-REVEAL] picture dropped: {path.split('?')[0]} -> HTTP {st} {code or '-'} after {attempt + 1} GET(s)")
+    if st == 503 and code in _PC_COMPOSITE_RETRYABLE:
+        return None, meta, "busy"
+    if st == 503 and code:
+        return None, meta, "renderer"
+    if st == 429:
+        return None, meta, "pacing"
+    if st == 0:
+        return None, meta, "unreachable"
+    return None, meta, "unavailable"
+
+
+async def _pc_reveal_revalidate(leases):
+    """Step 5: True only when every lease still answers live - asked together,
+    each at 3 s, inside the tightest lease's remaining time."""
+    if not leases:
+        return False
+    tightest = min(_pc_lease_left(deadline) for _lease_id, deadline in leases.values())
+    if tightest <= 0:
+        return False
+    try:
+        answers = await asyncio.wait_for(
+            asyncio.gather(*(_pc_lease_live(lease_id, timeout=3.0) for lease_id, _deadline in leases.values())),
+            timeout=min(3.0, tightest))
+    except Exception:
+        return False
+    return all(answers)
+
+
+def _pc_reveal_compose(head, lines, note, what):
+    tail = ("\n" + _PC_REVEAL_NOTES[note].format(what=what)) if note else ""
+    room = 2000 - len(head) - len(tail) - 1
+    return head + "\n" + _pc_fit_field(lines, cap=max(1, room)) + tail
+
+
+def _pc_reveal_pack_text(answer, index, note):
+    """The /pack post, rendered from the re-read alone: the pack line, then one
+    line per slot - slot number, rarity, name, marks, NEW or duplicate. A slot
+    whose print is gone reads the roster's rarity and the neutral label the
+    api supplies for it."""
+    pack = answer["packs"][0]
+    head = f"**Pack {int(index)}** - {_pc_name(pack.get('source'))}, opened {_pc_when(pack.get('opened_at'))}"
+    lines = []
+    for p in pack.get("prints") or []:
+        if p.get("gone"):
+            lines.append(f"{p.get('slot')}. {_PC_RARITY_EMOJI.get(p.get('rarity'), '')} **{_pc_name(p.get('subject_name'))}**")
+            continue
+        line = f"{p.get('slot')}. {_pc_print_line(p)}"
+        dup = p.get("dup_at_pull")
+        if isinstance(dup, int) and not isinstance(dup, bool):
+            line += " - NEW" if dup == 0 else f" - duplicate, copy {dup + 1}"
+        if p.get("discarded"):
+            line += " (discarded)"
+        lines.append(line)
+    return _pc_reveal_compose(head, lines, note, "pack")
+
+
+def _pc_reveal_binder_text(answer, note):
+    """The /binder post, rendered from the re-read alone: the owner, the page,
+    the collection-wide count and rarity totals (the shard balance on the
+    owner's own answer only), then one line per print."""
+    counts = answer.get("by_rarity") or {}
+    page, pages = int(answer.get("page") or 1), int(answer.get("pages") or 1)
+    head = (f"**{_pc_name(answer.get('owner_name'))}** - binder page {page} of {pages}"
+            f" - {int(answer.get('count') or 0)} prints")
+    if "shards" in answer:
+        head += f" - {int(answer.get('shards') or 0)} shards"
+    head += "\n" + " ".join(f"{_PC_RARITY_EMOJI.get(r, '')} {int(counts.get(r, 0) or 0)}"
+                            for r in ("legendary", "epic", "rare", "uncommon", "common"))
+    if int(counts.get("other", 0) or 0):
+        head += f" other {int(counts.get('other'))}"
+    lines = [f"{i}. {_pc_print_line(p)}" for i, p in enumerate(answer.get("prints") or [], start=1)]
+    if not lines:
+        if int(answer.get("count") or 0):
+            lines = [f"Page {page} is past the end: this binder has {pages} page{'s' if pages != 1 else ''}."]
+        else:
+            lines = ["No prints yet."]
+    return _pc_reveal_compose(head, lines, note, "page")
+
+
+async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params, render, ephemeral):
+    """Steps 2-7 for one reveal whose step 1 answered `first`. `reread` is
+    step 6, an awaitable factory answering (status, body); `render(answer,
+    note)` builds the post from the re-read's answer alone. Returns "posted",
+    or why nothing but one line may be posted: "private" (the re-read
+    answered 403), "unreachable" (0), "pacing" (429) or "moved"."""
+    prints = _pc_reveal_prints(first, kind) or []
+    before_view, before_drawn = _pc_reveal_view(first), _pc_reveal_drawn(prints)
+    image, meta, note, leases, started = None, {}, None, {}, None
+    try:
+        faces = {str(p.get("subject_player_id")) for p in prints if p.get("tile") == "face"}
+        if faces:
+            image, meta, note = await _pc_reveal_bytes(image_path, image_params)
+        if image is not None:
+            started = time.monotonic()
+            leased, _undeliverable, _past_deadline = await _pc_leases(faces)
+            if leased is not None and set(leased) == faces:
+                leases = leased
+            else:
+                if leased:
+                    await _pc_lease_release_all([lease_id for lease_id, _deadline in leased.values()])
+                print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: leases"
+                      f" (leased {len(leased or {})} of {len(faces)} subjects)")
+                image, note = None, "unavailable"
+        if image is not None:
+            failed = _pc_reveal_check(kind, first, prints, meta)
+            if failed:
+                print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: manifest assertion {failed}")
+                image, note = None, "unavailable"
+        if image is not None and not await _pc_reveal_revalidate(leases):
+            print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: a lease no longer authorises the send")
+            image, note = None, "unavailable"
+        st, again = await reread()
+        again_prints = _pc_reveal_prints(again, kind) if st == 200 else None
+        if again_prints is None:
+            print(f"[PC-REVEAL] {kind} ref={ref} not posted: the re-read answered HTTP {st}")
+            return {403: "private", 0: "unreachable", 429: "pacing"}.get(st, "moved")
+        moved_view = [m for m, b, a in zip(_PC_VIEW_MEMBERS, before_view, _pc_reveal_view(again)) if b != a]
+        if kind == "binder" and [p.get("print_id") for p in prints] != [p.get("print_id") for p in again_prints]:
+            moved_view.append("print_ids")
+        if moved_view:
+            print(f"[PC-REVEAL] {kind} ref={ref} not posted: the view moved ({', '.join(moved_view)})")
+            return "moved"
+        moved = _pc_reveal_moved(before_drawn, _pc_reveal_drawn(again_prints))
+        if moved and image is not None:
+            vanished = any(a.get("gone") and not b.get("gone") for b, a in zip(prints, again_prints))
+            print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: {'print_gone' if vanished else 'drawn_moved'}"
+                  f" (moved: {', '.join(moved)})")
+            image, note = None, "unavailable"
+        budget = _PC_REVEAL_SEND_S
+        if image is not None:
+            budget = min(_PC_REVEAL_SEND_S, _PC_REVEAL_SPAN_S - (time.monotonic() - started))
+            if budget <= 0:
+                print(f"[PC-REVEAL] {kind} ref={ref} picture dropped: no lease time left for the send")
+                image, note, budget = None, "unavailable", _PC_REVEAL_SEND_S
+        kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
+        if ephemeral:
+            kwargs["ephemeral"] = True
+        if image is not None:
+            try:
+                await asyncio.wait_for(ctx.send(render(again, None), file=discord.File(io.BytesIO(image),
+                                                filename=f"{kind}.png"), **kwargs), timeout=budget)
+                return "posted"
+            except discord.HTTPException as e:
+                if getattr(e, "status", None) != 413:
+                    raise
+                print(f"[PC-REVEAL] {kind} ref={ref} picture refused by Discord: too large")
+                note = "too_large"
+        await asyncio.wait_for(ctx.send(render(again, note), **kwargs), timeout=_PC_REVEAL_SEND_S)
+        return "posted"
+    finally:
+        await _pc_lease_release_all([lease_id for lease_id, _deadline in leases.values()])
+
+
+def _pc_reveal_refusal(ctx, status, body, what, target=None):
+    """The one line for a refused reveal read."""
+    d = _pc_detail(body)
+    if status == 404 and d.get("error") == "not_linked":
+        return _pc_not_linked(ctx, target or ctx.author)
+    if status == 429:
+        return "One moment - too many card requests in the last minute."
+    if status == 503 and d.get("error"):
+        return "Card pictures cannot be drawn on the server right now - try again later."
+    if status == 0:
+        return "The card service did not answer - try again in a moment."
+    if status == 404 and what == "pack":
+        return "That pack is no longer yours to show."
+    return f"Couldn't fetch that {what} right now."
+
+
+def _pc_reveal_unposted(outcome, what, target=None):
+    """The one line for a reveal whose re-read refused the post."""
+    if outcome == "private" and target is not None:
+        return f"{discord.utils.escape_markdown(target.display_name)}'s binder is private."
+    if outcome == "unreachable":
+        return "The card service did not answer - nothing was posted. Try again in a moment."
+    if outcome == "pacing":
+        return "One moment - too many card requests in the last minute; nothing was posted."
+    if what == "pack":
+        return "That pack is no longer yours to show - nothing was posted."
+    return "That binder page changed while it was being read - nothing was posted. Try again."
+
+
+async def _pc_reveal_pack(ctx, index, private):
+    """/pack [index] [private]: one of the caller's opened packs, 1 the latest."""
+    if private and getattr(ctx, "interaction", None) is None:
+        # A prefix command cannot answer privately, and a picture posted in a
+        # channel cannot be withdrawn: refuse before any read at all.
+        await _pc_reveal_say(ctx, "`private` needs the slash form (`/pack private:True`): a prefix command"
+                                  " cannot answer privately, so nothing was shown.")
+        return
+    ephemeral = bool(private)
+    if not _pc_reveal_cooldown(ctx):
+        await _pc_reveal_say(ctx, "One moment - your last reveal is still on its way.", ephemeral)
+        return
+    if ephemeral:
+        try:
+            await ctx.defer(ephemeral=True)
+        except Exception:
+            pass
+    else:
+        await _maybe_defer(ctx)
+    if index < 1:
+        await _pc_reveal_say(ctx, "Pack numbers start at 1 (your latest pack).", ephemeral)
+        return
+    me, locale = str(ctx.author.id), _pc_locale_of(ctx)
+    # Step 1: the pack at `index` and its slots, in one read - the route skips
+    # index - 1 packs of its newest-first order inside the same statement (S3's
+    # `index`). The walk from the newest summary page that stood here spent
+    # ceil(N/10) reads before step 1 from the same 20-a-minute JSON pacing, so
+    # /pack 181's final re-read was the 21st JSON read and was refused (R1
+    # MEDIUM Finding 1). /pack N is now two JSON reads whatever N is - this one
+    # and the final re-read - and S2.5's bound, which counts exactly one read
+    # before the leases, holds again. An index past any possible total goes as
+    # the route's largest: the answer's total then says how many packs there are.
+    status, first = await _pc_api("GET", "/internal/pc/packs",
+                                  params={"discord_id": me, "index": min(index, 2147483647), "locale": locale})
+    if status != 200 or not isinstance(first, dict):
+        await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "pack"), ephemeral)
+        return
+    total = int(first.get("total") or 0)
+    if total == 0:
+        await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims today's free pack, and it opens"
+                                  " in the mod.", ephemeral)
+        return
+    if index > total:
+        await _pc_reveal_say(ctx, f"You have {total} opened pack{'s' if total != 1 else ''}:"
+                                  f" `/pack` goes from 1 (the latest) to {total}.", ephemeral)
+        return
+    if not first.get("packs"):
+        await _pc_reveal_say(ctx, "That pack could not be found - try again in a moment.", ephemeral)
+        return
+    if _pc_reveal_prints(first, "pack") is None:
+        await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "pack"), ephemeral)
+        return
+    pack_id = str(first["packs"][0].get("pack_id"))
+    # The final re-read names the pack, never the index: a pack opened in
+    # between moves every index by one.
+    params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
+
+    async def _reread():
+        return await _pc_api("GET", "/internal/pc/packs", params=params, timeout=5.0)
+
+    outcome = await _pc_reveal_run(ctx, "pack", pack_id, first, _reread,
+                                   f"/internal/pc/packs/{pack_id}/strip/{str(first.get('locale') or locale)}.png",
+                                   {"discord_id": me}, lambda answer, note: _pc_reveal_pack_text(answer, index, note),
+                                   ephemeral)
+    if outcome != "posted":
+        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
+
+
+async def _pc_reveal_binder(ctx, member, page):
+    """/binder [member] [page]: one page of a binder, ten prints a page."""
+    target = member or ctx.author
+    if not _pc_reveal_cooldown(ctx):
+        await _pc_reveal_say(ctx, "One moment - your last reveal is still on its way.")
+        return
+    await _maybe_defer(ctx)
+    if page < 1 or page > 50:
+        await _pc_reveal_say(ctx, "Binder pages run from 1 to 50.")
+        return
+    locale = _pc_locale_of(ctx)
+    params = {"discord_id": str(target.id), "viewer_discord_id": str(ctx.author.id), "page": int(page),
+              "locale": locale}
+    # Step 1.
+    status, first = await _pc_api("GET", "/internal/pc/binder", params=params)
+    if status != 200 or _pc_reveal_prints(first, "binder") is None:
+        if status == 403 and _pc_detail(first).get("error") == "private":
+            await _pc_reveal_say(ctx, _pc_reveal_unposted("private", "binder", target))
+        else:
+            await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "binder", target))
+        return
+    owner_ref = str(first.get("owner_ref"))
+
+    async def _reread():
+        return await _pc_api("GET", "/internal/pc/binder", params=params, timeout=5.0)
+
+    outcome = await _pc_reveal_run(ctx, "binder", owner_ref, first, _reread,
+                                   f"/internal/pc/binder/{owner_ref}/page/{int(page)}/{locale}.png",
+                                   {"viewer_discord_id": str(ctx.author.id)}, _pc_reveal_binder_text, False)
+    if outcome != "posted":
+        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "binder", target))
+
+
+@bot.hybrid_command(name="pack", description="One of your opened Player Cards packs: five cards in one picture")
+@app_commands.describe(index="Which pack: 1 is your latest, 2 the one before it",
+                       private="Only you see the answer (slash command only)")
+async def cmd_pc_pack(ctx, index: int = 1, private: bool = False):
+    """Five cards of one opened pack, left to right in slot order, over the
+    list of them. The picture goes out whole or not at all."""
+    try:
+        await _pc_reveal_pack(ctx, index, private)
+    except Exception as e:
+        print(f"[PC-REVEAL] pack failed: {type(e).__name__}: {e}")
+        try:
+            await _pc_reveal_say(ctx, "Couldn't show that pack right now.",
+                                 bool(private) and getattr(ctx, "interaction", None) is not None)
+        except Exception:
+            pass
+
+
+@bot.hybrid_command(name="binder", description="A Player Cards binder page: ten cards in one picture")
+@app_commands.describe(member="Whose binder (defaults to yours)", page="Which page (ten cards a page)")
+async def cmd_pc_binder(ctx, member: discord.Member = None, page: int = 1):
+    """One binder page as a picture, over its text list. Someone else's only
+    while they keep it public."""
+    try:
+        await _pc_reveal_binder(ctx, member, page)
+    except Exception as e:
+        print(f"[PC-REVEAL] binder failed: {type(e).__name__}: {e}")
+        try:
+            await _pc_reveal_say(ctx, "Couldn't show that binder right now.")
+        except Exception:
+            pass
 
 
 _pc_events_sent = {}   # event id -> True once posted (a failed ack never re-posts; bounded below)
@@ -8909,7 +9504,7 @@ async def poll_pc_events():
                 # §8). The line posts without a face rather than attach the
                 # plate for good — an attachment cannot be swapped later.
                 if lease[0] and p.get("print_id") and first.get("face_ready", True):
-                    st, face = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
+                    st, face, _ = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
                                                    params={"size": "card"})
                     if st != 200:
                         face = None
