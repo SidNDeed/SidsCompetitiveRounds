@@ -250,3 +250,17 @@ def test_a_press_after_a_restore_waits_for_the_first_secure_session():
     assert wait.index("MintPortalSessionAndOpen();") > wait.index("while ("), wait
     finish = code_of(API, "private static void FinishPortalPress(SecureRouteRules.Conclusion c)")
     assert "host.StartCoroutine(OpenPortalWhenSessionReady());" in finish, finish
+
+
+# -- Round 2 (Codex round 1: HIGH 1, MEDIUM 1, LOW 1, LOW 2) ------------------
+# The decisions are executed by the harness (secureroute J, O, R, K, H cases);
+
+
+def test_the_probe_reads_the_whole_body_strictly():
+    """MEDIUM 1: the probe called a body usable when the compact substring
+    "version":" appeared, so a body cut off inside the string restored the
+    route and one with a space after the colon did not. It asks the strict
+    parser (harness J1-J6) and nothing else."""
+    probe = code_of(API, "private static IEnumerator ProbeSecureRoute(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)")
+    assert "reading.VersionParsed = SecureRouteRules.IsModVersionBody(body);" in probe, probe
+    assert "ExtractJsonString" not in probe, probe

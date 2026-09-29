@@ -269,9 +269,10 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[secureroute\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # 46 cases on the commit that added the suite; the floor is that count,
-    # not one far below it (#342). Raise it when cases are added.
-    assert run >= 46, "the SecureRouteRules suite shrank to %d cases" % run
+    # 46 cases on the commit that added the suite, 52 since round 2 added
+    # the J cases; the floor is that count, not one far below it (#342).
+    # Raise it when cases are added.
+    assert run >= 52, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -292,6 +293,11 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # the flip mid-flight
     "F1 a request queued on the backup before the flip completes against the backup",
     "F2 control: a request built after the flip goes to the secure base",
+    # round 2: the probe body (MEDIUM 1)
+    "J1 a compact mod-version body is usable and restores the secure route",
+    "J2 a mod-version body with whitespace between its tokens is usable and restores the secure route",
+    "J3 control: a JSON body without the version member is not the SCR server and keeps the backup",
+    "J4 control: a body cut off inside the version string is not the SCR server and keeps the backup",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",
     "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",

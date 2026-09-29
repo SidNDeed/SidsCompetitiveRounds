@@ -206,6 +206,245 @@ namespace CompetitiveRounds
             }
         }
 
+        // -- The probe's body (Codex round 1, MEDIUM 1) ------------------------
+
+        /// <summary>Whether a probe's 200 body is a mod-version answer: ONE JSON
+        /// object, whitespace allowed between tokens, every string and the
+        /// object closed, nothing after it, and a member "version" (exactly
+        /// once) whose string value is a release number, digits.digits.digits
+        /// with an optional suffix. Anything else is not the SCR server and
+        /// keeps the session where it is. The previous reading looked for the
+        /// compact text "version":" anywhere, so a body with a space after the
+        /// colon was refused and a body cut off inside the string was accepted,
+        /// and an accepted body ends the backup for the session.
+        ///
+        /// A strict parser for the whole JSON grammar (nested members are
+        /// walked and must be well formed too, so a later field of any shape
+        /// neither breaks the check nor slips a broken body past it).</summary>
+        internal static bool IsModVersionBody(string body)
+        {
+            if (body == null) return false;
+            var p = new StrictJson(body);
+            string version;
+            if (!p.ReadTopObject(out version)) return false;
+            p.SkipWs();
+            if (!p.AtEnd) return false;
+            return version != null && IsReleaseNumber(version);
+        }
+
+        /// <summary>digits.digits.digits, then optionally one of - + . and a
+        /// suffix of letters, digits and - + . (for example 1.41.0, 1.41.0-beta2).</summary>
+        internal static bool IsReleaseNumber(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return false;
+            int i = 0;
+            for (int part = 0; part < 3; part++)
+            {
+                int start = i;
+                while (i < v.Length && v[i] >= '0' && v[i] <= '9') i++;
+                if (i == start) return false;
+                if (part < 2)
+                {
+                    if (i >= v.Length || v[i] != '.') return false;
+                    i++;
+                }
+            }
+            if (i == v.Length) return true;
+            char sep = v[i];
+            if (sep != '-' && sep != '+' && sep != '.') return false;
+            i++;
+            if (i >= v.Length) return false;
+            for (; i < v.Length; i++)
+            {
+                char c = v[i];
+                bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                          || c == '-' || c == '+' || c == '.';
+                if (!ok) return false;
+            }
+            return true;
+        }
+
+        /// <summary>A reader for RFC 8259 JSON that answers only "well formed or
+        /// not" and, for the top-level object, the string value of "version".</summary>
+        private sealed class StrictJson
+        {
+            private readonly string _s;
+            private int _i;
+            private int _depth;
+            private const int MaxDepth = 32;
+
+            internal StrictJson(string s) { _s = s; _i = 0; }
+
+            internal bool AtEnd { get { return _i >= _s.Length; } }
+
+            internal void SkipWs()
+            {
+                while (_i < _s.Length && (_s[_i] == ' ' || _s[_i] == '\t' || _s[_i] == '\n' || _s[_i] == '\r')) _i++;
+            }
+
+            /// <summary>The top level must be an object. `version` is the
+            /// string value of its "version" member, or null when the member is
+            /// absent, is not a string, or appears more than once.</summary>
+            internal bool ReadTopObject(out string version)
+            {
+                version = null;
+                SkipWs();
+                if (_i >= _s.Length || _s[_i] != '{') return false;
+                int seen = 0;
+                string found = null;
+                bool ok = ReadObject((key, isString, value) =>
+                {
+                    if (key != "version") return;
+                    seen++;
+                    found = isString ? value : null;
+                });
+                if (!ok) return false;
+                version = seen == 1 ? found : null;
+                return true;
+            }
+
+            private bool ReadObject(Action<string, bool, string> onTopMember)
+            {
+                if (++_depth > MaxDepth) return false;
+                _i++;   // '{'
+                SkipWs();
+                if (_i < _s.Length && _s[_i] == '}') { _i++; _depth--; return true; }
+                while (true)
+                {
+                    SkipWs();
+                    string key;
+                    if (!ReadString(out key)) return false;
+                    SkipWs();
+                    if (_i >= _s.Length || _s[_i] != ':') return false;
+                    _i++;
+                    SkipWs();
+                    bool isString = _i < _s.Length && _s[_i] == '"';
+                    string sval = null;
+                    if (isString) { if (!ReadString(out sval)) return false; }
+                    else if (!ReadValue()) return false;
+                    if (onTopMember != null) onTopMember(key, isString, sval);
+                    SkipWs();
+                    if (_i >= _s.Length) return false;
+                    if (_s[_i] == ',') { _i++; continue; }
+                    if (_s[_i] == '}') { _i++; _depth--; return true; }
+                    return false;
+                }
+            }
+
+            private bool ReadArray()
+            {
+                if (++_depth > MaxDepth) return false;
+                _i++;   // '['
+                SkipWs();
+                if (_i < _s.Length && _s[_i] == ']') { _i++; _depth--; return true; }
+                while (true)
+                {
+                    SkipWs();
+                    if (!ReadValue()) return false;
+                    SkipWs();
+                    if (_i >= _s.Length) return false;
+                    if (_s[_i] == ',') { _i++; continue; }
+                    if (_s[_i] == ']') { _i++; _depth--; return true; }
+                    return false;
+                }
+            }
+
+            private bool ReadValue()
+            {
+                SkipWs();
+                if (_i >= _s.Length) return false;
+                char c = _s[_i];
+                if (c == '{') return ReadObject(null);
+                if (c == '[') return ReadArray();
+                if (c == '"') { string ignored; return ReadString(out ignored); }
+                if (c == 't') return ReadWord("true");
+                if (c == 'f') return ReadWord("false");
+                if (c == 'n') return ReadWord("null");
+                return ReadNumber();
+            }
+
+            private bool ReadWord(string w)
+            {
+                if (_i + w.Length > _s.Length || string.CompareOrdinal(_s, _i, w, 0, w.Length) != 0) return false;
+                _i += w.Length;
+                return true;
+            }
+
+            private bool ReadNumber()
+            {
+                int start = _i;
+                if (_i < _s.Length && _s[_i] == '-') _i++;
+                if (_i >= _s.Length) return false;
+                if (_s[_i] == '0') _i++;
+                else if (_s[_i] >= '1' && _s[_i] <= '9') { while (_i < _s.Length && _s[_i] >= '0' && _s[_i] <= '9') _i++; }
+                else return false;
+                if (_i < _s.Length && _s[_i] == '.')
+                {
+                    _i++;
+                    int d = _i;
+                    while (_i < _s.Length && _s[_i] >= '0' && _s[_i] <= '9') _i++;
+                    if (_i == d) return false;
+                }
+                if (_i < _s.Length && (_s[_i] == 'e' || _s[_i] == 'E'))
+                {
+                    _i++;
+                    if (_i < _s.Length && (_s[_i] == '+' || _s[_i] == '-')) _i++;
+                    int d = _i;
+                    while (_i < _s.Length && _s[_i] >= '0' && _s[_i] <= '9') _i++;
+                    if (_i == d) return false;
+                }
+                return _i > start;
+            }
+
+            /// <summary>A closed string with legal escapes and no raw control
+            /// character; `value` is the decoded text.</summary>
+            private bool ReadString(out string value)
+            {
+                value = null;
+                if (_i >= _s.Length || _s[_i] != '"') return false;
+                _i++;
+                var sb = new System.Text.StringBuilder();
+                while (_i < _s.Length)
+                {
+                    char c = _s[_i++];
+                    if (c == '"') { value = sb.ToString(); return true; }
+                    if (c < 0x20) return false;
+                    if (c != '\\') { sb.Append(c); continue; }
+                    if (_i >= _s.Length) return false;
+                    char e = _s[_i++];
+                    switch (e)
+                    {
+                        case '"': sb.Append('"'); break;
+                        case '\\': sb.Append('\\'); break;
+                        case '/': sb.Append('/'); break;
+                        case 'b': sb.Append('\b'); break;
+                        case 'f': sb.Append('\f'); break;
+                        case 'n': sb.Append('\n'); break;
+                        case 'r': sb.Append('\r'); break;
+                        case 't': sb.Append('\t'); break;
+                        case 'u':
+                        {
+                            if (_i + 4 > _s.Length) return false;
+                            int code = 0;
+                            for (int k = 0; k < 4; k++)
+                            {
+                                char h = _s[_i++];
+                                int v = h >= '0' && h <= '9' ? h - '0'
+                                      : h >= 'a' && h <= 'f' ? h - 'a' + 10
+                                      : h >= 'A' && h <= 'F' ? h - 'A' + 10 : -1;
+                                if (v < 0) return false;
+                                code = code * 16 + v;
+                            }
+                            sb.Append((char)code);
+                            break;
+                        }
+                        default: return false;
+                    }
+                }
+                return false;   // end of input inside the string
+            }
+        }
+
         /// <summary>
         /// One session's route state. ApiClient builds one per Initialize, and
         /// only for the compiled secure default: an explicit BaseUrl override

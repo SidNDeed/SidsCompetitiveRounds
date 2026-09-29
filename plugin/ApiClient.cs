@@ -2181,7 +2181,11 @@ namespace CompetitiveRounds
                     }
                     string body = probe.result == UnityWebRequest.Result.Success
                         ? (probe.downloadHandler?.text ?? "") : "";
-                    reading.VersionParsed = !string.IsNullOrEmpty(ExtractJsonString(body, "version"));
+                    // A strict parse of the whole body (Codex round 1 MEDIUM 1):
+                    // the substring reader accepted a body cut off inside the
+                    // version string and refused one with a space after the
+                    // colon, and a usable verdict ends the backup for good.
+                    reading.VersionParsed = SecureRouteRules.IsModVersionBody(body);
                 }
                 catch (Exception ex) { reading.Error = "probe read failed: " + ex.Message; }
             }

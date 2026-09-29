@@ -528,6 +528,74 @@ namespace CompetitiveRounds
                       flipped && after == TSecure + "/api/v1/matches/report", "after=" + after);
             }
 
+            // -- J: the probe's body (Codex round 1 MEDIUM 1) ---------------------
+            // The verdict a 200 body earns, through the same reading and the
+            // same Classify the transport's answer goes through, and then
+            // through a timer check on the backup: only a whole mod-version
+            // object restores the secure route.
+            {
+                const string compact = "{\"version\":\"1.41.0\",\"min_version\":\"1.38.7\",\"server_accepts_involuntary_ffa_cause\":true}";
+                const string spaced = "{ \"version\" : \"1.41.0\" ,\n  \"min_version\": \"1.38.7\",\t\"server_accepts_involuntary_ffa_cause\": false }\n";
+                const string wrong = "{\"latest\":\"1.41.0\",\"min_version\":\"1.38.7\"}";
+                const string truncated = "{\"version\":\"1.41.0";
+                Func<string, Outcome> verdict = body => Classify(new Reading
+                {
+                    Result = Transport.Success, ResultName = "Success", HttpCode = 200,
+                    VersionParsed = IsModVersionBody(body), ElapsedSeconds = 0.1,
+                }, ProbeTimeoutSeconds);
+                Func<string, bool> flips = body =>
+                {
+                    var clock = new FakeClock();
+                    var route = BackupRoute(clock, TRetry);
+                    var t = new FakeTransport { AutoAnswer = true, AutoReading = new Reading
+                    {
+                        Result = Transport.Success, ResultName = "Success", HttpCode = 200,
+                        VersionParsed = IsModVersionBody(body), ElapsedSeconds = 0.1,
+                    } };
+                    var log = new RunLog();
+                    TickTimer(route, clock, t, 300, 300, TRetry, log);
+                    return log.Last != null && log.Last.Flipped && !route.OnFallback;
+                };
+                Check(r, "J1 a compact mod-version body is usable and restores the secure route",
+                      verdict(compact) == Outcome.Usable && flips(compact), "outcome=" + verdict(compact) + " flips=" + flips(compact));
+                Check(r, "J2 a mod-version body with whitespace between its tokens is usable and restores the secure route",
+                      verdict(spaced) == Outcome.Usable && flips(spaced), "outcome=" + verdict(spaced) + " flips=" + flips(spaced));
+                Check(r, "J3 control: a JSON body without the version member is not the SCR server and keeps the backup",
+                      verdict(wrong) == Outcome.NotTheServer && !flips(wrong), "outcome=" + verdict(wrong) + " flips=" + flips(wrong));
+                Check(r, "J4 control: a body cut off inside the version string is not the SCR server and keeps the backup",
+                      verdict(truncated) == Outcome.NotTheServer && !flips(truncated),
+                      "outcome=" + verdict(truncated) + " flips=" + flips(truncated));
+                var malformed = new[]
+                {
+                    "{\"version\":\"1.41.0\"", "{\"version\":\"1.41.0\"} x", "x {\"version\":\"1.41.0\"}",
+                    "{\"version\":\"1.41.0\",}", "{\"version\":\"1.41.0\" \"a\":1}", "{\"version\":1.41}",
+                    "{\"version\":\"latest\"}", "{\"version\":\"1.41\"}", "{\"version\":\"1.41.0 \"}",
+                    "{\"version\":\"1.41.0\",\"version\":\"1.41.0\"}", "[{\"version\":\"1.41.0\"}]",
+                    "{\"a\":{\"version\":\"1.41.0\"}}", "<html>{\"version\":\"1.41.0\"}</html>", "", "   ",
+                    "{\"version\":\"1.41.0\",\"a\":[1,2}", "{\"version\":\"1.41.0\",\"a\":\"x\\q\"}",
+                    "{\"version\":\"1.41.0\",\"a\":01}", "{\"version\":\"1.41.0\",\"a\":tru}",
+                    "{\"version\":\"1.41.0\",\"a\":\"line\nbreak\"}", "{'version':'1.41.0'}", "{\"version\":\"1.41.0-\"}",
+                };
+                string accepted = null;
+                foreach (string m in malformed)
+                    if (IsModVersionBody(m)) { accepted = m; break; }
+                Check(r, "J5 every malformed or foreign body is refused (unclosed, trailing or leading text, trailing comma, "
+                         + "missing comma, a number or a non-release version, two version members, an array, a nested version, "
+                         + "HTML, empty, a broken nested value, a bad escape, a raw control character, single quotes)",
+                      accepted == null, accepted == null ? "refused=" + malformed.Length : "accepted=" + accepted);
+                var wellFormed = new[]
+                {
+                    "{\"version\":\"1.41.0-beta2\",\"caps\":{\"a\":[1,-2.5e3,0,null,true,false,\"\\u0041\\\"\"]},\"x\":[]}",
+                    "\r\n{\"min_version\":\"1.38.7\",\"version\":\"1.40.3\"}\r\n",
+                    "{\"version\":\"1\\u002e41.0\"}",
+                };
+                string refused = null;
+                foreach (string w in wellFormed)
+                    if (!IsModVersionBody(w)) { refused = w; break; }
+                Check(r, "J6 control: well-formed bodies with nested members, escapes, suffixes and any member order are accepted",
+                      refused == null, refused == null ? "accepted=" + wellFormed.Length : "refused=" + refused);
+            }
+
             // -- L: every catalogue, executed ---------------------------------------
             {
                 I18nCatalogues.Install();
