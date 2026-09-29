@@ -295,7 +295,9 @@ def test_the_duplicate_comments_terminal_set_is_the_set_the_client_acts_on():
     assert "RetryableRefusalStatus" not in terminal, (
         "503 is being treated as terminal, which drops a report the server "
         "asked us to re-send")
-    retry = code_of(api, "private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false)")
+    # The signature is read up to stopOnTerminalRefusal: the portal lane
+    # appended an onTokenStamped parameter after it.
+    retry = code_of(api, "private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false,")
     assert "FfaReportRules.IsTerminalRefusal(request.responseCode)" in retry, (
         "the retry loop no longer asks the shared rule which refusals stop it")
     # ...and the FFA caller opts in, or the whole rule is unreachable.
