@@ -60663,16 +60663,28 @@ _REPORT_KIND_SQL = """
                       AND NOT kx.absent)
      LIMIT 1
 """
-# Round 2 M4: the broadcast account's `viewer=` read is bound to a game that
-# account WATCHED. It answers a row only when a spectate game exists that
+# Round 2 M4, bound to the game itself in round 3: the broadcast account's
+# `viewer=` read answers only for the game that account WATCHED. It answers a
+# row only when a spectate game exists that
 #   - the calling account holds or held a lease on (spectate_leases: a grant
 #     for that seat; a revoked or expired lease row still records the grant),
-#   - lists the named viewer in its roster, and
+#   - lists the named viewer in its roster,
 #   - spans the requested game's end: from _REPORT_WATCH_PRE_S before the
 #     spectate game's start (the broadcaster's own history window opens
 #     WINDOW_PRE_START_SECONDS = 300 s early) to _REPORT_WATCH_POST_S after its
 #     end (or now while it is live; the end stamp is the room's close, which
-#     can trail the last game's report).
+#     can trail the last game's report),
+#   - has the requested game's MODE: the mode is the table the game row lives
+#     in (matches 1v1, team_matches 2v2, ovt_matches 1v2, ffa_matches ffa),
+#     compared with the mode the server recorded for the spectate game, and
+#   - is the requested game's SOURCE: when the spectate game records a source
+#     identity (source_ref, derived by the server from its own queue-lock
+#     records at attest time: the team or 1v2 series, the FFA lobby, a sync
+#     tournament match), it must be the requested game's series (or lobby) id,
+#     or for 1v1 the tournament match whose series the game belongs to; when
+#     it records none (1v1 queue and code rooms), the requested game's PLAYED
+#     roster (for FFA the players not absent) must equal the spectate game's
+#     roster exactly, as sets of steam ids.
 # The key is a game id of any mode; a series or session uuid is not one, so
 # `series` and `session` with a viewer resolve to nothing. No row = the same
 # 404 as every other refusal.
@@ -60680,22 +60692,47 @@ _REPORT_WATCH_PRE_S = 300
 _REPORT_WATCH_POST_S = 600
 _REPORT_WATCHED_SQL = """
     WITH anchor AS (
-        SELECT wm.ended_at FROM matches wm WHERE wm.id = CAST(:key AS uuid)
+        SELECT '1v1' AS mode, wm.ended_at, CAST(wm.series_id AS text) AS source_id,
+               ARRAY[wm.player1_id, wm.player2_id] AS played
+          FROM matches wm WHERE wm.id = CAST(:key AS uuid)
         UNION ALL
-        SELECT wt.ended_at FROM team_matches wt WHERE wt.id = CAST(:key AS uuid)
+        SELECT '2v2', wt.ended_at, CAST(wt.series_id AS text),
+               ARRAY[wt.t1a_id, wt.t1b_id, wt.t2a_id, wt.t2b_id]
+          FROM team_matches wt WHERE wt.id = CAST(:key AS uuid)
         UNION ALL
-        SELECT wo.ended_at FROM ovt_matches wo WHERE wo.id = CAST(:key AS uuid)
+        SELECT '1v2', wo.ended_at, CAST(wo.series_id AS text),
+               ARRAY[wo.solo_id, wo.duo_a_id, wo.duo_b_id]
+          FROM ovt_matches wo WHERE wo.id = CAST(:key AS uuid)
         UNION ALL
-        SELECT wf.ended_at FROM ffa_matches wf WHERE wf.id = CAST(:key AS uuid)
+        SELECT 'ffa', wf.ended_at, CAST(wf.lobby_id AS text),
+               ARRAY(SELECT wx.player_id FROM ffa_match_players wx
+                      WHERE wx.match_id = wf.id AND NOT wx.absent)
+          FROM ffa_matches wf WHERE wf.id = CAST(:key AS uuid)
+    ), requested AS (
+        SELECT a.mode, a.ended_at, a.source_id,
+               ARRAY(SELECT DISTINCT CAST(wp.steam_id AS text) FROM players wp
+                      WHERE wp.id = ANY(a.played) ORDER BY 1) AS played_sids
+          FROM anchor a
     )
     SELECT wg.id AS watched_game
-      FROM anchor a
+      FROM requested r
       JOIN spectate_games wg
-        ON a.ended_at >= wg.started_at - make_interval(secs => :pre)
-       AND a.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)
+        ON wg.mode = r.mode
+       AND r.ended_at >= wg.started_at - make_interval(secs => :pre)
+       AND r.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)
       JOIN spectate_leases wl
         ON wl.game_id = wg.id AND wl.spectator_steam_id = CAST(:bsid AS text)
      WHERE CAST(:viewer AS text) = ANY(string_to_array(wg.roster, ','))
+       AND CASE WHEN wg.source_ref <> ''
+                THEN wg.source_ref = r.source_id
+                  OR (r.mode = '1v1' AND EXISTS (
+                        SELECT 1 FROM tournament_matches wtm
+                         WHERE CAST(wtm.id AS text) = wg.source_ref
+                           AND CAST(wtm.series_id AS text) = r.source_id))
+                ELSE r.played_sids = ARRAY(
+                        SELECT DISTINCT wr FROM unnest(string_to_array(wg.roster, ',')) wr
+                         WHERE wr <> '' ORDER BY 1)
+           END
      LIMIT 1
 """
 # Sept 28 (board row 30a): the FFA LOBBY SITTING of an anchor game: every game
@@ -61645,10 +61682,13 @@ async def get_set_report(request: Request, steam_id: str = "",
     is not a 17-digit Steam id is a 400 "bad_request"; both are decided before
     any statement runs. Then (round 2 M4) the requested game must be one the
     broadcast seat WATCHED: _REPORT_WATCHED_SQL requires a lease of the caller
-    on a spectate game whose roster names the viewer and whose span holds the
-    requested game's end; anything else - including a series or session key,
-    which is not a game id - gets the same 404 as every other refusal, as does
-    a viewer who did not play the set."""
+    on a spectate game whose roster names the viewer, whose span holds the
+    requested game's end, whose recorded mode is the requested game's mode and
+    whose recorded source (series, lobby or tournament match) is the requested
+    game's, or, where it records no source, whose roster is exactly the
+    requested game's played roster (round 3); anything else - including a
+    series or session key, which is not a game id - gets the same 404 as every
+    other refusal, as does a viewer who did not play the set."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     # Board row 30g: whose report this is - the caller's own unless the
@@ -61672,8 +61712,10 @@ async def get_set_report(request: Request, steam_id: str = "",
     if viewer is not None:
         # Round 2 M4: the requested set must be one the broadcast seat watched
         # (_REPORT_WATCHED_SQL: a lease of this account on a spectate game
-        # whose roster names the viewer and whose span holds the requested
-        # game's end); otherwise the ordinary participant-closed 404.
+        # whose roster names the viewer, whose span holds the requested game's
+        # end, and whose mode and source - or, without a source, exact played
+        # roster - are the requested game's); otherwise the ordinary
+        # participant-closed 404.
         watched = await _report_rows(db, _REPORT_WATCHED_SQL, {
             "key": key, "viewer": viewer, "bsid": str(steam_id),
             "pre": _REPORT_WATCH_PRE_S, "post": _REPORT_WATCH_POST_S})

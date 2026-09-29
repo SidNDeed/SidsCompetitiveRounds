@@ -787,22 +787,38 @@ def test_each_game_and_the_set_carry_what_was_earned(lab):
     assert env["set_summary"]["xp_total"] == tot_x
 
 
-async def _watch(game_key, holder, roster_keys):
+async def _game_facts(conn, game_key):
+    """(mode, end, source) of a lab game: the mode is the table its row lives
+    in; the source is what the server records for a spectate game of that
+    mode (the team or 1v2 series, the FFA lobby; '' for a 1v1, as queue and
+    code rooms record none)."""
+    row = await conn.fetchrow("""
+        SELECT '1v1' AS mode, ended_at, '' AS src FROM matches WHERE id = $1
+        UNION ALL SELECT '2v2', ended_at, CAST(series_id AS text) FROM team_matches WHERE id = $1
+        UNION ALL SELECT '1v2', ended_at, CAST(series_id AS text) FROM ovt_matches WHERE id = $1
+        UNION ALL SELECT 'ffa', ended_at, CAST(lobby_id AS text) FROM ffa_matches WHERE id = $1""",
+                              uuid.UUID(ID[game_key]))
+    assert row is not None and row["ended_at"] is not None, game_key
+    return row["mode"], row["ended_at"], row["src"]
+
+
+async def _watch(game_key, holder, roster_keys, mode=None, source=None, span=None):
     """Round 2 M4: a spectate game around `game_key`'s end (from 5 min before
-    it to 1 min after) whose roster is `roster_keys`' steam ids, and a revoked
-    lease of `holder` on it - what the broadcast seat's grant leaves behind."""
+    it to 1 min after, or `span`) whose roster is `roster_keys`' steam ids, and
+    a revoked lease of `holder` on it - what the broadcast seat's grant leaves
+    behind. Round 3 M4: the spectate game records the game's TRUE mode and
+    source (_game_facts) unless `mode` / `source` name others - the round-2
+    fixture wrote every row as 1v1, which hid that the binding compared no
+    mode."""
     conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
     try:
-        end = await conn.fetchval("""
-            SELECT ended_at FROM matches WHERE id = $1
-            UNION ALL SELECT ended_at FROM team_matches WHERE id = $1
-            UNION ALL SELECT ended_at FROM ovt_matches WHERE id = $1
-            UNION ALL SELECT ended_at FROM ffa_matches WHERE id = $1""", uuid.UUID(ID[game_key]))
-        assert end is not None, game_key
+        true_mode, end, true_source = await _game_facts(conn, game_key)
+        start, stop = span or (end - timedelta(minutes=5), end + timedelta(minutes=1))
         wid = uuid.uuid4()
-        await _ins(conn, "spectate_games", id=wid, mode="1v1", room_name="w" + wid.hex[:12],
+        await _ins(conn, "spectate_games", id=wid, mode=mode or true_mode, room_name="w" + wid.hex[:12],
+                   source_ref=true_source if source is None else source,
                    roster=",".join(sorted(STEAM[k] for k in roster_keys)),
-                   started_at=end - timedelta(minutes=5), ended_at=end + timedelta(minutes=1))
+                   started_at=start, ended_at=stop)
         await _ins(conn, "spectate_leases", game_id=wid, spectator_steam_id=holder,
                    token_hash=uuid.uuid4().hex, join_expires_at=end, heartbeat_expires_at=end,
                    revoked_at=end + timedelta(minutes=1))
@@ -854,6 +870,127 @@ def test_a_viewer_read_is_bound_to_a_game_the_broadcast_seat_watched(lab, monkey
     # now the seat watched KL with A in the roster: served, the viewer's own envelope
     asyncio.run(_watch("KL", bcast, "AB"))
     assert _report(bcast, viewer=STEAM["A"], sitting=ID["KL"]) == _report("A", sitting=ID["KL"])
+
+
+# -- round 3 M4: the watched read is bound to the game the lease watched ---------
+
+@pytest.fixture
+def seat(monkeypatch):
+    """A broadcast seat of this test's own: a fresh steam id as the only entry
+    of SPECTATE_BROADCAST_STEAM_IDS, with a valid session. The lab keeps every
+    lease the other tests leave behind, so a refusal asserted for the shared
+    broadcast account could be answered by another test's watch; for this
+    seat only the watches its own test creates exist."""
+    s = "7656119%010d" % random.randrange(10 ** 10)
+    assert s not in STEAM.values()
+    monkeypatch.setattr(main, "SPECTATE_BROADCAST_STEAM_IDS", {s})
+
+    async def _ok(request, steam_id, db):
+        return steam_id in STEAM.values() or steam_id == s
+    monkeypatch.setattr(main, "_strict_steam_session_ok", _ok)
+    return s
+
+
+def _facts(*keys):
+    async def _go():
+        conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+        try:
+            return [await _game_facts(conn, k) for k in keys]
+        finally:
+            await conn.close()
+    return asyncio.run(_go())
+
+
+def _lab_sql(sql, *args):
+    async def _go():
+        conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+        try:
+            return await conn.fetchval(sql, *args)
+        finally:
+            await conn.close()
+    return asyncio.run(_go())
+
+
+def _inside(end, watched_end):
+    """True when `end` lies inside the window _watch's default span gives a
+    watch of a game ending at `watched_end` (5 min before its start, which is
+    5 min before that end, to the route's post slack after its stop)."""
+    lo = watched_end - timedelta(minutes=5) - timedelta(seconds=main._REPORT_WATCH_PRE_S)
+    hi = watched_end + timedelta(minutes=1) + timedelta(seconds=main._REPORT_WATCH_POST_S)
+    return lo <= end <= hi
+
+
+def test_a_game_of_another_mode_inside_a_watched_1v1_is_refused(lab, seat):
+    """Round 3 M4: the seat watched a 1v1 of A and B (recorded mode 1v1, no
+    source, roster A B) whose span runs from a minute before the end of A's
+    2v2 game TM2 to the end of A's FFA game F2, so both end inside it and both
+    name the viewer. Neither is the game the lease watched: both are refused
+    with the ordinary 404. Controls: A's own requests are served, and the same
+    games watched under their own mode and source are served to the seat as
+    A's own envelope."""
+    (_m, tm2_end, _s), (_m2, f2_end, _s2) = _facts("TM2", "F2")
+    asyncio.run(_watch("K1", seat, "AB", span=(tm2_end - timedelta(minutes=1), f2_end)))
+    for sel in ({"sitting": ID["TM2"]}, {"sitting": ID["F2"]}, {"lobby": ID["F2"]}):
+        assert _refused(seat, viewer=STEAM["A"], **sel) == (404, "not_found"), sel
+        assert _games(_report("A", **sel)), ("control: A's own request is served", sel)
+    asyncio.run(_watch("TM2", seat, "ABCD"))
+    asyncio.run(_watch("F2", seat, "ABD"))
+    for sel in ({"sitting": ID["TM2"]}, {"sitting": ID["F2"]}, {"lobby": ID["F2"]}):
+        assert _report(seat, viewer=STEAM["A"], **sel) == _report("A", **sel), sel
+
+
+def test_a_game_of_another_mode_with_the_same_roster_is_refused(lab, seat):
+    """Round 3 M4, the mode comparison on its own: A and B played the FFA game
+    F4 as its only two players - exactly the roster of a watched 1v1 of A and
+    B (recorded 1v1, no source) whose span holds F4's end, so the exact
+    roster comparison alone would accept it. F4 is not a 1v1: refused.
+    Controls: F4's played roster is exactly A B; A's own request is served;
+    F4 watched under its own mode and lobby is served to the seat."""
+    (_m, f4_end, _s), = _facts("F4")
+    played = _lab_sql("""
+        SELECT string_agg(CAST(p.steam_id AS text), ',' ORDER BY p.steam_id)
+          FROM ffa_match_players fp JOIN players p ON p.id = fp.player_id
+         WHERE fp.match_id = $1 AND NOT fp.absent""", uuid.UUID(ID["F4"]))
+    assert played == ",".join(sorted((STEAM["A"], STEAM["B"]))), "control: F4's roster is the watched roster"
+    asyncio.run(_watch("KL", seat, "AB", span=(f4_end - timedelta(minutes=1), f4_end)))
+    assert _refused(seat, viewer=STEAM["A"], match=ID["F4"]) == (404, "not_found")
+    assert _games(_report("A", match=ID["F4"])), "control: A's own request is served"
+    asyncio.run(_watch("F4", seat, "AB"))
+    assert _report(seat, viewer=STEAM["A"], match=ID["F4"]) == _report("A", match=ID["F4"])
+
+
+def test_another_opponent_of_the_viewer_inside_a_watched_1v1_is_refused(lab, seat):
+    """Round 3 M4: the seat watched A against B (K1: recorded 1v1, no source,
+    roster A B). A's game against C (KC) ends inside that watch's window and
+    names the viewer, but its played roster is A C, not the watched A B:
+    refused. Controls: the window does hold KC's end (so the refusal is the
+    roster), A's own request for KC is served, and the watched game itself is
+    served as A's own envelope."""
+    (_m, k1_end, _s), (_m2, kc_end, _s2) = _facts("K1", "KC")
+    assert _inside(kc_end, k1_end), "control: KC ends inside the K1 watch's window"
+    asyncio.run(_watch("K1", seat, "AB"))
+    for sel in ({"match": ID["KC"]}, {"sitting": ID["KC"]}):
+        assert _refused(seat, viewer=STEAM["A"], **sel) == (404, "not_found"), sel
+        assert _games(_report("A", **sel)), ("control: A's own request is served", sel)
+    assert _report(seat, viewer=STEAM["A"], match=ID["K1"]) == _report("A", match=ID["K1"])
+
+
+def test_a_watched_series_or_lobby_binds_only_its_own_games(lab, seat):
+    """Round 3 M4: a spectate game that records a source binds that source
+    only. A 2v2 watch over TM2 recorded under another series refuses TM2; the
+    seat's watch of F2 (lobby L1) refuses A's F5 (lobby L2) although F5 ends
+    inside it and names the viewer. Controls: the watch recorded under TM2's
+    own series serves TM2, and the F2 watch serves F2."""
+    (_m, f2_end, l1), (_m2, f5_end, l2) = _facts("F2", "F5")
+    assert l1 != l2 and _inside(f5_end, f2_end), "control: another lobby, inside the window"
+    asyncio.run(_watch("TM2", seat, "ABCD", source=str(uuid.uuid4())))
+    assert _refused(seat, viewer=STEAM["A"], sitting=ID["TM2"]) == (404, "not_found")
+    asyncio.run(_watch("F2", seat, "ABD"))
+    assert _refused(seat, viewer=STEAM["A"], match=ID["F5"]) == (404, "not_found")
+    assert _games(_report("A", match=ID["F5"])), "control: A's own request is served"
+    assert _report(seat, viewer=STEAM["A"], match=ID["F2"]) == _report("A", match=ID["F2"])
+    asyncio.run(_watch("TM2", seat, "ABCD"))
+    assert _report(seat, viewer=STEAM["A"], sitting=ID["TM2"]) == _report("A", sitting=ID["TM2"])
 
 
 # -- /health `session_report` against the lab database ---------------------------

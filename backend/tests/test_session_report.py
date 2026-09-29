@@ -115,8 +115,11 @@ SERIES_ROW = {
 # the ranked series (games at minutes 0, 5 and 10, two minutes each), with the
 # accounts that hold or held a lease on it. The broadcast account is appended
 # below, where it is defined.
+# Round 3 M4: each spectate game also records its mode and source identity
+# (a 1v1 queue room records none, so its roster is compared exactly).
 W1 = str(uuid.uuid4())
 WATCHED = [{"id": W1, "roster": ",".join(sorted((CALLER, OPP))), "leases": [],
+            "mode": "1v1", "source_ref": "",
             "started_at": T0 - timedelta(minutes=1), "ended_at": T0 + timedelta(minutes=13)}]
 MATCHES = [
     match_row(M1, PID_A, PID_B, minute=0, series_id=SERIES),
@@ -312,22 +315,49 @@ class FakeDb:
             # statement, or the fake refuses.
             for needle in ("JOIN spectate_leases wl ON wl.game_id = wg.id AND wl.spectator_steam_id = CAST(:bsid AS text)",
                            "CAST(:viewer AS text) = ANY(string_to_array(wg.roster, ','))",
-                           "a.ended_at >= wg.started_at - make_interval(secs => :pre)",
-                           "a.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)",
-                           "FROM matches wm WHERE wm.id = CAST(:key AS uuid)",
-                           "FROM team_matches wt WHERE wt.id = CAST(:key AS uuid)",
-                           "FROM ovt_matches wo WHERE wo.id = CAST(:key AS uuid)",
+                           "ON wg.mode = r.mode",
+                           "r.ended_at >= wg.started_at - make_interval(secs => :pre)",
+                           "r.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)",
+                           "CASE WHEN wg.source_ref <> '' THEN wg.source_ref = r.source_id",
+                           "ELSE r.played_sids = ARRAY(",
+                           "SELECT '1v1' AS mode, wm.ended_at, CAST(wm.series_id AS text) AS source_id, "
+                           "ARRAY[wm.player1_id, wm.player2_id] AS played FROM matches wm WHERE wm.id = CAST(:key AS uuid)",
+                           "SELECT '2v2', wt.ended_at, CAST(wt.series_id AS text), "
+                           "ARRAY[wt.t1a_id, wt.t1b_id, wt.t2a_id, wt.t2b_id] FROM team_matches wt WHERE wt.id = CAST(:key AS uuid)",
+                           "SELECT '1v2', wo.ended_at, CAST(wo.series_id AS text), "
+                           "ARRAY[wo.solo_id, wo.duo_a_id, wo.duo_b_id] FROM ovt_matches wo WHERE wo.id = CAST(:key AS uuid)",
+                           "SELECT 'ffa', wf.ended_at, CAST(wf.lobby_id AS text), ARRAY(SELECT wx.player_id "
+                           "FROM ffa_match_players wx WHERE wx.match_id = wf.id AND NOT wx.absent) "
                            "FROM ffa_matches wf WHERE wf.id = CAST(:key AS uuid)"):
                 assert needle in sql, "the watched statement lost a predicate: " + needle
             key = params["key"]
-            ends = [m["ended_at"] for m in list(self.matches) + list(self.team_matches) + [self.ffa_match]
-                    if str(m["id"]) == key]
+            sid_of = {str(p["id"]): p["steam_id"] for p in self.players}
+
+            def _played(*pids):
+                return {sid_of.get(str(p)) for p in pids if p is not None}
+            # (mode, end, source id, played roster) of the requested game
+            wanted = [("1v1", m["ended_at"], m.get("series_id"), _played(m["player1_id"], m["player2_id"]))
+                      for m in self.matches if str(m["id"]) == key]
+            wanted += [("2v2", m["ended_at"], m.get("series_id"),
+                        _played(m["t1a_id"], m["t1b_id"], m["t2a_id"], m["t2b_id"]))
+                       for m in self.team_matches if str(m["id"]) == key]
+            if str(self.ffa_match["id"]) == key:
+                wanted.append(("ffa", self.ffa_match["ended_at"], self.ffa_match.get("lobby_id"),
+                               _played(*[p["player_id"] for p in self.ffa_players if not p["absent"]])))
             pre, post = timedelta(seconds=params["pre"]), timedelta(seconds=params["post"])
             for w in self.watched:
                 if params["bsid"] not in w["leases"] or params["viewer"] not in w["roster"].split(","):
                     continue
-                if any(w["started_at"] - pre <= e <= (w["ended_at"] or datetime.now(timezone.utc)) + post
-                       for e in ends if e is not None):
+                for mode, e, src, played in wanted:
+                    if e is None or mode != w["mode"]:
+                        continue
+                    if not (w["started_at"] - pre <= e <= (w["ended_at"] or datetime.now(timezone.utc)) + post):
+                        continue
+                    if w["source_ref"]:
+                        if src is None or str(src) != w["source_ref"]:
+                            continue
+                    elif played != {s for s in w["roster"].split(",") if s}:
+                        continue
                     return _Res([{"watched_game": w["id"]}])
             return _Res([])
         if "AS report_kind" in sql:
