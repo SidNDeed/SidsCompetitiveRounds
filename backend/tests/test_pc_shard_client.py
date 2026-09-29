@@ -25,7 +25,12 @@ Row 24, round 2 of the review:
   G10 a failed refresh leaves the held card stale (only a card drawn, or the
       pool's 404, sets the fetch time), so the next try comes at the retry
       time thirty seconds out, and the held card is captioned as not loaded
-      while its last refresh has failed (finding 3).
+      while its last refresh has failed (finding 3);
+  G11 the single-flight latch cannot outlive its coroutine: a fetch with no
+      answer 25 s after it was sent (past the 20 s transport timeout) is
+      given up before the tick's in-flight check, and an answer to a fetch
+      given up commits nothing (its serial is not the latest) -- the host
+      that runs the coroutine can be destroyed and respawned (finding 4).
 Both rows:
   G9  every new string is in all four catalogues with its placeholders, and
       in the extractor's registry.
@@ -249,6 +254,29 @@ def gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so(s):
             "the held card keeps a current-card caption after its refresh failed")
 
 
+def gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch(s):
+    ui = s["ui"]
+    assert "private static float settingsCardSentAt;" in ui and "private static int settingsCardSerial;" in ui
+    tick = _member(ui, "private static void SettingsCardTick(")
+    give_up = _at(tick, "if (settingsCardInFlight && Now - settingsCardSentAt > 25f)",
+                  "a fetch that never answers holds the latch: nothing gives it up")
+    guard = _at(tick, "|| settingsCardInFlight ||", "the tick no longer runs one fetch at a time")
+    assert give_up < guard, "a fetch that never answers holds the latch: it is given up only after the in-flight return"
+    block = tick[give_up:guard]
+    assert "settingsCardInFlight = false;" in block and "settingsCardSerial++;" in block, (
+        "a fetch given up does not release the latch and retire its serial")
+    send = _at(tick, "settingsCardInFlight = true;", "the tick no longer sets the latch when it sends")
+    call = _at(tick, "ApiClient.PcFacePreview(id, ", "the tick no longer fetches the card")
+    stamp = tick[send:call]
+    assert "settingsCardSentAt = Now;" in stamp and "serial = ++settingsCardSerial" in stamp, (
+        "a sent fetch is not stamped with its time and serial")
+    cb = tick[call:]
+    epoch = _at(cb, "if (ep != uiEpoch) return;", "the identity check moved")
+    drop = _at(cb, "if (serial != settingsCardSerial)", "an answer to a fetch given up still commits")
+    first_write = _at(cb, "settingsCardInFlight = false;", "the answer no longer releases the latch")
+    assert epoch < drop < first_write, "an answer to a fetch given up still commits"
+
+
 NEW_KEYS = [
     "Saving your new picture - your card updates here once it has been sent.",
     "Other players still see this card: your new picture was not sent (the note below says why).",
@@ -331,7 +359,8 @@ GATES = [gate_g1_the_preview_requests_the_card_variant,
          gate_g7_the_last_copy_is_a_confirmation,
          gate_g8_the_toast_names_the_credited_total,
          gate_g9_every_new_string_is_in_every_catalogue,
-         gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so]
+         gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so,
+         gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -455,6 +484,24 @@ MUTATIONS = [
      "                    settingsCardState = SC_UNAVAILABLE;\n                    settingsCardRetryAt = Now + 300f;\n",
      "                    settingsCardState = SC_UNAVAILABLE;\n                    settingsCardRetryAt = Now + 30f;   // thirty seconds out\n",
      "a failed refresh no longer sets the unavailable state and the thirty-second retry"),
+    # Round 2, finding 4. M24l removes the give-up (the round-1 latch, held
+    # until an answer that a destroyed host never delivers): the negative
+    # control.
+    ("M24l", gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch, "ui",
+     "            if (settingsCardInFlight && Now - settingsCardSentAt > 25f)\n",
+     "            if (false)\n",
+     "            if (settingsCardInFlight && Now - settingsCardSentAt > 25f)   // given up\n",
+     "a fetch that never answers holds the latch"),
+    ("M24m", gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch, "ui",
+     "                if (serial != settingsCardSerial)\n",
+     "                if (false)\n",
+     "                if (serial != settingsCardSerial)   // given up meanwhile\n",
+     "an answer to a fetch given up still commits"),
+    ("M24n", gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch, "ui",
+     "            settingsCardSentAt = Now;\n",
+     "",
+     "            settingsCardSentAt = Now;   // when it was sent\n",
+     "a sent fetch is not stamped with its time and serial"),
 ]
 
 

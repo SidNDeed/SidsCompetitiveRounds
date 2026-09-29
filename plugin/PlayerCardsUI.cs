@@ -165,6 +165,12 @@ namespace CompetitiveRounds
         private static Sprite settingsCardSprite, settingsCardBound;
         private static string settingsCardKey;           // identity epoch | stored portrait hash | locale the card was drawn for
         private static bool settingsCardInFlight;
+        // When the fetch in flight was sent, and its serial: a fetch with no
+        // answer 25 s on (past the 20 s transport timeout) is given up and
+        // its latch released, and an answer whose serial is not the latest
+        // commits nothing (asks-b round 2, L4).
+        private static float settingsCardSentAt;
+        private static int settingsCardSerial;
         private static float settingsCardRetryAt, settingsCardAt = -1000f;
         private static int settingsCardState = SC_NONE;
         // Board row 25: the batch shard (a whole pack from its result, or a
@@ -2822,10 +2828,11 @@ namespace CompetitiveRounds
         /// synthetic click never reaches the overlay (#420). "daily" is the
         /// daily button (claim, or open the claimed pack), "open" the first
         /// waiting pack, "card:N" the Nth binder tile's card view, and
-        /// "view:open|binder|info" the view switch, with nothing seeded, and
+        /// "view:open|binder|info" the view switch, with nothing seeded,
         /// "shardpack" the Shard pack button on the pack on show (board row
         /// 25: the first press arms and names the total, a second press
-        /// inside six seconds sends).</summary>
+        /// inside six seconds sends), and "killhost" the persistent host
+        /// destroyed and respawned (board row 24, round 2).</summary>
         internal static void DevAct(string what)
         {
             what = what ?? "";
@@ -2848,6 +2855,17 @@ namespace CompetitiveRounds
                 return;
             }
             if (what == "shardpack") { Plugin.Log.LogInfo("[PC] act: shardpack"); OnShardPackClick(); return; }
+            if (what == "killhost")
+            {
+                // Board row 24, round 2 (L4): destroy the persistent host the
+                // way a scene teardown does, so the coroutines it runs (a
+                // Settings card fetch among them) stop without their callbacks
+                // and its OnDestroy respawns it.
+                Plugin.Log.LogInfo("[PC] act: killhost (settings card in flight: " + settingsCardInFlight + ", serial " + settingsCardSerial + ")");
+                var host = Plugin.Instance;
+                if (host != null) UnityEngine.Object.Destroy(host.gameObject);
+                return;
+            }
             if (what.StartsWith("view:"))
             {
                 string v = what.Substring(5);
@@ -3045,20 +3063,40 @@ namespace CompetitiveRounds
         /// every ranked result), never before a refusal's retry time, and never
         /// while a new look is on its way (the server would draw the picture it
         /// still holds; the upload's answer changes the key anyway). One fetch
-        /// at a time; an answer from before an identity edge commits nothing.</summary>
+        /// at a time; an answer from before an identity edge commits nothing.
+        /// A fetch with no answer 25 s after it was sent is given up (the
+        /// other latches' rule, past the 20 s transport timeout): when the
+        /// persistent host that ran its coroutine is destroyed and respawned
+        /// (Plugin.cs OnDestroy), the coroutine stops and its callback never
+        /// runs, so the latch would otherwise hold for the rest of the
+        /// session. An answer that does arrive after it was given up commits
+        /// nothing: its serial is no longer the latest.</summary>
         private static void SettingsCardTick(string id)
         {
             var me = ApiClient.CachedPcMe;
+            if (settingsCardInFlight && Now - settingsCardSentAt > 25f)
+            {
+                settingsCardInFlight = false;
+                settingsCardSerial++;
+                Plugin.Log.LogWarning("[PC] settings card: no answer 25 s after the request; given up, asking again");
+            }
             if (id == null || me == null || !SessionReady || settingsCardInFlight || presetPreview == null) return;
             if (PortraitRender.LookPending) return;
             string want = SettingsCardWant(me);
             bool stale = want != settingsCardKey || Now - settingsCardAt > 300f;
             if (!stale || Now < settingsCardRetryAt) return;
             settingsCardInFlight = true;
-            int ep = uiEpoch;
+            settingsCardSentAt = Now;
+            int ep = uiEpoch, serial = ++settingsCardSerial;
+            Plugin.Log.LogInfo($"[PC] settings card: requested (serial {serial})");
             ApiClient.PcFacePreview(id, (ok, data, code) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                if (serial != settingsCardSerial)
+                {
+                    Plugin.Log.LogInfo($"[PC] settings card: answer to serial {serial} dropped (given up)");
+                    return;
+                }
                 settingsCardInFlight = false;
                 Texture2D tex = ok ? PlayerCardFaces.DecodeOwned(data, "card", true) : null;
                 if (tex != null)
