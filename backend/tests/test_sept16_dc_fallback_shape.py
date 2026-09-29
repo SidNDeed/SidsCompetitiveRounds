@@ -2508,11 +2508,15 @@ def test_the_seat_binding_check_rejects_a_missing_and_a_late_binding():
 # names, under the session check's own policy (soft-fail where enforcement is
 # not armed for the caller). That class is filed in the round-9 notes and
 # not changed here; a renewer added later is unclassified and reddens this.
+# The ffa poll's body, its lease renewal with it, runs as _ffa_queue_poll_inner
+# since the connect-failure landing; ffa_queue_poll is now the route wrapper
+# that attaches the assembly notice after the poll's own COMMIT and renews
+# nothing itself. Same body, same class.
 LEASE_RENEWERS = {
     "presence_ping": "IN-GAME",
     "team_queue_poll": "LOBBY SEAT",
     "ovt_queue_poll": "LOBBY SEAT",
-    "ffa_queue_poll": "LOBBY SEAT",
+    "_ffa_queue_poll_inner": "LOBBY SEAT",
     "_lobby_state_impl": "LOBBY SEAT",
 }
 
@@ -2861,7 +2865,9 @@ LIVENESS_VETO_READERS = {
     "ovt_queue_leave": "OPEN",
     "ovt_queue_poll": "OPEN",
     "ffa_queue_leave": "OPEN",
-    "ffa_queue_poll": "OPEN",
+    # The ffa poll's body runs as _ffa_queue_poll_inner since the
+    # connect-failure landing (ffa_queue_poll wraps it and reads no veto).
+    "_ffa_queue_poll_inner": "OPEN",
     "_ffa_game_in_progress_tristate": "HELPER",
     "_ffa_poll_locked_payload": "REPORTED",
 }
