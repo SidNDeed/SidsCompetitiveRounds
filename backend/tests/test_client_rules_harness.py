@@ -272,7 +272,7 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # 46 cases on the commit that added the suite, 72 since round 2 added
     # the J, O, R, K and H cases; the floor is that count, not one far
     # below it (#342). Raise it when cases are added.
-    assert run >= 78, "the SecureRouteRules suite shrank to %d cases" % run
+    assert run >= 80, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -309,6 +309,7 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     "O7 restored without a session for 2 min: no send to the secure base, no attempt spent, the entry kept",
     "O7b then the session lands: exactly one send, with the token, one settlement, an empty outbox",
     "O8 a request sent without the token after the gate passed spends nothing and removes nothing",
+    "O9 a backup 401 that lands after a restore keeps the entry due by the restore's promise (20 s)",
     # round 2: the portal press (LOW 1, LOW 2)
     "R1 both refusal wordings (the portal mint's and the enforced writes') read as a session refusal",
     "R2 a mint refused for its session re-mints once, and the second refusal is reported, never looped",

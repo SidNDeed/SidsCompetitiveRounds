@@ -732,6 +732,12 @@ namespace CompetitiveRounds
             /// (SecureRouteRules.OutboxSendGate). Only so the wait is logged
             /// once when it begins and once when it ends, not on every lap.</summary>
             public bool waitingForSession;
+            /// <summary>In memory only: the time the last restore promised this
+            /// entry a look by (OutboxRouteRestored), negative when none stands.
+            /// A give-back never moves the entry later than it
+            /// (SecureRouteRules.OutboxGiveBackDue); a send that begins after
+            /// the promise has kept it.</summary>
+            public float restoreDueAt = -1f;
         }
         private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
         /// <summary>WHICH host is driving the supervisor, not merely that one
@@ -841,7 +847,10 @@ namespace CompetitiveRounds
             float soon = Time.realtimeSinceStartup + OUTBOX_RESTORE_DELAY;
             int pulled = 0;
             foreach (var p in _pendingReports)
+            {
+                p.restoreDueAt = soon;
                 if (p.nextAt > soon) { p.nextAt = soon; pulled++; }
+            }
             Plugin.Log.LogInfo($"[OUTBOX] secure route restored: {_pendingReports.Count} queued report(s) due within "
                                + $"{OUTBOX_RESTORE_DELAY:0} s ({pulled} brought forward)");
             EnsureOutboxLoop();
@@ -1931,6 +1940,7 @@ namespace CompetitiveRounds
                     p.waitingForSession = false;
                     Plugin.Log.LogInfo($"[OUTBOX] session held; sending the queued report to {SecureRouteRules.HostPort(target)} with it");
                 }
+                p.restoreDueAt = -1f;   // this send keeps any restore's promise
                 p.attempts++;
                 // Linear-ish backoff, capped at 4x the base interval. Measured
                 // from now rather than from the top of the pass — an earlier
@@ -2060,7 +2070,11 @@ namespace CompetitiveRounds
                         // a report nor removes the entry. The attempt is given
                         // back and the next one waits the capped interval.
                         p.attempts--;
-                        p.nextAt = Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER;
+                        // The earlier of the capped interval and a restore's
+                        // promise made while this request was in flight
+                        // (Codex round 2 LOW 1): never later than the promise.
+                        p.nextAt = (float)SecureRouteRules.OutboxGiveBackDue(
+                            Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER, p.restoreDueAt);
                         Plugin.Log.LogInfo($"[OUTBOX] a retry without the session token failed ({Trunc(resp ?? "(no response)", 60)}); "
                                            + $"not counted, the report stays queued ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
                         continue;

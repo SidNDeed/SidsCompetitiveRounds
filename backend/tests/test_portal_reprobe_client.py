@@ -396,6 +396,27 @@ def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spe
     assert "return requestCarriedToken;" in rules, rules
 
 
+def test_a_give_back_after_a_restore_never_cancels_the_restore_s_promise():
+    """Codex round 2 LOW 1: a tokenless retry in flight on the backup when the
+    route is restored answers 401 after the flip, and its give-back overwrote
+    the due time the restore had just set (within 20 s) with now plus 240 s.
+    The restore records its promise on every entry, a send that begins clears
+    it, and the give-back takes the earlier of the capped interval and the
+    promise (SecureRouteRules.OutboxGiveBackDue; harness O9)."""
+    restored = code_of(API, "private static void OutboxRouteRestored()")
+    loop = restored[restored.index("foreach (var p in _pendingReports)"):]
+    assert loop.index("p.restoreDueAt = soon;") < loop.index("if (p.nextAt > soon)"), restored
+    body = code_of(API, "private static IEnumerator OutboxPass()")
+    clear = body.index("p.restoreDueAt = -1f;")
+    assert body.count("p.restoreDueAt = -1f;") == 1, body
+    assert body.index("== SecureRouteRules.OutboxGate.WaitForSession)") < clear < body.index("p.attempts++;"), body
+    spend = body.index("if (!SecureRouteRules.OutboxAttemptSpent(carried))")
+    given_back = body[spend:body.index("continue;", spend)]
+    assert "p.nextAt = (float)SecureRouteRules.OutboxGiveBackDue(" in given_back, given_back
+    assert "p.restoreDueAt);" in given_back, given_back
+    assert given_back.count("p.nextAt =") == 1, given_back
+
+
 def test_the_probe_reads_the_whole_body_strictly():
     """MEDIUM 1: the probe called a body usable when the compact substring
     "version":" appeared, so a body cut off inside the string restored the

@@ -513,6 +513,19 @@ namespace CompetitiveRounds
             return requestCarriedToken;
         }
 
+        /// <summary>When a given-back entry falls due again (Codex round 2
+        /// LOW 1). A retry sent on the backup can still be in flight when the
+        /// route is restored and the entry is promised a look within 20 s
+        /// (`restoreDue`, negative when no promise stands); its 401 then arrives
+        /// after the flip, and overwriting the due time with the capped
+        /// interval cancelled that promise for four minutes. The give-back
+        /// takes the EARLIER of the two, so it never moves the entry later
+        /// than the restoration promised.</summary>
+        internal static double OutboxGiveBackDue(double proposed, double restoreDue)
+        {
+            return restoreDue >= 0 && restoreDue < proposed ? restoreDue : proposed;
+        }
+
         /// <summary>Whether a 401 body is the server refusing the session the
         /// request carried. Two routes word it differently: the enforced
         /// writes answer "session_required", the portal mint answers "steam

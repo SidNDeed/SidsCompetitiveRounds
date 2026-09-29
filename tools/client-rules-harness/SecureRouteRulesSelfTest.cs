@@ -820,6 +820,25 @@ namespace CompetitiveRounds
                       o7c.Settled == 1 && o7c.SecureSendsBeforeSession == 0 && o7c.SecureSendsAfterSession == 1, o7c.Describe());
                 // O8: the gate saw a session, but it was dropped before the
                 // stamp, so the request went out without the token.
+                // O9 (Codex round 2 LOW 1's falsifier): a tokenless retry on
+                // the backup is in flight at 290 s; the route is restored at
+                // 300 s (the entry is promised a look by 320 s); the held 401
+                // is released at 305 s. The give-back must not move the entry
+                // past the promise.
+                {
+                    double sendAt = 290.0, restoreAt = 300.0, answerAt = 305.0;
+                    double nextAtSend = sendAt + 60.0 * Math.Min(4.0, 1);
+                    double promise = restoreAt + 20.0;
+                    double nextAfterRestore = Math.Min(nextAtSend, promise);
+                    double proposed = answerAt + 60.0 * 4.0;
+                    double giveBack = OutboxGiveBackDue(proposed, promise);
+                    double giveBackNoRestore = OutboxGiveBackDue(proposed, -1.0);
+                    Check(r, "O9 a backup 401 that lands after a restore keeps the entry due by the restore's promise (20 s)",
+                          giveBack <= promise && nextAfterRestore <= promise,
+                          "promise=" + promise + " giveBack=" + giveBack + " proposed=" + proposed);
+                    Check(r, "O9c control: with no restore while it was in flight, the give-back waits the capped interval",
+                          giveBackNoRestore == proposed, "giveBack=" + giveBackNoRestore);
+                }
                 var o8 = OutboxComposition(93, 120.0, true);
                 Check(r, "O8 a request sent without the token after the gate passed spends nothing and removes nothing",
                       !o8.Dropped && o8.Settled == 1 && o8.TokenlessSecureSends == 1, o8.Describe());
