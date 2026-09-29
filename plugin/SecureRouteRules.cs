@@ -498,19 +498,31 @@ namespace CompetitiveRounds
         /// ten seconds, so in practice this means "every lap".</summary>
         internal const double OutboxSessionPollSeconds = 5.0;
 
-        /// <summary>Whether a failed outbox attempt spends one of the report's
-        /// attempts: only when the request CARRIED the session token (read from
-        /// the header actually stamped on it, not from its address). A request
-        /// without the token was never judged on the report by an enforcing
-        /// server, so its answer, whatever it is, neither counts toward the
-        /// budget that deletes a report nor removes the entry: the attempt is
-        /// given back and the entry stays queued (#98: a retry budget must not
-        /// tick while its precondition is unmet). The drop rule (the attempt
-        /// cap, and a permanent refusal) is therefore reached only by
-        /// authenticated attempts.</summary>
-        internal static bool OutboxAttemptSpent(bool requestCarriedToken)
+        /// <summary>What an outbox attempt's answer does to the queued report.
+        /// Settle: the entry is removed as delivered. GiveBack: the attempt is
+        /// returned and the entry stays queued. Spend: the attempt counts, and
+        /// the drop rule (the attempt cap, a permanent refusal) is asked.</summary>
+        internal enum OutboxAnswer { Settle, GiveBack, Spend }
+
+        /// <summary>The whole outbox answer rule. Whether the request CARRIED
+        /// the session token (read from the header actually stamped on it,
+        /// never from its address or scheme) decides removal as well as spend,
+        /// and it is asked BEFORE the answer's status (Codex round 3 HIGH 1).
+        /// A request without the token was never judged on the report by an
+        /// enforcing server, so its answer, a failure or a 2xx alike, neither
+        /// removes the entry nor counts toward the budget that deletes one: a
+        /// 2xx can come from a server that does not enforce, or from anything
+        /// answering in its place on the plaintext backup, and says nothing
+        /// about whether the report was recorded (#98: a retry budget must not
+        /// tick while its precondition is unmet). Such an entry is delivered
+        /// later by one send that carries the token; a server that did record
+        /// the tokenless copy answers that send as a duplicate. Only a 2xx to a
+        /// request that carried the token settles; only a failure of one
+        /// spends.</summary>
+        internal static OutboxAnswer OutboxAnswerFor(bool answered2xx, bool requestCarriedToken)
         {
-            return requestCarriedToken;
+            if (!requestCarriedToken) return OutboxAnswer.GiveBack;
+            return answered2xx ? OutboxAnswer.Settle : OutboxAnswer.Spend;
         }
 
         /// <summary>When a given-back entry falls due again (Codex round 2

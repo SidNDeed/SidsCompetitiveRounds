@@ -137,31 +137,50 @@ namespace CompetitiveRounds
         private sealed class OutboxRun
         {
             internal int SecureSendsBeforeSession, SecureSendsAfterSession, CarriedSends, TokenlessSecureSends, Settled;
+            internal int Rows, RowsAtRestore, TokenlessOkAnswers, TokenlessOkBeforeRestore, SettledTokenless;
             internal int AttemptsAtSession = -1;
-            internal bool QueuedAtSession, QueuedAtEnd, Dropped;
+            internal bool QueuedAtSession, QueuedAtEnd, QueuedAtRestore, Dropped;
             internal readonly List<string> Events = new List<string>();
             internal string Describe()
             {
                 return "secureBefore=" + SecureSendsBeforeSession + " secureAfter=" + SecureSendsAfterSession
                        + " carried=" + CarriedSends + " tokenlessSecure=" + TokenlessSecureSends
                        + " attemptsAtSession=" + AttemptsAtSession + " queuedAtSession=" + QueuedAtSession
-                       + " settled=" + Settled + " queuedAtEnd=" + QueuedAtEnd + " dropped=" + Dropped
+                       + " settled=" + Settled + " settledTokenless=" + SettledTokenless + " rows=" + Rows
+                       + " tokenless2xx=" + TokenlessOkAnswers + " (before restore " + TokenlessOkBeforeRestore + ")"
+                       + " queuedAtRestore=" + QueuedAtRestore + " rowsAtRestore=" + RowsAtRestore
+                       + " queuedAtEnd=" + QueuedAtEnd + " dropped=" + Dropped
                        + " | " + string.Join("; ", Events.ToArray());
             }
         }
 
+        /// <summary>What the sink answers a request that did NOT carry the
+        /// session token. Enforcing: 401 session_required (a request with the
+        /// token is answered 200 and records its row). Tokenless200: 200
+        /// WITHOUT recording a row (Codex round 3 HIGH 1's falsifier: a server
+        /// that does not enforce, or anything answering in its place on the
+        /// plaintext backup).</summary>
+        private enum Sink { Enforcing, Tokenless200 }
+
         /// <summary>ApiClient.OutboxPass over one queued report, a lap every
         /// ten fake seconds for thirty minutes: resolve the address
         /// (OutboxTarget), ask the gate (OutboxSendGate) with the session as
-        /// it is at that lap, send, and on a failure ask the spend rule
-        /// (OutboxAttemptSpent) with what the request CARRIED. The server
-        /// enforces: 200 to a request with the token, 401 to one without.
-        /// The route starts on the backup and is restored at 300 s (as
-        /// OnSecureRouteRestored does, the entry falls due within 20 s); the
-        /// session lands `sessionAfterRestore` seconds after that.
-        /// `dropBeforeStamp`: the first send after the session lands goes
-        /// out without the token although the gate saw it.</summary>
+        /// it is at that lap, send, and ask the answer rule (OutboxAnswerFor)
+        /// with the answer's status AND what the request CARRIED. The sink
+        /// answers a request with the token 200 and records one row; a
+        /// tokenless one per `sink`. Settlement is what the RULE decides (the
+        /// entry removed), and rows are what the sink recorded, counted apart,
+        /// so a removal without a row shows. The route starts on the backup and
+        /// is restored at 300 s (as OnSecureRouteRestored does, the entry falls
+        /// due within 20 s); the session lands `sessionAfterRestore` seconds
+        /// after that. `dropBeforeStamp`: the first send after the session
+        /// lands goes out without the token although the gate saw it.</summary>
         private static OutboxRun OutboxComposition(int seededAttempts, double sessionAfterRestore, bool dropBeforeStamp)
+        {
+            return OutboxComposition(seededAttempts, sessionAfterRestore, dropBeforeStamp, Sink.Enforcing);
+        }
+
+        private static OutboxRun OutboxComposition(int seededAttempts, double sessionAfterRestore, bool dropBeforeStamp, Sink sink)
         {
             const string path = "/api/v1/matches";
             const double restoreAt = 300.0;
@@ -181,6 +200,8 @@ namespace CompetitiveRounds
                     TickTimer(rt, clock, tt, now, now, TRetry, new RunLog());
                     restored = rt.Restored;
                     if (nextAt > now + 20.0) nextAt = now + 20.0;
+                    run.QueuedAtRestore = queued;
+                    run.RowsAtRestore = run.Rows;
                     run.Events.Add("restored@" + now);
                 }
                 bool session = now >= sessionAt && restored;
@@ -208,14 +229,23 @@ namespace CompetitiveRounds
                     if (!carried) run.TokenlessSecureSends++;
                 }
                 if (carried) run.CarriedSends++;
-                if (carried)
+                bool ok = carried || sink == Sink.Tokenless200;
+                if (ok && carried) run.Rows++;
+                if (ok && !carried)
+                {
+                    run.TokenlessOkAnswers++;
+                    if (!restored) run.TokenlessOkBeforeRestore++;
+                }
+                var answer = OutboxAnswerFor(ok, carried);
+                if (answer == OutboxAnswer.Settle)
                 {
                     run.Settled++;
+                    if (!carried) run.SettledTokenless++;
                     queued = false;
-                    run.Events.Add("settled@" + now);
+                    run.Events.Add("settled@" + now + (carried ? " with the token" : " WITHOUT the token"));
                     break;
                 }
-                if (!OutboxAttemptSpent(carried))
+                if (answer == OutboxAnswer.GiveBack)
                 {
                     attempts--;
                     nextAt = now + 60.0 * 4.0;
@@ -707,7 +737,7 @@ namespace CompetitiveRounds
             // -- O: the report outbox follows the route (Codex round 1 HIGH 1) ------
             // ApiClient.OutboxPass resolves each queued report's address with
             // OutboxTarget at every send, over the route's own bases, and asks
-            // OutboxAttemptSpent after a failed one. Modelled with the real
+            // OutboxAnswerFor after every answer. Modelled with the real
             // route and the real rules; the send is the fake.
             {
                 const string path = "/api/v1/matches";
@@ -742,12 +772,18 @@ namespace CompetitiveRounds
                       keptLan == lan && keptLook == lookalike,
                       "lan=" + keptLan + " lookalike=" + keptLook);
 
-                bool spentTokenless = OutboxAttemptSpent(false);
-                bool spentCarried = OutboxAttemptSpent(true);
+                var failTokenless = OutboxAnswerFor(false, false);
+                var failCarried = OutboxAnswerFor(false, true);
                 Check(r, "O4 a failed retry that did not carry the session token spends no attempt",
-                      !spentTokenless, "spent=" + spentTokenless);
+                      failTokenless == OutboxAnswer.GiveBack, "answer=" + failTokenless);
                 Check(r, "O4c control: a failed retry that carried the token spends one",
-                      spentCarried, "spent=" + spentCarried);
+                      failCarried == OutboxAnswer.Spend, "answer=" + failCarried);
+                var okTokenless = OutboxAnswerFor(true, false);
+                var okCarried = OutboxAnswerFor(true, true);
+                Check(r, "O4d a 2xx to a retry that did not carry the session token removes nothing and spends nothing",
+                      okTokenless == OutboxAnswer.GiveBack, "answer=" + okTokenless);
+                Check(r, "O4dc control: a 2xx to a retry that carried the token settles the report",
+                      okCarried == OutboxAnswer.Settle, "answer=" + okCarried);
                 var waitNoSession = OutboxSendGate(true, false);
                 var sendWithSession = OutboxSendGate(true, true);
                 var sendBackup = OutboxSendGate(false, false);
@@ -786,8 +822,10 @@ namespace CompetitiveRounds
                         attempts++;
                         sends++;
                         bool carried = transport && session;
-                        if (carried) return "delivered at send " + sends + " to " + target;
-                        if (!OutboxAttemptSpent(carried)) attempts--;
+                        // The enforcing sink: 200 only to a request with the token.
+                        var answer = OutboxAnswerFor(carried, carried);
+                        if (answer == OutboxAnswer.Settle) return "delivered at send " + sends + " to " + target;
+                        if (answer == OutboxAnswer.GiveBack) attempts--;
                         if (attempts >= 94) return "deleted at send " + sends + " (attempt " + attempts + ")";
                     }
                     return "still queued after 400 sends, attempt " + attempts;
@@ -813,7 +851,8 @@ namespace CompetitiveRounds
                       o7.SecureSendsBeforeSession == 0 && o7.AttemptsAtSession == 93 && o7.QueuedAtSession,
                       o7.Describe());
                 Check(r, "O7b then the session lands: exactly one send, with the token, one settlement, an empty outbox",
-                      o7.SecureSendsAfterSession == 1 && o7.CarriedSends == 1 && o7.Settled == 1 && !o7.QueuedAtEnd && !o7.Dropped,
+                      o7.SecureSendsAfterSession == 1 && o7.CarriedSends == 1 && o7.Settled == 1 && o7.Rows == 1
+                          && !o7.QueuedAtEnd && !o7.Dropped,
                       o7.Describe());
                 var o7c = OutboxComposition(93, 0.0, false);
                 Check(r, "O7c control: with the session already held at the restore, the first pass after it delivers",
@@ -841,7 +880,28 @@ namespace CompetitiveRounds
                 }
                 var o8 = OutboxComposition(93, 120.0, true);
                 Check(r, "O8 a request sent without the token after the gate passed spends nothing and removes nothing",
-                      !o8.Dropped && o8.Settled == 1 && o8.TokenlessSecureSends == 1, o8.Describe());
+                      !o8.Dropped && o8.Settled == 1 && o8.SettledTokenless == 0 && o8.Rows == 1 && o8.TokenlessSecureSends == 1,
+                      o8.Describe());
+                // O10, Codex round 3 HIGH 1's falsifier: the sink answers a
+                // tokenless POST 200 WITHOUT recording a row (a server that does
+                // not enforce, or anything answering in its place on the
+                // backup). The report is queued on the backup with 93 of 94
+                // spent; every backup send is answered that way; the route is
+                // restored at 300 s with the session held.
+                var o10 = OutboxComposition(93, 0.0, false, Sink.Tokenless200);
+                Check(r, "O10 a tokenless 2xx without a row leaves the entry queued: nothing removed, no attempt spent, 0 rows",
+                      o10.TokenlessOkBeforeRestore >= 1 && o10.QueuedAtRestore && o10.RowsAtRestore == 0
+                          && o10.AttemptsAtSession == 93 && o10.SettledTokenless == 0,
+                      o10.Describe());
+                Check(r, "O10b then the restore and the session: exactly one token-bearing settlement, one row, an empty outbox",
+                      o10.Settled == 1 && o10.SettledTokenless == 0 && o10.CarriedSends == 1 && o10.Rows == 1
+                          && !o10.QueuedAtEnd && !o10.Dropped,
+                      o10.Describe());
+                var o10c = OutboxComposition(93, 0.0, false, Sink.Enforcing);
+                Check(r, "O10c control: the same run against the enforcing sink (401 without the token) settles the same way",
+                      o10c.TokenlessOkAnswers == 0 && o10c.QueuedAtRestore && o10c.Settled == 1 && o10c.Rows == 1
+                          && !o10c.QueuedAtEnd,
+                      o10c.Describe());
             }
 
             // -- R and K: the portal press (Codex round 1 LOW 1 and LOW 2) --------

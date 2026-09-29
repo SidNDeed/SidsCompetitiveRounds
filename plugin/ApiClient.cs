@@ -1956,7 +1956,33 @@ namespace CompetitiveRounds
                 yield return PostRequest(target, p.json, (s, r) => { done = true; ok = s; resp = r; },
                                          stamped => carried = stamped);
                 while (!done) yield return null;
-                if (ok)
+                // Codex round 3 HIGH 1: what the request CARRIED decides
+                // removal as well as spend, and it is asked before the status.
+                // A request without the token (the plaintext backup, or a
+                // session dropped between the gate and the stamp) settles
+                // nothing, whatever it was answered: a 2xx there can come from
+                // a server that does not enforce or from anything answering in
+                // its place, and removing the entry on it lost the report. The
+                // attempt is given back and the entry stays queued until one
+                // send that carries the token settles it.
+                var answer = SecureRouteRules.OutboxAnswerFor(ok, carried);
+                if (answer == SecureRouteRules.OutboxAnswer.GiveBack)
+                {
+                    p.attempts--;
+                    // The earlier of the capped interval and a restore's
+                    // promise made while this request was in flight
+                    // (Codex round 2 LOW 1): never later than the promise.
+                    p.nextAt = (float)SecureRouteRules.OutboxGiveBackDue(
+                        Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER, p.restoreDueAt);
+                    if (ok)
+                        Plugin.Log.LogInfo("[OUTBOX] a retry without the session token was answered 2xx; not taken as delivered, "
+                                           + $"the report stays queued for a send with the token ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                    else
+                        Plugin.Log.LogInfo($"[OUTBOX] a retry without the session token failed ({Trunc(resp ?? "(no response)", 60)}); "
+                                           + $"not counted, the report stays queued ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                    continue;
+                }
+                if (answer == SecureRouteRules.OutboxAnswer.Settle)
                 {
                     Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
                     if (!IsSilentOutboxUrl(p.url))
@@ -2061,24 +2087,10 @@ namespace CompetitiveRounds
                     // retires one is the server, which turns the same refusal
                     // into a 403 once the sitting has been idle past its live
                     // window.
-                    if (!SecureRouteRules.OutboxAttemptSpent(carried))
-                    {
-                        // Sent without the session token (the plaintext
-                        // backup, or a session dropped between the gate and the
-                        // stamp): an enforcing server never judged the report,
-                        // so the answer neither spends the budget that deletes
-                        // a report nor removes the entry. The attempt is given
-                        // back and the next one waits the capped interval.
-                        p.attempts--;
-                        // The earlier of the capped interval and a restore's
-                        // promise made while this request was in flight
-                        // (Codex round 2 LOW 1): never later than the promise.
-                        p.nextAt = (float)SecureRouteRules.OutboxGiveBackDue(
-                            Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER, p.restoreDueAt);
-                        Plugin.Log.LogInfo($"[OUTBOX] a retry without the session token failed ({Trunc(resp ?? "(no response)", 60)}); "
-                                           + $"not counted, the report stays queued ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
-                        continue;
-                    }
+                    //
+                    // Only a request that carried the session token reaches
+                    // this branch (SecureRouteRules.OutboxAnswerFor): a
+                    // tokenless one was given back above.
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
@@ -8541,13 +8553,20 @@ namespace CompetitiveRounds
             // Persist before the first network yield so a quit, crash, or long
             // outage cannot erase the immutable evidence body.
             EnqueueFailedReport(url, body);
+            // The queued copy is taken out only for a 2xx to a request that
+            // carried the session token (SecureRouteRules.OutboxAnswerFor,
+            // Codex round 3 HIGH 1); a tokenless 2xx leaves it for the outbox.
+            bool carried = false;
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 url, body,
                 (ok, resp) =>
                 {
                     if (ok)
                     {
-                        RemovePendingReport(url, body);
+                        if (SecureRouteRules.OutboxAnswerFor(true, carried) == SecureRouteRules.OutboxAnswer.Settle)
+                            RemovePendingReport(url, body);
+                        else
+                            Plugin.Log.LogInfo("[INPUT] macro evidence answered without the session token; kept queued for a send with it");
                     }
                     else
                     {
@@ -8555,7 +8574,8 @@ namespace CompetitiveRounds
                             $"[INPUT] exact macro evidence was not attached: {Trunc120(resp)}");
                     }
                 },
-                maxRetries: 6, retryDelay: 2f));
+                maxRetries: 6, retryDelay: 2f,
+                onTokenStamped: stamped => carried = stamped));
         }
 
         public static void ReportMatch(
@@ -21938,6 +21958,11 @@ namespace CompetitiveRounds
             // OutboxPass, so a report that can never land is dropped rather
             // than retried twenty times.
             if (durable) EnqueueFailedReport(url, DC_REPORT_BODY);
+            // Whether this request carried the session token, read from the
+            // header actually stamped on it: the queued copy is taken out only
+            // for a 2xx to a request that did (SecureRouteRules.OutboxAnswerFor,
+            // Codex round 3 HIGH 1); a tokenless 2xx leaves it for the outbox.
+            bool carried = false;
             Plugin.Instance.StartCoroutine(PostRequest(
                 url,
                 DC_REPORT_BODY,
@@ -21945,14 +21970,18 @@ namespace CompetitiveRounds
                 {
                     if (success)
                     {
-                        if (durable) RemovePendingReport(url, DC_REPORT_BODY);
+                        if (durable && SecureRouteRules.OutboxAnswerFor(true, carried) == SecureRouteRules.OutboxAnswer.Settle)
+                            RemovePendingReport(url, DC_REPORT_BODY);
+                        else if (durable)
+                            Plugin.Log.LogInfo("[DC] disconnect report answered without the session token; kept queued for a send with it");
                         Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
                     }
                     else if (durable)
                         Plugin.Log.LogWarning($"[DC] Disconnect report failed, queued for retry: {response}");
                     else
                         Plugin.Log.LogWarning($"[DC] Failed to report disconnect (no series id — not queued): {response}");
-                }
+                },
+                stamped => carried = stamped
             ));
         }
 
@@ -22966,7 +22995,12 @@ namespace CompetitiveRounds
         /// existing caller retries exactly as it did; the match-report callers
         /// opt in, because for them each extra attempt is another settlement
         /// request for a game the server has already decided about.</summary>
-        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false)
+        /// <param name="onTokenStamped">Told before each attempt goes out
+        /// whether StampVersionHeader attached X-Session-Token to it (the
+        /// header itself is read back), so the last call before `callback`
+        /// describes the request that answered.</param>
+        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false,
+                                                        Action<bool> onTokenStamped = null)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, json, callback)) yield break;
@@ -22985,6 +23019,12 @@ namespace CompetitiveRounds
                     StampVersionHeader(request);
                     string _sentTok = SteamAuth.SessionToken;
                     request.timeout = 10;
+                    if (onTokenStamped != null)
+                    {
+                        bool stamped = false;
+                        try { stamped = !string.IsNullOrEmpty(request.GetRequestHeader("X-Session-Token")); } catch { }
+                        try { onTokenStamped(stamped); } catch { }
+                    }
 
                     yield return request.SendWebRequest();
 

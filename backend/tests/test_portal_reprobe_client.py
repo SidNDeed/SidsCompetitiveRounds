@@ -348,7 +348,9 @@ def test_a_queued_report_is_sent_where_the_route_is_at_the_send():
     send = "yield return PostRequest(target, p.json,"
     assert body.count(resolve) == 1 and body.count(send) == 1, body
     assert body.count("PostRequest(") == 1, "a second send in the pass: %s" % body
-    spend = "if (!SecureRouteRules.OutboxAttemptSpent(carried))"
+    # Round 4 (Codex round 3 HIGH 1): one answer rule, asked before removal
+    # and before spend.
+    spend = "if (answer == SecureRouteRules.OutboxAnswer.GiveBack)"
     assert body.count(spend) == 1, body
     assert body.index(spend) < body.index("bool permanent ="), body
     assert body.index(spend) < body.index("p.attempts >= OUTBOX_MAX_ATTEMPTS"), body
@@ -382,8 +384,8 @@ def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spe
     (SecureRouteRules.OutboxSendGate; harness O4b, O7) and otherwise waits
     without spending; whether a request carried the token is read from the
     header PostRequestRaw actually stamped; and only an attempt that carried it
-    is spent (OutboxAttemptSpent; harness O4, O8), so the drop rule is reached
-    by authenticated attempts only."""
+    is spent (OutboxAnswerFor since round 4; harness O4, O8), so the drop rule
+    is reached by authenticated attempts only."""
     body = code_of(API, "private static IEnumerator OutboxPass()")
     gate = ("if (SecureRouteRules.OutboxSendGate(CredentialedTransportAllowed(target), SteamAuth.HasFreshToken)\n"
             "                    == SecureRouteRules.OutboxGate.WaitForSession)")
@@ -398,7 +400,7 @@ def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spe
     assert "PostRequest(" not in waiting and "Remove(" not in waiting, waiting
     assert "stamped => carried = stamped);" in body[send:send + 200], body[send:send + 200]
     assert "CredentialedTransportAllowed(" not in body[spend_attempt:], "the spend rule reads the address again"
-    spend = body.index("if (!SecureRouteRules.OutboxAttemptSpent(carried))")
+    spend = body.index("if (answer == SecureRouteRules.OutboxAnswer.GiveBack)")
     given_back = body[spend:body.index("continue;", spend)]
     assert "p.attempts--;" in given_back and "Remove(" not in given_back, given_back
     assert spend < body.index("bool permanent =") < body.index("p.attempts >= OUTBOX_MAX_ATTEMPTS"), body
@@ -409,8 +411,70 @@ def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spe
     assert stamp < read < told < raw.index("request.SendWebRequest()"), raw
     post = code_of(API, "private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,")
     assert "callback, json, null, onTokenStamped, timeoutSeconds);" in post, post
-    rules = code_of(Path(ROOT) / "plugin" / "SecureRouteRules.cs", "internal static bool OutboxAttemptSpent(bool requestCarriedToken)")
-    assert "return requestCarriedToken;" in rules, rules
+    rules = code_of(RULES, "internal static OutboxAnswer OutboxAnswerFor(bool answered2xx, bool requestCarriedToken)")
+    assert "if (!requestCarriedToken) return OutboxAnswer.GiveBack;" in rules, rules
+
+
+def test_a_tokenless_2xx_never_removes_a_queued_report():
+    """Codex round 3 HIGH 1: the success branch of the outbox pass removed the
+    queued entry as soon as the answer was a 2xx, and asked what the request
+    carried only in the failure branch, so a tokenless 2xx (a server that does
+    not enforce, or anything answering in its place on the plaintext backup)
+    deleted a report no server had recorded. Now one rule
+    (SecureRouteRules.OutboxAnswerFor, harness O4d, O10, O10b) reads what the
+    request CARRIED before its status: only a 2xx to a request that carried the
+    token removes the entry; a tokenless answer of any status gives the attempt
+    back and leaves it queued. The same holds at the two places that take a
+    queued copy out after an immediate attempt (the disconnect report and the
+    macro evidence): the copy is removed only for a 2xx that carried the
+    token."""
+    body = code_of(API, "private static IEnumerator OutboxPass()")
+    waited = body.index("while (!done) yield return null;")
+    answer = "var answer = SecureRouteRules.OutboxAnswerFor(ok, carried);"
+    assert body.count(answer) == 1 and waited < body.index(answer), body
+    settle = "if (answer == SecureRouteRules.OutboxAnswer.Settle)"
+    give = "if (answer == SecureRouteRules.OutboxAnswer.GiveBack)"
+    assert body.count(settle) == 1 and body.count(give) == 1, body
+    removes = [m.start() for m in re.finditer(r"_pendingReports\.Remove\(p\)", body)]
+    assert len(removes) == 2, "the pass removes an entry in %d places" % len(removes)
+    # Nothing is removed before the rule has read what the request carried.
+    assert body.index(answer) < removes[0], "an entry is removed before the carried check"
+    # The first removal is the settlement, inside the Settle branch; the other
+    # is the drop rule, reached only by a request that carried the token.
+    settled = body[body.index(settle):body.index("else", body.index(settle))]
+    assert settled.count("_pendingReports.Remove(p)") == 1, settled
+    assert body.index(settle) < removes[0] < body.index("bool permanent =") < removes[1], body
+    given = body[body.index(give):body.index("continue;", body.index(give))]
+    assert "Remove(" not in given and "p.attempts--;" in given, given
+    assert body.index(give) < body.index(settle), "the settlement is decided before the give-back"
+    # The status alone decides nothing after the send: no branch on ok outside
+    # the give-back's choice of log line.
+    after = body[waited:]
+    oks = [m.start() for m in re.finditer(r"\bif \(ok\)", after)]
+    gb = (after.index(give), after.index("continue;", after.index(give)))
+    assert all(gb[0] < o < gb[1] for o in oks), "a branch on the status alone outside the give-back"
+    rules = code_of(RULES, "internal static OutboxAnswer OutboxAnswerFor(bool answered2xx, bool requestCarriedToken)")
+    carried_first = rules.index("if (!requestCarriedToken) return OutboxAnswer.GiveBack;")
+    assert carried_first < rules.index("answered2xx"), rules
+    # The immediate attempts that take their queued copy out again.
+    whole = code_of(API)
+    calls = [m.start() for m in re.finditer(r"\bRemovePendingReport\(", whole)]
+    definition = whole.index("private static void RemovePendingReport(string url, string json)")
+    calls = [c for c in calls if c != definition + len("private static void ")]
+    assert len(calls) == 2, "RemovePendingReport is called from %d places" % len(calls)
+    guard = "SecureRouteRules.OutboxAnswerFor(true, carried) == SecureRouteRules.OutboxAnswer.Settle"
+    for c in calls:
+        seg = whole[max(0, c - 200):c]
+        assert guard in seg, "a queued copy removed on a 2xx without the carried check: " + whole[c - 200:c + 60]
+    dc = code_of(API, "public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId, string seriesId)")
+    assert dc.count("stamped => carried = stamped") == 1 and dc.count(guard) == 1, dc
+    macro = whole[whole.index('string url = $"{baseUrl}/api/v1/matches/macro-evidence";'):]
+    macro = macro[:macro.index("maxRetries: 6, retryDelay: 2f,") + 200]
+    assert macro.count(guard) == 1 and "onTokenStamped: stamped => carried = stamped" in macro, macro
+    retry = code_of(API, "private static IEnumerator PostRequestWithRetry(")
+    stamp = retry.index("StampVersionHeader(request);")
+    read = retry.index('request.GetRequestHeader("X-Session-Token")')
+    assert stamp < read < retry.index("onTokenStamped(stamped);") < retry.index("request.SendWebRequest()"), retry
 
 
 def test_a_press_refused_for_a_plaintext_base_says_why_in_one_log_line():
@@ -475,7 +539,7 @@ def test_a_give_back_after_a_restore_never_cancels_the_restore_s_promise():
     clear = body.index("p.restoreDueAt = -1f;")
     assert body.count("p.restoreDueAt = -1f;") == 1, body
     assert body.index("== SecureRouteRules.OutboxGate.WaitForSession)") < clear < body.index("p.attempts++;"), body
-    spend = body.index("if (!SecureRouteRules.OutboxAttemptSpent(carried))")
+    spend = body.index("if (answer == SecureRouteRules.OutboxAnswer.GiveBack)")
     given_back = body[spend:body.index("continue;", spend)]
     assert "p.nextAt = (float)SecureRouteRules.OutboxGiveBackDue(" in given_back, given_back
     assert "p.restoreDueAt);" in given_back, given_back
