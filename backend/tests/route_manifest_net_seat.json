@@ -952,7 +952,7 @@
           ],
           "main",
           "player_ffa_history",
-          "1bd3af72fbd69dea92f350cd71c5588b2aecf422"
+          "c264eab09b3de557cb19b7043543dd4486943c3a"
         ],
         [
           "/api/v1/players/{steam_id}/gold-sources",
@@ -1141,7 +1141,7 @@
           ],
           "main",
           "get_recent_multimode_series",
-          "461e833d708c4499c2458f05186633f4532eba30"
+          "0ef792906bccc820cd49feb036d366d6abf237f3"
         ],
         [
           "/api/v1/series/{series_id}/live-points",
@@ -1795,7 +1795,7 @@
           ],
           "main",
           "ffa_recent",
-          "1442e1e0d4d21f8c419fb93c4a9a0ae014e38b8d"
+          "8108375b347c59309a43ea99a6a59b15173a480b"
         ],
         [
           "/api/v1/health",
@@ -3089,7 +3089,7 @@
           ],
           "main",
           "get_set_report",
-          "4869ec149d6e70c5db6d5ba99b031c0ea320dfed"
+          "112fe8b1fce8dbba610091869ee632a65a98e8b0"
         ],
         [
           "/api/v1/admin/pc/portrait/clear",
