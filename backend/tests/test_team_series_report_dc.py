@@ -3653,7 +3653,9 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     same string with two fields swapped, or over the token in upper case, is
     not. The two query parameters the client appends are both endpoints'
     own, in their order; PostTeamLivePoints and ReportTeamSeriesDc build them
-    from these helpers only, and their one caller each passes the token.
+    from these helpers only. PostTeamLivePoints' one caller passes the token;
+    ReportTeamSeriesDc reads its own, once, for a prompt report only (v1.41.0
+    merge pass 1, follow-up 5: see the pin at the end of this test).
     Round 6, finding F27: PinToken is 'nonce:ordinal:epoch', both canonicals
     end with the whole token, and the token with its ordinal or its epoch
     altered after signing, or sent as its nonce alone, is not accepted. The
@@ -3729,12 +3731,29 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     body = watcher[start:watcher.index("\n        }\n", start)]
     assert body.count("TeamGameNumber.Live.TokenFor(") == 1, "TeamTokenForReport"
     assert "ReadLiveScore()," in body and "TeamGameLifecycle.HooksLive, out why);" in body, "TeamTokenForReport"
+    # WHERE THE REPORT'S TOKEN IS READ (v1.41.0 merge pass 1, follow-up 5).
+    # This lane read it in Plugin.cs and passed it to the one ReportTeamSeriesDc
+    # call. The 886bed8 client half made ReportTeamSeriesDc the one place a DC
+    # report is composed (a prompt report and the watch's fallback both go
+    # through it) and pins that Plugin.cs call WITHOUT a token argument, so the
+    # merged tree reads the token inside ReportTeamSeriesDc, for a prompt report
+    # only. The pin moved with it; the guarantee did not: the token the report
+    # signs into DcTokenCanonical is the one TeamTokenForReport returns, read
+    # once, and a fallback carries none.
     plugin = _read(os.path.join(_PLUGIN_DIR, "Plugin.cs"))
     assert plugin.count("ApiClient.ReportTeamSeriesDc(") == 1
-    assert ("string dcToken = GameStateWatcher.TeamTokenForReport(seriesId, out dcTokenWhy);"
-            in plugin)
-    assert ("ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points, dcToken);"
-            in plugin)
+    assert ("ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,\n"
+            "                                             observedRoom, false);" in plugin)
+    assert "TeamTokenForReport(" not in plugin, "Plugin.cs reads the report's token again"
+    assert "dcToken" not in plugin, "Plugin.cs passes a token to ReportTeamSeriesDc again"
+    start = api.index("public static void ReportTeamSeriesDc(")
+    body = api[start:api.index("\n        }\n", start)]
+    assert body.count("TeamTokenForReport(") == 1, "ReportTeamSeriesDc: one token read"
+    read = body.index("gameToken = GameStateWatcher.TeamTokenForReport(seriesId, out tokenWhy)")
+    gate = body.rfind("if (!fallback)", 0, read)
+    assert gate > body.rfind('string gameToken = "";', 0, read) >= 0, "the read is prompt-only"
+    assert body.index("reporterSteamId, seriesId, dcPlayerSteamId, gameToken)") > read, (
+        "the canonical signs the token read here")
 
 
 # ---- Round 8, finding F31: physical game 1 is issued by the server ----------
