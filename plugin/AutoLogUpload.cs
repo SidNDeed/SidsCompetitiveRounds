@@ -76,6 +76,17 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class AutoLogUpload
     {
+        /// <summary>Item 13: the named writer of the settings row. The per-tab
+        /// reset never calls it: no Privacy & account row is bulk-written,
+        /// because sending logs is the player's own decision. The abortIf this
+        /// class polls reads the entry, so turning it off still cuts off an
+        /// upload in progress.</summary>
+        internal static void SetEnabled(bool on)
+        {
+            if (Plugin.AutoLogUploadEnabled == null) return;
+            Plugin.AutoLogUploadEnabled.Value = on;
+        }
+
         /// <summary>Minimum gap between two uploads from this process. The
         /// server has its own 12-per-24h bucket; this exists so a player who
         /// leaves and rejoins repeatedly spends neither their bucket nor their

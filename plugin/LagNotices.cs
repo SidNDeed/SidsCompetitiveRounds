@@ -43,6 +43,15 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class LagNotices
     {
+        /// <summary>Item 13: the named writer of the settings row and its
+        /// per-tab reset. The live effect needs no call here: the
+        /// SettingChanged hook this class installs reacts to the write.</summary>
+        internal static void SetEnabled(bool on)
+        {
+            if (Plugin.LagNoticesEnabled == null) return;
+            Plugin.LagNoticesEnabled.Value = on;
+        }
+
         internal const int MAX_LINES = 4;
         internal const int LOOKBACK = 5;
 

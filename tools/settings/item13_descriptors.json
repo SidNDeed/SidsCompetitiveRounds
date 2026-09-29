@@ -1,0 +1,5286 @@
+{
+  "authored_i18n": [
+    {
+      "class": "reason",
+      "key": "SAllowSpec",
+      "text": "turning it off also removes spectators already watching"
+    },
+    {
+      "class": "reason",
+      "key": "SAnimCos",
+      "text": "turn it off on a weak GPU; nothing is hidden"
+    },
+    {
+      "class": "reason",
+      "key": "SAppOff",
+      "text": "it only hides you from Home lists; it does not hide matches"
+    },
+    {
+      "class": "reason",
+      "key": "SAutoLog",
+      "text": "sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report"
+    },
+    {
+      "class": "reason",
+      "key": "SBlkDbg",
+      "text": "a debugging overlay, not a HUD"
+    },
+    {
+      "class": "reason",
+      "key": "SBloom",
+      "text": "painted-in glow stays whatever you pick"
+    },
+    {
+      "class": "reason",
+      "key": "SBugBtn",
+      "text": "the form attaches the current log, which a later report cannot"
+    },
+    {
+      "class": "help_body",
+      "key": "SBugBtn",
+      "text": "Opens the report form. It attaches the log the game is writing right now, which is why a report filed while the problem is on screen carries more than one written afterwards."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SBugBtn",
+      "text": "while the problem is still on screen"
+    },
+    {
+      "class": "reason",
+      "key": "SCT",
+      "text": "ranked is disabled until you grant it; revoking it again turns ranked back off"
+    },
+    {
+      "class": "reason",
+      "key": "SChatTtl",
+      "text": "the shipped default; 0 is a mode rather than a short timer, because chat then never appears in game"
+    },
+    {
+      "class": "reason",
+      "key": "SChromAb",
+      "text": "off is crisper and slightly faster"
+    },
+    {
+      "class": "reason",
+      "key": "SCursor",
+      "text": "it combines with an equipped cursor colour"
+    },
+    {
+      "class": "reason",
+      "key": "SDBtn",
+      "text": "it deletes your rating, history and collection, and there is no undo"
+    },
+    {
+      "class": "help_body",
+      "key": "SDBtn",
+      "text": "Arms the deletion. This press deletes nothing: the row swaps to a confirm button and a cancel button, and only the confirm performs it."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SDBtn",
+      "text": "only to leave for good"
+    },
+    {
+      "class": "reason",
+      "key": "SDCBtn",
+      "text": "this is the press that performs the deletion"
+    },
+    {
+      "class": "when_to_press",
+      "key": "SDCBtn",
+      "text": "only after reading the armed warning"
+    },
+    {
+      "class": "reason",
+      "key": "SDXBtn",
+      "text": "cancelling costs nothing and re-arms cleanly"
+    },
+    {
+      "class": "help_body",
+      "key": "SDXBtn",
+      "text": "Puts the delete row back to its normal state. Nothing has been deleted at this point, so cancelling costs nothing and the row can be armed again."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SDXBtn",
+      "text": "whenever you armed it by accident"
+    },
+    {
+      "class": "reason",
+      "key": "SDateFmt",
+      "text": "the shipped default; menus only, never match data, so switch to the order you read fastest"
+    },
+    {
+      "class": "reason",
+      "key": "SDeepIdle",
+      "text": "never active in a room or on match-found"
+    },
+    {
+      "class": "reason",
+      "key": "SEBtn",
+      "text": "it leaves every queue at once and costs nothing if you are not in one"
+    },
+    {
+      "class": "help_body",
+      "key": "SEBtn",
+      "text": "Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SEBtn",
+      "text": "when the game thinks you are still queued"
+    },
+    {
+      "class": "reason",
+      "key": "SFPS",
+      "text": "it is the instrument you judge the rest of this tab with"
+    },
+    {
+      "class": "reason",
+      "key": "SFPSCap",
+      "text": "it costs nothing while you are playing"
+    },
+    {
+      "class": "reason",
+      "key": "SHeavyFont",
+      "text": "the SDF face drops thin glyphs when light"
+    },
+    {
+      "class": "reason",
+      "key": "SHpPrec",
+      "text": "local display only; decimals help only when a card leaves max health on a fraction"
+    },
+    {
+      "class": "reason",
+      "key": "SIgChat",
+      "text": "M cycles the same state in game; Muted also tells the room you cannot read chat"
+    },
+    {
+      "class": "reason",
+      "key": "SInactiveLb",
+      "text": "keeps boards to players you can actually meet"
+    },
+    {
+      "class": "reason",
+      "key": "SInfoOpen",
+      "text": "the Info library answers most rules questions"
+    },
+    {
+      "class": "help_body",
+      "key": "SInfoOpen",
+      "text": "Opens the in-game library: how a pick lands, what each ranked state means, the leave rules, and the card and damage notes players have contributed."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SInfoOpen",
+      "text": "before asking in Discord"
+    },
+    {
+      "class": "reason",
+      "key": "SInpOv",
+      "text": "for streams and for spotting missed inputs"
+    },
+    {
+      "class": "reason",
+      "key": "SLagNotice",
+      "text": "worth it while investigating one match; it is noisy, so turn it back off afterwards"
+    },
+    {
+      "class": "reason",
+      "key": "SLang",
+      "text": "drafts are machine-translated until reviewed, and English is always complete"
+    },
+    {
+      "class": "reason",
+      "key": "SLight",
+      "text": "off is flat but faster"
+    },
+    {
+      "class": "reason",
+      "key": "SMailBlocked",
+      "text": "it is the only place a block can be lifted"
+    },
+    {
+      "class": "help_body",
+      "key": "SMailBlocked",
+      "text": "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SMailBlocked",
+      "text": "when you want to unblock someone"
+    },
+    {
+      "class": "reason",
+      "key": "SMailFrom",
+      "text": "blocked senders never reach you anyway"
+    },
+    {
+      "class": "help_body",
+      "key": "SMailFrom",
+      "text": "Chooses who may start a new mail thread with you: everyone, only players you have played, or nobody. Threads you already have are unaffected, and blocked senders never reach you."
+    },
+    {
+      "class": "reason",
+      "key": "SMailRelay",
+      "text": "once Discord is linked, mail reaches you when the game is closed and you can reply from there"
+    },
+    {
+      "class": "help_body",
+      "key": "SMailRelay",
+      "text": "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox."
+    },
+    {
+      "class": "reason",
+      "key": "SMenuMus",
+      "text": "matches always use your picks regardless"
+    },
+    {
+      "class": "reason",
+      "key": "SMusCredit",
+      "text": "one line, bottom-left, and only on custom tracks"
+    },
+    {
+      "class": "reason",
+      "key": "SMuteBg",
+      "text": "the menu stays audible either way"
+    },
+    {
+      "class": "reason",
+      "key": "SNT",
+      "text": "the Home chat log updates either way; this is the pop-up"
+    },
+    {
+      "class": "reason",
+      "key": "SPColor",
+      "text": "off falls everyone back to orange/blue"
+    },
+    {
+      "class": "reason",
+      "key": "SPcAnn",
+      "text": "only rare pulls, and only in one channel"
+    },
+    {
+      "class": "reason",
+      "key": "SPcPre",
+      "text": "follows the character you actually play"
+    },
+    {
+      "class": "reason",
+      "key": "SPcPub",
+      "text": "lets trades find your binder"
+    },
+    {
+      "class": "reason",
+      "key": "SPerfH",
+      "text": "it is the only place the individual patches can be seen"
+    },
+    {
+      "class": "help_body",
+      "key": "SPerfH",
+      "text": "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once."
+    },
+    {
+      "class": "when_to_press",
+      "key": "SPerfH",
+      "text": "when the count beside it is not 7/7"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_BulletCap",
+      "text": "largest visible win in heavy firefights"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_EdgeBn",
+      "text": "swallows the one null reference a destroyed bullet raises at a screen edge"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_HitSnd",
+      "text": "swallows the one null reference the hit sound raises when its parent is gone"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_Master",
+      "text": "master gate; off disables all seven"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_Menu",
+      "text": "menu code cannot matter mid-match"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_OOB",
+      "text": "host-only, and it despawns real bullets"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_PoolInit",
+      "text": "removes allocation stutter"
+    },
+    {
+      "class": "reason",
+      "key": "SPerf_Stun",
+      "text": "stops null-reference spam and changes nothing visible"
+    },
+    {
+      "class": "reason",
+      "key": "SPing",
+      "text": "tells you which region you are on"
+    },
+    {
+      "class": "reason",
+      "key": "SPortal",
+      "text": "it opens a browser; nothing in game changes"
+    },
+    {
+      "class": "when_to_press",
+      "key": "SPortal",
+      "text": "when you want to help translate the mod"
+    },
+    {
+      "class": "reason",
+      "key": "SPrefSC",
+      "text": "applies only when everyone in the room agrees"
+    },
+    {
+      "class": "reason",
+      "key": "SShad",
+      "text": "off keeps lighting and drops the beams"
+    },
+    {
+      "class": "reason",
+      "key": "SShake",
+      "text": "Reduced keeps the hit feedback without the camera motion"
+    },
+    {
+      "class": "reason",
+      "key": "SShowDc",
+      "text": "opt-in, and it needs a linked Discord to do anything"
+    },
+    {
+      "class": "reason",
+      "key": "STrail",
+      "text": "cosmetic only"
+    },
+    {
+      "class": "option_word",
+      "key": "SBloom",
+      "text": "FULL"
+    },
+    {
+      "class": "option_word",
+      "key": "SBloom",
+      "text": "REDUCED"
+    },
+    {
+      "class": "state_word",
+      "key": "SCT",
+      "text": "Granted"
+    },
+    {
+      "class": "state_word",
+      "key": "SCT",
+      "text": "Not granted"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "ROUNDS default"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Arrow"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Dot"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Crosshair"
+    },
+    {
+      "class": "option_word",
+      "key": "SCursor",
+      "text": "Circle"
+    },
+    {
+      "class": "state_word",
+      "key": "SDBtn",
+      "text": "Armed"
+    },
+    {
+      "class": "state_word",
+      "key": "SDBtn",
+      "text": "Not armed"
+    },
+    {
+      "class": "state_word",
+      "key": "SMailBlocked",
+      "text": "Expanded"
+    },
+    {
+      "class": "state_word",
+      "key": "SMailBlocked",
+      "text": "Collapsed"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "a picture choice has no right answer"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row to apply the detected id"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "consent is the player's own decision, never bulk-written"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "sending your logs automatically is your own decision, never bulk-written"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "there is no region detection to reset TO, and a deliberate regional choice should not revert to the shipped US default"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this row only opens and closes a list; it stores no value"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this row performs an action and stores no value, so there is nothing for a reset to write"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this row stores no value, and nothing bulk may ever arm or confirm a deletion"
+    },
+    {
+      "class": "exclusion_reason",
+      "key": "-",
+      "text": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Currently: {0}"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Recommended: {0}"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "When to press this: {0}"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Reset this tab to recommended"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Reset this tab to recommended?"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Read more"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Skipped: server settings"
+    },
+    {
+      "class": "shared_template",
+      "key": "-",
+      "text": "Detected: {0}"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "ingame",
+      "text": "In game"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "chatmail",
+      "text": "Chat & mail"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "sound",
+      "text": "Sound"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "visuals",
+      "text": "Visuals"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "perf",
+      "text": "Performance"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "langmenus",
+      "text": "Language & menus"
+    },
+    {
+      "class": "sub_tab_label",
+      "key": "privacy",
+      "text": "Privacy & account"
+    }
+  ],
+  "descriptors": {
+    "SAllowSpec": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 100,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SAllowSpec",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SAllowSpec_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "turning it off also removes spectators already watching",
+        "state_words": []
+      },
+      "key": "SAllowSpec",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "turning it off also removes spectators already watching",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14786,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": {
+          "arguments": [
+            {
+              "expression": "id",
+              "name": "steamId",
+              "source": "NativeUI.cs:13985, the expression this row already passes",
+              "type": "string"
+            },
+            {
+              "expression": "true",
+              "name": "allow",
+              "source": "the reset operand",
+              "type": "bool"
+            },
+            {
+              "expression": "(ok, resp) => { if (!ok) { // Roll the optimistic flip BACK (Codex r1 find 16): // a fa...",
+              "name": "callback",
+              "source": "NativeUI.cs:13985, the expression this row already passes",
+              "type": "Action<bool, string>"
+            }
+          ],
+          "call": "ApiClient.SetAllowSpectators(id, true, (ok, resp) => { if (!ok) { // Roll the optimistic flip BACK (Codex r1 find 16): // a fa...)",
+          "declared_at": "ApiClient.cs:4569",
+          "inner": "ApiClient.SetAllowSpectators",
+          "retained": [
+            "identifier validation",
+            "optimistic cache write",
+            "dirty flag",
+            "failure reconciliation"
+          ],
+          "site": "NativeUI.cs:13985",
+          "wrapper": "NativeUI.SetAllowSpectators(bool allow)"
+        },
+        "writer": "ApiClient.SetAllowSpectators(bool, cb)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SAllowSpec",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SAllowSpec",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ApiClient.SetAllowSpectators",
+          "CompetitiveUI.ShowNotification"
+        ],
+        "kind": "server_writer",
+        "name": "ApiClient.SetAllowSpectators(bool, cb)",
+        "note": null,
+        "source": "NativeUI.cs:13976",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SAnimCos": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "AnimatedCosmetics=UI.AnimatedCosmetics(true)"
+        ],
+        "pin": [
+          "AnimatedCosmetics=UI.AnimatedCosmetics(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 156,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SAnimCos",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SAnimCos_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "turn it off on a weak GPU; nothing is hidden",
+        "state_words": []
+      },
+      "key": "SAnimCos",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "turn it off on a weak GPU; nothing is hidden",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14880,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "PlayerEffectCosmetic.SetAnimatedCosmetics(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SAnimCos",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SAnimCos",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "MapSkinEffects.OnAnimatedCosmeticsToggled",
+          "PlayerEffectCosmetic.OnAnimatedCosmeticsToggled"
+        ],
+        "kind": "named_writer",
+        "name": "PlayerEffectCosmetic.SetAnimatedCosmetics(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14243-14252",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SAppOff": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 63,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SAppOff",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SAppOff_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "it only hides you from Home lists; it does not hide matches",
+        "state_words": []
+      },
+      "key": "SAppOff",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it only hides you from Home lists; it does not hide matches",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14757,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": {
+          "arguments": [
+            {
+              "expression": "id",
+              "name": "steamId",
+              "source": "NativeUI.cs:13895, the expression this row already passes",
+              "type": "string"
+            },
+            {
+              "expression": "false",
+              "name": "on",
+              "source": "the reset operand",
+              "type": "bool"
+            },
+            {
+              "expression": "(ok, resp) => { if (!ok) CompetitiveUI.ShowNotification(\"Couldn't change Appear offline...",
+              "name": "callback",
+              "source": "NativeUI.cs:13895, the expression this row already passes",
+              "type": "Action<bool, string>"
+            }
+          ],
+          "call": "ApiClient.SetAppearOffline(id, false, (ok, resp) => { if (!ok) CompetitiveUI.ShowNotification(\"Couldn't change Appear offline...)",
+          "declared_at": "ApiClient.cs:3640",
+          "inner": "ApiClient.SetAppearOffline",
+          "retained": [
+            "identifier validation",
+            "optimistic cache write",
+            "dirty flag",
+            "failure reconciliation"
+          ],
+          "site": "NativeUI.cs:13895",
+          "wrapper": "NativeUI.SetAppearOffline(bool on)"
+        },
+        "writer": "ApiClient.SetAppearOffline(bool, cb)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SAppOff",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SAppOff",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ApiClient.SetAppearOffline",
+          "CompetitiveUI.ShowNotification"
+        ],
+        "kind": "server_writer",
+        "name": "ApiClient.SetAppearOffline(bool, cb)",
+        "note": null,
+        "source": "NativeUI.cs:13886",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SAutoLog": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [
+          "AutoLogUploadEnabled=Data.AutoLogUpload(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 945,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SAutoLog",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SAutoLog_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report",
+        "state_words": []
+      },
+      "key": "SAutoLog",
+      "kind": "SWITCH",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 15055,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "lane",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "AutoLogUpload.SetEnabled(bool)"
+      },
+      "reset_excluded_reason": "sending your logs automatically is your own decision, never bulk-written",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SAutoLog",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SAutoLog",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "AutoLogUpload.SetEnabled(bool)",
+        "note": null,
+        "source": "lane AutoLogUpload.cs",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SBlkDbg": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowBlockDebug=UI.ShowBlockDebug(false)"
+        ],
+        "pin": [
+          "ShowBlockDebug=UI.ShowBlockDebug(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 151,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SBlkDbg",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SBlkDbg_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "a debugging overlay, not a HUD",
+        "state_words": []
+      },
+      "key": "SBlkDbg",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "a debugging overlay, not a HUD",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14845,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetShowBlockDebug(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SBlkDbg",
+      "stores_value": true,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SBlkDbg",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetShowBlockDebug(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14148",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SBloom": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "BloomStrength=UI.BloomStrength(\"Full\")"
+        ],
+        "pin": [
+          "BloomStrength=UI.BloomStrength(\"Full\")"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 271,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SBloom",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SBloom_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [
+          "FULL",
+          "REDUCED"
+        ],
+        "reason": "painted-in glow stays whatever you pick",
+        "state_words": []
+      },
+      "key": "SBloom",
+      "kind": "SEGMENTED",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "painted-in glow stays whatever you pick",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14890,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "ToUpperInvariant",
+        "render": {
+          "expression": "I18n.Tr(\"Full\".ToUpperInvariant())",
+          "extracted_from": null,
+          "label": null,
+          "label_source": null,
+          "not_constant_because": null,
+          "text": "FULL",
+          "text_source": null
+        },
+        "stored": "Full",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "\"Full\""
+        ],
+        "server": null,
+        "writer": "MapPhysicalColorPatch.BloomStrengthSetting.Set(string level)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": [
+          "Full",
+          "Reduced",
+          "Off"
+        ],
+        "canonical_source": "Plugin.cs:10464-10468 BloomStrengthSetting.Level",
+        "expression": "\"Full\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "FULL",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SBloom",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SBloom",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "MapPhysicalColorPatch.BloomStrengthSetting.Cycle"
+        ],
+        "kind": "semantic_setter",
+        "name": "MapPhysicalColorPatch.BloomStrengthSetting.Set(string level)",
+        "note": null,
+        "source": "Plugin.cs:10024-10029",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SBugBtn": {
+      "bulk_reset": false,
+      "config": {
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Opens the report form. It attaches the log the game is writing right now, which is why a report filed while the problem is on screen carries more than one written afterwards.",
+        "description_chars": 16,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SBugBtn",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SBugBtn_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "help_body": "Opens the report form. It attaches the log the game is writing right now, which is why a report filed while the problem is on screen carries more than one written afterwards.",
+        "option_words": [],
+        "reason": "the form attaches the current log, which a later report cannot",
+        "state_words": [],
+        "when_to_press": "while the problem is still on screen"
+      },
+      "key": "SBugBtn",
+      "kind": "ACTION",
+      "present_on": [
+        "pin"
+      ],
+      "reason": "the form attaches the current log, which a later report cannot",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "while the problem is still on screen"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row performs an action and stores no value, so there is nothing for a reset to write",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SBugBtn",
+      "stores_value": false,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SBugBtn",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [
+          "CompetitiveUI.OpenBugReportModal"
+        ],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14513",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SCT": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [
+          "DataConsent=Privacy.DataConsent(\"\")"
+        ],
+        "pin": [
+          "DataConsent=Privacy.DataConsent(\"\")"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 77,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SCT",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SCT_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "ranked is disabled until you grant it; revoking it again turns ranked back off",
+        "state_words": [
+          "Granted",
+          "Not granted"
+        ]
+      },
+      "key": "SCT",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "ranked is disabled until you grant it; revoking it again turns ranked back off",
+      "recommendation": {
+        "kind": "painted_after_change",
+        "new_i18n_key": false,
+        "note": "the pin paints 'Revoke consent' / 'Allow data reporting', which has no colon and therefore no value half; the r5 row paints its state word instead",
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14695,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_replaced": true,
+        "value": "Granted"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "ConsentSetting.Set(bool granted)"
+      },
+      "reset_excluded_reason": "consent is the player's own decision, never bulk-written",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "Granted",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SCT",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SCT",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ApiClient.OnConsentChanged"
+        ],
+        "kind": "named_writer",
+        "name": "ConsentSetting.Set(bool granted)",
+        "note": null,
+        "source": "NativeUI.cs:13867-13879",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SChatTtl": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ChatOverlaySeconds=UI.ChatOverlaySeconds(25f)"
+        ],
+        "pin": [
+          "ChatOverlaySeconds=UI.ChatOverlaySeconds(25f)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 97,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SChatTtl",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SChatTtl_q",
+      "home": "chatmail",
+      "home_label": "Chat & mail",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "the shipped default; 0 is a mode rather than a short timer, because chat then never appears in game",
+        "state_words": []
+      },
+      "key": "SChatTtl",
+      "kind": "SLIDER",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "the shipped default; 0 is a mode rather than a short timer, because chat then never appears in game",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14832,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "ChatOverlaySecondsLabel",
+        "render": {
+          "expression": "Plugin.ChatOverlaySecondsLabel(25f)",
+          "extracted_from": "ChatOverlaySecondsLabel",
+          "label": "ChatOverlaySecondsLabel",
+          "label_source": "pin Plugin.cs",
+          "not_constant_because": "Plugin.cs:263 composes it from the rounded number and the suffix, so no literal carries it whole",
+          "text": null,
+          "text_source": null
+        },
+        "stored": "25f",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "25f"
+        ],
+        "server": null,
+        "writer": "Plugin.SetChatOverlaySeconds(float s)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "25f",
+        "independent_of_painted": true,
+        "kind": "number",
+        "painted_value": null,
+        "type": "float",
+        "writer_value_param": "float"
+      },
+      "reset_selectors": [],
+      "row_group": "SChatTtl",
+      "stores_value": true,
+      "sub_tab_body": "SubChatMail",
+      "target_id": "SChatTtl",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "Plugin.CycleChatOverlaySeconds"
+        ],
+        "kind": "named_writer",
+        "name": "Plugin.SetChatOverlaySeconds(float s)",
+        "note": null,
+        "source": "Plugin.cs:211-219",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SChromAb": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ChromaticAberrationEnabled=UI.ChromaticAberrationEnabled(true)"
+        ],
+        "pin": [
+          "ChromaticAberrationEnabled=UI.ChromaticAberrationEnabled(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 137,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SChromAb",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SChromAb_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "off is crisper and slightly faster",
+        "state_words": []
+      },
+      "key": "SChromAb",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "off is crisper and slightly faster",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14893,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "MapPhysicalColorPatch.ChromaticAberrationSetting.Set(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SChromAb",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SChromAb",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "MapPhysicalColorPatch.ChromaticAberrationSetting.Apply"
+        ],
+        "kind": "named_writer",
+        "name": "MapPhysicalColorPatch.ChromaticAberrationSetting.Set(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14373-14380",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SCursor": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 74,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SCursor",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SCursor_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [
+          "ROUNDS default",
+          "Arrow",
+          "Dot",
+          "Crosshair",
+          "Circle"
+        ],
+        "reason": "it combines with an equipped cursor colour",
+        "state_words": []
+      },
+      "key": "SCursor",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it combines with an equipped cursor colour",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14837,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "CurrentShapeLabel",
+        "render": {
+          "expression": "I18n.Tr(CursorColorCosmetic.ShapeLabel(\"default\"))",
+          "extracted_from": "CurrentShapeLabel",
+          "label": "ShapeLabel",
+          "label_source": "pin CursorColorCosmetic.cs",
+          "not_constant_because": null,
+          "text": "ROUNDS default",
+          "text_source": "pin CursorColorCosmetic.cs"
+        },
+        "stored": "default",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "\"default\""
+        ],
+        "server": null,
+        "writer": "CursorColorCosmetic.SetShape(string id)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": [
+          "default",
+          "arrow",
+          "dot",
+          "crosshair",
+          "circle"
+        ],
+        "canonical_source": "CursorColorCosmetic.cs:37 Shapes",
+        "expression": "\"default\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "ROUNDS default",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SCursor",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SCursor",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "CursorColorCosmetic.CycleShape"
+        ],
+        "kind": "semantic_setter",
+        "name": "CursorColorCosmetic.SetShape(string id)",
+        "note": null,
+        "source": "CursorColorCosmetic.cs:56-62",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SDBtn": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Arms the deletion. This press deletes nothing: the row swaps to a confirm button and a cancel button, and only the confirm performs it.",
+        "description_chars": 17,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SDBtn",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SDR_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "help_body": "Arms the deletion. This press deletes nothing: the row swaps to a confirm button and a cancel button, and only the confirm performs it.",
+        "option_words": [],
+        "reason": "it deletes your rating, history and collection, and there is no undo",
+        "state_words": [
+          "Armed",
+          "Not armed"
+        ],
+        "when_to_press": "only to leave for good"
+      },
+      "key": "SDBtn",
+      "kind": "DESTRUCTIVE",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it deletes your rating, history and collection, and there is no undo",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "only to leave for good"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row stores no value, and nothing bulk may ever arm or confirm a deletion",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SDR",
+      "stores_value": false,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SDBtn",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14582",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SDCBtn": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [
+          "DataConsent=Privacy.DataConsent(\"\")"
+        ],
+        "pin": [
+          "DataConsent=Privacy.DataConsent(\"\")"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 88,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SDCBtn",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SDR_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "this is the press that performs the deletion",
+        "state_words": [
+          "Armed",
+          "Not armed"
+        ],
+        "when_to_press": "only after reading the armed warning"
+      },
+      "key": "SDCBtn",
+      "kind": "DESTRUCTIVE",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "this is the press that performs the deletion",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "only after reading the armed warning"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row stores no value, and nothing bulk may ever arm or confirm a deletion",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SDR",
+      "stores_value": false,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SDCBtn",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [
+          "ApiClient.DeletePlayerData",
+          "ApiClient.OnConsentChanged",
+          "UIFactory.SetText",
+          "UIFactory.SetTextRaw"
+        ],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14592",
+        "writes_entry_as_side_effect": "this row stores no setting, but it writes DataConsent=Privacy.DataConsent(\"\") as a consequence of the action it performs; the entry is deliberately not declared absent, so removing that write reddens B-COVER"
+      }
+    },
+    "SDXBtn": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Puts the delete row back to its normal state. Nothing has been deleted at this point, so cancelling costs nothing and the row can be armed again.",
+        "description_chars": 6,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SDXBtn",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SDR_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "help_body": "Puts the delete row back to its normal state. Nothing has been deleted at this point, so cancelling costs nothing and the row can be armed again.",
+        "option_words": [],
+        "reason": "cancelling costs nothing and re-arms cleanly",
+        "state_words": [
+          "Armed",
+          "Not armed"
+        ],
+        "when_to_press": "whenever you armed it by accident"
+      },
+      "key": "SDXBtn",
+      "kind": "DESTRUCTIVE",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "cancelling costs nothing and re-arms cleanly",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "whenever you armed it by accident"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row stores no value, and nothing bulk may ever arm or confirm a deletion",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SDR",
+      "stores_value": false,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SDXBtn",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14621",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SDateFmt": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [
+          "UiDateFormat=UI.DateOrder(\"MDY\")"
+        ],
+        "pin": [
+          "UiDateFormat=UI.DateOrder(\"MDY\")"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 87,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SDateFmt",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SDateFmt_q",
+      "home": "langmenus",
+      "home_label": "Language & menus",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "the shipped default; menus only, never match data, so switch to the order you read fastest",
+        "state_words": []
+      },
+      "key": "SDateFmt",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "the shipped default; menus only, never match data, so switch to the order you read fastest",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14913,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "Month/Day/Year (US)",
+        "value": "Month/Day/Year (US)"
+      },
+      "reset_call": {
+        "args": [
+          "\"MDY\""
+        ],
+        "server": null,
+        "writer": "NativeUI.SetUiDateFormat(string id)"
+      },
+      "reset_excluded_reason": "there is no region detection to reset TO, and a deliberate regional choice should not revert to the shipped US default",
+      "reset_operand": {
+        "canonical_set": [
+          "MDY",
+          "DMY",
+          "YMD"
+        ],
+        "canonical_source": "NativeUI.cs:14400 picker ids, Plugin.cs:133",
+        "expression": "\"MDY\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "Month/Day/Year (US)",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SDateFmt",
+      "stores_value": true,
+      "sub_tab_body": "SubLangMenus",
+      "target_id": "SDateFmt",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "CompetitiveUI.OpenArtistPicker"
+        ],
+        "kind": "named_writer",
+        "name": "NativeUI.SetUiDateFormat(string id)",
+        "note": null,
+        "source": "NativeUI.cs:14327",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SDeepIdle": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "DeepIdleUnfocused=Performance.DeepIdleUnfocused(true)"
+        ],
+        "pin": [
+          "DeepIdleUnfocused=Performance.DeepIdleUnfocused(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 141,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SDeepIdle",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SDeepIdle_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "never active in a room or on match-found",
+        "state_words": []
+      },
+      "key": "SDeepIdle",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "never active in a room or on match-found",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14717,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetDeepIdleUnfocused(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SDeepIdle",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SDeepIdle",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetDeepIdleUnfocused(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14073",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SEBtn": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued.",
+        "description_chars": 16,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SEBtn",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SEBtn_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "help_body": "Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued.",
+        "option_words": [],
+        "reason": "it leaves every queue at once and costs nothing if you are not in one",
+        "state_words": [],
+        "when_to_press": "when the game thinks you are still queued"
+      },
+      "key": "SEBtn",
+      "kind": "ACTION",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it leaves every queue at once and costs nothing if you are not in one",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "when the game thinks you are still queued"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row performs an action and stores no value, so there is nothing for a reset to write",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SEBtn",
+      "stores_value": false,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SEBtn",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [
+          "ApiClient.EscapeAllQueues"
+        ],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14544",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SFPS": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowFps=UI.ShowFps(true)"
+        ],
+        "pin": [
+          "ShowFps=UI.ShowFps(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 89,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SFPS",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SFPS_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "it is the instrument you judge the rest of this tab with",
+        "state_words": []
+      },
+      "key": "SFPS",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it is the instrument you judge the rest of this tab with",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14707,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetShowFps(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SFPS",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SFPS",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetShowFps(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14055",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SFPSCap": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "CapFpsUnfocused=Performance.CapFpsUnfocused(true)"
+        ],
+        "pin": [
+          "CapFpsUnfocused=Performance.CapFpsUnfocused(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 124,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SFPSCap",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SFPSCap_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "it costs nothing while you are playing",
+        "state_words": []
+      },
+      "key": "SFPSCap",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it costs nothing while you are playing",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14712,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetCapFpsUnfocused(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SFPSCap",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SFPSCap",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetCapFpsUnfocused(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14064",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SHeavyFont": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "UiHeavyFont=UI.HeavyMenuFont(true)"
+        ],
+        "pin": [
+          "UiHeavyFont=UI.HeavyMenuFont(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 91,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SHeavyFont",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SHeavyFont_q",
+      "home": "langmenus",
+      "home_label": "Language & menus",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "the SDF face drops thin glyphs when light",
+        "state_words": []
+      },
+      "key": "SHeavyFont",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "the SDF face drops thin glyphs when light",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14921,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetUiHeavyFont(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SHeavyFont",
+      "stores_value": true,
+      "sub_tab_body": "SubLangMenus",
+      "target_id": "SHeavyFont",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "Close",
+          "Open",
+          "SwitchTab",
+          "UIFactory.ResetWeightMaterial",
+          "UnityEngine.Object.Destroy"
+        ],
+        "kind": "named_writer",
+        "name": "NativeUI.SetUiHeavyFont(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14346-14362",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SHpPrec": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "_entry=UI.HealthPrecision(ROUNDED)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 270,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SHpPrec",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SHpPrec_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "local display only; decimals help only when a card leaves max health on a fraction",
+        "state_words": []
+      },
+      "key": "SHpPrec",
+      "kind": "SEGMENTED",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "local display only; decimals help only when a card leaves max health on a fraction",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 15169,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "lane",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "ROUNDED",
+        "value": "ROUNDED"
+      },
+      "reset_call": {
+        "args": [
+          "\"Rounded\""
+        ],
+        "server": null,
+        "writer": "TabStatsOverlay.HealthPrecisionSetting.Set(string level)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": [
+          "Rounded",
+          "1 decimal",
+          "2 decimals"
+        ],
+        "canonical_source": "lane TabStatsOverlay.cs:89-91 ROUNDED/ONE_DP/TWO_DP",
+        "expression": "\"Rounded\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "ROUNDED",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SHpPrec",
+      "stores_value": true,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SHpPrec",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "TabStatsOverlay.HealthPrecisionSetting.Cycle"
+        ],
+        "kind": "semantic_setter",
+        "name": "TabStatsOverlay.HealthPrecisionSetting.Set(string level)",
+        "note": null,
+        "source": "lane TabStatsOverlay.cs:138-142",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SIgChat": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ChatOverlayPinned=UI.ChatOverlayPinned(false)",
+          "ShowIngameChat=UI.ShowIngameChat(true)"
+        ],
+        "pin": [
+          "ChatOverlayPinned=UI.ChatOverlayPinned(false)",
+          "ShowIngameChat=UI.ShowIngameChat(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 122,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SIgChat",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SIgChat_q",
+      "home": "chatmail",
+      "home_label": "Chat & mail",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "M cycles the same state in game; Muted also tells the room you cannot read chat",
+        "state_words": []
+      },
+      "key": "SIgChat",
+      "kind": "SEGMENTED",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "M cycles the same state in game; Muted also tells the room you cannot read chat",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14816,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "CompetitiveUI.ChatOverlayMode.Normal"
+        ],
+        "server": null,
+        "writer": "CompetitiveUI.SetChatOverlayMode(ChatOverlayMode)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": [
+          "Normal",
+          "Pinned",
+          "Muted"
+        ],
+        "canonical_source": "CompetitiveUI.cs:4243 enum ChatOverlayMode",
+        "expression": "CompetitiveUI.ChatOverlayMode.Normal",
+        "independent_of_painted": true,
+        "kind": "enum_member",
+        "painted_value": "ON",
+        "type": "ChatOverlayMode",
+        "writer_value_param": "ChatOverlayMode"
+      },
+      "reset_selectors": [],
+      "row_group": "SIgChat",
+      "stores_value": true,
+      "sub_tab_body": "SubChatMail",
+      "target_id": "SIgChat",
+      "writer": {
+        "applies_on_same_value": false,
+        "captured_effects": [
+          "CompetitiveUI.CycleChatOverlayMode"
+        ],
+        "kind": "semantic_setter",
+        "name": "CompetitiveUI.SetChatOverlayMode(ChatOverlayMode)",
+        "note": "learning #590: a writer that returns early on an unchanged value performs no effect, and a reset to recommended writes values that are frequently already correct",
+        "source": "CompetitiveUI.cs:3937-3956",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SInactiveLb": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowInactiveOnBoards=UI.ShowInactiveOnBoards(false)"
+        ],
+        "pin": [
+          "ShowInactiveOnBoards=UI.ShowInactiveOnBoards(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 103,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SInactiveLb",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SInactiveLb_q",
+      "home": "langmenus",
+      "home_label": "Language & menus",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "keeps boards to players you can actually meet",
+        "state_words": []
+      },
+      "key": "SInactiveLb",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "keeps boards to players you can actually meet",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14801,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetShowInactiveOnBoards(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SInactiveLb",
+      "stores_value": true,
+      "sub_tab_body": "SubLangMenus",
+      "target_id": "SInactiveLb",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ApiClient.FetchTeamLeaderboard"
+        ],
+        "kind": "named_writer",
+        "name": "NativeUI.SetShowInactiveOnBoards(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14266",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SInfoOpen": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Opens the in-game library: how a pick lands, what each ranked state means, the leave rules, and the card and damage notes players have contributed.",
+        "description_chars": 21,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SInfoOpen",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SInfoOpen_q",
+      "home": "langmenus",
+      "home_label": "Language & menus",
+      "i18n_literals": {
+        "help_body": "Opens the in-game library: how a pick lands, what each ranked state means, the leave rules, and the card and damage notes players have contributed.",
+        "option_words": [],
+        "reason": "the Info library answers most rules questions",
+        "state_words": [],
+        "when_to_press": "before asking in Discord"
+      },
+      "key": "SInfoOpen",
+      "kind": "ACTION",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "the Info library answers most rules questions",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "before asking in Discord"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row performs an action and stores no value, so there is nothing for a reset to write",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SInfoOpen",
+      "stores_value": false,
+      "sub_tab_body": "SubLangMenus",
+      "target_id": "SInfoOpen",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [
+          "SwitchTab"
+        ],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14039",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SInpOv": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowInputOverlay=UI.ShowInputOverlay(false)"
+        ],
+        "pin": [
+          "ShowInputOverlay=UI.ShowInputOverlay(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 150,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SInpOv",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SInpOv_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "for streams and for spotting missed inputs",
+        "state_words": []
+      },
+      "key": "SInpOv",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "for streams and for spotting missed inputs",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14855,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetShowInputOverlay(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SInpOv",
+      "stores_value": true,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SInpOv",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetShowInputOverlay(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14135",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SLagNotice": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "LagNoticesEnabled=Network.LagNotices(false)"
+        ],
+        "pin": [
+          "LagNoticesEnabled=Network.LagNotices(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 104,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SLagNotice",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SLagNotice_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "worth it while investigating one match; it is noisy, so turn it back off afterwards",
+        "state_words": []
+      },
+      "key": "SLagNotice",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "worth it while investigating one match; it is noisy, so turn it back off afterwards",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14806,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "LagNotices.SetEnabled(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SLagNotice",
+      "stores_value": true,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SLagNotice",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "LagNotices.SetEnabled(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14122",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SLang": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [
+          "ModLanguage=UI.Language(I18n.LOCALE_UNSET)"
+        ],
+        "pin": [
+          "ModLanguage=UI.Language(I18n.LOCALE_UNSET)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 147,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SLang",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SLang_q",
+      "home": "langmenus",
+      "home_label": "Language & menus",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "drafts are machine-translated until reviewed, and English is always complete",
+        "state_words": []
+      },
+      "key": "SLang",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "drafts are machine-translated until reviewed, and English is always complete",
+      "recommendation": {
+        "detection": {
+          "cite": "I18n.cs:844-853",
+          "note": "the recommendation strip prints the painter's own language word; the detected id is a second line, never a parenthetical inside the recommendation",
+          "source": "I18n.SuggestFromOs()",
+          "template": "Detected: {0}"
+        },
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14905,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "lname",
+        "render": {
+          "expression": "NativeUI.LanguageName(I18n.SuggestFromOs())",
+          "extracted_from": "lname",
+          "label": "LanguageName",
+          "label_source": "pin NativeUI.cs",
+          "not_constant_because": "NativeUI.cs:14903-14904 maps the detected id to a language word, so the rendering is the machine's",
+          "text": null,
+          "text_source": null
+        },
+        "stored": "I18n.SuggestFromOs()",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "I18n.SuggestFromOs()"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetModLanguage(string id)"
+      },
+      "reset_excluded_reason": "applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row to apply the detected id",
+      "reset_operand": {
+        "canonical_set": [
+          "en",
+          "es",
+          "ru",
+          "uk",
+          "sv"
+        ],
+        "canonical_source": "NativeUI.cs:14391 picker ids",
+        "expression": "I18n.SuggestFromOs()",
+        "independent_of_painted": true,
+        "kind": "delegate",
+        "painted_value": null,
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SLang",
+      "stores_value": true,
+      "sub_tab_body": "SubLangMenus",
+      "target_id": "SLang",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "Close",
+          "CompetitiveUI.OpenArtistPicker",
+          "I18n.SetLocale",
+          "Open",
+          "SwitchTab",
+          "UnityEngine.Object.Destroy"
+        ],
+        "kind": "named_writer",
+        "name": "NativeUI.SetModLanguage(string id)",
+        "note": null,
+        "source": "NativeUI.cs:14291",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SLight": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "MapLightingEnabled=UI.MapLightingEnabled(true)"
+        ],
+        "pin": [
+          "MapLightingEnabled=UI.MapLightingEnabled(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 99,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SLight",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SLight_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "off is flat but faster",
+        "state_words": []
+      },
+      "key": "SLight",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "off is flat but faster",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14870,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "MapPhysicalColorPatch.RenderPerfSettings.SetLighting(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SLight",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SLight",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "CustomMapColors.IsCustomSku",
+          "MapPhysicalColorPatch.RenderPerfSettings.Apply",
+          "MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop",
+          "MapPhysicalColorPatch.ScheduleDeferredTints"
+        ],
+        "kind": "named_writer",
+        "name": "MapPhysicalColorPatch.RenderPerfSettings.SetLighting(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14383-14403",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SMailBlocked": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.",
+        "description_chars": 12,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SMailBlocked",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SMailBlocked_q",
+      "home": "chatmail",
+      "home_label": "Chat & mail",
+      "i18n_literals": {
+        "help_body": "Expands the senders you have blocked. It is the only place a block can be lifted, and unblocking takes effect for the next message that sender writes.",
+        "option_words": [],
+        "reason": "it is the only place a block can be lifted",
+        "state_words": [
+          "Expanded",
+          "Collapsed"
+        ],
+        "when_to_press": "when you want to unblock someone"
+      },
+      "key": "SMailBlocked",
+      "kind": "DISCLOSURE",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it is the only place a block can be lifted",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "when you want to unblock someone"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row only opens and closes a list; it stores no value",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SMailBlocked",
+      "stores_value": false,
+      "sub_tab_body": "SubChatMail",
+      "target_id": "SMailBlocked",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "MailUI.cs:604",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SMailFrom": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Chooses who may start a new mail thread with you: everyone, only players you have played, or nobody. Threads you already have are unaffected, and blocked senders never reach you.",
+        "description_chars": 9,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SMailFrom",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SMailFrom_q",
+      "home": "chatmail",
+      "home_label": "Chat & mail",
+      "i18n_literals": {
+        "help_body": "Chooses who may start a new mail thread with you: everyone, only players you have played, or nobody. Threads you already have are unaffected, and blocked senders never reach you.",
+        "option_words": [],
+        "reason": "blocked senders never reach you anyway",
+        "state_words": []
+      },
+      "key": "SMailFrom",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "blocked senders never reach you anyway",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "MailUI.cs",
+          "line": 625,
+          "method": "RefreshSettingsRow",
+          "source": "derived",
+          "tree": "pin",
+          "via": "inline",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "Everyone",
+        "value": "Everyone"
+      },
+      "reset_call": {
+        "args": [
+          "\"everyone\""
+        ],
+        "server": null,
+        "writer": "MailUI.SetMailFrom(string id)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": [
+          "everyone",
+          "played",
+          "nobody"
+        ],
+        "canonical_source": "MailClient.cs:626 MAIL_FROM_VALUES",
+        "expression": "\"everyone\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "Everyone",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SMailFrom",
+      "stores_value": true,
+      "sub_tab_body": "SubChatMail",
+      "target_id": "SMailFrom",
+      "writer": {
+        "applies_on_same_value": false,
+        "captured_effects": [],
+        "kind": "semantic_setter",
+        "name": "MailUI.SetMailFrom(string id)",
+        "note": "learning #590: a writer that returns early on an unchanged value performs no effect, and a reset to recommended writes values that are frequently already correct",
+        "source": "MailUI.cs:655-669",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SMailRelay": {
+      "bulk_reset": false,
+      "config": {
+        "lane": []
+      },
+      "help_body": {
+        "authored": "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox.",
+        "description_chars": 10,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SMailRelay",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SMailRelay_q",
+      "home": "chatmail",
+      "home_label": "Chat & mail",
+      "i18n_literals": {
+        "help_body": "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox.",
+        "option_words": [],
+        "reason": "once Discord is linked, mail reaches you when the game is closed and you can reply from there",
+        "state_words": []
+      },
+      "key": "SMailRelay",
+      "kind": "SWITCH",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "once Discord is linked, mail reaches you when the game is closed and you can reply from there",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "MailUI.cs",
+          "line": 650,
+          "method": "RefreshSettingsRow",
+          "source": "derived",
+          "tree": "lane",
+          "via": "inline",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "On",
+        "value": "On"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "MailUI.SetMailRelay(bool on)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "On",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SMailRelay",
+      "stores_value": true,
+      "sub_tab_body": "SubChatMail",
+      "target_id": "SMailRelay",
+      "writer": {
+        "applies_on_same_value": false,
+        "captured_effects": [],
+        "kind": "semantic_setter",
+        "name": "MailUI.SetMailRelay(bool on)",
+        "note": "learning #590: a writer that returns early on an unchanged value performs no effect, and a reset to recommended writes values that are frequently already correct",
+        "source": "lane MailUI.cs:701-725",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SMenuMus": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "MenuMusicMode=Music.MenuMusicMode(\"vanilla\")"
+        ],
+        "pin": [
+          "MenuMusicMode=Music.MenuMusicMode(\"vanilla\")"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 134,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SMenuMus",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SMenuMus_q",
+      "home": "sound",
+      "home_label": "Sound",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "matches always use your picks regardless",
+        "state_words": []
+      },
+      "key": "SMenuMus",
+      "kind": "SEGMENTED",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "matches always use your picks regardless",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14742,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "Default",
+        "value": "Default"
+      },
+      "reset_call": {
+        "args": [
+          "\"vanilla\""
+        ],
+        "server": null,
+        "writer": "NativeUI.SetMenuMusicMode(string id)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": [
+          "vanilla",
+          "custom",
+          "silent"
+        ],
+        "canonical_source": "NativeUI.cs:14717-14723 NormalizeMenuMusicMode",
+        "expression": "\"vanilla\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "Default",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SMenuMus",
+      "stores_value": true,
+      "sub_tab_body": "SubSound",
+      "target_id": "SMenuMus",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "CycleMenuMusicMode",
+          "MusicEngine.Reconcile"
+        ],
+        "kind": "semantic_setter",
+        "name": "NativeUI.SetMenuMusicMode(string id)",
+        "note": null,
+        "source": "NativeUI.cs:14669-14677",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SMusCredit": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "MusicCreditToast=Music.MusicCreditToast(false)"
+        ],
+        "pin": [
+          "MusicCreditToast=Music.MusicCreditToast(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 96,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SMusCredit",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SMusCredit_q",
+      "home": "sound",
+      "home_label": "Sound",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "one line, bottom-left, and only on custom tracks",
+        "state_words": []
+      },
+      "key": "SMusCredit",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "one line, bottom-left, and only on custom tracks",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14750,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetMusicCreditToast(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SMusCredit",
+      "stores_value": true,
+      "sub_tab_body": "SubSound",
+      "target_id": "SMusCredit",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetMusicCreditToast(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14202",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SMuteBg": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "MuteAudioInBackground=Performance.MuteAudioInBackground(false)"
+        ],
+        "pin": [
+          "MuteAudioInBackground=Performance.MuteAudioInBackground(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 132,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SMuteBg",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SMuteBg_q",
+      "home": "sound",
+      "home_label": "Sound",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "the menu stays audible either way",
+        "state_words": []
+      },
+      "key": "SMuteBg",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "the menu stays audible either way",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14722,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetMuteAudioInBackground(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SMuteBg",
+      "stores_value": true,
+      "sub_tab_body": "SubSound",
+      "target_id": "SMuteBg",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetMuteAudioInBackground(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14082",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SNT": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowNotifications=UI.ShowNotifications(true)"
+        ],
+        "pin": [
+          "ShowNotifications=UI.ShowNotifications(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 112,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SNT",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SNT_q",
+      "home": "chatmail",
+      "home_label": "Chat & mail",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "the Home chat log updates either way; this is the pop-up",
+        "state_words": []
+      },
+      "key": "SNT",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "the Home chat log updates either way; this is the pop-up",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14702,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetShowNotifications(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SNT",
+      "stores_value": true,
+      "sub_tab_body": "SubChatMail",
+      "target_id": "SNT",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetShowNotifications(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14257",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPColor": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowPlayerColors=UI.ShowPlayerColors(true)"
+        ],
+        "pin": [
+          "ShowPlayerColors=UI.ShowPlayerColors(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 139,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPColor",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPColor_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "off falls everyone back to orange/blue",
+        "state_words": []
+      },
+      "key": "SPColor",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "off falls everyone back to orange/blue",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14850,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "PlayerColorCosmetic.SetShowPlayerColors(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SPColor",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SPColor",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "PlayerColorCosmetic.OnShowPlayerColorsToggled",
+          "PlayerEffectCosmetic.OnShowPlayerColorsToggled"
+        ],
+        "kind": "named_writer",
+        "name": "PlayerColorCosmetic.SetShowPlayerColors(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14232-14240",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPcAnn": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 68,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPcAnn",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPcAnn_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "only rare pulls, and only in one channel",
+        "state_words": []
+      },
+      "key": "SPcAnn",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "only rare pulls, and only in one channel",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "PlayerCardsUI.cs",
+          "line": 2271,
+          "note": "RefreshSettingsRows",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"announce\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PlayerCardsUI.SetSetting(string key, bool value)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"announce\"",
+          "source": "PlayerCardsUI.cs:2184",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPcAnn",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SPcAnn",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ToggleSetting"
+        ],
+        "kind": "server_writer",
+        "name": "PlayerCardsUI.SetSetting(string key, bool value)",
+        "note": null,
+        "source": "PlayerCardsUI.cs:2310-2340 (ToggleSetting today)",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPcPre": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [
+          "PortraitPreset=Player Cards.PortraitPreset(-1)"
+        ],
+        "pin": [
+          "PortraitPreset=Player Cards.PortraitPreset(-1)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 166,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPcPre",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPcPre_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "follows the character you actually play",
+        "state_words": []
+      },
+      "key": "SPcPre",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "follows the character you actually play",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "PlayerCardsUI.cs",
+          "line": 2284,
+          "note": "RefreshPictureRows",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "PresetLabel",
+        "render": {
+          "expression": "PlayerCardsUI.PresetLabel(-1)",
+          "extracted_from": "PresetLabel",
+          "label": "PresetLabel",
+          "label_source": "pin PlayerCardsUI.cs",
+          "not_constant_because": null,
+          "text": "Follow my character",
+          "text_source": "pin PlayerCardsUI.cs"
+        },
+        "stored": "-1",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "-1"
+        ],
+        "server": null,
+        "writer": "PlayerCardsUI.SetPreset(int n)"
+      },
+      "reset_excluded_reason": "a picture choice has no right answer",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "-1",
+        "independent_of_painted": true,
+        "kind": "number",
+        "painted_value": "Follow my character",
+        "type": "int",
+        "writer_value_param": "int"
+      },
+      "reset_selectors": [],
+      "row_group": "SPcPre",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SPcPre",
+      "writer": {
+        "applies_on_same_value": false,
+        "captured_effects": [],
+        "kind": "semantic_setter",
+        "name": "PlayerCardsUI.SetPreset(int n)",
+        "note": "learning #590: a writer that returns early on an unchanged value performs no effect, and a reset to recommended writes values that are frequently already correct",
+        "source": "PlayerCardsUI.cs:2223-2236",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPcPub": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 64,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPcPub",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPcPub_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "lets trades find your binder",
+        "state_words": []
+      },
+      "key": "SPcPub",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "lets trades find your binder",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "PlayerCardsUI.cs",
+          "line": 2268,
+          "note": "RefreshSettingsRows",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"collection_public\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PlayerCardsUI.SetSetting(string key, bool value)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"collection_public\"",
+          "source": "PlayerCardsUI.cs:2181",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPcPub",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SPcPub",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ToggleSetting"
+        ],
+        "kind": "server_writer",
+        "name": "PlayerCardsUI.SetSetting(string key, bool value)",
+        "note": null,
+        "source": "PlayerCardsUI.cs:2310-2340 (ToggleSetting today)",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerfH": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once.",
+        "description_chars": 6,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SPerfH",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerfH_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "help_body": "Expands the seven individual performance patches. The count beside the row is how many are active, and the master switch above flips all seven at once.",
+        "option_words": [],
+        "reason": "it is the only place the individual patches can be seen",
+        "state_words": [
+          "Expanded",
+          "Collapsed"
+        ],
+        "when_to_press": "when the count beside it is not 7/7"
+      },
+      "key": "SPerfH",
+      "kind": "DISCLOSURE",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it is the only place the individual patches can be seen",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "when the count beside it is not 7/7"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row only opens and closes a list; it stores no value",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SPerfH",
+      "stores_value": false,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerfH",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [
+          "_perfSectionBody.SetActive"
+        ],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14438",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SPerf_BulletCap": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfBulletHitParticleCap=Performance.BulletHitParticleCap(true)"
+        ],
+        "pin": [
+          "PerfBulletHitParticleCap=Performance.BulletHitParticleCap(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 83,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_BulletCap",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_BulletCap_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "largest visible win in heavy firefights",
+        "state_words": []
+      },
+      "key": "SPerf_BulletCap",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "largest visible win in heavy firefights",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"BulletCap\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"BulletCap\"",
+          "source": "NativeUI.cs:14491",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_BulletCap",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_BulletCap",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14491",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerf_EdgeBn": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfSwallowEdgeBounceNREs=Performance.SwallowEdgeBounceNREs(true)"
+        ],
+        "pin": [
+          "PerfSwallowEdgeBounceNREs=Performance.SwallowEdgeBounceNREs(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 53,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_EdgeBn",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_EdgeBn_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "swallows the one null reference a destroyed bullet raises at a screen edge",
+        "state_words": []
+      },
+      "key": "SPerf_EdgeBn",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "swallows the one null reference a destroyed bullet raises at a screen edge",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"EdgeBn\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"EdgeBn\"",
+          "source": "NativeUI.cs:14485",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_EdgeBn",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_EdgeBn",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14485",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerf_HitSnd": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfSwallowHitSoundNREs=Performance.SwallowHitSoundNREs(true)"
+        ],
+        "pin": [
+          "PerfSwallowHitSoundNREs=Performance.SwallowHitSoundNREs(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 54,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_HitSnd",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_HitSnd_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "swallows the one null reference the hit sound raises when its parent is gone",
+        "state_words": []
+      },
+      "key": "SPerf_HitSnd",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "swallows the one null reference the hit sound raises when its parent is gone",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"HitSnd\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"HitSnd\"",
+          "source": "NativeUI.cs:14480",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_HitSnd",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_HitSnd",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14480",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerf_Master": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfOptimizations=Performance.Enabled(true)"
+        ],
+        "pin": [
+          "PerfOptimizations=Performance.Enabled(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 64,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_Master",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_Master_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "master gate; off disables all seven",
+        "state_words": []
+      },
+      "key": "SPerf_Master",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "master gate; off disables all seven",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"Master\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"Master\"",
+          "source": "NativeUI.cs:14471",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_Master",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_Master",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14471",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerf_Menu": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfSkipMenuUpdateInMatch=Performance.SkipMenuUpdateInMatch(true)"
+        ],
+        "pin": [
+          "PerfSkipMenuUpdateInMatch=Performance.SkipMenuUpdateInMatch(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 57,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_Menu",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_Menu_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "menu code cannot matter mid-match",
+        "state_words": []
+      },
+      "key": "SPerf_Menu",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "menu code cannot matter mid-match",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"Menu\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"Menu\"",
+          "source": "NativeUI.cs:14488",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_Menu",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_Menu",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14488",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerf_OOB": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfDespawnOffscreenBullets=Performance.DespawnOffscreenBullets(false)"
+        ],
+        "pin": [
+          "PerfDespawnOffscreenBullets=Performance.DespawnOffscreenBullets(false)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 79,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_OOB",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_OOB_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "host-only, and it despawns real bullets",
+        "state_words": []
+      },
+      "key": "SPerf_OOB",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "host-only, and it despawns real bullets",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "\"OOB\"",
+          "false"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"OOB\"",
+          "source": "NativeUI.cs:14477",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_OOB",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_OOB",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14477",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerf_PoolInit": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfClampObjectPoolInit=Performance.ClampObjectPoolInit(true)"
+        ],
+        "pin": [
+          "PerfClampObjectPoolInit=Performance.ClampObjectPoolInit(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 91,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_PoolInit",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_PoolInit_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "removes allocation stutter",
+        "state_words": []
+      },
+      "key": "SPerf_PoolInit",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "removes allocation stutter",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"PoolInit\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"PoolInit\"",
+          "source": "NativeUI.cs:14494",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_PoolInit",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_PoolInit",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14494",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPerf_Stun": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "PerfStunPlayerNullGuard=Performance.StunPlayerNullGuard(true)"
+        ],
+        "pin": [
+          "PerfStunPlayerNullGuard=Performance.StunPlayerNullGuard(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 75,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPerf_Stun",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPerf_Stun_q",
+      "home": "perf",
+      "home_label": "Performance",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "stops null-reference spam and changes nothing visible",
+        "state_words": []
+      },
+      "key": "SPerf_Stun",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "stops null-reference spam and changes nothing visible",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14952,
+          "note": "shared SetPerfRow, N:14948",
+          "source": "declared",
+          "verified": true,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"Stun\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PerfPatches.SetPatch(string id, bool value)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"Stun\"",
+          "source": "NativeUI.cs:14474",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPerf_Stun",
+      "stores_value": true,
+      "sub_tab_body": "SubPerf",
+      "target_id": "SPerf_Stun",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "PerfPatches.SetPatch(string id, bool value)",
+        "note": null,
+        "source": "NativeUI.cs:14474",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPing": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowRegionPing=UI.ShowRegionPing(true)"
+        ],
+        "pin": [
+          "ShowRegionPing=UI.ShowRegionPing(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 53,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPing",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPing_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "tells you which region you are on",
+        "state_words": []
+      },
+      "key": "SPing",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "tells you which region you are on",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14794,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "NativeUI.SetShowRegionPing(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SPing",
+      "stores_value": true,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SPing",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "named_writer",
+        "name": "NativeUI.SetShowRegionPing(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14113",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SPortal": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 128,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPortal",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPortal_q",
+      "home": "langmenus",
+      "home_label": "Language & menus",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "it opens a browser; nothing in game changes",
+        "state_words": [],
+        "when_to_press": "when you want to help translate the mod"
+      },
+      "key": "SPortal",
+      "kind": "ACTION",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "it opens a browser; nothing in game changes",
+      "recommendation": {
+        "kind": "when_to_press",
+        "new_i18n_key": true,
+        "painter": null,
+        "value": "when you want to help translate the mod"
+      },
+      "reset_call": {
+        "args": [],
+        "server": null,
+        "writer": null
+      },
+      "reset_excluded_reason": "this row performs an action and stores no value, so there is nothing for a reset to write",
+      "reset_operand": {
+        "expression": null,
+        "kind": "none",
+        "type": null,
+        "why": "this row performs something and stores no value, so a reset has nothing to write"
+      },
+      "reset_selectors": [],
+      "row_group": "SPortal",
+      "stores_value": false,
+      "sub_tab_body": "SubLangMenus",
+      "target_id": "SPortal",
+      "writer": {
+        "applies_on_same_value": null,
+        "captured_effects": [
+          "ApiClient.OpenTranslatePortal"
+        ],
+        "kind": "action",
+        "name": null,
+        "note": null,
+        "source": "NativeUI.cs:14365",
+        "writes_entry_as_side_effect": "this row writes no ConfigEntry at all"
+      }
+    },
+    "SPrefSC": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 151,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPrefSC",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPrefSC_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "applies only when everyone in the room agrees",
+        "state_words": []
+      },
+      "key": "SPrefSC",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "applies only when everyone in the room agrees",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14765,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": {
+          "arguments": [
+            {
+              "expression": "id",
+              "name": "steamId",
+              "source": "NativeUI.cs:13930, the expression this row already passes",
+              "type": "string"
+            },
+            {
+              "expression": "false",
+              "name": "on",
+              "source": "the reset operand",
+              "type": "bool"
+            },
+            {
+              "expression": "(ok, resp) => { prefSameCardsInFlight = false; if (!ok) { var cur = ApiClient.CachedPla...",
+              "name": "callback",
+              "source": "NativeUI.cs:13930, the expression this row already passes",
+              "type": "Action<bool, string>"
+            }
+          ],
+          "call": "ApiClient.SetPrefSameCards(id, false, (ok, resp) => { prefSameCardsInFlight = false; if (!ok) { var cur = ApiClient.CachedPla...)",
+          "declared_at": "ApiClient.cs:3657",
+          "inner": "ApiClient.SetPrefSameCards",
+          "retained": [
+            "identifier validation",
+            "optimistic cache write",
+            "dirty flag",
+            "failure reconciliation"
+          ],
+          "site": "NativeUI.cs:13930",
+          "wrapper": "NativeUI.SetPrefSameCards(bool on)"
+        },
+        "writer": "ApiClient.SetPrefSameCards(bool, cb)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SPrefSC",
+      "stores_value": true,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SPrefSC",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ApiClient.SetPrefSameCards",
+          "CompetitiveUI.ShowNotification"
+        ],
+        "kind": "server_writer",
+        "name": "ApiClient.SetPrefSameCards(bool, cb)",
+        "note": null,
+        "source": "NativeUI.cs:13910",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SShad": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "MapShadowsEnabled=UI.MapShadowsEnabled(true)"
+        ],
+        "pin": [
+          "MapShadowsEnabled=UI.MapShadowsEnabled(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 91,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SShad",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SShad_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "off keeps lighting and drops the beams",
+        "state_words": []
+      },
+      "key": "SShad",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "off keeps lighting and drops the beams",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14875,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "MapPhysicalColorPatch.RenderPerfSettings.SetShadows(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SShad",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SShad",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "CustomMapColors.IsCustomSku",
+          "MapPhysicalColorPatch.RenderPerfSettings.Apply",
+          "MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop",
+          "MapPhysicalColorPatch.ScheduleDeferredTints"
+        ],
+        "kind": "named_writer",
+        "name": "MapPhysicalColorPatch.RenderPerfSettings.SetShadows(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14406-14426",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SShake": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ScreenShakeStrength=UI.ScreenShakeStrength(\"Full\")"
+        ],
+        "pin": [
+          "ScreenShakeStrength=UI.ScreenShakeStrength(\"Full\")"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 144,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SShake",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SShake_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "Reduced keeps the hit feedback without the camera motion",
+        "state_words": []
+      },
+      "key": "SShake",
+      "kind": "SEGMENTED",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "Reduced keeps the hit feedback without the camera motion",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14866,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "ToUpperInvariant",
+        "render": {
+          "expression": "I18n.Tr(\"Full\".ToUpperInvariant())",
+          "extracted_from": null,
+          "label": null,
+          "label_source": null,
+          "not_constant_because": null,
+          "text": "FULL",
+          "text_source": null
+        },
+        "stored": "Full",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "\"Full\""
+        ],
+        "server": null,
+        "writer": "ScreenshakerDisablePatch.Set(string level)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": [
+          "Full",
+          "Reduced",
+          "Off"
+        ],
+        "canonical_source": "PerfPatches.cs:637-640 ScreenshakerDisablePatch.Level",
+        "expression": "\"Full\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "FULL",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SShake",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SShake",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ScreenshakerDisablePatch.Cycle"
+        ],
+        "kind": "semantic_setter",
+        "name": "ScreenshakerDisablePatch.Set(string level)",
+        "note": null,
+        "source": "PerfPatches.cs:574-579",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SShowDc": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 88,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SShowDc",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SShowDc_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "opt-in, and it needs a linked Discord to do anything",
+        "state_words": []
+      },
+      "key": "SShowDc",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "opt-in, and it needs a linked Discord to do anything",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14776,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "false"
+        ],
+        "server": {
+          "arguments": [
+            {
+              "expression": "id",
+              "name": "steamId",
+              "source": "NativeUI.cs:13964, the expression this row already passes",
+              "type": "string"
+            },
+            {
+              "expression": "false",
+              "name": "on",
+              "source": "the reset operand",
+              "type": "bool"
+            },
+            {
+              "expression": "(ok, resp) => { if (!ok) CompetitiveUI.ShowNotification(\"Couldn't change Show Discord o...",
+              "name": "callback",
+              "source": "NativeUI.cs:13964, the expression this row already passes",
+              "type": "Action<bool, string>"
+            }
+          ],
+          "call": "ApiClient.SetShowDiscord(id, false, (ok, resp) => { if (!ok) CompetitiveUI.ShowNotification(\"Couldn't change Show Discord o...)",
+          "declared_at": "ApiClient.cs:4554",
+          "inner": "ApiClient.SetShowDiscord",
+          "retained": [
+            "identifier validation",
+            "optimistic cache write",
+            "dirty flag",
+            "failure reconciliation"
+          ],
+          "site": "NativeUI.cs:13964",
+          "wrapper": "NativeUI.SetShowDiscord(bool on)"
+        },
+        "writer": "ApiClient.SetShowDiscord(bool, cb)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "false",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "OFF",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SShowDc",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SShowDc",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ApiClient.SetShowDiscord",
+          "CompetitiveUI.ShowNotification"
+        ],
+        "kind": "server_writer",
+        "name": "ApiClient.SetShowDiscord(bool, cb)",
+        "note": null,
+        "source": "NativeUI.cs:13950",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "STrail": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "ShowTrails=UI.ShowTrails(true)"
+        ],
+        "pin": [
+          "ShowTrails=UI.ShowTrails(true)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 54,
+        "source": "moved"
+      },
+      "help_entry_id": "help_STrail",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "STrail_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "cosmetic only",
+        "state_words": []
+      },
+      "key": "STrail",
+      "kind": "SWITCH",
+      "present_on": [
+        "pin",
+        "lane"
+      ],
+      "reason": "cosmetic only",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": 14840,
+          "method": "RefreshSettings",
+          "source": "derived",
+          "tree": "pin",
+          "via": "handle",
+          "writer": "SetText"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "TrailCosmetic.SetShowTrails(bool)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "STrail",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "STrail",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "TrailCosmetic.OnMatchEnd",
+          "TrailCosmetic.OnMatchStart"
+        ],
+        "kind": "named_writer",
+        "name": "TrailCosmetic.SetShowTrails(bool)",
+        "note": null,
+        "source": "NativeUI.cs:14214-14229",
+        "writes_entry_as_side_effect": null
+      }
+    }
+  },
+  "exclusion_reasons": [
+    "a picture choice has no right answer",
+    "applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row to apply the detected id",
+    "consent is the player's own decision, never bulk-written",
+    "sending your logs automatically is your own decision, never bulk-written",
+    "there is no region detection to reset TO, and a deliberate regional choice should not revert to the shipped US default",
+    "this row only opens and closes a list; it stores no value",
+    "this row performs an action and stores no value, so there is nothing for a reset to write",
+    "this row stores no value, and nothing bulk may ever arm or confirm a deletion",
+    "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored"
+  ],
+  "measured_from": {
+    "lane": "8328b74c49c8c0141edfce00fb25658d0e0b61bc",
+    "manifest": {
+      "lane": "46f54d4689bba538f13f5ab81e5a98463bc22e09",
+      "pin": "cc924982d612470830a90f7ffd05ef615fa96401"
+    },
+    "pin": "cc924982d612470830a90f7ffd05ef615fa96401"
+  },
+  "model_corrections": {
+    "SCT": {
+      "descriptor_says": {
+        "kind": "SWITCH",
+        "stores_value": true
+      },
+      "manifest_says": {
+        "kind": "ACTION",
+        "stores_value": false
+      },
+      "owed": "item13_home_manifest.json must be regenerated with kind=SWITCH and stores_value=true for SCT before the build step emits SettingsHomes.g.cs.",
+      "why": "r4-refutation H6. The control writes Privacy/DataConsent (NativeUI.cs:13870 and :13874) and its own painter says 'Revoke consent' when consent is held (NativeUI.cs:14695), so pressing it while granted REVOKES. Modelled as a no-value action with the recommendation 'grant it now', a player who already granted consent and follows the recommendation turns ranked off. It is a two-state value control."
+    }
+  },
+  "notes": [
+    "SPcAnn records no callable server path yet: the same owed writer as SPcPub; both rows share it.",
+    "SPcPub records no callable server path yet: PlayerCardsUI.SetSetting(string key, bool value) does not exist on either tree yet: the rows call ToggleSetting(key), which reads the cached value and writes its negation, so there is no parameter a reset can pass. The value-taking form is owed."
+  ],
+  "problems": [],
+  "reset_corrections": {
+    "SAutoLog": {
+      "descriptor_says": {
+        "bulk_reset": false
+      },
+      "manifest_says": {
+        "bulk_reset": true,
+        "reset_excluded_reason": null
+      },
+      "owed": "item13_home_manifest.json must be regenerated with bulk_reset=false and this reason for SAutoLog before the build step emits SettingsHomes.g.cs.",
+      "reason": "sending your logs automatically is your own decision, never bulk-written",
+      "why": "r6-refutation. The lane's Privacy reset set was this one row, so pressing Reset this tab would have switched automatic log upload ON for a player who had deliberately left it off -- the same class of decision SCT is excluded for, and the one the footer paragraph already claimed was not there."
+    }
+  },
+  "schema": "item13-descriptors/3",
+  "summary": {
+    "bulk_reset_lane": 33,
+    "bulk_reset_pin": 32,
+    "help_bodies_authored": [
+      "SBugBtn",
+      "SDBtn",
+      "SDXBtn",
+      "SEBtn",
+      "SInfoOpen",
+      "SMailBlocked",
+      "SMailFrom",
+      "SMailRelay",
+      "SPerfH"
+    ],
+    "help_bodies_moved": 46,
+    "i18n": {
+      "exclusion_reasons": 9,
+      "help_bodies": 9,
+      "option_words": 7,
+      "reasons": 55,
+      "recommendation_values": 0,
+      "shared_templates": 8,
+      "state_words": 6,
+      "sub_tab_labels": 7,
+      "total": 110,
+      "when_to_press": 9
+    },
+    "keys": 55,
+    "operands": {
+      "bool": 35,
+      "canonical_id": 7,
+      "delegate": 1,
+      "enum_member": 1,
+      "none": 9,
+      "number": 2
+    },
+    "painters_declared": 11,
+    "painters_derived": 35,
+    "render_rows": [
+      "SBloom",
+      "SChatTtl",
+      "SCursor",
+      "SLang",
+      "SPcPre",
+      "SShake"
+    ],
+    "selector_rows": [
+      "SPcAnn",
+      "SPcPub",
+      "SPerf_BulletCap",
+      "SPerf_EdgeBn",
+      "SPerf_HitSnd",
+      "SPerf_Master",
+      "SPerf_Menu",
+      "SPerf_OOB",
+      "SPerf_PoolInit",
+      "SPerf_Stun"
+    ],
+    "value_less": 9,
+    "value_storing": 46,
+    "writers_action": 9,
+    "writers_named_new": 31,
+    "writers_semantic": 9,
+    "writers_server": 6
+  }
+}

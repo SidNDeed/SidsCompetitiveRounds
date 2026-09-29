@@ -78,8 +78,9 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ChatOverlayPinned;
         // Item 4: how long a chat line stays fully opaque in the overlay before
         // the (still hardcoded) 10s fade begins. Float so the value can be
-        // hand-edited in the cfg to anything; the in-game control cycles a
-        // fixed set (CHAT_TTL_CYCLE) because this codebase has no slider.
+        // hand-edited in the cfg to anything; the in-game control (item 13: a
+        // slider since the settings page reorganisation) is quantised to a
+        // fixed set of stops, CHAT_TTL_CYCLE, and writes only those.
         // 0 (and any value <= 0) is a MODE, not a duration — see
         // ChatOverlayHiddenDuringPlay.
         internal static ConfigEntry<float> ChatOverlaySeconds;
@@ -189,10 +190,13 @@ namespace CompetitiveRounds
         public static bool DataConsentAsked   => DataConsent != null && !string.IsNullOrEmpty(DataConsent.Value);
 
         // ── Item 4: chat-overlay message TTL ─────────────────────────────
-        // There is no slider infrastructure anywhere in this codebase, so the
-        // established pattern for a numeric setting is a CYCLING button
-        // (cursorShapeBtn / dateFmtBtn). Both the Settings tab and the M
-        // hotkey read the same ConfigEntry, so they cannot disagree.
+        // Item 13: the Settings row is a SLIDER over the stops below
+        // (UIFactory.CreateSlider), and it writes through
+        // SetChatOverlaySeconds, which quantises to the nearest stop, so the
+        // stored value is always one of them. The cycling button this
+        // paragraph used to describe is gone; CycleChatOverlaySeconds stays
+        // as the stepping wrapper over the same writer. Both the Settings tab
+        // and the M hotkey read the same ConfigEntry, so they cannot disagree.
         //
         // The cycle is deliberately bounded, but NOT for the reason a reader
         // might assume: the overlay renders at most the last 8 entries
@@ -217,16 +221,44 @@ namespace CompetitiveRounds
         internal static readonly float[] CHAT_TTL_CYCLE = { 0f, 5f, 10f, 25f, 45f, 90f };
 
         /// <summary>Advance the chat-overlay TTL to the next value in
-        /// CHAT_TTL_CYCLE. A stored value outside the cycle (hand-edited cfg)
-        /// lands on the first entry.</summary>
+        /// CHAT_TTL_CYCLE, through SetChatOverlaySeconds. A stored value
+        /// outside the cycle (hand-edited cfg) lands on the first entry, as it
+        /// always has.</summary>
         public static void CycleChatOverlaySeconds()
         {
             if (ChatOverlaySeconds == null) return;
             int idx = -1;
             for (int i = 0; i < CHAT_TTL_CYCLE.Length; i++)
                 if (Mathf.Approximately(CHAT_TTL_CYCLE[i], ChatOverlaySeconds.Value)) { idx = i; break; }
-            ChatOverlaySeconds.Value = CHAT_TTL_CYCLE[(idx + 1) % CHAT_TTL_CYCLE.Length];
+            SetChatOverlaySeconds(CHAT_TTL_CYCLE[(idx + 1) % CHAT_TTL_CYCLE.Length]);
+        }
+
+        /// <summary>Item 13: the value-taking writer (the settings slider, and
+        /// the per-tab reset). The value is quantised to the NEAREST stop of
+        /// CHAT_TTL_CYCLE, so nothing but a stop is ever stored: a hand-edited
+        /// 30 written back through here becomes 25, never 0 ("hidden in
+        /// game"), which is where the old cycler sent an out-of-set value.
+        /// Null entry (pre-Awake) writes nothing.</summary>
+        public static void SetChatOverlaySeconds(float s)
+        {
+            if (ChatOverlaySeconds == null) return;
+            int best = 0;
+            for (int i = 1; i < CHAT_TTL_CYCLE.Length; i++)
+                if (Mathf.Abs(CHAT_TTL_CYCLE[i] - s) < Mathf.Abs(CHAT_TTL_CYCLE[best] - s)) best = i;
+            ChatOverlaySeconds.Value = CHAT_TTL_CYCLE[best];
             Log.LogInfo($"[SETTINGS] Chat overlay TTL -> {ChatOverlaySeconds.Value}s");
+        }
+
+        /// <summary>Item 13: the index of the stop nearest the stored value
+        /// (the slider's handle position). A hand-edited out-of-set value shows
+        /// at its nearest stop; nothing is written until the handle moves.</summary>
+        public static int ChatOverlaySecondsIndex()
+        {
+            float v = ChatOverlaySeconds != null ? ChatOverlaySeconds.Value : 25f;
+            int best = 0;
+            for (int i = 1; i < CHAT_TTL_CYCLE.Length; i++)
+                if (Mathf.Abs(CHAT_TTL_CYCLE[i] - v) < Mathf.Abs(CHAT_TTL_CYCLE[best] - v)) best = i;
+            return best;
         }
 
         /// <summary>True when the player has set the TTL to 0, i.e. the in-game
@@ -270,7 +302,14 @@ namespace CompetitiveRounds
         /// is the actual overlay ON / PINNED / OFF control).</summary>
         public static string ChatOverlaySecondsLabel()
         {
-            float v = ChatOverlaySeconds != null ? ChatOverlaySeconds.Value : 25f;
+            return ChatOverlaySecondsLabel(ChatOverlaySeconds != null ? ChatOverlaySeconds.Value : 25f);
+        }
+
+        /// <summary>Item 13: the same token for a GIVEN value, so the settings
+        /// pane can render the recommended value (25s) without it being the
+        /// live one. The zero-argument form above is this over the live value.</summary>
+        public static string ChatOverlaySecondsLabel(float v)
+        {
             if (v <= 0f) return "0s";
             return Mathf.RoundToInt(v).ToString(System.Globalization.CultureInfo.InvariantCulture) + "s";
         }
@@ -2569,6 +2608,16 @@ namespace CompetitiveRounds
                     // Titles section's ladder entries and their tier popup, e.g.
                     // "4:cat4:fixture:cat" (TitleLaddersUI.DevDirective owns the grammar).
                     if (parts.Length > 2) ladderDirective = string.Join(":", parts, 2, parts.Length - 2);
+                }
+                // Item 13: "5:<sub-tab>[:<key>]" opens a Settings sub-tab (and
+                // selects a row on it), "5:<sub-tab>:expand" also opens that
+                // tab's list, and "5:selftest" runs the settings self-test;
+                // NativeUI.DevSettingsDirective owns that grammar. A bare float
+                // keeps the scroll meaning.
+                else if (idx == 5 && !float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll))
+                {
+                    scroll = -1f;
+                    infoKey = raw.Substring(raw.IndexOf(':') + 1).Trim();
                 }
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
@@ -10554,6 +10603,40 @@ namespace CompetitiveRounds
         // because scene reloads spawn fresh renderers.
         internal static class RenderPerfSettings
         {
+            /// <summary>Item 13: the named writers of the two map-render rows
+            /// (the settings page and its per-tab reset). Each writes its entry
+            /// by name and then runs the same live effect the row's handler used
+            /// to run inline: re-apply the renderers, re-queue the backdrop, and
+            /// re-tint a live custom skin, because which side carries the
+            /// inverse gain depends on whether SFSS lighting is on (Codex r5
+            /// #1). Deferred, so it never lands mid-transition.</summary>
+            internal static void SetLighting(bool on)
+            {
+                if (Plugin.MapLightingEnabled == null) return;
+                Plugin.MapLightingEnabled.Value = on;
+                ApplyLive();
+            }
+
+            internal static void SetShadows(bool on)
+            {
+                if (Plugin.MapShadowsEnabled == null) return;
+                Plugin.MapShadowsEnabled.Value = on;
+                ApplyLive();
+            }
+
+            private static void ApplyLive()
+            {
+                try
+                {
+                    Apply();
+                    ApplyBackdrop();
+                    var liveSku = MapColorState.CurrentSku;
+                    if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
+                        MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
+                }
+                catch { }
+            }
+
             private static readonly Dictionary<int, bool> _vanillaShadows = new Dictionary<int, bool>();
             private static readonly Dictionary<int, bool> _vanillaEnabled = new Dictionary<int, bool>();
             // Flat backdrop shown while lighting is disabled (matches the mod's UI
@@ -10760,6 +10843,20 @@ namespace CompetitiveRounds
                 catch { }
                 return false;
             }
+
+            /// <summary>Item 13: the value-taking writer the settings page and
+            /// its per-tab reset call. Writes the entry by name, then re-applies
+            /// every live profile, which is what the row's handler used to do
+            /// inline. It stays BELOW the private Set(PostProcessProfile, bool):
+            /// the item-13 keyset instrument resolves a call to a bare Set by
+            /// the first Set declared in this file, and that must remain the
+            /// overload that writes no ConfigEntry.</summary>
+            internal static void Set(bool on)
+            {
+                if (Plugin.ChromaticAberrationEnabled == null) return;
+                Plugin.ChromaticAberrationEnabled.Value = on;
+                try { Apply(); } catch { }
+            }
         }
 
         /// <summary>Bloom strength (Sid's "cosmetics are illuminated and the effect is quite
@@ -10812,10 +10909,24 @@ namespace CompetitiveRounds
                 }
             }
 
-            /// <summary>Cycles Full -> Reduced -> Off -> Full and applies immediately.</summary>
+            /// <summary>Cycles Full -> Reduced -> Off -> Full through Set.</summary>
             internal static void Cycle()
             {
-                string next = Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full";
+                Set(Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full");
+            }
+
+            /// <summary>Item 13: the value-taking writer (the settings page's
+            /// segmented row and its per-tab reset). The level is canonicalised
+            /// to Full / Reduced / Off the same way Level reads it, so a caller
+            /// cannot store a display word; null or unknown writes Full. Applies
+            /// immediately. Declared BEFORE the private Set(PostProcessProfile,
+            /// string, string) below, so it is the first Set of this class.</summary>
+            internal static void Set(string level)
+            {
+                string v = (level ?? "").Trim();
+                string next = string.Equals(v, "Off", StringComparison.OrdinalIgnoreCase) ? "Off"
+                    : string.Equals(v, "Reduced", StringComparison.OrdinalIgnoreCase) ? "Reduced"
+                    : "Full";
                 if (Plugin.BloomStrength != null) Plugin.BloomStrength.Value = next;
                 Apply();
             }

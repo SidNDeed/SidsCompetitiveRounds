@@ -31,6 +31,25 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class TrailCosmetic
     {
+        /// <summary>Item 13: the named writer of the settings row and its
+        /// per-tab reset. It carries the live effect the row's handler used to
+        /// run inline: on, mid-match, re-attaches every trail; off detaches
+        /// them. A reset that wrote the entry alone would leave trails stale
+        /// until the next match.</summary>
+        internal static void SetShowTrails(bool on)
+        {
+            if (Plugin.ShowTrails == null) return;
+            Plugin.ShowTrails.Value = on;
+            if (on)
+            {
+                if (GameStateWatcher.IsInMatch) OnMatchStart();
+            }
+            else
+            {
+                OnMatchEnd();
+            }
+        }
+
         private const string PROP_SKU   = "cr_trail_sku";
         private const string PROP_COLOR = "cr_trail_color";
         private const string PROP_PRICE = "cr_trail_price";
