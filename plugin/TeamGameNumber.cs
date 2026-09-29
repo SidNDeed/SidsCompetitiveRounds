@@ -1919,14 +1919,15 @@ namespace CompetitiveRounds
             // process holds ("" = none was ever issued to it); a restart is a
             // new process on a new session, which the server then holds.
             public string Account = NewHarnessName("account"), Session = NewHarnessName("session");
-            // Round 10, M1: this seat's process was handed the room (`Handed`).
-            // A client joins a 2v2 room only from the queue poll's answer
-            // (ApiClient.cs, ParseTeamQueuePoll), so a process's first entry
-            // follows the poll's hand-out to it (TokenServer.HandOut), and a
-            // restarted or twin process is handed the room again. `OffPoll`:
-            // this process enters without one (no client path does: the
-            // residual's shape, TwinOffPoll, and a room no poll handed out,
-            // FreshOffPoll). `Handout`: what its hand-out recorded.
+            // Round 10, M1: this seat's process was handed the room (`Handed`)
+            // by the queue poll (TokenServer.HandOut, round 10's server). The
+            // poll is not the only way into a 2v2 room: the supported rejoin
+            // path can enter one without a hand-out, as can any process that
+            // has the room's name (the Codex round-10 report, M1). `OffPoll`:
+            // this process enters without one (TwinOffPoll, and a room no poll
+            // handed out, FreshOffPoll); round 11's server issues nothing, so
+            // neither shape settles (M1-ROUTE-A-TWIN-OFF-POLL, M1-ROUTE-A-ENTRY).
+            // `Handout`: what its hand-out recorded.
             public bool Handed, OffPoll;
             public string Handout = "";
             // Round 11, M1: the reporter client's ask for physical game 1
@@ -3099,13 +3100,13 @@ namespace CompetitiveRounds
         // TwinUnseen: A's own hand-out, on no session, voids physical game 1
         // before any game of the series is played, so B is issued nothing
         // and nothing settles. TwinOffPoll: TwinUnseen with A entering
-        // without a hand-out (no client path does: a 2v2 room is armed only
-        // from the poll's answer, ApiClient.cs's ParseTeamQueuePoll), so B
+        // without a hand-out (the supported rejoin path can, as can any
+        // process that has the room's name), so B
         // is the first process the poll hands the room to, is bound, is
         // issued game 3 as physical game 1, and a leave in game 4 settles
-        // wrongly where A's results never land and B's own do: the premise
-        // the rule rests on, stated with its residual in the notes, section
-        // 21. `issued` (the overload): physical game 1 was issued; `toLater`:
+        // wrongly where A's results never land and B's own do: round 10's
+        // residual, which round 11's server, issuing nothing, cannot reach
+        // (M1-ROUTE-A-TWIN-OFF-POLL). `issued` (the overload): physical game 1 was issued; `toLater`:
         // to a process of the reporter's account other than its first.
 
         private const int M1Others = 1, M1AnyPost = 2, M1Issued = 4, M1HandoutVoids = 8, M1HandoutBinds = 16;
@@ -4015,8 +4016,8 @@ namespace CompetitiveRounds
             // (M1-TWIN-UNSEEN-HANDOUT-VOID-UNREAD). The hand-out rule alone,
             // round 9's three rules absent, names, carries and settles nothing
             // in any of the three twin shapes (M1-TWIN-HANDOUT-ALONE).
-            // TwinOffPoll, A entering without a hand-out (no client path does),
-            // is the premise the rule rests on: it settles wrongly exactly
+            // TwinOffPoll, A entering without a hand-out (the supported rejoin
+            // path can), is where round 10's rule fails: it settles wrongly exactly
             // where round 9's residual did, 12 of 48, and nowhere else
             // (M1-OFF-POLL-PREMISE). Round 9's live and posted checks keep
             // round 9's server (R9All), so that each of its rules is still
@@ -5109,7 +5110,7 @@ namespace CompetitiveRounds
                 + " outside its class with round 9's issuance; " + m1UnseenNoVoid + " wrongly with the hand-out's void"
                 + " unread), " + m1HandoutAlone + " of 144 in the three shapes on the hand-out rule alone, and "
                 + m1OffPoll + " settled, " + m1OffPollWrong + " wrongly, " + m1OffPollOutside + " outside its class of 48"
-                + " where the first process entered without a hand-out (the premise); twin sweeps: "
+                + " where the first process entered without a hand-out (round 10's residual); twin sweeps: "
                 + m1LiveSweep.Timelines + " timelines each, " + m1LiveSweep.Settled + " live and " + m1PostedSweep.Settled
                 + " posted settled on round 9's server, " + m1LiveSweepR10.Settled + " live, " + m1PostedSweepR10.Settled
                 + " posted and " + m1UnseenSweep.Settled + " unseen on round 10's, " + m1UnseenSweep.Wrong + " unseen wrongly ("
