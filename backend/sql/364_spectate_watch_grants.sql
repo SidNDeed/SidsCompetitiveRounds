@@ -36,11 +36,20 @@
 -- statement anywhere updates or deletes this table (the lease cleanup
 -- touches spectate_leases only), which is what makes the record immutable.
 --
--- BACKFILL: every lease a master validation already bound to an actor
--- (bound_actor IS NOT NULL is exactly "validated as observed") becomes its
--- grant, with the game's mode, source and roster as they read now (the
--- last attestation's tuple): a lease validated under an earlier roster of
--- the same room is recorded under the room's last one.
+-- NO BACKFILL (round 4, MEDIUM 1): a grant carries only a tuple a master
+-- validation actually observed. Before this file, a validation recorded no
+-- tuple at all: the lease binding (spectate_leases.bound_actor) names the
+-- Photon actor and nothing else, while the spectate game row's mode, source
+-- and roster are the room's LAST attestation, rewritten in place by every
+-- participant attest. Copying that row onto an earlier binding would record
+-- a tuple the seat may never have watched (a seat validated on roster A-B
+-- would be granted the room's later A-C). No row of any table records the
+-- tuple a pre-364 binding observed, so every such binding fails closed: no
+-- grant is written for it, and a seat still watching revalidates going
+-- forward (the master's next validation writes the grant for the tuple it
+-- observes then). What that costs: the broadcast seat's report of a set
+-- whose every validation ran before the api that writes grants; the seat's
+-- report queue holds only its recent watches.
 --
 -- REQUIRES spectate_games and spectate_leases (194, 210). Written by
 -- POST /api/v1/spectate/validate; read by GET /api/v1/report (viewer=, the
@@ -48,14 +57,14 @@
 -- Not mapped in models.py: only raw SQL names it (#674).
 --
 -- DEPLOY ORDER (#477): THIS FILE FIRST, as its own commit and its own deploy,
--- then the API that reads and writes it. A wrong order fails no request that
--- is not already refused: the validation route's grant write is savepointed
--- (a missing table leaves the validation's answer unchanged), and the two
--- broadcast reads fail closed (no grant, no report) while /health reports
--- session_report=0, since its probe analyses _REPORT_WATCHED_SQL. The API from
+-- then the API that reads and writes it. Until this file is applied under
+-- that API, its two broadcast reads fail closed (no grant, no report) and
+-- /health reports session_report=0, since its probe analyses
+-- _REPORT_WATCHED_SQL; what its validation route answers without the table
+-- is stated at the grant write in spectate_validate (main.py). The API from
 -- before this file never names the table.
 --
--- Idempotent: IF NOT EXISTS and ON CONFLICT DO NOTHING, one explicit
+-- Idempotent: IF NOT EXISTS only (the file writes no rows), one explicit
 -- transaction (#340).
 
 BEGIN;
@@ -75,15 +84,5 @@ CREATE TABLE IF NOT EXISTS spectate_watch_grants (
 
 CREATE INDEX IF NOT EXISTS idx_spectate_watch_grants_spectator
     ON spectate_watch_grants (spectator_steam_id, game_started_at);
-
-INSERT INTO spectate_watch_grants
-    (game_id, spectator_steam_id, mode, source_ref, roster, game_started_at, granted_at)
-SELECT DISTINCT ON (l.game_id, l.spectator_steam_id)
-       l.game_id, l.spectator_steam_id, g.mode, g.source_ref, g.roster, g.started_at, l.issued_at
-  FROM spectate_leases l
-  JOIN spectate_games g ON g.id = l.game_id
- WHERE l.bound_actor IS NOT NULL
- ORDER BY l.game_id, l.spectator_steam_id, l.issued_at
-ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING;
 
 COMMIT;

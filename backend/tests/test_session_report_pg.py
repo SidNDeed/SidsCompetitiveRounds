@@ -1103,6 +1103,56 @@ def test_a_lease_the_master_never_observed_is_not_a_watch(lab, seat):
              w.end + timedelta(minutes=1))
 
 
+# -- round 4 MEDIUM 1: migration 364 grants no tuple the seat never observed ----
+
+def _apply_364():
+    """backend/sql/364_spectate_watch_grants.sql applied to the lab as the
+    migrate verb applies it (the whole file, its own transaction); the grant
+    table's row count before and after."""
+    async def _go():
+        conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+        try:
+            before = await conn.fetchval("SELECT count(*) FROM spectate_watch_grants")
+            await conn.execute((SQL_DIR / "364_spectate_watch_grants.sql").read_text(encoding="utf-8"))
+            return before, await conn.fetchval("SELECT count(*) FROM spectate_watch_grants")
+        finally:
+            await conn.close()
+    return asyncio.run(_go())
+
+
+def test_migration_364_grants_no_tuple_the_seat_never_observed(lab, seat):
+    """Round 4 MEDIUM 1, the reviewer's falsifier. A pre-364 validation bound
+    the seat's lease while the live room was A-B (sourceless 1v1 around K1):
+    the binding recorded the actor and no tuple. The room's row is then
+    rewritten by an attest to A-C, and 364 runs - twice. It writes no grant
+    for that binding: not A-C (never observed), and not A-B either (no row
+    records it), and the second run adds nothing. A's game against C (KC),
+    which ends inside the room's span, is refused to the seat. Controls: KC
+    ends inside the window; A's own request for KC is served; once the
+    master validates the seat under A-C (going forward), the grant is that
+    observed tuple and the same read is served as A's own envelope."""
+    (_m, k1_end, _s), (_m2, kc_end, _s2) = _facts("K1", "KC")
+    assert _inside(kc_end, k1_end), "control: KC ends inside the room's window"
+    w = _LiveWatch(seat, "K1")
+    # the pre-364 binding: bound to actor 3, no grant written
+    _lab_sql("UPDATE spectate_leases SET bound_actor = 3 WHERE game_id = $1 RETURNING 1", w.wid)
+    assert w.grants() == 0
+    ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
+    _lab_sql("UPDATE spectate_games SET roster = $2 WHERE id = $1 RETURNING 1", w.wid, ac)
+    first, second = _apply_364(), _apply_364()
+    assert w.grants() == 0, "no grant for a binding that recorded no tuple (neither A-C nor A-B)"
+    assert first[0] == first[1] and second[0] == second[1], ("364 wrote rows", first, second)
+    assert _refused(seat, viewer=STEAM["A"], match=ID["KC"]) == (404, "not_found")
+    assert _games(_report("A", match=ID["KC"])), "control: A's own request is served"
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert _lab_sql("SELECT string_agg(roster, '|') FROM spectate_watch_grants"
+                    " WHERE game_id = $1 AND spectator_steam_id = $2", w.wid, seat) == ac, \
+        "control: the grant going forward is the tuple the validation observed"
+    assert _report(seat, viewer=STEAM["A"], match=ID["KC"]) == _report("A", match=ID["KC"])
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
 # -- /health `session_report` against the lab database ---------------------------
 
 def test_the_health_word_reads_what_the_labs_database_has(lab):

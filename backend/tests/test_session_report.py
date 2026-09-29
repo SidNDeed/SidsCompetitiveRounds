@@ -2011,6 +2011,14 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
     body = body[:body.index(");")]
     assert "REFERENCES spectate_games(id)" in body and "ON DELETE" not in body
     assert "UNIQUE (game_id, spectator_steam_id, mode, source_ref, roster)" in body
+    # Round 4 MEDIUM 1: 364 writes no grant. A pre-364 lease binding recorded
+    # no tuple, and the spectate game row's tuple is the room's last attest,
+    # so a backfill from it could grant a tuple the seat never observed; the
+    # file creates the table and its index and nothing else.
+    code = " ".join(l for l in mig.splitlines() if not l.lstrip().startswith("--")).upper()
+    for verb in ("INSERT", "UPDATE", "DELETE", "SPECTATE_LEASES", "FROM SPECTATE_GAMES"):
+        assert verb not in code, ("364 statement", verb)
+    assert code.count("CREATE TABLE IF NOT EXISTS") == 1 and code.count("CREATE INDEX IF NOT EXISTS") == 1
     for f in sorted(sql.glob("*.sql")):
         head = f.name.split("_")[0]
         if head.isdigit() and int(head) > 364:
