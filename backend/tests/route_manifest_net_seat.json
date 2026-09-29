@@ -3416,7 +3416,7 @@
           ],
           "main",
           "pc_discard_batch",
-          "0ba7d5e12b9fbc2085cfaaf4785fc08335262d64"
+          "289a081fbfbe9ca1e4d601b4b0f7504b8bd1909b"
         ],
         [
           "/api/v1/pc/face/preview",
@@ -3464,7 +3464,7 @@
       [
         "main",
         "lifespan",
-        "fc6bd92a6d56b450a9eb3ba9581c22ac24afeae0"
+        "4e4a034202b7035d1a1230c7ed6b70d689750101"
       ]
     ]
   },
