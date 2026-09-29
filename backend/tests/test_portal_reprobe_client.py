@@ -236,17 +236,25 @@ def test_a_press_after_a_restore_waits_for_the_first_secure_session():
     minted at once, which the server refuses without a session (W3's press got
     401 session_required and the sign-in message). Once the route has been
     restored the OpenNow branch waits the same way; before any restore it
-    mints at once, as it always did."""
+    mints at once, as it always did.
+
+    Round 2: the order is SecureRouteRules.PortalPressAction's (harness cases
+    K1, K2, K3 and K3c), and this checks the press hands it the restored flag
+    and acts on its answer."""
     press = code_of(API, "public static void OpenTranslatePortal()")
-    cond = "if (route != null && route.Restored)"
-    assert press.count(cond) == 1, press
-    at = press.index(cond)
-    block = press[at:press.index("}", at)]
-    assert "Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());" in block and "return;" in block, block
-    assert press.index('if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))') < at, press
-    assert press.count("MintPortalSessionAndOpen();") == 1 and press.index("MintPortalSessionAndOpen();") > at, press
+    call = "var action = SecureRouteRules.PortalPressAction("
+    assert press.count(call) == 1, press
+    args = press[press.index(call):press.index(";", press.index(call))]
+    assert "route != null && route.Restored" in args, args
+    assert 'baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase)' in args, args
+    case = "case SecureRouteRules.PressAction.WaitThenMint:"
+    assert press.count(case) == 1, press
+    block = press[press.index(case):press.index("return;", press.index(case))]
+    assert "Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());" in block, block
+    assert press.count("MintPortalSessionAndOpen();") == 1, press
+    assert press.index("MintPortalSessionAndOpen();") > press.index(call), press
     wait = code_of(API, "private static IEnumerator OpenPortalWhenSessionReady()")
-    assert "while (string.IsNullOrEmpty(SteamAuth.SessionToken) && Time.realtimeSinceStartup < until)" in wait, wait
+    assert "while (!PortalSessionReady() && Time.realtimeSinceStartup < until)" in wait, wait
     assert wait.index("MintPortalSessionAndOpen();") > wait.index("while ("), wait
     finish = code_of(API, "private static void FinishPortalPress(SecureRouteRules.Conclusion c)")
     assert "host.StartCoroutine(OpenPortalWhenSessionReady());" in finish, finish
@@ -305,6 +313,26 @@ def test_the_probe_reads_the_whole_body_strictly():
     probe = code_of(API, "private static IEnumerator ProbeSecureRoute(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)")
     assert "reading.VersionParsed = SecureRouteRules.IsModVersionBody(body);" in probe, probe
     assert "ExtractJsonString" not in probe, probe
+
+
+def test_the_portal_press_asks_for_the_identity_only_before_a_mint():
+    """LOW 2: the press returned at once while the local identity was unknown
+    (the startup race), before it could start the secure check or show the
+    plaintext refusal, so the press did nothing. The route's press and the
+    rule's decision come first; the identity is an argument of the decision."""
+    press = code_of(API, "public static void OpenTranslatePortal()")
+    call = press.index("var action = SecureRouteRules.PortalPressAction(")
+    head = press[:call]
+    assert "return;" not in head.replace("if (Plugin.Instance == null) return;", ""), head
+    assert "route.PressPortal(" in head, head
+    args = press[call:press.index(";", call)]
+    assert '!string.IsNullOrEmpty(sid) && sid != "unknown"' in args, args
+    checking = press[press.index("case SecureRouteRules.PressAction.ShowChecking:"):]
+    checking = checking[:checking.index("return;")]
+    assert "SecureRouteText.Checking()" in checking and "RunSecureCheck(route, gen);" in checking, checking
+    refuse = press[press.index("case SecureRouteRules.PressAction.RefusePlaintext:"):]
+    refuse = refuse[:refuse.index("return;")]
+    assert "SecureRouteText.PlaintextOverride(baseUrl)" in refuse, refuse
 
 
 def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():

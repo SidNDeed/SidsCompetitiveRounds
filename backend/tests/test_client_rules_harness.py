@@ -269,10 +269,10 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[secureroute\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # 46 cases on the commit that added the suite, 64 since round 2 added
-    # the J, O and H cases; the floor is that count, not one far below it
-    # (#342). Raise it when cases are added.
-    assert run >= 64, "the SecureRouteRules suite shrank to %d cases" % run
+    # 46 cases on the commit that added the suite, 68 since round 2 added
+    # the J, O, K and H cases; the floor is that count, not one far below
+    # it (#342). Raise it when cases are added.
+    assert run >= 68, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -304,6 +304,9 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     "O4 a 401 to an unauthenticated retry on the backup spends no attempt while the secure route can return",
     "O5 with enforcement armed a report queued on the backup is delivered once, with the token, after the restore",
     "O5c control: the queued URL kept, as in round 1, posts to the backup until attempt 94 deletes the report",
+    # round 2: the portal press (LOW 2)
+    "K1 a press on the backup while the local identity is unknown still starts the check and shows it",
+    "K2 a press on an explicit plaintext address while the identity is unknown still names the address",
     "H1 a player's route never checks a plaintext address, loopback included",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",

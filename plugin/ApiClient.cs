@@ -2564,12 +2564,21 @@ namespace CompetitiveRounds
         private static IEnumerator OpenPortalWhenSessionReady()
         {
             float until = Time.realtimeSinceStartup + PortalSessionWaitSeconds;
-            while (string.IsNullOrEmpty(SteamAuth.SessionToken) && Time.realtimeSinceStartup < until)
+            while (!PortalSessionReady() && Time.realtimeSinceStartup < until)
             {
                 try { SteamAuth.MaybeRefresh(); } catch { }
                 yield return new WaitForSecondsRealtime(0.5f);
             }
             MintPortalSessionAndOpen();
+        }
+
+        /// <summary>A known local identity and a session token: what the portal
+        /// mint needs before it is worth sending.</summary>
+        private static bool PortalSessionReady()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return false;
+            return !string.IsNullOrEmpty(SteamAuth.SessionToken);
         }
 
         /// <summary>Bug 392 item A step 2: whether the server has said it
@@ -5871,48 +5880,59 @@ namespace CompetitiveRounds
         /// restore the press waits for the first secure session.</summary>
         public static void OpenTranslatePortal()
         {
-            string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            // The identity is asked only before a mint (Codex round 1 LOW 2):
+            // the secure check and the plaintext refusal need none, and asking
+            // first made a press during the startup identity race do nothing
+            // at all, with no toast. SecureRouteRules.PortalPressAction orders it.
+            if (Plugin.Instance == null) return;
             var route = _route;
+            SecureRouteRules.Press? press = null;
+            int gen = 0;
             if (route != null)
+                press = route.PressPortal(SecureProbeBase(), RealtimeNow(), SecureProbeOwner(), SecureRetrySeconds(), out gen);
+            string sid = MatchTracker.LocalSteamId;
+            var action = SecureRouteRules.PortalPressAction(
+                press, baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase),
+                route != null && route.Restored, !string.IsNullOrEmpty(sid) && sid != "unknown");
+            switch (action)
             {
-                int gen;
-                var press = route.PressPortal(SecureProbeBase(), RealtimeNow(), SecureProbeOwner(), SecureRetrySeconds(), out gen);
-                if (press == SecureRouteRules.Press.Checking || press == SecureRouteRules.Press.Joined)
-                {
+                case SecureRouteRules.PressAction.ShowChecking:
                     CompetitiveUI.ShowNotification(SecureRouteText.Checking(), Color.white, 9f);
                     Plugin.Log.LogInfo(press == SecureRouteRules.Press.Checking
                         ? "[SCR] portal button: on the backup connection, checking the secure route before opening"
                         : "[SCR] portal button: a secure route check is already running; the press waits for it");
                     if (press == SecureRouteRules.Press.Checking) RunSecureCheck(route, gen);
                     return;
-                }
+                case SecureRouteRules.PressAction.RefusePlaintext:
+                    // No check can help: an explicit plaintext BaseUrl (no
+                    // route), so the gate names the address instead of
+                    // promising one.
+                    CompetitiveUI.ShowNotification(SecureRouteText.PlaintextOverride(baseUrl), Color.yellow, 8f);
+                    return;
+                case SecureRouteRules.PressAction.WaitThenMint:
+                    // Back from the backup (the first secure session may not
+                    // have landed yet: SteamAuth requests one on its own loop
+                    // once the route returns), or the startup identity race:
+                    // wait for both, bounded, then mint.
+                    Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());
+                    return;
+                default:
+                    MintPortalSessionAndOpen();
+                    return;
             }
-            if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                // No route: an explicit plaintext BaseUrl, for which no check
-                // runs, so the gate names the address instead of promising one.
-                CompetitiveUI.ShowNotification(SecureRouteText.PlaintextOverride(baseUrl), Color.yellow, 8f);
-                return;
-            }
-            if (route != null && route.Restored)
-            {
-                // Back from the backup: the first secure session may not have
-                // landed yet (SteamAuth requests one on its own loop once the
-                // route returns), so the press waits for it, bounded, as the
-                // press that restored the route does.
-                Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());
-                return;
-            }
-            MintPortalSessionAndOpen();
         }
 
         /// <summary>The mint and the browser hand-off, behind the same gate. The
         /// base is read once, so the token is minted and opened on one host.</summary>
         private static void MintPortalSessionAndOpen()
         {
+            if (Plugin.Instance == null) return;
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown")
+            {
+                CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
+                return;
+            }
             string portalBase = baseUrl;
             if (!portalBase.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return;
             Plugin.Instance.StartCoroutine(PostRequest(

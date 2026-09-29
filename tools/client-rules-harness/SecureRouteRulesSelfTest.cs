@@ -681,6 +681,28 @@ namespace CompetitiveRounds
                       neverRun == "still queued after 400 sends, attempt 0", neverRun);
             }
 
+            // -- K: the portal press (Codex round 1 LOW 2) ------------------------
+            {
+
+                var clock = new FakeClock();
+                var route = BackupRoute(clock, TRetry);
+                int g;
+                var press = route.PressPortal(TSecure, clock.Now, TOwner, TRetry, out g);
+                var k1 = PortalPressAction(press, false, route.Restored, false);
+                Check(r, "K1 a press on the backup while the local identity is unknown still starts the check and shows it",
+                      press == Press.Checking && g != 0 && k1 == PressAction.ShowChecking, "press=" + press + " action=" + k1);
+                var k2 = PortalPressAction(null, false, false, false);
+                Check(r, "K2 a press on an explicit plaintext address while the identity is unknown still names the address",
+                      k2 == PressAction.RefusePlaintext, "action=" + k2);
+                var k3 = PortalPressAction(Press.OpenNow, true, false, false);
+                var k3c = PortalPressAction(Press.OpenNow, true, false, true);
+                var k4 = PortalPressAction(Press.OpenNow, true, true, true);
+                Check(r, "K3 on the secure base with the identity unknown the press waits for it and mints, never a silent no-op",
+                      k3 == PressAction.WaitThenMint, "action=" + k3);
+                Check(r, "K3c control: with the identity known the press mints at once; after a restore it waits for the session",
+                      k3c == PressAction.MintNow && k4 == PressAction.WaitThenMint, "known=" + k3c + " restored=" + k4);
+            }
+
             // -- H: the local witness harness's route ------------------------------
             {
                 const string loop = "http://127.0.0.1:18555";

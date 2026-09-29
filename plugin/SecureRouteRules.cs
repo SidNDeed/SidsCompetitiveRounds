@@ -488,6 +488,33 @@ namespace CompetitiveRounds
             return !(routeCanReturn && !requestCouldCarrySession && answered401);
         }
 
+        // -- The portal press (Codex round 1, LOW 2) ---------------------------
+
+        internal enum PressAction
+        {
+            /// <summary>A check was begun or joined: show "Checking...".</summary>
+            ShowChecking,
+            /// <summary>No route and a plaintext base: name the address.</summary>
+            RefusePlaintext,
+            /// <summary>Wait (bounded) for a known identity and a session token, then mint.</summary>
+            WaitThenMint,
+            MintNow,
+        }
+
+        /// <summary>What a Translate press does. `routePress` is the route's
+        /// answer, or null with no route. The identity is asked LAST: the
+        /// check and the plaintext refusal need none, and a press during the
+        /// startup identity race must still start the check or show the
+        /// refusal (LOW 2). After a restore, or before the identity is known,
+        /// the press waits for both before it mints.</summary>
+        internal static PressAction PortalPressAction(Press? routePress, bool baseIsHttps, bool restored, bool identityKnown)
+        {
+            if (routePress == Press.Checking || routePress == Press.Joined) return PressAction.ShowChecking;
+            if (!baseIsHttps) return PressAction.RefusePlaintext;
+            if (restored || !identityKnown) return PressAction.WaitThenMint;
+            return PressAction.MintNow;
+        }
+
         /// <summary>The local witness harness's stand-in for the secure route:
         /// plaintext to loopback only (127.0.0.1 or localhost), no user info.
         /// A Route accepts it only when built for that harness.</summary>
