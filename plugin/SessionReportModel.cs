@@ -266,10 +266,11 @@ namespace CompetitiveRounds
                 var sp = new Span { X0 = x0, X1 = x0 + dur };
                 x0 = sp.X1;
                 int gi = m.Spans.Count + 1;
-                if (m.Players.Count == 2)
+                int sa, sb;
+                if (PairScores(g, m.Players, out sa, out sb))
                 {
-                    string a = m.Players[0].Id, b = m.Players[1].Id;
-                    int sa = Get(g.Scores, a), sb = Get(g.Scores, b);
+                    // Two players who both have a key in this game (round 2 M1:
+                    // a missing key is never a 0; the standings below omit it).
                     if (sa > sb) setWins[0]++; else if (sb > sa) setWins[1]++;
                     sp.LabelShort = sa.ToString(INV) + "-" + sb.ToString(INV);
                     sp.LabelLong = ScoreLine(m, 0, sa, 1, sb);
@@ -816,18 +817,19 @@ namespace CompetitiveRounds
         /// dividers use.</summary>
         private static string BlockHeader(Model m, Game g, int number)
         {
-            if (m.Players.Count == 2)
-            {
-                int sa = Get(g.Scores, m.Players[0].Id), sb = Get(g.Scores, m.Players[1].Id);
+            int sa, sb;
+            if (PairScores(g, m.Players, out sa, out sb))
                 return I18n.TrF("Game {0}: {1}", number, ScoreLine(m, 0, sa, 1, sb));
-            }
             if (m.Kind == "team" || m.Kind == "ovt") return TeamScoreLabel(m, g, number, true);
             return FfaScoreLabel(m, g, number, true);
         }
 
         // ── small helpers ────────────────────────────────────────────────────
 
-        private static int Get(Dictionary<string, int> d, string k) { int v; return d.TryGetValue(k, out v) ? v : 0; }
+        // Round 2 M1: there is no "missing score reads 0" getter here. Every
+        // rendered score comes from SessionReportRules.PairScores, SideScore or
+        // Standings (executed by the client harness), which omit a player with
+        // no key in the game.
 
         private static float Val(Dictionary<string, float> d, string k) { float v; return d.TryGetValue(k, out v) ? v : float.NaN; }
 
@@ -848,18 +850,14 @@ namespace CompetitiveRounds
         /// <summary>Divider label for a two-SIDED game (2v2, 1v2): the recorded
         /// side scores — every player of a side carries the side's rounds — with
         /// the winning side's score in that side's first player's colour. Short
-        /// form for a narrow segment, long form names the sides.</summary>
+        /// form for a narrow segment, long form names the sides. A side with no
+        /// player who has a key in this game gives no score line (round 2 M1).</summary>
         private static string TeamScoreLabel(Model m, Game g, int gi, bool longForm)
         {
-            int p1 = -1, p2 = -1;
-            for (int i = 0; i < m.Players.Count; i++)
-            {
-                if (m.Players[i].Team == 1 && p1 < 0) p1 = i;
-                else if (m.Players[i].Team == 2 && p2 < 0) p2 = i;
-            }
+            int p1, p2;
+            int s1 = SideScore(g, m.Players, 1, out p1), s2 = SideScore(g, m.Players, 2, out p2);
             if (p1 < 0 || p2 < 0)
                 return longForm ? I18n.TrF("Game {0}", gi) : I18n.TrF("G{0}", gi);
-            int s1 = Get(g.Scores, m.Players[p1].Id), s2 = Get(g.Scores, m.Players[p2].Id);
             string a = s1.ToString(INV), b = s2.ToString(INV);
             if (s1 > s2) a = Coloured(m, p1, a);
             else if (s2 > s1) b = Coloured(m, p2, b);
@@ -870,19 +868,16 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Divider label for an N-player game (FFA): the recorded points,
-        /// best first, names in colour; at most four names, the rest counted.</summary>
+        /// best first, names in colour; at most four names, the rest counted.
+        /// Only the players who PLAYED this game (SessionReportRules.Standings):
+        /// a fluid lobby's union roster names players who sat it out, and they
+        /// are omitted here, never shown with a 0 (round 2 M1).</summary>
         private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)
         {
-            var order = new List<int>();
-            for (int i = 0; i < m.Players.Count; i++) order.Add(i);
-            order.Sort((x, y) =>
-            {
-                int c = Get(g.Scores, m.Players[y].Id).CompareTo(Get(g.Scores, m.Players[x].Id));
-                return c != 0 ? c : x.CompareTo(y);
-            });
+            var order = Standings(g, m.Players);
             if (order.Count == 0) return longForm ? I18n.TrF("Game {0}", gi) : I18n.TrF("G{0}", gi);
             if (!longForm)
-                return I18n.TrF("G{0} {1}", gi, Coloured(m, order[0], Get(g.Scores, m.Players[order[0]].Id).ToString(INV)));
+                return I18n.TrF("G{0} {1}", gi, Coloured(m, order[0], g.Scores[m.Players[order[0]].Id].ToString(INV)));
             var sb = new StringBuilder();
             int shown = Math.Min(4, order.Count);
             for (int k = 0; k < shown; k++)
@@ -890,7 +885,7 @@ namespace CompetitiveRounds
                 if (k > 0) sb.Append(", ");
                 int pi = order[k];
                 sb.Append(Coloured(m, pi, Safe(m.Players[pi].Name))).Append(' ')
-                  .Append(Get(g.Scores, m.Players[pi].Id).ToString(INV));
+                  .Append(g.Scores[m.Players[pi].Id].ToString(INV));
             }
             if (order.Count > shown) sb.Append(", ").Append(I18n.TrF("+{0} more", order.Count - shown));
             return I18n.TrF("Game {0}: {1}", gi, sb.ToString());

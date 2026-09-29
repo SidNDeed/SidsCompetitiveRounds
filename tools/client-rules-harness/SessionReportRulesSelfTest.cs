@@ -60,6 +60,7 @@ namespace CompetitiveRounds
             TeamCases(r);
             OvtCases(r);
             FfaCases(r);
+            PresenceCases(r);
             RobustnessCases(r);
             OverlayCases(r);
             LayoutCases(r);
@@ -167,6 +168,50 @@ namespace CompetitiveRounds
             List<Pt> kills = Stream(g0, A, "kills");
             Check(r, "ffa: the kills stream parses", kills != null && kills.Count == 2,
                   kills == null ? "no stream" : kills.Count + " samples");
+        }
+
+        // Round 2 M1: a game names only the players who PLAYED it. The FFA
+        // lobby is fluid: Charlie plays game 1 only, Delta joins in game 2 and
+        // Echo in game 3, so the union roster names two players game 1 lacks.
+        private static void PresenceCases(SelfTestResult r)
+        {
+            var e = Parse(FFA_LOBBY);
+            if (e == null || e.Games.Count != 3) { Check(r, "presence: the FFA lobby parses", false, "null"); return; }
+            Game g0 = e.Games[0], g1 = e.Games[1], g2 = e.Games[2];
+            string s0 = StandText(e, g0), s1 = StandText(e, g1), s2 = StandText(e, g2);
+            Check(r, "presence: a fluid lobby's game lists only who played it, best first (Delta joins in game 2)",
+                  s0 == "Alpha 3,Bravo 1,Charlie 0" && s1 == "Bravo 3,Alpha 1,Delta 0" && s2 == "Alpha 3,Bravo 1,Delta 0,Echo 0",
+                  "game 1 [" + s0 + "] game 2 [" + s1 + "] game 3 [" + s2 + "]");
+            Check(r, "presence (control): the union roster names two players game 1 does not have",
+                  e.Players.Count == 5 && !g0.Scores.ContainsKey(D) && !g0.Scores.ContainsKey(E) && g0.Scores.ContainsKey(C),
+                  "roster " + e.Players.Count + ", game 1 keys " + g0.Scores.Count);
+
+            var t = Parse(TEAM_SERIES);
+            if (t == null || t.Games.Count == 0) { Check(r, "presence: the 2v2 series parses", false, "null"); return; }
+            int at1, at2, h1, h2;
+            int s1s = SideScore(t.Games[0], t.Players, 1, out at1), s2s = SideScore(t.Games[0], t.Players, 2, out at2);
+            var half = new Game();
+            half.Scores[A] = 5;
+            int hs1 = SideScore(half, t.Players, 1, out h1), hs2 = SideScore(half, t.Players, 2, out h2);
+            Check(r, "presence: a side's score is its first playing seat's key; a side with no key has none",
+                  s1s == 5 && s2s == 3 && at1 == 0 && at2 == 2 && hs1 == 5 && h1 == 0 && hs2 == -1 && h2 == -1,
+                  "sides " + s1s + "@" + at1 + " " + s2s + "@" + at2 + "; one side keyed: " + hs1 + "@" + h1 + " " + hs2 + "@" + h2);
+
+            var p = Parse(RANKED_SERIES);
+            var lone = new Game();
+            lone.Scores[A] = 5;
+            int a, b;
+            bool full = p != null && p.Games.Count > 0 && PairScores(p.Games[0], p.Players, out a, out b);
+            bool one = p != null && PairScores(lone, p.Players, out a, out b);
+            Check(r, "presence: a two-player score line needs both keys", full && !one,
+                  "both keyed -> " + full + ", one keyed -> " + one);
+        }
+
+        private static string StandText(Envelope e, Game g)
+        {
+            var l = new List<string>();
+            foreach (int i in Standings(g, e.Players)) l.Add(e.Players[i].Name + " " + g.Scores[e.Players[i].Id].ToString(INV));
+            return string.Join(",", l.ToArray());
         }
 
         private static void RobustnessCases(SelfTestResult r)

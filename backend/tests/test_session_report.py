@@ -1703,6 +1703,31 @@ def test_the_race_grid_is_one_line_per_round_and_the_thin_line_is_gated():
     assert "if (line.Step)" in panel and "p.Dots[i]" in panel
 
 
+def test_a_game_names_only_the_players_who_played_it():
+    """Round 2 M1: a fluid FFA lobby's roster is the UNION of its games'
+    rosters, so a player can have no score key in a game. Every rendered
+    score of a game - its timeline divider, its builds block header and the
+    set's race line, which reuses the header - comes from the presence rules
+    the client harness executes (SessionReportRules.PairScores, SideScore,
+    Standings), which omit a player with no key; the model keeps no getter
+    that reads a missing key as 0. The harness's "presence" cases hold the
+    rules; this holds that the model renders through them."""
+    model = PLUGIN / "SessionReportModel.cs"
+    whole = strip_comments_only(model.read_text(encoding="utf-8"))
+    assert "Get(g.Scores" not in whole and "Get(Dictionary<string, int>" not in whole
+    assert not re.search(r"Scores\.TryGetValue\([^)]*\)\s*\?\s*\w+\s*:\s*0", whole), "a missing score read as 0"
+    ffa = _cs_body(model, "private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)")
+    assert "var order = Standings(g, m.Players);" in ffa
+    assert "m.Players.Count; i++" not in ffa, "the label enumerates the game's standings, not the roster"
+    team = _cs_body(model, "private static string TeamScoreLabel(Model m, Game g, int gi, bool longForm)")
+    assert "SideScore(g, m.Players, 1, out p1)" in team and "SideScore(g, m.Players, 2, out p2)" in team
+    header = _cs_body(model, "private static string BlockHeader(Model m, Game g, int number)")
+    assert "if (PairScores(g, m.Players, out sa, out sb))" in header
+    build = _cs_body(model, "internal static Model Build(Envelope env)")
+    assert build.count("if (PairScores(g, m.Players, out sa, out sb))") == 1
+    assert "if (m.Players.Count == 2)" not in build.split("m.Spans.Add(sp);")[0]
+
+
 # -- board row 30g: the broadcast account names a viewer ------------------------
 
 BROADCAST = next(iter(main.SPECTATE_BROADCAST_STEAM_IDS))

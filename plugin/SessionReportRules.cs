@@ -862,10 +862,62 @@ namespace CompetitiveRounds
             return g.Points.TryGetValue(players[1 - pi].Id, out o) ? o : -1;
         }
 
+        /// <summary>A 1v1 fighter's rounds for the replay maths, where both
+        /// fighters of every game carry a key. Never a label: a rendered score
+        /// goes through Standings / SideScore, which omit a missing key.</summary>
         internal static int Score(Game g, string id)
         {
             int v;
             return g.Scores.TryGetValue(id, out v) ? v : 0;
+        }
+
+        // -- round 2, M1: who played a game (pure) ----------------------------
+
+        /// <summary>The roster indices of the players who PLAYED game g (a
+        /// score key in it), best score first, roster order on a tie. A player
+        /// of a fluid lobby's union roster with no key in g sat that game out:
+        /// they are not in its standings, so no header, divider or row of that
+        /// game names them, and a missing key is never read as a score.</summary>
+        internal static List<int> Standings(Game g, IList<Player> players)
+        {
+            var order = new List<int>();
+            if (g == null || players == null) return order;
+            for (int i = 0; i < players.Count; i++)
+                if (g.Scores.ContainsKey(players[i].Id)) order.Add(i);
+            order.Sort((x, y) =>
+            {
+                int c = g.Scores[players[y].Id].CompareTo(g.Scores[players[x].Id]);
+                return c != 0 ? c : x.CompareTo(y);
+            });
+            return order;
+        }
+
+        /// <summary>A two-sided game's score for side `team` (every player of a
+        /// side carries the side's rounds): the key of the side's first roster
+        /// player who played g, and `at` that player's roster index; -1 (and
+        /// at = -1) when nobody of the side has a key in g.</summary>
+        internal static int SideScore(Game g, IList<Player> players, int team, out int at)
+        {
+            at = -1;
+            if (g == null || players == null) return -1;
+            for (int i = 0; i < players.Count; i++)
+            {
+                int v;
+                if (players[i].Team != team || !g.Scores.TryGetValue(players[i].Id, out v)) continue;
+                at = i;
+                return v;
+            }
+            return -1;
+        }
+
+        /// <summary>A two-player game's pair of scores, only when BOTH players
+        /// have a key in g; false otherwise (the caller then lists the
+        /// standings, which omit the one who did not play).</summary>
+        internal static bool PairScores(Game g, IList<Player> players, out int a, out int b)
+        {
+            a = b = 0;
+            return g != null && players != null && players.Count == 2
+                   && g.Scores.TryGetValue(players[0].Id, out a) && g.Scores.TryGetValue(players[1].Id, out b);
         }
 
         internal static List<Pt> Stream(Game g, string id, string name)
