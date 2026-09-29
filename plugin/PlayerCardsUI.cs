@@ -3060,7 +3060,6 @@ namespace CompetitiveRounds
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
                 settingsCardInFlight = false;
-                settingsCardAt = Now;
                 Texture2D tex = ok ? PlayerCardFaces.DecodeOwned(data, "card", true) : null;
                 if (tex != null)
                 {
@@ -3071,6 +3070,7 @@ namespace CompetitiveRounds
                         SettingsCardDrop();
                         settingsCardTex = tex; settingsCardSprite = spr;
                         settingsCardKey = want; settingsCardState = SC_CARD; settingsCardRetryAt = 0f;
+                        settingsCardAt = Now;
                         Plugin.Log.LogInfo($"[PC] settings card: {tex.width}x{tex.height} ({want})");
                         NativeUI.MarkDirty();
                         return;
@@ -3078,9 +3078,12 @@ namespace CompetitiveRounds
                 }
                 if (ok || code != 404)
                 {
-                    // Not drawn, or drawn but not the card size: a card already
-                    // held stays up (its key says whether it is still current),
-                    // and the next try is thirty seconds out.
+                    // Not drawn, or drawn but not the card size. settingsCardAt
+                    // stays the time of the last card DRAWN, so a failed refresh
+                    // of a held card leaves it stale and the next try comes at
+                    // the retry time, thirty seconds out (asks-b round 2, L3).
+                    // A card already held stays up, captioned as not loaded
+                    // (SettingsCardView) until a fetch succeeds.
                     settingsCardState = SC_UNAVAILABLE;
                     settingsCardRetryAt = Now + 30f;
                     Plugin.Log.LogWarning($"[PC] settings card: not drawn (HTTP {code}); retry in 30 s");
@@ -3091,6 +3094,7 @@ namespace CompetitiveRounds
                     // this player to show until the next snapshot takes them.
                     SettingsCardDrop();
                     settingsCardKey = want; settingsCardState = SC_NOT_IN_POOL;
+                    settingsCardAt = Now;
                     settingsCardRetryAt = Now + 300f;
                     Plugin.Log.LogInfo("[PC] settings card: not in the pool yet");
                 }
@@ -3116,7 +3120,8 @@ namespace CompetitiveRounds
         /// A new look on its way: the live picture (the held card until a
         /// render exists), with the pending line. Otherwise the server's card
         /// whenever the one held is for the current key -- with a line saying
-        /// other players still see it when the picture on screen differs from
+        /// it could not be loaded when its last refresh failed, or that other
+        /// players still see it when the picture on screen differs from
         /// the one the server holds (a render that was not sent; the note below
         /// the row says why). No card for this key: not in the pool, a refused
         /// fetch, or one still on its way, each with its own line, over the
@@ -3137,6 +3142,14 @@ namespace CompetitiveRounds
             if (held != null && me != null && settingsCardKey == SettingsCardWant(me))
             {
                 show = held;
+                if (settingsCardState == SC_UNAVAILABLE)
+                {
+                    // Its last refresh failed (asks-b round 2, L3): the card
+                    // on show is the last one drawn, not known to be current,
+                    // and the tick asks again at the retry time.
+                    cap = I18n.Tr("Your card could not be loaded right now - it is tried again shortly.");
+                    return;
+                }
                 string ld = PortraitRender.PreviewDescriptor;
                 bool unsent = live != null && ld != null && ld != (me.portrait_descriptor ?? "");
                 cap = unsent

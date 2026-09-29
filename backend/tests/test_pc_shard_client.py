@@ -21,6 +21,11 @@ Row 25 -- the batch shard:
       Select mode is claimed before it picks;
   G7  the last copy is a confirmation, never a block: the second click sends;
   G8  the toast names the total the server credited, from its answer.
+Row 24, round 2 of the review:
+  G10 a failed refresh leaves the held card stale (only a card drawn, or the
+      pool's 404, sets the fetch time), so the next try comes at the retry
+      time thirty seconds out, and the held card is captioned as not loaded
+      while its last refresh has failed (finding 3).
 Both rows:
   G9  every new string is in all four catalogues with its placeholders, and
       in the extractor's registry.
@@ -220,6 +225,30 @@ def gate_g8_the_toast_names_the_credited_total(s):
     assert "ShardTotal(" not in done, "the toast reports the client's estimate, not the server's credit"
 
 
+def gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so(s):
+    tick = _member(s["ui"], "private static void SettingsCardTick(")
+    assert "bool stale = want != settingsCardKey || Now - settingsCardAt > 300f;" in tick
+    assert "if (!stale || Now < settingsCardRetryAt) return;" in tick
+    drawn = _at(tick, "settingsCardKey = want; settingsCardState = SC_CARD; settingsCardRetryAt = 0f;",
+                "the tick no longer records a drawn card")
+    refused = _at(tick, "if (ok || code != 404)", "the tick no longer tells a refusal from the pool's 404")
+    missing = _at(tick, "settingsCardKey = want; settingsCardState = SC_NOT_IN_POOL;", "the pool's 404 moved")
+    stamps = [m.start() for m in re.finditer(re.escape("settingsCardAt = Now;"), tick)]
+    assert len(stamps) == 2 and drawn < stamps[0] < refused < missing < stamps[1], (
+        "a failed refresh marks the card fresh: only a card drawn or the pool's 404 may set settingsCardAt")
+    branch = tick[refused:missing]
+    assert "settingsCardState = SC_UNAVAILABLE;" in branch and "settingsCardRetryAt = Now + 30f;" in branch, (
+        "a failed refresh no longer sets the unavailable state and the thirty-second retry")
+    view = _member(s["ui"], "private static void SettingsCardView(")
+    held = _at(view, "if (held != null && me != null && settingsCardKey == SettingsCardWant(me))",
+               "the held card is no longer checked against the key")
+    current = _at(view, 'I18n.Tr("Your card as other players see it.")', "the current-card caption moved")
+    block = view[held:current]
+    assert "if (settingsCardState == SC_UNAVAILABLE)" in block and \
+        'I18n.Tr("Your card could not be loaded right now - it is tried again shortly.")' in block, (
+            "the held card keeps a current-card caption after its refresh failed")
+
+
 NEW_KEYS = [
     "Saving your new picture - your card updates here once it has been sent.",
     "Other players still see this card: your new picture was not sent (the note below says why).",
@@ -301,7 +330,8 @@ GATES = [gate_g1_the_preview_requests_the_card_variant,
          gate_g6_click_guards,
          gate_g7_the_last_copy_is_a_confirmation,
          gate_g8_the_toast_names_the_credited_total,
-         gate_g9_every_new_string_is_in_every_catalogue]
+         gate_g9_every_new_string_is_in_every_catalogue,
+         gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -408,6 +438,23 @@ MUTATIONS = [
      '            ["Sure? +{0} shards"] = "S\\u00e4ker? sk\\u00e4rvor",\n',
      '            ["Sure? +{0} shards"] = "S\\u00e4ker?  +{0} sk\\u00e4rvor",\n',
      "SV changes the placeholders of 'Sure? +{0} shards'"),
+    # Round 2, finding 3. M24i is the round-1 order restored (the callback
+    # stamped the fetch time before it knew the answer): the negative control.
+    ("M24i", gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so, "ui",
+     "                settingsCardInFlight = false;\n                Texture2D tex = ok ?",
+     "                settingsCardInFlight = false;\n                settingsCardAt = Now;\n                Texture2D tex = ok ?",
+     "                settingsCardInFlight = false;   // the answer is in\n                Texture2D tex = ok ?",
+     "a failed refresh marks the card fresh"),
+    ("M24j", gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so, "ui",
+     "                if (settingsCardState == SC_UNAVAILABLE)\n                {\n",
+     "                if (false)\n                {\n",
+     "                if (settingsCardState == SC_UNAVAILABLE)   // its refresh failed\n                {\n",
+     "the held card keeps a current-card caption after its refresh failed"),
+    ("M24k", gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so, "ui",
+     "                    settingsCardState = SC_UNAVAILABLE;\n                    settingsCardRetryAt = Now + 30f;\n",
+     "                    settingsCardState = SC_UNAVAILABLE;\n                    settingsCardRetryAt = Now + 300f;\n",
+     "                    settingsCardState = SC_UNAVAILABLE;\n                    settingsCardRetryAt = Now + 30f;   // thirty seconds out\n",
+     "a failed refresh no longer sets the unavailable state and the thirty-second retry"),
 ]
 
 
