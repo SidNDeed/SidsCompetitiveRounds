@@ -52,10 +52,16 @@ def test_both_sources_take_the_slider_through_the_ceiling():
     assert body.count("MusicLevels.SliderGain(VolumeStepPercent)") == 1
     assert re.search(r"float mult = MusicLevels\.SliderGain\(VolumeStepPercent\);", body)
     assert len(re.findall(r"\bmult\s*=", body)) == 1, "mult has a second writer"
-    assert re.search(r"float mainVolume = mult \* baseGain \*", body)
+    # Round 2 (M1): the clip's measured gain MULTIPLIES the slider law on both
+    # sources; it never replaces it.
+    assert re.search(r"float mainVolume = mult \* s\.mainTrackGain \* baseGain \*", body)
     assert "m.volume = mainVolume;" in body
-    assert "p.volume = mult * baseGain;" in body, "the preview source bypasses the ceiling"
+    assert "p.volume = mult * s.previewTrackGain * baseGain;" in body, (
+        "the preview source bypasses the ceiling or its clip's gain")
     assert "pctFrac" not in body, "the uncapped pre-1.41 law is still in the tick"
+
+
+PREVIEW_WRITE = "mult * s.previewTrackGain * baseGain"
 
 
 def test_nothing_else_sets_a_music_source_gain():
@@ -63,9 +69,83 @@ def test_nothing_else_sets_a_music_source_gain():
     before a Play or UnPause; a third path writing a gain would bypass the
     ceiling."""
     writes = [w.strip() for w in re.findall(r"\.volume\s*=\s*([^;]+);", code_of(_plugin(ENGINE)))]
-    others = [w for w in writes if w not in ("0f", "mainVolume", "mult * baseGain")]
+    others = [w for w in writes if w not in ("0f", "mainVolume", PREVIEW_WRITE)]
     assert not others, others
-    assert writes.count("mainVolume") == 1 and writes.count("mult * baseGain") == 1, writes
+    assert writes.count("mainVolume") == 1 and writes.count(PREVIEW_WRITE) == 1, writes
+
+
+# -- round 2, M1: the per-clip gain table ------------------------------------
+
+def _levels_table():
+    """(target, [(clip, rms, peak, gain)]) parsed from MusicLevels.cs."""
+    code = code_of(_plugin("MusicLevels.cs"))
+    t = re.search(r"internal const float TRACK_TARGET_RMS_DBFS\s*=\s*(-?[0-9.]+)f\s*;", code)
+    assert t, "no TRACK_TARGET_RMS_DBFS"
+    body = code.split("internal static readonly TrackLevel[] TrackLevels", 1)[1].split("};", 1)[0]
+    rows = [(c, float(r), float(p), float(g)) for c, r, p, g in re.findall(
+        r'new TrackLevel\("([^"]+)",\s*(-?[0-9.]+)f,\s*(-?[0-9.]+)f,\s*([0-9.]+)f\)', body)]
+    assert len(rows) == body.count("new TrackLevel("), "a table row the parser cannot read"
+    return float(t.group(1)), rows
+
+
+def _catalog_clips():
+    code = code_of(_plugin("MusicCatalog.cs"))
+    clips = re.findall(r'OggFile = "([^"]+)"', code) + re.findall(r'PreviewFile = "([^"]+)"', code)
+    assert clips and len(clips) == len(set(clips)), "the catalog names a clip twice"
+    return clips
+
+
+def test_every_clip_the_album_catalog_names_has_a_table_entry():
+    """The structure gate: a clip the catalog (and, where the asset manifest is
+    on disk, the manifest) names with no measured row fails here, never
+    silently plays at gain 1."""
+    _target, rows = _levels_table()
+    table = [c for c, _r, _p, _g in rows]
+    assert len(table) == len(set(table)), "a clip has two rows"
+    catalog = _catalog_clips()
+    assert sorted(table) == sorted(catalog), (
+        "missing: %s; extra: %s" % (sorted(set(catalog) - set(table)), sorted(set(table) - set(catalog))))
+    manifest = os.path.join(PLUGIN, "music", "manifest.json")
+    if os.path.exists(manifest):
+        import json
+        with io.open(manifest, encoding="utf-8") as fh:
+            oggs = [k for k in json.load(fh) if k.endswith(".ogg")]
+        assert sorted(oggs) == sorted(table), sorted(set(oggs) ^ set(table))
+
+
+def test_the_shipped_gains_bring_every_clip_within_3_db_of_one_target():
+    """Recomputes each gain from its recorded measurement and the ONE target,
+    and the post-gain RMS spread over the full tracks and over the previews."""
+    import math
+    target, rows = _levels_table()
+    for clip, rms, _peak, gain in rows:
+        want = 10 ** ((target - rms) / 20.0)
+        assert abs(gain - want) <= 0.00051, (clip, gain, round(want, 4))
+    for previews in (False, True):
+        post = [rms + 20 * math.log10(gain) for clip, rms, _p, gain in rows
+                if clip.endswith("_preview.ogg") == previews]
+        assert len(post) == 21, len(post)
+        spread = max(post) - min(post)
+        assert spread <= 3.0, ("previews" if previews else "tracks", round(spread, 3))
+    # the measurement the bar was judged on: without the table, 3.13 dB
+    full = [rms for clip, rms, _p, _g in rows if not clip.endswith("_preview.ogg")]
+    assert max(full) - min(full) > 3.0, "the recorded measurements no longer need the table"
+
+
+def test_the_engine_resolves_each_clips_gain_at_every_start_and_logs_it():
+    arm = code_of(_plugin(ENGINE), "private static void ArmFade()")
+    assert "s.mainTrackGain = s.current.HasValue ? ResolveTrackGain(s.current.Value, false) : 1f;" in arm
+    code = code_of(_plugin(ENGINE))
+    assert code.count("s.previewTrackGain = ResolveTrackGain(s.previewTrack.Value, true);") == 1
+    pre = code.split("s.previewTrackGain = ResolveTrackGain(s.previewTrack.Value, true);", 1)[1][:80]
+    assert "p.Play();" in pre, "the preview's gain is not resolved at its start"
+    assert len(re.findall(r"\bmainTrackGain\s*=[^=]", code)) == 2   # the field's 1f and ArmFade
+    assert len(re.findall(r"\bpreviewTrackGain\s*=[^=]", code)) == 2
+    res = code_of(_plugin(ENGINE), "private static float ResolveTrackGain(TrackRef t, bool preview)")
+    assert "MusicLevels.TryTrackGain(clip, out gain)" in res
+    assert "preview ? album.Tracks[t.Idx].PreviewFile : album.Tracks[t.Idx].OggFile" in res
+    assert res.count('"[MUSIC] level "') == 3, "one [MUSIC] line per start naming the clip and its gain"
+    assert "LogLevel.Warning" in res, "a clip without a row must not play at 1 silently"
 
 
 def test_the_slider_doc_no_longer_claims_vanilla_parity():
@@ -148,7 +228,6 @@ def test_arm_fade_consumes_the_pending_long_fade_once():
     assert body.count(decide) == 1 and body.count(consume) == 1
     assert body.index(decide) < body.index(consume)
     assert "[MUSIC-FADE] armed long" in body and "[MUSIC-FADE] armed short" in body
-
 
 def test_the_envelope_is_the_harnessed_math():
     body = _tick()

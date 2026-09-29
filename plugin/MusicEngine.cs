@@ -251,6 +251,10 @@ namespace CompetitiveRounds
             public bool fadeLong;
             public bool menuAudible;
             public bool longFadePending;
+            // Round 2 (M1): the measured per-clip gain of what Main and Preview
+            // play (MusicLevels.TrackLevels), resolved at every start.
+            public float mainTrackGain = 1f;
+            public float previewTrackGain = 1f;
             public float fadeSampleNext;                // next long-fade progress that logs a [MUSIC-FADE] sample
             public float fadeAudibleSec;                // audible seconds the current envelope has counted
             // previewSlot Pending bookkeeping (r1 MEDIUM 9): a pending preview
@@ -1984,6 +1988,7 @@ namespace CompetitiveRounds
                             p.clip = e.Clip;
                             try { p.mute = false; } catch { }   // undo any hard-silence fallback
                             try { p.time = 0f; } catch { }
+                            s.previewTrackGain = ResolveTrackGain(s.previewTrack.Value, true);
                             p.Play();
                             s.previewStarted = true;
                             s.previewStartedRt = rt;
@@ -2068,11 +2073,12 @@ namespace CompetitiveRounds
                 if (s.fadeProgress >= 1f) { s.fadeProgress = 1f; s.fadeActive = false; }
                 fade = MusicLevels.FadeGain(s.fadeProgress, s.fadeLong);
             }
-            float mainVolume = mult * baseGain * Mathf.Lerp(1f, DUCK_VOLUME, s.duckLevel) * fade;
+            // Round 2 (M1): the clip's measured gain multiplies the slider law.
+            float mainVolume = mult * s.mainTrackGain * baseGain * Mathf.Lerp(1f, DUCK_VOLUME, s.duckLevel) * fade;
             if (m != null) m.volume = mainVolume;
             if (s.fadeLong && s.fadeProgress >= s.fadeSampleNext) LogLongFadeSample(mainVolume, fade);
             var p = h.Preview;
-            if (p != null) p.volume = mult * baseGain;
+            if (p != null) p.volume = mult * s.previewTrackGain * baseGain;
             var lpf = h.Lpf;
             if (lpf != null)
             {
@@ -2669,6 +2675,44 @@ namespace CompetitiveRounds
                 ? "[MUSIC-FADE] armed long " + MusicLevels.LONG_FADE_SECONDS.ToString("0.0", LvlInv)
                   + " s perceptual (first track after a silent main menu) ctx=" + s.ctx
                 : "[MUSIC-FADE] armed short " + MusicLevels.SHORT_FADE_SECONDS.ToString("0.0", LvlInv) + " s ctx=" + s.ctx);
+            // Round 2 (M1): the clip that starts takes its measured gain.
+            s.mainTrackGain = s.current.HasValue ? ResolveTrackGain(s.current.Value, false) : 1f;
+        }
+
+        /// <summary>Round 2 (M1): the measured gain of a track's clip
+        /// (MusicLevels.TrackLevels), logged once per start as a [MUSIC] line
+        /// naming the clip. A vanilla-soundtrack track keeps gain 1: the game's
+        /// own clips are the calibration reference, not custom clips. A custom
+        /// clip the table does not carry plays at 1 with a warning (the
+        /// structure gate refuses such a catalog before it ships).</summary>
+        private static float ResolveTrackGain(TrackRef t, bool preview)
+        {
+            string role = preview ? "preview" : "main";
+            if (IsVanillaSku(t.Sku))
+            {
+                string raw = "?";
+                try { if (t.Idx >= 0 && t.Idx < S.vanillaTracks.Count) raw = S.vanillaTracks[t.Idx].RawName; } catch { }
+                SafeLog(LogLevel.Info, "[MUSIC] level " + role + ": clip=" + raw + " gain=1.0000 (the game's own soundtrack, the calibration reference)");
+                return 1f;
+            }
+            string clip = null;
+            try
+            {
+                var album = MusicCatalog.Get(t.Sku);
+                if (album != null && album.Tracks != null && t.Idx >= 0 && t.Idx < album.Tracks.Length && album.Tracks[t.Idx] != null)
+                    clip = preview ? album.Tracks[t.Idx].PreviewFile : album.Tracks[t.Idx].OggFile;
+            }
+            catch { }
+            float gain;
+            if (!MusicLevels.TryTrackGain(clip, out gain))
+            {
+                SafeLog(LogLevel.Warning, "[MUSIC] level " + role + ": clip=" + (clip ?? "?") + " (" + t + ") has no measured gain; playing at 1.0000");
+                return 1f;
+            }
+            SafeLog(LogLevel.Info, "[MUSIC] level " + role + ": clip=" + clip + " gain=" + gain.ToString("0.0000", LvlInv)
+                + " (" + (20.0 * Math.Log10(gain)).ToString("+0.00;-0.00", LvlInv) + " dB to "
+                + MusicLevels.TRACK_TARGET_RMS_DBFS.ToString("0.00", LvlInv) + " dBFS RMS)");
+            return gain;
         }
 
         /// <summary>Item 23b witness: one [MUSIC-FADE] line per tenth of the
@@ -4735,6 +4779,7 @@ namespace CompetitiveRounds
             SafeLog(LogLevel.Info, "[MUSIC-LEVEL] window=" + _tsF0.ToString("0.0", LvlInv) + "s frames=" + _lvlFrames
                 + " rms_dbfs=" + rmsDb + " peak_dbfs=" + peakDb + " ctx=" + S.ctx + " mode=" + S.mode
                 + " slider=" + VolumeStepPercent + " ceiling=" + MusicLevels.VOLUME_CEILING.ToString("0.00", LvlInv)
+                + " trackGain=" + S.mainTrackGain.ToString("0.0000", LvlInv)
                 + " mixerRouted=" + S.mixerRouted + " main{" + main + "} voices{" + TsMusicVoices() + " }");
             SafeLog(LogLevel.Info, "[MUSIC-LEVEL] events " + TsMusicEvents());
             TsEnd(true, "rms_dbfs=" + rmsDb + " peak_dbfs=" + peakDb);

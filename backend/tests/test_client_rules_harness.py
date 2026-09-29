@@ -661,9 +661,10 @@ def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[musiclevels\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The suite ran 18 cases on the commit that added it and 26 once the
-    # measured levels and the volume migration joined (#342).
-    assert run >= 26, "the MusicLevels suite shrank to %d cases" % run
+    # The suite ran 18 cases on the commit that added it, 26 once the
+    # measured levels and the volume migration joined, and 34 once round 2's
+    # per-clip gains joined (#342).
+    assert run >= 34, "the MusicLevels suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -693,6 +694,15 @@ def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
     "a one-second hitch counts as a tenth of a second",
     "a zero or negative frame does not advance the fade",
     "the short envelope reaches full gain well before 2.5 s (control)",
+    # round 2, M1: the per-clip gains
+    "every catalog clip's gain brings it to the one target",
+    "the full tracks' post-gain RMS spread is at most 3.0 dB",
+    "the previews' post-gain RMS spread is at most 3.0 dB",
+    "one global gain leaves the full tracks over 3 dB apart (control)",
+    "the default percent plays a custom clip within 1 dB of the calibration point",
+    "no clip peaks at or above 0 dBFS at the slider's 100 after its gain",
+    "a target 4 dB higher would peak over full scale at 100 (control)",
+    "every table clip is found and an unknown clip reads false at gain 1",
 ])
 def test_the_music_levels_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "musiclevels")

@@ -39,6 +39,19 @@ namespace CompetitiveRounds
     /// it always had. The first start after a silent main menu (the menu to
     /// game transition) takes LONG_FADE_SECONDS on the squared curve, the same
     /// law the slider uses, so the first note is not at full volume.
+    ///
+    /// Per-clip level (round 2). The custom clips differ among themselves by
+    /// 3.13 dB RMS (the full tracks; 4.22 dB with the previews), over the 3 dB
+    /// bar, so every clip the album catalog names carries its own linear gain
+    /// to ONE target, TRACK_TARGET_RMS_DBFS, in TrackLevels; the engine
+    /// multiplies it into the slider law and never replaces the law with it.
+    /// The target is the whole-clip RMS of the game's own round clip the
+    /// slider was calibrated against (CALIBRATION_CLIP_RMS_DBFS), so at the
+    /// default percent a custom clip plays where that clip plays: the
+    /// soundtrack's level. Measured once per clip by one method: the whole
+    /// clip decoded at its native rate and channel count, RMS over every
+    /// sample of every channel pooled (no window, no weighting), peak the
+    /// largest absolute sample, both in dBFS.
     /// </summary>
     internal static class MusicLevels
     {
@@ -69,6 +82,109 @@ namespace CompetitiveRounds
         /// <summary>One frame never counts for more than this, so a hitch
         /// (a scene load, a decode) cannot jump the envelope to full gain.</summary>
         internal const float MAX_FRAME_SECONDS = 0.1f;
+
+        // -- per-clip level (round 2) -----------------------------------------
+
+        /// <summary>The whole-clip RMS of MUS_Level_Limits_Of_The_Possible_Game,
+        /// the game's own round clip the slider was calibrated against.</summary>
+        internal const float CALIBRATION_CLIP_RMS_DBFS = -9.55f;
+
+        /// <summary>That clip at SOUNDTRACK_SOURCE_GAIN, measured at the game's
+        /// output on the broadcast seat (game sliders at max: mixer master
+        /// +16 dB, music +10 dB): the soundtrack's level.</summary>
+        internal const float CALIBRATION_OUTPUT_RMS_DBFS = -23.50f;
+
+        /// <summary>The ONE RMS every custom clip is brought to. Equal to the
+        /// calibration clip's own RMS, so the default percent keeps playing a
+        /// custom clip at the soundtrack's level; at the slider's 100 the
+        /// loudest peak after its gain stays 3.5 dB under full scale at the
+        /// game's output, so the target did not have to come down.</summary>
+        internal const float TRACK_TARGET_RMS_DBFS = -9.55f;
+
+        /// <summary>One measured clip: its file name (MusicTrackDef.OggFile or
+        /// PreviewFile), the measured RMS and peak in dBFS, and the linear gain
+        /// 10^((TRACK_TARGET_RMS_DBFS - RmsDbfs) / 20), rounded to four places.</summary>
+        internal sealed class TrackLevel
+        {
+            internal readonly string Clip;
+            internal readonly float RmsDbfs;
+            internal readonly float PeakDbfs;
+            internal readonly float Gain;
+            internal TrackLevel(string clip, float rmsDbfs, float peakDbfs, float gain)
+            {
+                Clip = clip; RmsDbfs = rmsDbfs; PeakDbfs = peakDbfs; Gain = gain;
+            }
+        }
+
+        /// <summary>Every clip the album catalog names (MusicCatalog.Albums:
+        /// each track's OggFile and PreviewFile), measured 2026-09-29 from the
+        /// shipped bytes (hash-checked against the catalog and the asset
+        /// manifest). A catalog clip missing here fails the structure gate
+        /// (test_music_levels_client.py); a re-mastered clip is re-measured and
+        /// its row replaced in the same change as its hash.</summary>
+        internal static readonly TrackLevel[] TrackLevels = new[]
+        {
+            new TrackLevel("mus_ar_01_a_very_heavy_vintage_indeed.ogg", -12.11f, -1.13f, 1.3428f),
+            new TrackLevel("mus_ar_01_a_very_heavy_vintage_indeed_preview.ogg", -11.34f, -0.15f, 1.2289f),
+            new TrackLevel("mus_ar_02_combo_of_the_doom.ogg", -12.62f, -1.06f, 1.4240f),
+            new TrackLevel("mus_ar_02_combo_of_the_doom_preview.ogg", -10.83f, 0.25f, 1.1588f),
+            new TrackLevel("mus_ar_03_take_me_head_on.ogg", -13.13f, -0.85f, 1.5101f),
+            new TrackLevel("mus_ar_03_take_me_head_on_preview.ogg", -12.04f, -0.99f, 1.3320f),
+            new TrackLevel("mus_ar_04_stealing_the_lead.ogg", -11.07f, -1.70f, 1.1912f),
+            new TrackLevel("mus_ar_04_stealing_the_lead_preview.ogg", -10.19f, -0.96f, 1.0765f),
+            new TrackLevel("mus_ar_05_push_it_even_further.ogg", -10.48f, -1.53f, 1.1130f),
+            new TrackLevel("mus_ar_05_push_it_even_further_preview.ogg", -9.39f, -1.45f, 0.9817f),
+            new TrackLevel("mus_ar_06_set_to_deep_fry.ogg", -10.62f, -1.53f, 1.1311f),
+            new TrackLevel("mus_ar_06_set_to_deep_fry_preview.ogg", -9.43f, -0.77f, 0.9863f),
+            new TrackLevel("mus_ar_07_another_round.ogg", -11.28f, -0.90f, 1.2204f),
+            new TrackLevel("mus_ar_07_another_round_preview.ogg", -10.91f, -1.03f, 1.1695f),
+            new TrackLevel("mus_cb_01_clavar_la_bala.ogg", -12.80f, 0.29f, 1.4538f),
+            new TrackLevel("mus_cb_01_clavar_la_bala_preview.ogg", -12.01f, 0.40f, 1.3274f),
+            new TrackLevel("mus_cb_02_a_cinco_rondas.ogg", -13.09f, 0.08f, 1.5031f),
+            new TrackLevel("mus_cb_02_a_cinco_rondas_preview.ogg", -12.30f, 0.13f, 1.3725f),
+            new TrackLevel("mus_cb_03_a_cinco_rondas_ii.ogg", -13.38f, 0.00f, 1.5542f),
+            new TrackLevel("mus_cb_03_a_cinco_rondas_ii_preview.ogg", -12.42f, 0.61f, 1.3916f),
+            new TrackLevel("mus_cb_04_bloqueo_perfecto.ogg", -12.96f, -0.10f, 1.4808f),
+            new TrackLevel("mus_cb_04_bloqueo_perfecto_preview.ogg", -11.96f, 1.01f, 1.3198f),
+            new TrackLevel("mus_cb_05_el_que_pierde_elige.ogg", -13.06f, 0.15f, 1.4980f),
+            new TrackLevel("mus_cb_05_el_que_pierde_elige_preview.ogg", -12.19f, 0.49f, 1.3552f),
+            new TrackLevel("mus_cb_06_el_que_pierde_elige_ii.ogg", -13.05f, 0.40f, 1.4962f),
+            new TrackLevel("mus_cb_06_el_que_pierde_elige_ii_preview.ogg", -12.01f, 0.42f, 1.3274f),
+            new TrackLevel("mus_cb_07_corona_prestada.ogg", -12.82f, -0.32f, 1.4571f),
+            new TrackLevel("mus_cb_07_corona_prestada_preview.ogg", -11.20f, 0.63f, 1.2092f),
+            new TrackLevel("mus_cb_08_corona_prestada_ii.ogg", -12.76f, -0.24f, 1.4471f),
+            new TrackLevel("mus_cb_08_corona_prestada_ii_preview.ogg", -11.63f, 0.22f, 1.2706f),
+            new TrackLevel("mus_cb_09_la_distancia_para_una_revancha.ogg", -12.80f, -0.07f, 1.4538f),
+            new TrackLevel("mus_cb_09_la_distancia_para_una_revancha_preview.ogg", -12.02f, 0.76f, 1.3289f),
+            new TrackLevel("mus_cb_10_muerte_subita.ogg", -12.98f, -0.04f, 1.4842f),
+            new TrackLevel("mus_cb_10_muerte_subita_preview.ogg", -12.29f, 0.29f, 1.3709f),
+            new TrackLevel("mus_cb_11_muerte_subita_ii.ogg", -12.94f, -0.08f, 1.4774f),
+            new TrackLevel("mus_cb_11_muerte_subita_ii_preview.ogg", -11.74f, 0.22f, 1.2868f),
+            new TrackLevel("mus_cb_12_muerte_subita_iii.ogg", -12.59f, 0.00f, 1.4191f),
+            new TrackLevel("mus_cb_12_muerte_subita_iii_preview.ogg", -11.63f, -0.20f, 1.2706f),
+            new TrackLevel("mus_cb_13_principio_de_ronda.ogg", -13.61f, 0.32f, 1.5959f),
+            new TrackLevel("mus_cb_13_principio_de_ronda_preview.ogg", -13.12f, 0.40f, 1.5083f),
+            new TrackLevel("mus_cb_14_nube_toxica.ogg", -12.76f, -0.17f, 1.4471f),
+            new TrackLevel("mus_cb_14_nube_toxica_preview.ogg", -11.88f, 0.15f, 1.3077f),
+        };
+
+        /// <summary>The measured gain of a catalog clip. False (gain 1) for a
+        /// clip the table does not carry: the caller logs it, and the
+        /// structure gate keeps a shipped catalog from ever reaching it.</summary>
+        internal static bool TryTrackGain(string clip, out float gain)
+        {
+            gain = 1f;
+            if (string.IsNullOrEmpty(clip)) return false;
+            for (int i = 0; i < TrackLevels.Length; i++)
+            {
+                if (string.Equals(TrackLevels[i].Clip, clip, System.StringComparison.Ordinal))
+                {
+                    gain = TrackLevels[i].Gain;
+                    return true;
+                }
+            }
+            return false;
+        }
 
         /// <summary>Source gain for a slider percent: the squared law times the
         /// ceiling. Values outside 0..100 clamp.</summary>
@@ -284,7 +400,100 @@ namespace CompetitiveRounds
                   ctlAt > 0f && ctlAt < LONG_FADE_SECONDS - 1f,
                   "reached=" + F(ctlAt) + "s");
 
+            PerClipCases(r);
             return r;
+        }
+
+        private static bool IsPreview(TrackLevel t)
+        {
+            return t.Clip.EndsWith("_preview.ogg", System.StringComparison.Ordinal);
+        }
+
+        /// <summary>Post-gain RMS spread in dB over the full tracks (previews
+        /// false) or the previews (true), with each clip's gain from pick.</summary>
+        private static double Spread(bool previews, System.Func<TrackLevel, float> pick, out int n)
+        {
+            double lo = double.MaxValue, hi = double.MinValue;
+            n = 0;
+            foreach (var t in TrackLevels)
+            {
+                if (IsPreview(t) != previews) continue;
+                double post = t.RmsDbfs + Db(pick(t));
+                if (post < lo) lo = post;
+                if (post > hi) hi = post;
+                n++;
+            }
+            return n == 0 ? double.MaxValue : hi - lo;
+        }
+
+        /// <summary>The loudest peak at the game's output at the slider's 100
+        /// for a target moved by shiftDb, on the calibrated chain.</summary>
+        private static double WorstOutputPeakAt100(double shiftDb, out string clip)
+        {
+            double worst = double.MinValue;
+            clip = "";
+            double chain = Db(SliderGain(100) / SOUNDTRACK_SOURCE_GAIN) + (CALIBRATION_OUTPUT_RMS_DBFS - CALIBRATION_CLIP_RMS_DBFS);
+            foreach (var t in TrackLevels)
+            {
+                double pk = t.PeakDbfs + Db(t.Gain) + shiftDb + chain;
+                if (pk > worst) { worst = pk; clip = t.Clip; }
+            }
+            return worst;
+        }
+
+        private static void PerClipCases(SelfTestResult r)
+        {
+            double worstDev = 0;
+            string worstClip = "";
+            bool positive = true;
+            foreach (var t in TrackLevels)
+            {
+                if (!(t.Gain > 0f)) positive = false;
+                double dev = System.Math.Abs(t.RmsDbfs + Db(t.Gain) - TRACK_TARGET_RMS_DBFS);
+                if (dev > worstDev) { worstDev = dev; worstClip = t.Clip; }
+            }
+            Check(r, "every catalog clip's gain brings it to the one target",
+                  positive && TrackLevels.Length > 0 && worstDev <= 0.01,
+                  "clips=" + TrackLevels.Length + " target=" + D(TRACK_TARGET_RMS_DBFS)
+                  + " worst deviation=" + worstDev.ToString("0.0000", CultureInfo.InvariantCulture) + " dB (" + worstClip + ")");
+
+            double fullAfter = Spread(false, t => t.Gain, out int nFull);
+            double fullBefore = Spread(false, t => 1f, out _);
+            Check(r, "the full tracks' post-gain RMS spread is at most 3.0 dB",
+                  nFull > 0 && fullAfter <= 3.0,
+                  "tracks=" + nFull + " spread=" + fullAfter.ToString("0.000", CultureInfo.InvariantCulture)
+                  + " dB (one global gain: " + D(fullBefore) + " dB)");
+            double prevAfter = Spread(true, t => t.Gain, out int nPrev);
+            Check(r, "the previews' post-gain RMS spread is at most 3.0 dB",
+                  nPrev > 0 && prevAfter <= 3.0,
+                  "previews=" + nPrev + " spread=" + prevAfter.ToString("0.000", CultureInfo.InvariantCulture) + " dB");
+            Check(r, "one global gain leaves the full tracks over 3 dB apart (control)",
+                  fullBefore > 3.0, "spread=" + D(fullBefore) + " dB");
+
+            double pred70 = CALIBRATION_OUTPUT_RMS_DBFS + (TRACK_TARGET_RMS_DBFS - CALIBRATION_CLIP_RMS_DBFS)
+                            + Db(SliderGain(DEFAULT_PERCENT) / SOUNDTRACK_SOURCE_GAIN);
+            Check(r, "the default percent plays a custom clip within 1 dB of the calibration point",
+                  System.Math.Abs(pred70 - CALIBRATION_OUTPUT_RMS_DBFS) <= 1.0,
+                  "default=" + DEFAULT_PERCENT + " predicted=" + D(pred70) + " dBFS calibration=" + D(CALIBRATION_OUTPUT_RMS_DBFS));
+
+            double worstOut = WorstOutputPeakAt100(0.0, out string peakClip);
+            double worstSrc = double.MinValue;
+            foreach (var t in TrackLevels)
+                worstSrc = System.Math.Max(worstSrc, t.PeakDbfs + Db(t.Gain) + Db(SliderGain(100)));
+            Check(r, "no clip peaks at or above 0 dBFS at the slider's 100 after its gain",
+                  worstOut < 0.0 && worstSrc < 0.0 && SliderGain(100) * 2f <= 1f,
+                  "output peak=" + D(worstOut) + " dBFS (" + peakClip + ") source peak=" + D(worstSrc) + " dBFS");
+            double over = WorstOutputPeakAt100(4.0, out _);
+            Check(r, "a target 4 dB higher would peak over full scale at 100 (control)",
+                  over >= 0.0, "output peak=" + D(over) + " dBFS");
+
+            bool found = true;
+            foreach (var t in TrackLevels)
+                if (!TryTrackGain(t.Clip, out float g) || g != t.Gain) found = false;
+            bool missing = !TryTrackGain("mus_zz_not_in_the_catalog.ogg", out float g0) && g0 == 1f
+                           && !TryTrackGain(null, out _) && !TryTrackGain("", out _);
+            Check(r, "every table clip is found and an unknown clip reads false at gain 1",
+                  found && missing, "found=" + found + " unknown=" + missing);
         }
 
         private static void Check(SelfTestResult r, string name, bool ok, string got)
