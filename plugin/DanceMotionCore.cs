@@ -568,13 +568,20 @@ namespace CompetitiveRounds
         /// catch boundary (DanceEmotes' restores run it over the arm deltas and
         /// the body tilts). For every key of `keys`, in order: a `dead` entry
         /// is forgotten without an undo; a `keep` entry is left untouched and
-        /// stays remembered; every other entry is inverse-applied by `undo` and
-        /// then forgotten by `forget` -- forgotten even when its undo throws, so
-        /// no entry is attempted twice. An exception from one entry (its scope
-        /// test, its undo or its forget) is handed to `failed` and the loop
-        /// goes on to the next entry, so one bad entry never leaves the later
-        /// ones owed. Returns the number of entries whose undo completed.
-        /// `keys` must be a copy: `forget` removes from the live set.</summary>
+        /// stays remembered; every other entry is inverse-applied by `undo`,
+        /// and it is forgotten by `forget` ONLY after an undo returned without
+        /// throwing. An undo that throws is attempted again at once (at most
+        /// UndoAttempts in one pass); if every attempt throws, the entry is NOT
+        /// forgotten: it stays remembered, so the delta it records is still
+        /// owed and the next restore pass of the same set retries it (for the
+        /// rig: Tick's restore once the pose is cleared, the next teardown, or
+        /// the room exit). An exception from one entry (its scope test, an
+        /// undo attempt or its forget) is handed to `failed` and the loop goes
+        /// on to the next entry, so one bad entry never leaves the later ones
+        /// owed. The retry assumes what DanceEmotes' undos are: one assignment
+        /// that either lands or throws before changing the transform. Returns
+        /// the number of entries whose undo completed. `keys` must be a copy:
+        /// `forget` removes from the live set.</summary>
         internal static int UndoEach<K>(List<K> keys, Func<K, bool> dead, Func<K, bool> keep, Action<K> undo, Action<K> forget, Action<K, Exception> failed)
         {
             int n = 0;
@@ -585,9 +592,13 @@ namespace CompetitiveRounds
                 {
                     if (dead(k)) { drop = true; continue; }
                     if (keep != null && keep(k)) continue;
-                    drop = true;
-                    undo(k);
-                    n++;
+                    bool undone = false;
+                    for (int attempt = 0; attempt < UndoAttempts && !undone; attempt++)
+                    {
+                        try { undo(k); undone = true; }
+                        catch (Exception ue) { Failed(failed, k, ue); }
+                    }
+                    if (undone) { n++; drop = true; }
                 }
                 catch (Exception e) { Failed(failed, k, e); }
                 finally
@@ -595,12 +606,17 @@ namespace CompetitiveRounds
                     if (drop)
                     {
                         try { forget(k); }
-                        catch (Exception e) { Failed(failed, k, e); }
+                        catch (Exception fe) { Failed(failed, k, fe); }
                     }
                 }
             }
             return n;
         }
+
+        /// <summary>How many times one restore pass attempts an entry's undo
+        /// before leaving it owed for the next pass (the first try and one
+        /// retry).</summary>
+        internal const int UndoAttempts = 2;
 
         private static void Failed<K>(Action<K, Exception> failed, K k, Exception e)
         {

@@ -396,12 +396,33 @@ MUTANTS = [
     {"name": "remember_key_by_visit", "file": "DanceMotionCore.cs",
      "edits": [("internal static string RememberKey(", "return (steamId ?? \"\") + \"|\" + (danceDescriptor ?? \"\");", "return (steamId ?? \"\") + \"|\" + System.Guid.NewGuid().ToString(\"N\");")],
      "targets": ["remember_key_stable"], "controls": ["t48_decide_truth_table"]},
-    # round three, RR-R2-2: the per-entry catch boundary of the rig undo
+    # round three, RR-R2-2: the per-entry catch boundary of the rig undo (round
+    # two's single boundary: an attempt's failure and the entry's both rethrow)
     {"name": "rig_undo_single_catch", "file": "DanceMotionCore.cs",
      "edits": [("internal static int UndoEach<K>(",
+                "catch (Exception ue) { Failed(failed, k, ue); }",
+                "catch (Exception ue) { Failed(failed, k, ue); throw; }"),
+               ("internal static int UndoEach<K>(",
                 "catch (Exception e) { Failed(failed, k, e); }\n                finally",
                 "catch (Exception e) { Failed(failed, k, e); throw; }\n                finally")],
-     "targets": ["rig_undo_owed_before_pose_clear"], "controls": ["rig_undo_clean", "remember_key_stable"]},
+     "targets": ["rig_undo_retry_restores_same_pass", "rig_undo_kept_owed_until_restored"],
+     "controls": ["rig_undo_clean", "remember_key_stable"]},
+    # LAND, RR-R2-2 (Codex round-3 LOW): an entry leaves the owed set only after
+    # its undo returned. (a) round three's code restored: one attempt, and the
+    # entry forgotten even when that attempt threw.
+    {"name": "rig_undo_forget_on_throw", "file": "DanceMotionCore.cs",
+     "edits": [("internal static int UndoEach<K>(", "attempt < UndoAttempts", "attempt < 1"),
+               ("internal static int UndoEach<K>(", "if (undone) { n++; drop = true; }", "if (undone) n++; drop = true;")],
+     "targets": ["rig_undo_retry_restores_same_pass", "rig_undo_kept_owed_until_restored"],
+     "controls": ["rig_undo_clean", "remember_key_stable"]},
+    # (a') the forget-on-throw alone, the retry kept: caught by the every-attempt arm
+    {"name": "rig_undo_forget_after_retry", "file": "DanceMotionCore.cs",
+     "edits": [("internal static int UndoEach<K>(", "if (undone) { n++; drop = true; }", "if (undone) n++; drop = true;")],
+     "targets": ["rig_undo_kept_owed_until_restored"], "controls": ["rig_undo_clean", "remember_key_stable"]},
+    # (b) the retry removed, the keep-owed kept: caught by the same-pass arm
+    {"name": "rig_undo_no_retry", "file": "DanceMotionCore.cs",
+     "edits": [("internal static int UndoEach<K>(", "attempt < UndoAttempts", "attempt < 1")],
+     "targets": ["rig_undo_retry_restores_same_pass"], "controls": ["rig_undo_clean", "remember_key_stable"]},
     # PlayerCardMotionCore
     {"name": "t39_clip_keyed_by_binding", "file": "PlayerCardMotionCore.cs",
      "edits": [("internal Clip Get(string printId, int bindSeq)", "string key = printId;", "string key = printId + \"#\" + bindSeq;")],

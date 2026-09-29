@@ -566,8 +566,9 @@ namespace CompetitiveRounds
         /// <summary>Inverse-apply and forget the remembered arm deltas, each in
         /// its own catch boundary (DanceMotionCore.UndoEach): a destroyed
         /// transform is forgotten, a transform `keep` names is left as it is,
-        /// every other entry is undone and removed exactly once. Returns the
-        /// number undone.</summary>
+        /// every other entry is undone and then removed; an entry whose undo
+        /// throws on its retry too stays remembered for the next restore.
+        /// Returns the number undone.</summary>
         private static int UndoArms(Func<Transform, bool> keep)
         {
             return DanceMotionCore.UndoEach(new List<Transform>(armApplied.Keys),
@@ -587,10 +588,18 @@ namespace CompetitiveRounds
                 UndoFailed);
         }
 
+        /// <summary>Logs a failed entry. An entry whose undo keeps throwing
+        /// stays owed and is retried by every later restore pass (Tick's
+        /// included), so the line is logged for the first eight failures and
+        /// then at each power of two, never once per pass.</summary>
         private static void UndoFailed(Transform k, Exception e)
         {
-            Plugin.Log?.LogWarning("[DANCE] rig undo: one remembered entry failed (" + e.GetType().Name + "); the others are still undone");
+            int n = ++_undoFailures;
+            if (n <= 8 || (n & (n - 1)) == 0)
+                Plugin.Log?.LogWarning("[DANCE] rig undo: one remembered entry failed (" + e.GetType().Name + ", failure " + n + "); an entry whose undo failed stays owed for the next restore, the others are still undone");
         }
+
+        private static int _undoFailures;
 
         /// <summary>Deterministic choreography: offsets + body Z tilt for
         /// (danceIdx, t). Pure math — same inputs, same pose on every seat.
@@ -816,8 +825,10 @@ namespace CompetitiveRounds
         /// Prefix nor Tick can subtract a delta from a baseline the capture
         /// has just rewritten. Entries whose transform is destroyed are
         /// dropped; entries outside the rig are untouched; an entry whose undo
-        /// throws is logged and forgotten, never retried, and the entries after
-        /// it are still undone. Returns the number of entries undone.</summary>
+        /// throws is logged and retried once, and if the retry throws too it
+        /// stays remembered (still owed, retried by the next restore pass)
+        /// rather than forgotten; the entries after it are still undone.
+        /// Returns the number of entries undone.</summary>
         internal static int RestorePortraitRig(Transform rigRoot)
         {
             int n = 0;
@@ -826,8 +837,10 @@ namespace CompetitiveRounds
             catch { posed = false; }
             // Round three: every entry in its own catch boundary
             // (DanceMotionCore.UndoEach): an entry whose undo throws is logged
-            // and forgotten, and the loop goes on, so every later rig entry is
-            // still undone and removed before any caller clears the pose.
+            // and retried once, and the loop goes on, so every later rig entry
+            // is still undone and removed before any caller clears the pose.
+            // An entry whose retry throws too stays remembered (owed), so the
+            // next restore pass can still inverse-apply it.
             Func<Transform, bool> outside = k => rigRoot == null || !k.IsChildOf(rigRoot);
             n += UndoArms(outside);
             n += UndoTilts(outside);
@@ -840,9 +853,12 @@ namespace CompetitiveRounds
         /// names the rig, and PortraitPose is cleared AFTER, in a finally -- so
         /// the rig's entries are undone while the pose names it, and the pose
         /// is cleared even if the restore throws. Round three: the restore
-        /// gives every entry its own catch boundary, so an entry whose undo
-        /// throws is logged and forgotten and every later entry is still
-        /// undone and removed before the pose is cleared. The three
+        /// gives every entry its own catch boundary, so every later entry is
+        /// still undone and removed before the pose is cleared. LAND: an
+        /// entry whose undo throws is retried once; if the retry throws too,
+        /// the entry stays remembered when the pose is cleared, and a later
+        /// restore pass inverse-applies it (Tick's, once no dance is active,
+        /// the next teardown, or the room exit). The three
         /// teardowns that end a pose call it: the capture job's finally
         /// (PortraitRenderDance.cs), ForceAbort and T45's own finally
         /// (PortraitRender.cs). A null or destroyed rig undoes nothing

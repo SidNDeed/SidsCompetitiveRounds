@@ -123,8 +123,9 @@ namespace DanceCardsClientTests
             Add("still_current_rows", StillCurrentRows);
             Add("remember_key_stable", RememberKeyStable);
             Add("frame_emit_for_server", FrameEmitForServer);
-            Add("rig_undo_owed_before_pose_clear", () => RigUndo(true));
-            Add("rig_undo_clean", () => RigUndo(false));
+            Add("rig_undo_retry_restores_same_pass", () => RigUndo(RigFault.FirstAttempt));
+            Add("rig_undo_kept_owed_until_restored", () => RigUndo(RigFault.EveryAttempt));
+            Add("rig_undo_clean", () => RigUndo(RigFault.None));
             // -- PlayerCardMotionCore -------------------------------------------
             Add("read_parse", ReadParse);
             Add("atlas_shape", AtlasShapeCase);
@@ -1074,32 +1075,51 @@ namespace DanceCardsClientTests
 
         // ============================================== the rig's teardown (L1)
 
-        /// <summary>Round three, finding RR-R2-2: the teardown of a portrait
-        /// pose, through the product's own DanceMotionCore.EndPose and UndoEach
-        /// (DanceEmotes.EndPortraitPose and RestorePortraitRig call exactly
-        /// these). Six remembered entries: r0-r3 under the rig, x9 outside it,
-        /// and one destroyed entry. With `failFirst` the undo of the FIRST rig
-        /// entry throws. The pose clear records what is still owed at that
-        /// moment. Must hold: nothing under the rig is owed when the pose is
-        /// cleared; every rig entry was attempted exactly once and removed;
-        /// the outside entry is untouched and still remembered; the dead entry
-        /// is forgotten; a second teardown attempts nothing.</summary>
-        private static void RigUndo(bool failFirst)
+        /// <summary>How the rig undo test injects a failure into r0's undo.</summary>
+        private enum RigFault { None, FirstAttempt, EveryAttempt }
+
+        /// <summary>LAND, finding RR-R2-2 (the Codex round-3 LOW): the teardown
+        /// of a portrait pose, through the product's own DanceMotionCore.EndPose
+        /// and UndoEach (DanceEmotes.EndPortraitPose and RestorePortraitRig call
+        /// exactly these). Six remembered entries: r0-r3 under the rig, x9
+        /// outside it, and one destroyed entry. Each entry's transform is a
+        /// VALUE: baseline 0, displaced by the entry's delta while the dance
+        /// holds it; the undo subtracts the remembered delta, and an injected
+        /// failure throws BEFORE the transform changes (r0 only: on its first
+        /// attempt in the FirstAttempt arm, on every attempt while the
+        /// injection lasts in the EveryAttempt arm). The pose clear inspects
+        /// the transforms: every rig entry must be at baseline or still owed
+        /// (remembered), never displaced and forgotten. Also: r1-r3 at baseline
+        /// and forgotten in the same pass; r0 at baseline in the same pass when
+        /// only its first attempt throws (the retry), and displaced but still
+        /// owed when every attempt throws, until the follow-up restore pass
+        /// (the injection lifted) brings it to baseline; the outside entry
+        /// untouched and remembered; the dead entry forgotten; after the
+        /// follow-up every rig entry is at baseline and none is owed.</summary>
+        private static void RigUndo(RigFault fault)
         {
+            string[] order = { "r0", "r1", "r2", "x9", "dead", "r3" };
+            string[] rig = { "r0", "r1", "r2", "r3" };
+            int[] deltas = { 3, 5, 7, 11, 13, 17 };
             var owed = new Dictionary<string, int>();
-            foreach (var k in new[] { "r0", "r1", "r2", "x9", "dead", "r3" }) owed[k] = 1;
+            var pos = new Dictionary<string, int>();
+            for (int i = 0; i < order.Length; i++) { owed[order[i]] = deltas[i]; pos[order[i]] = deltas[i]; }
             var attempts = new Dictionary<string, int>();
+            foreach (var k in order) attempts[k] = 0;
             var failures = new List<string>();
-            int owedAtClear = -1, clears = 0;
-            bool posed = true;
+            bool inject = fault != RigFault.None, posed = true, teardown = true;
+            int clears = 0, lostAtClear = -1;
+            var atClear = new Dictionary<string, string>();
             Func<int> restore = () => DanceMotionCore.UndoEach(new List<string>(owed.Keys),
                 k => k == "dead",
                 k => !k.StartsWith("r", StringComparison.Ordinal),
                 k =>
                 {
-                    Check(posed, "entry " + k + " undone after the pose was cleared");
-                    attempts[k] = (attempts.ContainsKey(k) ? attempts[k] : 0) + 1;
-                    if (failFirst && k == "r0") throw new InvalidOperationException("injected undo failure on " + k);
+                    Check(!teardown || posed, "entry " + k + " undone after the pose was cleared");
+                    attempts[k]++;
+                    if (inject && k == "r0" && (fault == RigFault.EveryAttempt || attempts[k] == 1))
+                        throw new InvalidOperationException("injected undo failure on " + k);
+                    pos[k] -= owed[k];
                 },
                 k => { owed.Remove(k); },
                 (k, e) => failures.Add(k + ":" + e.GetType().Name));
@@ -1108,25 +1128,51 @@ namespace DanceCardsClientTests
                 clears++;
                 if (posed)
                 {
-                    owedAtClear = 0;
-                    foreach (var k in owed.Keys) if (k.StartsWith("r", StringComparison.Ordinal)) owedAtClear++;
+                    lostAtClear = 0;
+                    foreach (var k in rig)
+                    {
+                        string s = pos[k] == 0 ? "baseline" : owed.ContainsKey(k) ? "owed" : "LOST";
+                        atClear[k] = s;
+                        if (s == "LOST") lostAtClear++;
+                    }
                 }
                 posed = false;
             };
             DanceMotionCore.EndPose(restore, clearPose, false);
             Check(clears == 1, "the pose was cleared " + clears + " times");
-            Check(owedAtClear == 0, owedAtClear + " rig entries were still owed when the pose was cleared");
-            foreach (var k in new[] { "r0", "r1", "r2", "r3" })
-                Check(attempts.ContainsKey(k) && attempts[k] == 1, "rig entry " + k + " attempted " + (attempts.ContainsKey(k) ? attempts[k] : 0) + " times");
-            Check(!attempts.ContainsKey("x9") && owed.ContainsKey("x9"), "the entry outside the rig was touched or forgotten");
-            Check(!attempts.ContainsKey("dead") && !owed.ContainsKey("dead"), "the dead entry was undone or kept");
-            Check(failures.Count == (failFirst ? 1 : 0), "failures logged: " + string.Join(",", failures));
-            posed = true;
+            // the transform oracle: at the clear, baseline or still owed, never displaced and forgotten
+            Check(lostAtClear == 0, lostAtClear + " rig entries were displaced and forgotten when the pose was cleared");
+            foreach (var k in new[] { "r1", "r2", "r3" })
+                Check(atClear[k] == "baseline" && !owed.ContainsKey(k) && attempts[k] == 1,
+                    "rig entry " + k + " was " + atClear[k] + " at the clear after " + attempts[k] + " attempts");
+            if (fault == RigFault.EveryAttempt)
+            {
+                Check(atClear["r0"] == "owed" && owed.ContainsKey("r0"), "r0, whose every attempt threw, was " + atClear["r0"] + " at the clear");
+                Check(attempts["r0"] == DanceMotionCore.UndoAttempts, "r0 was attempted " + attempts["r0"] + " times in the teardown pass");
+            }
+            else
+            {
+                Check(atClear["r0"] == "baseline" && !owed.ContainsKey("r0"), "r0 was " + atClear["r0"] + " at the clear (not restored in the same pass)");
+                Check(attempts["r0"] == (fault == RigFault.FirstAttempt ? 2 : 1), "r0 was attempted " + attempts["r0"] + " times in the teardown pass");
+            }
+            Check(attempts["x9"] == 0 && owed.ContainsKey("x9") && pos["x9"] == 11, "the entry outside the rig was touched or forgotten");
+            Check(attempts["dead"] == 0 && !owed.ContainsKey("dead"), "the dead entry was undone or kept");
+            int expectFailures = fault == RigFault.None ? 0 : fault == RigFault.FirstAttempt ? 1 : DanceMotionCore.UndoAttempts;
+            Check(failures.Count == expectFailures, "failures logged: " + string.Join(",", failures));
+            string r0AtClear = atClear["r0"];
+            int r0Attempts = attempts["r0"];
+            // the follow-up restore pass (Tick's once the pose is clear), the injection lifted
+            inject = false; teardown = false;
             int again = restore();
-            Check(again == 0 && failures.Count == (failFirst ? 1 : 0), "a second teardown undid " + again + " entries");
-            foreach (var k in new[] { "r0", "r1", "r2", "r3" }) Check(attempts[k] == 1, "rig entry " + k + " attempted twice");
-            Console.WriteLine("  rig undo " + (failFirst ? "(first entry throws)" : "(clean)") + ": owed at pose clear " + owedAtClear
-                + ", attempts r0-r3 " + attempts["r0"] + "/" + attempts["r1"] + "/" + attempts["r2"] + "/" + attempts["r3"]
+            Check(again == (fault == RigFault.EveryAttempt ? 1 : 0), "the follow-up pass undid " + again + " entries");
+            foreach (var k in rig)
+                Check(pos[k] == 0 && !owed.ContainsKey(k), "after the follow-up pass rig entry " + k + " is at " + pos[k] + ", owed " + owed.ContainsKey(k));
+            Check(attempts["r1"] == 1 && attempts["r2"] == 1 && attempts["r3"] == 1, "a restored rig entry was attempted again");
+            Check(owed.ContainsKey("x9") && failures.Count == expectFailures, "the follow-up pass touched the outside entry or failed");
+            Console.WriteLine("  rig undo (" + fault + "): at the clear r0 " + r0AtClear + " after " + r0Attempts + " attempts, r1-r3 "
+                + atClear["r1"] + "/" + atClear["r2"] + "/" + atClear["r3"] + ", displaced-and-forgotten " + lostAtClear
+                + "; follow-up undid " + again + "; rig entries owed after it " + (owed.ContainsKey("r0") ? 1 : 0)
+                + ", at baseline " + (pos["r0"] == 0 && pos["r1"] == 0 && pos["r2"] == 0 && pos["r3"] == 0)
                 + ", outside kept " + owed.ContainsKey("x9") + ", failures " + failures.Count);
         }
     }
