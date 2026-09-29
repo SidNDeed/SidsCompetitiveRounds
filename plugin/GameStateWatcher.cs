@@ -2338,7 +2338,15 @@ namespace CompetitiveRounds
         // 9-10), declared as field 24. PeerFreezeStats holds the definition, the
         // parse and the report fields; this is the per-peer state the receiver
         // fills from the same payload as the counters. 0 = the peer never said.
-        internal const int FREEZE_STATS_EPOCH = PeerFreezeStats.Epoch;
+        //
+        // Field 24 has one number per definition and two constants naming it:
+        // FREEZE_COUNT_EPOCH is what the payload builder writes and the report
+        // carries as local_freeze_epoch, PeerFreezeStats.Epoch is what a peer's
+        // counters are accepted under. OppFreezeEpoch and OppFreezeStatsEpoch
+        // are both read from the same field of the same payload and reset at the
+        // same edges. The constants are equal by construction, and this line
+        // stops compiling (a division by the constant zero) the moment they part.
+        private const int FreezeEpochsAgree = 1 / (FREEZE_COUNT_EPOCH == PeerFreezeStats.Epoch ? 1 : 0);
         public static int OppFreezeStatsEpoch { get; private set; }
         public static bool OppFreezeStatsUsable => PeerFreezeStats.Usable(OppFreezeStatsEpoch);
         public static int OppStatMacroSuspectSeconds { get; private set; }

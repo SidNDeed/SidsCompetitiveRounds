@@ -28,11 +28,19 @@ namespace CompetitiveRounds
     /// fail validation (ge=0).</summary>
     internal static class PeerFreezeStats
     {
-        /// <summary>1 = one trip per stall, measured on the monotonic stopwatch
-        /// alone (report #359). Bump it whenever the counting definition changes
-        /// again. 0 is reserved for "the peer never said", so it never names a
-        /// definition.</summary>
-        internal const int Epoch = 1;
+        /// <summary>2 = one trip per stall, measured on the monotonic stopwatch
+        /// alone (report #359). The number is GameStateWatcher.FREEZE_COUNT_EPOCH's:
+        /// field 24 is ONE field that two lanes declared (the 886bed8 client half,
+        /// and this batch's round 2 finding 3), so one value has to name one
+        /// definition. In that numbering 1 is the pre-fix count, which credited
+        /// one stall twice, and 0 is reserved for "the peer never said", so
+        /// neither names this definition. A v1.41.0 beta build from before the
+        /// numbering was shared declares 1 for this same count; its counters now
+        /// go to the report as absent, which is the conservative direction (a real
+        /// count withheld, never an inflated one trusted). GameStateWatcher stops
+        /// compiling if the two constants ever part. Bump both whenever the
+        /// counting definition changes again.</summary>
+        internal const int Epoch = 2;
 
         /// <summary>Field 24 of cr_gstats, after the bullet-stats epoch (field 23).</summary>
         internal const int EpochFieldIndex = 23;
@@ -136,6 +144,11 @@ namespace CompetitiveRounds
                 new { Name = "new-epoch",       Parts = Payload(24, Epoch.ToString(CultureInfo.InvariantCulture)), Want = TrustedFour },
                 new { Name = "new-epoch-extra", Parts = Payload(26, Epoch.ToString(CultureInfo.InvariantCulture)), Want = TrustedFour },
                 new { Name = "epoch-zero",      Parts = Payload(24, "0"), Want = Unknown },
+                // 1: the pre-fix count in the shared numbering, and what a beta
+                // build from before that numbering declared. Written as a literal
+                // of the wire, like every position here, so it cannot move with
+                // Epoch.
+                new { Name = "epoch-pre-fix",   Parts = Payload(24, "1"), Want = Unknown },
                 new { Name = "epoch-future",    Parts = Payload(24, (Epoch + 1).ToString(CultureInfo.InvariantCulture)), Want = Unknown },
                 new { Name = "epoch-garbled",   Parts = Payload(24, "x"), Want = Unknown },
                 new { Name = "epoch-empty",     Parts = Payload(24, ""), Want = Unknown },
