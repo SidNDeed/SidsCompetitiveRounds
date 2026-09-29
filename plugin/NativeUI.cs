@@ -12980,13 +12980,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // itself (MusicCatalog.cs header, #368): rendered raw and never
         // translated, so its words read the same in every locale.
         // Shown beside the album by-line and in the now-playing readout only.
-        // Round 2 (L2): ONE style for both places, an ABSOLUTE size at
-        // CreateText's 12 pt floor (the game's SDF font drops thin strokes
-        // such as the hyphen below it, even in bold; SetTextRaw bold-wraps
-        // both lines). A size relative to each line's own base made the
-        // readout's note a different size from the by-line's, and its hyphen
-        // drew no ink at the seat's window scale.
-        private const string MUSIC_NOTE_STYLE = "<size=12><color=#888>";
+        // Round 2 (L2): ONE style for both places, an ABSOLUTE size, and
+        // that size is 14 pt. Captured on the broadcast seat's 1080p window
+        // (bold-wrapped by SetTextRaw, heavy material): at 12 pt the hyphen
+        // in "machine-generated" drew no pixel in the readout or the by-line;
+        // at 14 pt it draws one partly covered pixel row in both. The stroke
+        // is under a pixel tall at these sizes, so whether it lands on a row
+        // depends on the line's position as well as the size (round 1 saw the
+        // by-line draw it at 10.2 pt): the ink is an observation at this
+        // seat's scale, not a property of the font, and needs a new capture
+        // if the size, the font, the material or the layout changes. Both
+        // lines use Overflow with no wrap (FitOneLine), so the text element
+        // itself does not truncate the larger run.
+        private const string MUSIC_NOTE_STYLE = "<size=14><color=#888>";
         private const string MUSIC_ALBUM_NOTE = "  " + MUSIC_NOTE_STYLE + "(machine-generated)</color></size>";
 
         private static string MusicAlbumNote(MusicAlbumDef alb)

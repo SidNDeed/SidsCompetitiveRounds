@@ -342,14 +342,16 @@ def test_the_note_is_authored_text_beside_the_byline_and_in_the_readout():
 
 def test_the_readout_and_the_byline_share_one_absolute_note_style():
     """Round 2 (L2): both lines render the note through the SAME style
-    constant, at an ABSOLUTE size no smaller than CreateText's 12 pt floor
-    (below it the game's SDF font drops the hyphen even in bold), never a size
-    relative to each line's own base -- which is what made the readout's note
-    another size than the by-line's and left its hyphen without ink."""
+    constant, at an ABSOLUTE size of at least 14 pt, never a size relative to
+    each line's own base -- which is what made the readout's note another size
+    than the by-line's. 14, not CreateText's 12 pt floor: the round-2 seat
+    capture found no hyphen pixel at 12 pt in either line and one partly
+    covered row at 14 pt in both (an observation at that scale, not a
+    guarantee of the font)."""
     ui = code_of(_plugin("NativeUI.cs"))
     style = re.search(r'private const string MUSIC_NOTE_STYLE\s*=\s*"([^"]*)"\s*;', ui).group(1)
     size = re.search(r"<size=([0-9.]+)>", style)
-    assert size and float(size.group(1)) >= 12.0, style
+    assert size and float(size.group(1)) >= 14.0, style
     assert "%" not in style and "<size=+" not in style and "<size=-" not in style, style
     assert ui.count("MUSIC_NOTE_STYLE") == 2, "a second style for the note: %d" % ui.count("MUSIC_NOTE_STYLE")
     assert ui.count("<size=85%><color=#888>(") == 0
