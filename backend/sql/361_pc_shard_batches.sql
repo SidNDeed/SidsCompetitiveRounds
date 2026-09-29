@@ -18,29 +18,32 @@
 --   prints         how many prints the batch discarded (1..40).
 --   shards_gained  the shards the batch credited, which a replay answers
 --                  again without crediting anything.
---   created_at     when the batch committed (the retention clock).
+--   created_at     when the batch committed. Nothing prunes by it: the rows
+--                  are kept (below). Its index lost its only reader (the
+--                  retention that pruned by age) and stays unused.
 -- A replay of the same key with the same set answers the stored row and
 -- credits nothing; the same key with a different set is refused (409
--- key_reused).
+-- key_reused), however old the key is.
 --
--- THE MONEY GUARD IS NOT THIS TABLE. Every print is discarded by a
--- conditional UPDATE (discarded_at IS NULL), so a print pays at most once
--- whether or not a row here survives; this table only lets a player whose
--- answer was lost ask again and get the same total back. That is why the
--- Player Cards janitor may prune rows older than 30 days: a replay past that
--- answers not_owned and still credits nothing.
+-- THE ROWS ARE KEPT. No retention deletes them (asks-b round 2): a key
+-- whose row was pruned would read as never used, and the same key with
+-- another list of prints would then discard and credit that list instead
+-- of answering 409 key_reused. Every row names at least one discarded
+-- print and a print is discarded once, so the table never holds more rows
+-- than the discarded prints. Per print, the money guard is the conditional
+-- UPDATE (discarded_at IS NULL): a print pays at most once whatever this
+-- table holds.
 --
--- Written and read by the batch route only; deleted by delete_player_data
--- (by name: a players row is anonymised, never deleted, so the ON DELETE
--- CASCADE below never fires on that path, #437) and by the janitor's
--- retention. Not mapped in models.py: only raw SQL names it.
+-- Written and read by the batch route only; deleted only by
+-- delete_player_data (by name: a players row is anonymised, never deleted,
+-- so the ON DELETE CASCADE below never fires on that path, #437). Not
+-- mapped in models.py: only raw SQL names it.
 --
 -- DEPLOY ORDER (#477): THIS FILE FIRST, as its own commit and its own deploy,
 -- then the API that reads and writes it. A wrong order fails safe: the batch
--- route answers 503 shard_batch_unavailable before it reads or writes
--- anything, the janitor's retention statement and the deletion statement are
--- skipped while the table does not exist, and the single-print route does
--- not depend on this table at all.
+-- route answers 503 shard_batch_unavailable before it takes a lock or writes
+-- anything, the deletion statement is skipped while the table does not
+-- exist, and the single-print route does not depend on this table at all.
 --
 -- LOCKS: CREATE TABLE with a foreign key takes SHARE ROW EXCLUSIVE on
 -- players for the length of this short transaction, which waits for writers
