@@ -6062,26 +6062,16 @@ namespace CompetitiveRounds
                     }
                     if (act != SecureRouteRules.MintAction.Open)
                     {
-                        // The failure's own answer, never a token: a success
-                        // without one is named, not printed.
-                        string why = success ? "answered without a token" : PortalMintFailureText(response);
-                        Plugin.Log.LogWarning($"[I18N] portal mint failed over {portalBase}: {why}"
-                                              + (remintOnRefusal ? "" : " (after the one re-mint)"));
+                        // The failure's own answer, never a token: one line,
+                        // scrubbed of credentials, then bounded (Codex round 2
+                        // LOW 4; SecureRouteRules.PortalMintFailureLine).
+                        Plugin.Log.LogWarning(SecureRouteRules.PortalMintFailureLine(portalBase, success, response, !remintOnRefusal));
                         CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
                         return;
                     }
                     Plugin.Log.LogInfo($"[I18N] portal opened over {portalBase}");
                     Application.OpenURL($"{portalBase}/translate#token={token}");
                 }));
-        }
-
-        /// <summary>A failed mint's answer for the log: one line, at most 160
-        /// characters (a proxy's HTML error page would otherwise fill it).</summary>
-        internal static string PortalMintFailureText(string response)
-        {
-            if (string.IsNullOrEmpty(response)) return "no answer";
-            string one = response.Replace("\r", " ").Replace("\n", " ").Trim();
-            return one.Length <= 160 ? one : one.Substring(0, 160) + "...";
         }
 
         /// <summary>After the portal mint refused the session: wait (bounded)

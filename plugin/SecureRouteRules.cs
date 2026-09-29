@@ -609,6 +609,32 @@ namespace CompetitiveRounds
             return parsed.Scheme + "://" + parsed.Host + ":" + parsed.Port;
         }
 
+        /// <summary>The declared bound on the portal mint's failure line, the
+        /// whole line (Codex round 2 LOW 4).</summary>
+        internal const int MintFailureLineMax = 240;
+
+        /// <summary>The one log line a failed portal mint writes: the base as
+        /// scheme://host:port, the failure's own answer (never a token: a
+        /// success without one is named, not printed), and whether this was
+        /// the mint after the one re-mint. Built whole, then CR/LF become
+        /// spaces, then LogScrub.RedactCredentials runs over it, and only
+        /// then is it cut to MintFailureLineMax including the "..." marker,
+        /// so a cut can never split a credential out of the scrub's
+        /// sight.</summary>
+        internal static string PortalMintFailureLine(string portalBase, bool success, string response, bool afterRemint)
+        {
+            string why = success ? "answered without a token"
+                       : string.IsNullOrEmpty(response) ? "no answer" : response.Trim();
+            string tail = afterRemint ? " (after the one re-mint)" : "";
+            string line = "[I18N] portal mint failed over " + CredentialFreeBase(portalBase) + ": " + why;
+            line = line.Replace("\r", " ").Replace("\n", " ");
+            line = LogScrub.RedactCredentials(line);
+            // The fixed tail survives the cut; the answer is what is shortened.
+            return line.Length + tail.Length <= MintFailureLineMax
+                ? line + tail
+                : line.Substring(0, MintFailureLineMax - 3 - tail.Length) + "..." + tail;
+        }
+
         internal enum MintAction { Open, RemintOnce, Fail }
 
         /// <summary>What the portal mint's answer means. A token opens the

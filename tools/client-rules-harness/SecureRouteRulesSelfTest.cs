@@ -940,6 +940,33 @@ namespace CompetitiveRounds
                       lan + " || " + junk);
             }
 
+            // -- M: the mint failure line is bounded and token-safe (Codex round 2 LOW 4)
+            {
+                const string sentinel = "SENTINELtok9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+                string body = "HTTP 502: {\"detail\":\"upstream\",\"token\":\"" + sentinel + "\"}\r\n<html>"
+                              + new string('x', 200) + "\r\n</html>";
+                string line = PortalMintFailureLine("https://scr.example.org:8443", false, body, true);
+                bool bounded = line.Length <= MintFailureLineMax && line.EndsWith("... (after the one re-mint)", StringComparison.Ordinal);
+                bool oneLine = line.IndexOf('\r') < 0 && line.IndexOf('\n') < 0;
+                bool scrubbed = line.IndexOf("SENTINEL", StringComparison.Ordinal) < 0 && line.Contains("[redacted]");
+                Check(r, "M1 a 161+ character failure body with a token: the whole line is bounded, one line, and scrubbed",
+                      body.Length > 161 && bounded && oneLine && scrubbed
+                          && line.StartsWith("[I18N] portal mint failed over https://scr.example.org:8443: HTTP 502", StringComparison.Ordinal),
+                      "len=" + line.Length + "/" + MintFailureLineMax + " oneLine=" + oneLine + " scrubbed=" + scrubbed + " line=" + line);
+                string bare = PortalMintFailureLine("https://scr.example.org:8443", false,
+                    "HTTP 401: session " + sentinel + " X-Session-Token: abcDEF0123 ?portal_token=zz99 Session Ticket: " + new string('A', 40), false);
+                bool bareClean = bare.IndexOf("SENTINEL", StringComparison.Ordinal) < 0 && bare.IndexOf("abcDEF0123", StringComparison.Ordinal) < 0
+                                 && bare.IndexOf("zz99", StringComparison.Ordinal) < 0 && bare.IndexOf("AAAAAAAAAA", StringComparison.Ordinal) < 0;
+                Check(r, "M2 a bare token-shaped value, a session header, a token pair and a Steam ticket are all redacted",
+                      bareClean, bare);
+                string plain = PortalMintFailureLine("https://scr.example.org:8443", false, "HTTP 403: {\"detail\":\"banned\"}", false);
+                string noTok = PortalMintFailureLine("https://scr.example.org:8443", true, "{\"token\":\"" + sentinel + "\"}", true);
+                Check(r, "M1c control: a short answer with no credential is logged whole, and a success is named, never printed",
+                      plain == "[I18N] portal mint failed over https://scr.example.org:8443: HTTP 403: {\"detail\":\"banned\"}"
+                          && noTok == "[I18N] portal mint failed over https://scr.example.org:8443: answered without a token (after the one re-mint)",
+                      plain + " || " + noTok);
+            }
+
             // -- H: the local witness harness's route ------------------------------
             {
                 const string loop = "http://127.0.0.1:18555";

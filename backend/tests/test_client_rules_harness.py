@@ -272,7 +272,7 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # 46 cases on the commit that added the suite, 72 since round 2 added
     # the J, O, R, K and H cases; the floor is that count, not one far
     # below it (#342). Raise it when cases are added.
-    assert run >= 84, "the SecureRouteRules suite shrank to %d cases" % run
+    assert run >= 87, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -320,6 +320,9 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     "W1 a session the exchange lands 16-19.9 s after the press is waited for: the one mint carries it",
     # round 3: the plaintext refusal says why in the log (Codex round 2 LOW 3)
     "N1 the plaintext refusal's log line names the base as scheme://host:port and the reason, with no credential",
+    # round 3: the mint failure line is bounded and token-safe (Codex round 2 LOW 4)
+    "M1 a 161+ character failure body with a token: the whole line is bounded, one line, and scrubbed",
+    "M2 a bare token-shaped value, a session header, a token pair and a Steam ticket are all redacted",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",
     "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",

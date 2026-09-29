@@ -544,11 +544,18 @@ def test_every_portal_mint_that_opens_nothing_says_why_in_the_log():
         assert "Plugin.Log.Log" in seg, "a mint return that opens nothing and logs nothing: " + seg
     fail = body[body.index("if (act != SecureRouteRules.MintAction.Open)"):]
     fail = fail[:fail.index("return;")]
-    assert 'string why = success ? "answered without a token" : PortalMintFailureText(response);' in fail, fail
-    assert "[I18N] portal mint failed over {portalBase}: {why}" in fail, fail
-    assert "token}" not in fail.replace("{portalBase}", ""), "the failure line prints the token"
-    text = code_of(API, "internal static string PortalMintFailureText(string response)")
-    assert "160" in text and 'Replace("\\n", " ")' in text, text
+    # Round 3 (Codex round 2 LOW 4): the whole line is built, flattened,
+    # scrubbed and only then bounded, by one rule the harness executes (M1, M2).
+    assert fail.count("Plugin.Log.") == 1, fail
+    assert ("Plugin.Log.LogWarning(SecureRouteRules.PortalMintFailureLine(portalBase, success, response, !remintOnRefusal));"
+            in fail), fail
+    assert "token}" not in fail and "PortalMintFailureText" not in code_of(API), "the unscrubbed failure text is back"
+    line = code_of(RULES, "internal static string PortalMintFailureLine(string portalBase, bool success, string response, bool afterRemint)")
+    flat = line.index('line = line.Replace("\\r", " ").Replace("\\n", " ");')
+    scrub = line.index("line = LogScrub.RedactCredentials(line);")
+    cut = line.index("line.Substring(0, MintFailureLineMax - 3 - tail.Length)")
+    assert flat < scrub < cut, line
+    assert line.count("Substring(") == 1 and "response.Substring" not in line, line
 
 def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
     """The local harness (TestBackupUrl, TestQueueReport) and the stale-token
