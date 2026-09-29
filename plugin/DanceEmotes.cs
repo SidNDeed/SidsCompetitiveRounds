@@ -544,48 +544,52 @@ namespace CompetitiveRounds
             try { var cur = PortraitPose; if (cur.HasValue && cur.Value.RigRoot != null) keep = cur.Value.RigRoot; }
             catch { keep = null; }
             if (keep == null || DevRestoreIgnoresPortrait) { RestoreAllAppliedUnscoped(); return; }
-            try
-            {
-                foreach (var k in new List<Transform>(armApplied.Keys))
-                {
-                    if (k != null && k.IsChildOf(keep)) continue;   // the capture's own entry
-                    if (k != null) k.position -= armApplied[k];
-                    armApplied.Remove(k);
-                }
-            }
-            catch { }
-            try
-            {
-                foreach (var k in new List<Transform>(bodyRotApplied.Keys))
-                {
-                    if (k != null && k.IsChildOf(keep)) continue;
-                    if (k != null) k.rotation = Quaternion.Euler(0f, 0f, -bodyRotApplied[k]) * k.rotation;
-                    bodyRotApplied.Remove(k);
-                }
-            }
-            catch { }
+            // Round three: one catch boundary per entry (DanceMotionCore.UndoEach),
+            // so one failing entry never leaves the later ones owed.
+            UndoArms(k => k.IsChildOf(keep));   // the capture's own entries stay
+            UndoTilts(k => k.IsChildOf(keep));
         }
 
         /// <summary>The restore with no rig scope: every remembered delta
-        /// undone and forgotten (RestoreAllApplied's body before L1's class
-        /// fix). Called by RestoreAllApplied when no capture pose is live, and
-        /// by the T45 probe's L1 mutant arm.</summary>
+        /// undone and forgotten, one entry at a time (round three: each entry
+        /// in its own catch boundary, and each removed as it is undone rather
+        /// than the set cleared wholesale -- so an exception neither skips nor
+        /// silently forgets the entries after it). Called by RestoreAllApplied
+        /// when no capture pose is live, and by the T45 probe's L1 mutant
+        /// arm.</summary>
         private static void RestoreAllAppliedUnscoped()
         {
-            try
-            {
-                foreach (var kv in armApplied)
-                    if (kv.Key != null) kv.Key.position -= kv.Value;
-                armApplied.Clear();
-            }
-            catch { armApplied.Clear(); }
-            try
-            {
-                foreach (var kv in bodyRotApplied)
-                    if (kv.Key != null) kv.Key.rotation = Quaternion.Euler(0f, 0f, -kv.Value) * kv.Key.rotation;
-                bodyRotApplied.Clear();
-            }
-            catch { bodyRotApplied.Clear(); }
+            UndoArms(null);
+            UndoTilts(null);
+        }
+
+        /// <summary>Inverse-apply and forget the remembered arm deltas, each in
+        /// its own catch boundary (DanceMotionCore.UndoEach): a destroyed
+        /// transform is forgotten, a transform `keep` names is left as it is,
+        /// every other entry is undone and removed exactly once. Returns the
+        /// number undone.</summary>
+        private static int UndoArms(Func<Transform, bool> keep)
+        {
+            return DanceMotionCore.UndoEach(new List<Transform>(armApplied.Keys),
+                k => k == null, keep,
+                k => { k.position -= armApplied[k]; },
+                k => { armApplied.Remove(k); },
+                UndoFailed);
+        }
+
+        /// <summary>UndoArms for the remembered body tilts.</summary>
+        private static int UndoTilts(Func<Transform, bool> keep)
+        {
+            return DanceMotionCore.UndoEach(new List<Transform>(bodyRotApplied.Keys),
+                k => k == null, keep,
+                k => { k.rotation = Quaternion.Euler(0f, 0f, -bodyRotApplied[k]) * k.rotation; },
+                k => { bodyRotApplied.Remove(k); },
+                UndoFailed);
+        }
+
+        private static void UndoFailed(Transform k, Exception e)
+        {
+            Plugin.Log?.LogWarning("[DANCE] rig undo: one remembered entry failed (" + e.GetType().Name + "); the others are still undone");
         }
 
         /// <summary>Deterministic choreography: offsets + body Z tilt for
@@ -811,40 +815,22 @@ namespace CompetitiveRounds
         /// it clears PortraitPose or tears the rig down, so neither the next
         /// Prefix nor Tick can subtract a delta from a baseline the capture
         /// has just rewritten. Entries whose transform is destroyed are
-        /// dropped; entries outside the rig are untouched. Returns the number
-        /// of entries undone.</summary>
+        /// dropped; entries outside the rig are untouched; an entry whose undo
+        /// throws is logged and forgotten, never retried, and the entries after
+        /// it are still undone. Returns the number of entries undone.</summary>
         internal static int RestorePortraitRig(Transform rigRoot)
         {
             int n = 0;
             bool posed = false;
             try { var cur = PortraitPose; posed = cur.HasValue && rigRoot != null && cur.Value.RigRoot == rigRoot; }
             catch { posed = false; }
-            try
-            {
-                var armKeys = new List<Transform>(armApplied.Keys);
-                foreach (var k in armKeys)
-                {
-                    if (k == null) { armApplied.Remove(k); continue; }
-                    if (rigRoot == null || !k.IsChildOf(rigRoot)) continue;
-                    k.position -= armApplied[k];
-                    armApplied.Remove(k);
-                    n++;
-                }
-            }
-            catch { }
-            try
-            {
-                var rotKeys = new List<Transform>(bodyRotApplied.Keys);
-                foreach (var k in rotKeys)
-                {
-                    if (k == null) { bodyRotApplied.Remove(k); continue; }
-                    if (rigRoot == null || !k.IsChildOf(rigRoot)) continue;
-                    k.rotation = Quaternion.Euler(0f, 0f, -bodyRotApplied[k]) * k.rotation;
-                    bodyRotApplied.Remove(k);
-                    n++;
-                }
-            }
-            catch { }
+            // Round three: every entry in its own catch boundary
+            // (DanceMotionCore.UndoEach): an entry whose undo throws is logged
+            // and forgotten, and the loop goes on, so every later rig entry is
+            // still undone and removed before any caller clears the pose.
+            Func<Transform, bool> outside = k => rigRoot == null || !k.IsChildOf(rigRoot);
+            n += UndoArms(outside);
+            n += UndoTilts(outside);
             if (posed) DevUndoneUnderPose += n; else DevUndoneAfterClear += n;
             return n;
         }
@@ -853,7 +839,10 @@ namespace CompetitiveRounds
         /// remembered deltas are inverse-applied FIRST, while PortraitPose still
         /// names the rig, and PortraitPose is cleared AFTER, in a finally -- so
         /// the rig's entries are undone while the pose names it, and the pose
-        /// is cleared even when an undo throws (over what is left). The three
+        /// is cleared even if the restore throws. Round three: the restore
+        /// gives every entry its own catch boundary, so an entry whose undo
+        /// throws is logged and forgotten and every later entry is still
+        /// undone and removed before the pose is cleared. The three
         /// teardowns that end a pose call it: the capture job's finally
         /// (PortraitRenderDance.cs), ForceAbort and T45's own finally
         /// (PortraitRender.cs). A null or destroyed rig undoes nothing
@@ -861,13 +850,10 @@ namespace CompetitiveRounds
         /// cleared.</summary>
         internal static void EndPortraitPose(Transform rigRoot)
         {
-            try
-            {
-                if (DevTeardownClearsFirst) PortraitPose = null;   // T45's teardown mutant arms only: the order swapped
-                RestorePortraitRig(rigRoot);
-            }
-            catch { }
-            finally { PortraitPose = null; }
+            // DanceMotionCore.EndPose: RestorePortraitRig first, PortraitPose
+            // cleared after it in a finally; DevTeardownClearsFirst is T45's
+            // teardown mutant arms only (the order swapped).
+            DanceMotionCore.EndPose(() => RestorePortraitRig(rigRoot), () => { PortraitPose = null; }, DevTeardownClearsFirst);
         }
 
         /// <summary>Remembered arm deltas and body tilts, for the capture's

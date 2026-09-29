@@ -396,6 +396,12 @@ MUTANTS = [
     {"name": "remember_key_by_visit", "file": "DanceMotionCore.cs",
      "edits": [("internal static string RememberKey(", "return (steamId ?? \"\") + \"|\" + (danceDescriptor ?? \"\");", "return (steamId ?? \"\") + \"|\" + System.Guid.NewGuid().ToString(\"N\");")],
      "targets": ["remember_key_stable"], "controls": ["t48_decide_truth_table"]},
+    # round three, RR-R2-2: the per-entry catch boundary of the rig undo
+    {"name": "rig_undo_single_catch", "file": "DanceMotionCore.cs",
+     "edits": [("internal static int UndoEach<K>(",
+                "catch (Exception e) { Failed(failed, k, e); }\n                finally",
+                "catch (Exception e) { Failed(failed, k, e); throw; }\n                finally")],
+     "targets": ["rig_undo_owed_before_pose_clear"], "controls": ["rig_undo_clean", "remember_key_stable"]},
     # PlayerCardMotionCore
     {"name": "t39_clip_keyed_by_binding", "file": "PlayerCardMotionCore.cs",
      "edits": [("internal Clip Get(string printId, int bindSeq)", "string key = printId;", "string key = printId + \"#\" + bindSeq;")],

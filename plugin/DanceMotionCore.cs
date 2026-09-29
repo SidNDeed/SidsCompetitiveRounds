@@ -561,6 +561,67 @@ namespace CompetitiveRounds
         {
             return (steamId ?? "") + "|" + (danceDescriptor ?? "");
         }
+
+        // -- the rig's remembered deltas (finding L1, round three) ----------------
+
+        /// <summary>Undo remembered entries one at a time, each inside its own
+        /// catch boundary (DanceEmotes' restores run it over the arm deltas and
+        /// the body tilts). For every key of `keys`, in order: a `dead` entry
+        /// is forgotten without an undo; a `keep` entry is left untouched and
+        /// stays remembered; every other entry is inverse-applied by `undo` and
+        /// then forgotten by `forget` -- forgotten even when its undo throws, so
+        /// no entry is attempted twice. An exception from one entry (its scope
+        /// test, its undo or its forget) is handed to `failed` and the loop
+        /// goes on to the next entry, so one bad entry never leaves the later
+        /// ones owed. Returns the number of entries whose undo completed.
+        /// `keys` must be a copy: `forget` removes from the live set.</summary>
+        internal static int UndoEach<K>(List<K> keys, Func<K, bool> dead, Func<K, bool> keep, Action<K> undo, Action<K> forget, Action<K, Exception> failed)
+        {
+            int n = 0;
+            foreach (var k in keys)
+            {
+                bool drop = false;
+                try
+                {
+                    if (dead(k)) { drop = true; continue; }
+                    if (keep != null && keep(k)) continue;
+                    drop = true;
+                    undo(k);
+                    n++;
+                }
+                catch (Exception e) { Failed(failed, k, e); }
+                finally
+                {
+                    if (drop)
+                    {
+                        try { forget(k); }
+                        catch (Exception e) { Failed(failed, k, e); }
+                    }
+                }
+            }
+            return n;
+        }
+
+        private static void Failed<K>(Action<K, Exception> failed, K k, Exception e)
+        {
+            try { if (failed != null) failed(k, e); } catch { }
+        }
+
+        /// <summary>The teardown order that ends a portrait pose (finding L1):
+        /// `restore` runs FIRST, while the pose still names the rig, and
+        /// `clearPose` runs AFTER it in a finally, so the pose is cleared even
+        /// when `restore` throws. `clearFirst` is T45's teardown mutant only
+        /// (the order swapped); false everywhere else.</summary>
+        internal static void EndPose(Func<int> restore, Action clearPose, bool clearFirst)
+        {
+            try
+            {
+                if (clearFirst) clearPose();
+                restore();
+            }
+            catch { }
+            finally { clearPose(); }
+        }
     }
 
     /// <summary>What the upload job needs from the world: the two writers, a
