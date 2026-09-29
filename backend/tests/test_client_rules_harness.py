@@ -272,7 +272,7 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # 46 cases on the commit that added the suite, 72 since round 2 added
     # the J, O, R, K and H cases; the floor is that count, not one far
     # below it (#342). Raise it when cases are added.
-    assert run >= 87, "the SecureRouteRules suite shrank to %d cases" % run
+    assert run >= 92, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -323,6 +323,11 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # round 3: the mint failure line is bounded and token-safe (Codex round 2 LOW 4)
     "M1 a 161+ character failure body with a token: the whole line is bounded, one line, and scrubbed",
     "M2 a bare token-shaped value, a session header, a token pair and a Steam ticket are all redacted",
+    # round 3: the ticket latch is released only after the cancel (Codex round 2 LOW 5)
+    "MT6 a cancel that throws once keeps the handle; the next tick cancels it, and no successor is requested before that",
+    "MT6b a cancel that throws twice is retired with a log line on the next tick, never tried a third time",
+    "MT7 a repeated end of a failed handle, and a late end of an old serial, change nothing",
+    "MT8 a held ticket whose end never arrives is abandoned (cancelled) past the exchange's timeout, then superseded",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",
     "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",

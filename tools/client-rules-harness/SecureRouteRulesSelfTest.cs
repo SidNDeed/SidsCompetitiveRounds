@@ -967,6 +967,101 @@ namespace CompetitiveRounds
                       plain + " || " + noTok);
             }
 
+            // -- MT: the one-ticket latch (Codex round 2 LOW 5) ---------------------
+            // A refresh tick is modelled as SteamAuth.MaybeRefresh runs it: the
+            // latch's Tick first, then a successor only when MayRequest.
+            {
+                int cancels = 0, requested = 0, throwsLeft = 0;
+                var requestedAtCancel = new List<int>();
+                var freeDuringCancel = new List<bool>();
+                var lines = new List<string>();
+                TicketLatch latch = null;
+                Func<bool> cancel = () =>
+                {
+                    cancels++;
+                    requestedAtCancel.Add(requested);
+                    // While a handle's cancel is running the latch is not free:
+                    // nothing reached from inside the cancel may request beside it.
+                    freeDuringCancel.Add(latch.MayRequest);
+                    if (throwsLeft > 0) { throwsLeft--; throw new InvalidOperationException("steam cancel unavailable"); }
+                    return true;
+                };
+                Action<double> refreshTick = now =>
+                {
+                    bool f;
+                    string n = latch.Tick(now, cancel, out f);
+                    if (n != null) lines.Add(n);
+                    if (latch.MayRequest) { requested++; latch.Took(now); }
+                };
+                Action<int> reset = t => { latch = new TicketLatch(); cancels = 0; requested = 0; throwsLeft = t; requestedAtCancel.Clear(); freeDuringCancel.Clear(); lines.Clear(); };
+
+                // MT6: the cancel throws once while ticket creation stays available.
+                reset(1);
+                refreshTick(0.0);                                   // ticket 1
+                bool failed6;
+                string end6 = latch.End(1, "answered", cancel, out failed6);
+                bool heldAfterFail = !latch.MayRequest && latch.State == TicketState.CancelFailed;
+                int requestedBeforeRetry = requested;
+                refreshTick(3.0);                                   // retry succeeds, then ticket 2
+                refreshTick(6.0);
+                Check(r, "MT6 a cancel that throws once keeps the handle; the next tick cancels it, and no successor is requested before that",
+                      failed6 && heldAfterFail && requestedBeforeRetry == 1 && cancels == 2 && requestedAtCancel[1] == 1
+                          && !freeDuringCancel.Contains(true)
+                          && requested == 2 && latch.Serial == 2 && latch.IsHeld
+                          && lines.Count == 1 && lines[0].Contains("cancelled with Steam on the retry"),
+                      "end=" + end6 + " | heldAfterFail=" + heldAfterFail + " cancels=" + cancels + " requested=" + requested
+                          + " requestedAtRetry=" + (requestedAtCancel.Count > 1 ? requestedAtCancel[1] : -1)
+                          + " freeDuringCancel=" + string.Join(",", freeDuringCancel) + " lines=" + string.Join(" / ", lines));
+
+                // MT6b: the cancel throws twice: retired with a line, never a third attempt.
+                reset(2);
+                refreshTick(0.0);
+                bool failed6b;
+                latch.End(1, "failed", cancel, out failed6b);
+                refreshTick(3.0);                                   // retry fails: retired, then ticket 2
+                int cancelsAfterRetire = cancels;
+                refreshTick(6.0); refreshTick(9.0);
+                Check(r, "MT6b a cancel that throws twice is retired with a log line on the next tick, never tried a third time",
+                      failed6b && cancelsAfterRetire == 2 && cancels == 2 && requestedAtCancel[1] == 1 && requested == 2
+                          && lines.Count == 1 && lines[0].Contains("retired uncancelled") && latch.Serial == 2,
+                      "cancels=" + cancels + " requested=" + requested + " lines=" + string.Join(" / ", lines));
+
+                // MT6c control: a cancel that succeeds frees the latch at once.
+                reset(0);
+                refreshTick(0.0);
+                bool failed6c;
+                string end6c = latch.End(1, "answered", cancel, out failed6c);
+                bool freeAtOnce = latch.MayRequest;
+                refreshTick(3.0);
+                Check(r, "MT6c control: a cancel that succeeds frees the latch at once, and the next tick may request",
+                      !failed6c && freeAtOnce && end6c.EndsWith("cancelled with Steam", StringComparison.Ordinal) && requested == 2 && cancels == 1,
+                      "end=" + end6c + " requested=" + requested);
+
+                // MT7: a late or repeated end changes nothing.
+                reset(1);
+                refreshTick(0.0);
+                bool fx;
+                latch.End(1, "failed", cancel, out fx);             // CancelFailed
+                string again = latch.End(1, "failed", cancel, out fx);
+                bool stillFailed = latch.State == TicketState.CancelFailed && cancels == 1;
+                refreshTick(3.0);                                   // retry ok, ticket 2
+                string stale = latch.End(1, "late", cancel, out fx);
+                Check(r, "MT7 a repeated end of a failed handle, and a late end of an old serial, change nothing",
+                      again == null && stillFailed && stale == null && latch.IsHeld && latch.Serial == 2 && cancels == 2,
+                      "again=" + (again ?? "null") + " stale=" + (stale ?? "null") + " state=" + latch.State + " cancels=" + cancels);
+
+                // MT8: a held ticket whose end never arrives is abandoned past the exchange's timeout.
+                reset(0);
+                refreshTick(0.0);
+                refreshTick(TicketAbandonSeconds - 1);
+                int before = requested;
+                refreshTick(TicketAbandonSeconds + 1);
+                Check(r, "MT8 a held ticket whose end never arrives is abandoned (cancelled) past the exchange's timeout, then superseded",
+                      before == 1 && requested == 2 && cancels == 1 && TicketAbandonSeconds > SteamAuthExchangeTimeoutSeconds + 10
+                          && lines.Count == 1 && lines[0].Contains("abandoned after 45 s") && lines[0].EndsWith("cancelled with Steam", StringComparison.Ordinal),
+                      "requested=" + requested + " lines=" + string.Join(" / ", lines));
+            }
+
             // -- H: the local witness harness's route ------------------------------
             {
                 const string loop = "http://127.0.0.1:18555";

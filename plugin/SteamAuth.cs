@@ -38,13 +38,14 @@ namespace CompetitiveRounds
         // such tickets followed by no further ticket for the rest of the
         // session, and the round-2 witness S4 repeated it (20 tickets, then
         // none after the restore).
-        private static bool _ticketHeld;
+        //
+        // Round 3 (Codex round 2 LOW 5): the latch is SecureRouteRules.TicketLatch
+        // and is released only after the cancel returns. A cancel that throws
+        // keeps the handle held-but-failed; the next refresh tick retries it
+        // once and then retires the handle with a log line; no successor ticket
+        // is requested while a handle is unretired (harness MT6-MT8).
+        private static readonly SecureRouteRules.TicketLatch _latch = new SecureRouteRules.TicketLatch();
         private static HAuthTicket _ticket;
-        private static int _ticketSerial;
-        private static float _ticketSince = -999f;
-        // Longer than the exchange's own 20 s request timeout plus the ticket
-        // callback, so only a ticket whose end never arrived is abandoned.
-        private const float TicketAbandonSeconds = 45f;
 
         public static bool HasFreshToken =>
             !string.IsNullOrEmpty(SessionToken)
@@ -60,10 +61,15 @@ namespace CompetitiveRounds
             {
                 // A held ticket whose end never arrived (a lost callback, a
                 // coroutine that died with its host) is abandoned and
-                // cancelled here, so the next one supersedes it and never
-                // stacks on it.
-                if (_ticketHeld && Time.realtimeSinceStartup - _ticketSince > TicketAbandonSeconds)
-                    EndTicket(_ticketSerial, "abandoned after " + TicketAbandonSeconds.ToString("0") + " s");
+                // cancelled here, and a cancel that failed is retried once and
+                // then retired, so the next ticket supersedes the old one and
+                // never stacks on it.
+                string note = _latch.Tick(Time.realtimeSinceStartup, CancelHeldTicket, out bool tickFailed);
+                if (note != null)
+                {
+                    if (tickFailed) Plugin.Log.LogWarning(note);
+                    else Plugin.Log.LogInfo(note);
+                }
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown" || sid.StartsWith("photon_")) return;
                 // No ticket while the api would refuse to exchange it (the
@@ -82,7 +88,7 @@ namespace CompetitiveRounds
                     ApiClient.NoteTicketExchangeRefused();
                     return;
                 }
-                if (HasFreshToken || _ticketHeld) return;
+                if (HasFreshToken || !_latch.MayRequest) return;
                 // Hammer until the FIRST session lands (enforced actions 401
                 // without one, so the startup window must be short); relax to
                 // a 60s pre-expiry refresh cadence once established.
@@ -92,9 +98,7 @@ namespace CompetitiveRounds
                 if (_webTicketCb == null)
                     _webTicketCb = Callback<GetTicketForWebApiResponse_t>.Create(OnWebTicket);
                 _ticket = SteamUser.GetAuthTicketForWebApi("competitive-rounds");
-                _ticketHeld = true;
-                _ticketSerial++;
-                _ticketSince = Time.realtimeSinceStartup;
+                _latch.Took(Time.realtimeSinceStartup);
             }
             catch (Exception ex)
             {
@@ -111,8 +115,8 @@ namespace CompetitiveRounds
             // Only the held ticket's callback counts. A late callback for a
             // ticket already ended (abandoned, so already cancelled) is dropped:
             // exchanging it would put a second exchange beside the held one.
-            if (!_ticketHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;
-            int serial = _ticketSerial;
+            if (!_latch.IsHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;
+            int serial = _latch.Serial;
             try
             {
                 if (cb.m_eResult != EResult.k_EResultOK || cb.m_cubTicket <= 0 || cb.m_rgubTicket == null)
@@ -133,29 +137,27 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The held ticket's exchange has ended (`outcome` names how):
-        /// cancel the ticket with Steam and release the one-ticket latch. A
+        /// cancel the ticket with Steam, and only then release the one-ticket
+        /// latch (a failed cancel keeps it; SecureRouteRules.TicketLatch). A
         /// serial that is no longer the held ticket's (already ended, or
         /// superseded) changes nothing, so an end reported twice, or late,
         /// can never release a newer ticket.</summary>
         internal static void EndTicket(int serial, string outcome)
         {
-            if (!_ticketHeld || serial != _ticketSerial) return;
-            _ticketHeld = false;
-            bool cancelled = false;
-            try
-            {
-                if (_ticket.m_HAuthTicket != 0)
-                {
-                    SteamUser.CancelAuthTicket(_ticket);
-                    cancelled = true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning($"[STEAM-AUTH] ticket {serial} cancel failed: {ex.Message}");
-            }
-            Plugin.Log.LogInfo($"[STEAM-AUTH] ticket {serial} ended ({outcome}); "
-                               + (cancelled ? "cancelled with Steam" : "no ticket handle to cancel"));
+            string line = _latch.End(serial, outcome, CancelHeldTicket, out bool failed);
+            if (line == null) return;
+            if (failed) Plugin.Log.LogWarning(line);
+            else Plugin.Log.LogInfo(line);
+        }
+
+        /// <summary>Cancel the held handle with Steam: false when there is no
+        /// handle, and a failure THROWS, so the latch sees it and keeps the
+        /// handle.</summary>
+        private static bool CancelHeldTicket()
+        {
+            if (_ticket.m_HAuthTicket == 0) return false;
+            SteamUser.CancelAuthTicket(_ticket);
+            return true;
         }
 
         public static void SetSession(string token, int expiresInSeconds)

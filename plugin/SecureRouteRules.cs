@@ -564,6 +564,93 @@ namespace CompetitiveRounds
             return !ready && now - started < PortalSessionWaitSeconds;
         }
 
+        // -- The one-ticket latch (board row 27 round 2; Codex round 2 LOW 5) --
+
+        /// <summary>How long a held ticket may wait for its exchange's end
+        /// before it is abandoned (cancelled) on a refresh tick: past the
+        /// exchange's own timeout plus the ticket callback, so only a ticket
+        /// whose end never arrived is abandoned.</summary>
+        internal const double TicketAbandonSeconds = SteamAuthExchangeTimeoutSeconds + 25;
+
+        internal enum TicketState { Free, Held, CancelFailed }
+
+        /// <summary>
+        /// One Steam web-API ticket at a time. A ticket is held from its request
+        /// until its exchange ends, and the latch is released only AFTER the
+        /// ticket's cancel returns. A cancel that throws keeps the handle
+        /// held-but-failed (CancelFailed); the next refresh tick retries the
+        /// cancel once, and then the handle is retired either way, with a log
+        /// line. No successor ticket may be requested while a handle is held or
+        /// unretired (MayRequest). SteamAuth owns the handle and passes the
+        /// cancel in: it returns false when there is no handle to cancel and
+        /// throws when the cancel fails.
+        /// </summary>
+        internal sealed class TicketLatch
+        {
+            internal TicketState State { get; private set; } = TicketState.Free;
+            internal int Serial { get; private set; }
+            internal double Since { get; private set; } = -999;
+
+            internal bool MayRequest => State == TicketState.Free;
+            internal bool IsHeld => State == TicketState.Held;
+
+            /// <summary>A ticket was requested (after the request returned).</summary>
+            internal int Took(double now)
+            {
+                State = TicketState.Held;
+                Serial++;
+                Since = now;
+                return Serial;
+            }
+
+            /// <summary>The held ticket's exchange ended (`outcome` names how).
+            /// Cancels first; Free only once the cancel has returned. A serial
+            /// that is not the held ticket's, or a handle already failed,
+            /// changes nothing (null). The line to log is returned; `failed`
+            /// says it is a warning.</summary>
+            internal string End(int serial, string outcome, Func<bool> cancel, out bool failed)
+            {
+                failed = false;
+                if (State != TicketState.Held || serial != Serial) return null;
+                bool had;
+                try { had = cancel(); }
+                catch (Exception ex)
+                {
+                    State = TicketState.CancelFailed;
+                    failed = true;
+                    return "[STEAM-AUTH] ticket " + Serial + " ended (" + outcome + "); cancel failed: " + ex.Message
+                         + "; kept held, the cancel is retried once on the next refresh tick";
+                }
+                State = TicketState.Free;
+                return "[STEAM-AUTH] ticket " + Serial + " ended (" + outcome + "); "
+                     + (had ? "cancelled with Steam" : "no ticket handle to cancel");
+            }
+
+            /// <summary>Run at the top of every refresh tick, before the request
+            /// gate. A failed cancel is retried exactly once and the handle is
+            /// then retired either way; a held ticket past TicketAbandonSeconds
+            /// is ended as abandoned (which cancels it).</summary>
+            internal string Tick(double now, Func<bool> cancel, out bool failed)
+            {
+                failed = false;
+                if (State == TicketState.CancelFailed)
+                {
+                    try { cancel(); }
+                    catch (Exception ex)
+                    {
+                        State = TicketState.Free;   // retired: one retry, never a third attempt
+                        failed = true;
+                        return "[STEAM-AUTH] ticket " + Serial + " retired uncancelled: the retry failed too (" + ex.Message + ")";
+                    }
+                    State = TicketState.Free;
+                    return "[STEAM-AUTH] ticket " + Serial + " cancelled with Steam on the retry";
+                }
+                if (State == TicketState.Held && now - Since > TicketAbandonSeconds)
+                    return End(Serial, "abandoned after " + (int)TicketAbandonSeconds + " s", cancel, out failed);
+                return null;
+            }
+        }
+
         internal enum PressAction
         {
             /// <summary>A check was begun or joined: show "Checking...".</summary>

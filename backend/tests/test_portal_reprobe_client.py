@@ -186,7 +186,7 @@ def test_no_steam_ticket_is_requested_while_the_api_would_refuse_to_exchange_it(
     gate = "if (!ApiClient.TicketExchangeAllowed())"
     assert refresh.count(gate) == 1, refresh
     at = refresh.index(gate)
-    assert at < refresh.index("if (HasFreshToken || _ticketHeld) return;"), refresh
+    assert at < refresh.index("if (HasFreshToken || !_latch.MayRequest) return;"), refresh
     assert at < refresh.index("_lastAttemptAt = Time.realtimeSinceStartup;"), refresh
     assert at < refresh.index('_ticket = SteamUser.GetAuthTicketForWebApi("competitive-rounds");'), refresh
     branch = refresh[at:refresh.index("}", at)]
@@ -223,31 +223,46 @@ def test_every_steam_ticket_is_cancelled_when_its_exchange_ends_and_one_is_held_
     auth = code_of(STEAMAUTH)
     assert "_requestInFlight" not in auth, "the callback-time latch is back"
     refresh = code_of(STEAMAUTH, "public static void MaybeRefresh()")
-    gate = "if (HasFreshToken || _ticketHeld) return;"
+    tick = "string note = _latch.Tick(Time.realtimeSinceStartup, CancelHeldTicket, out bool tickFailed);"
+    gate = "if (HasFreshToken || !_latch.MayRequest) return;"
     mint = '_ticket = SteamUser.GetAuthTicketForWebApi("competitive-rounds");'
-    assert refresh.count(gate) == 1 and refresh.count(mint) == 1, refresh
-    assert refresh.index(gate) < refresh.index(mint) < refresh.index("_ticketHeld = true;"), refresh
-    assert refresh.index(mint) < refresh.index("_ticketSerial++;"), refresh
-    abandon = "if (_ticketHeld && Time.realtimeSinceStartup - _ticketSince > TicketAbandonSeconds)"
-    assert refresh.count(abandon) == 1 and refresh.index(abandon) < refresh.index(gate), refresh
-    after = refresh[refresh.index(abandon) + len(abandon):]
-    assert after.lstrip().startswith("EndTicket(_ticketSerial,"), "abandonment does not end (cancel) the ticket"
+    took = "_latch.Took(Time.realtimeSinceStartup);"
+    for s in (tick, gate, mint, took):
+        assert refresh.count(s) == 1, (s, refresh)
+    # The latch's tick (abandonment, and the one retry of a failed cancel) runs
+    # before the gate; the ticket is taken only after the request returned.
+    assert refresh.index(tick) < refresh.index(gate) < refresh.index(mint) < refresh.index(took), refresh
     # Abandonment only for an end that never arrives: past the exchange's own timeout.
-    limit = float(re.search(r"const float TicketAbandonSeconds = ([0-9.]+)f;", auth).group(1))
+    rules = code_of(RULES)
+    limit = int(re.search(r"const int SteamAuthExchangeTimeoutSeconds = (\d+);", rules).group(1)) + float(re.search(r"const double TicketAbandonSeconds = SteamAuthExchangeTimeoutSeconds \+ ([0-9.]+);", rules).group(1))
     # (Round 3: the exchange's timeout is SecureRouteRules' named constant,
     # which PostSteamAuth passes to its POST; the portal wait derives from it.)
     timeout = int(re.search(r"const int SteamAuthExchangeTimeoutSeconds = (\d+);", code_of(RULES)).group(1))
     assert limit > timeout + 10, (limit, timeout)
-    # The only release of the latch is EndTicket, which cancels, and a stale serial changes nothing.
-    assert auth.count("_ticketHeld = false;") == 1, "the latch is released somewhere other than EndTicket"
+    # The latch is released only AFTER the cancel returns (round 3, Codex round
+    # 2 LOW 5). This pin used to assert the opposite order, release before
+    # CancelAuthTicket, which is the defect: a throwing cancel left the latch
+    # free with the handle uncancelled, so a successor could be requested
+    # beside it. The latch (SecureRouteRules.TicketLatch) is executed by the
+    # harness, MT6-MT8; here: SteamAuth keeps no latch of its own, every end
+    # goes through TicketLatch.End, and a failed cancel reaches it as a throw.
+    for gone in ("_ticketHeld", "_ticketSerial", "_ticketSince"):
+        assert gone not in auth, "SteamAuth keeps a latch of its own again: " + gone
     end = code_of(STEAMAUTH, "internal static void EndTicket(int serial, string outcome)")
-    guard = "if (!_ticketHeld || serial != _ticketSerial) return;"
-    assert end.count(guard) == 1 and "_ticketHeld = false;" in end, end
-    assert end.index(guard) < end.index("_ticketHeld = false;") < end.index("SteamUser.CancelAuthTicket(_ticket);"), end
+    assert "_latch.End(serial, outcome, CancelHeldTicket, out bool failed);" in end, end
+    cancel = code_of(STEAMAUTH, "private static bool CancelHeldTicket()")
+    assert "SteamUser.CancelAuthTicket(_ticket);" in cancel and "catch" not in cancel, cancel
+    assert auth.count("SteamUser.CancelAuthTicket(") == 1, "a cancel outside CancelHeldTicket"
+    latch_end = code_of(RULES, "internal string End(int serial, string outcome, Func<bool> cancel, out bool failed)")
+    assert latch_end.index("had = cancel();") < latch_end.index("State = TicketState.Free;"), latch_end
+    caught = latch_end[latch_end.index("catch (Exception ex)"):]
+    caught = caught[:caught.index("return ")]
+    assert "State = TicketState.CancelFailed;" in caught and "TicketState.Free" not in caught, caught
+    assert "internal bool MayRequest => State == TicketState.Free;" in rules, "a successor may be requested beside a held or failed handle"
     # The callback: only the held ticket, and every path ends it.
     cb = code_of(STEAMAUTH, "private static void OnWebTicket(GetTicketForWebApiResponse_t cb)")
-    held = "if (!_ticketHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;"
-    assert cb.count(held) == 1 and cb.index(held) < cb.index("int serial = _ticketSerial;"), cb
+    held = "if (!_latch.IsHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;"
+    assert cb.count(held) == 1 and cb.index(held) < cb.index("int serial = _latch.Serial;"), cb
     failed = cb[cb.index("ticket callback failed"):]
     assert failed.index('EndTicket(serial, "callback failed");') < failed.index("return;"), cb
     assert "ApiClient.PostSteamAuth(hex, outcome => EndTicket(serial, outcome));" in cb, cb
