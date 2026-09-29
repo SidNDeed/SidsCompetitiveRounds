@@ -869,9 +869,27 @@ def _in_match_evidence_trustworthy() -> bool:
 def _group_game_in_progress(group_id) -> bool:
     """True if a client reported being IN a game for this lobby/series recently.
 
-    Returns False when the evidence is not yet trustworthy (fresh process) — so
-    callers must treat this as 'proof of life', never as 'proof of death'. Use it
-    only to VETO a destructive action, never to trigger one.
+    For a NAMED group, returns TRUE while the evidence is not yet trustworthy
+    (fresh process) -- too soon after boot there is no way to tell "idle" from
+    "we have not listened yet", so it answers as though a game were live and
+    that caller's destructive action is vetoed. That is what the code below
+    does. The sentence this replaces said the same thing without the
+    qualifier; the one before that said the opposite.
+
+    THE QUALIFIER IS LOAD-BEARING, and the ORDER below is why. An absent or
+    empty group id is answered FALSE first, before process age is consulted at
+    all, because there is no group that could have been heard from. So the
+    young-process veto covers every caller that passes a real id and covers
+    NOTHING for a caller that passes none — the opposite failure direction, on
+    the one input for which an unqualified sentence here would read as a
+    guarantee this function does not make (#351: a comment asserting a
+    guarantee is a claim about the whole state space, and it is usually
+    written from the one state its author had in mind). Every caller today
+    passes a row id or guards on truthiness first; a future one that can pass
+    None must not read the first sentence as covering it.
+
+    Callers must treat the result as 'proof of life', never as 'proof of
+    death': use it only to VETO a destructive action, never to trigger one.
 
     Caller contract (Codex batch finds 2/4): this CONSERVATIVE variant (young
     process => veto) belongs only to JANITOR closers, which re-fire every tick
@@ -1926,6 +1944,19 @@ async def _supervised(name: str, coro_factory):
 _JANITOR_SELFTEST_ROOTS = (
     ("main", "queue_cleanup_loop"),
     ("main", "team_queue_cleanup_loop"),
+    # The deferred-fallback sweep is the unattended writer whose whole job is
+    # settling a series a fallback report declined to settle. It is not the
+    # only writer that ends a deferral. A real-totals report
+    # inside the bound settles it too, at the lead-forfeit completion or at the
+    # dc_incomplete exit; a revival funnel ATTEMPTS the marker clear, and only
+    # a clear whose UPDATE ran leaves nothing for the sweep to settle; and a
+    # queue-janitor cancel, an admin resolution or a completing game report can
+    # move the row out of the two open statuses as well -- the shape suite's
+    # writer census names every such writer. It is janitor SQL in exactly the
+    # sense this self-test exists for: it runs unattended every minute and its
+    # failure is silent. It also names a column migration 356 adds, which makes
+    # the boot banner the loud half of the migration-before-api deploy order.
+    ("main", "team_dc_fallback_sweep_loop"),
     ("tournaments", "tournament_tick"),
 )
 
@@ -3543,6 +3574,11 @@ async def lifespan(app: FastAPI):
                 _supervised("tournament_tick", tournament_tick)))
             tasks.append(asyncio.create_task(
                 _supervised("min_version_autoraise", min_version_autoraise_loop)))
+            # Deferred 2v2 disconnect fallbacks. PRIMARY ONLY, with the rest of
+            # the write schedulers: it is the only writer of the settlement a
+            # fallback report defers, and the standby's postgres is read-only.
+            tasks.append(asyncio.create_task(
+                _supervised("team_dc_fallback_sweep", team_dc_fallback_sweep_loop)))
             # Detached one-shot, deliberately NOT under _supervised (its while-True
             # would rerun a returning task forever) and not awaited on the boot path.
             tasks.append(asyncio.create_task(_run_janitor_query_selftest()))
@@ -3801,6 +3837,396 @@ async def team_queue_cleanup_loop():
             print(f"[TEAM-QUEUE-CLEANUP] Error: {e}")
 
 
+# ── Deferred 2v2 disconnect fallbacks ───────────────────────────────────────
+#
+# THE BOUND, AND WHERE THE NUMBER COMES FROM. A fallback report defers instead
+# of settling (see team_series_report_dc), so something has to settle the row if
+# no real-totals report ever arrives. The window has to cover every real-totals
+# report that could still be in flight when the fallback lands.
+#
+# TERM 1 -- TRANSPORT. One client report costs at most one transport budget:
+# PostRequestWithRetry makes 3 attempts with a 10 s request timeout and 2 s
+# between them, so 3 x 10 + 2 x 2 = 34 s nominal (the client's own
+# retry_budget_seconds() parses those three terms out of that method's body
+# rather than hardcoding the sum).
+#
+# TERM 2 -- THE HOLD, which the first cut of this bound left out and which is
+# the larger term. A client does not necessarily fire its report the moment the
+# game ends. This file says so itself, in the room fence of the report handler
+# below: "a DEFERRED DC report (clients can hold one through an assembly phase
+# and fire it minutes later)". The longest assembly this server will hold a seat
+# in is its own ceiling, _ASSEMBLY_DEADLINE_SECONDS = 180 s, after which the
+# state poll cancels the assembly and frees the seat. So a held report's FIRST
+# attempt can land 180 s after the fallback was filed, with its transport budget
+# only starting there.
+#
+# TERM 3 -- RE-ELECTION. A second disconnect on another seat can elect a new
+# reporter that then spends a full transport budget of its own: +34 s.
+#
+# 180 + 34 + 34 = 248 s worst case. 420 s is that plus 172 s of margin (1.69x):
+# margin for a Unity request timeout that is not a hard ceiling under a stalled
+# socket, for the report endpoint's own row-lock wait, and for a tick landing
+# just before a marker comes due.
+#
+# WHAT THE DERIVATION DOES NOT COVER, said plainly rather than left for the
+# reader to discover (#302, #351): a client that holds a report for longer than
+# one full assembly deadline plus its transport budget is not observable from
+# this side, and no constant chosen here is a proof against it. This is a bound,
+# not a guarantee. It is set at the longest value whose only cost is latency,
+# because the two costs are not symmetric -- waiting too long means a genuinely
+# abandoned series reaches the admin panel seven minutes late, while settling
+# too early means a PLAYED series is recorded dc_incomplete and its rating and
+# gold are never applied (#276, #430).
+#
+# WHAT NARROWS THE UNCOVERED PART, AND WHAT DOES NOT. Round 4 answered this
+# with a "second refusal": a 214 s room-quiet term that was supposed to
+# decline a due row on state independent of the marker's age. It could not
+# decline anything. An ordinary room is stamped onto the series when it is
+# ISSUED, which is before the sitting that produced the marker, so a marker
+# past 420 s always sits on a room past 420 s and the room term was already
+# true; and a continuation series carries a real room with a NULL
+# room_issued_at, because the continuation INSERT does not stamp it, which
+# made the term true on arrival. There is a third shape -- a room issued AFTER
+# a marker was filed, which the term WOULD have refused -- and production
+# reaches it only when a clear fails: issuing a room ATTEMPTS the marker clear
+# in the same function that stamps it (the one such statement in this file),
+# that attempt swallows whatever it raises, and a failed attempt leaves
+# exactly this shape. That is the swallowed-error residual the clear helper
+# records, and there the deletion does give up a refusal, for the 214 s after
+# the re-issue; what stands on that row is the live-game veto below, a bound
+# and not a guarantee. The structural suite counts the room-issue operation
+# file-wide, and the orderings suite settles this shape on the bound like the
+# other two. On every shape a working flow produces the term could not
+# refuse, and a check that cannot
+# refuse is worse than no check (#342, #431, #441), so it is DELETED rather
+# than patched (#310, #389). What narrows the uncovered part is the live-game
+# veto in the sweep below -- in-process evidence rather than a clock on a
+# column -- and nothing else here claims to.
+#
+# THE BOUND, in the one sentence both lanes carry verbatim:
+#
+#   A real-totals report wins while the deferred marker is younger than 420
+#   seconds, and after that only until a sweep tick finds no live-game
+#   evidence for the series and settles the row; once a row is settled, a
+#   later report is refused at the settled-row exit and is not rated.
+_DC_FALLBACK_DEFER_SECONDS = 420
+
+# The transport budget, named so the arithmetic above is something a test can
+# CHECK rather than a paragraph nobody re-derives (#342).
+# test_sept16_dc_fallback_shape.py rebuilds both numbers from
+# _ASSEMBLY_DEADLINE_SECONDS at import time, so moving the assembly ceiling
+# reddens this bound instead of silently invalidating the derivation.
+_DC_CLIENT_TRANSPORT_BUDGET_SECONDS = 34
+
+
+async def _team_clear_dc_fallback_marker(db, series_id) -> None:
+    """Clear the deferral marker on a series an adoption funnel just revived.
+
+    THE OPERATION, NOT THE LINE (#432, #330). Every funnel that flips a
+    team_series row back to 'active' and clears dc_player_id has to call this: a
+    marker that survives a resume comes due like any other: on the first
+    tick after it passes the bound, the sweep settles the FRESHLY RESUMED
+    series to dc_incomplete and attributes it to the previous sitting's
+    disconnect.
+
+    THE CLEAR IS UNCONDITIONAL, AND THE MARKER'S AGE IS NOT SOMETHING ANY
+    CALLER MAY REASON FROM. A revival says nothing about how old the marker
+    is. A settlement inside the bound followed by an immediate revival leaves
+    a marker YOUNGER than the bound; a post-bound sweep followed by a later
+    revival leaves one OLDER. This comment and the header of migration 356
+    each used to assert one of those as if it were the only case, in opposite
+    directions, and neither followed from the revival. Both cases need the
+    same clear, so the clear is age-independent. WHAT THIS CALL GUARANTEES,
+    precisely, because a guarantee in a comment is a claim about the whole
+    state space (#351): it ATTEMPTS the clear inside its own savepoint and
+    swallows every exception the attempt raises. On a clean return the row
+    carries no marker ONLY when that UPDATE actually ran; a swallowed database
+    error -- the pre-356 missing column, a lock timeout, a connection the
+    driver has already given up on -- leaves the revived row still carrying
+    its marker, and a later tick past the bound can settle a series that has
+    resumed. That is a recorded residual of this design and not a case a
+    caller may reason away. That is also why the clear belongs
+    in the funnel and not in a freshness test in the sweep -- a freshness test
+    would have to pick one of those two cases to be right about.
+
+    There are exactly two such funnels, the queue/sticky resume
+    (_team_relock_existing_series) and the hosted-lobby Start adoption
+    (team_lobby_start), and the first cut of this change cleared the marker in
+    only one of them. test_sept16_dc_fallback_shape.py counts the revival
+    OPERATION across the WHOLE file -- matched on the columns the operation
+    writes, insensitive to how the SQL is spaced -- and requires this call
+    inside every function that performs one, so a third funnel cannot be added
+    without either calling it or reddening.
+
+    Its own savepoint rather than a clause in the callers' own UPDATE (#235):
+    pre-migration-356 the columns do not exist and a caught SQL error poisons
+    the whole enclosing transaction under asyncpg -- neither resume may start
+    failing because a deploy ran out of order. Skipping it then is harmless,
+    because with no column there are no markers.
+    """
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "UPDATE team_series"
+                "   SET dc_fallback_at = NULL, dc_fallback_player_id = NULL"
+                " WHERE id = :sid"
+            ), {"sid": series_id})
+    except Exception:
+        pass
+
+
+async def _team_dc_fallback_sweep_once(db) -> int:
+    """One pass of the deferred-fallback sweep. Returns the number settled.
+
+    Split out of the loop below so the acceptance harness can drive a pass
+    against a real database at a chosen moment, which is the only way to test
+    the orderings this sweep exists to make safe -- lock waits and
+    clock_timestamp are PostgreSQL behaviours and a fake session cannot
+    exhibit them.
+    """
+    settled = 0
+    # Discovery is UNLOCKED and bounded. It selects CANDIDATE IDS and nothing
+    # else -- every value the settle acts on is re-read under the lock below,
+    # so there is no column here that a later edit could quietly start carrying
+    # into a write on the strength of a comment (#302).
+    #
+    # ONE time term, not two. Round 4 also required the stored room to have
+    # been quiet for 214 s. That term could refuse no row a working flow
+    # produces, and the one row it could -- a room re-issued over a marker
+    # whose clear failed -- is the recorded residual the bound block above
+    # prices, so it is gone from both statements rather than left here reading
+    # like a second condition somebody could rely on (#342, #441).
+    due = (await db.execute(
+        text("""
+            SELECT ts.id
+              FROM team_series ts
+             WHERE ts.status IN ('active', 'dc_paused')
+               AND ts.dc_fallback_at IS NOT NULL
+               AND ts.dc_fallback_at
+                   < clock_timestamp() - make_interval(secs => :bound)
+             LIMIT 20
+        """),
+        {"bound": float(_DC_FALLBACK_DEFER_SECONDS)},
+    )).mappings().all()
+    for row in due:
+        sid = row["id"]
+        # Proof-of-life veto, PASS 1: a cheap filter that keeps the ordinary
+        # case from taking a lock at all. It is not the decision -- pass 2 below
+        # is. The CONSERVATIVE variant, per that helper's own caller contract:
+        # this is a janitor closer that re-fires every tick and whose marker
+        # does not age out, so a wrongly-vetoed pass costs one minute and is
+        # retried, while settling a live game costs the game. A young process
+        # vetoes everything, which is the correct direction after a restart --
+        # the evidence map is empty because we have not listened yet, not
+        # because nobody is playing.
+        if _group_game_in_progress(str(sid)):
+            print(f"[TEAM-DC-SWEEP] deferred settle VETOED, game in progress: {sid}")
+            continue
+        # RE-SELECT UNDER THE LOCK AND RE-CHECK THE PREDICATE INSIDE THIS
+        # TRANSACTION (#202, #208). The discovery SELECT above holds nothing: a
+        # real-totals report can take this row between the two statements and
+        # complete the series with ratings and gold, and a set-based UPDATE
+        # keyed on the discovery result would then overwrite that completion
+        # with dc_incomplete. FOR NO KEY UPDATE, the same mode the report
+        # handler takes, so the two serialize against each other and neither
+        # fights the synthetic-forfeit team_matches insert's FK KEY SHARE.
+        #
+        # SKIP LOCKED, like every sibling janitor in this file. Without it this
+        # statement is an UNBOUNDED wait -- there is no lock_timeout on the
+        # engine and none set here -- so one row held by an admin resolution or
+        # by a family-pick transaction stalls the whole pass, and because the
+        # loop is sleep-then-one-pass the other nineteen due rows wait out the
+        # holder with nothing in the log to say why. A skipped row is retried
+        # next tick, which is already the disposition coded below for a row
+        # somebody else decided, so the two cases need no separate handling.
+        #
+        # Everything the settle uses is read HERE, under the lock: status, the
+        # marker and its dueness, the filed player id and the membership. The
+        # marker especially is re-read rather than carried, because a resume
+        # clears it (and puts the series back to 'active'), so the row can
+        # arrive at this lock with no marker at all or with a fresh one filed
+        # after that resume. clock_timestamp() inside the locked statement is
+        # read after whatever this SELECT itself did, so the bound is measured
+        # from the moment authority is actually held.
+        locked = (await db.execute(
+            text("""
+                SELECT status, dc_fallback_at, dc_fallback_player_id,
+                       t1a_id, t1b_id, t2a_id, t2b_id,
+                       (dc_fallback_at
+                        < clock_timestamp() - make_interval(secs => :bound))
+                       AS past_bound
+                  FROM team_series
+                 WHERE id = :sid
+                   FOR NO KEY UPDATE SKIP LOCKED
+            """),
+            {"sid": sid, "bound": float(_DC_FALLBACK_DEFER_SECONDS)},
+        )).mappings().first()
+        if (locked is None
+                or locked["status"] not in ("active", "dc_paused")
+                or locked["dc_fallback_at"] is None
+                or not locked["past_bound"]):
+            # Either somebody is holding this row right now (SKIP LOCKED returns
+            # nothing rather than queueing behind them) or they already decided
+            # it between the two statements. Both are the designed outcome, not
+            # an error, and both have the same disposition: leave it alone and
+            # let the next tick read it from scratch.
+            await db.commit()
+            continue
+        # The service-subject refusal is per ROW, not per pass. The sibling
+        # sweeps let it propagate, which is survivable there; here it would
+        # abort the rest of this batch every tick for as long as the offending
+        # row is due, starving the other nineteen. Skipping the row IS the
+        # refusal, and it says so out loud rather than silently. It judges the
+        # LOCKED row's membership -- the same four ids the settle is about to
+        # attribute to -- with the lock held.
+        #
+        # IT RUNS BEFORE THE VETO (round-4 HIGH). This helper AWAITS: on a cold
+        # or hourly-expired cache _service_player_uuids issues its own SELECT.
+        # Running it first means the only awaits after the veto read are the
+        # settlement statement and its commit, so the lookup's cost is paid
+        # while nothing is decided. What keeps the veto CURRENT through the
+        # write is not that ordering but the lock discipline described at the
+        # settlement statement. Under it a heartbeat that arrives DURING this
+        # lookup is ordered AFTER the settlement -- it waits for this pass's
+        # commit and publishes nothing to a settled row -- so in either order
+        # no heartbeat can land between the veto read and the write. The
+        # lookup's position is the integrator's statement shape (the settle's
+        # parameters bound immediately before the statement that carries
+        # them), and the structural suite holds it there.
+        try:
+            await _assert_no_service_subject(
+                db,
+                affected_player_ids=[locked["t1a_id"], locked["t1b_id"],
+                                     locked["t2a_id"], locked["t2b_id"]],
+            )
+        except HTTPException:
+            print(f"[TEAM-DC-SWEEP] deferred settle REFUSED, service subject: {sid}")
+            await db.commit()
+            continue
+        # The remaining team is derived from the membership on the LOCKED row's
+        # own series, and from the player id on the LOCKED row's own marker:
+        # the fallback filed a player and this is where it becomes an
+        # attribution, so it is read from the same statement that granted the
+        # authority to write it rather than from the unlocked discovery pass.
+        # None when the filing named nobody, which leaves the admin panel to
+        # decide from the log.
+        _dcp = locked["dc_fallback_player_id"]
+        _remaining = None
+        if _dcp is not None:
+            _remaining = 2 if _dcp in (locked["t1a_id"], locked["t1b_id"]) else 1
+        # Proof-of-life veto, PASS 2, and THIS is the one the settle rests on.
+        # Pass 1 ran before the lock. A row can become live between the two --
+        # the four press Start, a room is issued, the first in-match ping lands
+        # -- and the in-transaction re-check above cannot see it, because it
+        # re-checks COLUMNS while liveness is in-process evidence.
+        #
+        # THE SETTLEMENT STATEMENT CARRIES THE VETO (round-7c HIGH). The
+        # evidence is this process's memory, so no SQL predicate can read it;
+        # the veto is read while the statement's parameters are built and
+        # travels INTO the UPDATE as a typed bind, and the UPDATE refuses in
+        # SQL when it holds. There is no separate step between the last veto
+        # read and the write for anything to land in.
+        #
+        # WHY THAT READING IS STILL CURRENT WHEN THE COMMIT MAKES IT
+        # AUTHORITATIVE: the lock, and not an absence of awaits -- the UPDATE
+        # itself is awaited. This pass holds FOR NO KEY UPDATE on the row from
+        # its locked re-SELECT until the commit below. The one caller of
+        # _in_match_touch, presence_ping, takes FOR SHARE on the same series
+        # row BEFORE its membership read and publishes while it still holds
+        # that lock, and FOR SHARE conflicts with FOR NO KEY UPDATE. So a
+        # publication for this series lands in one of three places relative to
+        # this pass: it finished before this pass's lock was granted, and is
+        # in the map the bind reads, counting until IN_MATCH_TTL_SEC lapses;
+        # or its lock was held when this pass asked
+        # for one, and SKIP LOCKED passed the row over, so nothing was settled
+        # this tick; or it waits for the commit and reads the row as this pass
+        # left it -- publishing if the row is still open and nothing if it is
+        # settled. That third place takes EVERY heartbeat that arrives after
+        # this pass's lock is granted -- during the locked re-read, during the
+        # service-subject lookup, while the statement is built and while it is
+        # awaited: each one waits, is ordered after the settlement, publishes
+        # nothing to a settled row and still renews its lease.
+        # test_sept16_dc_fallback_shape.py asserts the bind, the predicate and
+        # the publisher's lock, and counts the publishers; the orderings file
+        # sends a real ping into three of those windows -- after the lock
+        # grant, during the lookup, and between the veto read and the write --
+        # and asserts that it waits and publishes nothing.
+        #
+        # The UPDATE also re-states every other condition the settle rests on
+        # -- status, a marker present, the marker past the bound on
+        # clock_timestamp() -- so what it writes is decided by what it finds.
+        _settle = {"sid": sid, "dpid": _dcp, "ot": _remaining,
+                   "bound": float(_DC_FALLBACK_DEFER_SECONDS),
+                   "live": _group_game_in_progress(str(sid))}
+        done = (await db.execute(
+            text("""
+                UPDATE team_series
+                   SET status = 'dc_incomplete',
+                       dc_player_id = COALESCE(dc_player_id, :dpid),
+                       dc_team_remaining = COALESCE(dc_team_remaining, :ot),
+                       invalidation_reason = 'dc_manual_pending'
+                 WHERE id = :sid
+                   AND status IN ('active', 'dc_paused')
+                   AND dc_fallback_at IS NOT NULL
+                   AND dc_fallback_at
+                       < clock_timestamp() - make_interval(secs => :bound)
+                   AND NOT CAST(:live AS BOOLEAN)
+                 RETURNING id
+            """),
+            _settle,
+        )).scalar()
+        await db.commit()
+        if _settle["live"]:
+            print("[TEAM-DC-SWEEP] deferred settle VETOED after the lock, "
+                  f"game in progress: {sid}")
+            continue
+        if done:
+            settled += 1
+            print("[TEAM-DC-SWEEP] deferred fallback settled to dc_incomplete: "
+                  f"{sid} (remaining_team={_remaining})")
+    return settled
+
+
+async def team_dc_fallback_sweep_loop():
+    """Settle 2v2 series whose only disconnect report was a deferred fallback.
+
+    A fallback report -- one filed by a survivor that is not the elected
+    reporter, carrying no point totals -- no longer writes a terminal status.
+    It stamps dc_fallback_at and returns "deferred", which leaves the series
+    'active', so while the row is STILL active a real-totals report that
+    lands in either order relative to that fallback reaches its normal
+    branches, including the rated lead-forfeit. What ends that is this
+    loop, and the sentence below is the bound on it. This loop is what closes the series when no such report
+    ever arrives, and it is also the far end of the window:
+
+      A real-totals report wins while the deferred marker is younger than 420
+      seconds, and after that only until a sweep tick finds no live-game
+      evidence for the series and settles the row; once a row is settled, a
+      later report is refused at the settled-row exit and is not rated.
+
+    It can only ever produce 'dc_incomplete' with invalidation_reason
+    'dc_manual_pending' -- the admin panel's queue. It never calls
+    _complete_team_series_with_ratings and moves no rating, gold or xp, so no
+    ordering of client reports can make this loop decide a RESULT; what a
+    settled row costs is the rating and gold the lead-forfeit would have
+    applied, which is why the bound is set long rather than short (#276).
+    """
+    import asyncio as _aio
+    from database import async_session
+    while True:
+        try:
+            await _aio.sleep(60)
+        except Exception:
+            continue
+        # Its own transaction and its own guard, like every other sweep arm:
+        # one broken statement here must not starve the arms around it.
+        try:
+            async with async_session() as db:
+                await _team_dc_fallback_sweep_once(db)
+        except Exception as e:
+            print(f"[TEAM-DC-SWEEP] error: {e}")
+
+
 # ── 1v2 abandoned-series horizon (bug 391) ───────────────────────────────
 # Sid ruled on 2026-09-20 that a ranked series idle for 14 days is closed
 # rather than left live. A 1v2 sitting is UNRANKED (`is_ranked` defaults FALSE
@@ -3870,7 +4296,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:46008 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:47121 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3936,7 +4362,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:45820 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:46933 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4006,7 +4432,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:45723 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:46836 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6401,6 +6827,20 @@ _RJ_TRIAGE_MARKER = 2
 # Its sibling _LEAD_FORFEIT_PERGAME (the /health `lead_forfeit_pergame` word)
 # is DERIVED from the two 2v2 per-game wirings rather than written here, so
 # it is defined after team_series_report_dc, whose reader call it reads.
+# Its sibling _TEAM_DC_FALLBACK_LAST (the /health `team_dc_fallback` word)
+# asks the DATABASE, as `pc_trading` also does: whether this box's
+# team_series has the columns the 2v2 disconnect deferral reads and writes
+# (migration 356). The connected arm probes and the degraded arm reads back
+# the last probe's answer. The probe's column list is DERIVED from the four
+# functions that use those columns, so it is defined after the last of them,
+# team_series_report_dc.
+# Its sibling _FFA_FINISHING_COUNT_LAST (the /health `ffa_finishing_count`
+# word) asks the DATABASE too, the same way: whether this box's ffa_lobbies
+# and ffa_match_players carry the columns the ranked-FFA finishing-count rule
+# reads and writes (board row 28). The connected arm probes and the degraded
+# arm reads back the last probe's answer. The probe's column lists are
+# DERIVED from the three functions that read or write those columns, so it
+# is defined after the last of them, submit_ffa_match.
 # TICKET-REDACTION, reported on /health as `ticket_redaction`. A marker whose
 # only purpose is to be probed (#306): nothing reads it and no behaviour
 # depends on it. 1 = this build applies log_redaction's credential rule (the
@@ -6421,6 +6861,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
     try:
         await db.execute(text("SELECT 1"))
+        team_dc_fallback = await _team_dc_fallback_probe(db)
+        ffa_finishing_count = await _ffa_finishing_count_probe(db)
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
@@ -6435,12 +6877,18 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
-                              pc_motion=_pc_motion_health_word())
+                              pc_motion=_pc_motion_health_word(),
+                              ffa_finishing_count=ffa_finishing_count,
+                              team_dc_fallback=team_dc_fallback)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
+        # team_dc_fallback and ffa_finishing_count both need the database, so
+        # this arm answers each one's last probe on this worker (0 before the
+        # first, which the release train reads as not proven); pc_trading
+        # answers its own cache-only form.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
@@ -6452,7 +6900,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
-                              pc_motion=_pc_motion_health_word())
+                              pc_motion=_pc_motion_health_word(),
+                              ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
+                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -6481,6 +6931,19 @@ async def get_mod_version():
     The NAME is not chosen here — it is the client's own constant, read off
     this tree by the test that pins it. See the capability constant for how
     the two files are held to one spelling.
+
+    NO 2v2 SERIES-STATUS CAPABILITY IS ADVERTISED HERE, and round 5 of the 2v2
+    disconnect-fallback work removed the one that was.
+    `series_status_readonly` used to say "this box honours ?lifecycle=false on
+    the series state endpoint". An answer from this route cannot speak for the
+    box that answers a LATER request: the edge chooses an upstream per request
+    and the primary and the standby are deployed independently, so a client
+    that read the advertisement from an updated box could still send its next
+    request to one that had not been updated (learning #422, bug #266). The
+    lifecycle parameter is gone with it; a caller that must not mutate calls
+    GET /api/v1/team/series/{id}/status, which is a route rather than an
+    argument, and reads "readonly": true out of that response -- proof about
+    the box that produced it, and about nothing else.
     """
     _involuntary = bool(_INVOLUNTARY_EXIT_CAUSES) and (
         _INVOLUNTARY_EXIT_CAUSES <= _IN_ROOM_EXIT_CAUSES)
@@ -13796,6 +14259,50 @@ async def _strict_steam_session_ok(request, steam_id: str, db: AsyncSession) -> 
     return await _seat_attestation_verdict(request, steam_id, db) == SEAT_VERIFIED
 
 
+class _NotOwnSeat(Exception):
+    """An in-match claim naming a seat the request's own session does not name.
+    Raised inside presence_ping's guarded block, which drops the claim the way
+    it drops every other refusal there; the ping itself is still answered."""
+
+
+async def _session_seat(request, db: AsyncSession) -> str | None:
+    """The steam_id of the session the request's X-Session-Token names, or
+    None when it names none: no token, a token no session row carries, or a
+    lookup that failed.
+
+    A DIFFERENT QUESTION OF THE SAME ROW. _check_steam_session asks whether the
+    CLAIMED steam_id is established, and where enforcement is not armed for the
+    caller it records the answer in one log line and returns.
+    _seat_attestation_verdict asks whether the session is verified, current
+    and the claimed id's. This asks only whose session the request carries,
+    and it is answered on every branch: expiry and verification are not read,
+    because a client holding its own expired or unverified session is still
+    the holder of that session. A caller that must act only for the
+    requester's own seat compares its claim with this.
+
+    WHAT THE ANSWER IS WORTH follows the mint, and this does not change it:
+    while STEAM_WEB_API_KEY is set, /auth/steam issues a session only for the
+    steam_id a Steam ticket verified; while it is unset, the mint issues an
+    unverified session for whatever steam_id it is handed, and a session then
+    names the seat it was minted for and proves nothing stronger.
+
+    Never raises. The read is inside a SAVEPOINT for the reason
+    _seat_attestation_verdict gives: under asyncpg a caught statement error
+    still leaves the whole transaction aborted (#235), and the caller's next
+    statement must not inherit that."""
+    try:
+        token = request.headers.get("X-Session-Token") if request is not None else None
+        if not token:
+            return None
+        async with db.begin_nested():
+            row = (await db.execute(text(
+                "SELECT steam_id FROM steam_sessions WHERE token_hash = :th"
+            ), {"th": hashlib.sha256(token.encode()).hexdigest()})).first()
+        return None if row is None else row[0]
+    except Exception:
+        return None
+
+
 def _mark_session_verified(request, ok):
     """Stamp the session verdict on the request. Fail-quiet: a caller reading
     it back defaults to False, and a request object without `state` (internal
@@ -14476,7 +14983,14 @@ async def _lease_renew(db: AsyncSession, player_id, mode: str, group_id=None,
         a lease since re-acquired for a different game.
       * per-player only        — the caller renews THEIR OWN lease. One member
         must never be able to renew the whole group, or a single lying client
-        holds everyone. Spoofing then costs only self-exclusion.
+        holds everyone. This function renews whatever player_id it is handed,
+        so WHOSE lease that is, is the caller's decision. presence_ping's
+        in-game renewal reaches it only for the seat the request's own
+        session names (its seat binding, residual 26), on every branch of
+        the session check. The lobby-seat renewals in the queue polls, which
+        test_every_lease_renewer_is_classified names, renew the seat of the
+        id their request names, under the session check's own policy,
+        which soft-fails where enforcement is not armed for the caller.
       * max_total_seconds      — optional ceiling on TOTAL life since acquire,
         for renewal sources that are merely "a client is running" rather than
         "a game is happening". The 30-minute CHECK in migration 174 bounds one
@@ -16005,21 +16519,83 @@ async def presence_ping(request: Request,
     #
     # Codex batch find 8: this is DESTRUCTION-VETO evidence, so it must be
     # authenticated — an unauthenticated ping naming a public series id could
-    # hold any group open forever. Trust the claim only when (a) the pinger's
-    # session checks out (the client stamps X-Session-Token on every request)
-    # and (b) the pinger is a recorded MEMBER of the named group. A failed
-    # check silently drops the claim — the ping itself (presence, last_seen)
-    # is still honoured, and old clients never send in_match at all.
+    # hold any group open forever. Trust the claim only when (a) the session
+    # check passes where it is armed, (b) the claimed steam_id is the seat the
+    # request's own session names -- on every branch of that check (the client
+    # stamps X-Session-Token on every request) -- and (c) that seat is a
+    # recorded MEMBER of the named group. A failed check drops the claim —
+    # the ping itself (presence, last_seen) is still answered, and old clients
+    # never send in_match at all.
     if in_match:
         _im_ok = False
         _im_mode = None
         _im_pid = None
+        _im_publish = False
         try:
             # Python-side UUID validation first: a malformed id must not reach
             # a CAST and poison the transaction the last_seen stamp below
             # still needs (#235).
             _gid = UUID(in_match)
             await _check_steam_session(request, steam_id, db)
+            # THE CLAIM ACTS ONLY FOR THE REQUESTER'S OWN SEAT (residual 26),
+            # on EVERY branch of the check above. Where enforcement is armed
+            # for this caller a session that does not verify raises there;
+            # everywhere else the check logs one line and returns, and nothing
+            # up to here ties the claimed steam_id to anything the request
+            # carries. So the claim is compared with the seat the request's own
+            # session names, and a claim naming any other seat, or a request
+            # carrying no session at all, is refused HERE: before the series
+            # lock, before the publication and before the lease renewal below,
+            # each of which acts for whatever steam_id reaches it. The client
+            # pings as the id whose token it holds, so its own claims pass;
+            # while it holds no session (a lapsed or failed mint) this ping
+            # publishes nothing and renews nothing, and its lease expires by
+            # default after LEASE_TTL_INGAME.
+            _im_own_seat = await _session_seat(request, db)
+            if _im_own_seat != steam_id:
+                print("[PRESENCE] in_match claim refused, not the requester's "
+                      "own seat (the request's session names "
+                      + ("no seat" if _im_own_seat is None else "another seat")
+                      + f"): {steam_id} -> {in_match}")
+                raise _NotOwnSeat()
+            # THE SERIES LOCK COMES BEFORE THE MEMBERSHIP READ (round-7c
+            # HIGH). This is the only caller of _in_match_touch, and the 2v2
+            # deferred-fallback sweep settles a series on the strength of that
+            # evidence being ABSENT: it holds FOR NO KEY UPDATE on the series
+            # row from its locked re-read until its commit, and its settlement
+            # statement carries the veto it read under that lock. FOR SHARE
+            # conflicts with that lock, so while the sweep holds it this read
+            # waits; when the sweep commits, the read returns the row as the
+            # sweep left it. The publication below therefore lands in one of
+            # three places relative to one sweep pass over this series: before
+            # the sweep's lock is granted, where the veto its settlement
+            # carries reads it; while this lock is held, in which case the
+            # sweep's SKIP LOCKED passes the row over and settles nothing that
+            # tick; or after the sweep's commit, against the row as the sweep
+            # left it -- published to if it is still open, not if it was
+            # settled. A plain membership SELECT could run in the middle of
+            # that transaction, see the row still open and publish evidence the
+            # settlement never saw.
+            #
+            # FOR SHARE and not FOR NO KEY UPDATE: it is the weakest mode that
+            # conflicts with the sweep's (#202), so the four seats of one
+            # series do not queue behind each other's pings. A group id that
+            # is not a team series matches no row and takes no lock; the ovt
+            # and ffa branches below are unchanged. Taken AFTER the session
+            # check, and what that buys depends on the check's branch: where
+            # enforcement is armed for this caller, a session that does not
+            # verify raises there and no series row is locked; on the
+            # soft-fail branch -- enforcement off, a caller below
+            # STEAM_AUTH_MIN_VERSION whose account is not armed, or a failed
+            # session lookup -- the check logs one line and returns, and the
+            # seat binding above has already refused every claim for a seat
+            # the request's own session does not name, so what reaches this
+            # lock is a claim for the requester's own seat. The lock changes
+            # WHERE a publication lands relative to a sweep pass, not WHO may
+            # publish. The seat binding is what decides who may.
+            _im_series = (await db.execute(text(
+                "SELECT status FROM team_series WHERE id = :gid FOR SHARE"
+            ), {"gid": _gid})).first()
             # Returns WHICH kind of group as well as whether membership holds,
             # because this ping is also the queue lease's in-game renewal
             # carrier (migration 174) and a lease renewal must name its mode.
@@ -16049,6 +16625,27 @@ async def presence_ping(request: Request,
                 _im_ok = True
                 _im_mode = _im_row["mode"]
                 _im_pid = _im_row["pid"]
+                # A team series is published to only while it is still a
+                # series a closer can act on -- the two statuses the sweep
+                # settles from -- as read under the lock above. A row the
+                # sweep has already settled is not: evidence arriving after a
+                # settlement is not evidence the settlement could have seen.
+                _im_publish = (_im_mode != "team"
+                               or (_im_series is not None
+                                   and _im_series[0] in ("active",
+                                                         "dc_paused")))
+            if _im_publish:
+                _in_match_touch(in_match)
+            elif _im_ok:
+                print("[PRESENCE] in_match evidence not published, series "
+                      f"no longer open: {steam_id} -> {in_match}")
+            # Release the series lock before any other write: the lease
+            # renewal and the presence stamp below each take row locks of
+            # their own, and holding this one across them would put a ping
+            # into lock orders it has no business in. The release comes
+            # AFTER the publication, so the evidence is in the map before a
+            # sweep waiting on this row can take it.
+            await db.commit()
         except Exception:
             _im_ok = False
             try:
@@ -16056,11 +16653,12 @@ async def presence_ping(request: Request,
             except Exception:
                 pass
         if _im_ok:
-            _in_match_touch(in_match)
             # RENEW this caller's own lease only — never the group's. One
             # member must not be able to hold three other people's exclusion
             # open, so a client that lies about being in a battle can only
-            # keep ITSELF queue-locked. _lease_renew cannot create or
+            # keep ITSELF queue-locked: _im_pid is the seat the request's own
+            # session names, because the seat binding above refused every
+            # other claim before it got here. _lease_renew cannot create or
             # resurrect, so a ping arriving after the lease already lapsed
             # (or after an explicit escape) does not re-block the player.
             try:
@@ -42269,6 +42867,57 @@ async def team_queue_poll(steam_id: str, request: Request,
                     {"rn": room_name, "rr": chosen_region, "sid": me["series_id"],
                      "has_rules": me["rules"] is not None, "rules": _rules_json(rules)},
                 )
+                # ISSUING A ROOM ATTEMPTS THE DEFERRAL-MARKER CLEAR, on the one
+                # statement in this file that stamps room_issued_at. What that
+                # buys is an ATTEMPT and not an invariant: the helper clears
+                # inside its own savepoint and swallows every exception the
+                # attempt raises, so a swallowed error here leaves a marker
+                # standing on a row whose room was just re-issued. NO READER
+                # MAY TREAT A MARKER AS NECESSARILY YOUNGER THAN THE ROOM it
+                # would be settled against; that is the same guarantee the
+                # helper's own doc had to be narrowed to an attempt, and it is
+                # no truer one screen away (#351).
+                # The deferred-fallback sweep no longer consults the room clock
+                # at all, and WHAT MAKES THAT DELETION SAFE IS THE DELETED
+                # TERM'S OWN VACUITY: the 214 s term could refuse no row a
+                # working flow produces, which
+                # test_the_sweep_does_not_consult_the_room_clock sets out; the
+                # one row it could have refused -- a room re-issued over a
+                # marker whose clear FAILED, for 214 s after the issue -- is
+                # the swallowed-error residual this block opens by pricing.
+                # It took nothing from a working flow, so nothing here
+                # replaces it --
+                # and an earlier cut of this paragraph said the clear did,
+                # while the cut that replaced it said the veto did. Two
+                # attributions for one deletion means neither was read off
+                # the code (#405). What stands between a marker this call
+                # failed to clear and a settled row is the sweep's LIVE-GAME
+                # VETO, the last read before the write, which refuses a row
+                # with a live game in evidence -- a BOUND and not a
+                # guarantee, since a resumed series with no live game in
+                # evidence at the tick is outside it. That is why this clear
+                # is attempted here at all. The two funnels
+                # that revive a series call the helper on their own path, so on
+                # today's flows this is expected to find nothing to clear --
+                # "expected", not "guaranteed": the ordering between a revival
+                # and the poll that issues the room is a matter of two
+                # requests, and that is exactly the kind of reasoning this
+                # call exists to stop anyone having to do (#432, #330).
+                # This call is also a writer that ends a deferral. A deferral
+                # ends when the row leaves ('active','dc_paused') with the
+                # marker still set -- a sweep tick, the report path's
+                # lead-forfeit and dc_incomplete exits, a completing game
+                # report, an admin void or completion, a queue-janitor or
+                # queue-leave cancel and the legacy dc_paused lapse among them
+                # -- or when the marker itself is cleared, which only the
+                # helper's callers do: the revival funnels and this call. The
+                # shape suite's writer census derives both lists from this file
+                # and migration 356's header names the roles without a count,
+                # so a marker that vanished from a row still open, with no
+                # funnel in the log, was cleared here.
+                # test_sept16_dc_fallback_shape.py counts the room-issue
+                # OPERATION file-wide and requires this call beside it.
+                await _team_clear_dc_fallback_marker(db, me["series_id"])
                 # Re-read so the response reflects the new room name.
                 me_re = await db.execute(
                     text("SELECT room_name, room_region FROM team_queue WHERE player_id = :pid"),
@@ -42920,6 +43569,185 @@ async def team_series_spawn_confirm(
     return {"confirmations": int(new_count), "status": "active", "already_recorded": False}
 
 
+@app.get("/api/v1/team/series/{series_id}/status", tags=["Team Matches"])
+async def team_series_status_readonly(
+    series_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Read a 2v2 series' status. This route never writes.
+
+    WHY IT IS A ROUTE AND NOT A FLAG. The team tab's DC-grace banner wants to
+    know what a series' status is; the endpoint it used to ask,
+    GET .../state below, is a lifecycle operation that cancels an overdue
+    assembly and reconciles that series' bets. Round 4 gave that endpoint a
+    `lifecycle=false` parameter and had the client check the echoed flag. The
+    guarantee was then a property of an ARGUMENT, and an unknown argument is
+    the one thing a box that predates it answers 200 while ignoring (bug #266,
+    learning #422) -- so on a partly-updated deployment the first "read" the
+    banner issued could still cancel a played series and refund its stakes,
+    before any echo told the client to stop. The edge routes GETs to whichever
+    box it chooses and can route two requests from one seat to two boxes, so no
+    earlier answer -- an advertisement on /api/v1/mod-version included -- can
+    speak for the box that answers THIS one.
+
+    A separate path cannot be ignored. A box that does not carry this route
+    has no handler for it, no catch-all route and no exception handler that
+    would dress the miss up as success, so it answers 404 and the client
+    latches its banner off for that series. The capability is proven per
+    RESPONSE, by "readonly": true in the body the answering box produced, and
+    it proves nothing about any other request.
+
+    WHAT "NEVER WRITES" MEANS HERE, precisely, because a guarantee in a
+    comment is a claim about the whole state space (#351, #302): this function
+    issues one SELECT, plus whatever SELECT the service-subject assertion
+    needs; it opens no savepoint, calls no commit, and reaches no helper that
+    writes. test_sept16_dc_fallback_orderings.py records every statement this
+    route puts on the connection and requires each to be a SELECT, with the
+    mutating state GET under the same recorder as the positive control that
+    the recorder can see a write at all (#391).
+
+    WHAT THIS ROUTE CARRIES FOR THE BANNER, and what that costs. The response
+    carries the DEFERRAL STATE -- dc_deferred, dc_deferred_seconds_remaining
+    and dc_deferred_bound_seconds -- and the team tab's DC-grace banner derives
+    its shown/hidden state and its countdown from exactly those three fields.
+    The predicate the banner used before required status == 'dc_paused' and a
+    positive remaining time; no statement in this api writes that status and
+    dc_grace_until is only ever written NULL, so that predicate could not be
+    satisfied by any series this server produces. It is deleted on the client
+    rather than patched (#310, #389), and these fields are what replaces it.
+
+    THIS ROUTE NOW REQUIRES MIGRATION 356. The SELECT below reads
+    dc_fallback_at directly -- no savepoint, no fallback branch -- so on a box
+    where 356 has not been applied the statement raises UndefinedColumn and
+    this route answers 500. That is the reason the deploy order is the
+    migration FIRST and then the api on both boxes, and it is a deliberate
+    choice rather than an oversight: a branch that answered 200 with the
+    deferral fields missing would put the "is this box updated" question back
+    inside the body, which is the shape bug #266 turns on. The colour columns
+    beside them arrived in migration 206 and are read the same way (#235).
+
+    WHAT A REFUSAL COSTS, stated from the client's own use of this call rather
+    than from the name of the banner: the answer to this read is what the team
+    tab refreshes its cached series status, its series score and its frozen
+    team-colour stamp from, so a refused answer latches this series dark and
+    leaves ALL of that as stale as it leaves the banner. Pricing the refusal at
+    "the banner" alone understates it. What it does NOT cost is any outcome:
+    the assembly poll is a different call to a different route, nothing here
+    writes, and a dark banner changes no row. A 500 in the state GET would cost
+    the assembly; a 500 here costs a tab that stops updating."""
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    r = (await db.execute(
+        text("""
+            SELECT status, invalidation_reason, spawn_confirmations,
+                   created_at, room_issued_at, dc_grace_until,
+                   dc_team_remaining, dc_player_id,
+                   t1_series_wins, t2_series_wins,
+                   t1_color_name, t1_color_hex, t2_color_name, t2_color_hex,
+                   t1a_id, t1b_id, t2a_id, t2b_id,
+                   -- THE DEFERRAL STATE, derived here in the one SELECT.
+                   -- dc_deferred repeats the sweep's own predicate against
+                   -- this row, so "the banner is up" and "the sweep could
+                   -- still act on this marker" are one condition read once
+                   -- rather than two that can disagree (#342). It is false on
+                   -- a settled row that still carries an inert marker.
+                   (dc_fallback_at IS NOT NULL
+                    AND status IN ('active', 'dc_paused')) AS dc_deferred,
+                   -- The DEADLINE, expressed as the seconds left on it: the
+                   -- marker plus the one bound constant, minus
+                   -- clock_timestamp(). The same clock that stamped
+                   -- dc_fallback_at and the same clock the sweep measures the
+                   -- bound on, so no api-to-database skew enters it and there
+                   -- is no second clock to reconcile (#426, #427).
+                   -- make_interval(secs => :bound) rather than arithmetic on
+                   -- the parameter: that spelling is the one whose binding
+                   -- this file already exercises against the driver, in the
+                   -- sweep's two statements (#275).
+                   CASE WHEN dc_fallback_at IS NULL THEN 0
+                        ELSE GREATEST(0, EXTRACT(EPOCH FROM (
+                                 (dc_fallback_at + make_interval(secs => :bound))
+                                 - clock_timestamp())))
+                   END AS dc_deferred_seconds_remaining
+              FROM team_series
+             WHERE id = :sid
+        """),
+        {"sid": sid_uuid, "bound": float(_DC_FALLBACK_DEFER_SECONDS)},
+    )).mappings().first()
+    if r is None:
+        raise HTTPException(404, "Series not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[r["t1a_id"], r["t1b_id"],
+                                 r["t2a_id"], r["t2b_id"]])
+    _anchor = r["room_issued_at"] or r["created_at"]
+    _age = (datetime.now(timezone.utc) - _anchor).total_seconds()
+    _grace = 0
+    if r["dc_grace_until"] is not None:
+        _grace = max(0, int((r["dc_grace_until"]
+                             - datetime.now(timezone.utc)).total_seconds()))
+    # Both values come out of the row above and nothing else is consulted. The
+    # floor to 0 when not deferred is not cosmetic: the SQL already returns 0
+    # for a NULL marker, and this second floor covers the row that DOES carry a
+    # marker with time left on it but is no longer in a status the sweep admits
+    # -- a completed series -- where a remaining count would be a countdown to
+    # nothing.
+    _deferred = bool(r["dc_deferred"])
+    _defer_left = (int(r["dc_deferred_seconds_remaining"] or 0)
+                   if _deferred else 0)
+    return {
+        # The whole capability, stated by the box that answered. A client that
+        # does not see this key treats the answer as no answer.
+        "readonly": True,
+        "status": r["status"],
+        "reason": r["invalidation_reason"],
+        "confirmations": int(r["spawn_confirmations"] or 0),
+        "expected": 4,
+        # age_seconds and deadline_seconds are REPORTED, never acted on here:
+        # a reader can see that an assembly is overdue, and only the assembly
+        # poll's own call to the state endpoint below may do anything about it.
+        "age_seconds": int(_age),
+        "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+        "dc_grace_seconds_remaining": _grace,
+        "dc_team_remaining": r["dc_team_remaining"],
+        "dc_player_id": str(r["dc_player_id"]) if r["dc_player_id"] else None,
+        # THE DEFERRAL STATE, and the ONLY input the team tab's DC-grace
+        # banner has. Three fields, all three present on every 200 and none of
+        # them ever null: the client parses these bodies by hand (Unity's
+        # JsonUtility silently fails on nested arrays, so the codebase splits
+        # strings everywhere instead), and a null where an int is expected is
+        # the shape that reads as a silent 0 on one path and throws on another.
+        #
+        # WHAT EACH ONE IS A CLAIM ABOUT, and nothing wider:
+        #   dc_deferred                   -- this row, as read a few lines
+        #                                    above, carries a marker the sweep
+        #                                    could still act on. It is not a
+        #                                    claim that the sweep will act, or
+        #                                    that a report is still in flight.
+        #   dc_deferred_seconds_remaining -- seconds left on THAT marker's
+        #                                    bound at the moment of the read,
+        #                                    floored at 0. 0 with dc_deferred
+        #                                    true is a real state: the bound
+        #                                    has passed and no tick has
+        #                                    settled the row yet.
+        #   dc_deferred_bound_seconds     -- the one constant, emitted so no
+        #                                    client carries its own copy of the
+        #                                    number.
+        "dc_deferred": _deferred,
+        "dc_deferred_seconds_remaining": _defer_left,
+        "dc_deferred_bound_seconds": _DC_FALLBACK_DEFER_SECONDS,
+        "t1_series_wins": int(r["t1_series_wins"] or 0),
+        "t2_series_wins": int(r["t2_series_wins"] or 0),
+        "t1_color_name": r["t1_color_name"] or "",
+        "t1_color_hex": r["t1_color_hex"] or "",
+        "t2_color_name": r["t2_color_name"] or "",
+        "t2_color_hex": r["t2_color_hex"] or "",
+        "color_decided": any(
+            r[c] is not None for c in ("t1_color_name", "t1_color_hex",
+                                       "t2_color_name", "t2_color_hex")),
+    }
+
+
 @app.get("/api/v1/team/series/{series_id}/state", tags=["Team Matches"])
 async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     """Per-series assembly + lifecycle state. Polled by clients after
@@ -42927,7 +43755,31 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     deadline (_ASSEMBLY_DEADLINE_SECONDS from room_issued_at) with fewer
     than 4 spawn-confirms and no live-game evidence, transitions to
     status='canceled' with reason 'assembly_timeout' so all 4 clients can
-    bail back to menu."""
+    bail back to menu.
+
+    THIS GET WRITES. Despite the shape, it is a lifecycle operation: two arms
+    below change status and commit, and the assembly arm also reconciles the
+    series' bets. Its four conditions -- 'active', fewer than four
+    spawn-confirms, age past the deadline measured from room_issued_at, and no
+    positive live-game evidence -- are all ordinary on a played 2v2 whose
+    spawn-confirm POST was lost, so a caller that merely wants to READ the
+    status can cancel a played series and refund its stakes.
+
+    A CALLER THAT ONLY WANTS TO READ MUST NOT CALL THIS AT ALL. It calls
+    GET /api/v1/team/series/{series_id}/status, the route directly above,
+    which has no mutating arm of any kind. Round 4 tried to give this endpoint
+    a `lifecycle=false` parameter instead; that made the read-only guarantee a
+    property of an ARGUMENT, and an argument is exactly what a box that
+    predates it ignores while answering 200 (bug #266, learning #422) -- so a
+    request the caller believed was a read could still cancel a played series
+    on any box that had not been updated yet. A separate route cannot be
+    ignored: a box that lacks it has no handler on the path and answers 404.
+    The parameter, its response echo and the capability advertisement on
+    /api/v1/mod-version are all deleted.
+
+    The assembly poll (PollAssemblyStateLoop) is the only caller that wants
+    this endpoint: it is the one thing that frees four clients from a failed
+    assembly, and it runs only while a seat is waiting to spawn."""
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -44225,6 +45077,10 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
             ), {"sid": srow["id"]})
     except Exception:
         pass
+    # Clear the deferred-fallback marker with the other DC fields above. This
+    # funnel is one of the two that revive a series; the shared helper is the
+    # whole reason the other one cannot be forgotten again.
+    await _team_clear_dc_fallback_marker(db, srow["id"])
     await db.commit()
     print(f"[TEAM-QUEUE-LOCK] relock onto existing series={srow['id']} "
           f"caller={caller_steam} reason={reason}")
@@ -44250,10 +45106,16 @@ async def team_series_report_dc(
     t1_points_total: int = Query(0, ge=0),
     t2_points_total: int = Query(0, ge=0),
     photon_room_id: str = Query(None),
+    is_fallback: bool = Query(False),
     hmac_sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Mid-series disconnect report. Two outcomes: (1) lead-forfeit — if the
+    """Mid-series disconnect report. Three outcomes now. (0) DEFERRED — when
+    is_fallback is set, the report records a marker and settles nothing at
+    all; see the branch below for why, and team_dc_fallback_sweep_loop for
+    what eventually closes such a series. The two settling outcomes are
+    unchanged and are what every report without that flag still gets:
+    (1) lead-forfeit -- if the
     non-DC team was already up a game AND the server's own per-game record
     (team_series_games, raised by the live-points POST during play; never the
     report's point snapshot) shows the abandoned game reached >=2 total
@@ -44263,8 +45125,13 @@ async def team_series_report_dc(
     UNLESS the same four re-queue within ~30 minutes, in which case the
     matcher's sticky resume / same-four dedupe re-locks them onto THIS series
     (original partition, scores kept) and clears the pending flag (bug 245).
-    The old dc_paused-with-grace flow is legacy; only the state-poll's
-    expiry sweep still reads it."""
+    The old dc_paused-with-grace flow is
+    legacy in its WRITER -- no statement in this api sets that status any more
+    -- and it has many READERS still: the state GET's expiry sweep resolves an
+    overdue one, this handler's own status gate and the deferred-fallback
+    sweep both admit it, the relock and adoption family picks admit it, and
+    the admin bet panel and the history listings show it. A guard derived from
+    "one reader" would miss every one of them."""
     if not _verify_team_dc_hmac(reporter_steam_id, series_id, dc_player_steam_id, hmac_sig):
         raise HTTPException(403, "Invalid DC report signature")
     try:
@@ -44298,7 +45165,20 @@ async def team_series_report_dc(
     if s is None:
         raise HTTPException(404, "Series not found")
     if s["status"] not in ("active", "dc_paused"):
-        return {"status": s["status"], "ignored": True}
+        # THE SETTLED-ROW EXIT. A report that arrives after anything terminal
+        # has been written -- by another report, by an admin, or by the
+        # deferred-fallback sweep -- is ignored here and is not rated. That is
+        # the second half of the bound stated in the deferral branch below.
+        #
+        # This call itself settles nothing: whatever wrote the terminal status
+        # wrote it before this report arrived, which is what "ignored": True
+        # says. "deferred": False rides this exit because every 200 this
+        # endpoint returns carries the field -- without it on the exits that
+        # do not park a report, a client could not tell this build from one
+        # that predates the flag and dropped the parameter (bug #266, learning
+        # #422). The field is DEFINED once, in the deferral branch below, and
+        # means here exactly what it says there and nothing more.
+        return {"status": s["status"], "ignored": True, "deferred": False}
     # Bug 245 companion: a DEFERRED DC report (clients can hold one through an
     # assembly phase and fire it minutes later) must not decide a series the
     # four have since RESUMED. Two arms, both against the LOCKED row:
@@ -44320,7 +45200,7 @@ async def team_series_report_dc(
              and not _claimed_room.startswith(_stored_room + "_"))
             or not _stored_room):
         return {"status": s["status"], "ignored": True,
-                "reason": "dc_room_mismatch"}
+                "reason": "dc_room_mismatch", "deferred": False}
     # r2 HIGH 1: an OLD client's report carries no room at all, so the fence
     # above cannot see a delayed pre-resume report. Discriminator: the
     # relock stamp. A ROOMLESS report inside the post-relock window is by
@@ -44346,7 +45226,7 @@ async def team_series_report_dc(
             _recent_relock = False
         if _recent_relock:
             return {"status": s["status"], "ignored": True,
-                    "reason": "dc_after_resume"}
+                    "reason": "dc_after_resume", "deferred": False}
     await _assert_no_service_subject(
         db,
         affected_player_ids=[s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]],
@@ -44369,6 +45249,113 @@ async def team_series_report_dc(
     if rep_team is None or rep_team == dc_team:
         raise HTTPException(400, "reporter must be a member of the non-DC team")
 
+    # ── Deferred fallback: the report that decides nothing ─────────────────
+    # is_fallback marks a report filed by a survivor that is NOT the elected
+    # reporter. ONE condition produces it in the client THIS release carries
+    # -- no released build publishes cr_dcr at all, so there is no older
+    # client whose conditions also have to be counted: the elected
+    # seat published a terminal refusal (cr_dcr=no), which tells the survivors
+    # that no real-totals report is coming. When the elected seat's attempts
+    # go UNANSWERED instead, it publishes cr_dcr=unk and the survivors WITHHOLD
+    # — no fallback is filed, no marker is written and the series stays
+    # 'active'. The disposition of such a series is the rowless-husk arm of
+    # team_queue_cleanup_loop: quiet for 60 minutes, no team_queue rows, no
+    # positive in-game evidence, and it is cancelled with
+    # invalidation_reason='rowless_husk' and its bets reconciled. That is a
+    # cancel, not a rating — no seat gains from an unanswered report.
+    #
+    # WHY IT DEFERS. A fallback and the elected seat's real-totals report can
+    # be in flight at the same moment and are not orderable from inside either
+    # client. When both settle on arrival, whichever takes this row's lock
+    # first decides the series: a fallback landing first writes
+    # 'dc_incomplete', and the settled-row exit above then discards the
+    # real-totals report along with the rated lead-forfeit it would have
+    # applied — the same four players get a rated series or a pending admin
+    # row depending on request order alone. Deferring removes the ordering
+    # from the outcome instead of guessing at it.
+    #
+    # THE BOUND, and it is a bound rather than a guarantee. Both lanes carry
+    # this sentence verbatim (client ApiClient.cs and the header of migration
+    # 356):
+    #
+    #   A real-totals report wins while the deferred marker is younger than
+    #   420 seconds, and after that only until a sweep tick finds no live-game
+    #   evidence for the series and settles the row; once a row is settled, a
+    #   later report is refused at the settled-row exit and is not rated.
+    #
+    # The round-4 comment here said "at ANY later moment", which is the one
+    # thing that is not true: the sweep exists precisely to close a row that
+    # nothing else ever settles, and a report that arrives after it has done
+    # so takes the settled-row exit above (#351 — the guarantee a comment
+    # asserts is a claim about the whole state space).
+    #
+    # THE INPUT IS UNSIGNED, and deliberately. The DC canonical is frozen at
+    # reporter:series:dc_player:dc, so a new signed field would fail every
+    # current client's signature; is_fallback rides outside it, the same
+    # precedent as photon_room_id above. It can only move this handler toward
+    # the conservative outcome — setting it buys a report that decides
+    # nothing, omitting it buys exactly today's position (#283). Default False
+    # keeps every client that predates the flag on today's path.
+    #
+    # WHERE THIS BRANCH SITS, AND WHY THERE. After the row lock and after
+    # every validation the settling path performs — the room fence, the
+    # post-relock fence, the service-subject assertion, the DC-team resolution
+    # and the reporter-membership bind — and BEFORE the lead-forfeit block, so
+    # no rating, gold or team_matches write is REACHABLE with is_fallback set.
+    # That is structural. It does not rest on a fallback happening to carry
+    # zero points, which is a property of today's client and not a check this
+    # endpoint could fail on (#342).
+    #
+    # clock_timestamp(), not NOW(): NOW() freezes at transaction start, and
+    # this handler's own FOR NO KEY UPDATE wait would backdate the marker by
+    # the whole wait — a wait approaching the bound would hand the sweep a
+    # marker already expired on arrival and let it settle the series while a
+    # real-totals report was still in flight (#277). COALESCE keeps the FIRST
+    # filing, so neither a retrying client nor a second survivor can push the
+    # bound forward by re-posting.
+    if is_fallback:
+        await db.execute(
+            text("""
+                UPDATE team_series
+                   SET dc_fallback_at = COALESCE(dc_fallback_at, clock_timestamp()),
+                       dc_fallback_player_id = COALESCE(dc_fallback_player_id, :dpid)
+                 WHERE id = :sid AND status IN ('active', 'dc_paused')
+            """),
+            {"sid": sid_uuid, "dpid": dc_pid},
+        )
+        await db.commit()
+        print(f"[TEAM-DC] fallback DEFERRED series={sid_uuid} dc_player={dc_pid} "
+              f"reporter={reporter_steam_id} bound={_DC_FALLBACK_DEFER_SECONDS}s")
+        # "deferred" is a status this endpoint has never returned before, which
+        # is how a client tells a deployed server from one that predates the
+        # flag and dropped it (bug #266, learning #422): a box at 0cc7f75
+        # answers with one of ITS statuses — a settlement, or one of the same
+        # three ignoring exits it already had — and never with this one, and
+        # nothing on that box will revisit the report afterwards. It is a 2xx
+        # either way, so the client's answered/unanswered split reads it as
+        # answered and the seat stops retrying. A caller that needs the
+        # deferral must read this field; having sent the parameter proves
+        # nothing about what answered.
+        #
+        # The FIELD, not the status, is the discriminator, and it rides every
+        # 200 this endpoint returns. THE DEFINITION, and the only one in this
+        # file: "deferred" says only whether THIS call parked the report: true
+        # when it did, false on the five exits that do not park one -- two of
+        # which settle the series while the other three, the settled-row exit
+        # and the two room fences, decide nothing and say so with "ignored":
+        # true -- and absent only from a box that predates the flag. False is
+        # therefore not a claim that this call settled anything: a caller that
+        # needs the disposition reads "ignored" and "status" out of the same
+        # body, and a caller that reads no "deferred" key at all knows it
+        # reached a box that predates the flag.
+        return {
+            "status": "deferred",
+            "deferred": True,
+            "series_status": s["status"],
+            "reason": "dc_fallback_deferred",
+            "defer_seconds": _DC_FALLBACK_DEFER_SECONDS,
+        }
+
     # F6 FOLLOW-UP (tracked in docs/SECURITY_ACTION_ITEMS.md): t1/t2_points_total
     # are still client-supplied + outside the DC HMAC, so a member could misreport
     # the abandoned game's score to flip the >=2-points game-award branch. Lower
@@ -44379,13 +45366,22 @@ async def team_series_report_dc(
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
     # If the NON-DC (remaining) team has ALREADY won at least one game of this
-    # series, a DC by the other team forfeits the WHOLE series to them
-    # immediately — regardless of the abandoned game's point total. This is the
-    # rule Sid asked for: you can't leave a 2v2 to dodge a loss once the other
-    # team is up a game. Applies full Glicko/gold/xp via the shared helper so
-    # the forfeit win actually moves the board (the old dc_decided/dc_forfeit
-    # paths completed the series with NO ratings — leaving was strictly safer
-    # than losing).
+    # series AND the abandoned game had at least 2 total points, a DC by the
+    # other team forfeits the WHOLE series to them. This is the rule Sid asked
+    # for: you can't leave a 2v2 to dodge a loss once the other team is up a
+    # game. BOTH conditions are required — the branch below tests them
+    # together — and the points half is what keeps a break/restart out of it;
+    # the round-4 comment here said "regardless of the abandoned game's point
+    # total", which is the opposite of the code two lines down.
+    #
+    # It applies full Glicko and series gold via the shared helper so the
+    # forfeit win actually moves the board (the old dc_decided/dc_forfeit paths
+    # completed the series with NO ratings — leaving was strictly safer than
+    # losing). NO XP: match XP is a per-GAME payout granted inline by
+    # submit_team_match for games actually played, and
+    # _complete_team_series_with_ratings deliberately awards none — see its
+    # own docstring, which records that an earlier version of this claim was
+    # wrong in the same direction.
     other_team_existing_wins = (s["t1_series_wins"] or 0) if other_team == 1 else (s["t2_series_wins"] or 0)
     # "Clear case" (Sid's rule): auto-forfeit ONLY when the non-DC team was already
     # up a game AND real play happened in the abandoned game (>=2 points). A break/
@@ -44411,7 +45407,8 @@ async def team_series_report_dc(
         )
         await db.commit()
         return {"status": "completed", "winner_team": other_team,
-                "reason": "dc_leadforfeit", "new_ratings": new_ratings}
+                "reason": "dc_leadforfeit", "new_ratings": new_ratings,
+                "deferred": False}
 
     # Not a clear-cut forfeit (non-DC team wasn't already up a game, or too little
     # was played to count). Per the 2v2 manual-control policy — a game can break and
@@ -44435,6 +45432,7 @@ async def team_series_report_dc(
         "status": "dc_incomplete",
         "dc_team_remaining": other_team,
         "reason": "awaiting_admin_resolution",
+        "deferred": False,
     }
 
 
@@ -44475,6 +45473,121 @@ _LEAD_FORFEIT_PERGAME = _lead_forfeit_pergame_marker(
                               "_record_team_game_points"),
     _lead_forfeit_loaded_name(team_series_report_dc.__code__,
                               "_team_game_crossed_two"))
+
+
+# -- The 2v2 disconnect-deferral marker (/health `team_dc_fallback`) --------
+# A survivor's fallback disconnect report no longer settles a 2v2 series on
+# arrival: team_series_report_dc stamps team_series.dc_fallback_at and
+# dc_fallback_player_id, and team_dc_fallback_sweep_loop settles the row once
+# the deferral bound has passed. Migration 356 adds those two columns. The
+# report, the sweep, the marker clear and the read-only status route each run
+# statements naming one or both of them, and such a statement fails with
+# UndefinedColumn when it runs on a database that lacks a column it names.
+# This word says whether the database THIS box is connected to has them: 1
+# when a probe naming every such column runs, 0 when it fails because a
+# column or the table is missing. It is the release train's discriminator for
+# the migration as the api sees it, and nothing else reads it (#306). It
+# runs a statement on this route, as `pc_trading` also does, so it
+# describes the database the answering box uses, not the code alone; the
+# code half is told by the status route, which a build before this one
+# does not carry at all.
+#
+# DERIVED, never written down (#342): the probe names every dc_fallback_*
+# identifier that a SQL statement among these four functions' compiled string
+# constants names (nested code included), so it asks for exactly what the
+# code will ask for. A constant counts as a statement only when it opens
+# with an upper-case SQL verb, each def's own docstring is skipped whatever
+# it opens with, and a comment is not a constant at all -- so prose and
+# response keys add no name. A build whose statements named no such column
+# would have nothing to prove, and reads 0 without probing.
+#
+# The probe runs on the connected arm only, after its SELECT 1, and catches
+# ONE class of error: the statement named a column or a table this database
+# does not have (SQLSTATE 42703 or 42P01), found on the error's own wrapping
+# chain (.orig and __cause__). That error aborts the transaction, so the probe
+# rolls back before it answers 0 and the session is usable again. Any other
+# error is left to health_check's own catch, which reports the box degraded
+# as it does when SELECT 1 fails: a probe that fails for any other reason is
+# a database fault, not a schema answer. A box that is merely unmigrated
+# answers "ok" with a 0 here, never "database disconnected" (#430). The
+# degraded arm cannot probe, so it answers the last value a probe on this
+# worker wrote -- 0 until one has run, which the train reads as not proven.
+import asyncpg.exceptions as _team_dc_apg_exc
+
+_TEAM_DC_FALLBACK_STATEMENT = _re.compile(r"^\s*(?:SELECT|UPDATE|INSERT|WITH|DELETE)\b")
+_TEAM_DC_FALLBACK_NAME = _re.compile(r"\bdc_fallback_[a-z_]+\b")
+_TEAM_DC_FALLBACK_SQLSTATES = frozenset({"42703", "42P01"})   # undefined_column, undefined_table
+
+
+def _team_dc_fallback_columns(*functions) -> tuple:
+    """The dc_fallback_* names that the SQL statements among `functions`'
+    compiled string constants use (nested code objects included), sorted,
+    each once. A statement is a constant that opens with an upper-case SQL
+    verb; each function's own docstring is skipped whatever it opens with."""
+    names = set()
+    for f in functions:
+        todo = [f.__code__]
+        while todo:
+            code = todo.pop()
+            for const in code.co_consts:
+                if isinstance(const, type(code)):
+                    todo.append(const)
+                elif (isinstance(const, str) and const is not f.__doc__
+                      and _TEAM_DC_FALLBACK_STATEMENT.match(const)):
+                    names.update(_TEAM_DC_FALLBACK_NAME.findall(const))
+    return tuple(sorted(names))
+
+
+_TEAM_DC_FALLBACK_COLUMNS = _team_dc_fallback_columns(
+    _team_clear_dc_fallback_marker, _team_dc_fallback_sweep_once,
+    team_series_status_readonly, team_series_report_dc)
+_TEAM_DC_FALLBACK_PROBE = (
+    "SELECT " + ", ".join(_TEAM_DC_FALLBACK_COLUMNS) + " FROM team_series LIMIT 0"
+    if _TEAM_DC_FALLBACK_COLUMNS else "")
+_TEAM_DC_FALLBACK_LAST = 0
+
+
+def _team_dc_fallback_schema_missing(exc) -> bool:
+    """True when the statement named a column or a table the database does
+    not have: the driver's own class for either, or SQLSTATE 42703 / 42P01,
+    on `exc` or on its wrapping chain (.orig and __cause__). An exception
+    merely raised while another was being handled (__context__) is not
+    wrapping it, and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, (_team_dc_apg_exc.UndefinedColumnError,
+                            _team_dc_apg_exc.UndefinedTableError)):
+            return True
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if str(state or "") in _TEAM_DC_FALLBACK_SQLSTATES:
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+async def _team_dc_fallback_probe(db) -> int:
+    """/health `team_dc_fallback` on the connected arm, written through to
+    the cache the degraded arm reads: 1 when the probe ran, 0 when the
+    database lacks a column or the table it names. Any other error is
+    raised to health_check's own catch."""
+    global _TEAM_DC_FALLBACK_LAST
+    if not _TEAM_DC_FALLBACK_PROBE:
+        _TEAM_DC_FALLBACK_LAST = 0
+        return 0
+    try:
+        await db.execute(text(_TEAM_DC_FALLBACK_PROBE))
+    except Exception as exc:
+        if not _team_dc_fallback_schema_missing(exc):
+            raise
+        await db.rollback()
+        _TEAM_DC_FALLBACK_LAST = 0
+        return 0
+    _TEAM_DC_FALLBACK_LAST = 1
+    return 1
 
 
 # ── 2v2 series continuation (recording-gap fix) ─────────────────────────────
@@ -46115,7 +47228,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:3975 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4401 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -49391,6 +50504,20 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
              WHERE id = :sid
                AND status IN ('active', 'dc_paused', 'dc_incomplete')
         """), {"sid": series_id})
+        # Clear the deferred-fallback marker, exactly as the queue/sticky
+        # resume does. This is the SECOND same-four adoption funnel and it was
+        # missed when the marker was introduced: _team_lock_family_pick admits
+        # a 'dc_incomplete' row as resumable, so four players who pressed Start
+        # again carried the old marker back onto a now-'active' series. A
+        # carried marker comes due on the first tick after it passes the
+        # bound -- immediately if it was already past it, later if the resume
+        # happened inside the window -- and settles the sitting they had just
+        # resumed back to dc_incomplete, attributed to the previous sitting's
+        # disconnect. The clear is unconditional for that reason: the revival
+        # tells us nothing about the age, so neither age is assumed. The
+        # helper says where the operation lives and the shape test counts it
+        # across the file (#432, #330).
+        await _team_clear_dc_fallback_marker(db, series_id)
         # relocked_at is stamped just before the COMMIT below (r4 finding:
         # stamping here left every later lock wait — the wager query, lobby
         # activation, lease acquisition — aging the stamp before it was
@@ -52299,6 +53426,56 @@ def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, lis
     return ghosts, graced, log
 
 
+def _ffa_finishing_count(member_ids, departed_ids, report) -> tuple[int, int, int]:
+    """How many players FINISHED the game a report describes, for every
+    "N or more players" FFA achievement. Returns (count, server, attested).
+
+    Sid's ruling (2026-09-28, the same rule for everyone): the tier reads the
+    players present at the end of THIS game, not the sitting's seated roster.
+    The seated roster (`ffa_lobbies.member_ids`, frozen at lock) keeps every
+    seat for the whole sitting, so a seat that left in an earlier game, or
+    earlier in this one, used to count toward Clean House / Party Crasher /
+    Hostile Takeover: a 5-seat sitting with 2 players left at the end paid all
+    three tiers.
+
+    The count is the MINIMUM of two independent accounts:
+
+      * server   -- seated members minus the seats the server itself recorded
+                    as departed (`ffa_lobbies.departed_ids`, migration 159,
+                    append-only). The caller passes the array off the lobby row
+                    it locked before reading the report, and every departure
+                    writer updates that same row, so the set is exactly the
+                    departures recorded BEFORE this report; one recorded after
+                    it waits on the lock and cannot change this game's count.
+      * attested -- seats the report marks neither `left_early` nor `absent`.
+
+    WHY THE MINIMUM. `left_early` and `absent` are outside the FFA HMAC
+    canonical (_ffa_hmac_canonical), which is why the tier used to be pinned to
+    member_ids (Codex Aug-7): a count read off those flags alone would let two
+    unsigned flags turn a 3-player 5-0 into the 4- and 5-player tiers. Under
+    the minimum the flags can only LOWER the count: a seat the server recorded
+    as departed stays out whatever the report says about it, so the count
+    never exceeds the server's own account and never exceeds the old
+    `len(member_ids)`. A report that understates the count changes nothing its
+    reporter does not already decide, because the signed tallies that decide
+    the shutout at all are reporter-attested too (the signature authenticates
+    the reporting build, not gameplay truth).
+
+    Direction of the residuals, all toward FEWER tiers: a report delivered
+    late, after a seat that finished it has since departed, counts that seat
+    out (the lobby records no time or game index per departure); and a seat a
+    future readmission puts back stays counted out while departed_ids keeps no
+    removal path (#686). A seat that vanished without any recorded departure
+    counts only while the report says it stayed, and never beyond `server`.
+    """
+    seated = set(member_ids or ())
+    departed = seated & set(departed_ids or ())
+    server = len(seated) - len(departed)
+    attested = sum(1 for p in report.players
+                   if not p.left_early and not bool(getattr(p, "absent", False)))
+    return min(server, attested), server, attested
+
+
 def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
                               kills_signed: bool) -> str | None:
     """None when an incoming report says the same thing about a game as the row
@@ -53545,21 +54722,31 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 _ach_players = sorted(
                     (p for p in report.players if p.steam_id not in unrated),
                     key=lambda q: str(id_by_steam[q.steam_id]))
-                # Codex Aug-7 (HIGH): the shutout TIER must not be decided by
-                # `absent`/`left_early`, which are UNSIGNED client flags. A
-                # modified reporter could flip two carried ghosts to
-                # absent=false and turn a genuine 3-player 5-0 into the 4- and
-                # 5-player badges. `members` is the lobby's LOCK-TIME roster
-                # read from ffa_lobbies.member_ids under the lobby lock — server
-                # state the client cannot author — so the tier is decided by
-                # how many people the server SEATED, not by how many the
-                # reporter says stayed.
+                # THE TIER COUNTS THE PLAYERS WHO FINISHED THIS GAME (Sid,
+                # 2026-09-28: the same rule for everyone). Until then it was
+                # `len(members)`, the sitting's seated roster, so seats that
+                # had left counted: a 5-seat sitting with 2 players at the end
+                # paid all three tiers.
                 #
-                # This is deliberately the stricter reading of "an FFA of N
-                # people": a 5-seat lobby whose players quit is still a
-                # 5-person FFA that the winner won. The reverse (tiering on
-                # survivors) is both forgeable and rewards attrition.
-                _n_played = len(members)
+                # Why it was pinned to the roster, and still is as a BOUND:
+                # Codex Aug-7 (HIGH) -- `absent`/`left_early` are UNSIGNED
+                # client flags, outside the FFA HMAC canonical, so a count read
+                # off them alone would let two flags turn a genuine 3-player
+                # 5-0 into the 4- and 5-player badges. The count is now the
+                # MINIMUM of the server's own account (the seated roster minus
+                # the departures recorded on the row locked above, before this
+                # report) and the report's account (seats marked neither
+                # left_early nor absent), so those flags can only lower it and
+                # no flag raises a tier. The rule and its residuals live in
+                # _ffa_finishing_count.
+                #
+                # A lobby row without departed_ids cannot vouch for anyone, so
+                # it counts every seat as departed: no tier rather than a guess
+                # (every production row carries it, migration 159).
+                _n_played, _n_server, _n_attested = _ffa_finishing_count(
+                    member_set,
+                    lobby["departed_ids"] if "departed_ids" in lobby else member_set,
+                    report)
 
                 # 1-3: shutout tiers, WINNER only, nested (a 5-player 5-0
                 # unlocks all three). "5-0" = the winner converted 5 full
@@ -53585,6 +54772,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                         (5, "ffa_shutout_5")):
                         if _n_played >= _need:
                             await _grant_achievement_inline(db, _win_pid, _key)
+                    print(f"[FFA-ACH] shutout tier count {_n_played} in room "
+                          f"{report.photon_room_id}: server {_n_server} of "
+                          f"{len(member_set)} seated not recorded departed before "
+                          f"this report, reporter {report.reported_by_steam_id} "
+                          f"attests {_n_attested} present")
 
                 for _p in _ach_players:
                     _ach_pid = id_by_steam[_p.steam_id]
@@ -53806,6 +54998,146 @@ _FFA_GAME_NUMBER = _ffa_game_number_marker(
 # Its sibling _OVT_SOLO_SPLIT (the /health `ovt_solo_split` word) is derived
 # the same way, from two of submit_ovt_match's compiled string constants, and
 # is defined right after that endpoint.
+
+
+# -- The FFA finishing-count marker (/health `ffa_finishing_count`) ---------
+# Board row 28: the ranked-FFA "N or more players" shutout tiers (Clean
+# House / Party Crasher / Hostile Takeover, ffa_shutout_3/_4/_5) are tiered on
+# _ffa_finishing_count, the MINIMUM of the server's account (ffa_lobbies
+# .member_ids frozen by ffa_lobby_start, minus ffa_lobbies.departed_ids
+# appended by ffa_queue_leave) and the report's own attestation (neither
+# left_early nor absent, the same flags this endpoint persists to
+# ffa_match_players.left_early / .absent). Migration 363 revokes four awards
+# that fail this count but adds no column of its own -- the rule is new CODE
+# over an unchanged schema -- so this word says whether the database THIS box
+# is connected to still carries the columns the rule depends on: 1 when a
+# probe naming every such column runs, 0 when it fails because a column or a
+# table is missing. The batch adds no route at all, so this is the release
+# train's discriminator for it; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): the two probes name every member_ids /
+# departed_ids / left_early / absent identifier that a SQL statement among
+# ffa_lobby_start's, ffa_queue_leave's and submit_ffa_match's compiled string
+# constants names (nested code included), so a future rename in any of the
+# three moves this word on its own, never a hand-edited list. A constant
+# counts as a statement only when it opens with an upper-case SQL verb; each
+# def's own docstring is skipped whatever it opens with, and a comment is not
+# a constant at all. Which of the two tables a derived name belongs to is
+# fixed schema knowledge (member_ids and departed_ids are ffa_lobbies
+# columns, left_early and absent are ffa_match_players columns), not a guess
+# about which ones exist -- a name the scan stops finding simply drops out of
+# its table's probe.
+#
+# The probes run on the connected arm only, after its SELECT 1 and after
+# team_dc_fallback's own probe, each inside its own savepoint
+# (`db.begin_nested`, as `pc_trading` also does): a failed probe rolls back
+# only its own savepoint, leaving the caller's transaction usable, and a
+# session with no `begin_nested` at all -- this file's own narrower test
+# doubles among them -- cannot run this probe, which is a capability gap in
+# the double rather than a fact about a database, so it leaves the cache
+# exactly as the last real probe left it. Inside the savepoint, ONE class of
+# error is classified: the statement named a column or a table this database
+# does not have (SQLSTATE 42703 or 42P01, found on the error's own wrapping
+# chain, .orig and __cause__), which reads 0. Any OTHER error also leaves the
+# cache exactly as the last real probe left it, the same fallback the
+# capability gap above uses, rather than reaching health_check's own catch:
+# a caught statement error still poisons the whole transaction under asyncpg
+# (#235), so a probe sharing one with an earlier prober in this same
+# connected arm cannot assume it started clean, and a sibling's OWN failure
+# handling is not this probe's fact to report. pc_trading's schema probe
+# (_pc_trade_schema) never raises for the same reason. The degraded arm
+# cannot probe either, so both paths answer the last value a probe on this
+# worker wrote -- 0 until one has run, which the train reads as not proven.
+import asyncpg.exceptions as _ffa_fc_apg_exc
+
+_FFA_FINISHING_COUNT_STATEMENT = _re.compile(r"^\s*(?:SELECT|UPDATE|INSERT|WITH|DELETE)\b")
+_FFA_FINISHING_COUNT_NAME = _re.compile(r"\b(?:member_ids|departed_ids|left_early|absent)\b")
+_FFA_FINISHING_COUNT_SQLSTATES = frozenset({"42703", "42P01"})   # undefined_column, undefined_table
+
+
+def _ffa_finishing_count_columns(*functions) -> tuple:
+    """The member_ids / departed_ids / left_early / absent names that the SQL
+    statements among `functions`' compiled string constants use (nested code
+    objects included), sorted, each once. A statement is a constant that
+    opens with an upper-case SQL verb; each function's own docstring is
+    skipped whatever it opens with."""
+    names = set()
+    for f in functions:
+        todo = [f.__code__]
+        while todo:
+            code = todo.pop()
+            for const in code.co_consts:
+                if isinstance(const, type(code)):
+                    todo.append(const)
+                elif (isinstance(const, str) and const is not f.__doc__
+                      and _FFA_FINISHING_COUNT_STATEMENT.match(const)):
+                    names.update(_FFA_FINISHING_COUNT_NAME.findall(const))
+    return tuple(sorted(names))
+
+
+_FFA_FINISHING_COUNT_COLUMNS = _ffa_finishing_count_columns(
+    ffa_lobby_start, ffa_queue_leave, submit_ffa_match)
+_FFA_FINISHING_COUNT_LOBBY_COLUMNS = tuple(
+    c for c in _FFA_FINISHING_COUNT_COLUMNS if c in ("member_ids", "departed_ids"))
+_FFA_FINISHING_COUNT_PLAYER_COLUMNS = tuple(
+    c for c in _FFA_FINISHING_COUNT_COLUMNS if c in ("left_early", "absent"))
+_FFA_FINISHING_COUNT_PROBES = tuple(stmt for stmt in (
+    ("SELECT " + ", ".join(_FFA_FINISHING_COUNT_LOBBY_COLUMNS) + " FROM ffa_lobbies LIMIT 0"
+     if _FFA_FINISHING_COUNT_LOBBY_COLUMNS else ""),
+    ("SELECT " + ", ".join(_FFA_FINISHING_COUNT_PLAYER_COLUMNS) + " FROM ffa_match_players LIMIT 0"
+     if _FFA_FINISHING_COUNT_PLAYER_COLUMNS else "")) if stmt)
+_FFA_FINISHING_COUNT_LAST = 0
+
+
+def _ffa_finishing_count_schema_missing(exc) -> bool:
+    """True when the statement named a column or a table the database does
+    not have: the driver's own class for either, or SQLSTATE 42703 / 42P01,
+    on `exc` or on its wrapping chain (.orig and __cause__). An exception
+    merely raised while another was being handled (__context__) is not
+    wrapping it, and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, (_ffa_fc_apg_exc.UndefinedColumnError,
+                            _ffa_fc_apg_exc.UndefinedTableError)):
+            return True
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if str(state or "") in _FFA_FINISHING_COUNT_SQLSTATES:
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+async def _ffa_finishing_count_probe(db) -> int:
+    """/health `ffa_finishing_count` on the connected arm, written through to
+    the cache the degraded arm reads: 1 when both probes ran, 0 when the
+    database lacks a column or a table either one names. Each probe runs in
+    its own savepoint; a session with no `begin_nested`, or any error this
+    probe cannot classify as a missing column or table, leaves the cache
+    exactly as the last real probe left it rather than reaching
+    health_check's own catch -- never raises, the same contract
+    _pc_trade_schema documents for the same reason (#235)."""
+    global _FFA_FINISHING_COUNT_LAST
+    if not _FFA_FINISHING_COUNT_PROBES:
+        _FFA_FINISHING_COUNT_LAST = 0
+        return 0
+    begin_nested = getattr(db, "begin_nested", None)
+    if begin_nested is None:
+        return _FFA_FINISHING_COUNT_LAST
+    for stmt in _FFA_FINISHING_COUNT_PROBES:
+        try:
+            async with begin_nested():
+                await db.execute(text(stmt))
+        except Exception as exc:
+            if not _ffa_finishing_count_schema_missing(exc):
+                return _FFA_FINISHING_COUNT_LAST
+            _FFA_FINISHING_COUNT_LAST = 0
+            return 0
+    _FFA_FINISHING_COUNT_LAST = 1
+    return 1
 
 
 _FFA_LB_SORTS = {

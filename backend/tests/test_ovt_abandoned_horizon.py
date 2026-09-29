@@ -1577,17 +1577,22 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # Both counts, because one source line can expand into several statements
     # and reporting only one number is how two counts get reconciled instead
     # of explained (#431).
+    # 886bed8 LAND: +1 decline at +1 site, the deferred-fallback sweep's
+    # locked re-read (_team_dc_fallback_sweep_once, FOR NO KEY UPDATE SKIP
+    # LOCKED), reached from the team_dc_fallback_sweep_loop root. It declines
+    # and never waits, so the two WAIT counts do not move. Before: 27, 24.
     # Card trading's janitor step (migration 353) adds four declining sites,
     # one statement each and every one FOR UPDATE SKIP LOCKED: the expiry,
     # the void and the two retention deletes (23/20 before). No new waiter.
     # Dance cards B9 (design S3.6): two declining sites join, both in
     # _pc_motion_janitor -- the selection's FOR NO KEY UPDATE SKIP LOCKED and
-    # the motion row's FOR UPDATE SKIP LOCKED -- and no waiter (27/24 before).
+    # the motion row's FOR UPDATE SKIP LOCKED -- and no waiter (27/24 before; 28/25
+    # once the 886bed8 LAND's +1 above is merged in).
     assert sum(r["func"] == "_pc_motion_janitor" for r in census["declines"]) == 2, census["declines"]
     assert not any(r["func"] == "_pc_motion_janitor" for r in census["waits"]), census["waits"]
-    assert len(census["declines"]) == 29, census["declines"]
+    assert len(census["declines"]) == 30, census["declines"]
     assert len(census["waits"]) == 13, census["waits"]
-    assert len(census["decline_sites"]) == 26, census["decline_sites"]
+    assert len(census["decline_sites"]) == 27, census["decline_sites"]
     assert len(census["wait_sites"]) == 10, census["wait_sites"]
 
 

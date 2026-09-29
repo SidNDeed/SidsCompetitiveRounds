@@ -389,10 +389,14 @@ class _Lab:
         reporter = ser["steams"][reporter_seat]
         dc = ser["steams"][dc_seat]
         async with self.sm() as db:
+            # A direct call gets no FastAPI resolution: an omitted is_fallback would be
+            # its Query(False) default object, which is truthy, and the handler would
+            # take the 2v2 fallback deferral. This report is a real one (886bed8 LAND).
             return await main.team_series_report_dc(
                 series_id=str(ser["sid"]), reporter_steam_id=reporter,
                 dc_player_steam_id=dc, t1_points_total=t1_total,
                 t2_points_total=t2_total, photon_room_id=room,
+                is_fallback=False,
                 hmac_sig=_dc_sig(reporter, str(ser["sid"]), dc), db=db)
 
     async def settlement(self, ser):
