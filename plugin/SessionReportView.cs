@@ -423,7 +423,15 @@ namespace CompetitiveRounds
                 GUI.Label(r, "<color=#8FA3B8>" + p.Missing + "</color>", stCenter);
                 return;
             }
-            var plot = new Rect(r.x + 60f, r.y + 28f, r.width - 76f, r.height - 28f - 22f);
+            // A panel note (round 2 M2: the race's target is not recorded) sits
+            // under the title and pushes the plot down by its line.
+            float noteH = 0f;
+            if (!string.IsNullOrEmpty(p.Note))
+            {
+                noteH = 16f;
+                GUI.Label(new Rect(r.x + 8f, r.y + 22f, r.width - 16f, 18f), "<color=#8FA3B8>" + p.Note + "</color>", stTiny);
+            }
+            var plot = new Rect(r.x + 60f, r.y + 28f + noteH, r.width - 76f, r.height - 28f - 22f - noteH);
             if (plot.width < 20f || plot.height < 10f) return;
 
             // Horizontal grid with axis values: one line per round on a rounds

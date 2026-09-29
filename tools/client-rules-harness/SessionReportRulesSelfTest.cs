@@ -383,10 +383,29 @@ namespace CompetitiveRounds
         {
             var f = Parse(FFA_LOBBY);
             var noTarget = new Game();
-            Check(r, "race: 1v1, 2v2 and 1v2 play to 5 rounds, FFA to its lobby's target",
+            Check(r, "race: 1v1, 2v2 and 1v2 play to 5 rounds, FFA to its lobby's recorded target, unknown when none is recorded",
                   WinTarget("ranked", null) == 5 && WinTarget("team", null) == 5 && WinTarget("ovt", null) == 5
-                  && WinTarget("ffa", f.Games[0]) == 3 && WinTarget("ffa", noTarget) == 5,
-                  "ffa lobby " + WinTarget("ffa", f.Games[0]) + ", ffa unknown " + WinTarget("ffa", noTarget));
+                  && WinTarget("ffa", f.Games[0]) == 3 && WinTarget("ffa", noTarget) == TARGET_UNKNOWN,
+                  "ffa lobby " + WinTarget("ffa", f.Games[0]) + ", ffa with no settings " + WinTarget("ffa", noTarget));
+            // Round 2 M2: the axis of a race whose target is not recorded ends at
+            // the top recorded score (a first-to-3 historical game reads 3, not
+            // a guessed 5) and the unknown games are counted for the view's note.
+            int uOnly, uMixed, uKnown, uV1;
+            var hist = new Game();
+            hist.Scores[A] = 3; hist.Scores[B] = 1;
+            float topOnly = RaceTop("ffa", new List<Game> { hist }, 3f, out uOnly);
+            float topMixed = RaceTop("ffa", new List<Game> { f.Games[0], hist }, 2f, out uMixed);
+            float topKnown = RaceTop("ffa", f.Games, 3f, out uKnown);
+            float topV1 = RaceTop("ranked", new List<Game> { new Game() }, 4f, out uV1);
+            Check(r, "race: an FFA game with no recorded target draws no race to a guessed number and is counted unknown",
+                  topOnly == 3f && uOnly == 1 && topMixed == 3f && uMixed == 1 && topKnown == 3f && uKnown == 0 && topV1 == 5f && uV1 == 0,
+                  "unknown only " + topOnly.ToString(INV) + "/" + uOnly + ", mixed " + topMixed.ToString(INV) + "/" + uMixed
+                  + ", recorded 3 " + topKnown.ToString(INV) + "/" + uKnown + ", 1v1 " + topV1.ToString(INV) + "/" + uV1);
+            var seven = new Game { ScoreTarget = 7 };
+            int u7;
+            float top7 = RaceTop("ffa", new List<Game> { seven }, 2f, out u7);
+            Check(r, "race (control): a recorded target is the axis even above the scores",
+                  top7 == 7f && u7 == 0, "target 7, top score 2 -> " + top7.ToString(INV) + "/" + u7);
             var v1 = RoundsSeries(new List<Pt> { new Pt(1f, 1f), new Pt(2f, 2f), new Pt(3f, 3f), new Pt(4f, 4f), new Pt(5f, 9f) }, RaceDivisor("ranked"), false);
             var ff = RoundsSeries(new List<Pt> { new Pt(1f, 0.5f), new Pt(2f, 1f), new Pt(3f, 1.5f), new Pt(4f, 3f) }, RaceDivisor("ffa"), false);
             var thin = RoundsSeries(new List<Pt> { new Pt(1f, 1f), new Pt(2f, 3f) }, RaceDivisor("casual"), true);

@@ -2908,6 +2908,8 @@ namespace CompetitiveRounds
             "point won",
             "press",
             "private",
+            "race target not recorded for {0} of {1} games",
+            "race target not recorded: the axis ends at the top score",
             "ranked 1v1 series vs anyone in the selection, minimum 5 series",
             "ranked or casual",
             "rare",

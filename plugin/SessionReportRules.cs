@@ -933,17 +933,41 @@ namespace CompetitiveRounds
         /// <summary>A game is won at 5 rounds in 1v1, 2v2 and 1v2
         /// (GameStateWatcher's roundsToWin default, read from GM.roundsToWinGame
         /// at runtime; the mod changes it for none of them). An FFA game plays
-        /// its lobby's score target (settings.score_target); a lobby that
-        /// predates configurable settings played the engine default
-        /// (FfaMode.RoundsToWin = 5).</summary>
+        /// its lobby's score target, and only a RECORDED one counts: the server
+        /// sends settings=null for a game with no settings record, on purpose
+        /// (early FFA games were first-to-3, so the server reports unknown
+        /// rather than a plausible value), and such a game's target is
+        /// TARGET_UNKNOWN - never a guessed default (round 2 M2).</summary>
         internal const int ROUNDS_TO_WIN = 5;
-        internal const int FFA_DEFAULT_TARGET = 5;
+        internal const int TARGET_UNKNOWN = 0;
 
-        /// <summary>The rounds a game is played to: the top of its race axis.</summary>
+        /// <summary>The rounds a game is played to: the top of its race axis;
+        /// TARGET_UNKNOWN for an FFA game whose settings are not recorded.</summary>
         internal static int WinTarget(string kind, Game g)
         {
-            if (kind == "ffa") return g != null && g.ScoreTarget > 0 ? g.ScoreTarget : FFA_DEFAULT_TARGET;
+            if (kind == "ffa") return g != null && g.ScoreTarget > 0 ? g.ScoreTarget : TARGET_UNKNOWN;
             return ROUNDS_TO_WIN;
+        }
+
+        /// <summary>The race's y-axis top over the games of a set: the highest
+        /// KNOWN target, raised to the highest recorded value (`recordedTop`)
+        /// so nothing is clipped, at least 1. `unknown` counts the games whose
+        /// target is not recorded; with every target unknown the axis ends at
+        /// the top recorded score - no race to a guessed number is drawn, and
+        /// the view says the target is not recorded (round 2 M2).</summary>
+        internal static float RaceTop(string kind, IList<Game> games, float recordedTop, out int unknown)
+        {
+            unknown = 0;
+            float top = 1f;
+            if (games != null)
+                foreach (var g in games)
+                {
+                    int t = WinTarget(kind, g);
+                    if (t == TARGET_UNKNOWN) unknown++;
+                    else top = Math.Max(top, t);
+                }
+            if (!float.IsNaN(recordedTop)) top = Math.Max(top, recordedTop);
+            return (float)Math.Ceiling(top);
         }
 
         /// <summary>A score stream's value per round won: 2 in 1v1 (the

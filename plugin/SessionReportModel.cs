@@ -94,6 +94,9 @@ namespace CompetitiveRounds
             /// the view draws them only where they are legible.</summary>
             public readonly List<Poly> Thin = new List<Poly>();
             public readonly List<Dot> Dots = new List<Dot>();
+            /// <summary>A line the view prints under the title (round 2 M2: a
+            /// race whose target is not recorded says so); null for none.</summary>
+            public string Note;
         }
 
         internal sealed class Span
@@ -712,17 +715,19 @@ namespace CompetitiveRounds
 
         /// <summary>The race's end scores where a game has no point events
         /// (2v2, 1v2, or a player with no stream), and its y-axis: the rounds
-        /// the mode is played to (WinTarget), raised only if a recorded score
-        /// is higher, so nothing is ever clipped. The other panels keep NiceCeil.</summary>
+        /// the mode is played to (SessionReportRules.RaceTop over WinTarget),
+        /// raised only if a recorded score is higher, so nothing is ever
+        /// clipped. A game whose target is not recorded (an FFA game with no
+        /// settings record) contributes no target: the axis is never drawn to
+        /// a guessed number, and the panel's Note says the target is not
+        /// recorded (round 2 M2). The other panels keep NiceCeil.</summary>
         private static void FinishRace(Model m, Envelope env, string missing)
         {
             var p = m.Score;
             var raced = new HashSet<string>();
-            int target = 0;
             for (int gi = 0; gi < env.Games.Count; gi++)
             {
                 var g = env.Games[gi];
-                target = Math.Max(target, WinTarget(m.Kind, g));
                 var sp = m.Spans[gi];
                 raced.Clear();
                 foreach (var l in p.Lines)
@@ -740,10 +745,15 @@ namespace CompetitiveRounds
                 }
             }
             if (p.Lines.Count == 0 && p.Dots.Count == 0) { p.Missing = missing; return; }
-            float top = Math.Max(1, target);
-            foreach (var l in p.Lines) foreach (var pt in l.Pts) top = Mathf.Max(top, pt.y);
-            foreach (var d in p.Dots) top = Mathf.Max(top, d.Y);
-            p.MaxY = Mathf.Ceil(top);
+            float recorded = 0f;
+            foreach (var l in p.Lines) foreach (var pt in l.Pts) recorded = Mathf.Max(recorded, pt.y);
+            foreach (var d in p.Dots) recorded = Mathf.Max(recorded, d.Y);
+            int unknown;
+            p.MaxY = RaceTop(m.Kind, env.Games, recorded, out unknown);
+            if (unknown > 0)
+                p.Note = unknown >= env.Games.Count
+                    ? I18n.Tr("race target not recorded: the axis ends at the top score")
+                    : I18n.TrF("race target not recorded for {0} of {1} games", unknown, env.Games.Count);
         }
 
         internal static float NiceCeil(float v)

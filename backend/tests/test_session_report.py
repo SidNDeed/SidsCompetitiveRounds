@@ -1690,8 +1690,31 @@ def test_the_race_plots_rounds_won_on_the_modes_win_target():
         assert panel in finish_loop, panel
     assert build.count("FinishRace(m, env, missing)") == 1
     race = _cs_body(model, "private static void FinishRace(Model m, Envelope env, string missing)")
-    assert "WinTarget(m.Kind, g)" in race and "p.Dots.Add(" in race
+    assert "p.MaxY = RaceTop(m.Kind, env.Games, recorded, out unknown);" in race and "p.Dots.Add(" in race
     assert "NiceCeil" not in race
+
+
+def test_an_unrecorded_race_target_is_unknown_never_guessed():
+    """Round 2 M2: the server sends settings=null for an FFA game with no
+    settings record (early games were first-to-3), so the client has no
+    target for it. SessionReportRules.WinTarget answers TARGET_UNKNOWN there
+    and RaceTop (both executed by the client harness) draws the axis to the
+    top recorded score, counting the unknown games; the race panel's Note says
+    the target is not recorded, and the view prints it. No default target
+    constant is left to substitute."""
+    rules = strip_comments_only((PLUGIN / "SessionReportRules.cs").read_text(encoding="utf-8"))
+    assert "FFA_DEFAULT_TARGET" not in rules
+    target = _cs_body(PLUGIN / "SessionReportRules.cs", "internal static int WinTarget(string kind, Game g)")
+    assert 'if (kind == "ffa") return g != null && g.ScoreTarget > 0 ? g.ScoreTarget : TARGET_UNKNOWN;' in target
+    model = PLUGIN / "SessionReportModel.cs"
+    race = _cs_body(model, "private static void FinishRace(Model m, Envelope env, string missing)")
+    assert "WinTarget(" not in race, "the axis comes from RaceTop only"
+    assert "if (unknown > 0)" in race
+    assert 'I18n.Tr("race target not recorded: the axis ends at the top score")' in race
+    assert 'I18n.TrF("race target not recorded for {0} of {1} games", unknown, env.Games.Count)' in race
+    panel = _cs_body(PLUGIN / "SessionReportView.cs",
+                     "private static void DrawPanel(Rect r, SessionReportModel.Panel p, SessionReportModel.Model m, bool marks)")
+    assert "if (!string.IsNullOrEmpty(p.Note))" in panel and "+ p.Note +" in panel
 
 
 def test_the_race_grid_is_one_line_per_round_and_the_thin_line_is_gated():

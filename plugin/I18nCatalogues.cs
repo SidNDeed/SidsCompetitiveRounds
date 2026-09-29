@@ -3054,6 +3054,8 @@ namespace CompetitiveRounds
             ["team 1 {0}-{1} team 2"] = "equipo 1 {0}-{1} equipo 2",
             ["{0} not shown"] = "{0} sin mostrar",
             ["{0} of {1} games timed"] = "{0} de {1} juegos cronometrados",
+            ["race target not recorded: the axis ends at the top score"] = "objetivo de la carrera no registrado: el eje termina en la puntuación más alta",
+            ["race target not recorded for {0} of {1} games"] = "objetivo de la carrera no registrado en {0} de {1} juegos",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -6074,6 +6076,8 @@ namespace CompetitiveRounds
             ["team 1 {0}-{1} team 2"] = "команда 1 {0}-{1} команда 2",
             ["{0} not shown"] = "{0} не показано",
             ["{0} of {1} games timed"] = "Время есть у {0} из {1} игр",
+            ["race target not recorded: the axis ends at the top score"] = "цель гонки не записана: ось заканчивается на наивысшем счёте",
+            ["race target not recorded for {0} of {1} games"] = "цель гонки не записана для {0} из {1} игр",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -9020,6 +9024,8 @@ namespace CompetitiveRounds
             ["team 1 {0}-{1} team 2"] = "команда 1 {0}-{1} команда 2",
             ["{0} not shown"] = "{0} не показано",
             ["{0} of {1} games timed"] = "Час є для {0} з {1} ігор",
+            ["race target not recorded: the axis ends at the top score"] = "ціль перегонів не записана: вісь закінчується на найвищому рахунку",
+            ["race target not recorded for {0} of {1} games"] = "ціль перегонів не записана для {0} з {1} ігор",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -11966,6 +11972,8 @@ namespace CompetitiveRounds
             ["team 1 {0}-{1} team 2"] = "lag 1 {0}-{1} lag 2",
             ["{0} not shown"] = "{0} visas inte",
             ["{0} of {1} games timed"] = "{0} av {1} matcher tidtagna",
+            ["race target not recorded: the axis ends at the top score"] = "loppets mål är inte registrerat: axeln slutar vid den högsta poängen",
+            ["race target not recorded for {0} of {1} games"] = "loppets mål är inte registrerat för {0} av {1} matcher",
         };
     }
 }

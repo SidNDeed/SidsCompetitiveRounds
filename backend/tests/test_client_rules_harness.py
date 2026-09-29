@@ -269,9 +269,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     # The suite ran 31 cases on the commit that added it, 35 once board row
     # 30b added the overlay rule's cases, 38 with 30c's builds layout, 59
     # with 30d's derived numbers, 63 with 30e's race axis, 67 with 30g's
-    # broadcast playback and 71 with round 2's presence rules (M1); the
-    # floor is that count (#342). Raise it when cases are added.
-    assert run >= 71, "the SessionReportRules suite shrank to %d cases" % run
+    # broadcast playback, 71 with round 2's presence rules (M1) and 73 with
+    # its unknown race target (M2); the floor is that count (#342). Raise it
+    # when cases are added.
+    assert run >= 73, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -723,7 +724,9 @@ def test_the_session_report_derives_every_totals_number(harness_run, name):
 
 
 @pytest.mark.parametrize("name", [
-    "race: 1v1, 2v2 and 1v2 play to 5 rounds, FFA to its lobby's target",
+    "race: 1v1, 2v2 and 1v2 play to 5 rounds, FFA to its lobby's recorded target, unknown when none is recorded",
+    "race: an FFA game with no recorded target draws no race to a guessed number and is counted unknown",
+    "race (control): a recorded target is the axis even above the scores",
     "race: a 1v1 value of rounds*2+points plots its rounds, FFA floors its half points",
     "race (control): 2v2 and 1v2 streams are not raced (no point events)",
     "race: every 1v1 game's rounds line ends on its recorded rounds",

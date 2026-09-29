@@ -2902,6 +2902,8 @@
   "point won",
   "press",
   "private",
+  "race target not recorded for {0} of {1} games",
+  "race target not recorded: the axis ends at the top score",
   "ranked 1v1 series vs anyone in the selection, minimum 5 series",
   "ranked or casual",
   "rare",
@@ -17541,6 +17543,16 @@
   "private": {
    "surface": "NativeUI",
    "location": "RenderHostLobbySection",
+   "kind": "Tr"
+  },
+  "race target not recorded for {0} of {1} games": {
+   "surface": "SessionReportModel",
+   "location": "FinishRace",
+   "kind": "TrF"
+  },
+  "race target not recorded: the axis ends at the top score": {
+   "surface": "SessionReportModel",
+   "location": "FinishRace",
    "kind": "Tr"
   },
   "ranked 1v1 series vs anyone in the selection, minimum 5 series": {
