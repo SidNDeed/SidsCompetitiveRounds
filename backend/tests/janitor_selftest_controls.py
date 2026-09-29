@@ -69,10 +69,17 @@ L9 = T + "test_pg_the_health_word_reads_the_self_tests_verdict"
 P7 = T + "test_the_health_word_is_the_recorded_verdict"
 P8 = T + "test_both_health_arms_carry_the_word_and_the_schema_requires_it"
 P9 = T + "test_both_arms_carry_the_build_marker_both_roles_answer_alike"
+P10 = T + ("test_the_replica_branch_of_lifespan_writes_exactly_the_skipped_report_"
+          "and_never_starts_the_selftest")
 BUILD_SITE = "_JANITOR_SELFTEST_BUILD = 1\n"
 BUILD_ARG = "                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,\n"
 CACHED_ARM = "                              pc_trading=_pc_trading_word_cached(),\n"
 WORD_SITE = '    return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)\n'
+STANDBY_UPDATE_SITE = ('            _janitor_selftest_report.update({\n'
+                       '                "status": "skipped",\n'
+                       '                "reason": "read replica: the janitor writers this '
+                       'validates do not run here",\n'
+                       '            })\n')
 
 STMT_SITE = '        stmt = text("EXPLAIN " + s["sql"] if cls == "explain" else s["sql"])\n'
 ROLLBACK_SITE = ("        try:\n"
@@ -247,6 +254,24 @@ PLANTS = [
      "why": "HealthResponse no longer declares the build marker: the payload drops the key",
      "file": SCHEMAS, "old": "    janitor_selftest_build: int\n", "new": "",
      "red": [L9, P9], "green": [P7, P8]},
+    # The role-specific LAND acceptance (Codex r1 MEDIUM, round 2).
+    {"name": "M24-selftest-started-on-replica-too",
+     "why": "the boot task is also started on the replica branch: the standby would race "
+            "the read-only recovery connection with EXPLAINs of FOR UPDATE SKIP LOCKED "
+            "janitor SQL, the exact thing the skip exists to avoid",
+     "file": MAIN, "old": STANDBY_UPDATE_SITE,
+     "new": STANDBY_UPDATE_SITE +
+            "            tasks.append(asyncio.create_task(_run_janitor_query_selftest()))\n",
+     "red": [P10], "green": [P7, P8, P9]},
+    {"name": "T5-inert-twin-at-the-standby-report",
+     "why": "the same two keys, written in the other order: nothing may redden",
+     "file": MAIN, "old": STANDBY_UPDATE_SITE,
+     "new": ('            _janitor_selftest_report.update({\n'
+             '                "reason": "read replica: the janitor writers this '
+             'validates do not run here",\n'
+             '                "status": "skipped",\n'
+             '            })\n'),
+     "red": [], "green": [P10, P7, P8, P9]},
 ]
 
 

@@ -376,6 +376,72 @@ def test_both_arms_carry_the_build_marker_both_roles_answer_alike():
         schemas.HealthResponse(**answer)
 
 
+def _calls_named(nodes, name):
+    """Every ast.Call among `nodes` (and their descendants) whose func
+    resolves to `name`, plain or as the tail of an attribute chain."""
+    found = []
+    for root in nodes:
+        for n in ast.walk(root):
+            if isinstance(n, ast.Call) and ast.unparse(n.func).rsplit(".", 1)[-1] == name:
+                found.append(n)
+    return found
+
+
+def test_the_replica_branch_of_lifespan_writes_exactly_the_skipped_report_and_never_starts_the_selftest():
+    """The LAND acceptance is role-specific (Codex r1 MEDIUM, board row 26):
+    the standby's report can never carry the primary's proof (status="ok",
+    counts.failed == 0, the trading row executed_rolled_back), because
+    lifespan's `if IS_REPLICA:` branch replaces the report before the box
+    serves a request and never starts _run_janitor_query_selftest. A test
+    process never runs `lifespan` itself (test_pc_card_themes.py:189), so
+    this reads the actual branch from the SOURCE rather than assuming what
+    it does -- the gap the existing string search
+    (test_both_health_arms_carry_the_word_and_the_schema_requires_it, which
+    only checks '"status": "skipped"' appears somewhere in the function)
+    left open. IS_REPLICA false: the report is never "skipped" on this path
+    (asserted below), and is pending (word 3) before the task ends, ok
+    (word 1) after -- test_the_health_word_is_the_recorded_verdict's
+    parametrize table and test_pg_the_health_word_reads_the_self_tests_
+    verdict already cover both words live; not repeated here. Which box
+    answered is already on /health as `replica` (HealthResponse.replica,
+    both arms of health_check, read by the same live test): no new health
+    field is added for this."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    (lifespan,) = [n for n in tree.body
+                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan"]
+    branches = [n for n in ast.walk(lifespan)
+                if isinstance(n, ast.If) and ast.unparse(n.test) == "IS_REPLICA"]
+    assert len(branches) == 1, branches
+    (replica_if,) = branches
+
+    # The replica branch never starts the self-test task ...
+    assert _calls_named(replica_if.body, "_run_janitor_query_selftest") == []
+    # ... the primary (`else:`) branch starts it exactly once ...
+    primary_starts = _calls_named(replica_if.orelse, "_run_janitor_query_selftest")
+    assert len(primary_starts) == 1, primary_starts
+    # ... and the primary branch never pre-empts the outcome that task will
+    # record by writing to the report itself.
+    report_writes = [n for stmt in replica_if.orelse for n in ast.walk(stmt)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr in ("update", "clear")
+                     and ast.unparse(n.func.value) == "_janitor_selftest_report"]
+    assert report_writes == [], report_writes
+
+    # The replica branch's report write, read from the source, not assumed:
+    # exactly {"status": "skipped", "reason": ...}, nothing else.
+    updates = [n for n in ast.walk(replica_if) if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Attribute) and n.func.attr == "update"
+               and ast.unparse(n.func.value) == "_janitor_selftest_report"]
+    assert len(updates) == 1, updates
+    written = ast.literal_eval(updates[0].args[0])
+    assert set(written) == {"status", "reason"}, written
+    assert written["status"] == "skipped", written
+    assert written["reason"] == (
+        "read replica: the janitor writers this validates do not run here"), written
+    assert main._JANITOR_SELFTEST_WORDS[written["status"]] == 2, written
+
+
 # ------------------------------------------------------- the lane schema
 
 _TOKEN = re.compile(

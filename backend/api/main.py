@@ -3702,6 +3702,18 @@ async def lifespan(app: FastAPI):
                 "status": "skipped",
                 "reason": "read replica: the janitor writers this validates do not run here",
             })
+            # POST-DEPLOY ACCEPTANCE is role-specific -- the row this proves
+            # cannot exist on both boxes (Codex r1 MEDIUM, board row 26).
+            # PRIMARY: the endpoint (get_janitor_selftest) reports
+            # status="ok", counts.failed == 0 and the trading janitor's row
+            # executed_rolled_back; /health reads janitor_selftest=1 and
+            # janitor_selftest_build=1. STANDBY: this block replaces the
+            # report before the box serves a request, so its own positive
+            # signal is exactly this dict -- {"status": "skipped", "reason":
+            # ...}, nothing else -- with /health reading janitor_selftest=2
+            # and janitor_selftest_build=1. Which box answered is already on
+            # /health as `replica` (HealthResponse.replica, both arms of
+            # health_check below): no new health key is added for this.
             # The janitor self-test is skipped rather than trusted: it EXPLAINs
             # janitor SQL containing FOR UPDATE SKIP LOCKED, and whether
             # recovery accepts EXPLAIN of a locking statement is UNVERIFIED
