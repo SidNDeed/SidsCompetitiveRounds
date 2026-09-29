@@ -22,8 +22,9 @@ namespace CompetitiveRounds
     /// So the number is the server's own count, never a free-running one. At
     /// every game start in a cr_ff room (GameStateWatcher.OnMatchStarted, the
     /// event that also resets the pair the post carries) it is frozen as the
-    /// recorded games of THIS series, the highest any read of
-    /// team/series/{id}/state has shown, plus one. Every read counted was
+    /// recorded games of THIS series, the highest any read of the series has
+    /// shown (team/series/{id}/state, or its read-only twin .../status; both
+    /// reach ApiClient.ObserveSeriesStateAnswer), plus one. Every read counted was
     /// answered before this game started, and the server only ever adds to
     /// that count (main.py's two writers of t1_series_wins/t2_series_wins each
     /// add one game), so the frozen number is at most the game the server was
@@ -677,7 +678,12 @@ namespace CompetitiveRounds
             private bool resetOut;
             private int playOut;
 
-            /// <summary>A read of team/series/{id}/state for `seriesId`.
+            /// <summary>A read of the series `seriesId`, from either route
+            /// ApiClient.ObserveSeriesStateAnswer is fed by: the lifecycle
+            /// team/series/{id}/state, or the read-only .../status, whose answer
+            /// carries the two win counts but not `relocked` or
+            /// `two_points_on_record`, so a status read is a read of the games
+            /// and never of the sitting.
             /// `hasWins`: the answer carried both win counts (the canceled and
             /// dc_incomplete answers carry neither, and a missing field parses as
             /// 0, which is not a read). Never lowers what an earlier read showed.

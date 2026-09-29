@@ -2224,6 +2224,12 @@ namespace CompetitiveRounds
                     }
                 }
                 // NOTHING IS READ OUT OF THIS ANSWER BUT THE TWO VERSION NUMBERS.
+                // That sentence came with the 886bed8 client half and is about
+                // series status. One other field of this answer IS read, above:
+                // the involuntary-cause capability (bug 392), which gates what
+                // this client sends when it leaves an FFA room, and whose own
+                // paragraph states what reading it once at startup does not
+                // cover.
                 // The previous round parsed a series-status capability flag here
                 // and let it decide whether a later, separately routed request was
                 // safe to send. Both halves of that are gone — the parse and the
