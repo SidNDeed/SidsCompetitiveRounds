@@ -52,7 +52,7 @@ UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it
 OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_refusal", "_pc_open_and_show",
                                "_pc_reveal_opened", "cmd_pc_buypack", "_pc_open_verdict", "_pc_buy_pending",
                                "_pc_buy_pending_write", "_pc_buy_and_show", "_pc_buy_player",
-                               "_pc_buy_settled_ok"}
+                               "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver"}
 # _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
 # the test's own folder instead of the container's /opt/bot-state
 OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
@@ -1480,4 +1480,72 @@ def test_m1r3_a_purchase_starts_only_when_the_buyers_player_can_be_read(monkeypa
         assert calls_to(stranger, OPEN) == [] and journal(stranger) == {}
         assert len(stranger.sent) == 1 and "Not linked" in stranger.sent[0].content
         assert (await purse(env, own))["gold_spent"] == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 3, item 2: a definitive answer is not lost at the reveal boundary ----------------------
+# Round 2 took a bought pack's entry out of the journal BEFORE its reveal was delivered, so a crash
+# between the api's answer and the reveal lost the receipt (Codex round 2 residual). Now the entry
+# stays, marked settled with the answer, until the reveal's send has returned, and a /buypack that
+# finds a settled entry delivers that reveal from the journal without any request that could buy.
+
+def test_item2_a_crash_between_the_answer_and_the_reveal_keeps_the_receipt_and_a_restart_delivers_it(
+        monkeypatch, tmp_path):
+    """The purchase commits and is answered; the process dies inside the
+    reveal's send. A new bot process's /buypack shows exactly that pack, once,
+    and sends no purchase request. The decisive line is the first assertion
+    after the restart: under the round-2 removal order the entry is gone, the
+    restart buys a second pack, and the reveal of the first is lost."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        before = rig_over(env)
+        ctx = before.ctx(own.discord)
+
+        async def dies(*a, **k):
+            raise RuntimeError("the process ended before the reveal was delivered")
+        ctx.send = dies
+        with pytest.raises(RuntimeError, match="before the reveal was delivered"):
+            await buypack(before, own.discord, "gold", ctx=ctx)
+        (first,) = calls_to(before, OPEN)
+        bought = json.loads(first.reply.body)["pack_id"] if first.status == 200 else None
+        after_crash = journal(before)
+        deal(env, subs)   # a deal for a second purchase, should the restart make one
+        after = rig_over(env)
+        await buypack(after, own.discord, "gold")
+        revealed = [c.params.get("pack_id") for c in calls_to(after, PACKS, "GET") if c.params.get("pack_id")]
+        buys = calls_to(after, OPEN)
+        assert (revealed[:1], len(buys)) == ([bought], 0), \
+            f"the reveal of the bought pack was lost: revealed {revealed}, purchase requests after the restart {len(buys)}"
+        assert after_crash == {own.discord: {"nonce": first.params["nonce"], "pay": "gold", "player": own.steam,
+                                             "settled": {"pack_id": bought, "pay": "gold", "price": price}}}, after_crash
+        assert len(after.sent) == 1 and after.sent[0].file is not None, [s.content for s in after.sent]
+        assert after.sent[0].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert journal(after) == {}
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_item2_the_settled_entry_leaves_the_journal_only_after_the_reveal_is_sent(monkeypatch, tmp_path):
+    """While the reveal's send runs, the journal holds the entry marked settled
+    with the answer; once the send has returned it holds nothing."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        ctx = rig.ctx(own.discord)
+        real, seen = ctx.send, []
+
+        async def send(*a, **k):
+            seen.append(journal(rig))
+            return await real(*a, **k)
+        ctx.send = send
+        await buypack(rig, own.discord, "gold", ctx=ctx)
+        (buy,) = calls_to(rig, OPEN)
+        pack_id = json.loads(buy.reply.body)["pack_id"]
+        assert seen == [{own.discord: {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+                                       "settled": {"pack_id": pack_id, "pay": "gold", "price": price}}}], seen
+        assert journal(rig) == {} and len(rig.sent) == 1 and rig.sent[0].file is not None
     e2e(monkeypatch, tmp_path, body)

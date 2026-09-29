@@ -9041,15 +9041,19 @@ def _pc_fix_ready_line():
     """The bot's startup witness for the Discord fix (round 2): the purchase
     journal's volume as THIS process finds it - a folder that is not a mount
     point refuses every purchase, so "NOT mounted" is the reading a release
-    must stop on - and how many purchases the journal holds unsettled; the
-    replay policy; the sync availability-check rule (board row 32). Stamped
+    must stop on - how many purchases the journal holds unsettled and how
+    many bought ones still await their reveal (round 3, item 2); the replay
+    policy and the purchase's player binding (round 3, M1); the sync
+    availability-check rule (board row 32). Stamped
     with the process's gen, as [BOT-READY] is (r7 M2). Its only job is to be
     read by the release train. It never raises: a witness that cannot be
     built says so in its own line, and on_ready still reaches [BOT-READY]."""
     try:
         mounted = os.path.ismount(os.path.dirname(_PC_BUY_PENDING_FILE))
         pending = _pc_buy_pending()
-        held = "unreadable" if pending is None else f"{len(pending)} unsettled"
+        shown = 0 if pending is None else sum(1 for v in pending.values() if "settled" in v)
+        held = ("unreadable" if pending is None
+                else f"{len(pending) - shown} unsettled, {shown} bought and awaiting their reveal")
         return (f"[DISCORD-FIX] gen={_BOT_GEN} purchase journal {_PC_BUY_PENDING_FILE}: "
                 f"{'mounted' if mounted else 'NOT mounted'}, {held}; an unanswered open sends its key "
                 f"{_PC_OPEN_SENDS} times; every purchase names the player it was bought for; "
@@ -9076,15 +9080,41 @@ async def _pc_buy_player(ctx, me):
     return None
 
 
+def _pc_buy_forget(me, nonce):
+    """Take `me`'s purchase `nonce` out of the journal (a later entry of
+    `me` is left alone). A write that fails leaves it there, and the next
+    /buypack reads its outcome again."""
+    now = _pc_buy_pending()
+    if now is not None and (now.get(me) or {}).get("nonce") == nonce:
+        del now[me]
+        if not _pc_buy_pending_write(now):
+            print(f"[PC-BUY] purchase {nonce[:8]} is finished but still in the journal:"
+                  " the next /buypack reads its outcome again")
+
+
+async def _pc_buy_deliver(ctx, me, entry, earlier):
+    """The reveal of a bought pack from its journal entry's "settled" part
+    (round 3, item 2). The entry leaves the journal only AFTER the reveal
+    is delivered - the library's send returned, with the pack or with the
+    line saying it is open and where to see it; a send that raises leaves
+    it settled in the journal, and the next /buypack delivers it from
+    there, sending nothing that could buy."""
+    s = entry["settled"]
+    head = f"**Pack bought for {s['price']} {s['pay']}**"
+    await _pc_reveal_opened(ctx, s["pack_id"], ("Your earlier purchase went through - " + head) if earlier else head)
+    _pc_buy_forget(me, entry["nonce"])
+
+
 async def _pc_buy_and_show(ctx, me, pay):
     """/buypack's purchase (Discord fix round 2, M1). A purchase an earlier
     /buypack left unconfirmed is completed first, with its own nonce and pay,
     and this command buys nothing else; otherwise a fresh nonce is drawn and
     written to the journal BEFORE the first send, and nothing is sent when
     that write fails. The nonce leaves the journal only when the api settles
-    it - the pack (the reveal follows) or a refusal (its line follows). An
-    unconfirmed purchase stays in the journal, and the player is told it is
-    being confirmed and where to see it.
+    it - a refusal (its line follows), or the pack, whose entry is marked
+    settled and leaves only once its reveal is delivered (round 3, item 2:
+    _pc_buy_deliver). An unconfirmed purchase stays in the journal, and the
+    player is told it is being confirmed and where to see it.
     Round 3, M1: the journal entry names the player the purchase is for -
     the Discord id's player when the nonce is drawn - and every send of the
     nonce, the first, the automatic replays and a later /buypack's, names
@@ -9098,6 +9128,12 @@ async def _pc_buy_and_show(ctx, me, pay):
         await ctx.send(_PC_BUY_PAUSED)
         return
     held = pending.get(me)
+    if held is not None and "settled" in held:
+        # round 3, item 2: bought, and its reveal never delivered (a crash or a
+        # failed send between the answer and the reveal) - shown from the
+        # journal; nothing is sent that could buy
+        await _pc_buy_deliver(ctx, me, held, True)
+        return
     if held is not None:
         key, player = {"nonce": held["nonce"], "pay": held["pay"]}, held["player"]
     else:
@@ -9120,21 +9156,23 @@ async def _pc_buy_and_show(ctx, me, pay):
               " it stays in the journal, unconfirmed")
         await ctx.send(_PC_BUY_UNCONFIRMED)
         return
-    now = _pc_buy_pending()
-    if now is not None and (now.get(me) or {}).get("nonce") == key["nonce"]:
-        del now[me]
-        if not _pc_buy_pending_write(now):
-            print(f"[PC-BUY] purchase {key['nonce'][:8]} is settled but still in the journal:"
-                  " the next /buypack reads its outcome again")
+    if verdict == "opened":
+        price = body.get("price")
+        entry = {**key, "player": player, "settled": {
+            "pack_id": str(body["pack_id"]), "pay": body.get("pay") if body.get("pay") in ("gold", "shards")
+            else key["pay"], "price": price if isinstance(price, int) and not isinstance(price, bool) else None}}
+        now = _pc_buy_pending()
+        if now is not None and (now.get(me) or {}).get("nonce") == key["nonce"]:
+            if not _pc_buy_pending_write({**now, me: entry}):
+                print(f"[PC-BUY] purchase {key['nonce'][:8]} is settled but its answer is not in the journal:"
+                      " the next /buypack reads its outcome again")
+        await _pc_buy_deliver(ctx, me, entry, held is not None)
+        return
+    _pc_buy_forget(me, key["nonce"])
     if verdict == "moved":
         print(f"[PC-BUY] purchase {key['nonce'][:8]} settled as the earlier player's: the Discord id is now"
               f" linked to another player (recorded {_pc_detail(body).get('recorded')})")
         await ctx.send(_PC_BUY_MOVED)
-        return
-    if verdict == "opened":
-        head = f"**Pack bought for {body.get('price')} {body.get('pay') or key['pay']}**"
-        await _pc_reveal_opened(ctx, str(body["pack_id"]),
-                                ("Your earlier purchase went through - " + head) if held is not None else head)
         return
     line = _pc_open_refusal(ctx, status, body, bought=True)
     await ctx.send(("Your earlier purchase did not go through: " + line) if held is not None else line)

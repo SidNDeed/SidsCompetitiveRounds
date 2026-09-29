@@ -256,12 +256,23 @@ def test_the_witness_names_a_mounted_journal_and_its_unsettled_purchases(tmp_pat
     journal = json.dumps({H.discord_of(1): {"nonce": "nonce-aaaaaaaa", "pay": "gold", "player": H.steam_of(1)},
                           H.discord_of(2): {"nonce": "nonce-bbbbbbbb", "pay": "shards", "player": H.steam_of(2)}})
     line, path = witness(tmp_path, mounted=True, journal=journal)
-    assert line == f"[DISCORD-FIX] gen=gen-test purchase journal {path}: mounted, 2 unsettled; {TAIL}"
+    assert line == f"[DISCORD-FIX] gen=gen-test purchase journal {path}: mounted, 2 unsettled, 0 bought and awaiting their reveal; {TAIL}"
+
+
+def test_the_witness_counts_bought_purchases_awaiting_their_reveal_apart(tmp_path):
+    """Round 3, item 2: an entry marked settled is a bought pack whose reveal
+    was not delivered, not an unsettled purchase."""
+    journal = json.dumps({H.discord_of(1): {"nonce": "nonce-aaaaaaaa", "pay": "gold", "player": H.steam_of(1)},
+                          H.discord_of(2): {"nonce": "nonce-bbbbbbbb", "pay": "gold", "player": H.steam_of(2),
+                                            "settled": {"pack_id": "p" * 8, "pay": "gold", "price": 100}}})
+    line, path = witness(tmp_path, mounted=True, journal=journal)
+    assert line == (f"[DISCORD-FIX] gen=gen-test purchase journal {path}: mounted, 1 unsettled, "
+                    f"1 bought and awaiting their reveal; {TAIL}")
 
 
 def test_the_witness_says_not_mounted_when_the_volume_is_missing(tmp_path):
     line, path = witness(tmp_path, mounted=False)
-    assert line == f"[DISCORD-FIX] gen=gen-test purchase journal {path}: NOT mounted, 0 unsettled; {TAIL}"
+    assert line == f"[DISCORD-FIX] gen=gen-test purchase journal {path}: NOT mounted, 0 unsettled, 0 bought and awaiting their reveal; {TAIL}"
 
 
 def test_the_witness_says_unreadable_for_a_journal_it_cannot_read(tmp_path):
