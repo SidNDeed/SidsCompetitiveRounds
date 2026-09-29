@@ -679,6 +679,42 @@ def test_pg_the_same_statement_with_a_bad_value_or_name_fails(lane):
     assert verdict == "failed" and detail.startswith("[42704]"), (verdict, detail)
 
 
+def test_pg_a_semicolon_joined_two_command_statement_fails_and_never_executes(lane):
+    """Codex r1 LOW 1: no live case plants a semicolon-joined two-command
+    session statement. `_janitor_check_statement` sends a harvested
+    statement VERBATIM as one statement (main.py:3198); the pinned
+    SQLAlchemy/asyncpg path prepares it with the extended query protocol,
+    which the server refuses to Parse when it carries more than one command
+    -- syntax error, sqlstate 42601 -- so it fails closed before Bind/Execute
+    ever runs, the same bucket a malformed SELECT falls into
+    (test_pg_dml_is_still_explained_and_never_executed). No application-level
+    mutant reaches this: nothing in main.py decides to run "one statement" or
+    "many" -- that is the wire protocol between asyncpg and the server, below
+    any line this fix could move -- so there is no red/green pair to name
+    here, only the control-plus-plant recorded below (Codex r1 LOW 1's own
+    escape hatch)."""
+    joined, single = _planted(
+        "SET LOCAL lock_timeout = '2s'; SET LOCAL statement_timeout = '5s'",
+        "SET LOCAL lock_timeout = '2s'")["statements"]
+    (verdict, detail), log = _run(_check_one(lane.schema, joined))
+    assert verdict == "failed" and detail.startswith("[42601]"), (verdict, detail)
+    assert "multiple commands" in detail or "cannot insert multiple" in detail, detail
+    # sent VERBATIM as ONE statement (never split into two db.execute calls,
+    # which would let the first command run while hiding the second): the
+    # server's Parse-time refusal is what fails it, not an application-level
+    # split -- the same "sent whole, judged by the server" shape
+    # test_pg_dml_is_still_explained_and_never_executed uses for a malformed
+    # SELECT.
+    assert log == [("sql", "SET LOCAL statement_timeout = '5s'"),
+                   ("sql", joined["sql"]), ("rollback",)], log
+    # Negative control: the SAME first command alone executes and rolls back
+    # -- the joined statement fails for being TWO commands, not for its text.
+    (verdict, detail), log = _run(_check_one(lane.schema, single))
+    assert (verdict, detail) == ("executed_rolled_back", None)
+    assert log == [("sql", "SET LOCAL statement_timeout = '5s'"),
+                   ("sql", single["sql"]), ("rollback",)], log
+
+
 def test_pg_dml_is_still_explained_and_never_executed(lane):
     malformed, probe = _planted("SELECT id FROM WHERE status = 1",
                                 "SELECT nextval('%s')" % PROBE_SEQ)["statements"]
