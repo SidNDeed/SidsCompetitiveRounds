@@ -1153,6 +1153,54 @@ def test_migration_364_grants_no_tuple_the_seat_never_observed(lab, seat):
              w.end + timedelta(minutes=1))
 
 
+# -- round 4 LOW 1: a validation answered ok carries a durable grant -------------
+
+def test_a_validation_whose_grant_write_fails_is_not_answered_ok(lab, seat):
+    """Round 4 LOW 1, the reviewer's falsifier. A trigger makes the grant
+    insert fail for this test's seat only (a transient error, or the table
+    missing, stands in). The master's validation of the seat is then NOT
+    answered ok, the lease is left unbound (the binding rolled back with the
+    grant), and no grant exists; the lease is still live, so the next
+    validation retries. Controls: the same validation with the trigger gone
+    is answered ok, binds the lease and writes exactly one grant, and the
+    report is then served to the seat as A's own envelope."""
+    w = _LiveWatch(seat, "KL")
+    fn, trg = "sr_r4_fail_" + seat, "sr_r4_fail_trg_" + seat
+
+    async def _trigger(on):
+        conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+        try:
+            if on:
+                await conn.execute(
+                    "CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN"
+                    " RAISE EXCEPTION 'grant insert failure (injected)'; END $f$" % fn)
+                await conn.execute(
+                    "CREATE TRIGGER %s BEFORE INSERT ON spectate_watch_grants FOR EACH ROW"
+                    " WHEN (NEW.spectator_steam_id = '%s') EXECUTE FUNCTION %s()" % (trg, seat, fn))
+            else:
+                await conn.execute("DROP TRIGGER IF EXISTS %s ON spectate_watch_grants" % trg)
+                await conn.execute("DROP FUNCTION IF EXISTS %s()" % fn)
+        finally:
+            await conn.close()
+
+    bound = lambda: _lab_sql("SELECT bound_actor FROM spectate_leases WHERE game_id = $1", w.wid)
+    asyncio.run(_trigger(True))
+    try:
+        assert [r["ok"] for r in w.validate([seat])["results"]] == [False], "no grant, no ok"
+        assert bound() is None, "the binding rolled back with the grant"
+        assert w.grants() == 0
+        assert _lab_sql("SELECT count(*) FROM spectate_leases WHERE game_id = $1 AND revoked_at IS NULL"
+                        " AND heartbeat_expires_at > clock_timestamp()", w.wid) == 1, \
+            "the lease is still live: the next validation retries"
+    finally:
+        asyncio.run(_trigger(False))
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True], "control: the retry is answered ok"
+    assert bound() == 3 and w.grants() == 1, "control: bound, with its grant"
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+    assert _report(seat, viewer=STEAM["A"], match=ID["KL"]) == _report("A", match=ID["KL"])
+
+
 # -- /health `session_report` against the lab database ---------------------------
 
 def test_the_health_word_reads_what_the_labs_database_has(lab):

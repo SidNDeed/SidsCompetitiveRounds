@@ -60294,6 +60294,17 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
             # here too, not only at its own heartbeat. Savepoint (#235 + r3
             # find 6): a missing migration-210 column must yield ok=False for
             # this actor (fail closed), not poison the whole transaction.
+            # Session report round 3 N1 / round 4 LOW 1: a lease validated as
+            # OBSERVED also records the watch where the sweep above cannot
+            # reach it: spectate_watch_grants (migration 364), one immutable
+            # row per game, spectator and (mode, source, roster) tuple - the
+            # tuple of the room row this request read under the room's lock -
+            # the entitlement the broadcast seat's report reads rest on. The
+            # binding and the grant share ONE savepoint, so an answer of
+            # ok=True always carries a durable grant: when the grant insert
+            # fails (a transient error, or the API deployed before 364) the
+            # binding rolls back with it and this actor is answered ok=False,
+            # exactly as a failed binding is.
             lease = None
             try:
                 async with db.begin_nested():
@@ -60308,20 +60319,7 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                     """), {"gid": str(game["id"]), "sid": entry.steam_id,
                            "actor": entry.actor_number,
                            "pmin": max(int(game.get("protocol_min") or 1), SPECTATE_PROTOCOL)})).first()
-            except Exception:
-                lease = None
-            if lease is not None:
-                ok = True
-                # Session report round 3 N1: the lease was validated as
-                # OBSERVED, so record the watch where the sweep above cannot
-                # reach it: spectate_watch_grants (migration 364), one
-                # immutable row per game, spectator and (mode, source, roster)
-                # tuple, the entitlement the broadcast seat's report reads
-                # rest on. Savepointed: a missing table (the API deployed
-                # before 364) leaves this validation's answer unchanged and
-                # the reads fail closed.
-                try:
-                    async with db.begin_nested():
+                    if lease is not None:
                         await db.execute(text("""
                             INSERT INTO spectate_watch_grants
                                 (game_id, spectator_steam_id, mode, source_ref, roster,
@@ -60332,8 +60330,12 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                              WHERE g.id = CAST(:gid AS uuid)
                             ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING
                         """), {"gid": str(game["id"]), "sid": entry.steam_id})
-                except Exception as ex:
-                    print(f"[SPECTATE] watched grant not recorded: {type(ex).__name__}")
+            except Exception as ex:
+                if lease is not None:
+                    print(f"[SPECTATE] watched grant not recorded, validation refused: {type(ex).__name__}")
+                lease = None
+            if lease is not None:
+                ok = True
                 display = (await db.execute(text("""
                     SELECT display_name FROM players WHERE steam_id = :sid
                 """), {"sid": entry.steam_id})).scalar() or ""

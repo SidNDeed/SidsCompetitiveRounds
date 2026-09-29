@@ -1998,10 +1998,20 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
                  "TRUNCATE spectate_watch_grants", "ALTER TABLE spectate_watch_grants"):
         assert verb not in src, verb
     val = " ".join(inspect.getsource(main.spectate_validate).split())
-    assert val.index("if lease is not None: ok = True") < val.index("INSERT INTO spectate_watch_grants")
     assert "ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING" in val
-    assert val.index("async with db.begin_nested():", val.index("if lease is not None:")) < \
-        val.index("INSERT INTO spectate_watch_grants"), "the grant write is savepointed"
+    # Round 4 LOW 1: the binding and the grant share one savepoint, and ok is
+    # answered only after both, outside the handler that drops the lease on
+    # any failure of either - so ok=True always carries a durable grant.
+    bind = val.index("UPDATE spectate_leases SET bound_actor = :actor")
+    ins = val.index("INSERT INTO spectate_watch_grants")
+    sp = val.rindex("async with db.begin_nested():", 0, bind)
+    assert bind < ins and val.count("async with db.begin_nested():", sp, ins) == 1, \
+        "the binding and the grant write share one savepoint"
+    handler = val.index("except Exception as ex:", ins)
+    ok_at = val.index("if lease is not None: ok = True")
+    assert ins < handler < ok_at and "lease = None" in val[handler:ok_at], \
+        "a failed grant write refuses the validation"
+    assert val.count("ok = True") == 1
     status = " ".join(inspect.getsource(main.broadcast_report_status).split())
     assert "FROM spectate_watch_grants l" in status and "spectate_leases" not in status
     assert "spectate_leases" not in main._REPORT_WATCHED_SQL
