@@ -45,7 +45,6 @@ failures become named skips. The structure tests run either way.
 There is no pytest-asyncio in this suite: each test is a sync function that
 runs one coroutine.
 """
-import ast
 import asyncio
 import hashlib
 import hmac
@@ -1123,7 +1122,7 @@ def test_the_credit_is_a_delta_and_the_discard_conditional_in_the_batch_route():
     assert code.count(stmt) == 1 and single.count(stmt) == 1
 
 
-# =========================== row 25: deletion and retention of the key's rows
+# ========================== row 25: deletion and durability of the key's rows
 
 def test_the_data_deletion_removes_the_players_batch_rows_by_name():
     """#437: the players row is anonymised, so the CASCADE never fires; the
@@ -1135,33 +1134,55 @@ def test_the_data_deletion_removes_the_players_batch_rows_by_name():
     assert guard < code.index("DELETE FROM pc_shard_batches WHERE player_id = :pid")
 
 
-def _janitor_retention_sql():
-    code = _fn_src("_pc_snapshot_janitor_step")
-    tree = ast.parse(code)
-    hits = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
-            and n.value.startswith("DELETE FROM pc_shard_batches")]
-    assert len(hits) == 1, hits
-    return hits[0]
+def test_nothing_in_the_api_deletes_batch_rows_but_the_data_deletion():
+    """The key's rows are kept (asks-b round 2, finding 1): across every api
+    module, the one statement that deletes from pc_shard_batches is the data
+    deletion's, and nothing truncates the table or names it in a retention
+    predicate."""
+    hits = []
+    for f in sorted((BACKEND / "api").glob("*.py")):
+        src = f.read_text(encoding="utf-8")
+        for m in re.finditer(r"(?is)(DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+pc_shard_batches\b", src):
+            hits.append((f.name, src.count("\n", 0, m.start()) + 1))
+    assert len(hits) == 1 and hits[0][0] == "main.py", hits
+    code = _flat(_code(_fn_src("delete_player_data")))
+    assert code.count("DELETE FROM pc_shard_batches WHERE player_id = :pid") == 1
+    assert "pc_shard_batches" not in _code(_fn_src("_pc_snapshot_janitor_step"))
 
 
-def test_the_janitor_prunes_only_rows_past_thirty_days(env):
-    """The janitor's OWN statement (lifted from the function, never a copy),
-    run against the table: a 31-day-old row goes, a 29-day-old row stays."""
-    sql = _janitor_retention_sql()
-    assert "INTERVAL '30 days'" in sql
+def test_a_key_older_than_thirty_days_survives_the_real_janitor_and_still_refuses_another_list(env):
+    """Key K commits for list A; its row is aged 400 days; the ACTUAL
+    janitor step (_pc_snapshot_janitor_step, on this schema, stopped after
+    its retention and rollover by the snapshot due-check) runs; the row is
+    still there, K over another owned live list B is 409 key_reused with B
+    live and the balance untouched, and K over A still answers the recorded
+    result without crediting (finding 1: durable idempotency)."""
+    import database
 
     async def body(ctx):
-        me = await _player(1)
-        pid = uuid.UUID(me.pid)
-        conn = await _connect("janitor")
-        try:
-            for key, age in (("oldoldold", 31), ("newnewnew", 29)):
-                await conn.execute("INSERT INTO pc_shard_batches (player_id, batch_key, print_ids, prints, "
-                                   "shards_gained, created_at) VALUES ($1, $2, $3, 1, 5, now() - make_interval("
-                                   "days => $4))", pid, key, str(uuid.uuid4()), age)
-            await conn.execute(sql)
-            left = [r[0] for r in await conn.fetch("SELECT batch_key FROM pc_shard_batches ORDER BY 1")]
-        finally:
-            await conn.close()
-        assert left == ["newnewnew"]
+        me = await _player(1, shards=4)
+        subject = await _player(2)
+        a = [await _print(me, subject, "rare"), await _print(me, subject, "common")]
+        b = [await _print(me, subject, "legendary")]
+        k = _key()
+        first = await _batch(ctx, "a", me, k, a)
+        assert first[0] == 200 and first[1]["shards_gained"] == 45, first
+        await _q("UPDATE pc_shard_batches SET created_at = now() - interval '400 days' WHERE player_id = $1::uuid",
+                 me.pid)
+        maker = await ctx.session("janitor")
+        env.monkeypatch.setattr(database, "async_session", maker)
+
+        async def _not_due(_db):
+            return None
+        env.monkeypatch.setattr(main, "_pc_snapshot_due", _not_due)
+        await main._pc_snapshot_janitor_step()
+        assert any("pc_events" in _flat(s) for s in ctx.statements("janitor")), "the janitor step did not run"
+        assert [(r["batch_key"], r["prints"], r["shards_gained"]) for r in await _batches(me)] == [(k, 2, 45)]
+        balance = await _shards(me)
+        assert balance == 49
+        assert _err(await _batch(ctx, "b", me, k, b)) == (409, "key_reused")
+        assert (await _discarded(b))[b[0]] == (False, None) and await _shards(me) == balance
+        again = await _batch(ctx, "c", me, k, a)
+        assert again[0] == 200 and again[1]["replayed"] is True and again[1]["shards_gained"] == 45, again
+        assert await _shards(me) == balance and len(await _batches(me)) == 1
     _scenario(env, body)

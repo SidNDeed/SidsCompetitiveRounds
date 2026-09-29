@@ -26365,12 +26365,14 @@ async def _pc_snapshot_janitor_step() -> None:
         # older than a day can never be replayed (its session proof expired).
         await db.execute(text("DELETE FROM pc_delivery_leases WHERE until < NOW() - INTERVAL '1 hour'"))
         await db.execute(text("DELETE FROM pc_portrait_nonces WHERE used_at < NOW() - INTERVAL '1 day'"))
-        # The batch shard's idempotency rows (migration 361) after 30 days: a
-        # print pays at most once whatever survives here (its discard is
-        # conditional), so a replay past the window answers not_owned and
-        # still credits nothing. Skipped only while 361 has not run.
-        if (await db.execute(text("SELECT to_regclass('pc_shard_batches') IS NOT NULL"))).scalar_one_or_none():
-            await db.execute(text("DELETE FROM pc_shard_batches WHERE created_at < NOW() - INTERVAL '30 days'"))
+        # The batch shard's idempotency rows (migration 361) are NOT pruned
+        # here or anywhere else: a key must answer 409 key_reused or its
+        # recorded result however old it is, and a pruned key would read as
+        # never used, so the same key over another list of prints would
+        # discard and credit that list. Every row names at least one
+        # discarded print and a print is discarded once, so the table never
+        # outgrows the discarded prints; delete_player_data removes a
+        # player's rows by name (#437).
         # Released portrait blobs (Steam pictures v2 §6): deleted only after
         # ten unreferenced minutes, each under its P lock.
         await _pc_portrait_blob_janitor(db)
