@@ -59945,14 +59945,17 @@ async def broadcast_report_status(
     if len(requested) > 8:
         raise HTTPException(status_code=400, detail="too_many_game_ids")
 
-    # Round 2 M4: only games this broadcast account holds or held a lease on
-    # (spectate_leases records the grant; a revoked or expired row still does).
+    # Round 2 M4: only games this broadcast account WATCHED. Since round 3
+    # (N1) that is its watched-grant record (spectate_watch_grants, migration
+    # 364: written when a master validation observed the seat in the room,
+    # never updated or deleted), not its lease row, which the validation
+    # sweep deletes once the seat's authorization has ended.
     # Any other id is omitted, exactly as an id with no row is.
     games = (await db.execute(text("""
         SELECT g.id, g.mode, g.started_at, g.ended_at, g.roster
           FROM spectate_games g
          WHERE g.id = ANY(CAST(:gids AS uuid[]))
-           AND EXISTS (SELECT 1 FROM spectate_leases l
+           AND EXISTS (SELECT 1 FROM spectate_watch_grants l
                         WHERE l.game_id = g.id
                           AND l.spectator_steam_id = CAST(:sid AS text))
     """), {"gids": requested, "sid": steam_id})).mappings().all()
@@ -60309,6 +60312,28 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                 lease = None
             if lease is not None:
                 ok = True
+                # Session report round 3 N1: the lease was validated as
+                # OBSERVED, so record the watch where the sweep above cannot
+                # reach it: spectate_watch_grants (migration 364), one
+                # immutable row per game, spectator and (mode, source, roster)
+                # tuple, the entitlement the broadcast seat's report reads
+                # rest on. Savepointed: a missing table (the API deployed
+                # before 364) leaves this validation's answer unchanged and
+                # the reads fail closed.
+                try:
+                    async with db.begin_nested():
+                        await db.execute(text("""
+                            INSERT INTO spectate_watch_grants
+                                (game_id, spectator_steam_id, mode, source_ref, roster,
+                                 game_started_at)
+                            SELECT g.id, CAST(:sid AS text), g.mode, g.source_ref, g.roster,
+                                   g.started_at
+                              FROM spectate_games g
+                             WHERE g.id = CAST(:gid AS uuid)
+                            ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING
+                        """), {"gid": str(game["id"]), "sid": entry.steam_id})
+                except Exception as ex:
+                    print(f"[SPECTATE] watched grant not recorded: {type(ex).__name__}")
                 display = (await db.execute(text("""
                     SELECT display_name FROM players WHERE steam_id = :sid
                 """), {"sid": entry.steam_id})).scalar() or ""
@@ -60665,9 +60690,12 @@ _REPORT_KIND_SQL = """
 """
 # Round 2 M4, bound to the game itself in round 3: the broadcast account's
 # `viewer=` read answers only for the game that account WATCHED. It answers a
-# row only when a spectate game exists that
-#   - the calling account holds or held a lease on (spectate_leases: a grant
-#     for that seat; a revoked or expired lease row still records the grant),
+# row only when a watched-grant record of the calling account exists
+# (spectate_watch_grants, migration 364, round 3 N1: written when a master
+# validation observed that seat in the spectate game's room, never updated or
+# deleted - the lease row itself is deleted by the validation sweep once its
+# authorization has ended, so it cannot carry the entitlement) whose
+# recorded tuple
 #   - lists the named viewer in its roster,
 #   - spans the requested game's end: from _REPORT_WATCH_PRE_S before the
 #     spectate game's start (the broadcaster's own history window opens
@@ -60677,14 +60705,16 @@ _REPORT_KIND_SQL = """
 #   - has the requested game's MODE: the mode is the table the game row lives
 #     in (matches 1v1, team_matches 2v2, ovt_matches 1v2, ffa_matches ffa),
 #     compared with the mode the server recorded for the spectate game, and
-#   - is the requested game's SOURCE: when the spectate game records a source
+#   - is the requested game's SOURCE: when the record carries a source
 #     identity (source_ref, derived by the server from its own queue-lock
 #     records at attest time: the team or 1v2 series, the FFA lobby, a sync
 #     tournament match), it must be the requested game's series (or lobby) id,
 #     or for 1v1 the tournament match whose series the game belongs to; when
-#     it records none (1v1 queue and code rooms), the requested game's PLAYED
-#     roster (for FFA the players not absent) must equal the spectate game's
-#     roster exactly, as sets of steam ids.
+#     it carries none (1v1 queue and code rooms), the requested game's PLAYED
+#     roster (for FFA the players not absent) must equal the recorded roster
+#     exactly, as sets of steam ids.
+# The window's opening edge is the recorded game start; its closing edge is
+# the spectate game's ended_at, read from the row the record references.
 # The key is a game id of any mode; a series or session uuid is not one, so
 # `series` and `session` with a viewer resolve to nothing. No row = the same
 # 404 as every other refusal.
@@ -60714,14 +60744,15 @@ _REPORT_WATCHED_SQL = """
                       WHERE wp.id = ANY(a.played) ORDER BY 1) AS played_sids
           FROM anchor a
     )
-    SELECT wg.id AS watched_game
+    SELECT wg.game_id AS watched_game
       FROM requested r
-      JOIN spectate_games wg
-        ON wg.mode = r.mode
-       AND r.ended_at >= wg.started_at - make_interval(secs => :pre)
-       AND r.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)
-      JOIN spectate_leases wl
-        ON wl.game_id = wg.id AND wl.spectator_steam_id = CAST(:bsid AS text)
+      JOIN spectate_watch_grants wg
+        ON wg.spectator_steam_id = CAST(:bsid AS text)
+       AND wg.mode = r.mode
+       AND r.ended_at >= wg.game_started_at - make_interval(secs => :pre)
+      JOIN spectate_games ws
+        ON ws.id = wg.game_id
+       AND r.ended_at <= COALESCE(ws.ended_at, NOW()) + make_interval(secs => :post)
      WHERE CAST(:viewer AS text) = ANY(string_to_array(wg.roster, ','))
        AND CASE WHEN wg.source_ref <> ''
                 THEN wg.source_ref = r.source_id
@@ -61681,8 +61712,10 @@ async def get_set_report(request: Request, steam_id: str = "",
     checks /broadcast/target and /broadcast/report-status make). A viewer that
     is not a 17-digit Steam id is a 400 "bad_request"; both are decided before
     any statement runs. Then (round 2 M4) the requested game must be one the
-    broadcast seat WATCHED: _REPORT_WATCHED_SQL requires a lease of the caller
-    on a spectate game whose roster names the viewer, whose span holds the
+    broadcast seat WATCHED: _REPORT_WATCHED_SQL requires a watched-grant
+    record of the caller (spectate_watch_grants: a master validation observed
+    the seat in that spectate game's room; round 3 N1, it outlives the lease
+    row) for a spectate game whose roster names the viewer, whose span holds the
     requested game's end, whose recorded mode is the requested game's mode and
     whose recorded source (series, lobby or tournament match) is the requested
     game's, or, where it records no source, whose roster is exactly the
@@ -61711,11 +61744,11 @@ async def get_set_report(request: Request, steam_id: str = "",
         raise HTTPException(status_code=400, detail="bad_request")
     if viewer is not None:
         # Round 2 M4: the requested set must be one the broadcast seat watched
-        # (_REPORT_WATCHED_SQL: a lease of this account on a spectate game
-        # whose roster names the viewer, whose span holds the requested game's
-        # end, and whose mode and source - or, without a source, exact played
-        # roster - are the requested game's); otherwise the ordinary
-        # participant-closed 404.
+        # (_REPORT_WATCHED_SQL: a watched-grant record of this account for a
+        # spectate game whose roster names the viewer, whose span holds the
+        # requested game's end, and whose mode and source - or, without a
+        # source, exact played roster - are the requested game's); otherwise
+        # the ordinary participant-closed 404.
         watched = await _report_rows(db, _REPORT_WATCHED_SQL, {
             "key": key, "viewer": viewer, "bsid": str(steam_id),
             "pre": _REPORT_WATCH_PRE_S, "post": _REPORT_WATCH_POST_S})

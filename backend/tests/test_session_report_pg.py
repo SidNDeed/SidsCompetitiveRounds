@@ -809,19 +809,25 @@ async def _watch(game_key, holder, roster_keys, mode=None, source=None, span=Non
     behind. Round 3 M4: the spectate game records the game's TRUE mode and
     source (_game_facts) unless `mode` / `source` name others - the round-2
     fixture wrote every row as 1v1, which hid that the binding compared no
-    mode."""
+    mode. Round 3 N1: the watch also leaves the seat's watched-grant record
+    (spectate_watch_grants, the game's tuple), which is what a master
+    validation observing the seat writes and what the reads consult;
+    test_a_watched_report_outlives_the_lease_cleanup drives that write
+    through the validation route itself."""
     conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
     try:
         true_mode, end, true_source = await _game_facts(conn, game_key)
         start, stop = span or (end - timedelta(minutes=5), end + timedelta(minutes=1))
         wid = uuid.uuid4()
-        await _ins(conn, "spectate_games", id=wid, mode=mode or true_mode, room_name="w" + wid.hex[:12],
-                   source_ref=true_source if source is None else source,
-                   roster=",".join(sorted(STEAM[k] for k in roster_keys)),
-                   started_at=start, ended_at=stop)
+        tup = {"mode": mode or true_mode, "source_ref": true_source if source is None else source,
+               "roster": ",".join(sorted(STEAM[k] for k in roster_keys))}
+        await _ins(conn, "spectate_games", id=wid, room_name="w" + wid.hex[:12],
+                   started_at=start, ended_at=stop, **tup)
         await _ins(conn, "spectate_leases", game_id=wid, spectator_steam_id=holder,
                    token_hash=uuid.uuid4().hex, join_expires_at=end, heartbeat_expires_at=end,
-                   revoked_at=end + timedelta(minutes=1))
+                   revoked_at=end + timedelta(minutes=1), bound_actor=3)
+        await _ins(conn, "spectate_watch_grants", game_id=wid, spectator_steam_id=holder,
+                   game_started_at=start, **tup)
         return wid
     finally:
         await conn.close()
@@ -991,6 +997,110 @@ def test_a_watched_series_or_lobby_binds_only_its_own_games(lab, seat):
     assert _report(seat, viewer=STEAM["A"], match=ID["F2"]) == _report("A", match=ID["F2"])
     asyncio.run(_watch("TM2", seat, "ABCD"))
     assert _report(seat, viewer=STEAM["A"], sitting=ID["TM2"]) == _report("A", sitting=ID["TM2"])
+
+
+# -- round 3 N1: the entitlement outlives the lease row ---------------------------
+
+def _lab_call(fn):
+    """Run `fn(db)` on a session over the lab schema (the routes commit)."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    async def _go():
+        engine = create_async_engine(ASYNC_DSN, poolclass=NullPool,
+                                     connect_args={"server_settings": {"search_path": _LAB["schema"]}})
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+                return await fn(db)
+        finally:
+            await engine.dispose()
+    return asyncio.run(_go())
+
+
+class _LiveWatch:
+    """A live spectate game of A and B (recorded 1v1, no source) from five
+    minutes before `game_key`'s end, and a live, unbound lease of `seat` on
+    it; validate(...) is A (a fighter of the room) validating the listed
+    spectators through POST /api/v1/spectate/validate, status() the seat's
+    GET /api/v1/broadcast/report-status for the game."""
+
+    def __init__(self, seat, game_key):
+        (_m, self.end, _s), = _facts(game_key)
+        self.seat, self.wid, self.room = seat, uuid.uuid4(), "w" + uuid.uuid4().hex[:12]
+
+        async def _setup():
+            conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+            try:
+                await _ins(conn, "spectate_games", id=self.wid, mode="1v1", source_ref="", room_name=self.room,
+                           roster=",".join(sorted((STEAM["A"], STEAM["B"]))), protocol_min=1,
+                           started_at=self.end - timedelta(minutes=5), ended_at=None)
+                now = await conn.fetchval("SELECT clock_timestamp()")
+                await _ins(conn, "spectate_leases", game_id=self.wid, spectator_steam_id=seat,
+                           token_hash=uuid.uuid4().hex, protocol=main.SPECTATE_PROTOCOL,
+                           join_expires_at=now + timedelta(hours=1),
+                           heartbeat_expires_at=now + timedelta(hours=1))
+            finally:
+                await conn.close()
+        asyncio.run(_setup())
+
+    def validate(self, observed):
+        body = main.SpectateValidateBody(steam_id=STEAM["A"], room_name=self.room,
+                                         spectators=[{"actor_number": 3, "steam_id": s} for s in observed])
+        return _lab_call(lambda db: main.spectate_validate(body, request=None, db=db))
+
+    def status(self):
+        return _lab_call(lambda db: main.broadcast_report_status(request=None, steam_id=self.seat,
+                                                                 game_ids=str(self.wid), db=db))
+
+    def grants(self):
+        return _lab_sql("SELECT count(*) FROM spectate_watch_grants"
+                        " WHERE game_id = $1 AND spectator_steam_id = $2", self.wid, self.seat)
+
+
+def test_a_watched_report_outlives_the_lease_cleanup(lab, seat):
+    """Round 3 N1, through the routes themselves. The seat holds a live lease
+    on a live spectate game of A and B around K3. A validates the seat as
+    observed - twice - which records the watch once; the seat's lease is then
+    revoked and the next validation, which no longer observes the seat,
+    deletes the lease row (the ordinary cleanup); the game ends. The report
+    of K3 is still served to the seat as A's own envelope, and report-status
+    still lists the game. Controls: the cleanup did delete the lease row; the
+    repeated validation added no second record; the record survived the
+    cleanup."""
+    w = _LiveWatch(seat, "K3")
+    for _ in range(2):
+        assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert w.grants() == 1, "one record per observed tuple"
+    # the seat leaves: its lease is revoked, and the next sweep deletes it
+    _lab_sql("UPDATE spectate_leases SET revoked_at = clock_timestamp() WHERE game_id = $1 RETURNING 1", w.wid)
+    assert w.validate([])["results"] == []
+    assert _lab_sql("SELECT count(*) FROM spectate_leases WHERE game_id = $1", w.wid) == 0, \
+        "control: the ordinary cleanup deleted the lease row"
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+    assert w.grants() == 1, "control: the record survived the cleanup"
+    assert _report(seat, viewer=STEAM["A"], match=ID["K3"]) == _report("A", match=ID["K3"])
+    assert [r["game_id"] for r in w.status()] == [str(w.wid)]
+
+
+def test_a_lease_the_master_never_observed_is_not_a_watch(lab, seat):
+    """Round 3 N1: a live lease of the seat on a live spectate game of A and B
+    around K2, which no master validation has observed, entitles nothing:
+    the report is refused and report-status omits the game, although the
+    lease row exists. Control: once A validates the seat as observed, the
+    same read is served as A's own envelope and the status lists the game -
+    the record, not the lease row, is what the reads consult."""
+    w = _LiveWatch(seat, "K2")
+    assert _lab_sql("SELECT count(*) FROM spectate_leases WHERE game_id = $1 AND revoked_at IS NULL",
+                    w.wid) == 1, "the lease row exists"
+    assert _refused(seat, viewer=STEAM["A"], match=ID["K2"]) == (404, "not_found")
+    assert w.status() == []
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert w.grants() == 1
+    assert _report(seat, viewer=STEAM["A"], match=ID["K2"]) == _report("A", match=ID["K2"])
+    assert [r["game_id"] for r in w.status()] == [str(w.wid)]
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
 
 
 # -- /health `session_report` against the lab database ---------------------------

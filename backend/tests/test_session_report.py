@@ -113,12 +113,14 @@ SERIES_ROW = {
 }
 # Round 2 M4: the spectate game the broadcast seat watched - A against B over
 # the ranked series (games at minutes 0, 5 and 10, two minutes each), with the
-# accounts that hold or held a lease on it. The broadcast account is appended
-# below, where it is defined.
+# accounts holding a watched-grant record of it (round 3 N1: the record a
+# master validation writes when it observes the seat; the lease row itself is
+# not what the reads consult). The broadcast account is appended below, where
+# it is defined.
 # Round 3 M4: each spectate game also records its mode and source identity
 # (a 1v1 queue room records none, so its roster is compared exactly).
 W1 = str(uuid.uuid4())
-WATCHED = [{"id": W1, "roster": ",".join(sorted((CALLER, OPP))), "leases": [],
+WATCHED = [{"id": W1, "roster": ",".join(sorted((CALLER, OPP))), "grants": [],
             "mode": "1v1", "source_ref": "",
             "started_at": T0 - timedelta(minutes=1), "ended_at": T0 + timedelta(minutes=13)}]
 MATCHES = [
@@ -269,7 +271,7 @@ class FakeDb:
                  ffa_players=None, series_row=None, team_series_row=None, fail_rating=False,
                  watched=None):
         self.statements = []
-        # Round 2 M4: spectate games with the accounts holding a lease on each
+        # Round 2 M4: spectate games with the accounts holding a watched grant of each
         self.watched = WATCHED if watched is None else watched
         self.matches = MATCHES if matches is None else matches
         self.players = PLAYERS if players is None else players
@@ -313,11 +315,12 @@ class FakeDb:
             # Round 2 M4: the broadcast account's viewer read, bound to a game it
             # watched. Every predicate the binding rests on must be in the
             # statement, or the fake refuses.
-            for needle in ("JOIN spectate_leases wl ON wl.game_id = wg.id AND wl.spectator_steam_id = CAST(:bsid AS text)",
+            for needle in ("JOIN spectate_watch_grants wg ON wg.spectator_steam_id = CAST(:bsid AS text) "
+                           "AND wg.mode = r.mode",
+                           "JOIN spectate_games ws ON ws.id = wg.game_id",
                            "CAST(:viewer AS text) = ANY(string_to_array(wg.roster, ','))",
-                           "ON wg.mode = r.mode",
-                           "r.ended_at >= wg.started_at - make_interval(secs => :pre)",
-                           "r.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)",
+                           "r.ended_at >= wg.game_started_at - make_interval(secs => :pre)",
+                           "r.ended_at <= COALESCE(ws.ended_at, NOW()) + make_interval(secs => :post)",
                            "CASE WHEN wg.source_ref <> '' THEN wg.source_ref = r.source_id",
                            "ELSE r.played_sids = ARRAY(",
                            "SELECT '1v1' AS mode, wm.ended_at, CAST(wm.series_id AS text) AS source_id, "
@@ -346,7 +349,7 @@ class FakeDb:
                                _played(*[p["player_id"] for p in self.ffa_players if not p["absent"]])))
             pre, post = timedelta(seconds=params["pre"]), timedelta(seconds=params["post"])
             for w in self.watched:
-                if params["bsid"] not in w["leases"] or params["viewer"] not in w["roster"].split(","):
+                if params["bsid"] not in w["grants"] or params["viewer"] not in w["roster"].split(","):
                     continue
                 for mode, e, src, played in wanted:
                     if e is None or mode != w["mode"]:
@@ -1818,7 +1821,7 @@ def test_a_game_names_only_the_players_who_played_it():
 # -- board row 30g: the broadcast account names a viewer ------------------------
 
 BROADCAST = next(iter(main.SPECTATE_BROADCAST_STEAM_IDS))
-WATCHED[0]["leases"].append(BROADCAST)
+WATCHED[0]["grants"].append(BROADCAST)
 
 
 @pytest.fixture
@@ -1889,7 +1892,7 @@ def _refused(db, **sel):
 
 def test_a_viewer_read_is_bound_to_a_game_the_broadcast_seat_watched(broadcast_session):
     """Round 2 M4: with viewer= the requested set must be one the broadcast
-    seat watched - a spectate game the calling account holds or held a lease
+    seat watched - a spectate game the calling account holds a watched grant
     on, whose roster names the viewer and whose span holds the requested
     game's end. Inside that binding the viewer's own envelope is served;
     outside it the ordinary 404, decided before any player statement runs.
@@ -1901,8 +1904,8 @@ def test_a_viewer_read_is_bound_to_a_game_the_broadcast_seat_watched(broadcast_s
     assert _refused(db, sitting=C1, viewer=CALLER)
     assert len(db.statements) == 1 and "AS watched_game" in db.statements[0][0], "no player statement ran"
     assert _call(FakeDb(), CALLER, sitting=C1)["games"], "control: the viewer's own request is served"
-    # the lease belongs to another account
-    assert _refused(FakeDb(watched=[dict(WATCHED[0], leases=[OTHER])]), sitting=M1, viewer=CALLER)
+    # the watched grant belongs to another account
+    assert _refused(FakeDb(watched=[dict(WATCHED[0], grants=[OTHER])]), sitting=M1, viewer=CALLER)
     # the watched game's roster does not name the viewer
     assert _refused(FakeDb(watched=[dict(WATCHED[0], roster=OPP)]), sitting=M1, viewer=CALLER)
     # no watched game at all
@@ -1922,7 +1925,7 @@ def test_a_viewer_read_is_bound_to_a_game_the_broadcast_seat_watched(broadcast_s
 def test_the_watched_binding_is_a_named_report_statement():
     """The binding runs through _report_rows like every report statement, so
     the /health probe analyses its tables and columns too (spectate_games,
-    spectate_leases); its window constants mirror the broadcaster's."""
+    spectate_watch_grants); its window constants mirror the broadcaster's."""
     assert main._SESSION_REPORT_NAMED["_REPORT_WATCHED_SQL"] is main._REPORT_WATCHED_SQL
     assert main._REPORT_WATCHED_SQL in main._SESSION_REPORT_STATEMENTS
     src = inspect.getsource(main.get_set_report)
@@ -1934,11 +1937,12 @@ def test_the_watched_binding_is_a_named_report_statement():
 
 
 class _StatusDb:
-    """report-status's two statements over a spectate world with lease holders.
-    The games statement must carry the lease predicate, or every row answers."""
+    """report-status's two statements over a spectate world with watched-grant
+    holders. The games statement must carry the grant predicate, or every row
+    answers."""
 
-    def __init__(self, games, leases, names):
-        self.games, self.leases, self.names = games, leases, names
+    def __init__(self, games, grants, names):
+        self.games, self.grants, self.names = games, grants, names
         self.statements = []
 
     async def execute(self, stmt, params=None):
@@ -1946,9 +1950,9 @@ class _StatusDb:
         self.statements.append((sql, params))
         if "FROM spectate_games g" in sql:
             rows = [g for g in self.games if g["id"] in params["gids"]]
-            if ("AND EXISTS (SELECT 1 FROM spectate_leases l WHERE l.game_id = g.id "
+            if ("AND EXISTS (SELECT 1 FROM spectate_watch_grants l WHERE l.game_id = g.id "
                     "AND l.spectator_steam_id = CAST(:sid AS text))") in sql:
-                rows = [g for g in rows if params["sid"] in self.leases.get(g["id"], ())]
+                rows = [g for g in rows if params["sid"] in self.grants.get(g["id"], ())]
             return _Res(rows)
         if "FROM players" in sql:
             return _Res([{"steam_id": s, "display_name": n} for s, n in self.names.items() if s in params["sids"]])
@@ -1960,11 +1964,12 @@ def _status(db, ids, who=None):
                                              game_ids=",".join(str(i) for i in ids), db=db))
 
 
-def test_report_status_answers_only_games_the_seat_holds_a_lease_on(broadcast_session):
-    """Round 2 M4: /broadcast/report-status answers a spectate game only when
-    the calling broadcast account holds or held a lease on it; any other id is
-    omitted, as an id with no row is. Control: with a lease on both, both
-    answer - the omission is the lease rule, not the lookup."""
+def test_report_status_answers_only_games_the_seat_watched(broadcast_session):
+    """Round 2 M4 / round 3 N1: /broadcast/report-status answers a spectate
+    game only when the calling broadcast account holds a watched-grant record
+    of it; any other id is omitted, as an id with no row is. Control: with a
+    grant on both, both answer - the omission is the grant rule, not the
+    lookup."""
     g1, g2 = uuid.uuid4(), uuid.uuid4()
     games = [{"id": g, "mode": "1v1", "started_at": T0, "ended_at": T0 + timedelta(minutes=9),
               "roster": ",".join(sorted((CALLER, OPP)))} for g in (g1, g2)]
@@ -1977,6 +1982,43 @@ def test_report_status_answers_only_games_the_seat_holds_a_lease_on(broadcast_se
     with pytest.raises(HTTPException) as ei:
         _status(_StatusDb(games, {g1: [CALLER]}, names), [g1], who=CALLER)
     assert ei.value.status_code == 403 and ei.value.detail == "broadcast_only"
+
+
+def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
+    """Round 3 N1: spectate_watch_grants is written only by the validation
+    route, after the lease validated as observed, as INSERT ... ON CONFLICT DO
+    NOTHING on its (game, spectator, mode, source, roster) tuple, inside a
+    savepoint; no statement of the api or of any migration after 364 updates
+    or deletes it, and its key into spectate_games carries no cascade. The
+    status and report reads name it, never spectate_leases."""
+    root = PLUGIN.parent
+    src = " ".join((root / "backend" / "api" / "main.py").read_text(encoding="utf-8").split())
+    assert src.count("INSERT INTO spectate_watch_grants") == 1
+    for verb in ("UPDATE spectate_watch_grants", "DELETE FROM spectate_watch_grants",
+                 "TRUNCATE spectate_watch_grants", "ALTER TABLE spectate_watch_grants"):
+        assert verb not in src, verb
+    val = " ".join(inspect.getsource(main.spectate_validate).split())
+    assert val.index("if lease is not None: ok = True") < val.index("INSERT INTO spectate_watch_grants")
+    assert "ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING" in val
+    assert val.index("async with db.begin_nested():", val.index("if lease is not None:")) < \
+        val.index("INSERT INTO spectate_watch_grants"), "the grant write is savepointed"
+    status = " ".join(inspect.getsource(main.broadcast_report_status).split())
+    assert "FROM spectate_watch_grants l" in status and "spectate_leases" not in status
+    assert "spectate_leases" not in main._REPORT_WATCHED_SQL
+    sql = root / "backend" / "sql"
+    mig = (sql / "364_spectate_watch_grants.sql").read_text(encoding="utf-8")
+    body = mig[mig.index("CREATE TABLE IF NOT EXISTS spectate_watch_grants"):]
+    body = body[:body.index(");")]
+    assert "REFERENCES spectate_games(id)" in body and "ON DELETE" not in body
+    assert "UNIQUE (game_id, spectator_steam_id, mode, source_ref, roster)" in body
+    for f in sorted(sql.glob("*.sql")):
+        head = f.name.split("_")[0]
+        if head.isdigit() and int(head) > 364:
+            low = " ".join(f.read_text(encoding="utf-8").split()).upper()
+            for verb in ("UPDATE SPECTATE_WATCH_GRANTS", "DELETE FROM SPECTATE_WATCH_GRANTS",
+                         "TRUNCATE SPECTATE_WATCH_GRANTS", "DROP TABLE IF EXISTS SPECTATE_WATCH_GRANTS",
+                         "DROP TABLE SPECTATE_WATCH_GRANTS"):
+                assert verb not in low, (f.name, verb)
 
 
 # -- board row 30g: the broadcaster pages through the session report ------------
