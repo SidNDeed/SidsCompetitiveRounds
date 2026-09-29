@@ -1498,7 +1498,7 @@
           ],
           "main",
           "broadcast_report_status",
-          "f6260bea217a7bc9859349bfff64de4a7a15efaa"
+          "7f59186334cd57b6c2debb5e40c9446099bf12d0"
         ],
         [
           "/api/v1/broadcast/target",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "83b667aa9236b7aa2f50ebb2fdffc16c2205723f"
+          "80286b5cf30b346dc9bc00002fc714940b18e2bf"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2623,7 +2623,7 @@
           ],
           "main",
           "spectate_validate",
-          "79383a8d22445b0642d7ac77bd615faa3af5a542"
+          "12c63268d0a9b61c029b650a418c43c17ca48dbb"
         ],
         [
           "/api/v1/team-bets",
@@ -3089,7 +3089,7 @@
           ],
           "main",
           "get_set_report",
-          "ffe2a9ff76e282ffc1288e46d516890f415a60f5"
+          "d8e0b3d8fbe86d7d8890469dfeabe1a8ef915c7a"
         ],
         [
           "/api/v1/admin/pc/portrait/clear",
