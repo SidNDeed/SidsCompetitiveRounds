@@ -982,7 +982,34 @@ def test_the_helper_closure_stays_affordable():
     #
     # The bound moves to 80, ~5% over the measurement; the median and worst
     # bounds stay.
-    assert code_p90 <= 86, f"p90 code closure {code_p90} of {total}"
+    #
+    # Connect-failure LAND, merge main d889294 into the lane (2026-09-29):
+    # the same walk with the same route seeds over each tree's own
+    # backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   fork 9a1dd9d                          365   21 / 69 / 326
+    #   main d889294                          377   21 / 82 / 326
+    #   lane be70f04                          369   21 / 76 / 326
+    #   merge a234c91 (measured at 8652bdf)   381   22 / 83 / 326
+    #
+    # Neither side passes 83; the composition does, by rank alone. At
+    # n = 381 the p90 is the 39th route from the top and 38 routes sit above
+    # 83 on the merged tree: main's nine trade and collection routes (117 to
+    # 280) and the lane's four (POST /api/v1/ffa/lobby/{lobby_id}/connect
+    # 268, .../assembly 266, .../release 93, and POST
+    # /api/v1/ffa/queue/leave, 53 on main and 234 on the lane) are above it
+    # together for the first time. The route at the rank is GET
+    # /api/v1/spectate/games, 83 on both sides too. No count is the merge's
+    # own: checked route by route, every count at the merge is main's plus
+    # the lane's minus the fork's (or the one side's, for a route only one
+    # side has); the median moves 21 -> 22 the same way, by rank, under its
+    # bound of 24.
+    #
+    # The bound moves to 88 -- ~6% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median and
+    # worst bounds stay.
+    assert code_p90 <= 88, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1093,7 +1120,34 @@ def test_the_helper_closure_stays_affordable():
     # same four: connect 377, assembly 375, release 152, and POST
     # /api/v1/ffa/queue/leave 118 -> 341. The bound moves to 160, ~6% over
     # the measurement; the median and worst bounds stay.
-    assert all_p90 <= 174, f"p90 closure {all_p90} of {total}"
+    #
+    # Connect-failure LAND, merge main d889294 into the lane (2026-09-29),
+    # the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   fork 9a1dd9d                          365   72 / 140 / 457
+    #   main d889294                          377   75 / 165 / 459
+    #   lane be70f04                          369   73 / 151 / 457
+    #   merge a234c91 (measured at 8652bdf)   381   76 / 167 / 459
+    #
+    # The same rank effect as the code p90 above: 37 routes sit above 167 on
+    # the merged tree, and the 39th from the top is GET
+    # /api/v1/spectate/games (with POST
+    # /api/v1/tournaments/{tournament_id}/matches/{match_id}/play-now) at
+    # 167, 167 on main too and 165 on the lane. Above it sit main's nine new
+    # routes and the lane's connect (379), assembly (377) and POST
+    # /api/v1/ffa/queue/leave (343; 120 on main), beside GET
+    # /api/v1/ffa/queue/poll/{steam_id} (377 on the merge, 183 on main).
+    # Every count on a route both sides have is main's plus the lane's minus
+    # the fork's; the lane's four new routes each measure 1 or 2 above their
+    # lane counts (connect 377 -> 379, assembly 375 -> 377, release
+    # 152 -> 153, POST /api/v1/admin/ffa-g3-seats 54 -> 55): models.text on
+    # all four and models.deferred on connect and assembly, the import
+    # bindings main's Player mapping added, which every route reaching the
+    # model reaches. The bound moves to 177, ~6% over the measurement; the
+    # median and worst bounds stay (the worst route measures 459 against
+    # 460).
+    assert all_p90 <= 177, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
