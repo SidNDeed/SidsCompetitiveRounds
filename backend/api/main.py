@@ -1027,9 +1027,10 @@ _INVOLUNTARY_EXIT_CAUSES = frozenset({"in_room_timeout"})
 #
 # The first spelling was carried beside this one as a transitional alias while
 # the lanes were apart; both keys were bound from one expression so they could
-# not drift. The condition written there for its removal was that the lanes be
-# merged and the client literal be read off the merged tree, and that is this
-# branch. One boolean, one name.
+# not drift. The condition written there for its removal had two parts: both
+# lanes on one branch, and the client literal taken from the client source by
+# the server-side pin rather than transcribed. This branch meets both (the pin
+# is the test named above). One boolean, one name.
 _INVOLUNTARY_CAUSE_CAPABILITY_FIELD = "ffa_involuntary_cause"
 
 
@@ -4771,9 +4772,9 @@ _AUTO_LOG_PRUNE_STATE = {"next": 0.0}   # janitor cadence, monotonic seconds
 # progress bars from. Pure read, no writes, safe on the replica.
 #
 # The module's per-series completion hook is NOT called from here. Wiring it
-# into the four completion paths is a separate change on a separate tree, and
-# until it lands this route answers games=0 for every account — which the
-# client renders as NOT STARTED per line rather than as a countdown.
+# into the four completion paths is a separate change, not made in this one,
+# and until that change is in, this route answers games=0 for every account —
+# which the client renders as NOT STARTED per line rather than as a countdown.
 #
 # Deliberately not naming that hook's symbol in this comment:
 # test_title_ladders.py decides whether to run its per-mode coverage assertion

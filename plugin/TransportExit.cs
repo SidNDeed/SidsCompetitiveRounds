@@ -86,9 +86,10 @@ namespace CompetitiveRounds
         /// lanes were apart the server carried the retired spelling
         /// `"involuntary_leave_cause"` beside it as a transitional ALIAS, both
         /// keys bound from one expression so they could not drift. The removal
-        /// condition written at that constant was that the lanes be merged and
-        /// this literal be read off the merged tree; the merge that put this
-        /// file on the server's tree met it, and the alias is gone. One
+        /// condition written at that constant had two parts: both lanes on one
+        /// branch, and this literal taken from this file by the server-side pin
+        /// rather than transcribed. Both hold on this branch, which carries this
+        /// file and the server side together, and the alias is gone. One
         /// boolean, one name — so this constant must never be moved onto the
         /// retired one.
         ///
