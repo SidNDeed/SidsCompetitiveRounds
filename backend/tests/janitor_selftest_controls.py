@@ -71,6 +71,8 @@ P8 = T + "test_both_health_arms_carry_the_word_and_the_schema_requires_it"
 P9 = T + "test_both_arms_carry_the_build_marker_both_roles_answer_alike"
 P10 = T + ("test_the_replica_branch_of_lifespan_writes_exactly_the_skipped_report_"
           "and_never_starts_the_selftest")
+L10 = T + "test_pg_a_semicolon_joined_two_command_statement_fails_and_never_executes"
+L11 = T + "test_pg_the_semicolon_plants_one_command_control_executes_and_rolls_back"
 BUILD_SITE = "_JANITOR_SELFTEST_BUILD = 1\n"
 BUILD_ARG = "                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,\n"
 CACHED_ARM = "                              pc_trading=_pc_trading_word_cached(),\n"
@@ -81,6 +83,8 @@ STANDBY_UPDATE_SITE = ('            _janitor_selftest_report.update({\n'
                        'validates do not run here",\n'
                        '            })\n')
 
+EXECUTE_SITE = ('        await db.execute(stmt, params)\n'
+                '        verdict = "explained" if cls == "explain" else "executed_rolled_back"\n')
 STMT_SITE = '        stmt = text("EXPLAIN " + s["sql"] if cls == "explain" else s["sql"])\n'
 ROLLBACK_SITE = ("        try:\n"
                  "            await db.rollback()\n"
@@ -121,8 +125,7 @@ PLANTS = [
     {"name": "M4-session-statement-not-executed",
      "why": "a session statement passes without running, so a bad value passes too",
      "file": MAIN,
-     "old": ('        await db.execute(stmt, params)\n'
-             '        verdict = "explained" if cls == "explain" else "executed_rolled_back"\n'),
+     "old": EXECUTE_SITE,
      "new": ('        if cls == "explain":\n'
              '            await db.execute(stmt, params)\n'
              '        verdict = "explained" if cls == "explain" else "executed_rolled_back"\n'),
@@ -272,7 +275,21 @@ PLANTS = [
              '                "status": "skipped",\n'
              '            })\n'),
      "red": [], "green": [P10, P7, P8, P9]},
+    # The semicolon plant's application mutant (Codex r2 LOW 1, round 3).
+    {"name": "M25-split-and-execute-each-command",
+     "why": "the single execute becomes a loop over the text split on ';': a joined "
+            "two-command statement runs both commands and passes, with no driver change",
+     "file": MAIN, "old": EXECUTE_SITE,
+     "new": ('        for part in [p for p in stmt.text.split(";") if p.strip()]:\n'
+             '            piece = text(part)\n'
+             '            await db.execute(piece, {k: None for k in getattr(piece, "_bindparams", {})})\n'
+             '        verdict = "explained" if cls == "explain" else "executed_rolled_back"\n'),
+     "red": [L10], "green": [L11, L1, L3]},
 ]
+
+# Totals for the closing SUMMARY line, filled in by run().
+STATS = {"planted": 0, "restored_equal": 0, "clean_after": 0,
+         "red": 0, "caught": 0, "green": 0, "held": 0}
 
 
 def _git(*args):
@@ -359,6 +376,7 @@ def run(plant, log, expect_head):
     sha_before = _sha(before)
     out("sha256 before %s" % sha_before)
     planted = src.replace(old, new, 1)
+    STATS["planted"] += 1
     try:
         with open(path, "wb") as fh:
             fh.write(planted.encode("utf-8"))
@@ -380,16 +398,21 @@ def run(plant, log, expect_head):
         for node, want, v in verdicts:
             out("  %-5s %-7s %s" % (want.upper(), v, node.split("::")[-1]))
         bad = [(node.split("::")[-1], want, v) for node, want, v in verdicts if v != "ok"]
+        for node, want, v in verdicts:
+            STATS["red" if want == "red" else "green"] += 1
+            STATS["caught" if want == "red" else "held"] += v == "ok"
     finally:
         with open(path, "wb") as fh:
             fh.write(before)
         with open(path, "rb") as fh:
             sha_after = _sha(fh.read())
         out("sha256 after  %s (%s)" % (sha_after, "equal" if sha_after == sha_before else "DIFFERENT"))
+    STATS["restored_equal"] += sha_after == sha_before
     if sha_after != sha_before:
         return "FAILED (the file was not restored)"
     status = _git("status", "--porcelain")
     out("git status --porcelain after: %r" % status)
+    STATS["clean_after"] += not status.strip()
     if status.strip():
         return "FAILED (tree not clean after the plant)"
     return "AS REQUIRED" if not bad else "FAILED (%r)" % bad
@@ -440,6 +463,14 @@ def main():
             print(line)
             log.write(line + "\n")
             results.append(r)
+        line = ("SUMMARY plants=%d as_required=%d planted=%d restores_equal=%d/%d "
+                "clean_after=%d/%d red_caught=%d/%d controls_green=%d/%d" % (
+                    len(results), sum(r == "AS REQUIRED" for r in results),
+                    STATS["planted"], STATS["restored_equal"], STATS["planted"],
+                    STATS["clean_after"], STATS["planted"], STATS["caught"], STATS["red"],
+                    STATS["held"], STATS["green"]))
+        print(line)
+        log.write(line + "\n")
     return 0 if all(r == "AS REQUIRED" for r in results) else 1
 
 
