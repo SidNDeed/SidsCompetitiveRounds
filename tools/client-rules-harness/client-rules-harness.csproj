@@ -55,6 +55,15 @@
                         I18nStub.cs stands in for the plugin's I18n, which
                         needs Unity. The cases live in the harness-only
                         SettingsModelSelfTest.cs.
+      PcTradeRules.cs   card trading's client half: the canonical item list
+                        and its SHA-256 digest (checked against fixed vectors
+                        the server's own player_cards.trade_items and
+                        trade_digest produced), the signed terms, what a
+                        summary read means for the Trades view, the three
+                        lists, the refetch and busy-retry rules, new-proposal
+                        detection and the In a trade set. A digest that is
+                        off by one byte makes every proposal answer bad_terms
+                        with no other symptom, so it is RUN, not described.
 
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
@@ -88,6 +97,7 @@
     <Compile Include="../../plugin/SettingsDescriptors.g.cs" />
     <Compile Include="I18nStub.cs" />
     <Compile Include="SettingsModelSelfTest.cs" />
+    <Compile Include="../../plugin/PcTradeRules.cs" />
   </ItemGroup>
 
 </Project>

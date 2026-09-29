@@ -267,6 +267,11 @@
     },
     {
       "class": "reason",
+      "key": "SPcTrd",
+      "text": "nothing moves until you accept a proposal"
+    },
+    {
+      "class": "reason",
       "key": "SPerfH",
       "text": "it is the only place the individual patches can be seen"
     },
@@ -546,5 +551,5 @@
       "text": "Privacy & account"
     }
   ],
-  "total": 107
+  "total": 108
 }

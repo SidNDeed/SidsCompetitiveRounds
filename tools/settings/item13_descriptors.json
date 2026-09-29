@@ -272,6 +272,11 @@
     },
     {
       "class": "reason",
+      "key": "SPcTrd",
+      "text": "nothing moves until you accept a proposal"
+    },
+    {
+      "class": "reason",
       "key": "SPerfH",
       "text": "it is the only place the individual patches can be seen"
     },
@@ -3778,6 +3783,89 @@
         "writes_entry_as_side_effect": null
       }
     },
+    "SPcTrd": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 132,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPcTrd",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPcTrd_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "nothing moves until you accept a proposal",
+        "state_words": []
+      },
+      "key": "SPcTrd",
+      "kind": "SWITCH",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "nothing moves until you accept a proposal",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "PlayerCardsUI.cs",
+          "line": null,
+          "note": "PaintTrades (merge pass 1)",
+          "source": "declared",
+          "verified": false,
+          "writer": "declared"
+        },
+        "painter_token": "ON",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "\"trades_open\"",
+          "true"
+        ],
+        "server": null,
+        "writer": "PlayerCardsUI.SetSetting(string key, bool value)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [
+        {
+          "expression": "\"trades_open\"",
+          "source": "PlayerCardsUI.cs BuildSettingsRows (merge pass 1)",
+          "type": "string"
+        }
+      ],
+      "row_group": "SPcTrd",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SPcTrd",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "ToggleSetting"
+        ],
+        "kind": "server_writer",
+        "name": "PlayerCardsUI.SetSetting(string key, bool value)",
+        "note": null,
+        "source": "PlayerCardsUI.SetSetting (merge pass 1: the trading lane's third key)",
+        "writes_entry_as_side_effect": null
+      }
+    },
     "SPerfH": {
       "bulk_reset": false,
       "config": {
@@ -5200,7 +5288,8 @@
   },
   "notes": [
     "SPcAnn records no callable server path yet: the same owed writer as SPcPub; both rows share it.",
-    "SPcPub records no callable server path yet: PlayerCardsUI.SetSetting(string key, bool value) does not exist on either tree yet: the rows call ToggleSetting(key), which reads the cached value and writes its negation, so there is no parameter a reset can pass. The value-taking form is owed."
+    "SPcPub records no callable server path yet: PlayerCardsUI.SetSetting(string key, bool value) does not exist on either tree yet: the rows call ToggleSetting(key), which reads the cached value and writes its negation, so there is no parameter a reset can pass. The value-taking form is owed.",
+    "SPcTrd (card trading, trades_open) was added by the v1.41.0 merge pass 1 when the trading client lane met this table; it was not measured by the generator. It is a clone of SPcAnn (same writer PlayerCardsUI.SetSetting, same server-row exclusion from the bulk reset) with its own key, selector and reason; recommended ON is the server's column default (pc_trades_open DEFAULT true, migration 353). The row shows only while /pc/me carries trades_open; present_on is lane only."
   ],
   "problems": [],
   "reset_corrections": {
@@ -5232,29 +5321,29 @@
       "SMailRelay",
       "SPerfH"
     ],
-    "help_bodies_moved": 46,
+    "help_bodies_moved": 47,
     "i18n": {
       "exclusion_reasons": 9,
       "help_bodies": 9,
       "option_words": 7,
-      "reasons": 55,
+      "reasons": 56,
       "recommendation_values": 0,
       "shared_templates": 8,
       "state_words": 6,
       "sub_tab_labels": 7,
-      "total": 110,
+      "total": 111,
       "when_to_press": 9
     },
-    "keys": 55,
+    "keys": 56,
     "operands": {
-      "bool": 35,
+      "bool": 36,
       "canonical_id": 7,
       "delegate": 1,
       "enum_member": 1,
       "none": 9,
       "number": 2
     },
-    "painters_declared": 11,
+    "painters_declared": 12,
     "painters_derived": 35,
     "render_rows": [
       "SBloom",
@@ -5267,6 +5356,7 @@
     "selector_rows": [
       "SPcAnn",
       "SPcPub",
+      "SPcTrd",
       "SPerf_BulletCap",
       "SPerf_EdgeBn",
       "SPerf_HitSnd",
@@ -5277,10 +5367,10 @@
       "SPerf_Stun"
     ],
     "value_less": 9,
-    "value_storing": 46,
+    "value_storing": 47,
     "writers_action": 9,
     "writers_named_new": 31,
     "writers_semantic": 9,
-    "writers_server": 6
+    "writers_server": 7
   }
 }

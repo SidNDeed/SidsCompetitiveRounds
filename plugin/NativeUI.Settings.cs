@@ -857,6 +857,7 @@ namespace CompetitiveRounds
                 case "SAutoLog": PaintAutoLog(t, SettingsAsBool(v)); return true;
                 case "SPcPub": PlayerCardsUI.PaintCollectionPublic(t, SettingsAsBool(v)); return true;
                 case "SPcAnn": PlayerCardsUI.PaintAnnounce(t, SettingsAsBool(v)); return true;
+                case "SPcTrd": PlayerCardsUI.PaintTrades(t, SettingsAsBool(v)); return true;
                 case "SPcPre": PlayerCardsUI.PaintPreset(t, SettingsAsInt(v)); return true;
                 case "SMailFrom": MailUI.PaintMailFrom(t, SettingsAsStr(v)); return true;
                 case "SMailRelay": MailUI.PaintMailRelay(t, true, true, SettingsAsBool(v)); return true;
@@ -1143,7 +1144,7 @@ namespace CompetitiveRounds
                 case "SBlkDbg": k = "blocking"; break;
                 case "SAllowSpec": k = "spectating"; break;
                 case "SCT": case "SAutoLog": k = "tracking"; break;
-                case "SPcPub": case "SPcAnn": k = "cards"; break;
+                case "SPcPub": case "SPcAnn": case "SPcTrd": k = "cards"; break;
                 case "SPcPre": k = "cards-pictures"; break;
                 case "SAnimCos": case "STrail": case "SCursor": k = "cosmetics"; break;
                 case "SPColor": k = "colors"; break;
@@ -1257,7 +1258,7 @@ namespace CompetitiveRounds
 
         private static void SettingsShowExtras(string key)
         {
-            bool pc = key == "SPcPub" || key == "SPcAnn" || key == "SPcPre";
+            bool pc = key == "SPcPub" || key == "SPcAnn" || key == "SPcTrd" || key == "SPcPre";
             SettingsSetActive(setExtraSCS, key == "SCT");
             SettingsSetActive(setExtraSDD, key == "SDR");
             SettingsSetActive(setExtraSDD2, key == "SDR");

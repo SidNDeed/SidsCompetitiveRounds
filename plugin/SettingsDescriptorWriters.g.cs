@@ -92,6 +92,7 @@ namespace CompetitiveRounds
                 case "SPcAnn": return true;
                 case "SPcPre": return -1;
                 case "SPcPub": return true;
+                case "SPcTrd": return true;
                 case "SPerf_BulletCap": return true;
                 case "SPerf_EdgeBn": return true;
                 case "SPerf_HitSnd": return true;

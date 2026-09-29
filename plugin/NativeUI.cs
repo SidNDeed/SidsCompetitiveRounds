@@ -2907,6 +2907,7 @@ namespace CompetitiveRounds
                         if(subTexts[i]!=null){UIFactory.SetColor(subTexts[i],i==currentTab?C_WHITE:C_LABEL);UIFactory.SetBold(subTexts[i],i==currentTab);}
                     }
                 }
+            if(subTexts!=null&&TAB_COLLECTION<subTexts.Length)PlayerCardsUI.PaintCollectionTabLabel(subTexts[TAB_COLLECTION]);/* v1.41.0 card trading: "Collection (n)" while n trade proposals wait (V8 6.4) */
         }
         // ── FFA tab (live — first playtest build, ranked from day one) ─────
         private static object txtFfaStatus, txtFfaLobbyHeader, txtFfaLobbyBody, txtFfaLbHeader, txtFfaRecentHeader, txtFfaRecentPage;

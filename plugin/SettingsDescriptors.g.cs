@@ -64,6 +64,7 @@ namespace CompetitiveRounds
             new SettingsDescriptor("SPcAnn", "SWITCH", "privacy", false, true, "SPcAnn", "SPcAnn_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPcPre", "DROPDOWN", "privacy", false, true, "SPcPre", "SPcPre_q", "painted_runtime", null),
             new SettingsDescriptor("SPcPub", "SWITCH", "privacy", false, true, "SPcPub", "SPcPub_q", "painted_literal", "ON"),
+            new SettingsDescriptor("SPcTrd", "SWITCH", "privacy", false, true, "SPcTrd", "SPcTrd_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPerfH", "DISCLOSURE", "perf", false, false, "SPerfH", "SPerfH_q", "when_to_press", "when the count beside it is not 7/7"),
             new SettingsDescriptor("SPerf_BulletCap", "SWITCH", "perf", true, true, "SPerf_BulletCap", "SPerf_BulletCap_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPerf_EdgeBn", "SWITCH", "perf", true, true, "SPerf_EdgeBn", "SPerf_EdgeBn_q", "painted_literal", "ON"),
@@ -131,6 +132,7 @@ namespace CompetitiveRounds
                 case "SPcAnn": return I18n.Tr("only rare pulls, and only in one channel");
                 case "SPcPre": return I18n.Tr("follows the character you actually play");
                 case "SPcPub": return I18n.Tr("lets trades find your binder");
+                case "SPcTrd": return I18n.Tr("nothing moves until you accept a proposal");
                 case "SPerfH": return I18n.Tr("it is the only place the individual patches can be seen");
                 case "SPerf_BulletCap": return I18n.Tr("largest visible win in heavy firefights");
                 case "SPerf_EdgeBn": return I18n.Tr("swallows the one null reference a destroyed bullet raises at a screen edge");
@@ -217,6 +219,7 @@ namespace CompetitiveRounds
                 case "SMailRelay":
                 case "SPcAnn":
                 case "SPcPub":
+                case "SPcTrd":
                 case "SPrefSC":
                 case "SShowDc":
                     return I18n.Tr("this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored");
