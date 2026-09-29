@@ -5937,7 +5937,7 @@ _FFA_HOLD_FENCES = 1
 # route carry it; a box on the build before round 2 answers without the key.
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
-# Its sibling _SESSION_REPORT_LAST (the /health `session_report` word) asks
+# Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
 # DERIVED from the report's own constants, so it is defined after
@@ -5965,15 +5965,16 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
-        # session_report needs the database, so this arm answers the last
-        # probe on this worker (0 before the first: not proven).
+        # session_report needs the database, so this arm answers 0: a
+        # disconnected answer proves nothing about the report route, whatever
+        # an earlier probe on this worker found (round 2 L9).
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
                               rj_triage=_RJ_TRIAGE_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER,
                               pc_card_themes=_pc_card_themes_word(),
-                              session_report=_SESSION_REPORT_LAST)
+                              session_report=0)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -61834,8 +61835,9 @@ async def get_set_report(request: Request, steam_id: str = "",
 # statement the analysis cannot take must not turn the whole answer into
 # "database disconnected" on a healthy box. Anything else is left to
 # health_check's own catch, as a failed SELECT 1 is. The degraded arm cannot
-# ask, so it answers the last value a probe on this worker wrote -- 0 until
-# one has run, which the train reads as not proven.
+# ask, so it answers 0, which the train reads as not proven; a box counts as
+# proven only on the whole tuple status=ok, database=connected,
+# session_report=1.
 _SESSION_REPORT_STATEMENT = _re.compile(r"^\s*(?:SELECT|WITH)\b")
 
 
@@ -61925,18 +61927,15 @@ _SESSION_REPORT_STATEMENTS = _session_report_statements(_SESSION_REPORT_NAMED)
 _SESSION_REPORT_PROBE = _session_report_probe_sql(_SESSION_REPORT_STATEMENTS)
 _SESSION_REPORT_BINDS = (tuple(sorted(text(_SESSION_REPORT_PROBE).compile().params))
                          if _SESSION_REPORT_PROBE else ())
-_SESSION_REPORT_LAST = 0
 
 
 async def _session_report_probe(db) -> int:
-    """/health `session_report` on the connected arm, written through to the
-    cache the degraded arm reads: 1 when the route is bound and the analysis
-    took every statement, 0 when the route is not bound, the set is
-    incomplete or the analysis refused (class 42). Any other error is raised
-    to health_check's own catch."""
-    global _SESSION_REPORT_LAST
+    """/health `session_report` on the connected arm: 1 when the route is
+    bound and the analysis took every statement, 0 when the route is not
+    bound, the set is incomplete or the analysis refused (class 42). Any
+    other error is raised to health_check's own catch. Nothing is cached: the
+    degraded arm answers 0."""
     if not _SESSION_REPORT_PROBE or not _session_report_bound():
-        _SESSION_REPORT_LAST = 0
         return 0
     try:
         await db.execute(text(_SESSION_REPORT_PROBE),
@@ -61945,9 +61944,7 @@ async def _session_report_probe(db) -> int:
         if not _session_report_refused(exc):
             raise
         await db.rollback()
-        _SESSION_REPORT_LAST = 0
         return 0
-    _SESSION_REPORT_LAST = 1
     return 1
 
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──

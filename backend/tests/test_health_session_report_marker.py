@@ -209,7 +209,6 @@ def _contexted(inner):
 def test_the_probe_analyses_every_statement_with_every_bind_null():
     db = _Db()
     assert _run(main._session_report_probe(db)) == 1
-    assert main._SESSION_REPORT_LAST == 1
     ((sql, params),) = db.calls
     assert sql == main._SESSION_REPORT_PROBE
     assert sql.startswith("SELECT 1 WHERE false AND EXISTS (")
@@ -225,7 +224,7 @@ def test_the_probe_analyses_every_statement_with_every_bind_null():
 def test_a_refused_analysis_reads_0_and_rolls_back(exc):
     db = _Db(exc)
     assert _run(main._session_report_probe(db)) == 0
-    assert db.rolled_back == 1 and main._SESSION_REPORT_LAST == 0
+    assert db.rolled_back == 1
 
 
 @pytest.mark.parametrize("exc", [
@@ -285,13 +284,25 @@ def test_both_health_arms_carry_the_word(monkeypatch):
     up = _run(main.health_check(db=_Up())).model_dump()
     assert (up["status"], up["session_report"]) == ("ok", 1)
     down = _run(main.health_check(db=_Down())).model_dump()
-    assert (down["status"], down["session_report"]) == ("degraded", 1), "the last probe on this worker"
+    assert (down["status"], down["session_report"]) == ("degraded", 0)
     # an unmigrated database answers "ok" with 0, never "database disconnected"
     bare = _run(main.health_check(db=_Unmigrated())).model_dump()
     assert (bare["status"], bare["database"], bare["session_report"]) == ("ok", "connected", 0)
     assert _run(main.health_check(db=_Down())).model_dump()["session_report"] == 0
-    monkeypatch.setattr(main, "_SESSION_REPORT_LAST", 0)
-    assert _run(main.health_check(db=_Down())).model_dump()["session_report"] == 0
+
+
+def test_a_degraded_answer_after_a_successful_probe_reads_0():
+    """Round 2 L9: once a probe on this worker has read 1, a database outage
+    answers status=degraded, database=disconnected and session_report=0 -
+    never the earlier 1. Control: the same worker's next connected answer
+    reads 1 again, so the 0 is the outage's and not a stuck value."""
+    up = _run(main.health_check(db=_Up())).model_dump()
+    assert (up["status"], up["database"], up["session_report"]) == ("ok", "connected", 1)
+    down = _run(main.health_check(db=_Down())).model_dump()
+    assert (down["status"], down["database"], down["session_report"]) == ("degraded", "disconnected", 0)
+    again = _run(main.health_check(db=_Up())).model_dump()
+    assert (again["status"], again["database"], again["session_report"]) == ("ok", "connected", 1)
+    assert not hasattr(main, "_SESSION_REPORT_LAST"), "no worker-local copy of the word is kept"
 
 
 def test_the_word_is_declared_required_and_read_by_nothing_else():
@@ -310,10 +321,10 @@ def test_the_word_is_declared_required_and_read_by_nothing_else():
     assert len(probes) == 1 and id(probes[0]) in ok_arm
     ok_src = ast.unparse(tries[0].body[0]) if tries[0].body else ""
     assert "SELECT 1" in ok_src, "the probe runs after the connectivity check"
-    last = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
-            and n.id == "_SESSION_REPORT_LAST" and isinstance(n.ctx, ast.Load)]
-    assert len(last) == 1 and id(last[0]) in degraded_arm
     keywords = [k for k in ast.walk(tree) if isinstance(k, ast.keyword) and k.arg == "session_report"]
     assert len(keywords) == 2
     assert sum(id(k) in ok_arm for k in keywords) == 1
     assert sum(id(k) in degraded_arm for k in keywords) == 1
+    # Round 2 L9: the degraded arm's word is the constant 0
+    (down,) = [k for k in keywords if id(k) in degraded_arm]
+    assert isinstance(down.value, ast.Constant) and down.value.value == 0, ast.unparse(down.value)
