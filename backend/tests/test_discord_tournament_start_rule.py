@@ -533,3 +533,28 @@ def test_row32_f_the_unsignup_line_and_the_push_back_state_the_rule_and_name_the
                         " them in the F5 tab if that no longer works for you."), pushed
         assert "best slot had" not in pushed
     Q.e2e(monkeypatch, tmp_path, body)
+
+
+def test_row32_f_a_force_start_push_back_keeps_the_eligible_count(monkeypatch, tmp_path):
+    """A force start skips the time vote, so when the ban filter leaves it
+    short its push-back says so (7 of 8 eligible), not that no time had 8
+    agreeing; the rule and how to vote follow as on every sync push-back."""
+    import test_discord_tournament_quorum as Q
+    import models
+
+    async def body(env):
+        people = await Q.entrants_of(env, 8)
+        tid, slot = await Q.sync_tournament(env, people, 0)
+        await env.ban(people[5])
+
+        async def go(db, T):
+            t = await db.get(models.Tournament, tid)
+            await T.lock_tournament(db, t, force=True)
+            return t.status
+        assert await Q.in_app(env, go) == "voting"
+        pushed = (await env.rows(f"SELECT content FROM {Q.SCHEMA}.pending_channel_posts"
+                                 " ORDER BY created_at, id"))[-1]["content"]
+        later = int(slot.timestamp()) + 7 * 86400
+        assert ("pushed back: not enough players (7 of 8 required signed up). New start time is"
+                f" <t:{later}:F>. {RULE}: 0 of 8 agree on a time so far. {HOW_TO_VOTE}") in pushed, pushed
+    Q.e2e(monkeypatch, tmp_path, body)

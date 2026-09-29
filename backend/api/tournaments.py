@@ -1153,8 +1153,9 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
     async def _push_back(reason: str, consensus: Optional[str] = None) -> None:
         # `reason` goes to the log; a sync tournament's channel post names
         # the consensus instead (`consensus`, row 32: "no start time had 8
-        # players agreeing on it") and states the start rule with the tally
-        # its carried votes hold at the new times.
+        # players agreeing on it"; a force start, which skips the vote, keeps
+        # `reason`) and states the start rule with the tally its carried
+        # votes hold at the new times.
         # Pushback path. Status stays "voting" so the cron re-enters this
         # function next week. (Round-20 find 1: factored into a closure so
         # the post-kick eligible-minimum recheck can push back too.)
@@ -1213,7 +1214,10 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                        "works for you." if t.kind == "sync" else "")
             said = reason
             if t.kind == "sync":
-                said = consensus or f"no start time had {t.min_players} players agreeing on it"
+                # A force start skips the time vote, so its push-back keeps
+                # the eligible count that stopped it.
+                said = consensus or (reason if force else
+                                     f"no start time had {t.min_players} players agreeing on it")
                 rule = _tsync_rule(t.min_players, await _eligible_slot_tallies(db, t.id, now))
                 when_sentence = f"{when_sentence} {rule} {TSYNC_VOTE_HOW}"
             await _queue_channel_post(
