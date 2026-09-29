@@ -12980,7 +12980,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // itself (MusicCatalog.cs header, #368): rendered raw and never
         // translated, so its words read the same in every locale.
         // Shown beside the album by-line and in the now-playing readout only.
-        private const string MUSIC_ALBUM_NOTE = "  <size=85%><color=#888>(machine-generated)</color></size>";
+        // Round 2 (L2): ONE style for both places, an ABSOLUTE size at
+        // CreateText's 12 pt floor (the game's SDF font drops thin strokes
+        // such as the hyphen below it, even in bold; SetTextRaw bold-wraps
+        // both lines). A size relative to each line's own base made the
+        // readout's note a different size from the by-line's, and its hyphen
+        // drew no ink at the seat's window scale.
+        private const string MUSIC_NOTE_STYLE = "<size=12><color=#888>";
+        private const string MUSIC_ALBUM_NOTE = "  " + MUSIC_NOTE_STYLE + "(machine-generated)</color></size>";
 
         private static string MusicAlbumNote(MusicAlbumDef alb)
         {

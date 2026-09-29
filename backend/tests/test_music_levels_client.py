@@ -320,9 +320,11 @@ def test_the_flag_defaults_false_and_marks_exactly_the_custom_albums():
 def test_the_note_is_authored_text_beside_the_byline_and_in_the_readout():
     raw = _plugin("NativeUI.cs")
     ui = code_of(raw)
-    m = re.search(r'private const string MUSIC_ALBUM_NOTE\s*=\s*"([^"]*)"\s*;', ui)
-    assert m, "no MUSIC_ALBUM_NOTE constant"
-    assert re.sub(r"<[^>]+>", "", m.group(1)).strip() == "(" + NOTE + ")", m.group(1)
+    style = re.search(r'private const string MUSIC_NOTE_STYLE\s*=\s*"([^"]*)"\s*;', ui)
+    assert style, "no MUSIC_NOTE_STYLE constant"
+    m = re.search(r'private const string MUSIC_ALBUM_NOTE\s*=\s*"  " \+ MUSIC_NOTE_STYLE \+ "([^"]*)"\s*;', ui)
+    assert m, "MUSIC_ALBUM_NOTE is not built on MUSIC_NOTE_STYLE"
+    assert re.sub(r"<[^>]+>", "", style.group(1) + m.group(1)).strip() == "(" + NOTE + ")", m.group(1)
     helper = code_of(raw, "private static string MusicAlbumNote(MusicAlbumDef alb)")
     assert "alb.MachineGenerated" in helper and "MUSIC_ALBUM_NOTE" in helper
     byline = [ln for ln in ui.splitlines() if 'I18n.TrF("by {0}", HomeSan(alb.ArtistName' in ln]
@@ -336,6 +338,30 @@ def test_the_note_is_authored_text_beside_the_byline_and_in_the_readout():
     assert ui.count("MusicAlbumNote(") == 3, ui.count("MusicAlbumNote(")
     assert ui.count("NowPlayingAlbumNote()") == 2, ui.count("NowPlayingAlbumNote()")
     assert ui.count("MUSIC_ALBUM_NOTE") == 2, ui.count("MUSIC_ALBUM_NOTE")
+
+
+def test_the_readout_and_the_byline_share_one_absolute_note_style():
+    """Round 2 (L2): both lines render the note through the SAME style
+    constant, at an ABSOLUTE size no smaller than CreateText's 12 pt floor
+    (below it the game's SDF font drops the hyphen even in bold), never a size
+    relative to each line's own base -- which is what made the readout's note
+    another size than the by-line's and left its hyphen without ink."""
+    ui = code_of(_plugin("NativeUI.cs"))
+    style = re.search(r'private const string MUSIC_NOTE_STYLE\s*=\s*"([^"]*)"\s*;', ui).group(1)
+    size = re.search(r"<size=([0-9.]+)>", style)
+    assert size and float(size.group(1)) >= 12.0, style
+    assert "%" not in style and "<size=+" not in style and "<size=-" not in style, style
+    assert ui.count("MUSIC_NOTE_STYLE") == 2, "a second style for the note: %d" % ui.count("MUSIC_NOTE_STYLE")
+    assert ui.count("<size=85%><color=#888>(") == 0
+    note = re.search(r'private const string MUSIC_ALBUM_NOTE\s*=\s*([^;]+);', ui).group(1)
+    assert "<size" not in note.replace("MUSIC_NOTE_STYLE", ""), note
+    # Both render sites reach the note only through MusicAlbumNote (one helper,
+    # one constant): the readout's helper returns MusicAlbumNote(...), the
+    # by-line calls it directly.
+    readout = code_of(_plugin("NativeUI.cs"), "private static string NowPlayingAlbumNote()")
+    assert "MusicAlbumNote(MusicCatalog.Get(sku))" in readout and "<size" not in readout
+    refresh = code_of(_plugin("NativeUI.cs"), "private static void RefreshMusicTab()")
+    assert "np + NowPlayingAlbumNote()" in refresh
 
 
 def test_the_note_never_goes_through_i18n_and_is_shown_nowhere_else():
