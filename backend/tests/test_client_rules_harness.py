@@ -272,7 +272,7 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # 46 cases on the commit that added the suite, 72 since round 2 added
     # the J, O, R, K and H cases; the floor is that count, not one far
     # below it (#342). Raise it when cases are added.
-    assert run >= 72, "the SecureRouteRules suite shrank to %d cases" % run
+    assert run >= 78, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -301,9 +301,14 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # round 2: the outbox follows the route (HIGH 1)
     "O1 a report queued on the backup is sent to the secure base from the first send after the flip",
     "O1c control: before the flip the same report is sent to the backup",
-    "O4 a 401 to an unauthenticated retry on the backup spends no attempt while the secure route can return",
+    "O4 a failed retry that did not carry the session token spends no attempt",
     "O5 with enforcement armed a report queued on the backup is delivered once, with the token, after the restore",
-    "O5c control: the queued URL kept, as in round 1, posts to the backup until attempt 94 deletes the report",
+    "O5c control: the queued URL kept, as in round 1, never reaches the secure base and is never delivered",
+    # round 3: a restored retry goes out only with the session (Codex round 2 HIGH 1)
+    "O4b over a transport that carries the token, a report without a fresh session waits and is not sent",
+    "O7 restored without a session for 2 min: no send to the secure base, no attempt spent, the entry kept",
+    "O7b then the session lands: exactly one send, with the token, one settlement, an empty outbox",
+    "O8 a request sent without the token after the gate passed spends nothing and removes nothing",
     # round 2: the portal press (LOW 1, LOW 2)
     "R1 both refusal wordings (the portal mint's and the enforced writes') read as a session refusal",
     "R2 a mint refused for its session re-mints once, and the second refusal is reported, never looped",

@@ -475,17 +475,42 @@ namespace CompetitiveRounds
             return storedUrl;
         }
 
-        /// <summary>Whether a failed outbox attempt spends one of the report's
-        /// attempts. A 401 to a request that could not carry the session (the
-        /// transport withheld the token: plaintext to a public host) says
-        /// nothing about the report, and while the session is on the backup the
-        /// secure route can still return and deliver it with the token; so that
-        /// answer does not count toward the budget that deletes a report. Every
-        /// other failure counts as before, and so does this one when the route
-        /// cannot return (no route, or already restored).</summary>
-        internal static bool OutboxAttemptSpent(bool routeCanReturn, bool requestCouldCarrySession, bool answered401)
+        /// <summary>What the outbox does with a due report (Codex round 2,
+        /// HIGH 1). WaitForSession: the send would go over a transport that
+        /// carries the session token (the secure base, or a private-network or
+        /// loopback address) but no fresh session is held, so nothing is sent
+        /// and no attempt is spent; the entry is looked at again after
+        /// OutboxSessionPollSeconds. A report is therefore sent to such an
+        /// address only with the token, and an enforcing server never sees it
+        /// unauthenticated there. Send: a session is held, or the transport
+        /// cannot carry one anyway (the plaintext backup to a public host,
+        /// where the token is withheld by rule and an unarmed server may still
+        /// take the report).</summary>
+        internal enum OutboxGate { Send, WaitForSession }
+
+        internal static OutboxGate OutboxSendGate(bool transportCarriesSession, bool freshSession)
         {
-            return !(routeCanReturn && !requestCouldCarrySession && answered401);
+            return transportCarriesSession && !freshSession ? OutboxGate.WaitForSession : OutboxGate.Send;
+        }
+
+        /// <summary>How often a report waiting for a session is looked at
+        /// again. Bounded polling, never a send: the supervisor's own lap is
+        /// ten seconds, so in practice this means "every lap".</summary>
+        internal const double OutboxSessionPollSeconds = 5.0;
+
+        /// <summary>Whether a failed outbox attempt spends one of the report's
+        /// attempts: only when the request CARRIED the session token (read from
+        /// the header actually stamped on it, not from its address). A request
+        /// without the token was never judged on the report by an enforcing
+        /// server, so its answer, whatever it is, neither counts toward the
+        /// budget that deletes a report nor removes the entry: the attempt is
+        /// given back and the entry stays queued (#98: a retry budget must not
+        /// tick while its precondition is unmet). The drop rule (the attempt
+        /// cap, and a permanent refusal) is therefore reached only by
+        /// authenticated attempts.</summary>
+        internal static bool OutboxAttemptSpent(bool requestCarriedToken)
+        {
+            return requestCarriedToken;
         }
 
         /// <summary>Whether a 401 body is the server refusing the session the
@@ -607,9 +632,6 @@ namespace CompetitiveRounds
             /// <summary>Back on a secure base after the backup. Terminal for
             /// this Route: no timer and no button check runs again.</summary>
             internal bool Restored { get; private set; }
-            /// <summary>On the backup with a check still able to restore the
-            /// secure route (OutboxAttemptSpent).</summary>
-            internal bool CanReturn => OnFallback && !Restored;
             internal int AttemptsSinceFallback { get; private set; }
             /// <summary>Realtime second at which the timer's next check is due
             /// (MaxValue when no check is scheduled).</summary>

@@ -331,11 +331,7 @@ def test_a_queued_report_is_sent_where_the_route_is_at_the_send():
     send = "yield return PostRequest(target, p.json,"
     assert body.count(resolve) == 1 and body.count(send) == 1, body
     assert body.count("PostRequest(") == 1, "a second send in the pass: %s" % body
-    carry = "bool couldCarrySession = CredentialedTransportAllowed(target);"
-    ret = "bool routeCanReturn = routeAtSend != null && routeAtSend.CanReturn;"
-    assert body.index(resolve) < body.index(carry) < body.index(send), body
-    assert body.index(ret) < body.index(send), body
-    spend = "if (!SecureRouteRules.OutboxAttemptSpent(routeCanReturn, couldCarrySession, answered401))"
+    spend = "if (!SecureRouteRules.OutboxAttemptSpent(carried))"
     assert body.count(spend) == 1, body
     assert body.index(spend) < body.index("bool permanent ="), body
     assert body.index(spend) < body.index("p.attempts >= OUTBOX_MAX_ATTEMPTS"), body
@@ -357,6 +353,47 @@ def test_a_queued_report_is_sent_where_the_route_is_at_the_send():
         "a report identity compares raw URLs somewhere")
     restored = code_of(API, "private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)")
     assert "OutboxRouteRestored();" in restored, restored
+
+
+def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spends_nothing():
+    """Codex round 2 HIGH 1: after a restore the outbox made every queued
+    report due within 20 s without waiting for a session, recorded "could carry
+    the session" from the address alone, and spent an attempt on the enforcing
+    sink's 401 once the route could no longer return, so attempt 94 deleted the
+    report while the Steam exchange was still unavailable. Now, over a
+    transport that carries the token, the pass sends only with a fresh session
+    (SecureRouteRules.OutboxSendGate; harness O4b, O7) and otherwise waits
+    without spending; whether a request carried the token is read from the
+    header PostRequestRaw actually stamped; and only an attempt that carried it
+    is spent (OutboxAttemptSpent; harness O4, O8), so the drop rule is reached
+    by authenticated attempts only."""
+    body = code_of(API, "private static IEnumerator OutboxPass()")
+    gate = ("if (SecureRouteRules.OutboxSendGate(CredentialedTransportAllowed(target), SteamAuth.HasFreshToken)\n"
+            "                    == SecureRouteRules.OutboxGate.WaitForSession)")
+    assert body.count(gate) == 1, body
+    resolve = body.index("string target = OutboxSendUrl(p.url);")
+    spend_attempt = body.index("p.attempts++;")
+    send = body.index("yield return PostRequest(target, p.json,")
+    assert resolve < body.index(gate) < spend_attempt < send, body
+    waiting = body[body.index(gate):body.index("continue;", body.index(gate))]
+    assert "p.nextAt = Time.realtimeSinceStartup + (float)SecureRouteRules.OutboxSessionPollSeconds;" in waiting, waiting
+    assert not re.search(r"p\.attempts\s*(\+\+|--|[-+]?=)", waiting), "the wait spends or sets attempts: " + waiting
+    assert "PostRequest(" not in waiting and "Remove(" not in waiting, waiting
+    assert "stamped => carried = stamped);" in body[send:send + 200], body[send:send + 200]
+    assert "CredentialedTransportAllowed(" not in body[spend_attempt:], "the spend rule reads the address again"
+    spend = body.index("if (!SecureRouteRules.OutboxAttemptSpent(carried))")
+    given_back = body[spend:body.index("continue;", spend)]
+    assert "p.attempts--;" in given_back and "Remove(" not in given_back, given_back
+    assert spend < body.index("bool permanent =") < body.index("p.attempts >= OUTBOX_MAX_ATTEMPTS"), body
+    raw = code_of(API, "private static IEnumerator PostRequestRaw(")
+    stamp = raw.index("StampVersionHeader(request);")
+    read = raw.index('request.GetRequestHeader("X-Session-Token")')
+    told = raw.index("onTokenStamped(stamped);")
+    assert stamp < read < told < raw.index("request.SendWebRequest()"), raw
+    post = code_of(API, "private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,")
+    assert "callback, json, null, onTokenStamped);" in post, post
+    rules = code_of(Path(ROOT) / "plugin" / "SecureRouteRules.cs", "internal static bool OutboxAttemptSpent(bool requestCarriedToken)")
+    assert "return requestCarriedToken;" in rules, rules
 
 
 def test_the_probe_reads_the_whole_body_strictly():

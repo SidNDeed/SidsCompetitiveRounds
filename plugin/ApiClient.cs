@@ -724,7 +724,15 @@ namespace CompetitiveRounds
         // matches has UNIQUE (photon_room_id, player1_id, player2_id), team_matches
         // has the 5-column equivalent, and room ids are per-game suffixed — a
         // replay of a report that actually landed just errors out and is dropped.
-        private class PendingReport { public string url; public string json; public int attempts; public float nextAt; }
+        private class PendingReport
+        {
+            public string url; public string json; public int attempts; public float nextAt;
+            /// <summary>In memory only (never persisted): the entry is held
+            /// back because no session is held for a transport that carries one
+            /// (SecureRouteRules.OutboxSendGate). Only so the wait is logged
+            /// once when it begins and once when it ends, not on every lap.</summary>
+            public bool waitingForSession;
+        }
         private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
         /// <summary>WHICH host is driving the supervisor, not merely that one
         /// was started. The flag this replaces was cleared only by the
@@ -819,11 +827,14 @@ namespace CompetitiveRounds
 
         /// <summary>The route has just returned to the secure base: every
         /// queued report falls due within OUTBOX_RESTORE_DELAY, so a report that
-        /// waited on the backup (at the capped interval) is delivered with the
-        /// token promptly. The delay leaves SteamAuth time to land the first
-        /// secure session, which it requests on its own loop once the route
-        /// returns. Nothing is sent from here: the supervisor's next pass sends,
-        /// resolving each address as always.</summary>
+        /// waited on the backup (at the capped interval) is looked at promptly.
+        /// Falling due is not being sent: the pass sends a report to the secure
+        /// base only with a fresh session (SecureRouteRules.OutboxSendGate), and
+        /// until SteamAuth lands one the entry waits without spending an attempt
+        /// (Codex round 2 HIGH 1: a restore followed by minutes without a
+        /// session used to send it tokenless and spend its budget). Nothing is
+        /// sent from here: the supervisor's next pass decides, resolving each
+        /// address as always.</summary>
         private static void OutboxRouteRestored()
         {
             if (_pendingReports.Count == 0) return;
@@ -1887,13 +1898,6 @@ namespace CompetitiveRounds
             foreach (var p in due)
             {
                 if (!_pendingReports.Contains(p)) continue;
-                p.attempts++;
-                // Linear-ish backoff, capped at 4x the base interval. Measured
-                // from now rather than from the top of the pass — an earlier
-                // entry's attempt can have taken most of a minute.
-                p.nextAt = Time.realtimeSinceStartup
-                           + OUTBOX_RETRY_SECONDS
-                             * Math.Min(OUTBOX_RETRY_MAX_MULTIPLIER, (float)p.attempts);
                 // Codex round 1 HIGH 1: the address is resolved for THIS send
                 // and kept in a local, so a flip during the request changes
                 // nothing about it; the entry is rewritten (and persisted) only
@@ -1906,11 +1910,41 @@ namespace CompetitiveRounds
                     p.url = target;
                     PersistOutbox();
                 }
-                bool couldCarrySession = CredentialedTransportAllowed(target);
-                var routeAtSend = _route;
-                bool routeCanReturn = routeAtSend != null && routeAtSend.CanReturn;
-                bool done = false, ok = false; string resp = null;
-                yield return PostRequest(target, p.json, (s, r) => { done = true; ok = s; resp = r; });
+                // Codex round 2 HIGH 1: over a transport that carries the
+                // session token, a report goes out only WITH a fresh session.
+                // Without one it waits here: no send, no attempt spent, the
+                // entry kept, looked at again after the poll interval.
+                if (SecureRouteRules.OutboxSendGate(CredentialedTransportAllowed(target), SteamAuth.HasFreshToken)
+                    == SecureRouteRules.OutboxGate.WaitForSession)
+                {
+                    p.nextAt = Time.realtimeSinceStartup + (float)SecureRouteRules.OutboxSessionPollSeconds;
+                    if (!p.waitingForSession)
+                    {
+                        p.waitingForSession = true;
+                        Plugin.Log.LogInfo($"[OUTBOX] queued report waits for a session before it goes to {SecureRouteRules.HostPort(target)}: "
+                                           + $"sent only with the token, no attempt spent while it waits ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                    }
+                    continue;
+                }
+                if (p.waitingForSession)
+                {
+                    p.waitingForSession = false;
+                    Plugin.Log.LogInfo($"[OUTBOX] session held; sending the queued report to {SecureRouteRules.HostPort(target)} with it");
+                }
+                p.attempts++;
+                // Linear-ish backoff, capped at 4x the base interval. Measured
+                // from now rather than from the top of the pass — an earlier
+                // entry's attempt can have taken most of a minute.
+                p.nextAt = Time.realtimeSinceStartup
+                           + OUTBOX_RETRY_SECONDS
+                             * Math.Min(OUTBOX_RETRY_MAX_MULTIPLIER, (float)p.attempts);
+                // Whether THIS request carried the token, read from the header
+                // PostRequestRaw actually stamped (not from the address: a
+                // session dropped between the gate and the stamp leaves an
+                // https request without one).
+                bool done = false, ok = false, carried = false; string resp = null;
+                yield return PostRequest(target, p.json, (s, r) => { done = true; ok = s; resp = r; },
+                                         stamped => carried = stamped);
                 while (!done) yield return null;
                 if (ok)
                 {
@@ -2017,19 +2051,18 @@ namespace CompetitiveRounds
                     // retires one is the server, which turns the same refusal
                     // into a 403 once the sitting has been idle past its live
                     // window.
-                    bool answered401 = resp != null
-                        && (resp.StartsWith("HTTP 401", StringComparison.Ordinal) || resp.Contains("HTTP/1.1 401"));
-                    if (!SecureRouteRules.OutboxAttemptSpent(routeCanReturn, couldCarrySession, answered401))
+                    if (!SecureRouteRules.OutboxAttemptSpent(carried))
                     {
-                        // Sent without the session over the backup while the
-                        // secure route can still return: the 401 is about the
-                        // transport, not the report, so it does not spend the
-                        // budget that deletes a report. The attempt is given
+                        // Sent without the session token (the plaintext
+                        // backup, or a session dropped between the gate and the
+                        // stamp): an enforcing server never judged the report,
+                        // so the answer neither spends the budget that deletes
+                        // a report nor removes the entry. The attempt is given
                         // back and the next one waits the capped interval.
                         p.attempts--;
                         p.nextAt = Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER;
-                        Plugin.Log.LogInfo("[OUTBOX] unauthenticated retry on the backup answered 401; not counted "
-                                           + "while the secure route can return");
+                        Plugin.Log.LogInfo($"[OUTBOX] a retry without the session token failed ({Trunc(resp ?? "(no response)", 60)}); "
+                                           + $"not counted, the report stays queued ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
                         continue;
                     }
                     bool retryableTransient =
@@ -2263,9 +2296,29 @@ namespace CompetitiveRounds
                     }
                     Plugin.Log.LogWarning($"[SCR] TestQueueReport: the send failed ({Trunc(response ?? "", 160)}); queued as a game's report is");
                     EnqueueFailedReport($"{baseUrl}/api/v1/matches", json);   // as ReportMatch's failure branch
+                    SeedWitnessAttempts(want, json);
                 }));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestQueueReport failed: {ex.Message}"); }
+        }
+
+        /// <summary>Witness only (Codex round 2 HIGH 1's control S8/S9): a
+        /// TestQueueReport value ending "@N" sets the attempts the queued entry
+        /// has already spent to N, so the one attempt that would delete it is
+        /// the next counted one. Reached only from TickTestQueueReport, which
+        /// does nothing unless the broadcast-only witness harness is armed.</summary>
+        private static void SeedWitnessAttempts(string want, string json)
+        {
+            int at = want.LastIndexOf('@');
+            int seed;
+            if (at < 0 || !int.TryParse(want.Substring(at + 1), out seed) || seed < 0 || seed >= OUTBOX_MAX_ATTEMPTS) return;
+            foreach (var p in _pendingReports)
+            {
+                if (p.json != json) continue;
+                p.attempts = seed;
+                Plugin.Log.LogWarning($"[SCR] TestQueueReport: the queued entry's spent attempts set to {seed} of {OUTBOX_MAX_ATTEMPTS} (witness only)");
+                return;
+            }
         }
 
         private static string _testStaleTokenLast;
@@ -22696,11 +22749,16 @@ namespace CompetitiveRounds
         /// consent gate, the sensitive-transport gate, the version header, the
         /// session handling and the error formatting cannot differ between a
         /// caller that hands over text and one that hands over bytes.</summary>
-        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback)
+        /// <param name="onTokenStamped">Told once, before the request goes
+        /// out, whether StampVersionHeader attached X-Session-Token to it (the
+        /// header itself is read back): the outbox's spend rule asks what the
+        /// request carried, not what its address could have carried.</param>
+        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,
+                                               Action<bool> onTokenStamped = null)
         {
             return PostRequestRaw(url,
                                   string.IsNullOrEmpty(json) ? null : Encoding.UTF8.GetBytes(json),
-                                  callback, json);
+                                  callback, json, null, onTokenStamped);
         }
 
         /// <summary>The response text a request aborted by
@@ -22727,7 +22785,8 @@ namespace CompetitiveRounds
         private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,
                                                   Action<bool, string> callback,
                                                   string sensitiveProbe = null,
-                                                  Func<bool> abortIf = null)
+                                                  Func<bool> abortIf = null,
+                                                  Action<bool> onTokenStamped = null)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
@@ -22743,6 +22802,12 @@ namespace CompetitiveRounds
                 StampVersionHeader(request);
                 string _sentTok = SteamAuth.SessionToken;
                 request.timeout = 20;
+                if (onTokenStamped != null)
+                {
+                    bool stamped = false;
+                    try { stamped = !string.IsNullOrEmpty(request.GetRequestHeader("X-Session-Token")); } catch { }
+                    try { onTokenStamped(stamped); } catch { }
+                }
 
                 if (abortIf == null)
                 {

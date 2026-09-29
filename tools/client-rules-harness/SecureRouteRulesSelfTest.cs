@@ -126,6 +126,113 @@ namespace CompetitiveRounds
             return begun;
         }
 
+        /// <summary>The harness's stand-in for ApiClient.CredentialedTransportAllowed
+        /// on the addresses these cases use: the secure address carries the
+        /// token, the public plaintext backup does not.</summary>
+        private static bool OutboxModelCarries(string url)
+        {
+            return url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private sealed class OutboxRun
+        {
+            internal int SecureSendsBeforeSession, SecureSendsAfterSession, CarriedSends, TokenlessSecureSends, Settled;
+            internal int AttemptsAtSession = -1;
+            internal bool QueuedAtSession, QueuedAtEnd, Dropped;
+            internal readonly List<string> Events = new List<string>();
+            internal string Describe()
+            {
+                return "secureBefore=" + SecureSendsBeforeSession + " secureAfter=" + SecureSendsAfterSession
+                       + " carried=" + CarriedSends + " tokenlessSecure=" + TokenlessSecureSends
+                       + " attemptsAtSession=" + AttemptsAtSession + " queuedAtSession=" + QueuedAtSession
+                       + " settled=" + Settled + " queuedAtEnd=" + QueuedAtEnd + " dropped=" + Dropped
+                       + " | " + string.Join("; ", Events.ToArray());
+            }
+        }
+
+        /// <summary>ApiClient.OutboxPass over one queued report, a lap every
+        /// ten fake seconds for thirty minutes: resolve the address
+        /// (OutboxTarget), ask the gate (OutboxSendGate) with the session as
+        /// it is at that lap, send, and on a failure ask the spend rule
+        /// (OutboxAttemptSpent) with what the request CARRIED. The server
+        /// enforces: 200 to a request with the token, 401 to one without.
+        /// The route starts on the backup and is restored at 300 s (as
+        /// OnSecureRouteRestored does, the entry falls due within 20 s); the
+        /// session lands `sessionAfterRestore` seconds after that.
+        /// `dropBeforeStamp`: the first send after the session lands goes
+        /// out without the token although the gate saw it.</summary>
+        private static OutboxRun OutboxComposition(int seededAttempts, double sessionAfterRestore, bool dropBeforeStamp)
+        {
+            const string path = "/api/v1/matches";
+            const double restoreAt = 300.0;
+            var run = new OutboxRun();
+            var clock = new FakeClock();
+            var rt = BackupRoute(clock, TRetry);
+            string url = rt.CurrentBase + path;
+            int attempts = seededAttempts;
+            double nextAt = 30.0;
+            bool queued = true, restored = false, dropUsed = false;
+            double sessionAt = restoreAt + sessionAfterRestore;
+            for (double now = 0; now <= 1800.0 && queued; now += 10.0)
+            {
+                if (!restored && now >= restoreAt)
+                {
+                    var tt = new FakeTransport { AutoAnswer = true, AutoReading = ROk() };
+                    TickTimer(rt, clock, tt, now, now, TRetry, new RunLog());
+                    restored = rt.Restored;
+                    if (nextAt > now + 20.0) nextAt = now + 20.0;
+                    run.Events.Add("restored@" + now);
+                }
+                bool session = now >= sessionAt && restored;
+                if (session && run.AttemptsAtSession < 0)
+                {
+                    run.AttemptsAtSession = attempts;
+                    run.QueuedAtSession = queued;
+                }
+                if (now < nextAt) continue;
+                string target = OutboxTarget(url, rt.CurrentBase, rt.Bases(TSecure));
+                url = target;
+                bool transport = OutboxModelCarries(target);
+                if (OutboxSendGate(transport, session) == OutboxGate.WaitForSession)
+                {
+                    nextAt = now + OutboxSessionPollSeconds;
+                    continue;
+                }
+                attempts++;
+                nextAt = now + 60.0 * Math.Min(4.0, attempts);
+                bool carried = transport && session;
+                if (carried && dropBeforeStamp && !dropUsed) { carried = false; dropUsed = true; }
+                if (transport)
+                {
+                    if (session) run.SecureSendsAfterSession++; else run.SecureSendsBeforeSession++;
+                    if (!carried) run.TokenlessSecureSends++;
+                }
+                if (carried) run.CarriedSends++;
+                if (carried)
+                {
+                    run.Settled++;
+                    queued = false;
+                    run.Events.Add("settled@" + now);
+                    break;
+                }
+                if (!OutboxAttemptSpent(carried))
+                {
+                    attempts--;
+                    nextAt = now + 60.0 * 4.0;
+                    continue;
+                }
+                if (attempts >= 94)
+                {
+                    queued = false;
+                    run.Dropped = true;
+                    run.Events.Add("dropped@" + now + " attempt " + attempts);
+                }
+            }
+            if (run.AttemptsAtSession < 0) { run.AttemptsAtSession = attempts; run.QueuedAtSession = queued; }
+            run.QueuedAtEnd = queued;
+            return run;
+        }
+
         private static string Times(List<double> ts)
         {
             var parts = new List<string>();
@@ -635,37 +742,52 @@ namespace CompetitiveRounds
                       keptLan == lan && keptLook == lookalike,
                       "lan=" + keptLan + " lookalike=" + keptLook);
 
-                bool spentBackup = OutboxAttemptSpent(true, false, true);
-                Check(r, "O4 a 401 to an unauthenticated retry on the backup spends no attempt while the secure route can return",
-                      !spentBackup, "spent=" + spentBackup);
-                bool c1 = OutboxAttemptSpent(false, false, true), c2 = OutboxAttemptSpent(true, true, true),
-                     c3 = OutboxAttemptSpent(true, false, false);
-                Check(r, "O4c control: it spends one when the route cannot return, when the token rode along, or when it was not a 401",
-                      c1 && c2 && c3, "noReturn=" + c1 + " carried=" + c2 + " not401=" + c3);
+                bool spentTokenless = OutboxAttemptSpent(false);
+                bool spentCarried = OutboxAttemptSpent(true);
+                Check(r, "O4 a failed retry that did not carry the session token spends no attempt",
+                      !spentTokenless, "spent=" + spentTokenless);
+                Check(r, "O4c control: a failed retry that carried the token spends one",
+                      spentCarried, "spent=" + spentCarried);
+                var waitNoSession = OutboxSendGate(true, false);
+                var sendWithSession = OutboxSendGate(true, true);
+                var sendBackup = OutboxSendGate(false, false);
+                Check(r, "O4b over a transport that carries the token, a report without a fresh session waits and is not sent",
+                      waitNoSession == OutboxGate.WaitForSession, "gate=" + waitNoSession);
+                Check(r, "O4bc control: with a fresh session it is sent; over the plaintext backup (no token either way) it is sent",
+                      sendWithSession == OutboxGate.Send && sendBackup == OutboxGate.Send,
+                      "session=" + sendWithSession + " backup=" + sendBackup);
 
                 // The outbox's ladder against a server that answers 401 to any
                 // request without the token (enforcement armed): 94 counted
-                // attempts delete a report.
+                // attempts delete a report. "Carried" is what the request
+                // carried: a session held at the send AND a transport that
+                // stamps it (Codex round 2: the round-2 model read "https" as
+                // carried, so it could not tell a restored route without a
+                // session from one with).
                 Func<bool, bool, string> ladder = (followRoute, restoreAt10) =>
                 {
                     var c = new FakeClock();
                     var rt = BackupRoute(c, TRetry);
                     string url = rt.CurrentBase + path;
                     int attempts = 0, sends = 0;
+                    bool session = false;
                     for (int i = 1; i <= 400; i++)
                     {
                         if (restoreAt10 && i == 10)
                         {
                             var tt = new FakeTransport { AutoAnswer = true, AutoReading = ROk() };
                             TickTimer(rt, c, tt, 300, 300, TRetry, new RunLog());
+                            session = true;
                         }
                         string target = followRoute ? OutboxTarget(url, rt.CurrentBase, rt.Bases(TSecure)) : url;
                         url = target;
+                        bool transport = OutboxModelCarries(target);
+                        if (OutboxSendGate(transport, session) == OutboxGate.WaitForSession) continue;
                         attempts++;
                         sends++;
-                        bool carried = target.StartsWith("https://", StringComparison.Ordinal);
+                        bool carried = transport && session;
                         if (carried) return "delivered at send " + sends + " to " + target;
-                        if (!OutboxAttemptSpent(rt.CanReturn, false, true)) attempts--;
+                        if (!OutboxAttemptSpent(carried)) attempts--;
                         if (attempts >= 94) return "deleted at send " + sends + " (attempt " + attempts + ")";
                     }
                     return "still queued after 400 sends, attempt " + attempts;
@@ -675,10 +797,32 @@ namespace CompetitiveRounds
                 string neverRun = ladder(true, false);
                 Check(r, "O5 with enforcement armed a report queued on the backup is delivered once, with the token, after the restore",
                       fixedRun == "delivered at send 10 to " + TSecure + path, fixedRun);
-                Check(r, "O5c control: the queued URL kept, as in round 1, posts to the backup until attempt 94 deletes the report",
-                      oldRun == "deleted at send 103 (attempt 94)", oldRun);
+                Check(r, "O5c control: the queued URL kept, as in round 1, never reaches the secure base and is never delivered",
+                      oldRun == "still queued after 400 sends, attempt 0", oldRun);
                 Check(r, "O6 a session that never leaves the backup keeps the report queued instead of deleting it at 94",
                       neverRun == "still queued after 400 sends, attempt 0", neverRun);
+
+                // O7, Codex round 2 HIGH 1's falsifier as a composition: the
+                // report is queued on the backup with NO session and 93 of 94
+                // attempts already spent, the route is restored while the
+                // Steam exchange stays unavailable for two minutes, then a
+                // session lands. Every pass is modelled on ApiClient.OutboxPass
+                // (resolve, gate, spend) against an enforcing server.
+                var o7 = OutboxComposition(93, 120.0, false);
+                Check(r, "O7 restored without a session for 2 min: no send to the secure base, no attempt spent, the entry kept",
+                      o7.SecureSendsBeforeSession == 0 && o7.AttemptsAtSession == 93 && o7.QueuedAtSession,
+                      o7.Describe());
+                Check(r, "O7b then the session lands: exactly one send, with the token, one settlement, an empty outbox",
+                      o7.SecureSendsAfterSession == 1 && o7.CarriedSends == 1 && o7.Settled == 1 && !o7.QueuedAtEnd && !o7.Dropped,
+                      o7.Describe());
+                var o7c = OutboxComposition(93, 0.0, false);
+                Check(r, "O7c control: with the session already held at the restore, the first pass after it delivers",
+                      o7c.Settled == 1 && o7c.SecureSendsBeforeSession == 0 && o7c.SecureSendsAfterSession == 1, o7c.Describe());
+                // O8: the gate saw a session, but it was dropped before the
+                // stamp, so the request went out without the token.
+                var o8 = OutboxComposition(93, 120.0, true);
+                Check(r, "O8 a request sent without the token after the gate passed spends nothing and removes nothing",
+                      !o8.Dropped && o8.Settled == 1 && o8.TokenlessSecureSends == 1, o8.Describe());
             }
 
             // -- R and K: the portal press (Codex round 1 LOW 1 and LOW 2) --------
