@@ -410,7 +410,7 @@ def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spe
     told = raw.index("onTokenStamped(stamped);")
     assert stamp < read < told < raw.index("request.SendWebRequest()"), raw
     post = code_of(API, "private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,")
-    assert "callback, json, null, onTokenStamped, timeoutSeconds);" in post, post
+    assert "callback, json, null, onTokenStamped, timeoutSeconds, redactErrorText);" in post, post
     rules = code_of(RULES, "internal static OutboxAnswer OutboxAnswerFor(bool answered2xx, bool requestCarriedToken)")
     assert "if (!requestCarriedToken) return OutboxAnswer.GiveBack;" in rules, rules
 
@@ -520,7 +520,7 @@ def test_both_portal_waits_outlast_the_auth_exchange_they_wait_for():
     auth = code_of(API, "public static void PostSteamAuth(string ticketHex, Action<string> onEnded)")
     assert auth.count("timeoutSeconds: SecureRouteRules.SteamAuthExchangeTimeoutSeconds") == 1, auth
     post = code_of(API, "private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,")
-    assert "callback, json, null, onTokenStamped, timeoutSeconds);" in post, post
+    assert "callback, json, null, onTokenStamped, timeoutSeconds, redactErrorText);" in post, post
     raw = code_of(API, "private static IEnumerator PostRequestRaw(")
     assert raw.count("request.timeout = timeoutSeconds;") == 1 and "request.timeout = 20;" not in raw, raw
 
@@ -665,6 +665,35 @@ def test_every_portal_mint_that_opens_nothing_says_why_in_the_log():
     cut = line.index("line.Substring(0, MintFailureLineMax - 3 - tail.Length)")
     assert flat < scrub < cut, line
     assert line.count("Substring(") == 1 and "response.Substring" not in line, line
+
+
+def test_the_mint_failure_text_is_scrubbed_whole_before_any_cut():
+    """Codex round 3 LOW 3: FormatRequestError cut the raw body at 300 before
+    the mint's failure line scrubbed it, so a credential straddling that cut
+    left the patterns' sight, and the key=value pattern had lost
+    "authorization" from the documented key set. The text is now built by one
+    rule (SecureRouteRules.RequestErrorText, harness M3, M3c): with `redact`,
+    the WHOLE body is scrubbed and only then cut; the mint asks for it; and
+    the key=value pattern names every key the JSON-member pattern names."""
+    fmt = code_of(API, "private static string FormatRequestError(UnityWebRequest request, bool redact = false)")
+    assert "Substring(" not in fmt, "FormatRequestError cuts the body itself again: " + fmt
+    assert ("return SecureRouteRules.RequestErrorText(request.responseCode, body, request.error, retryAfter, redact);"
+            in fmt), fmt
+    text = code_of(RULES, "internal static string RequestErrorText(long responseCode, string body, string error, string retryAfter, bool redact)")
+    scrub = text.index("body = LogScrub.RedactCredentials(body);")
+    cut = text.index("body = body.Substring(0, RequestErrorBodyMax);")
+    assert scrub < cut and text.count("Substring(") == 1, text
+    assert "internal const int RequestErrorBodyMax = 300;" in code_of(RULES)
+    raw = code_of(API, "private static IEnumerator PostRequestRaw(")
+    assert raw.count("FormatRequestError(request, redactErrorText)") == 1 and "FormatRequestError(request))" not in raw, raw
+    mint = code_of(API, "private static void MintPortalSessionAndOpen(bool remintOnRefusal)")
+    assert mint.count("redactErrorText: true));") == 1, mint
+    scrubsrc = code_of(Path(ROOT) / "plugin" / "LogScrub.cs")
+    keys = "token|secret|password|passwd|ticket|api_?key|authorization|credential"
+    for name in ("CredentialJsonPattern", "CredentialPairPattern"):
+        decl = scrubsrc[scrubsrc.index("private static readonly Regex " + name):]
+        decl = decl[:decl.index(";")]
+        assert "(?:%s)" % keys in decl, "%s does not name the documented key set: %s" % (name, decl)
 
 def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
     """The local harness (TestBackupUrl, TestQueueReport) and the stale-token

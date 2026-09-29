@@ -1102,6 +1102,36 @@ namespace CompetitiveRounds
                       bareClean, bare);
                 string plain = PortalMintFailureLine("https://scr.example.org:8443", false, "HTTP 403: {\"detail\":\"banned\"}", false);
                 string noTok = PortalMintFailureLine("https://scr.example.org:8443", true, "{\"token\":\"" + sentinel + "\"}", true);
+                // M3 (Codex round 3 LOW 3's falsifier): the real composition,
+                // FormatRequestError's text (RequestErrorText, redact as the
+                // mint asks) into PortalMintFailureLine. The body carries a short
+                // authorization= value, then a 200-character bare token (which
+                // the scrub shortens to "[redacted]", pulling what follows into
+                // the line's first 240 characters), then a JSON token member
+                // whose value starts before body character 300 and closes after
+                // it: cut first, its closing quote is gone and the pattern
+                // cannot see it.
+                string lead = "{\"detail\":\"refused\",\"why\":\"authorization=abcDEF0123 \",\"trace\":\"Z9" + new string('k', 198) + "\",\"pad\":\"";
+                string straddle = "STRADDLE7qx" + new string('y', 30);
+                string bodyM3 = lead + new string('.', 285 - lead.Length - "\",\"token\":\"".Length) + "\",\"token\":\"" + straddle + "\"}";
+                int valueAt = bodyM3.IndexOf("STRADDLE7", StringComparison.Ordinal);
+                string text = RequestErrorText(502, bodyM3, "HTTP/1.1 502 Bad Gateway", null, true);
+                string lineM3 = PortalMintFailureLine("https://scr.example.org:8443", false, text, false);
+                bool m3Clean = lineM3.IndexOf("abcDEF0123", StringComparison.Ordinal) < 0
+                               && lineM3.IndexOf("STRADDLE7", StringComparison.Ordinal) < 0
+                               && lineM3.Length <= MintFailureLineMax && lineM3.IndexOf('\n') < 0
+                               && lineM3.StartsWith("[I18N] portal mint failed over https://scr.example.org:8443: HTTP 502: ", StringComparison.Ordinal);
+                Check(r, "M3 FormatRequestError's text into the mint line: an authorization= value and a credential straddling character 300 are both gone, 240 held",
+                      valueAt < RequestErrorBodyMax && valueAt + straddle.Length > RequestErrorBodyMax && m3Clean,
+                      "valueAt=" + valueAt + " len=" + lineM3.Length + "/" + MintFailureLineMax + " line=" + lineM3);
+                string keep = RequestErrorText(409, "{\"detail\":\"already recorded (duplicate)\"}", "HTTP/1.1 409 Conflict", "30", true);
+                string keepRaw = RequestErrorText(409, "{\"detail\":\"already recorded (duplicate)\"}", "HTTP/1.1 409 Conflict", "30", false);
+                string longRaw = RequestErrorText(500, new string('e', 400), "x", null, false);
+                Check(r, "M3c control: a body with no credential reads the same scrubbed or not, prefix and Retry-After kept, and the cut is 300",
+                      keep == keepRaw && keep == "HTTP 409: {\"detail\":\"already recorded (duplicate)\"}\nRetry-After: 30"
+                          && longRaw == "HTTP 500: " + new string('e', 300),
+                      keep.Replace("\n", "\\n") + " || len=" + longRaw.Length);
+
                 Check(r, "M1c control: a short answer with no credential is logged whole, and a success is named, never printed",
                       plain == "[I18N] portal mint failed over https://scr.example.org:8443: HTTP 403: {\"detail\":\"banned\"}"
                           && noTok == "[I18N] portal mint failed over https://scr.example.org:8443: answered without a token (after the one re-mint)",

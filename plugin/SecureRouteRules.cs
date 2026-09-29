@@ -801,6 +801,36 @@ namespace CompetitiveRounds
                 : line.Substring(0, MintFailureLineMax - 3 - tail.Length) + "..." + tail;
         }
 
+        /// <summary>How much of a failed request's response body its error text
+        /// keeps (ApiClient.FormatRequestError).</summary>
+        internal const int RequestErrorBodyMax = 300;
+
+        /// <summary>The error text ApiClient.FormatRequestError gives a failed
+        /// request: "HTTP &lt;code&gt;: &lt;body, at most RequestErrorBodyMax
+        /// characters&gt;" (Unity's error when the body is empty, and Unity's
+        /// error alone when there was no status), then a "Retry-After:" line
+        /// when the answer carried one. Every consumer's prefix match reads
+        /// the same text as before. `redact`: the caller logs this text (the
+        /// portal mint, the outbox), so the WHOLE body is passed through
+        /// LogScrub.RedactCredentials BEFORE it is cut (Codex round 3 LOW 3):
+        /// cutting first left a credential that straddled the cut outside
+        /// every pattern's sight.</summary>
+        internal static string RequestErrorText(long responseCode, string body, string error, string retryAfter, bool redact)
+        {
+            body = body ?? "";
+            if (redact)
+            {
+                body = LogScrub.RedactCredentials(body);
+                error = LogScrub.RedactCredentials(error);
+            }
+            if (body.Length > RequestErrorBodyMax) body = body.Substring(0, RequestErrorBodyMax);
+            string line = responseCode > 0
+                ? "HTTP " + responseCode + ": " + (string.IsNullOrEmpty(body) ? error : body)
+                : error;
+            if (!string.IsNullOrEmpty(retryAfter) && !string.IsNullOrEmpty(line)) line += "\nRetry-After: " + retryAfter.Trim();
+            return line;
+        }
+
         internal enum MintAction { Open, RemintOnce, Fail }
 
         /// <summary>What the portal mint's answer means. A token opens the

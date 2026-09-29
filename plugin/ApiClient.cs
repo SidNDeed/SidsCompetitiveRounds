@@ -6083,7 +6083,8 @@ namespace CompetitiveRounds
                     }
                     Plugin.Log.LogInfo($"[I18N] portal opened over {portalBase}");
                     Application.OpenURL($"{portalBase}/translate#token={token}");
-                }));
+                },
+                redactErrorText: true));   // the failure text is logged: scrubbed whole before it is cut
         }
 
         /// <summary>After the portal mint refused the session: wait (bounded)
@@ -22790,12 +22791,16 @@ namespace CompetitiveRounds
         /// <param name="timeoutSeconds">The request's timeout. The session
         /// exchange passes SecureRouteRules.SteamAuthExchangeTimeoutSeconds,
         /// which the portal's readiness wait is derived from.</param>
+        /// <param name="redactErrorText">The caller logs the failure text: its
+        /// whole body is scrubbed of credentials before it is cut
+        /// (FormatRequestError; Codex round 3 LOW 3).</param>
         private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,
-                                               Action<bool> onTokenStamped = null, int timeoutSeconds = 20)
+                                               Action<bool> onTokenStamped = null, int timeoutSeconds = 20,
+                                               bool redactErrorText = false)
         {
             return PostRequestRaw(url,
                                   string.IsNullOrEmpty(json) ? null : Encoding.UTF8.GetBytes(json),
-                                  callback, json, null, onTokenStamped, timeoutSeconds);
+                                  callback, json, null, onTokenStamped, timeoutSeconds, redactErrorText);
         }
 
         /// <summary>The response text a request aborted by
@@ -22824,7 +22829,8 @@ namespace CompetitiveRounds
                                                   string sensitiveProbe = null,
                                                   Func<bool> abortIf = null,
                                                   Action<bool> onTokenStamped = null,
-                                                  int timeoutSeconds = 20)
+                                                  int timeoutSeconds = 20,
+                                                  bool redactErrorText = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
@@ -22889,11 +22895,14 @@ namespace CompetitiveRounds
                     success,
                     success
                         ? request.downloadHandler.text
-                        : FormatRequestError(request));
+                        : FormatRequestError(request, redactErrorText));
             }
         }
 
-        private static string FormatRequestError(UnityWebRequest request)
+        /// <param name="redact">The caller logs this text: the whole response
+        /// body is scrubbed of credentials BEFORE it is cut (Codex round 3
+        /// LOW 3; SecureRouteRules.RequestErrorText).</param>
+        private static string FormatRequestError(UnityWebRequest request, bool redact = false)
         {
             if (request == null) return "request failed";
             // Carry the RESPONSE BODY, not just Unity's status text (lobby
@@ -22904,10 +22913,6 @@ namespace CompetitiveRounds
             // pattern-matches it for permanence.
             string body = "";
             try { body = request.downloadHandler?.text ?? ""; } catch { }
-            if (body.Length > 300) body = body.Substring(0, 300);
-            string line = request.responseCode > 0
-                ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}"
-                : request.error;
             // Sept 6 item b (review r1 M14): a 429 says WHEN to retry in its
             // Retry-After header, and for the daily window that header is the
             // only honest figure — carry it as a trailing line so a caller can
@@ -22917,8 +22922,9 @@ namespace CompetitiveRounds
             // extractors) sees exactly what it saw before.
             string retryAfter = null;
             try { retryAfter = request.GetResponseHeader("Retry-After"); } catch { }
-            if (!string.IsNullOrEmpty(retryAfter) && !string.IsNullOrEmpty(line)) line += "\nRetry-After: " + retryAfter.Trim();
-            return line;
+            // The text itself (the body cut to 300, after the scrub when
+            // `redact`) is built by one rule the harness executes.
+            return SecureRouteRules.RequestErrorText(request.responseCode, body, request.error, retryAfter, redact);
         }
 
         // ── Sept 6 (Sid, in-game mail): request + slicer aliases for MailClient.cs ──

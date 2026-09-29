@@ -276,7 +276,12 @@ namespace CompetitiveRounds
         // NOT a pass of Scrub: the bundle's bound above ("any token or credential
         // other than that ticket" is not removed) is unchanged. A caller that
         // logs a server's answer (the portal mint's failure line, Codex round 2
-        // LOW 4) runs it through RedactCredentials first.
+        // LOW 4) runs it through RedactCredentials first. The JSON-member and
+        // key=value patterns name the same keys (Codex round 3 LOW 3: the pair
+        // pattern had lost "authorization"), and a scheme word (Bearer, Basic)
+        // before a value is taken with it. A caller that also shortens the
+        // text scrubs the WHOLE text first (SecureRouteRules.RequestErrorText),
+        // so a cut can never split a credential out of these patterns' sight.
 
         private const string CredentialRedacted = "[redacted]";
 
@@ -289,7 +294,7 @@ namespace CompetitiveRounds
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         private static readonly Regex CredentialPairPattern = new Regex(
-            "\\b([A-Za-z0-9_-]*(?:token|secret|password|passwd|ticket|api_?key|credential)[A-Za-z0-9_-]*=)[^&\\s\"'<>#;,]+",
+            "\\b([A-Za-z0-9_-]*(?:token|secret|password|passwd|ticket|api_?key|authorization|credential)[A-Za-z0-9_-]*=)(?:(?:Bearer|Basic)\\s+)?[^&\\s\"'<>#;,]+",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         private static readonly Regex TokenShapedPattern = new Regex("[A-Za-z0-9_-]{32,}", RegexOptions.CultureInvariant);
