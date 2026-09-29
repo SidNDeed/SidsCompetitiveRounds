@@ -51,11 +51,13 @@ UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it
 
 OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_refusal", "_pc_open_and_show",
                                "_pc_reveal_opened", "cmd_pc_buypack", "_pc_open_verdict", "_pc_buy_pending",
-                               "_pc_buy_pending_write", "_pc_buy_and_show"}
+                               "_pc_buy_pending_write", "_pc_buy_and_show", "_pc_buy_player",
+                               "_pc_buy_settled_ok"}
 # _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
 # the test's own folder instead of the container's /opt/bot-state
 OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
-                                   "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED"}
+                                   "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED",
+                                   "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER"}
 
 
 def e2e(monkeypatch, tmp_path, fn, **kw):
@@ -480,8 +482,14 @@ async def ledger(env, who):
 
 
 async def buy_internal(env, discord_id, nonce, pay, **extra):
+    """A purchase through the bot's route. It names the player it is for as
+    the bot does (round 3, M1): the player the Discord id is linked to at
+    this call, unless `player_steam_id` is passed (None: not named)."""
     params = {"discord_id": str(discord_id), "nonce": nonce, "pay": pay}
-    params.update(extra)
+    if "player_steam_id" not in extra:
+        extra["player_steam_id"] = await env.val(f"SELECT steam_id FROM {SCHEMA}.players WHERE discord_id = :d",
+                                                 {"d": str(discord_id)})
+    params.update({k: v for k, v in extra.items() if v is not None})
     return await env.client.post("/api/v1" + OPEN, headers=env.ihead(), params=params)
 
 
@@ -590,6 +598,9 @@ def test_d2_the_route_takes_a_held_pack_or_a_purchase_and_nothing_else(monkeypat
             {"discord_id": own.discord, "pack_id": pack_id, "nonce": "d2-form-" + secrets.token_hex(8),
              "pay": "gold"},                                                           # both forms
             {"discord_id": own.discord, "pack_id": pack_id, "expected_price": 1},
+            # round 3, M1: a purchase names its player, and a held pack takes none
+            {"discord_id": own.discord, "nonce": "d2-form-" + secrets.token_hex(8), "pay": "gold"},
+            {"discord_id": own.discord, "pack_id": pack_id, "player_steam_id": own.steam},
         ]
         for params in cases:
             r = await env.client.post("/api/v1" + OPEN, headers=head, params=params)
@@ -665,8 +676,9 @@ def test_d2_buypack_buys_opens_and_posts_the_pack(monkeypatch, tmp_path):
         opens = calls_to(rig, OPEN)
         assert len(opens) == 1, [(c.method, c.path) for c in rig.calls]
         params = opens[0].params
-        assert set(params) == {"discord_id", "locale", "nonce", "pay"}, params
+        assert set(params) == {"discord_id", "locale", "nonce", "pay", "player_steam_id"}, params
         assert params["discord_id"] == own.discord and params["pay"] == "gold"
+        assert params["player_steam_id"] == own.steam
         assert re.fullmatch(r"[0-9a-f]{32}", params["nonce"]), params["nonce"]
         assert len(rig.sent) == 1, [s.content for s in rig.sent]
         post = rig.sent[0]
@@ -1107,7 +1119,7 @@ def test_m1_a_purchase_left_unconfirmed_outlasts_a_restart_of_the_bot(monkeypatc
         holder["rig"] = before
         await buypack(before, own.discord, "gold")
         nonce = calls_to(before, OPEN)[0].params["nonce"]
-        assert journal(before) == {own.discord: {"nonce": nonce, "pay": "gold"}}
+        assert journal(before) == {own.discord: {"nonce": nonce, "pay": "gold", "player": own.steam}}
         env.plan([(s, False, False) for s in subs])
         after = rig_over(env)
         assert after.ns["_PC_BUY_PENDING_FILE"] == before.ns["_PC_BUY_PENDING_FILE"]
@@ -1156,12 +1168,12 @@ def test_m1_the_nonce_is_in_the_journal_before_the_purchase_is_sent(monkeypatch,
         holder["rig"] = rig
         await buypack(rig, own.discord, "gold")
         (nonce, on_disk), = at_send
-        assert on_disk == {own.discord: {"nonce": nonce, "pay": "gold"}}, on_disk
+        assert on_disk == {own.discord: {"nonce": nonce, "pay": "gold", "player": own.steam}}, on_disk
         assert journal(rig) == {} and len(rig.sent) == 1 and rig.sent[0].file is not None
     e2e(monkeypatch, tmp_path, body)
 
 
-@pytest.mark.parametrize("state", ["not on a mounted volume", "unreadable", "not purchases"])
+@pytest.mark.parametrize("state", ["not on a mounted volume", "unreadable", "not purchases", "no player named"])
 def test_m1_a_journal_that_cannot_hold_the_nonce_buys_nothing(state, monkeypatch, tmp_path):
     async def body(env):
         own, subs = await world(env)
@@ -1173,13 +1185,17 @@ def test_m1_a_journal_that_cannot_hold_the_nonce_buys_nothing(state, monkeypatch
                 f.write("{half a journal")
         elif state == "not purchases":
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({own.discord: {"nonce": "", "pay": "gold"}}, f)
+                json.dump({own.discord: {"nonce": "", "pay": "gold", "player": own.steam}}, f)
+        elif state == "no player named":   # round 3, M1: the round-2 shape cannot name its player
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({own.discord: {"nonce": "n" * 32, "pay": "gold"}}, f)
         await buypack(rig, own.discord, "gold")
         assert calls_to(rig, OPEN) == [], [(c.method, c.path) for c in rig.calls]
         assert [s.content for s in rig.sent] == [rig.ns["_PC_BUY_PAUSED"]]
         assert (await purse(env, own))["gold_spent"] == 0 and await ledger(env, own) == []
         why = {"not on a mounted volume": "is not a mounted volume", "unreadable": "could not be read",
-               "not purchases": "holds something other than purchases"}[state]
+               "not purchases": "holds something other than purchases",
+               "no player named": "holds something other than purchases"}[state]
         assert any(line.startswith("[PC-BUY]") and why in line for line in rig.logs), rig.logs
     e2e(monkeypatch, tmp_path, body)
 
@@ -1258,6 +1274,9 @@ VERDICTS = [
     (403, {"detail": "service_account_forbidden"}, False, "refused"),
     (410, {"detail": "Account deleted"}, False, "refused"),
     (410, {"detail": "Account deleted"}, True, "unconfirmed"),
+    (412, {"detail": {"error": "player_changed", "player_steam_id": "s", "recorded": "done"}}, True, "moved"),
+    (412, {"detail": {"error": "player_changed", "player_steam_id": "s", "recorded": None}}, False, "moved"),
+    (412, {"detail": "Precondition Failed"}, False, "unconfirmed"),
     (404, {"detail": "Not Found"}, False, "unconfirmed"),
     (0, None, False, "unconfirmed"),
     (500, {"detail": "Internal Server Error"}, False, "unconfirmed"),
@@ -1280,3 +1299,185 @@ def test_m1_each_answer_is_read_as_opened_refused_or_unconfirmed(status, body, r
     rig = H.BotRig(never, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
     assert rig.ns["_pc_open_verdict"](status, body, replayed) == verdict
     assert rig.calls == []
+
+
+# -- Round 3, M1: a journaled purchase is bound to the player it was bought for -------------------
+# Codex round 2 MEDIUM 1: the journal kept only discord id -> {nonce, pay}, while the api's key is
+# (player, nonce) and its actor is the Discord id's player at each request. A Discord id linked to
+# another player between the commit and a replay therefore made the replay a second purchase, for
+# that other player. Now the journal names the player the purchase is for, every send names it,
+# and the api refuses (412 player_changed) a purchase whose Discord id has since moved, before any
+# write; the bot settles such an entry as the earlier player's.
+
+async def pack_result(env, who, nonce):
+    """The mod's own recovery read, /pc/packs/result, keyed on the player and the nonce."""
+    canon = env.main._pc.canon_result(who.steam, nonce)
+    return await env.client.get("/api/v1/pc/packs/result", headers=env.mod_headers(who),
+                                params={"steam_id": who.steam, "sig": H.mod_sig(canon), "nonce": nonce})
+
+
+async def two_players(env):
+    """The buyer A (linked, funded) and B (funded, linked to nothing yet): the
+    Discord id moves from A to B in these tests."""
+    own, subs = await world(env)
+    other = await env.player("other", rating=None, discord=False)
+    price = price_of(env, "gold")
+    await set_gold(env, own, 10 * price)
+    await set_gold(env, other, 10 * price)
+    return own, other, subs, price
+
+
+async def holdings(env, who):
+    """(gold spent, bought packs, ledger rows) of one player."""
+    return (await purse(env, who))["gold_spent"], await bought_packs(env, who), len(await ledger(env, who))
+
+
+def deal(env, subs):
+    """One more scripted deal, so a second purchase - should one be made - can mint."""
+    if not env._plans:
+        env.plan([(s, False, False) for s in subs])
+
+
+def test_m1r3_the_api_refuses_a_purchase_whose_discord_id_is_now_linked_to_another_player(monkeypatch, tmp_path):
+    """The server half. A/N commits; the Discord id moves to B; the same key,
+    naming A, is refused 412 player_changed with A's recorded status and no
+    write; a key never committed is refused the same way (recorded null); B
+    is untouched; A/N stays readable on /pc/packs/result; and the Discord id
+    buys for B only when a purchase names B."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        nonce = "m1r3-api-" + secrets.token_hex(8)
+        first = await buy_internal(env, d, nonce, "gold")
+        assert first.status_code == 200 and first.json()["player_steam_id"] == own.steam, first.text[:300]
+        await env.rebind(d, other)
+        deal(env, subs)
+        again = await buy_internal(env, d, nonce, "gold", player_steam_id=own.steam)
+        spent, packs, rows = await holdings(env, other)
+        assert (spent, packs, rows) == (0, 0, 0), f"B charged {spent} gold, holds {packs} packs, {rows} ledger rows"
+        assert again.status_code == 412, (again.status_code, again.text[:300])
+        assert again.json()["detail"] == {"error": "player_changed", "player_steam_id": own.steam,
+                                          "recorded": "done"}, again.json()
+        never = await buy_internal(env, d, "m1r3-api-never-" + secrets.token_hex(8), "gold",
+                                   player_steam_id=own.steam)
+        assert never.status_code == 412 and never.json()["detail"]["recorded"] is None, never.text[:300]
+        assert await holdings(env, other) == (0, 0, 0)
+        assert await holdings(env, own) == (price, 1, 1)
+        r = await pack_result(env, own, nonce)
+        assert r.status_code == 200 and r.json()["pack_id"] == first.json()["pack_id"], r.text[:300]
+        deal(env, subs)
+        ok = await buy_internal(env, d, "m1r3-api-b-" + secrets.token_hex(8), "gold", player_steam_id=other.steam)
+        assert ok.status_code == 200 and ok.json()["player_steam_id"] == other.steam, ok.text[:300]
+        assert await holdings(env, other) == (price, 1, 1) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def commit_then_rebind(holder, env, to):
+    """The reviewer's falsifier, automatic-retry arm: the first purchase send
+    commits at the api, the Discord id is then linked to `to` through the
+    production link route, and the answer is lost - replaced by a 500 - on
+    its way back. Every later send gets the api's own answer."""
+    state = {"n": 0}
+
+    async def stub(call):
+        if call.method == "POST" and call.path == OPEN and call.params.get("nonce"):
+            state["n"] += 1
+            if state["n"] == 1:
+                await holder["rig"].base(call)
+                await env.rebind(call.params["discord_id"], to)
+                return H.Reply(500, json={"detail": "Internal Server Error"})
+        return None
+    return stub
+
+
+def test_m1r3_a_rebind_before_the_automatic_retry_charges_the_new_player_nothing(monkeypatch, tmp_path):
+    """Commit A/N behind a 500, the Discord id moves to B, and the bot's own
+    replay of N names A: B's balance and pack count are unchanged, A holds
+    exactly one ledger row and one pack, the entry is settled as A's with one
+    plain line, and A/N stays readable by its journaled key. The decisive
+    line is the first assertion; under the round-2 journal shape (no player
+    named, the actor re-resolved) B is charged."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        holder = {}
+        rig = rig_over(env, commit_then_rebind(holder, env, other))
+        holder["rig"] = rig
+        d = own.discord
+        deal(env, subs)
+        await buypack(rig, d, "gold")
+        spent, packs, rows = await holdings(env, other)
+        assert (spent, packs, rows) == (0, 0, 0), f"B charged {spent} gold, holds {packs} packs, {rows} ledger rows"
+        assert await holdings(env, own) == (price, 1, 1)
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 412], [c.status for c in opens]
+        assert len({c.params["nonce"] for c in opens}) == 1
+        assert [c.params["player_steam_id"] for c in opens] == [own.steam, own.steam]
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_BUY_MOVED"]], [s.content for s in rig.sent]
+        assert all(ord(ch) < 128 for ch in rig.ns["_PC_BUY_MOVED"])
+        assert journal(rig) == {}
+        r = await pack_result(env, own, opens[0].params["nonce"])
+        assert r.status_code == 200 and r.json()["status"] == "done" and r.json()["price"] == price, r.text[:300]
+        assert any("settled as the earlier player's" in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1r3_a_rebind_before_a_restart_replay_charges_the_new_player_nothing(monkeypatch, tmp_path):
+    """The restart arm of the falsifier: every answer of A/N is lost after its
+    commit, so the entry stays in the journal naming A; the Discord id moves
+    to B; a new bot process's /buypack replays N naming A and is refused.
+    B is untouched, A holds one pack and one ledger row, the new process sends
+    exactly that one key and draws no fresh nonce on that entry, and A/N stays
+    readable. Only the NEXT /buypack, a new purchase, buys for B."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        holder = {}
+        lost = [H.Reply(500, json={"detail": "Internal Server Error"}), H.Reply(200, b""), None]
+        before = rig_over(env, lose_first_answers(holder, lost))
+        holder["rig"] = before
+        d = own.discord
+        await buypack(before, d, "gold")
+        nonce = calls_to(before, OPEN)[0].params["nonce"]
+        assert journal(before) == {d: {"nonce": nonce, "pay": "gold", "player": own.steam}}
+        await env.rebind(d, other)
+        deal(env, subs)
+        after = rig_over(env)
+        await buypack(after, d, "gold")
+        spent, packs, rows = await holdings(env, other)
+        assert (spent, packs, rows) == (0, 0, 0), f"B charged {spent} gold, holds {packs} packs, {rows} ledger rows"
+        assert await holdings(env, own) == (price, 1, 1)
+        assert [(c.params["nonce"], c.params["player_steam_id"], c.status) for c in calls_to(after, OPEN)] == \
+            [(nonce, own.steam, 412)]
+        assert [s.content for s in after.sent] == [after.ns["_PC_BUY_MOVED"]] and journal(after) == {}
+        r = await pack_result(env, own, nonce)
+        assert r.status_code == 200 and r.json()["status"] == "done", r.text[:300]
+        # a new command is a new purchase, for the player linked now, with a fresh nonce
+        deal(env, subs)
+        await buypack(after, d, "gold")
+        last = calls_to(after, OPEN)[-1]
+        assert last.params["nonce"] != nonce and last.params["player_steam_id"] == other.steam and last.status == 200
+        assert await holdings(env, other) == (price, 1, 1) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1r3_a_purchase_starts_only_when_the_buyers_player_can_be_read(monkeypatch, tmp_path):
+    """The player is read before the nonce is drawn: an unlinked Discord id gets
+    the link hint and a link that cannot be read gets one line; neither sends
+    a purchase or writes the journal."""
+    async def body(env):
+        own, subs = await world(env)
+        await set_gold(env, own, 10 * price_of(env, "gold"))
+
+        async def down(call):
+            if call.method == "GET" and call.path.startswith("/players/by-discord/"):
+                return H.Reply(503, json={"detail": "unavailable"})
+            return None
+        rig = rig_over(env, down)
+        await buypack(rig, own.discord, "gold")
+        assert calls_to(rig, OPEN) == [] and journal(rig) == {}
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_BUY_NO_PLAYER"]]
+        stranger = rig_over(env)
+        await buypack(stranger, H.discord_of(9999), "gold")
+        assert calls_to(stranger, OPEN) == [] and journal(stranger) == {}
+        assert len(stranger.sent) == 1 and "Not linked" in stranger.sent[0].content
+        assert (await purse(env, own))["gold_spent"] == 0
+    e2e(monkeypatch, tmp_path, body)

@@ -230,9 +230,10 @@ def test_pg_the_probe_reads_0_while_what_it_names_is_missing_and_1_once_mended(m
 
 # -- bot: the startup witness --------------------------------------------------------------------
 
-WITNESS_FUNCS = {"_pc_fix_ready_line", "_pc_buy_pending"}
+WITNESS_FUNCS = {"_pc_fix_ready_line", "_pc_buy_pending", "_pc_buy_settled_ok"}
 WITNESS_ASSIGNS = {"_PC_OPEN_SENDS"}
-TAIL = "an unanswered open sends its key 3 times; sync availability checks wait for a start time with min_players votes"
+TAIL = ("an unanswered open sends its key 3 times; every purchase names the player it was bought for; "
+        "sync availability checks wait for a start time with min_players votes")
 
 
 def witness(tmp_path, *, mounted, journal=None, ismount=None, source=None):
@@ -252,8 +253,8 @@ def witness(tmp_path, *, mounted, journal=None, ismount=None, source=None):
 
 
 def test_the_witness_names_a_mounted_journal_and_its_unsettled_purchases(tmp_path):
-    journal = json.dumps({H.discord_of(1): {"nonce": "nonce-aaaaaaaa", "pay": "gold"},
-                          H.discord_of(2): {"nonce": "nonce-bbbbbbbb", "pay": "shards"}})
+    journal = json.dumps({H.discord_of(1): {"nonce": "nonce-aaaaaaaa", "pay": "gold", "player": H.steam_of(1)},
+                          H.discord_of(2): {"nonce": "nonce-bbbbbbbb", "pay": "shards", "player": H.steam_of(2)}})
     line, path = witness(tmp_path, mounted=True, journal=journal)
     assert line == f"[DISCORD-FIX] gen=gen-test purchase journal {path}: mounted, 2 unsettled; {TAIL}"
 

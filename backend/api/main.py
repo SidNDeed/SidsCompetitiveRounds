@@ -28395,6 +28395,7 @@ async def internal_pc_open_pack(
     pay: str | None = Query(None),
     expected_price: int | None = Query(None, ge=0),
     locale: str | None = Query(None, max_length=16),
+    player_steam_id: str | None = Query(None, min_length=1, max_length=32),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -28404,24 +28405,48 @@ async def internal_pc_open_pack(
     on /pc/packs/open:
     - a held pack of the linked player, by `pack_id`: today's daily, from
       /daily (D1, 2026-09-28);
-    - a purchase, by `nonce` + `pay` (gold | shards): /buypack (D2, a scope
-      addition Sid asked for on 2026-09-28). The price is the api's own
-      (PC_ECONOMY, the mod's price) and the answer states it; an
-      `expected_price`, when sent, must equal it (409 price_changed). The
-      daily paid-pack cap, the conditional delta debit under the players
-      row lock and the gold ledger row are the mod's; the nonce is the
-      idempotency key, so a resend answers the committed row.
+    - a purchase, by `nonce` + `pay` (gold | shards) + `player_steam_id`:
+      /buypack (D2, a scope addition Sid asked for on 2026-09-28). The price
+      is the api's own (PC_ECONOMY, the mod's price) and the answer states
+      it; an `expected_price`, when sent, must equal it (409 price_changed).
+      The daily paid-pack cap, the conditional delta debit under the players
+      row lock and the gold ledger row are the mod's; the key is the
+      committed row (player, nonce), so a resend answers that row.
+    A purchase names the player it is for (Discord fix round 3, M1): the bot
+    journals that player beside the nonce when it first sends it and names
+    it on every resend. The key is (player, nonce) and the actor is the
+    Discord id's player NOW, so a purchase whose Discord id has since been
+    linked to another player is refused here with 412 player_changed, before
+    any write and before any other check that could name the new player:
+    no claim, no debit, no mint, nothing for the new player. The detail
+    names the journaled player and the recorded status of its key (null when
+    none is committed), and the outcome stays readable on the mod's
+    /pc/packs/result by that player and nonce. A 200 names the player it
+    charged (`player_steam_id`).
     The renderer gate comes first, before any write, as on the mod's route;
     the identity is the Discord link, as on every internal route, and
     _pc_bot_actor takes the identity lock before the claim."""
     _require_internal_key(x_internal_key)
     _pc_require_renderer()
     if pack_id:
-        if nonce or pay or expected_price is not None:
-            raise HTTPException(status_code=422, detail="a held pack takes no nonce, pay or expected_price")
-    elif not nonce or pay not in _pc.PACK_PAY:
-        raise HTTPException(status_code=422, detail="pack_id, or nonce and pay (gold | shards), is required")
+        if nonce or pay or expected_price is not None or player_steam_id:
+            raise HTTPException(status_code=422,
+                                detail="a held pack takes no nonce, pay, expected_price or player_steam_id")
+    elif not nonce or pay not in _pc.PACK_PAY or not player_steam_id:
+        raise HTTPException(status_code=422,
+                            detail="pack_id, or nonce, pay (gold | shards) and player_steam_id, is required")
     player = await _pc_player_by_discord(db, discord_id)
+    if not pack_id and str(player.steam_id) != player_steam_id:
+        recorded = (await db.execute(text("""
+            SELECT pk.status FROM players p
+              JOIN pc_packs pk ON pk.player_id = p.id AND pk.nonce = CAST(:nonce AS text)
+             WHERE p.steam_id = CAST(:sid AS text)
+        """), {"nonce": nonce, "sid": player_steam_id})).scalar_one_or_none()
+        await db.rollback()
+        print(f"[PC-OPEN] purchase {nonce[:8]} for player={player_steam_id}: refused, the Discord id is now "
+              f"linked to another player (recorded={recorded}) via=discord")
+        raise HTTPException(status_code=412, detail={"error": "player_changed", "player_steam_id": player_steam_id,
+                                                     "recorded": recorded})
     # both ids, as the mod's door checks them (_pc_verified_actor)
     await _assert_no_service_subject(db, affected_player_ids=[player.id], affected_steam_ids=[player.steam_id])
     await _pc_bot_actor(db, player, discord_id)
@@ -28432,8 +28457,13 @@ async def internal_pc_open_pack(
     if pack_id:
         return await _pc_open_for(db, player, player.steam_id, pack_id=pack_id, nonce=None, pay=None,
                                   expected_price=None, locale=loc, via="discord")
-    return await _pc_open_for(db, player, player.steam_id, pack_id=None, nonce=nonce, pay=pay,
-                              expected_price=expected_price, locale=loc, via="discord")
+    # read before the open: a rollback inside it (a committed row answered
+    # without face keys) expires the player row, and a lazy read after that
+    # would fail the answer of a purchase that committed
+    charged = str(player.steam_id)
+    answer = await _pc_open_for(db, player, charged, pack_id=None, nonce=nonce, pay=pay,
+                                expected_price=expected_price, locale=loc, via="discord")
+    return {**answer, "player_steam_id": charged}
 
 
 # -- The Discord fix marker (/health `discord_fix`) ----------------------------

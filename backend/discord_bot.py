@@ -8843,14 +8843,21 @@ async def cmd_pc_daily(ctx):
 _PC_OPEN_TIMEOUT_S = 20.0   # the open rolls, mints and pre-renders: the api's own work, not a picture read
 _PC_OPEN_SENDS = 3          # one open request and up to two replays of the same key (Discord fix round 2, M1)
 _PC_OPEN_REPLAY_PAUSE_S = (2.0, 5.0)   # the pause before each replay
-# The purchases /buypack has sent and the api has not settled, by Discord id:
-# {"<id>": {"nonce": ..., "pay": ...}}. It lives on the volume compose mounts
-# for the bot's state, so a purchase left unconfirmed outlasts a restart and a
-# rebuild, and the next /buypack completes it with its own nonce (M1).
+# The purchases /buypack has sent and not yet finished, by Discord id:
+# {"<id>": {"nonce": ..., "pay": ..., "player": <Steam id>}}, and, once the api
+# has answered it with its pack, "settled": {"pack_id", "price", "pay"} until
+# the reveal is delivered. It lives on the volume compose mounts for the
+# bot's state, so a purchase left unconfirmed, or bought and not yet shown,
+# outlasts a restart and a rebuild, and the next /buypack completes it with
+# its own nonce (round 2, M1) for the player it was bought for (round 3, M1),
+# or shows the pack it bought (round 3, item 2).
 _PC_BUY_PENDING_FILE = "/opt/bot-state/pc_buy_pending.json"
 _PC_BUY_UNCONFIRMED = ("Your purchase is still being confirmed. `/pack` shows the pack once it has gone through,"
                        " and your next `/buypack` completes this same purchase instead of buying another.")
 _PC_BUY_PAUSED = "Buying packs here is paused right now - nothing was charged."
+_PC_BUY_MOVED = ("Your Discord account is now linked to a different player, so your earlier purchase stays with"
+                 " the player it was made for - nothing was charged to the player linked now.")
+_PC_BUY_NO_PLAYER = "Couldn't start a purchase right now - nothing was charged. Try again in a moment."
 
 
 def _pc_open_verdict(status, body, replayed=False):
@@ -8864,6 +8871,10 @@ def _pc_open_verdict(status, body, replayed=False):
     account). The caller's refusals come before the api reads the key, so
     they settle it only when no earlier send of it went unanswered
     (`replayed` False): after one, that send may have committed.
+    "moved" (round 3, M1): a purchase whose Discord id is now linked to
+    another player than the one the purchase names - the api refuses it
+    before any write (412 player_changed), and the key belongs to the
+    player it was bought for, whatever became of it.
     "unconfirmed": everything else - no answer at all (status 0: refused,
     or cut short by the timeout), any 5xx, a 200 without a usable body, a
     key still in progress, any other status or token."""
@@ -8871,6 +8882,8 @@ def _pc_open_verdict(status, body, replayed=False):
         return "opened" if isinstance(body, dict) and body.get("pack_id") else "unconfirmed"
     d = _pc_detail(body)
     err = d.get("error")
+    if status == 412 and err == "player_changed":
+        return "moved"
     if err == "in_progress":
         return "unconfirmed"
     if status == 402 and err in ("insufficient_gold", "insufficient_shards"):
@@ -8963,11 +8976,20 @@ async def _pc_open_and_show(ctx, key, head):
     await ctx.send(_pc_open_refusal(ctx, status, body))
 
 
+def _pc_buy_settled_ok(s):
+    """A journal entry's "settled" part: the pack the api answered, and what it cost."""
+    return (isinstance(s, dict) and set(s) == {"pack_id", "price", "pay"}
+            and isinstance(s["pack_id"], str) and s["pack_id"] and s["pay"] in ("gold", "shards")
+            and (s["price"] is None or (isinstance(s["price"], int) and not isinstance(s["price"], bool))))
+
+
 def _pc_buy_pending():
-    """The unsettled purchases (_PC_BUY_PENDING_FILE) as {discord id: {"nonce",
-    "pay"}}: {} when there is no file yet, None when it cannot be read or
-    holds anything else - /buypack then buys nothing, since a purchase it
-    cannot see might be one it would buy a second time."""
+    """The purchases in the journal (_PC_BUY_PENDING_FILE) as {discord id:
+    {"nonce", "pay", "player"[, "settled"]}}: {} when there is no file yet,
+    None when it cannot be read or holds anything else - /buypack then buys
+    nothing, since a purchase it cannot see might be one it would buy a
+    second time. An entry without the player it was bought for (the round-2
+    shape) is something else: a replay of it could not name its player."""
     try:
         with open(_PC_BUY_PENDING_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -8977,8 +8999,11 @@ def _pc_buy_pending():
         print(f"[PC-BUY] the purchase journal could not be read ({type(ex).__name__}: {ex})")
         return None
     if not (isinstance(data, dict) and all(
-            isinstance(k, str) and isinstance(v, dict) and set(v) == {"nonce", "pay"}
+            isinstance(k, str) and isinstance(v, dict)
+            and set(v) in ({"nonce", "pay", "player"}, {"nonce", "pay", "player", "settled"})
             and isinstance(v["nonce"], str) and v["nonce"] and v["pay"] in ("gold", "shards")
+            and isinstance(v["player"], str) and v["player"]
+            and ("settled" not in v or _pc_buy_settled_ok(v["settled"]))
             for k, v in data.items())):
         print("[PC-BUY] the purchase journal holds something other than purchases")
         return None
@@ -9027,9 +9052,28 @@ def _pc_fix_ready_line():
         held = "unreadable" if pending is None else f"{len(pending)} unsettled"
         return (f"[DISCORD-FIX] gen={_BOT_GEN} purchase journal {_PC_BUY_PENDING_FILE}: "
                 f"{'mounted' if mounted else 'NOT mounted'}, {held}; an unanswered open sends its key "
-                f"{_PC_OPEN_SENDS} times; sync availability checks wait for a start time with min_players votes")
+                f"{_PC_OPEN_SENDS} times; every purchase names the player it was bought for; "
+                f"sync availability checks wait for a start time with min_players votes")
     except Exception as ex:
         return f"[DISCORD-FIX] gen={_BOT_GEN} witness failed: {type(ex).__name__}: {ex}"
+
+
+async def _pc_buy_player(ctx, me):
+    """The Steam id of the player `me` (a Discord id) is linked to now, read
+    once when a purchase is first sent, so the journal can name the player
+    the purchase is for; None after telling the caller why no purchase
+    starts (not linked, or the link could not be read - nothing is sent to
+    the api then, so nothing was charged)."""
+    status, body = await _pc_api("GET", f"/players/by-discord/{me}")
+    steam = body.get("steam_id") if status == 200 and isinstance(body, dict) else None
+    if isinstance(steam, str) and steam:
+        return steam
+    if status == 404:
+        await ctx.send(_pc_not_linked(ctx, ctx.author))
+    else:
+        print(f"[PC-BUY] the player linked to a buyer could not be read (HTTP {status})")
+        await ctx.send(_PC_BUY_NO_PLAYER)
+    return None
 
 
 async def _pc_buy_and_show(ctx, me, pay):
@@ -9040,23 +9084,40 @@ async def _pc_buy_and_show(ctx, me, pay):
     that write fails. The nonce leaves the journal only when the api settles
     it - the pack (the reveal follows) or a refusal (its line follows). An
     unconfirmed purchase stays in the journal, and the player is told it is
-    being confirmed and where to see it."""
+    being confirmed and where to see it.
+    Round 3, M1: the journal entry names the player the purchase is for -
+    the Discord id's player when the nonce is drawn - and every send of the
+    nonce, the first, the automatic replays and a later /buypack's, names
+    that player; the api answers it only from that player's key and refuses
+    it (412 player_changed, "moved") when the Discord id is now linked to
+    another player. A moved purchase is settled as the earlier player's: its
+    entry leaves the journal, one line says so, and no nonce is drawn for
+    the player linked now on its account."""
     pending = _pc_buy_pending()
     if pending is None:
         await ctx.send(_PC_BUY_PAUSED)
         return
     held = pending.get(me)
     if held is not None:
-        key = {"nonce": held["nonce"], "pay": held["pay"]}
+        key, player = {"nonce": held["nonce"], "pay": held["pay"]}, held["player"]
     else:
+        player = await _pc_buy_player(ctx, me)
+        if player is None:
+            return
         key = {"nonce": secrets.token_hex(16), "pay": pay}
-        if not _pc_buy_pending_write({**pending, me: dict(key)}):
+        if not _pc_buy_pending_write({**pending, me: {**key, "player": player}}):
             await ctx.send(_PC_BUY_PAUSED)
             return
     verdict, status, body = await _pc_open_pack_api(
-        {"discord_id": me, "locale": _pc_locale_of(ctx), **key}, replayed=held is not None)
+        {"discord_id": me, "locale": _pc_locale_of(ctx), **key, "player_steam_id": player},
+        replayed=held is not None)
     if verdict == "unconfirmed":
         print(f"[PC-BUY] purchase {key['nonce'][:8]} stays in the journal, unconfirmed (HTTP {status})")
+        await ctx.send(_PC_BUY_UNCONFIRMED)
+        return
+    if verdict == "opened" and str(body.get("player_steam_id") or "") != player:
+        print(f"[PC-BUY] purchase {key['nonce'][:8]} was answered for another player than its journal names:"
+              " it stays in the journal, unconfirmed")
         await ctx.send(_PC_BUY_UNCONFIRMED)
         return
     now = _pc_buy_pending()
@@ -9065,6 +9126,11 @@ async def _pc_buy_and_show(ctx, me, pay):
         if not _pc_buy_pending_write(now):
             print(f"[PC-BUY] purchase {key['nonce'][:8]} is settled but still in the journal:"
                   " the next /buypack reads its outcome again")
+    if verdict == "moved":
+        print(f"[PC-BUY] purchase {key['nonce'][:8]} settled as the earlier player's: the Discord id is now"
+              f" linked to another player (recorded {_pc_detail(body).get('recorded')})")
+        await ctx.send(_PC_BUY_MOVED)
+        return
     if verdict == "opened":
         head = f"**Pack bought for {body.get('price')} {body.get('pay') or key['pay']}**"
         await _pc_reveal_opened(ctx, str(body["pack_id"]),
