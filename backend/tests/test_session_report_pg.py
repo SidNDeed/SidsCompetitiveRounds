@@ -787,20 +787,73 @@ def test_each_game_and_the_set_carry_what_was_earned(lab):
     assert env["set_summary"]["xp_total"] == tot_x
 
 
+async def _watch(game_key, holder, roster_keys):
+    """Round 2 M4: a spectate game around `game_key`'s end (from 5 min before
+    it to 1 min after) whose roster is `roster_keys`' steam ids, and a revoked
+    lease of `holder` on it - what the broadcast seat's grant leaves behind."""
+    conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+    try:
+        end = await conn.fetchval("""
+            SELECT ended_at FROM matches WHERE id = $1
+            UNION ALL SELECT ended_at FROM team_matches WHERE id = $1
+            UNION ALL SELECT ended_at FROM ovt_matches WHERE id = $1
+            UNION ALL SELECT ended_at FROM ffa_matches WHERE id = $1""", uuid.UUID(ID[game_key]))
+        assert end is not None, game_key
+        wid = uuid.uuid4()
+        await _ins(conn, "spectate_games", id=wid, mode="1v1", room_name="w" + wid.hex[:12],
+                   roster=",".join(sorted(STEAM[k] for k in roster_keys)),
+                   started_at=end - timedelta(minutes=5), ended_at=end + timedelta(minutes=1))
+        await _ins(conn, "spectate_leases", game_id=wid, spectator_steam_id=holder,
+                   token_hash=uuid.uuid4().hex, join_expires_at=end, heartbeat_expires_at=end,
+                   revoked_at=end + timedelta(minutes=1))
+        return wid
+    finally:
+        await conn.close()
+
+
 def test_the_broadcast_account_is_served_the_set_as_its_viewer(lab, monkeypatch):
     """Board row 30g, against the real statements: the broadcast account names
     a player and is served exactly that player's envelope for each kind the
-    broadcaster reports (a 1v1 sitting, a 2v2 series, an FFA lobby)."""
+    broadcaster reports (a 1v1 sitting, a 2v2 series, an FFA lobby) - for a
+    game it WATCHED (round 2 M4: a lease of that account on a spectate game
+    whose roster names the viewer and whose span holds the game's end)."""
     bcast = next(iter(main.SPECTATE_BROADCAST_STEAM_IDS))
 
     async def _ok(request, steam_id, db):
         return steam_id in STEAM.values() or steam_id == bcast
     monkeypatch.setattr(main, "_strict_steam_session_ok", _ok)
+    for key, roster in (("K2", "AB"), ("TM2", "ABCD"), ("F2", "ABD")):
+        asyncio.run(_watch(key, bcast, roster))
     for sel in ({"sitting": ID["K2"]}, {"sitting": ID["TM2"]}, {"sitting": ID["F2"]}):
         assert _report(bcast, viewer=STEAM["A"], **sel) == _report("A", **sel), sel
     assert _refused(bcast, sitting=ID["K2"]) == (404, "not_found"), "no viewer: it played nothing"
     assert _refused(bcast, viewer=STEAM["C"], lobby=ID["F2"]) == (404, "not_found"), "C sat F2 out"
     assert _refused("B", viewer=STEAM["A"], sitting=ID["K2"]) == (403, "broadcast_only")
+
+
+def test_a_viewer_read_is_bound_to_a_game_the_broadcast_seat_watched(lab, monkeypatch):
+    """Round 2 M4 on the real statements: outside a watched game the viewer
+    read is the ordinary 404; control: the viewer's own request for the same
+    set is served, and a watched game makes the same request succeed."""
+    bcast = next(iter(main.SPECTATE_BROADCAST_STEAM_IDS))
+
+    async def _ok(request, steam_id, db):
+        return steam_id in STEAM.values() or steam_id == bcast
+    monkeypatch.setattr(main, "_strict_steam_session_ok", _ok)
+    # KL is A's next sitting (minute 420): nothing the broadcast seat watched
+    assert _refused(bcast, viewer=STEAM["A"], sitting=ID["KL"]) == (404, "not_found")
+    assert _games(_report("A", sitting=ID["KL"])), "control: A's own request is served"
+    # a spectate game over KL whose lease is ANOTHER account's
+    asyncio.run(_watch("KL", STEAM["Z"], "AB"))
+    assert _refused(bcast, viewer=STEAM["A"], sitting=ID["KL"]) == (404, "not_found")
+    # the broadcast seat's lease on a game whose roster does not name the viewer
+    asyncio.run(_watch("KL", bcast, "BZ"))
+    assert _refused(bcast, viewer=STEAM["A"], sitting=ID["KL"]) == (404, "not_found")
+    # a series key is not a game id
+    assert _refused(bcast, viewer=STEAM["A"], series=ID["RS1"]) == (404, "not_found")
+    # now the seat watched KL with A in the roster: served, the viewer's own envelope
+    asyncio.run(_watch("KL", bcast, "AB"))
+    assert _report(bcast, viewer=STEAM["A"], sitting=ID["KL"]) == _report("A", sitting=ID["KL"])
 
 
 # -- /health `session_report` against the lab database ---------------------------

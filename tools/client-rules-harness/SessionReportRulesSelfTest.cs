@@ -505,6 +505,27 @@ namespace CompetitiveRounds
             int devDown = PlaybackAfterFetch(true, stream, true);
             Func<bool> broken = () => { throw new InvalidOperationException("no stream info"); };
             int thrown = PlaybackAfterFetch(true, broken, false);
+            // Round 2 M4: the TestWatchedSet lever runs only against a local
+            // test api - never the public host or the LAN addresses of the
+            // backend boxes and the edge.
+            var refused = new List<string>();
+            foreach (var url in new[] { "https://competitive-rounds.duckdns.org:8444", "http://competitive-rounds.duckdns.org:8443",
+                                        "http://192.168.72.102:8443", "http://192.168.72.199:8443", "http://192.168.72.90:8443",
+                                        "http://127.0.0.1.evil.example:8611", "http://user@127.0.0.1:8611", "ftp://127.0.0.1/", "", null })
+            {
+                string h;
+                if (!DevLeverApiAllowed(url, out h)) refused.Add(url ?? "null");
+            }
+            Check(r, "broadcast: the watched-set lever refuses production and every non-local api",
+                  refused.Count == 10, "refused " + refused.Count + " of 10: " + string.Join(" ", refused.ToArray()));
+            var allowed = new List<string>();
+            foreach (var url in new[] { "http://127.0.0.1:8611", "http://localhost:8611", "http://[::1]:8611", "https://127.0.0.2:9000" })
+            {
+                string h;
+                if (DevLeverApiAllowed(url, out h)) allowed.Add(h);
+            }
+            Check(r, "broadcast (control): a local test api is allowed",
+                  allowed.Count == 4, "allowed " + string.Join(" ", allowed.ToArray()));
             Check(r, "broadcast (control): a live stream plays the report or the screens; the dev entry plays down; a probe that throws defers",
                   okUp == PLAYBACK_REPORT && failUp == PLAYBACK_SCREENS && devDown == PLAYBACK_REPORT && thrown == PLAYBACK_DEFER,
                   "live: success " + okUp + ", failure " + failUp + "; dev entry down " + devDown + "; throwing probe " + thrown);

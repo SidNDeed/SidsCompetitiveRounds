@@ -1047,6 +1047,27 @@ namespace CompetitiveRounds
             return haveModel ? PLAYBACK_REPORT : PLAYBACK_SCREENS;
         }
 
+        /// <summary>Round 2 M4: whether a dev lever that replays a recorded set
+        /// may run against the API this client is configured for - ONLY a
+        /// local test server: exactly "localhost", or a loopback address
+        /// (127.0.0.0/8, ::1). Production (the public host, and the LAN
+        /// addresses of the backend boxes and the edge that the seat's cfg
+        /// uses) and every other host refuse; so does a URL with user info or
+        /// one that does not parse. `host` is what the URL named, for the
+        /// refusal's log line ("" when it did not parse).</summary>
+        internal static bool DevLeverApiAllowed(string baseUrl, out string host)
+        {
+            host = "";
+            Uri uri;
+            if (string.IsNullOrEmpty(baseUrl) || !Uri.TryCreate(baseUrl.Trim(), UriKind.Absolute, out uri)) return false;
+            host = uri.Host ?? "";
+            if (!string.IsNullOrEmpty(uri.UserInfo)) return false;
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+            if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)) return true;
+            System.Net.IPAddress ip;
+            return System.Net.IPAddress.TryParse(host.Trim('[', ']'), out ip) && System.Net.IPAddress.IsLoopback(ip);
+        }
+
         /// <summary>A game the broadcaster may anchor the watched set's report
         /// on: its id, its end (server UTC) and the steam ids of the players
         /// who PLAYED it (an FFA frozen-roster ghost is not one).</summary>

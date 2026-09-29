@@ -111,6 +111,13 @@ SERIES_ROW = {
     "invalidated_at": None, "p1_rating_change": -12.5, "p2_rating_change": 12.5,
     **_room_cols(),
 }
+# Round 2 M4: the spectate game the broadcast seat watched - A against B over
+# the ranked series (games at minutes 0, 5 and 10, two minutes each), with the
+# accounts that hold or held a lease on it. The broadcast account is appended
+# below, where it is defined.
+W1 = str(uuid.uuid4())
+WATCHED = [{"id": W1, "roster": ",".join(sorted((CALLER, OPP))), "leases": [],
+            "started_at": T0 - timedelta(minutes=1), "ended_at": T0 + timedelta(minutes=13)}]
 MATCHES = [
     match_row(M1, PID_A, PID_B, minute=0, series_id=SERIES),
     match_row(M2, PID_B, PID_A, minute=5, series_id=SERIES),
@@ -256,8 +263,11 @@ class FakeDb:
 
     def __init__(self, *, matches=None, players=None, cards=None, ffa_cards=None, gold=None,
                  rating_history=None, team_matches=None, team_tele=None, ffa_match=None,
-                 ffa_players=None, series_row=None, team_series_row=None, fail_rating=False):
+                 ffa_players=None, series_row=None, team_series_row=None, fail_rating=False,
+                 watched=None):
         self.statements = []
+        # Round 2 M4: spectate games with the accounts holding a lease on each
+        self.watched = WATCHED if watched is None else watched
         self.matches = MATCHES if matches is None else matches
         self.players = PLAYERS if players is None else players
         self.cards = CARDS if cards is None else cards
@@ -296,6 +306,30 @@ class FakeDb:
         sql = " ".join(str(stmt).split())
         params = params or {}
         self.statements.append((sql, params))
+        if "AS watched_game" in sql:
+            # Round 2 M4: the broadcast account's viewer read, bound to a game it
+            # watched. Every predicate the binding rests on must be in the
+            # statement, or the fake refuses.
+            for needle in ("JOIN spectate_leases wl ON wl.game_id = wg.id AND wl.spectator_steam_id = CAST(:bsid AS text)",
+                           "CAST(:viewer AS text) = ANY(string_to_array(wg.roster, ','))",
+                           "a.ended_at >= wg.started_at - make_interval(secs => :pre)",
+                           "a.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)",
+                           "FROM matches wm WHERE wm.id = CAST(:key AS uuid)",
+                           "FROM team_matches wt WHERE wt.id = CAST(:key AS uuid)",
+                           "FROM ovt_matches wo WHERE wo.id = CAST(:key AS uuid)",
+                           "FROM ffa_matches wf WHERE wf.id = CAST(:key AS uuid)"):
+                assert needle in sql, "the watched statement lost a predicate: " + needle
+            key = params["key"]
+            ends = [m["ended_at"] for m in list(self.matches) + list(self.team_matches) + [self.ffa_match]
+                    if str(m["id"]) == key]
+            pre, post = timedelta(seconds=params["pre"]), timedelta(seconds=params["post"])
+            for w in self.watched:
+                if params["bsid"] not in w["leases"] or params["viewer"] not in w["roster"].split(","):
+                    continue
+                if any(w["started_at"] - pre <= e <= (w["ended_at"] or datetime.now(timezone.utc)) + post
+                       for e in ends if e is not None):
+                    return _Res([{"watched_game": w["id"]}])
+            return _Res([])
         if "AS report_kind" in sql:
             # Sept 28 (board row 30a): the `sitting` anchor's kind. Every arm
             # carries its own mode's caller predicate.
@@ -1754,6 +1788,7 @@ def test_a_game_names_only_the_players_who_played_it():
 # -- board row 30g: the broadcast account names a viewer ------------------------
 
 BROADCAST = next(iter(main.SPECTATE_BROADCAST_STEAM_IDS))
+WATCHED[0]["leases"].append(BROADCAST)
 
 
 @pytest.fixture
@@ -1768,11 +1803,12 @@ def test_the_broadcast_account_is_served_the_set_as_its_viewer(broadcast_session
     """Board row 30g: the broadcast seat names a player who played the set and
     gets exactly the envelope that player's own request gets - participation
     and the roster check are decided for the viewer."""
-    own = _call(FakeDb(), CALLER, series=SERIES)
+    own = _call(FakeDb(), CALLER, sitting=M1)
     db = FakeDb()
-    assert _call(db, BROADCAST, series=SERIES, viewer=CALLER) == own
-    assert db.statements[0][1] == {"sid": CALLER}, "the caller lookup reads the VIEWER"
-    for sel in ({"match": M1}, {"session": SESSION}):
+    assert _call(db, BROADCAST, sitting=M1, viewer=CALLER) == own
+    assert "AS watched_game" in db.statements[0][0], "the watched binding is asked first"
+    assert db.statements[1][1] == {"sid": CALLER}, "the caller lookup reads the VIEWER"
+    for sel in ({"match": M1}, {"sitting": M3}):
         assert _call(FakeDb(), BROADCAST, viewer=CALLER, **sel) == _call(FakeDb(), CALLER, **sel), sel
 
 
@@ -1780,13 +1816,13 @@ def test_a_viewer_is_refused_to_every_other_caller(broadcast_session):
     for who in (CALLER, OPP, OTHER):
         db = FakeDb()
         with pytest.raises(HTTPException) as ei:
-            _call(db, who, series=SERIES, viewer=CALLER)
+            _call(db, who, sitting=M1, viewer=CALLER)
         assert ei.value.status_code == 403 and ei.value.detail == "broadcast_only", who
         assert db.statements == [], "a refused viewer is decided before any statement"
     for bad in ("", CALLER[:-1], CALLER + "1", CALLER[:5] + "x" + CALLER[6:], CALLER + " "):
         db = FakeDb()
         with pytest.raises(HTTPException) as ei:
-            _call(db, BROADCAST, series=SERIES, viewer=bad)
+            _call(db, BROADCAST, sitting=M1, viewer=bad)
         assert ei.value.status_code == 400 and ei.value.detail == "bad_request", repr(bad)
         assert db.statements == [], repr(bad)
 
@@ -1796,9 +1832,10 @@ def test_the_broadcast_account_gets_nothing_it_did_not_name(broadcast_session):
     (it played nothing: 404), and a viewer who did not play the set gets the
     404 every refusal gets."""
     with pytest.raises(HTTPException) as own:
-        _call(FakeDb(), BROADCAST, series=SERIES)
+        _call(FakeDb(), BROADCAST, sitting=M1)
     with pytest.raises(HTTPException) as bystander:
-        _call(FakeDb(), BROADCAST, series=SERIES, viewer=OTHER)
+        # OTHER is in no roster of the watched game, and played no 1v1 with A
+        _call(FakeDb(watched=[dict(WATCHED[0], roster=OTHER)]), BROADCAST, sitting=M1, viewer=OTHER)
     assert own.value.status_code == bystander.value.status_code == 404
     assert own.value.detail == bystander.value.detail == "not_found"
 
@@ -1809,9 +1846,107 @@ def test_a_viewer_still_needs_the_callers_session(monkeypatch):
     monkeypatch.setattr(main, "_strict_steam_session_ok", _no)
     db = FakeDb()
     with pytest.raises(HTTPException) as ei:
-        _call(db, BROADCAST, series=SERIES, viewer=CALLER)
+        _call(db, BROADCAST, sitting=M1, viewer=CALLER)
     assert ei.value.status_code == 401 and ei.value.detail == "session_required"
     assert db.statements == []
+
+
+def _refused(db, **sel):
+    with pytest.raises(HTTPException) as ei:
+        _call(db, BROADCAST, **sel)
+    return ei.value.status_code == 404 and ei.value.detail == "not_found"
+
+
+def test_a_viewer_read_is_bound_to_a_game_the_broadcast_seat_watched(broadcast_session):
+    """Round 2 M4: with viewer= the requested set must be one the broadcast
+    seat watched - a spectate game the calling account holds or held a lease
+    on, whose roster names the viewer and whose span holds the requested
+    game's end. Inside that binding the viewer's own envelope is served;
+    outside it the ordinary 404, decided before any player statement runs.
+    Control: every refused request below is one the viewer's OWN request is
+    served, so the refusal is the binding, not participation."""
+    assert _call(FakeDb(), BROADCAST, sitting=M1, viewer=CALLER) == _call(FakeDb(), CALLER, sitting=M1)
+    # a game of A outside the watched span (the casual sitting, minute 60)
+    db = FakeDb()
+    assert _refused(db, sitting=C1, viewer=CALLER)
+    assert len(db.statements) == 1 and "AS watched_game" in db.statements[0][0], "no player statement ran"
+    assert _call(FakeDb(), CALLER, sitting=C1)["games"], "control: the viewer's own request is served"
+    # the lease belongs to another account
+    assert _refused(FakeDb(watched=[dict(WATCHED[0], leases=[OTHER])]), sitting=M1, viewer=CALLER)
+    # the watched game's roster does not name the viewer
+    assert _refused(FakeDb(watched=[dict(WATCHED[0], roster=OPP)]), sitting=M1, viewer=CALLER)
+    # no watched game at all
+    assert _refused(FakeDb(watched=[]), match=M1, viewer=CALLER)
+    # a series or session key is not a game id: nothing to bind it to
+    assert _refused(FakeDb(), series=SERIES, viewer=CALLER)
+    assert _refused(FakeDb(), session=SESSION, viewer=CALLER)
+    assert _call(FakeDb(), CALLER, series=SERIES)["games"], "control: the viewer's own series request is served"
+    # the span: a game ending just inside the post slack is bound, past it not
+    late = dict(WATCHED[0], ended_at=MATCHES[2]["ended_at"] - timedelta(seconds=main._REPORT_WATCH_POST_S - 1))
+    early = dict(WATCHED[0], ended_at=MATCHES[2]["ended_at"] - timedelta(seconds=main._REPORT_WATCH_POST_S + 1))
+    assert _call(FakeDb(watched=[late]), BROADCAST, sitting=M3, viewer=CALLER)["games"]
+    assert _refused(FakeDb(watched=[dict(early, started_at=MATCHES[2]["started_at"] - timedelta(hours=1))]),
+                    match=M3, viewer=CALLER)
+
+
+def test_the_watched_binding_is_a_named_report_statement():
+    """The binding runs through _report_rows like every report statement, so
+    the /health probe analyses its tables and columns too (spectate_games,
+    spectate_leases); its window constants mirror the broadcaster's."""
+    assert main._SESSION_REPORT_NAMED["_REPORT_WATCHED_SQL"] is main._REPORT_WATCHED_SQL
+    assert main._REPORT_WATCHED_SQL in main._SESSION_REPORT_STATEMENTS
+    src = inspect.getsource(main.get_set_report)
+    assert src.count("_report_rows(db, _REPORT_WATCHED_SQL,") == 1
+    assert src.index("_REPORT_WATCHED_SQL") < src.index("_REPORT_CALLER_SQL"), "bound before any player read"
+    post = strip_comments_only((PLUGIN / "PostSessionReport.cs").read_text(encoding="utf-8"))
+    m = re.search(r"WINDOW_PRE_START_SECONDS = ([0-9.]+)f;", post)
+    assert m and float(m.group(1)) == main._REPORT_WATCH_PRE_S
+
+
+class _StatusDb:
+    """report-status's two statements over a spectate world with lease holders.
+    The games statement must carry the lease predicate, or every row answers."""
+
+    def __init__(self, games, leases, names):
+        self.games, self.leases, self.names = games, leases, names
+        self.statements = []
+
+    async def execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        self.statements.append((sql, params))
+        if "FROM spectate_games g" in sql:
+            rows = [g for g in self.games if g["id"] in params["gids"]]
+            if ("AND EXISTS (SELECT 1 FROM spectate_leases l WHERE l.game_id = g.id "
+                    "AND l.spectator_steam_id = CAST(:sid AS text))") in sql:
+                rows = [g for g in rows if params["sid"] in self.leases.get(g["id"], ())]
+            return _Res(rows)
+        if "FROM players" in sql:
+            return _Res([{"steam_id": s, "display_name": n} for s, n in self.names.items() if s in params["sids"]])
+        raise AssertionError("unexpected statement: " + sql[:120])
+
+
+def _status(db, ids, who=None):
+    return _run(main.broadcast_report_status(request=None, steam_id=who or BROADCAST,
+                                             game_ids=",".join(str(i) for i in ids), db=db))
+
+
+def test_report_status_answers_only_games_the_seat_holds_a_lease_on(broadcast_session):
+    """Round 2 M4: /broadcast/report-status answers a spectate game only when
+    the calling broadcast account holds or held a lease on it; any other id is
+    omitted, as an id with no row is. Control: with a lease on both, both
+    answer - the omission is the lease rule, not the lookup."""
+    g1, g2 = uuid.uuid4(), uuid.uuid4()
+    games = [{"id": g, "mode": "1v1", "started_at": T0, "ended_at": T0 + timedelta(minutes=9),
+              "roster": ",".join(sorted((CALLER, OPP)))} for g in (g1, g2)]
+    names = {CALLER: "A", OPP: "B"}
+    got = _status(_StatusDb(games, {g1: [BROADCAST], g2: [OTHER]}, names), [g1, g2])
+    assert [r["game_id"] for r in got] == [str(g1)]
+    both = _status(_StatusDb(games, {g1: [BROADCAST], g2: [BROADCAST]}, names), [g1, g2])
+    assert [r["game_id"] for r in both] == [str(g1), str(g2)]
+    assert both[0]["names"] == ["A", "B"]
+    with pytest.raises(HTTPException) as ei:
+        _status(_StatusDb(games, {g1: [CALLER]}, names), [g1], who=CALLER)
+    assert ei.value.status_code == 403 and ei.value.detail == "broadcast_only"
 
 
 # -- board row 30g: the broadcaster pages through the session report ------------
@@ -1948,6 +2083,16 @@ def test_the_watched_set_lever_replays_a_recorded_set_through_the_pipeline():
     plugin = PLUGIN / "Plugin.cs"
     lever = _cs_body(plugin, "private void TickTestWatchedSet()")
     assert "!BroadcastMode.IsBroadcastIdentity" in lever and "PostSessionReport.DevWatchSet(raw);" in lever
+    # Round 2 M4: the lever refuses unless the configured API is a local test
+    # server (SessionReportRules.DevLeverApiAllowed, executed by the harness),
+    # asked before the set is queued, and its refusal says so.
+    gate = "if (!SessionReportRules.DevLeverApiAllowed(ApiClient.BaseUrl, out apiHost))"
+    assert gate in lever and lever.index(gate) < lever.index("PostSessionReport.DevWatchSet(raw);")
+    assert "test watched set refused: the configured API (" in lever and "is production" in lever
+    post = strip_comments_only(POST.read_text(encoding="utf-8"))
+    whole = "".join(strip_comments_only(p.read_text(encoding="utf-8")) for p in sorted(PLUGIN.glob("*.cs")))
+    assert whole.count("PostSessionReport.DevWatchSet(") == 1, "the lever is the only way in"
+    assert post.count("DevWatchSet(") == 1, "no caller inside PostSessionReport either"
     assert "if (_lastTestWatchedSet == null) { _lastTestWatchedSet = raw; return; }" in lever
     assert strip_comments_only(plugin.read_text(encoding="utf-8")).count("try { TickTestWatchedSet(); } catch { }") == 1
 

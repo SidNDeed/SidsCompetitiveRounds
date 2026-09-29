@@ -2694,6 +2694,16 @@ namespace CompetitiveRounds
             if (raw == _lastTestWatchedSet) return;
             _lastTestWatchedSet = raw;
             if (raw.Length == 0) return;
+            // Round 2 M4: the lever replays a recorded set as if the seat had
+            // watched it, so it runs only against a local test api; while the
+            // configured API is production (or any other non-local host) it
+            // refuses and says so.
+            string apiHost;
+            if (!SessionReportRules.DevLeverApiAllowed(ApiClient.BaseUrl, out apiHost))
+            {
+                try { Plugin.Log?.LogWarning("[REPORT] test watched set refused: the configured API (" + apiHost + ") is production or another non-local server; this lever runs only against a local test api (localhost / 127.0.0.1)"); } catch { }
+                return;
+            }
             PostSessionReport.DevWatchSet(raw);
         }
 

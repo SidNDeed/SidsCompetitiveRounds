@@ -59944,11 +59944,17 @@ async def broadcast_report_status(
     if len(requested) > 8:
         raise HTTPException(status_code=400, detail="too_many_game_ids")
 
+    # Round 2 M4: only games this broadcast account holds or held a lease on
+    # (spectate_leases records the grant; a revoked or expired row still does).
+    # Any other id is omitted, exactly as an id with no row is.
     games = (await db.execute(text("""
-        SELECT id, mode, started_at, ended_at, roster
-          FROM spectate_games
-         WHERE id = ANY(CAST(:gids AS uuid[]))
-    """), {"gids": requested})).mappings().all()
+        SELECT g.id, g.mode, g.started_at, g.ended_at, g.roster
+          FROM spectate_games g
+         WHERE g.id = ANY(CAST(:gids AS uuid[]))
+           AND EXISTS (SELECT 1 FROM spectate_leases l
+                        WHERE l.game_id = g.id
+                          AND l.spectator_steam_id = CAST(:sid AS text))
+    """), {"gids": requested, "sid": steam_id})).mappings().all()
     by_id = {g["id"]: g for g in games}
 
     # Display names for every roster member across all found games, in one
@@ -59967,7 +59973,7 @@ async def broadcast_report_status(
         names_by_sid = {r["steam_id"]: (r["display_name"] or "?") for r in rows}
 
     out = []
-    for gid in requested:  # request order; ids with no row are omitted
+    for gid in requested:  # request order; ids with no row (or no lease of this account) are omitted
         g = by_id.get(gid)
         if g is None:
             continue
@@ -60654,6 +60660,41 @@ _REPORT_KIND_SQL = """
                     WHERE kx.match_id = kf.id
                       AND kx.player_id = CAST(:cpid AS uuid)
                       AND NOT kx.absent)
+     LIMIT 1
+"""
+# Round 2 M4: the broadcast account's `viewer=` read is bound to a game that
+# account WATCHED. It answers a row only when a spectate game exists that
+#   - the calling account holds or held a lease on (spectate_leases: a grant
+#     for that seat; a revoked or expired lease row still records the grant),
+#   - lists the named viewer in its roster, and
+#   - spans the requested game's end: from _REPORT_WATCH_PRE_S before the
+#     spectate game's start (the broadcaster's own history window opens
+#     WINDOW_PRE_START_SECONDS = 300 s early) to _REPORT_WATCH_POST_S after its
+#     end (or now while it is live; the end stamp is the room's close, which
+#     can trail the last game's report).
+# The key is a game id of any mode; a series or session uuid is not one, so
+# `series` and `session` with a viewer resolve to nothing. No row = the same
+# 404 as every other refusal.
+_REPORT_WATCH_PRE_S = 300
+_REPORT_WATCH_POST_S = 600
+_REPORT_WATCHED_SQL = """
+    WITH anchor AS (
+        SELECT wm.ended_at FROM matches wm WHERE wm.id = CAST(:key AS uuid)
+        UNION ALL
+        SELECT wt.ended_at FROM team_matches wt WHERE wt.id = CAST(:key AS uuid)
+        UNION ALL
+        SELECT wo.ended_at FROM ovt_matches wo WHERE wo.id = CAST(:key AS uuid)
+        UNION ALL
+        SELECT wf.ended_at FROM ffa_matches wf WHERE wf.id = CAST(:key AS uuid)
+    )
+    SELECT wg.id AS watched_game
+      FROM anchor a
+      JOIN spectate_games wg
+        ON a.ended_at >= wg.started_at - make_interval(secs => :pre)
+       AND a.ended_at <= COALESCE(wg.ended_at, NOW()) + make_interval(secs => :post)
+      JOIN spectate_leases wl
+        ON wl.game_id = wg.id AND wl.spectator_steam_id = CAST(:bsid AS text)
+     WHERE CAST(:viewer AS text) = ANY(string_to_array(wg.roster, ','))
      LIMIT 1
 """
 # Sept 28 (board row 30a): the FFA LOBBY SITTING of an anchor game: every game
@@ -61601,8 +61642,12 @@ async def get_set_report(request: Request, steam_id: str = "",
     outside SPECTATE_BROADCAST_STEAM_IDS gets 403 "broadcast_only" (the two
     checks /broadcast/target and /broadcast/report-status make). A viewer that
     is not a 17-digit Steam id is a 400 "bad_request"; both are decided before
-    any statement runs. A viewer who did not play the set gets the same 404 as
-    every other refusal."""
+    any statement runs. Then (round 2 M4) the requested game must be one the
+    broadcast seat WATCHED: _REPORT_WATCHED_SQL requires a lease of the caller
+    on a spectate game whose roster names the viewer and whose span holds the
+    requested game's end; anything else - including a series or session key,
+    which is not a game id - gets the same 404 as every other refusal, as does
+    a viewer who did not play the set."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     # Board row 30g: whose report this is - the caller's own unless the
@@ -61623,6 +61668,16 @@ async def get_set_report(request: Request, steam_id: str = "",
     key = _report_parse_uuid(raw)
     if key is None:
         raise HTTPException(status_code=400, detail="bad_request")
+    if viewer is not None:
+        # Round 2 M4: the requested set must be one the broadcast seat watched
+        # (_REPORT_WATCHED_SQL: a lease of this account on a spectate game
+        # whose roster names the viewer and whose span holds the requested
+        # game's end); otherwise the ordinary participant-closed 404.
+        watched = await _report_rows(db, _REPORT_WATCHED_SQL, {
+            "key": key, "viewer": viewer, "bsid": str(steam_id),
+            "pre": _REPORT_WATCH_PRE_S, "post": _REPORT_WATCH_POST_S})
+        if not watched:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
 
     caller = await _report_rows(db, _REPORT_CALLER_SQL, {"sid": reader})
     if not caller or caller[0]["id"] is None:
@@ -61859,6 +61914,7 @@ _SESSION_REPORT_NAMED = {
     "_REPORT_FFA_SQL": _REPORT_FFA_SQL,
     "_REPORT_FFA_PLAYERS_SQL": _REPORT_FFA_PLAYERS_SQL,
     "_REPORT_KIND_SQL": _REPORT_KIND_SQL,
+    "_REPORT_WATCHED_SQL": _REPORT_WATCHED_SQL,
     "_REPORT_FFA_LOBBY_SQL": _REPORT_FFA_LOBBY_SQL,
     "_REPORT_ROSTER_SQL": _REPORT_ROSTER_SQL,
     "_REPORT_GOLD_SQL": _REPORT_GOLD_SQL,
