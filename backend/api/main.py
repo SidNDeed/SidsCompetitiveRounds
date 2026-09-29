@@ -27161,8 +27161,10 @@ async def pc_discard_batch(
         row for the key that is there anyway (the primary key on (player,
         key) is the last line of defence) rolls all of it back and answers
         409 key_reused, never a 500.
-    503 shard_batch_unavailable while migration 361 has not run on this box
-    (checked before the first lock or write)."""
+    503 shard_batch_unavailable while migration 361 has not run on this box,
+    checked before the first lock or write: after the body's own refusals
+    and before the verified actor (whose identity advisory lock would
+    otherwise be the first lock)."""
     key, ids = await _pc_batch_body(request)
     if not _PC_BATCH_KEY_RE.fullmatch(key):
         raise HTTPException(status_code=422, detail={"error": "bad_key"})
@@ -27178,11 +27180,15 @@ async def pc_discard_batch(
             raise HTTPException(status_code=422, detail={"error": "bad_print_id"})
     if len(set(norm)) != len(norm):
         raise HTTPException(status_code=422, detail={"error": "duplicate_print"})
-    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_discard_batch(steam_id, key, ids), db)
-    pid = str(player.id)
+    # Migration 361 not run on this box: 503 before ANY lock or write, so
+    # ahead of the verified actor, whose first statement takes the shared
+    # identity advisory lock (asks-b round 2, finding 2). to_regclass takes
+    # no lock.
     if not (await db.execute(text("SELECT to_regclass('pc_shard_batches') IS NOT NULL"))).scalar_one_or_none():
         await db.rollback()
         raise HTTPException(status_code=503, detail={"error": "shard_batch_unavailable"})
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_discard_batch(steam_id, key, ids), db)
+    pid = str(player.id)
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
     order = sorted(norm)
     joined = ",".join(order)

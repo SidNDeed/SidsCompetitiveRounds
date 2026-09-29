@@ -1147,15 +1147,20 @@ def test_a_single_discard_racing_a_batch_over_the_same_print_pays_once(env):
 
 def test_a_missing_table_answers_503_before_any_lock_or_write(env):
     """Migration 361 not run on this box (the table dropped for the test and
-    restored by the next reset): 503 shard_batch_unavailable, no players
-    lock, nothing discarded (rule R9)."""
+    restored by the next reset): 503 shard_batch_unavailable, and the
+    batch's statement trace holds the table check and nothing that locks --
+    no advisory lock (the verified actor's shared identity lock included,
+    round 2 finding 2), no row lock -- and nothing is discarded (rule R9)."""
     async def body(ctx):
         me = await _player(1, shards=2)
         subject = await _player(2)
         p = await _print(me, subject, "rare")
         await _q("DROP TABLE pc_shard_batches")
         assert _err(await _batch(ctx, "a", me, _key(), [p])) == (503, "shard_batch_unavailable")
-        assert not any("FOR NO KEY UPDATE" in s for s in ctx.statements("a"))
+        trace = [_flat(s) for s in ctx.statements("a")]
+        assert any("to_regclass('pc_shard_batches')" in s for s in trace), trace
+        assert not any("pg_advisory" in s for s in trace), "a lock ran before the 503: %r" % trace
+        assert not any(re.search(r"FOR (NO KEY |KEY )?(UPDATE|SHARE)", s) for s in trace), trace
         assert (await _discarded([p]))[p] == (False, None) and await _shards(me) == 2
         # the single route does not depend on the table
         assert (await _single(ctx, "b", me, p))[0] == 200
