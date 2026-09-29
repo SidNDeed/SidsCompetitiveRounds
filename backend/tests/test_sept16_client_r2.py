@@ -1780,8 +1780,30 @@ def test_every_cross_seat_roster_filter_reads_the_replicated_property():
     assert "RoomActors.IsSpectatorReplicated(a)" in census
     assert "RoomActors.IsSpectator(a)" not in census
 
-    # both quorums
-    assert vf.count("RoomActors.IsSpectatorReplicated(actor)") == 2
+    # every quorum in VanillaFixes, BY NAME (v1.41.0 merge pass 1, follow-up
+    # 7). This lane's sweep moved the two it could see, the saw quorum and the
+    # grow quorum. The v1.41.0 client lane had added a third it could not see,
+    # the weapon-cooldown reset's AllFightersCapable, which follow-up 2 moved
+    # to the replicated read. Each is asserted inside its own method, and the
+    # file-wide count must equal the named sites, so a fourth quorum added
+    # without a name here fails instead of being absorbed by a bare count.
+    quorums = (
+        ("internal static class SawTargetSync",
+         "private static bool AllFightersCapable(out int fighterCount, out int missingActor)"),
+        ("internal static class GrowNormalize",
+         "private static bool Quorum(out bool allCap, out bool allRankedIntent,"),
+        ("internal static class WeaponCooldownReset",
+         "private static bool AllFightersCapable(out int fighterCount, out int missingActor)"),
+    )
+    for cls, sig in quorums:
+        span = vf[vf.index(cls):]
+        span = span[:span.index("\n    }\n")]
+        assert span.count(sig) == 1, (cls, sig)
+        body = span[span.index(sig):]
+        body = body[:body.index("\n        }\n")]
+        assert body.count("RoomActors.IsSpectatorReplicated(actor)") == 1, (cls, sig)
+        assert "RoomActors.IsSpectator(" not in body, (cls, sig)
+    assert vf.count("RoomActors.IsSpectatorReplicated(actor)") == len(quorums)
     assert "RoomActors.IsSpectator(actor)" not in vf
 
     # PoisonSync's own capability roster, both halves of it
