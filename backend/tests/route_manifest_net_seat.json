@@ -709,7 +709,7 @@
           ],
           "main",
           "pc_open_pack",
-          "ff81410efa4f9e9e7f50fb9f284045ad508bb0dc"
+          "85d246bb93c7dc58b3822b34013a0a37c62f42ea"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -718,7 +718,7 @@
           ],
           "main",
           "pc_pack_result",
-          "f3c2673b129dc1bd2b44bd738d860744ff1bf99a"
+          "6a8c187ff81a7027f45ed0c5a9bd0d2d416b15f1"
         ],
         [
           "/api/v1/pc/packs",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "8c526ab6210622b033296acedc9e4680f3fd91dc"
+          "030bb94a4727f191759a7f5d793fe8552ac6614c"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3206,7 +3206,7 @@
           ],
           "main",
           "internal_pc_open_pack",
-          "86d78e2dd5851ddf03f629b1241c4ed0aa466313"
+          "39030bea5a6048e853d240f05469cfb57d84be5c"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
@@ -3473,7 +3473,7 @@
       [
         "main",
         "lifespan",
-        "c114912fc3655b220586c3c1a7b8f7a753a1866f"
+        "f2513a66351133c3fa6ca568b3538c23e1a52031"
       ]
     ]
   },
