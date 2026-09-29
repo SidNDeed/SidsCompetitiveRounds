@@ -5577,3 +5577,171 @@ def test_the_assembly_pool_and_its_connect_timeout():
                 fh.write(_json.dumps({"pool": args, "connect_bound": [1.5, 3.0]},
                                      sort_keys=True, indent=1))
     _run(go())
+
+
+# -- The LAND's old-client proof (the connect-failure LAND brief, item 5) -----
+#
+# The server must serve the OLD client unchanged until the client ships: the
+# assembly writers, the verdict and the gated leave stay inert until a client
+# advertises ffa_asm1/ffa_adm1, and an old client never does. This proof
+# drives the three pre-existing FFA routes an old client calls, over HTTP
+# with its own header (X-Mod-Version 1.40.3, the batch entry's
+# mod_version_header) and its own bodies (no caps), through BOTH builds on
+# the same migrated schema: this tree's app and main d889294's (the build
+# the LAND merged, which is what production runs before this batch), and
+# asserts the answers and the durable rows are the same shape. It is a
+# different proof from the batch entry's route_probes, which show the NEW
+# routes are absent on the old build and present on the new one; this one
+# shows the OLD routes behave the same whichever build answers.
+
+OLD_CLIENT_VERSION = "1.40.3"
+OLD_BUILD_COMMIT = "d889294"
+_OLD_BUILD = {}
+
+
+def _old_build_main():
+    """main.py at OLD_BUILD_COMMIT, imported as module main_land_old."""
+    if "mod" in _OLD_BUILD:
+        return _OLD_BUILD["mod"]
+    repo = os.path.normpath(os.path.join(HERE, "..", ".."))
+    src = subprocess.run(["git", "-C", repo, "show", OLD_BUILD_COMMIT + ":backend/api/main.py"],
+                         capture_output=True, check=True).stdout
+    d = tempfile.mkdtemp(prefix="cf_old_")
+    path = os.path.join(d, "main_land_old.py")
+    with open(path, "wb") as fh:
+        fh.write(src)
+    spec = importlib.util.spec_from_file_location("main_land_old", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _OLD_BUILD["mod"] = mod
+    return mod
+
+
+def test_land_old_client_queue_join_create_leave_unchanged(monkeypatch):
+    """LAND item 5: an old client (X-Mod-Version 1.40.3, no caps) joins the
+    FFA queue, leaves it, opens a host lobby and leaves that; on this build
+    every answer is the old build's, byte for byte after normalising ids and
+    times, and so is every row those calls leave (the two queue rows, the
+    lobby row with the new columns at their defaults); no seat, epoch or G3
+    row is written, no [FFA-ASM] line is printed, and the lobby stays
+    ungated and bettable. The comparison's own negative control: the same
+    flow with a NEW client's caps on the lobby create is NOT the old shape."""
+    import httpx
+    import database
+    old = _old_build_main()
+
+    async def no_session(request, steam_id, db):
+        return None
+    monkeypatch.setattr(old, "_check_steam_session", no_session)
+
+    async def body(env):
+        monkeypatch.setattr(old, "time", main.time)
+        monkeypatch.setattr(old, "_presence_seen", {})
+
+        async def override():
+            async with env.sm() as db:
+                yield db
+        main.app.dependency_overrides[database.get_db] = override
+        old.app.dependency_overrides[database.get_db] = override
+        try:
+            async def flow(app, tag, caps=None):
+                """The old client's calls through `app`; returns the shape."""
+                env.serial += 1
+                base = cf_asm.STEAM_BASE + 900000 + env.serial * 20
+                sids = [str(base), str(base + 1)]
+                pids = []
+                for i, sid in enumerate(sids):
+                    pids.append(await env.conn.fetchval(
+                        "INSERT INTO players (id, steam_id, display_name, mod_version)"
+                        " VALUES ($3, $1, $2, $4) RETURNING id", sid, "cf old %s %d" % (tag, i),
+                        cf_asm.fixture_uuid("player", sid), OLD_CLIENT_VERSION))
+                answers = []
+
+                async def http(method, path, js=None, params=None):
+                    async def go():
+                        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                                     base_url="http://cf", timeout=60) as cl:
+                            r = await cl.request(method, path, json=js, params=params,
+                                                 headers={"X-Mod-Version": OLD_CLIENT_VERSION})
+                        return r.status_code, r.json()
+                    # Through env._call, so every line the handler prints is
+                    # in env.lines (the no-[FFA-ASM] assertion reads them).
+                    st, body_ = (await env._call(go)).body
+                    answers.append([st, body_])
+                    return st, body_
+
+                async def queue(i):
+                    r = await env.conn.fetchrow(
+                        "SELECT * FROM ffa_queue WHERE player_id = $1", pids[i])
+                    return dict(r) if r is not None else None
+                join = {"steam_id": sids[0], "display_name": "cf old %s 0" % tag, "region": "eu"}
+                st, _ = await http("POST", "/api/v1/ffa/queue/join", join)
+                assert st == 200, ("OLD join", tag, answers)
+                q_join = await queue(0)
+                await http("POST", "/api/v1/ffa/queue/leave", params={"steam_id": sids[0]})
+                q_left = await queue(0)
+                create = {"steam_id": sids[1], "display_name": "cf old %s 1" % tag, "region": "eu"}
+                if caps is not None:
+                    create["caps"] = caps
+                st, js = await http("POST", "/api/v1/ffa/lobby/create", create)
+                assert st == 200 and js.get("lobby_id"), ("OLD create", tag, answers)
+                lid = uuid.UUID(js["lobby_id"])
+                q_host = await queue(1)
+                l_open = dict(await env.conn.fetchrow("SELECT * FROM ffa_lobbies WHERE id = $1", lid))
+                await http("POST", "/api/v1/ffa/queue/leave",
+                           params={"steam_id": sids[1], "expected_lobby_id": str(lid)})
+                l_closed = dict(await env.conn.fetchrow("SELECT * FROM ffa_lobbies WHERE id = $1", lid))
+                q_gone = await queue(1)
+                side = {}
+                for table in ("ffa_assembly_seats", "ffa_kept_epochs"):
+                    side[table] = await env.conn.fetchval(
+                        "SELECT count(*) FROM %s WHERE lobby_id = $1" % table, lid)
+                side["ffa_assembly_seats_by_player"] = await env.conn.fetchval(
+                    "SELECT count(*) FROM ffa_assembly_seats WHERE player_id = ANY($1::uuid[])", pids)
+                side["ffa_g3_seats"] = await env.conn.fetchval(
+                    "SELECT count(*) FROM ffa_g3_seats WHERE player_id = ANY($1::uuid[])", pids)
+                names = {}
+                for i, sid in enumerate(sids):
+                    names[sid] = "SID%d" % i
+                    names["cf old %s %d" % (tag, i)] = "NAME%d" % i
+                rows = {"answers": answers, "queue_join": q_join, "queue_left": q_left,
+                        "queue_host": q_host, "lobby_open": l_open, "lobby_closed": l_closed,
+                        "queue_gone": q_gone, "side": side}
+                seed = [(pids[0], "P0"), (pids[1], "P1"), (lid, "LOBBY")]
+                return rows, cf_asm.normalise(_anon(rows, names), seed)
+
+            n0 = len(env.lines)
+            new_rows, new_shape = await flow(main.app, "new")
+            old_rows, old_shape = await flow(old.app, "old")
+            assert new_shape == old_shape, ("OLD same shape", new_shape, old_shape)
+            assert [a[1] for a in new_rows["answers"]] == [
+                {"status": "ok", "queue_count": 1}, {"status": "ok", "lock_dissolved": False},
+                {"status": "ok", "lobby_id": new_rows["answers"][2][1]["lobby_id"]},
+                {"status": "ok"}], ("OLD answers", new_rows["answers"])
+            assert new_rows["queue_join"]["caps"] == "" and \
+                new_rows["queue_join"]["mod_version"] == OLD_CLIENT_VERSION, \
+                ("OLD join row", new_rows["queue_join"])
+            assert new_rows["queue_host"]["caps"] == "", ("OLD host row", new_rows["queue_host"])
+            assert new_rows["queue_left"] is None and new_rows["queue_gone"] is None, \
+                ("OLD rows gone", new_rows["queue_left"], new_rows["queue_gone"])
+            for key in ("lobby_open", "lobby_closed"):
+                lob = new_rows[key]
+                assert (lob["assembly_v1"], lob["admission_v1"], lob["bets_disabled"]) == \
+                    (False, False, False), ("OLD ungated", key, lob)
+                assert all(lob[c] is None for c in (
+                    "reformed_from", "reformed_to", "start_granted_at", "short_started_at",
+                    "asm_rule", "dissolve_path", "first_leaver", "region_why")), ("OLD untouched", key, lob)
+            assert new_rows["lobby_closed"]["status"] == "canceled" and \
+                new_rows["lobby_closed"]["invalidation_reason"] == "lobby_disbanded", \
+                ("OLD disband", new_rows["lobby_closed"])
+            assert new_rows["side"] == {"ffa_assembly_seats": 0, "ffa_kept_epochs": 0,
+                                        "ffa_assembly_seats_by_player": 0, "ffa_g3_seats": 0}, \
+                ("OLD no seat rows", new_rows["side"])
+            assert not [ln for ln in env.lines[n0:] if "[FFA-ASM]" in ln], \
+                ("OLD no assembly line", env.lines[n0:])
+            _, ctl_shape = await flow(main.app, "ctl", caps="ffa_asm1,ffa_adm1")
+            assert ctl_shape != old_shape, "OLD control: a new client's caps change the shape"
+        finally:
+            main.app.dependency_overrides.pop(database.get_db, None)
+            old.app.dependency_overrides.pop(database.get_db, None)
+    run_env(monkeypatch, body)
