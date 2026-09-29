@@ -415,6 +415,33 @@ def test_a_refused_portal_session_is_dropped_and_minted_again_once():
     assert "MintPortalSessionAndOpen();" not in whole, "a mint site that says nothing about the retry"
 
 
+
+def test_every_portal_mint_that_opens_nothing_says_why_in_the_log():
+    """Witness S5's press r5 (a valid session after a restore) opened no
+    portal and left no log line: the mint's failure branch showed only a 5 s
+    toast, so whether the request timed out or was refused could not be read
+    afterwards. Every return of the mint that opens nothing now writes one
+    line before it returns, and the failure line carries the answer's own
+    text (bounded) and never a token."""
+    mint = code_of(API, "private static void MintPortalSessionAndOpen(bool remintOnRefusal)")
+    body = mint[mint.index("{") + 1:]
+    returns = [m.start() for m in re.finditer(r"\breturn;", body)]
+    assert len(returns) == 5, "a new return in the mint must be looked at: %d" % len(returns)
+    first = body.index("if (Plugin.Instance == null) return;")
+    for at in returns:
+        if at == first + len("if (Plugin.Instance == null) ") or "RemintThenOpenPortal" in body[max(0, at - 160):at]:
+            continue   # no plugin host at all; the re-mint hand-off logs its own line above
+        before = body[max(0, at - 700):at]
+        seg = before[before.rfind("if ("):]
+        assert "Plugin.Log.Log" in seg, "a mint return that opens nothing and logs nothing: " + seg
+    fail = body[body.index("if (act != SecureRouteRules.MintAction.Open)"):]
+    fail = fail[:fail.index("return;")]
+    assert 'string why = success ? "answered without a token" : PortalMintFailureText(response);' in fail, fail
+    assert "[I18N] portal mint failed over {portalBase}: {why}" in fail, fail
+    assert "token}" not in fail.replace("{portalBase}", ""), "the failure line prints the token"
+    text = code_of(API, "internal static string PortalMintFailureText(string response)")
+    assert "160" in text and 'Replace("\\n", " ")' in text, text
+
 def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
     """The local harness (TestBackupUrl, TestQueueReport) and the stale-token
     lever change nothing for a player: the harness is armed only when the

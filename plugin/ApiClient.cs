@@ -5965,13 +5965,21 @@ namespace CompetitiveRounds
         {
             if (Plugin.Instance == null) return;
             string sid = MatchTracker.LocalSteamId;
+            // Every press that ends without a portal says why in the log (board
+            // row 27 round 2: witness S5's press r5 showed only a 5 s toast and
+            // left no line, so its cause could not be read afterwards).
             if (string.IsNullOrEmpty(sid) || sid == "unknown")
             {
+                Plugin.Log.LogWarning("[I18N] portal not opened: the local Steam identity is not known yet");
                 CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
                 return;
             }
             string portalBase = baseUrl;
-            if (!portalBase.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return;
+            if (!portalBase.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                Plugin.Log.LogWarning($"[I18N] portal not opened: the base moved off https before the mint ({portalBase})");
+                return;
+            }
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{portalBase}/api/v1/i18n/portal-session",
                 $"{{\"steam_id\":\"{Escape(sid)}\"}}",
@@ -5987,12 +5995,26 @@ namespace CompetitiveRounds
                     }
                     if (act != SecureRouteRules.MintAction.Open)
                     {
+                        // The failure's own answer, never a token: a success
+                        // without one is named, not printed.
+                        string why = success ? "answered without a token" : PortalMintFailureText(response);
+                        Plugin.Log.LogWarning($"[I18N] portal mint failed over {portalBase}: {why}"
+                                              + (remintOnRefusal ? "" : " (after the one re-mint)"));
                         CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
                         return;
                     }
                     Plugin.Log.LogInfo($"[I18N] portal opened over {portalBase}");
                     Application.OpenURL($"{portalBase}/translate#token={token}");
                 }));
+        }
+
+        /// <summary>A failed mint's answer for the log: one line, at most 160
+        /// characters (a proxy's HTML error page would otherwise fill it).</summary>
+        internal static string PortalMintFailureText(string response)
+        {
+            if (string.IsNullOrEmpty(response)) return "no answer";
+            string one = response.Replace("\r", " ").Replace("\n", " ").Trim();
+            return one.Length <= 160 ? one : one.Substring(0, 160) + "...";
         }
 
         /// <summary>After the portal mint refused the session: wait (bounded)
