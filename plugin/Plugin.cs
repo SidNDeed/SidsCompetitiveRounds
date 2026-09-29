@@ -2451,7 +2451,8 @@ namespace CompetitiveRounds
         /// read the teams; a readable but wrong `t_id`; in each, the lowest id in
         /// the room is the leaver's own teammate) leave a reporter the server
         /// accepts, as does every state of a four-seat room in its sweep, and that
-        /// rooms whose teams are readable and true elect exactly two seats.
+        /// rooms whose teams are readable and true elect exactly two seats, exactly
+        /// one of which the server accepts (merge pass 1, follow-up 6).
         /// Nothing is sent. Logs [REPORTER-ELECTION-SENTINEL] PASS/FAIL.</summary>
         internal static void DevReporterElectionSentinelTest()
         {
@@ -4579,7 +4580,10 @@ namespace CompetitiveRounds
                 //      mid-change, or one peer on a build that does not advertise
                 //      `cr_dc2`. The FLOOR election runs: DcReporterElection's two
                 //      lowest ids plus its team claim (v1.41.0 beta round 3 finding
-                //      2), at least one report the server accepts, always, because
+                //      2), or, in a view it can check, the lowest id advertising the
+                //      team that stayed plus the seat advertising the leaver's team
+                //      (merge pass 1, follow-up 6); at least one report the server
+                //      accepts, always, because
                 //      zero reporters is the one outcome worse than the bug (#276).
                 //      A peer on an older build runs its own older rule, and the
                 //      two-seat bound holds only over the seats running this one.
@@ -4784,14 +4788,24 @@ namespace CompetitiveRounds
                     //
                     // It replaces the floor both lanes carried before they met. The
                     // room-wide lowest id alone is refused whenever it is the
-                    // leaver's teammate. The L3 stand-down (a seat that looks like
-                    // the leaver's teammate defers while another survivor looks
-                    // eligible) reaches ZERO accepted reports when the leaver
-                    // advertises the team that stayed: with real teams {L,A} and
-                    // {B,C}, A < B < C, and L advertising B's team, A looks eligible
-                    // and reports -- refused, it is L's real teammate -- while B and
-                    // C both read as the leaver's team and stand down. Zero
-                    // reporters is the one outcome worse than the bug (#276).
+                    // leaver's teammate. The 886bed8 lane's first cut of the L3
+                    // stand-down (a seat that looks like the leaver's teammate
+                    // defers while another survivor looks eligible) reaches ZERO
+                    // accepted reports when the leaver advertises the team that
+                    // stayed: with real teams {L,A} and {B,C}, A < B < C, and L
+                    // advertising B's team, A looks eligible and reports -- refused,
+                    // it is L's real teammate -- while B and C both read as the
+                    // leaver's team and stand down. Zero reporters is the one
+                    // outcome worse than the bug (#276).
+                    //
+                    // THE STAND-DOWN AS RULED (v1.41.0 merge pass 1, follow-up 6):
+                    // exactly one of the eligible seats reports, the lowest id, and
+                    // the stand-down belongs to an eligible seat that is not the
+                    // lowest eligible one. ShouldReport applies it only in a view it
+                    // can check (every survivor's `u_id` and `t_id` readable and the
+                    // advertised split 2/2), where the seat advertising the leaver's
+                    // team still reports; in the example above the view is not 2/2
+                    // (three seats advertise B's team) and the floor decides.
                     //
                     // Its census is the fighter view (RoomActors.ActiveFighters), as
                     // it was where this rule was certified. That view is LOCAL state,
@@ -4811,10 +4825,15 @@ namespace CompetitiveRounds
                             ppSid = pp.CustomProperties["u_id"]?.ToString();
                         census.Add(new DcReporterElection.Peer(ppSid, TeamIdOf(pp)));
                     }
-                    bool onFloor;
+                    bool onFloor, consistentView;
                     if (!DcReporterElection.ShouldReport(myVal, myTeam, dcTeam, census,
-                            out onFloor, out _)) return;
-                    if (!teamsKnown)
+                            out onFloor, out _, out consistentView)) return;
+                    if (consistentView)
+                        Plugin.Log.LogInfo(myTeam == dcTeam
+                            ? "[2v2-DC] reporting from a consistent 2/2 view as the seat advertising the leaver's team "
+                              + "(the server refuses it if that team is true; the lower id of the other team reports as well)"
+                            : "[2v2-DC] reporting from a consistent 2/2 view as the lower id of the team that stayed");
+                    else if (!teamsKnown)
                         Plugin.Log.LogInfo($"[2v2-DC] reporting with the teams unreadable (my t_id={myTeam}, "
                             + $"leaver t_id={dcTeam}); the server accepts only the team that stayed");
                     else if (!onFloor)

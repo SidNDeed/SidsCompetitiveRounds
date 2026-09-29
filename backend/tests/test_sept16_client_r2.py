@@ -218,29 +218,93 @@ def elect(seats, leaver, capable=None):
                           "prompt" if my_val == lowest_non_dc else "watch"))
             continue
 
-        # arm (2): the floor election, unchanged, with this seat's own snapshot
-        lowest_overall = True
-        lowest_on_my_team = teams_known and my_team != dc_team
-        other_eligible = False
-        for pp in seats:
-            if pp is me:
-                continue
-            pv = pp["uid"]
-            if pv is None:
-                continue
-            if teams_known and pp["team"] is not None and pp["team"] != dc_team:
-                other_eligible = True
-            if pv >= my_val:
-                continue
-            lowest_overall = False
-            if lowest_on_my_team and pp["team"] == my_team:
-                lowest_on_my_team = False
-        if teams_known and my_team == dc_team and other_eligible:
-            continue
-        if not lowest_overall and not lowest_on_my_team:
-            continue
-        posts.append((my_val, "REAL", "prompt"))
+        # arm (2): the floor election as the merged tree runs it,
+        # DcReporterElection.ShouldReport (floor_rule below), with this seat's
+        # own snapshot. This lane's own floor (the room-wide lowest id, plus the
+        # L3 stand-down of a seat advertising the leaver's team) met the
+        # v1.41.0 client lane's two-lowest floor in merge pass 1; see
+        # test_l3_dc_team_seat_stands_down_when_another_is_eligible.
+        peers = [(pp["uid"], _team(pp["team"])) for pp in seats if pp is not me]
+        if floor_rule(my_val, _team(my_team), _team(dc_team), peers):
+            posts.append((my_val, "REAL", "prompt"))
     return posts
+
+
+def _team(t):
+    return -1 if t is None else t
+
+
+def floor_rule(my_val, my_team, dc_team, peers):
+    """DcReporterElection.ShouldReport, transliterated (v1.41.0 merge pass 1,
+    follow-up 6). `peers`: (uid or None, team or -1) for every other survivor.
+
+    THE CONSISTENT VIEW first: both teams known, exactly two peers, every peer's
+    uid readable and distinct (and not mine) and its team readable, and exactly
+    one survivor advertising the leaver's team. There the seat advertising the
+    leaver's team reports, and of the two advertising the other team only the
+    lower id does. Everywhere else: the two lowest readable ids report (the
+    floor) OR the team claim (teams unknown, or I look eligible and no lower
+    peer shares my team)."""
+    teams_known = dc_team >= 0 and my_team >= 0
+    ids = [u for u, _t in peers]
+    if (teams_known and len(peers) == 2 and None not in ids and my_val not in ids
+            and len(set(ids)) == 2 and all(t >= 0 for _u, t in peers)
+            and (my_team == dc_team) + [t for _u, t in peers].count(dc_team) == 1):
+        if my_team == dc_team:
+            return True
+        return not any(u < my_val and t != dc_team for u, t in peers)
+    lower = 0
+    lowest_on_my_team = (not teams_known) or my_team != dc_team
+    for u, t in peers:
+        if u is None or u >= my_val:
+            continue
+        lower += 1
+        if teams_known and lowest_on_my_team and t == my_team:
+            lowest_on_my_team = False
+    return lower < 2 or lowest_on_my_team
+
+
+def lane_standdown_rule(my_val, my_team, dc_team, peers):
+    """The negative control: floor_rule with this lane's first cut of the L3
+    stand-down put back -- a seat advertising the leaver's team stands down
+    whenever another survivor with a readable id looks eligible."""
+    if dc_team >= 0 and my_team >= 0 and my_team == dc_team:
+        if any(u is not None and t >= 0 and t != dc_team for u, t in peers):
+            return False
+    return floor_rule(my_val, my_team, dc_team, peers)
+
+
+def _floor_sweep(rule):
+    """DcReporterElection's sentinel sweep over `rule`: every leaver, every
+    order of four ids, every t_id 0, 1 or unreadable, every u_id readable or
+    not. Seats 0 and 1 really play on team 0, seats 2 and 3 on team 1; a report
+    is ACCEPTED when its seat's real team is not the leaver's (the F6 gate).
+    Returns (states, states with no accepted report, true-team states,
+    true-team states whose accepted count is not exactly one), where a
+    true-team state has every u_id readable and every t_id true or every one
+    exchanged."""
+    states = misses = true_states = true_not_one = 0
+    for order in itertools.permutations((100, 200, 300, 400)):
+        for adv in itertools.product((0, 1, None), repeat=4):
+            real = (0, 0, 1, 1)
+            same = all(adv[i] == real[i] for i in range(4))
+            swapped = all(adv[i] == 1 - real[i] for i in range(4))
+            for unreadable in range(16):
+                uid = [None if (unreadable >> i) & 1 else order[i] for i in range(4)]
+                for lv in range(4):
+                    accepted = 0
+                    for me in range(4):
+                        if me == lv:
+                            continue
+                        peers = [(uid[o], _team(adv[o])) for o in range(4) if o not in (me, lv)]
+                        if rule(order[me], _team(adv[me]), _team(adv[lv]), peers) and real[me] != real[lv]:
+                            accepted += 1
+                    states += 1
+                    misses += accepted < 1
+                    if unreadable == 0 and (same or swapped):
+                        true_states += 1
+                        true_not_one += accepted != 1
+    return states, misses, true_states, true_not_one
 
 
 def _prompt(posts):
@@ -914,17 +978,56 @@ def test_h1_the_totals_are_this_seats_snapshot_in_both_arms():
 
 
 def test_l3_dc_team_seat_stands_down_when_another_is_eligible():
-    src = _src("Plugin.cs")
+    """L3 as the integrator ruled it in v1.41.0 merge pass 1 (follow-up 6).
+    The requirement: at least one seat the server accepts always reports a
+    2v2 disconnect, and when several seats are eligible exactly one of them
+    does, the lowest Steam id (the project's reporter rule). So the stand-down
+    belongs to an ELIGIBLE seat that is not the lowest eligible one.
+
+    This test used to pin the lane's first cut, `if (teamsKnown && myTeam ==
+    dcTeam && otherEligible) return;` in Plugin.cs: a seat advertising the
+    leaver's team stood down whenever another survivor looked eligible. Beside
+    the v1.41.0 lane's two-lowest floor that leaves states with NO accepted
+    reporter (a wrong t_id makes the seat that stands down one of the two that
+    stayed; that lane's round 3 finding 2), so that expectation is gone, and
+    the negative control below is exactly that rule put back. The census arm's
+    half of L3 is unchanged: with the split intact and every seat running the
+    census, the DC-team survivor never posts."""
+    src = _src("DcReporterElection.cs")
 
     def claim(s):
-        return "if (teamsKnown && myTeam == dcTeam && otherEligible) return;" in s
+        return ("consistentView = ConsistentView(myVal, myTeam, dcTeam, peers, out lowerLooksEligible);" in s
+                and "return myTeam == dcTeam || !lowerLooksEligible;" in s)
 
     _assert_discriminating(
         claim, src,
-        _mutate(src, "if (teamsKnown && myTeam == dcTeam && otherEligible) return;",
-                "// stand-down removed", "L3"),
-        "L3 DC-team stand-down")
-    # and the model: with the split intact the DC-team survivor never posts
+        _mutate(src, "return myTeam == dcTeam || !lowerLooksEligible;",
+                "return !lowerLooksEligible;", "L3 two-sided"),
+        "L3 stand-down of an eligible seat that is not the lowest eligible one")
+    plug = _src("Plugin.cs")
+    assert "otherEligible" not in plug, "the unconditional stand-down is back in Plugin.cs"
+    assert "out onFloor, out _, out consistentView)) return;" in plug
+
+    # the model, over the sentinel's whole sweep: the ruled rule meets both
+    # halves of the requirement ...
+    states, misses, true_states, true_not_one = _floor_sweep(floor_rule)
+    assert states == 124416 and true_states == 192, (states, true_states)
+    assert misses == 0, ("states with no accepted reporter", misses)
+    assert true_not_one == 0, ("true-team states without exactly one accepted", true_not_one)
+    # ... and the unconditional stand-down put back is red: zero reporters.
+    _s, lane_misses, _t, _n = _floor_sweep(lane_standdown_rule)
+    assert lane_misses > 0, "the negative control no longer misses: the sweep proves nothing"
+    # the named state: real teams {L=400, A=100} and {B=200, C=300}; A and C
+    # advertise each other's teams, a clean 2/2 split that is wrong. The seat
+    # advertising the leaver's team is C, one of the two that stayed.
+    seats = [(100, 1), (200, 1), (300, 0)]              # A, B, C as advertised
+    peers_of = lambda i: [(u, t) for j, (u, t) in enumerate(seats) if j != i]
+    ruled = [u for i, (u, t) in enumerate(seats) if floor_rule(u, t, 0, peers_of(i))]
+    lane = [u for i, (u, t) in enumerate(seats) if lane_standdown_rule(u, t, 0, peers_of(i))]
+    assert ruled == [100, 300], ruled                  # A refused, C accepted
+    assert lane == [100], lane                         # A alone: refused, zero accepted
+
+    # the census arm: with the split intact the DC-team survivor never posts
     seats = _seats([(10, 0), (20, 1), (30, 1)])
     assert 10 not in [u for u, _t, _d in elect(seats, {"uid": 40, "team": 0})]
 
