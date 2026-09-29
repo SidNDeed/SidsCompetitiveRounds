@@ -36998,6 +36998,16 @@ async def internal_tournament_notices(
           JOIN players p ON p.id = tn.player_id
           JOIN tournaments t ON t.id = tn.tournament_id
          WHERE {where}
+           -- An availability check goes only to a CURRENT entrant (Discord
+           -- fix round 3, item 4): the bot sends from this read, so a notice
+           -- that outlived its signup is never delivered. Unsignup also
+           -- deletes the unsent row; a re-signup re-arms this one.
+           AND (
+               tn.notice_type <> 'availability_check'
+               OR EXISTS (SELECT 1 FROM tournament_signups ts
+                           WHERE ts.tournament_id = tn.tournament_id
+                             AND ts.player_id = tn.player_id)
+           )
            AND (
                tn.notice_type <> 'deadline_checkin'
                OR (

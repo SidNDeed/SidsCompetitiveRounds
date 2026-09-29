@@ -211,3 +211,82 @@ def test_item3_an_eighth_eligible_vote_reaches_the_quorum_on_every_surface(monke
         status, start = await lock(env, tid)
         assert status == "locked" and int(start.timestamp()) == unix, (status, start)
     e2e(monkeypatch, tmp_path, body)
+
+
+# -- item 4: a held availability notice dies with its recipient's signup ------------------------
+
+AVAIL_UNSENT = (f"SELECT COUNT(*) FROM {SCHEMA}.tournament_notices WHERE tournament_id = CAST(:t AS uuid)"
+                " AND player_id = CAST(:p AS uuid) AND notice_type = 'availability_check' AND notified_at IS NULL")
+
+
+async def held_below_quorum(env):
+    """Eight entrants, seven of them voting for the one slot; the eight checks
+    queued and held by a bot tick (7 of 8, no DM). Returns (tid, slot, people):
+    people[2] is a voter who will leave, people[8] and people[9] the
+    replacements."""
+    people = await entrants_of(env, 10)
+    tid, slot = await sync_tournament(env, people[:8], 7)
+    await queue_notices(env)
+    rig = bot_over(env)
+    await tick(rig)
+    assert rig.client.dms == [] and len(R.held_lines(rig)) == 1, (rig.client.dms, rig.logs)
+    return tid, slot, people
+
+
+async def replacements_reach_quorum(env, tid, slot, people):
+    for who in people[8:10]:
+        await vote(env, tid, who, slot)
+    await queue_notices(env)
+    assert tallies_of(await current(env, people[0])) == [(int(slot.timestamp()), 8)]
+    rig = bot_over(env)
+    await tick(rig)
+    return rig
+
+
+def dm_view(rig, people, slot):
+    """(recipients, contents) of the tick's DMs, each recipient named by its
+    fixture tag; and the tags every entrant but the leaver should hold."""
+    by_did = {str(p.discord): p.tag for p in people}
+    got = sorted(by_did.get(str(d.uid), f"?{d.uid}") for d in rig.client.dms)
+    want = sorted(p.tag for i, p in enumerate(people) if i != 2)
+    line = f"Are you still available to play in the **Synchronized tournament** at <t:{int(slot.timestamp())}:F>?"
+    return got, want, {d.content for d in rig.client.dms}, line
+
+
+def test_item4_unsignup_drops_the_held_check_and_the_former_entrant_gets_no_dm(monkeypatch, tmp_path):
+    """Queue, hold below quorum, the voter people[2] leaves through the
+    production unsignup route, two replacements vote and the slot reaches
+    eight: the leaver's unsent check is gone the moment they leave (the drop),
+    no DM reaches them, and the nine current entrants' DMs are the ones they
+    get without the leaver in the story - one each, naming the slot."""
+    async def body(env):
+        tid, slot, people = await held_below_quorum(env)
+        leaver = people[2]
+        r = await env.client.post(f"/api/v1/tournaments/{tid}/unsignup", json={"steam_id": leaver.steam},
+                                  headers=env.mod_headers(leaver))
+        assert r.status_code == 200, (r.status_code, r.text[:300])
+        left = await env.val(AVAIL_UNSENT, {"t": tid, "p": leaver.id})
+        assert left == 0, f"the leaver's held availability check survived the unsignup: {left} unsent row(s)"
+        rig = await replacements_reach_quorum(env, tid, slot, people)
+        got, want, contents, line = dm_view(rig, people, slot)
+        assert (got, contents) == (want, {line}), f"DMs to {got}"
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_item4_a_check_that_outlived_its_signup_is_never_sent(monkeypatch, tmp_path):
+    """The send path's own re-check: a held check whose signup is gone by
+    another road - here the rows an unsignup before this fix left behind
+    (signup and votes deleted, the notice kept) - is not in the feed the bot
+    sends from, so the former entrant gets no DM when the replacements reach
+    quorum, and the nine current entrants' DMs are unchanged."""
+    async def body(env):
+        tid, slot, people = await held_below_quorum(env)
+        leaver = people[2]
+        for table in ("tournament_time_votes", "tournament_signups"):
+            await env.ex(f"DELETE FROM {SCHEMA}.{table} WHERE tournament_id = CAST(:t AS uuid)"
+                         " AND player_id = CAST(:p AS uuid)", {"t": tid, "p": leaver.id})
+        assert await env.val(AVAIL_UNSENT, {"t": tid, "p": leaver.id}) == 1
+        rig = await replacements_reach_quorum(env, tid, slot, people)
+        got, want, contents, line = dm_view(rig, people, slot)
+        assert (got, contents) == (want, {line}), f"DMs to {got}"
+    e2e(monkeypatch, tmp_path, body)

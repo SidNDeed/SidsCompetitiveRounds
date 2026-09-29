@@ -4423,6 +4423,17 @@ async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: A
         # signup into their slot OR collapse their matches into byes for
         # their opponents so the bracket still resolves.
         await _handle_leaving_signup(db, tournament_id, existing.id)
+    # The availability check queued for this entrant and not yet sent dies
+    # with the signup (Discord fix round 3, item 4; Codex round 2 LOW 2): a
+    # sync check can sit held for days until a start time reaches
+    # min_players, and a former entrant must not be asked. The notice feed
+    # re-checks the live signup as well (main.py internal_tournament_notices),
+    # for a notice that outlives its signup by any other road. A later
+    # re-signup queues a fresh one (_queue_availability_notices).
+    await db.execute(text(
+        "DELETE FROM tournament_notices WHERE tournament_id = :tid AND player_id = :pid"
+        " AND notice_type = 'availability_check' AND notified_at IS NULL"),
+        {"tid": tournament_id, "pid": player.id})
     await db.flush()
     # Discord feed (v1.32): departure + updated progress line. In the locked
     # branch the count can stay flat (a speculative got promoted) — the line
