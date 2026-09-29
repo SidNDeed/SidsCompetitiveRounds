@@ -995,16 +995,12 @@ namespace CompetitiveRounds
             // R1 f21: the stream can die during the fetch (<=30s) — never flip
             // to PLAY on a dead stream. Abandon the run; the entry stays
             // queued under the 2h rule and re-picks when the stream is back
-            // (the pick gate keeps this from looping).
-            bool live = false;
-            try { live = BroadcastMode.StreamInfoLive; } catch { }
-            if (!live && !IsDevEntry(e))
+            // (the pick gate keeps this from looping). Round 2 M3: the same
+            // gate (SessionReportRules.PlaybackMayStart, asked now) guards
+            // every later door into playback too - see EnterPlayback.
+            if (!SessionReportRules.PlaybackMayStart(StreamLiveNow, IsDevEntry(e)))
             {
-                _gen++;
-                _fetch = null;
-                _current = null;
-                _phase = PHASE_NONE;
-                try { Plugin.Log?.LogInfo("[REPORT] stream not live - deferring " + e.reportId); } catch { }
+                DeferEntry(e);
                 return;
             }
 
@@ -1028,7 +1024,46 @@ namespace CompetitiveRounds
                 return;
             }
             try { Plugin.Log?.LogInfo("[REPORT] no game of the set in the fetched history - playing the screens"); } catch { }
-            PlayScreens(e, pages);
+            EnterPlayback(e, null, pages);
+        }
+
+        /// <summary>Round 2 M3: the ONE door into playback. Every path that
+        /// ends a fetch - no anchor, the report fetch's success, its HTTP
+        /// failure, its timeout, a body that is not an envelope - comes here,
+        /// and SessionReportRules.PlaybackAfterFetch (executed by the client
+        /// harness) asks the stream NOW: the report GET can take up to
+        /// SR_FETCH_DEADLINE, and a stream that died during it defers the set
+        /// exactly as the first fetch does (DeferEntry) instead of spending
+        /// its dwell clock on pages nobody sees. The dev lever's own entry
+        /// plays with the stream down, as at the first gate.</summary>
+        private static void EnterPlayback(Entry e, SessionReportModel.Model model, List<Page> pages)
+        {
+            int step = SessionReportRules.PlaybackAfterFetch(model != null, StreamLiveNow, IsDevEntry(e));
+            if (step == SessionReportRules.PLAYBACK_DEFER)
+            {
+                DeferEntry(e);
+                return;
+            }
+            if (step == SessionReportRules.PLAYBACK_REPORT) PlaySessionReport(model);
+            else PlayScreens(e, pages);
+        }
+
+        /// <summary>The stream's live flag, read at the moment the gate asks
+        /// (it may throw; the rule treats a throw as not live).</summary>
+        private static bool StreamLiveNow() => BroadcastMode.StreamInfoLive;
+
+        /// <summary>Abandon this run without consuming the entry: it stays
+        /// queued under the 2h rule and re-picks when the stream is back.
+        /// Late fetch callbacks are discarded (the generation moves).</summary>
+        private static void DeferEntry(Entry e)
+        {
+            _gen++;
+            _fetch = null;
+            _current = null;
+            _srModel = null;
+            _fallbackPages = null;
+            _phase = PHASE_NONE;
+            try { Plugin.Log?.LogInfo("[REPORT] stream not live - deferring " + (e != null ? e.reportId : "?")); } catch { }
         }
 
         /// <summary>The screens play (the pre-30g path): the report page, then
@@ -1174,7 +1209,7 @@ namespace CompetitiveRounds
                 return;
             }
             if (model == null) { ReportFallback("the body was not an envelope"); return; }
-            PlaySessionReport(model);
+            EnterPlayback(_current, model, null);
         }
 
         private static void TickReportFetch(float now)
@@ -1193,7 +1228,7 @@ namespace CompetitiveRounds
             _fallbackPages = null;
             try { Plugin.Log?.LogWarning("[REPORT] session report unavailable (" + why + ") - playing the screens"); } catch { }
             if (e == null) { _phase = PHASE_NONE; return; }
-            PlayScreens(e, pages);
+            EnterPlayback(e, null, pages);
         }
 
         private static void PlaySessionReport(SessionReportModel.Model model)

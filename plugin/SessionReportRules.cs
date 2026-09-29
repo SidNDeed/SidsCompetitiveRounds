@@ -1020,6 +1020,33 @@ namespace CompetitiveRounds
             return next >= 1 && next < pages ? next : -1;
         }
 
+        // -- round 2 M3: the one gate into the broadcaster's playback (pure) ------
+
+        internal const int PLAYBACK_DEFER = 0, PLAYBACK_REPORT = 1, PLAYBACK_SCREENS = 2;
+
+        /// <summary>Whether the broadcaster may start playing a queued set: only
+        /// while the stream is live, or for the dev lever's own entry (a seat
+        /// under a maintenance pause has no stream). The stream is ASKED here,
+        /// at the moment of the decision, never taken from a value read before
+        /// a fetch; a probe that throws or is missing reads as not live.</summary>
+        internal static bool PlaybackMayStart(Func<bool> streamLive, bool devEntry)
+        {
+            if (devEntry) return true;
+            try { return streamLive != null && streamLive(); }
+            catch { return false; }
+        }
+
+        /// <summary>Where a finished fetch enters: PLAYBACK_DEFER unless
+        /// PlaybackMayStart; then the session report when a model was built,
+        /// else the screens (its fallback: an HTTP failure, the timeout, a body
+        /// that is not an envelope, or no anchor). Every outcome passes this one
+        /// gate - success, failure and timeout alike.</summary>
+        internal static int PlaybackAfterFetch(bool haveModel, Func<bool> streamLive, bool devEntry)
+        {
+            if (!PlaybackMayStart(streamLive, devEntry)) return PLAYBACK_DEFER;
+            return haveModel ? PLAYBACK_REPORT : PLAYBACK_SCREENS;
+        }
+
         /// <summary>A game the broadcaster may anchor the watched set's report
         /// on: its id, its end (server UTC) and the steam ids of the players
         /// who PLAYED it (an FFA frozen-roster ghost is not one).</summary>

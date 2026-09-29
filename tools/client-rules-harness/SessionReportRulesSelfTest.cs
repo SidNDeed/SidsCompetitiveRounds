@@ -481,6 +481,33 @@ namespace CompetitiveRounds
             var none = NewestAnchor(new List<AnchorGame> { ghost }, t0, t0.AddMinutes(60), roster[0], roster, out v3);
             Check(r, "broadcast (control): no anchor when nobody of the roster played the newest game",
                   none == null && v3 == null, none == null ? "no anchor" : "anchor " + none.Id);
+
+            // Round 2 M3: a fake stream that goes down DURING the report fetch.
+            // The fetch starts while live; every outcome of it - success (a
+            // model), an HTTP failure and the timeout (both: no model, the
+            // screens' fallback) - asks the stream again and defers.
+            bool live = true;
+            int asked = 0;
+            Func<bool> stream = () => { asked++; return live; };
+            bool started = PlaybackMayStart(stream, false);
+            live = false;
+            int okDown = PlaybackAfterFetch(true, stream, false);
+            int failDown = PlaybackAfterFetch(false, stream, false);
+            int timeoutDown = PlaybackAfterFetch(false, stream, false);
+            int askedDown = asked;
+            Check(r, "broadcast: a stream that dies during the report fetch defers success, failure and timeout alike",
+                  started && okDown == PLAYBACK_DEFER && failDown == PLAYBACK_DEFER && timeoutDown == PLAYBACK_DEFER && askedDown == 4,
+                  "started " + started + "; after the stream went down: success " + okDown + ", failure " + failDown
+                  + ", timeout " + timeoutDown + "; stream asked " + askedDown + " times");
+            live = true;
+            int okUp = PlaybackAfterFetch(true, stream, false), failUp = PlaybackAfterFetch(false, stream, false);
+            live = false;
+            int devDown = PlaybackAfterFetch(true, stream, true);
+            Func<bool> broken = () => { throw new InvalidOperationException("no stream info"); };
+            int thrown = PlaybackAfterFetch(true, broken, false);
+            Check(r, "broadcast (control): a live stream plays the report or the screens; the dev entry plays down; a probe that throws defers",
+                  okUp == PLAYBACK_REPORT && failUp == PLAYBACK_SCREENS && devDown == PLAYBACK_REPORT && thrown == PLAYBACK_DEFER,
+                  "live: success " + okUp + ", failure " + failUp + "; dev entry down " + devDown + "; throwing probe " + thrown);
         }
 
         private const int FIXED_PAGES_FOR_TEST = 6;

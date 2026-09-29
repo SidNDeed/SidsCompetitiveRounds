@@ -1829,7 +1829,7 @@ def test_the_broadcaster_asks_for_the_watched_sets_report():
     assert "anchor = SessionAnchor(e, f, out viewer);" in fetch
     assert "_fallbackPages = pages;" in fetch and "BeginReportFetch(e, anchor, viewer, now);" in fetch
     assert fetch.index("pages = BuildPages(e, f);") < fetch.index("SessionAnchor(e, f, out viewer)")
-    assert "PlayScreens(e, pages);" in fetch, "no anchor: the screens play"
+    assert "EnterPlayback(e, null, pages);" in fetch, "no anchor: the screens play (through the gate)"
     anchor = _cs_body(POST, "private static string SessionAnchor(Entry e, FetchBox f, out string viewer)")
     assert "SessionReportRules.NewestAnchor(games, lo, hi, idA, e.rosterIds, out viewer)" in anchor
     assert "GetWindow(e, out lo, out hi);" in anchor
@@ -1846,7 +1846,7 @@ def test_the_report_plays_through_the_f5_model_and_view():
     got = _cs_body(POST, "private static void OnReportFetched(int gen, bool ok, string body)")
     assert "if (gen != _gen || _phase != PHASE_REPORT_FETCH) return;" in got
     assert "SessionReportRules.Parse(body)" in got and "SessionReportModel.Build(env)" in got
-    assert "PlaySessionReport(model);" in got
+    assert "EnterPlayback(_current, model, null);" in got
     draw = _cs_body(POST, "public static void Draw()")
     assert "SessionReportView.DrawBroadcast(_srModel, _pageIdx)" in draw
     assert draw.index("NativeUI.IsOpen") < draw.index("DrawBroadcast"), "F5 open still hides the report"
@@ -1889,11 +1889,44 @@ def test_the_kind_stays_report_and_the_screens_are_the_fallback():
     assert 'if (_srModel != null) return "report";' in screen
     assert screen.index('if (_srModel != null) return "report";') < screen.index('"graphs"')
     fb = _cs_body(POST, "private static void ReportFallback(string why)")
-    assert "PlayScreens(e, pages);" in fb
+    assert "EnterPlayback(e, null, pages);" in fb
     tr = _cs_body(POST, "private static void TickReportFetch(float now)")
     assert "SR_FETCH_DEADLINE" in tr and "ReportFallback(" in tr
     got = _cs_body(POST, "private static void OnReportFetched(int gen, bool ok, string body)")
     assert got.count("ReportFallback(") == 3, "fetch failure, build failure and a non-envelope body"
+
+
+def test_every_door_into_playback_asks_the_stream_now():
+    """Round 2 M3: the report GET can take up to SR_FETCH_DEADLINE, so the
+    stream may die while it runs. Every path out of a fetch - no anchor,
+    success, HTTP failure, the timeout, a non-envelope body - enters playback
+    through EnterPlayback, whose SessionReportRules.PlaybackAfterFetch asks the
+    stream at that moment (the harness drives it with a stream that goes down
+    mid-fetch); a dead stream defers the set with the first gate's own
+    DeferEntry. PlaySessionReport and PlayScreens have no other caller, so no
+    later edit can add a door that skips the gate without failing here."""
+    src = strip_comments_only(POST.read_text(encoding="utf-8"))
+    door = _cs_body(POST, "private static void EnterPlayback(Entry e, SessionReportModel.Model model, List<Page> pages)")
+    assert "SessionReportRules.PlaybackAfterFetch(model != null, StreamLiveNow, IsDevEntry(e))" in door
+    assert door.index("PLAYBACK_DEFER") < door.index("PlaySessionReport(model)") < door.index("PlayScreens(e, pages)")
+    assert "DeferEntry(e);" in door
+    for callee, sig in (("PlaySessionReport(", "private static void PlaySessionReport(SessionReportModel.Model model)"),
+                        ("PlayScreens(", "private static void PlayScreens(Entry e, List<Page> pages)")):
+        calls = len(re.findall(r"(?<![\w.])" + re.escape(callee), src)) - 1   # minus the definition
+        assert calls == 1 and door.count(callee) == 1, "%s is called %d times; the only call is EnterPlayback's" % (callee, calls)
+    assert len(re.findall(r"(?<![\w.])EnterPlayback\(", src)) - 1 == 3, "no anchor, success, the fallback"
+    fb = _cs_body(POST, "private static void ReportFallback(string why)")
+    assert "EnterPlayback(e, null, pages);" in fb
+    assert "ReportFallback(" in _cs_body(POST, "private static void TickReportFetch(float now)"), "the timeout"
+    got = _cs_body(POST, "private static void OnReportFetched(int gen, bool ok, string body)")
+    assert got.count("ReportFallback(") == 3 and "EnterPlayback(_current, model, null);" in got
+    fetch = _cs_body(POST, "private static void TickFetch(float now)")
+    assert "if (!SessionReportRules.PlaybackMayStart(StreamLiveNow, IsDevEntry(e)))" in fetch and "DeferEntry(e);" in fetch
+    assert "BroadcastMode.StreamInfoLive" not in fetch, "one shared gate, not a copy"
+    assert "private static bool StreamLiveNow() => BroadcastMode.StreamInfoLive;" in src
+    defer = _cs_body(POST, "private static void DeferEntry(Entry e)")
+    assert "_phase = PHASE_NONE;" in defer and "_current = null;" in defer and "_gen++;" in defer
+    assert "_queue.Remove" not in defer, "a deferred set stays queued"
 
 
 def test_the_viewer_rides_only_when_named_and_well_formed():
@@ -1911,7 +1944,7 @@ def test_the_watched_set_lever_replays_a_recorded_set_through_the_pipeline():
     tick = _cs_body(POST, "public static void Tick(bool directorIdleNoTicket)")
     assert "if (!streamLive && !IsDevEntry(e)) return;" in tick
     fetch = _cs_body(POST, "private static void TickFetch(float now)")
-    assert "if (!live && !IsDevEntry(e))" in fetch
+    assert "if (!SessionReportRules.PlaybackMayStart(StreamLiveNow, IsDevEntry(e)))" in fetch
     plugin = PLUGIN / "Plugin.cs"
     lever = _cs_body(plugin, "private void TickTestWatchedSet()")
     assert "!BroadcastMode.IsBroadcastIdentity" in lever and "PostSessionReport.DevWatchSet(raw);" in lever

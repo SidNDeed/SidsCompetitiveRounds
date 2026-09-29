@@ -269,10 +269,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     # The suite ran 31 cases on the commit that added it, 35 once board row
     # 30b added the overlay rule's cases, 38 with 30c's builds layout, 59
     # with 30d's derived numbers, 63 with 30e's race axis, 67 with 30g's
-    # broadcast playback, 71 with round 2's presence rules (M1) and 73 with
-    # its unknown race target (M2); the floor is that count (#342). Raise it
-    # when cases are added.
-    assert run >= 73, "the SessionReportRules suite shrank to %d cases" % run
+    # broadcast playback, 71 with round 2's presence rules (M1), 73 with its
+    # unknown race target (M2) and 75 with its playback gate (M3); the floor
+    # is that count (#342). Raise it when cases are added.
+    assert run >= 75, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -748,6 +748,17 @@ def test_a_game_names_only_the_players_who_played_it(harness_run, name):
     """Round 2 M1: SessionReportRules.Standings / SideScore / PairScores,
     executed - a fluid FFA lobby's game omits the players who sat it out and
     a missing score key is never read as a score."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "broadcast: a stream that dies during the report fetch defers success, failure and timeout alike",
+    "broadcast (control): a live stream plays the report or the screens; the dev entry plays down; a probe that throws defers",
+])
+def test_every_door_into_playback_asks_the_stream_then(harness_run, name):
+    """Round 2 M3: SessionReportRules.PlaybackMayStart / PlaybackAfterFetch,
+    executed with a fake stream that goes down during the report fetch."""
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line
 
