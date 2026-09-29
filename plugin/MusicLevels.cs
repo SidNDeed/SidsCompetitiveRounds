@@ -38,7 +38,10 @@ namespace CompetitiveRounds
     /// Fade-in. Every track start and resume keeps the 0.6 s linear envelope
     /// it always had. The first start after a silent main menu (the menu to
     /// game transition) takes LONG_FADE_SECONDS on the squared curve, the same
-    /// law the slider uses, so the first note is not at full volume.
+    /// law the slider uses, so the first note is not at full volume. A menu
+    /// is silent only when neither the mod's own music source nor the game's
+    /// own menu music was audible in it; FirstTrackFade takes that decision
+    /// from what MusicEngine observes and hands it to the next start once.
     ///
     /// Per-clip level (round 2). The custom clips differ among themselves by
     /// 3.13 dB RMS (the full tracks; 4.22 dB with the previews), over the 3 dB
@@ -184,6 +187,61 @@ namespace CompetitiveRounds
                 }
             }
             return false;
+        }
+
+        // -- first-track fade decision (round 2) ------------------------------
+
+        /// <summary>Which envelope the next start takes. The engine samples the
+        /// menu on every volume tick while its context is the menu (SampleMenu,
+        /// the latest sample wins), closes the decision on the menu-to-game
+        /// edge (LeaveMenu), resets it on the way back in (EnterMenu), and every
+        /// start asks Arm. Only the first start after a menu in which NOTHING
+        /// was audible takes the long envelope; a start while the context is
+        /// still the menu never consumes the decision. Plain fields, no
+        /// allocation and no throw: LeaveMenu and EnterMenu run inside a
+        /// Harmony prefix.</summary>
+        internal sealed class FirstTrackFade
+        {
+            private bool _menuAudible;
+            private string _menuWhy;
+            private bool _longPending;
+            private string _shortWhy;
+
+            /// <summary>The mod's own source was audible, or the game's own
+            /// menu music is playing and the game's music is not muted.</summary>
+            internal void SampleMenu(bool modSourceAudible, bool gameMenuMusicPlays, bool gameMusicMuted,
+                                     string gameWhy)
+            {
+                if (modSourceAudible) { _menuAudible = true; _menuWhy = "the mod's own music source"; }
+                else if (gameMenuMusicPlays && !gameMusicMuted) { _menuAudible = true; _menuWhy = gameWhy ?? "the game's menu music"; }
+                else { _menuAudible = false; _menuWhy = null; }
+            }
+
+            internal void LeaveMenu()
+            {
+                _longPending = !_menuAudible;
+                _shortWhy = _menuAudible ? _menuWhy : null;
+            }
+
+            internal void EnterMenu()
+            {
+                _menuAudible = false; _menuWhy = null; _longPending = false; _shortWhy = null;
+            }
+
+            /// <summary>True: this start takes the long envelope (once). False
+            /// with why set: the first start after an audible menu (why names
+            /// the source). False with why null: any other start.</summary>
+            internal bool Arm(bool inMenu, out string why)
+            {
+                why = null;
+                if (inMenu) return false;
+                if (_longPending) { _longPending = false; _shortWhy = null; return true; }
+                why = _shortWhy;
+                _shortWhy = null;
+                return false;
+            }
+
+            internal bool LongPending { get { return _longPending; } }
         }
 
         /// <summary>Source gain for a slider percent: the squared law times the
@@ -401,6 +459,7 @@ namespace CompetitiveRounds
                   "reached=" + F(ctlAt) + "s");
 
             PerClipCases(r);
+            FirstTrackFadeCases(r);
             return r;
         }
 
@@ -494,6 +553,86 @@ namespace CompetitiveRounds
                            && !TryTrackGain(null, out _) && !TryTrackGain("", out _);
             Check(r, "every table clip is found and an unknown clip reads false at gain 1",
                   found && missing, "found=" + found + " unknown=" + missing);
+        }
+
+        /// <summary>The round-1 rule, NEGATIVE CONTROL (#391): the long fade
+        /// armed whenever the mod's own source was silent in the menu,
+        /// whatever the game's menu music did. Never called by the engine.</summary>
+        private static bool RoundOneArmsLong(bool modSourceAudible)
+        {
+            return !modSourceAudible;
+        }
+
+        private static string Arms(FirstTrackFade f, int starts)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < starts; i++)
+            {
+                bool isLong = f.Arm(false, out string why);
+                if (i > 0) sb.Append(',');
+                sb.Append(isLong ? "long" : why == null ? "short" : "short(" + why + ")");
+            }
+            return sb.ToString();
+        }
+
+        private static void FirstTrackFadeCases(SelfTestResult r)
+        {
+            const string game = "the game's menu music";
+            var f = new FirstTrackFade();
+            f.EnterMenu();
+            f.SampleMenu(false, true, false, game);
+            f.LeaveMenu();
+            string got = Arms(f, 3);
+            Check(r, "an audible vanilla menu arms the short fade and names the game's music",
+                  got.StartsWith("short(" + game + ")", System.StringComparison.Ordinal), got);
+            Check(r, "later starts after an audible menu stay short",
+                  got == "short(" + game + "),short,short", got);
+
+            f.EnterMenu();
+            f.SampleMenu(false, false, false, null);
+            f.LeaveMenu();
+            got = Arms(f, 3);
+            Check(r, "a silent menu arms the long fade exactly once", got == "long,short,short", got);
+
+            f.EnterMenu();
+            f.SampleMenu(true, false, false, null);
+            f.LeaveMenu();
+            got = Arms(f, 2);
+            Check(r, "the mod's own audible menu music arms the short fade",
+                  got == "short(the mod's own music source),short", got);
+
+            f.EnterMenu();
+            f.SampleMenu(false, true, true, game);
+            f.LeaveMenu();
+            got = Arms(f, 2);
+            Check(r, "a muted game music volume makes the vanilla menu silent", got == "long,short", got);
+
+            f.EnterMenu();
+            f.SampleMenu(false, false, false, null);
+            bool inMenuLong = f.Arm(true, out string inMenuWhy);
+            f.LeaveMenu();
+            got = Arms(f, 1);
+            Check(r, "a start while still in the menu never consumes the decision",
+                  !inMenuLong && inMenuWhy == null && got == "long", "inMenu=" + inMenuLong + " then " + got);
+
+            f.EnterMenu();
+            f.SampleMenu(true, false, false, null);
+            f.SampleMenu(false, false, false, null);
+            f.LeaveMenu();
+            got = Arms(f, 1);
+            Check(r, "the latest menu sample decides", got == "long", got);
+
+            f.EnterMenu();
+            f.SampleMenu(false, false, false, null);
+            f.LeaveMenu();
+            f.EnterMenu();
+            f.SampleMenu(false, true, false, game);
+            f.LeaveMenu();
+            got = Arms(f, 1);
+            Check(r, "returning to the menu clears a stale decision", got == "short(" + game + ")", got);
+
+            Check(r, "the round-1 rule arms long after the default vanilla menu (control)",
+                  RoundOneArmsLong(false), "round1Long=" + RoundOneArmsLong(false));
         }
 
         private static void Check(SelfTestResult r, string name, bool ok, string got)

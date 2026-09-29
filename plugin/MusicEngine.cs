@@ -245,12 +245,16 @@ namespace CompetitiveRounds
             public int fadeArmFrame = -1;
             // v1.41.0 item 23b: the first start after a silent main menu takes
             // the long perceptual envelope (MusicLevels.LONG_FADE_SECONDS).
-            // menuAudible is refreshed every volume tick while the context is
-            // the menu; the menu-to-game edge in NotePrefixContext turns it
-            // into longFadePending, which the next ArmFade consumes.
+            // Round 2: firstFade decides. The volume tick samples the menu
+            // (SampleMenuAudibility: the mod's own sources, and the game's own
+            // menu music whenever the engine does not own the menu, unless the
+            // game's music is muted at its mixer); the menu-to-game edge in
+            // NotePrefixContext closes the decision and the next ArmFade takes it.
             public bool fadeLong;
-            public bool menuAudible;
-            public bool longFadePending;
+            public readonly MusicLevels.FirstTrackFade firstFade = new MusicLevels.FirstTrackFade();
+            public float gameMusicSampleRt = -1f;       // last read of the game's music mixer (0.5 s cadence, menu only)
+            public bool gameMusicMuted;
+            public string gameMenuWhy;
             // Round 2 (M1): the measured per-clip gain of what Main and Preview
             // play (MusicLevels.TrackLevels), resolved at every start.
             public float mainTrackGain = 1f;
@@ -1579,13 +1583,14 @@ namespace CompetitiveRounds
                 {
                     // v6 §2.2: a Pending preview intent does not survive the menu.
                     if (s.previewPending.HasValue) { s.previewPending = null; }
-                    // v1.41.0 item 23b: leaving a menu in which the engine's
-                    // music was not audible makes the next start the long fade.
-                    s.longFadePending = !s.menuAudible;
+                    // v1.41.0 item 23b: leaving a menu in which nothing was
+                    // audible (neither the mod's music nor the game's) makes
+                    // the next start the long fade.
+                    s.firstFade.LeaveMenu();
                 }
                 else if (c == Ctx.Menu)
                 {
-                    s.longFadePending = false;   // re-decided at the next menu exit
+                    s.firstFade.EnterMenu();   // re-decided at the next menu exit
                 }
             }
             // [I14] menu entry clears any stale pick-phase duck — a disconnect
@@ -2050,7 +2055,7 @@ namespace CompetitiveRounds
             var m = h.Main;
             bool mainAudible = m != null && m.isPlaying && !s.mainPausedByUs && !s.paused;
             // Item 23b: what the next menu exit decides the fade from.
-            if (s.ctx == Ctx.Menu) s.menuAudible = mainAudible;
+            if (s.ctx == Ctx.Menu) SampleMenuAudibility(mainAudible, rt);
             // v4 §2.5 fade-in: progress-based (0.6 s), advancing ONLY while
             // Main is audibly playing (never while paused / paused-by-us). A
             // RESUME re-arms it (impl note 45, r9 LOW 2 — accepted): the track
@@ -2666,17 +2671,66 @@ namespace CompetitiveRounds
             // v1.41.0 item 23b: the first start after a silent main menu takes
             // the long perceptual envelope, once; every other start and resume
             // keeps the 0.6 s one. A start while the context is still the menu
-            // (the menu's own music) never consumes it.
-            s.fadeLong = s.longFadePending && s.ctx != Ctx.Menu;
-            if (s.fadeLong) s.longFadePending = false;
+            // (the menu's own music) never consumes it (MusicLevels.FirstTrackFade).
+            string audibleWhy;
+            s.fadeLong = s.firstFade.Arm(s.ctx == Ctx.Menu, out audibleWhy);
             s.fadeAudibleSec = 0f;
             s.fadeSampleNext = 0f;
             SafeLog(LogLevel.Info, s.fadeLong
                 ? "[MUSIC-FADE] armed long " + MusicLevels.LONG_FADE_SECONDS.ToString("0.0", LvlInv)
-                  + " s perceptual (first track after a silent main menu) ctx=" + s.ctx
-                : "[MUSIC-FADE] armed short " + MusicLevels.SHORT_FADE_SECONDS.ToString("0.0", LvlInv) + " s ctx=" + s.ctx);
+                  + " s (first track after a silent main menu) perceptual ctx=" + s.ctx
+                : "[MUSIC-FADE] armed short " + MusicLevels.SHORT_FADE_SECONDS.ToString("0.0", LvlInv) + " s"
+                  + (audibleWhy != null ? " (menu was audible: " + audibleWhy + ")" : "") + " ctx=" + s.ctx);
             // Round 2 (M1): the clip that starts takes its measured gain.
             s.mainTrackGain = s.current.HasValue ? ResolveTrackGain(s.current.Value, false) : 1f;
+        }
+
+        /// <summary>Round 2 (M2): one menu sample for the first-track fade.
+        /// Audible when the mod's own Main or Preview source plays, or when the
+        /// game's own menu music plays: the engine does not own the menu (the
+        /// menu mode "vanilla" parks it, or no custom music is selected, or a
+        /// fault or a dead patch fails open to vanilla), and the game's music
+        /// is not muted at its mixer (master or music at vanilla's -80 dB
+        /// floor). Silent only under the "silent" menu mode (owned silence) or
+        /// with the game's music muted. The mixer is read every 0.5 s.</summary>
+        private static void SampleMenuAudibility(bool mainAudible, float rt)
+        {
+            var s = S;
+            var h = _host;
+            bool previewAudible = false;
+            try { previewAudible = h != null && h.Preview != null && h.Preview.isPlaying; } catch { }
+            bool gamePlays = !IsEngineOwned(s.mode) || s.faultPending || s.faultDurable || _patchDead;
+            if (gamePlays && (s.gameMusicSampleRt < 0f || rt - s.gameMusicSampleRt >= 0.5f || rt < s.gameMusicSampleRt))
+            {
+                s.gameMusicSampleRt = rt;
+                s.gameMusicMuted = GameMusicMuted(out s.gameMenuWhy);
+            }
+            s.firstFade.SampleMenu(mainAudible || previewAudible, gamePlays, s.gameMusicMuted, s.gameMenuWhy);
+        }
+
+        private const float GAME_MUTED_DB = -79f;   // vanilla maps a slider at 0 to -80 dB
+
+        /// <summary>The game's own music volume as its mixer applies it,
+        /// through vanilla's SoundVolumeManager (the exposed parameter names are
+        /// its fields, as AudioSelfCheck reads them). Unreadable reads as not
+        /// muted: the short fade, the behavior before 1.41.</summary>
+        private static bool GameMusicMuted(out string why)
+        {
+            why = "the game's menu music (engine mode " + S.mode + ", mixer unread)";
+            try
+            {
+                var svm = SoundVolumeManager.Instance;
+                var mixer = svm != null ? svm.audioMixer : null;
+                if (mixer == null) return false;
+                float master = 0f, mus = 0f;
+                bool okM = !string.IsNullOrEmpty(svm.masterName) && mixer.GetFloat(svm.masterName, out master);
+                bool okU = !string.IsNullOrEmpty(svm.musName) && mixer.GetFloat(svm.musName, out mus);
+                why = "the game's menu music (engine mode " + S.mode
+                    + ", game mixer master " + (okM ? master.ToString("+0.0;-0.0", LvlInv) + " dB" : "?")
+                    + ", music " + (okU ? mus.ToString("+0.0;-0.0", LvlInv) + " dB" : "?") + ")";
+                return (okM && master <= GAME_MUTED_DB) || (okU && mus <= GAME_MUTED_DB);
+            }
+            catch { return false; }
         }
 
         /// <summary>Round 2 (M1): the measured gain of a track's clip

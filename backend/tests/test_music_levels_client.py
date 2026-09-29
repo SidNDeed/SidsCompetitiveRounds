@@ -200,34 +200,53 @@ def test_the_volume_migration_runs_once_behind_its_own_flag():
 # -- (b) the long first-track fade -------------------------------------------
 
 def test_the_menu_exit_decides_the_long_fade():
+    """The decision lives in MusicLevels.FirstTrackFade (executed by the
+    harness); the engine closes it on the menu-to-game edge and resets it on
+    the way back in, and nowhere else."""
     body = code_of(_plugin(ENGINE), "internal static void NotePrefixContext(bool menuCall, bool isCard)")
-    assert body.count("s.longFadePending = !s.menuAudible;") == 1
     assert body.count("if (leavingMenu)") == 1 and body.count("else if (c == Ctx.Menu)") == 1
     exit_at = body.index("if (leavingMenu)")
     enter_at = body.index("else if (c == Ctx.Menu)")
-    assert exit_at < body.index("s.longFadePending = !s.menuAudible;") < enter_at, \
+    assert body.count("s.firstFade.LeaveMenu();") == 1 and body.count("s.firstFade.EnterMenu();") == 1
+    assert exit_at < body.index("s.firstFade.LeaveMenu();") < enter_at, \
         "the long fade is not decided on the menu-to-game edge"
-    assert "s.longFadePending = false;" in body[enter_at:], "entering the menu keeps a stale decision"
-    # The engine has no other writer of the decision besides ArmFade's consume.
+    assert body.index("s.firstFade.EnterMenu();") > enter_at, "entering the menu keeps a stale decision"
     code = code_of(_plugin(ENGINE))
-    assert len(re.findall(r"\blongFadePending\s*=", code)) == 3, \
-        re.findall(r".*\blongFadePending\s*=.*", code)
+    for call in ("firstFade.LeaveMenu(", "firstFade.EnterMenu(", "firstFade.SampleMenu(", "firstFade.Arm("):
+        assert code.count(call) == 1, (call, code.count(call))
+    # the round-1 fields are gone, so nothing can decide beside FirstTrackFade
+    assert "longFadePending" not in code and "menuAudible" not in code
 
 
-def test_menu_audibility_is_sampled_only_in_the_menu():
+def test_menu_audibility_counts_the_games_own_menu_music():
+    """Round 2 (M2): the menu is audible when the mod's own Main or Preview
+    source plays OR the game's own menu music plays -- the engine does not own
+    the menu (vanilla menu mode, nothing selected, fault, dead patch) and the
+    game's music is not muted at its mixer. Sampled only while in the menu."""
     body = _tick()
     assert re.search(r"bool mainAudible = m != null && m\.isPlaying && !s\.mainPausedByUs && !s\.paused;", body)
-    assert re.search(r"if \(s\.ctx == Ctx\.Menu\) s\.menuAudible = mainAudible;", body)
-    assert len(re.findall(r"\bmenuAudible\s*=", code_of(_plugin(ENGINE)))) == 1, "menuAudible has a second writer"
+    assert re.search(r"if \(s\.ctx == Ctx\.Menu\) SampleMenuAudibility\(mainAudible, rt\);", body)
+    assert _plugin(ENGINE).count("SampleMenuAudibility(") == 2   # definition + the one call
+    sample = code_of(_plugin(ENGINE), "private static void SampleMenuAudibility(bool mainAudible, float rt)")
+    assert "bool gamePlays = !IsEngineOwned(s.mode) || s.faultPending || s.faultDurable || _patchDead;" in sample
+    assert "s.gameMusicMuted = GameMusicMuted(out s.gameMenuWhy);" in sample
+    assert "h.Preview.isPlaying" in sample
+    assert ("s.firstFade.SampleMenu(mainAudible || previewAudible, gamePlays, s.gameMusicMuted, s.gameMenuWhy);"
+            in sample)
+    muted = code_of(_plugin(ENGINE), "private static bool GameMusicMuted(out string why)")
+    assert "SoundVolumeManager.Instance" in muted
+    assert "mixer.GetFloat(svm.masterName, out master)" in muted and "mixer.GetFloat(svm.musName, out mus)" in muted
+    assert "return (okM && master <= GAME_MUTED_DB) || (okU && mus <= GAME_MUTED_DB);" in muted
+    assert re.search(r"private const float GAME_MUTED_DB = -79f;", code_of(_plugin(ENGINE)))
 
 
-def test_arm_fade_consumes_the_pending_long_fade_once():
+def test_arm_fade_takes_the_decision_once_and_names_an_audible_menu():
     body = code_of(_plugin(ENGINE), "private static void ArmFade()")
-    decide = "s.fadeLong = s.longFadePending && s.ctx != Ctx.Menu;"
-    consume = "if (s.fadeLong) s.longFadePending = false;"
-    assert body.count(decide) == 1 and body.count(consume) == 1
-    assert body.index(decide) < body.index(consume)
+    assert body.count("s.fadeLong = s.firstFade.Arm(s.ctx == Ctx.Menu, out audibleWhy);") == 1
+    assert '" s (first track after a silent main menu) perceptual ctx="' in body
+    assert '" (menu was audible: " + audibleWhy + ")"' in body
     assert "[MUSIC-FADE] armed long" in body and "[MUSIC-FADE] armed short" in body
+
 
 def test_the_envelope_is_the_harnessed_math():
     body = _tick()

@@ -662,9 +662,9 @@ def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The suite ran 18 cases on the commit that added it, 26 once the
-    # measured levels and the volume migration joined, and 34 once round 2's
-    # per-clip gains joined (#342).
-    assert run >= 34, "the MusicLevels suite shrank to %d cases" % run
+    # measured levels and the volume migration joined, and 43 once round 2's
+    # per-clip gains and first-track fade decision joined (#342).
+    assert run >= 43, "the MusicLevels suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -703,6 +703,16 @@ def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
     "no clip peaks at or above 0 dBFS at the slider's 100 after its gain",
     "a target 4 dB higher would peak over full scale at 100 (control)",
     "every table clip is found and an unknown clip reads false at gain 1",
+    # round 2, M2: the first-track fade decision
+    "an audible vanilla menu arms the short fade and names the game's music",
+    "later starts after an audible menu stay short",
+    "a silent menu arms the long fade exactly once",
+    "the mod's own audible menu music arms the short fade",
+    "a muted game music volume makes the vanilla menu silent",
+    "a start while still in the menu never consumes the decision",
+    "the latest menu sample decides",
+    "returning to the menu clears a stale decision",
+    "the round-1 rule arms long after the default vanilla menu (control)",
 ])
 def test_the_music_levels_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "musiclevels")
