@@ -2470,10 +2470,20 @@ namespace CompetitiveRounds
 
         /// <summary>Broadcast-seat lever `act:<what>` (identity-gated by the
         /// caller): presses the REAL buttons against the live api, because a
-        /// synthetic click never reaches the overlay (#420). "daily" is the
-        /// daily button (claim, or open the claimed pack), "open" the first
-        /// waiting pack, "card:N" the Nth binder tile's card view, and
-        /// "view:open|binder|info" the view switch, with nothing seeded.</summary>
+        /// synthetic click never reaches the overlay (#420). The full list of
+        /// what it takes, each with nothing seeded:
+        ///   "daily"         the daily button (claim, or open the claimed pack);
+        ///   "open"          the first waiting pack;
+        ///   "card:N"        the Nth binder tile's card view;
+        ///   "view:open|binder|info|trades"  the view switch (any other value
+        ///                   selects the Open view);
+        ///   "setting:collection_public|announce|trades_open"  that server
+        ///                   row's toggle (ToggleSetting); any other key is
+        ///                   logged and ignored;
+        ///   "trade:..."     the card-trading verbs, handed to DevTrade (listed
+        ///                   there).
+        /// A "/n" suffix is dropped before matching, so a repeated press can
+        /// carry a distinct value. Anything else is logged as unknown.</summary>
         internal static void DevAct(string what)
         {
             what = what ?? "";
