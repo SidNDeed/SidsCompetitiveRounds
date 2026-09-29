@@ -250,6 +250,9 @@ namespace CompetitiveRounds
             if (g.Xp.Count > 0) o.Add(MET_XP);
             if (g.Gold.Count > 0) o.Add(MET_GOLD);
             if (g.Scores.Count > 0 || g.Picks.Count > 0) o.Add(MET_PLAY);
+            // Round 3 L1: a game's end scores are the score race's dots
+            // (SessionReportModel.FinishRace) in every mode.
+            if (g.Scores.Count > 0) o.Add(MET_SCORE);
             if (g.DurationS > 0f) o.Add(MET_DURATION);
             return o;
         }
@@ -276,19 +279,43 @@ namespace CompetitiveRounds
             // supported for this mode'; the same metric in a mode that carries
             // it reads 'not recorded for this set'; an unknown kind claims nothing.
             int[] got = {
-                MissingReason("ovt", MET_PING), MissingReason("ovt", MET_COMBAT), MissingReason("ovt", MET_SCORE),
-                MissingReason("team", MET_KILLS), MissingReason("team", MET_SCORE), MissingReason("team", MET_XP),
+                MissingReason("ovt", MET_PING), MissingReason("ovt", MET_COMBAT), MissingReason("ovt", MET_XP),
+                MissingReason("team", MET_KILLS), MissingReason("team", MET_DAMAGE_TOTAL), MissingReason("team", MET_XP),
                 MissingReason("ranked", MET_PING), MissingReason("casual", MET_KILLS), MissingReason("ffa", MET_SCORE),
                 MissingReason("team", MET_HIT), MissingReason("sometime-later", MET_PING),
+                MissingReason("team", MET_SCORE), MissingReason("ovt", MET_SCORE),
             };
             int[] want = { MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE,
-                           MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET };
+                           MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET,
+                           MISSING_SET, MISSING_SET };
             bool same = got.Length == want.Length;
             for (int i = 0; same && i < got.Length; i++) same = got[i] == want[i];
             var gs = new List<string>();
             foreach (var x in got) gs.Add(x.ToString(CultureInfo.InvariantCulture));
             Check(r, "provenance (control): a metric no set of the mode can carry reads 'not supported for this mode'",
                   same, "got " + string.Join(",", gs.ToArray()));
+            // Round 3 L1: the same-mode pairs for the score race. The captured
+            // 2v2 and 1v2 series carry end scores on every game; the same sets
+            // with every game's scores emptied carry none, and their race
+            // reads 'not recorded for this set' - the mode carries scores.
+            foreach (var pair in new[] { new[] { "team", TEAM_SERIES }, new[] { "ovt", OVT_SERIES } })
+            {
+                int games = 0;
+                string stripped = System.Text.RegularExpressions.Regex.Replace(pair[1], "\"scores\":\\{[^}]*\\}",
+                    m => { games++; return "\"scores\":{}"; });
+                var full = Parse(pair[1]);
+                var bare = Parse(stripped);
+                bool fullScores = full != null && full.Games.Count > 0, bareScores = false;
+                if (full != null) foreach (var g in full.Games) fullScores &= RecordedMetrics(full.Kind, g).Contains(MET_SCORE);
+                if (bare != null) foreach (var g in bare.Games) bareScores |= RecordedMetrics(bare.Kind, g).Contains(MET_SCORE);
+                Check(r, "provenance: a " + (pair[0] == "team" ? "2v2" : "1v2")
+                         + " set with no scores reads 'not recorded for this set' - its same-mode pair carries scores",
+                      full != null && bare != null && full.Kind == pair[0] && bare.Kind == pair[0]
+                      && games == full.Games.Count && games == bare.Games.Count && fullScores && !bareScores
+                      && MissingReason(pair[0], MET_SCORE) == MISSING_SET,
+                      "games " + games + " full scores " + fullScores + " bare scores " + bareScores
+                      + " reason " + MissingReason(pair[0], MET_SCORE));
+            }
             // Every metric a captured set records is one its mode carries -
             // the lists never call a recorded metric unsupported.
             var bad = new List<string>();

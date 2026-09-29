@@ -1059,14 +1059,18 @@ namespace CompetitiveRounds
         // mode puts on a game (backend/api/main.py _report_load_1v1 / _team /
         // _ovt / _ffa - the timeline streams, the totals counters, XP; 1v1
         // kills are the other fighter's recorded deaths) plus what every mode
-        // records (gold, picks and points, game length).
+        // records (gold, picks and points, game length). The score race
+        // (MET_SCORE) is carried by every mode: 1v1 and FFA games carry its
+        // point stream, and every game's end scores are drawn as the race's
+        // dots (SessionReportModel.FinishRace) - for 2v2 and 1v2 those dots are
+        // the whole race (round 3 L1).
         // backend/tests/test_session_report.py executes the four loaders on
         // saturated rows and compares with these lists, in both directions.
         private static readonly string[] CARRIES_1V1 = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
             MET_DAMAGE_TOTAL, MET_KILLS, MET_XP, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
-        private static readonly string[] CARRIES_TEAM = { MET_DAMAGE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
+        private static readonly string[] CARRIES_TEAM = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
             MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
-        private static readonly string[] CARRIES_OVT = { MET_DAMAGE, MET_GOLD, MET_PLAY, MET_DURATION };
+        private static readonly string[] CARRIES_OVT = { MET_DAMAGE, MET_SCORE, MET_GOLD, MET_PLAY, MET_DURATION };
         private static readonly string[] CARRIES_FFA = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
             MET_DAMAGE_TOTAL, MET_KILLS, MET_XP, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
 

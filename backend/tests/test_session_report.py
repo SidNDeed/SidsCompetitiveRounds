@@ -2324,9 +2324,12 @@ class _Saturated(dict):
         return True     # `tele_by.get(...) or {}` must keep it
 
 
-def _loader_metrics(monkeypatch, consts, mode, drop=()):
+def _loader_metrics(monkeypatch, consts, mode, drop=(), strip=()):
     """Run the server's loader for `mode` on saturated rows and name the
-    metrics its games carry (the client's metric names)."""
+    metrics its games carry (the client's metric names). `strip` names
+    envelope keys of each game emptied before they are read (round 3 L1: the
+    loaders name every seat in `scores`, so an envelope without scores is
+    built by emptying that key)."""
     async def _rows(db, sql, params):
         return [_Saturated(drop)]
     monkeypatch.setattr(main, "_report_rows", _rows)
@@ -2348,6 +2351,8 @@ def _loader_metrics(monkeypatch, consts, mode, drop=()):
     for game in games:
         sid_of = {s["pid"]: "7656119%010d" % i for i, s in enumerate(game["slots"])}
         out = main._report_game_json(game, sid_of, {})
+        for k in strip:
+            out[k] = type(out[k])()
         for name in out["available"]:
             got.add(consts[stream[name]])
         for tot in out["totals"].values():
@@ -2361,6 +2366,9 @@ def _loader_metrics(monkeypatch, consts, mode, drop=()):
             got.add(consts["MET_XP"])
         if out["scores"]:
             got.add(consts["MET_PLAY"])
+            # round 3 L1: a game's end scores are the score race's dots in
+            # every mode (FinishRace) - for 2v2 and 1v2 the whole race
+            got.add(consts["MET_SCORE"])
         if out["duration_s"] > 0:
             got.add(consts["MET_DURATION"])
         # Gold is the ledger's per-game record (1v1 / 2v2 / 1v2) or the FFA
@@ -2385,3 +2393,28 @@ def test_the_modes_carry_lists_are_what_the_server_loaders_read(monkeypatch):
     # its damage timelines empty carries no damage at all.
     bare = _loader_metrics(monkeypatch, consts, "OVT", drop=("_damage_timeline",))
     assert consts["MET_DAMAGE"] not in bare and consts["MET_DAMAGE"] in lists["OVT"], sorted(bare)
+
+
+def test_a_team_or_1v2_set_without_scores_reads_not_recorded_for_this_set(monkeypatch):
+    """Round 3 L1: the 2v2 and 1v2 loaders put end scores on every game, and
+    those scores are the whole of those modes' score race (FinishRace's
+    dots), so both modes carry MET_SCORE. An envelope of either mode whose
+    games carry no scores (the loader's own envelope with `scores` emptied)
+    has no score race, and the race panel's text is MissingText(kind,
+    MET_SCORE): with the metric in the mode's list that is "not recorded for
+    this set", never "not supported for this mode". Control: the same
+    envelope with its scores carries the metric."""
+    consts, lists = _carries_lists()
+    score = consts["MET_SCORE"]
+    for mode in ("TEAM", "OVT"):
+        full = _loader_metrics(monkeypatch, consts, mode)
+        bare = _loader_metrics(monkeypatch, consts, mode, strip=("scores",))
+        assert score in full, (mode, "control: the loader's envelope carries scores")
+        assert score not in bare, (mode, sorted(bare))
+        assert score in lists[mode], (mode, "the race would read 'not supported for this mode'")
+    build = _cs_body(PLUGIN / "SessionReportModel.cs", "internal static Model Build(Envelope env)")
+    assert "FinishRace(m, env, MissingText(m.Kind, MET_SCORE));" in build
+    race = _cs_body(PLUGIN / "SessionReportModel.cs",
+                    "private static void FinishRace(Model m, Envelope env, string missing)")
+    assert "if (p.Lines.Count == 0 && p.Dots.Count == 0) { p.Missing = missing; return; }" in race
+    assert "g.Scores.TryGetValue(pid, out v)" in race, "the dots are the games' end scores"

@@ -271,10 +271,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     # with 30d's derived numbers, 63 with 30e's race axis, 67 with 30g's
     # broadcast playback, 71 with round 2's presence rules (M1), 73 with its
     # unknown race target (M2), 75 with its playback gate (M3), 77 with the
-    # watched-set lever's api rule (M4) and 80 with the missing-data
-    # provenance (L1); the floor is that count (#342). Raise it when cases are
-    # added.
-    assert run >= 80, "the SessionReportRules suite shrank to %d cases" % run
+    # watched-set lever's api rule (M4), 80 with the missing-data
+    # provenance (L1) and 82 with round 3's score-race pairs for 2v2 and 1v2
+    # (L1); the floor is that count (#342). Raise it when cases are added.
+    assert run >= 82, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -781,11 +781,14 @@ def test_the_watched_set_lever_runs_only_against_a_local_api(harness_run, name):
     "provenance: a 1v2 set with no damage reads 'not recorded for this set' - its same-mode pair carries damage",
     "provenance (control): a metric no set of the mode can carry reads 'not supported for this mode'",
     "provenance: every metric a captured set records is one its mode carries",
+    "provenance: a 2v2 set with no scores reads 'not recorded for this set' - its same-mode pair carries scores",
+    "provenance: a 1v2 set with no scores reads 'not recorded for this set' - its same-mode pair carries scores",
 ])
 def test_an_empty_chart_names_the_set_or_the_mode(harness_run, name):
     """Round 2 L1: SessionReportRules.ModeCarries / MissingReason, executed
     with a same-mode 1v2 pair (one with its damage stream, one without) and
-    every captured fixture's recorded metrics."""
+    every captured fixture's recorded metrics; round 3 L1: the same-mode
+    2v2 and 1v2 pairs for the score race (every game's scores emptied)."""
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line
 
