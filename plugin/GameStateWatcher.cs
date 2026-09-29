@@ -2882,10 +2882,6 @@ namespace CompetitiveRounds
             public int[] Fps = new int[4];
             public ApiClient.TeamTelemetry[] Tele = new ApiClient.TeamTelemetry[4];
             public string[] EndStats = new string[4];
-            /// <summary>Round 8, finding F31: the anchor this client held for
-            /// the series when the report was built (ApiClient.AnchorFor), ""
-            /// when none. The report carries it as game_anchor.</summary>
-            public string GameAnchor = "";
         }
 
         /// <summary>Index one captured build under every spelling of its
@@ -5371,18 +5367,15 @@ namespace CompetitiveRounds
         /// 0-0). Armed only when SetCustomProperties reports the send (#428);
         /// the host's own posts then wait for the room to show the value, like
         /// every other seat's. Every reason not to publish is logged once per
-        /// game. Three are retried on the next tick while the first round
-        /// lasts: "not the host" (a host handoff inside the first round), the
-        /// series' reporter waiting for the server's answer on the series'
-        /// physical game 1 (round 8, F31), and a send SetCustomProperties
-        /// refused; every other one ends this seat's part. Round 7, finding
-        /// F29: the token names the physical game's ordinal this seat holds
-        /// (grounded on a publish it took or, since round 8, on the server's
-        /// issue of the series' physical game 1, never on a count) and an
-        /// epoch above every one this seat has read in the room or published
-        /// (TeamGameNumber.Tracker.TokenToPublish). The seat the server issued
-        /// physical game 1 publishes that game's token whether or not it is
-        /// the room's host.</summary>
+        /// game. Two are retried on the next tick while the first round
+        /// lasts: "not the host" (a host handoff inside the first round) and a
+        /// send SetCustomProperties refused; every other one ends this seat's
+        /// part. Round 7, finding F29: the token names the physical game's
+        /// ordinal this seat holds (grounded on a publish it took, never on a
+        /// count) and an epoch above every one this seat has read in the room
+        /// or published (TeamGameNumber.Tracker.TokenToPublish). Since round
+        /// 11 (finding M1) no server names a series' physical game 1, so no
+        /// seat is grounded and this publishes nothing.</summary>
         private static void TryPublishTeamToken(bool firstRound)
         {
             bool host = false;
@@ -5393,7 +5386,7 @@ namespace CompetitiveRounds
             string token = TeamGameNumber.Live.TokenToPublish(host, firstRound, current, out why);
             if (token.Length == 0)
             {
-                if (why != TeamGameNumber.WhyNotHost && why != TeamGameNumber.WhyFirstGamePending) teamTokenOwed = false;
+                if (why != TeamGameNumber.WhyNotHost) teamTokenOwed = false;
                 if (why != teamTokenLastWhy)
                 {
                     teamTokenLastWhy = why;
@@ -5428,139 +5421,8 @@ namespace CompetitiveRounds
             }
             TeamGameNumber.Live.ArmPublished(token);
             teamTokenOwed = false;
-            Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} game token {TeamGameNumber.Describe(token)} published "
-                               + (host ? "as the room's host" : "as the seat the server issued the series' physical game 1")
-                               + "; this seat's posts carry it once the room shows it");
-        }
-
-        // -- Round 8, finding F31: the ask for the series' physical game 1 -----
-
-        /// <summary>Series-less 2v2 reports this seat deferred until a
-        /// continuation series lands (the deferred path in the match-end
-        /// report): each one's result is on its way but in no report ledger
-        /// until SubmitTeamReport sends it, so no series' physical game 1 is
-        /// asked for while one is. Bounded, not latched: a request whose
-        /// coroutine died never calls back, and its report is then never sent
-        /// either; the request itself ends well inside
-        /// TeamDeferredBoundSeconds (three attempts of at most 10 s, 2 s
-        /// apart).</summary>
-        private static int teamReportsDeferred;
-        private static float teamReportsDeferredRt = -999f;
-        private const float TeamDeferredBoundSeconds = 90f;
-
-        private static void HoldTeamReportDeferred()
-        {
-            teamReportsDeferred++;
-            teamReportsDeferredRt = UnityEngine.Time.realtimeSinceStartup;
-        }
-
-        private static void ReleaseTeamReportDeferred()
-        {
-            if (teamReportsDeferred > 0) teamReportsDeferred--;
-        }
-
-        private static bool TeamReportDeferred()
-        {
-            if (teamReportsDeferred <= 0) return false;
-            if (UnityEngine.Time.realtimeSinceStartup - teamReportsDeferredRt < TeamDeferredBoundSeconds) return true;
-            teamReportsDeferred = 0;
-            return false;
-        }
-
-        /// <summary>Whether this seat is the series' reporter: the lowest
-        /// Steam ID of the room's four fighters, all four resolved and
-        /// distinct (the election BuildTeamReportPayload and
-        /// TryRequestContinuationSeries make). The server checks the same
-        /// against the series' stored members before it issues anything.</summary>
-        private static bool LocalIsTeamReporter()
-        {
-            try
-            {
-                var fighters = RoomActors.ActiveFighters();
-                if (fighters == null || fighters.Length != 4) return false;
-                var seen = new HashSet<string>(StringComparer.Ordinal);
-                string lowest = null;
-                long lowestVal = long.MaxValue;
-                for (int i = 0; i < 4; i++)
-                {
-                    var pp = fighters[i];
-                    if (pp == null) return false;
-                    string sid = ResolvePhotonSteamId(pp);
-                    if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_") || !seen.Add(sid)) return false;
-                    long v;
-                    if (!long.TryParse(sid, out v)) return false;
-                    if (v < lowestVal) { lowestVal = v; lowest = sid; }
-                }
-                return lowest != null && lowest == localSteamId;
-            }
-            catch { return false; }
-        }
-
-        /// <summary>Round 8, finding F31: at the start of a game in a cr_ff
-        /// room, the series' reporter asks the server for the series' physical
-        /// game 1 when TeamGameNumber.Tracker.AskFirstGame lets it: in a game
-        /// whose start the game itself reported, holding no ordinal, and only
-        /// while its client has sent, queued and deferred no report of the
-        /// series (ApiClient.TeamReportsClean, TeamReportDeferred); the server
-        /// issues it only on a Steam session issued before the series was
-        /// created (a restarted client's never is), and (round 9, finding M1)
-        /// only while no other session of this account was live since the
-        /// series was created and nothing is on the series' live-points record:
-        /// to one process of the account, whose session it keeps (a match
-        /// report sent on another session voids the issue, and a DC report this
-        /// account sends on another session reads no token). The answer
-        /// is taken only if that still holds and the client can first keep
-        /// the whole issued nonce in its report ledger (ApiClient.NoteTeamAnchor;
-        /// round 9, finding M2): every match report it sends for the series
-        /// then carries it, and a recorded one that does not voids the issued
-        /// game on the server. Any other seat, and any other
-        /// answer, leaves the game tokenless unless a publish grounds the
-        /// seat.</summary>
-        private static void TryAskTeamFirstGame()
-        {
-            string series = ApiClient.ActiveTeamSeriesId ?? "";
-            string room = TeamGameRoom();
-            string whyNotClean = null;
-            bool clean;
-            if (TeamReportDeferred())
-            {
-                clean = false;
-                whyNotClean = "a report of this seat's is deferred until a continuation series lands";
-            }
-            else clean = ApiClient.TeamReportsClean(series, out whyNotClean);
-            int gen;
-            string why;
-            if (!TeamGameNumber.Live.AskFirstGame(series, room, LocalIsTeamReporter(), clean, out gen, out why))
-            {
-                Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} no ask for the series' physical game 1: {why}"
-                                   + (!clean && whyNotClean != null ? " (" + whyNotClean + ")" : ""));
-                return;
-            }
-            Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} asking the server for the series' physical game 1");
-            ApiClient.RequestTeamFirstGame(series, localSteamId, room, (issued, nonce, reason) =>
-            {
-                try
-                {
-                    string whyNot2 = null;
-                    bool clean2;
-                    if (TeamReportDeferred())
-                    {
-                        clean2 = false;
-                        whyNot2 = "a report of this seat's is deferred until a continuation series lands";
-                    }
-                    else clean2 = ApiClient.TeamReportsClean(series, out whyNot2);
-                    string line;
-                    if (issued && clean2 && !ApiClient.NoteTeamAnchor(series, nonce))
-                        line = TeamGameNumber.Live.DropFirstGame(gen, "the report ledger cannot be written");
-                    else
-                        line = TeamGameNumber.Live.OnFirstGame(series, room, gen, issued, nonce, reason, clean2);
-                    Plugin.Log.LogInfo(line + (issued && !clean2 && whyNot2 != null ? " (" + whyNot2 + ")" : ""));
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} physical game 1 answer error: {ex.Message}");
-                }
-            });
+            Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} game token {TeamGameNumber.Describe(token)} published"
+                               + " as the room's host; this seat's posts carry it once the room shows it");
         }
 
         private static void OnMatchStarted()
@@ -5630,10 +5492,6 @@ namespace CompetitiveRounds
                     if (tokLine != null) Plugin.Log.LogInfo(tokLine);
                     teamTokenOwed = true;
                     teamTokenLastWhy = "";
-                    // Round 8, finding F31: the series' reporter asks for the
-                    // series' physical game 1 (TryAskTeamFirstGame); the
-                    // publish waits for the answer while the first round lasts.
-                    TryAskTeamFirstGame();
                 }
                 else
                 {
@@ -6482,15 +6340,9 @@ namespace CompetitiveRounds
                         // callback can possibly run. TeamReportPayload lists
                         // them; nothing but the series id is read late.
                         var deferredPayload = BuildTeamReportPayload(reportRoomId, duration);
-                        // v1.41.0 beta round 8, finding F31: this game's result
-                        // is on its way but in no report ledger until the
-                        // continuation lands and SubmitTeamReport sends it, so
-                        // no series' physical game 1 is asked for meanwhile.
-                        bool deferring = deferredPayload != null && deferredPayload.LocalIsReporter;
-                        if (deferring) HoldTeamReportDeferred();
                         if (deferredPayload == null)
                             Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] could not resolve this game at match end — still requesting the continuation (later games need it), but this game cannot be submitted");
-                        Action<bool> deferredDone = ok =>
+                        TryRequestContinuationSeries(ok =>
                         {
                             if (!ok || string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId))
                             {
@@ -6504,16 +6356,7 @@ namespace CompetitiveRounds
                             if (deferredPayload == null || !deferredPayload.LocalIsReporter) return;
                             SubmitTeamReport(deferredPayload);
                             Plugin.Log.LogInfo("[2v2-REPORT-ROUTE] deferred report submitted after continuation");
-                        };
-                        bool dispatched = TryRequestContinuationSeries(ok =>
-                        {
-                            try { deferredDone(ok); }
-                            finally { if (deferring) ReleaseTeamReportDeferred(); }
                         });
-                        // Not sent (debounced, or the census does not make this
-                        // seat the one that asks): the callback never runs, and
-                        // the report is never sent either.
-                        if (!dispatched && deferring) ReleaseTeamReportDeferred();
                     }
                     else
                     {
@@ -6758,44 +6601,41 @@ namespace CompetitiveRounds
         /// (lowest Steam ID) opens a continuation series so games past the first BO3 record
         /// as ranked. Best-effort — if the lineup can't be resolved yet it retries next
         /// game. Team comes from the t_id custom property (set at queue-lock; no spawn
-        /// needed). 8s debounce so an in-flight request isn't re-fired. Returns
-        /// whether the request went out; only then does `onDone` run (round
-        /// 8, finding F31: the deferred report path holds the ask for the
-        /// series' physical game 1 until it does).</summary>
-        private static bool TryRequestContinuationSeries(Action<bool> onDone = null)
+        /// needed). 8s debounce so an in-flight request isn't re-fired.</summary>
+        private static void TryRequestContinuationSeries(Action<bool> onDone = null)
         {
             try
             {
-                if (UnityEngine.Time.time - lastContinuationRequestTime < 8f) return false;
+                if (UnityEngine.Time.time - lastContinuationRequestTime < 8f) return;
                 // Census: gate AND iteration use the same fighter view — they
                 // must convert together or disagree (recon structural hazard).
                 var fighters = RoomActors.ActiveFighters();
-                if (fighters.Length != 4) return false;
+                if (fighters.Length != 4) return;
 
                 var sids = new string[4];
                 var teams = new int[4];
                 for (int i = 0; i < 4; i++)
                 {
                     var pp = fighters[i];
-                    if (pp == null) return false;
+                    if (pp == null) return;
                     string sid = ResolvePhotonSteamId(pp);
-                    if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return false;
+                    if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return;
                     int team = -1;
                     if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(Player.VAR_TEAMID))
                     { try { team = Convert.ToInt32(pp.CustomProperties[Player.VAR_TEAMID]); } catch { } }
-                    if (team != 0 && team != 1) return false;
+                    if (team != 0 && team != 1) return;
                     sids[i] = sid; teams[i] = team;
                 }
 
                 var team0 = new List<string>();
                 var team1 = new List<string>();
                 for (int i = 0; i < 4; i++) { if (teams[i] == 0) team0.Add(sids[i]); else team1.Add(sids[i]); }
-                if (team0.Count != 2 || team1.Count != 2) return false;
+                if (team0.Count != 2 || team1.Count != 2) return;
 
                 // Reporter election: lowest Steam ID among the four (same as the report path).
                 string lowest = null; long lowestVal = long.MaxValue;
                 foreach (var s in sids) { if (long.TryParse(s, out long v) && v < lowestVal) { lowestVal = v; lowest = s; } }
-                if (lowest != localSteamId) return false;  // only the reporter opens it; server is idempotent
+                if (lowest != localSteamId) return;  // only the reporter opens it; server is idempotent
 
                 team0.Sort(StringComparer.Ordinal);
                 team1.Sort(StringComparer.Ordinal);
@@ -6804,10 +6644,8 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[2v2-CONTINUATION] requesting continuation (t0={team0[0]},{team0[1]} t1={team1[0]},{team1[1]})");
                 ApiClient.RequestContinuationSeries(localSteamId, room, photonRegion,
                     team0[0], team0[1], team1[0], team1[1], onDone);
-                return true;
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-CONTINUATION] resolve error: {ex.Message}"); }
-            return false;
         }
 
         private static float lastOvtContinuationRequestTime = -999f;
@@ -7888,10 +7726,6 @@ namespace CompetitiveRounds
                 // already have wiped them (#171).
                 payload.EndStats[i] = EndStatsFor(sid);
             }
-            // Round 8, finding F31: frozen here with everything else. The
-            // deferred path builds before its continuation series exists, so
-            // its report carries none.
-            payload.GameAnchor = ApiClient.AnchorFor(ApiClient.ActiveTeamSeriesId);
             return payload;
         }
 
@@ -7918,8 +7752,7 @@ namespace CompetitiveRounds
                 t1aFps: p.Fps[0], t1bFps: p.Fps[1], t2aFps: p.Fps[2], t2bFps: p.Fps[3],
                 t1aTele: p.Tele[0], t1bTele: p.Tele[1], t2aTele: p.Tele[2], t2bTele: p.Tele[3],
                 t1aEndStats: p.EndStats[0], t1bEndStats: p.EndStats[1],
-                t2aEndStats: p.EndStats[2], t2bEndStats: p.EndStats[3],
-                gameAnchor: p.GameAnchor
+                t2aEndStats: p.EndStats[2], t2bEndStats: p.EndStats[3]
             );
             Plugin.Log.LogInfo($"[2v2-REPORT] submitted: t1={p.Steam[0]},{p.Steam[1]} t2={p.Steam[2]},{p.Steam[3]} winner=T{p.WinnerTeam}");
         }
