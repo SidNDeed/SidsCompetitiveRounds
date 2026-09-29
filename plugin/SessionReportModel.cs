@@ -156,6 +156,8 @@ namespace CompetitiveRounds
         internal sealed class Table
         {
             public string Title = "";
+            /// <summary>Round 2 L1: what the view prints when no column was kept.</summary>
+            public string Missing = "";
             public readonly List<string> Header = new List<string>();
             public readonly List<List<string>> Rows = new List<List<string>>();
         }
@@ -191,7 +193,7 @@ namespace CompetitiveRounds
             public readonly List<Tile> SetTiles = new List<Tile>();
             public readonly List<StripSeg> Strip = new List<StripSeg>();
             public float StripTotal;
-            public string StripKey = "", StripNote = "", RaceLine = "", RaceNote = "";
+            public string StripKey = "", StripNote = "", RaceLine = "", RaceNote = "", StripMissing = "";
             public readonly Table Combat = new Table(), Play = new Table(), Progress = new Table();
             public Bars DamageBars, KillsBars, GoldBars, XpBars;
             // the builds pages: one block per game, packed onto pages by the view
@@ -227,7 +229,6 @@ namespace CompetitiveRounds
         internal static Model Build(Envelope env)
         {
             var m = new Model { Env = env, Kind = env.Kind ?? "" };
-            string missing = I18n.Tr("not recorded for this mode");
             m.PageTitles[0] = I18n.Tr("Timeline");
             m.PageTitles[1] = I18n.Tr("Rates");
             m.PageTitles[2] = I18n.Tr("Set totals");
@@ -402,9 +403,15 @@ namespace CompetitiveRounds
                     if (fps != null && fps.Count > 0) AddLine(m.Fps, pid, m.Tints[pi], Shift(fps, sp.X0, false));
                 }
             }
-            foreach (var pn in new[] { m.Damage, m.Dps, m.HitPct, m.BlockPct, m.Ping, m.Fps })
-                Finish(pn, missing);
-            FinishRace(m, env, missing);
+            // Round 2 L1: each chart says why it is empty - this set, or the mode.
+            Finish(m.Damage, MissingText(m.Kind, MET_DAMAGE));
+            Finish(m.Dps, MissingText(m.Kind, MET_DAMAGE));
+            Finish(m.HitPct, MissingText(m.Kind, MET_HIT));
+            Finish(m.BlockPct, MissingText(m.Kind, MET_BLOCK));
+            Finish(m.Ping, MissingText(m.Kind, MET_PING));
+            Finish(m.Fps, MissingText(m.Kind, MET_FPS));
+            FinishRace(m, env, MissingText(m.Kind, MET_SCORE));
+            m.StripMissing = MissingText(m.Kind, MET_DURATION);
             if (m.BlockPct.Missing != null && legacyBlocks)
                 m.BlockPct.Missing = I18n.Tr("not recorded (older block format)");
 
@@ -525,6 +532,7 @@ namespace CompetitiveRounds
             Column(combat, I18n.Tr("Kills/game"), n, pi => PerGame(d.Players[pi].KillsByGame, "F1"));
             Column(combat, I18n.Tr("K/D"), n, pi => Kd(d.Players[pi]));
             FillTable(m, m.Combat, combat);
+            m.Combat.Missing = MissingText(m.Kind, MET_COMBAT);
 
             m.Play.Title = I18n.Tr("Cards and points");
             var play = new List<KeyValuePair<string, string[]>>();
@@ -538,11 +546,14 @@ namespace CompetitiveRounds
             Column(play, I18n.Tr("Biggest comeback (rounds)"), n, pi => Int(d.Players[pi].BiggestComeback));
             Column(play, I18n.Tr("Time in lead"), n, pi => d.Players[pi].LeadS.HasValue ? Clock(d.Players[pi].LeadS.Value) : null);
             FillTable(m, m.Play, play);
+            m.Play.Missing = MissingText(m.Kind, MET_PLAY);
 
             // Per game: one bar per player per game.
             int games = env.Games.Count;
-            m.DamageBars = MakeBars(I18n.Tr("Damage per game"), I18n.Tr("dmg"), d, pl => pl.DamageByGame, games);
-            m.KillsBars = MakeBars(I18n.Tr("Kills per game"), I18n.Tr("kills"), d, pl => pl.KillsByGame, games);
+            m.DamageBars = MakeBars(I18n.Tr("Damage per game"), I18n.Tr("dmg"), d, pl => pl.DamageByGame, games,
+                                    MissingText(m.Kind, MET_DAMAGE_TOTAL));
+            m.KillsBars = MakeBars(I18n.Tr("Kills per game"), I18n.Tr("kills"), d, pl => pl.KillsByGame, games,
+                                   MissingText(m.Kind, MET_KILLS));
 
             // Progress: rating before / after / change, gold and XP this set.
             m.Progress.Title = I18n.Tr("Rating, gold and XP");
@@ -553,8 +564,10 @@ namespace CompetitiveRounds
             Column(prog, I18n.Tr("Gold this set"), n, pi => Signed(d.Players[pi].Gold));
             Column(prog, I18n.Tr("XP this set"), n, pi => Signed(d.Players[pi].Xp));
             FillTable(m, m.Progress, prog);
-            m.GoldBars = MakeBars(I18n.Tr("Gold per game"), I18n.Tr("gold"), d, pl => pl.GoldByGame, games);
-            m.XpBars = MakeBars(I18n.Tr("XP per game"), I18n.Tr("XP"), d, pl => pl.XpByGame, games);
+            m.GoldBars = MakeBars(I18n.Tr("Gold per game"), I18n.Tr("gold"), d, pl => pl.GoldByGame, games,
+                                  MissingText(m.Kind, MET_GOLD));
+            m.XpBars = MakeBars(I18n.Tr("XP per game"), I18n.Tr("XP"), d, pl => pl.XpByGame, games,
+                                MissingText(m.Kind, MET_XP));
         }
 
         /// <summary>A table column: kept only when some player has a value.</summary>
@@ -583,7 +596,8 @@ namespace CompetitiveRounds
             }
         }
 
-        private static Bars MakeBars(string title, string unit, Derived d, Func<PlayerLine, List<float?>> pick, int games)
+        private static Bars MakeBars(string title, string unit, Derived d, Func<PlayerLine, List<float?>> pick, int games,
+                                     string missing)
         {
             var b = new Bars { Title = title, Unit = unit };
             bool any = false;
@@ -605,7 +619,7 @@ namespace CompetitiveRounds
                 b.Texts.Add(text);
                 b.Labels.Add("<color=#8FA3B8>" + (gi + 1).ToString(INV) + "</color>");
             }
-            if (!any) b.Missing = I18n.Tr("not recorded for this mode");
+            if (!any) b.Missing = missing;
             else b.MaxY = NiceCeil(b.MaxY);
             return b;
         }
@@ -704,6 +718,19 @@ namespace CompetitiveRounds
             if (pts == null || pts.Count == 0) return;
             for (int i = 0; i < pts.Count; i++) if (pts[i].y > p.MaxY) p.MaxY = pts[i].y;
             p.Lines.Add(new Poly { PlayerId = pid, Tint = tint, Pts = pts });
+        }
+
+        /// <summary>Round 2 L1: the text of a chart, bar set or table with no
+        /// data - "not recorded for this set" when a set of this mode can carry
+        /// the metric, "not supported for this mode" only when no set of the
+        /// mode can (SessionReportRules.MissingReason, executed by the client
+        /// harness; its per-mode lists are checked against the server's
+        /// loaders).</summary>
+        private static string MissingText(string kind, string metric)
+        {
+            return MissingReason(kind, metric) == MISSING_MODE
+                ? I18n.Tr("not supported for this mode")
+                : I18n.Tr("not recorded for this set");
         }
 
         private static void Finish(Panel p, string missing)

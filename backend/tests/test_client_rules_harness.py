@@ -270,10 +270,11 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     # 30b added the overlay rule's cases, 38 with 30c's builds layout, 59
     # with 30d's derived numbers, 63 with 30e's race axis, 67 with 30g's
     # broadcast playback, 71 with round 2's presence rules (M1), 73 with its
-    # unknown race target (M2), 75 with its playback gate (M3) and 77 with the
-    # watched-set lever's api rule (M4); the floor is that count (#342). Raise
-    # it when cases are added.
-    assert run >= 77, "the SessionReportRules suite shrank to %d cases" % run
+    # unknown race target (M2), 75 with its playback gate (M3), 77 with the
+    # watched-set lever's api rule (M4) and 80 with the missing-data
+    # provenance (L1); the floor is that count (#342). Raise it when cases are
+    # added.
+    assert run >= 80, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -772,6 +773,19 @@ def test_the_watched_set_lever_runs_only_against_a_local_api(harness_run, name):
     """Round 2 M4: SessionReportRules.DevLeverApiAllowed, executed - the
     TestWatchedSet lever refuses the public host and the LAN production
     addresses, and runs against a local test api only."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "provenance: a 1v2 set with no damage reads 'not recorded for this set' - its same-mode pair carries damage",
+    "provenance (control): a metric no set of the mode can carry reads 'not supported for this mode'",
+    "provenance: every metric a captured set records is one its mode carries",
+])
+def test_an_empty_chart_names_the_set_or_the_mode(harness_run, name):
+    """Round 2 L1: SessionReportRules.ModeCarries / MissingReason, executed
+    with a same-mode 1v2 pair (one with its damage stream, one without) and
+    every captured fixture's recorded metrics."""
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line
 

@@ -1679,8 +1679,8 @@ def test_a_stat_nobody_recorded_is_omitted_never_zero():
                    "private static string Signed(int? v) => v.HasValue ?"):
         line = text[text.index(helper):text.index(";", text.index(helper))]
         assert line.rstrip().endswith(": null"), line
-    bars = _cs_body(model, "private static Bars MakeBars(string title, string unit, Derived d, Func<PlayerLine, List<float?>> pick, int games)")
-    assert 'b.Missing = I18n.Tr("not recorded for this mode")' in bars
+    bars = _cs_body(model, "private static Bars MakeBars(string title")
+    assert "if (!any) b.Missing = missing;" in bars
 
 
 def test_the_totals_pages_draw_one_element_per_data_type():
@@ -1718,11 +1718,11 @@ def test_the_race_plots_rounds_won_on_the_modes_win_target():
     assert "float racePer = RaceDivisor(m.Kind);" in build
     assert "RoundsSeries(score, racePer, false)" in build and "RoundsSeries(score, racePer, true)" in build
     assert ".Step = true;" in build
-    finish_loop = build[build.index("foreach (var pn in new[]"):build.index("Finish(pn, missing);")]
-    assert "m.Score" not in finish_loop, "the race is not NiceCeil'd"
+    # Round 2 L1: each panel is finished with its own empty text.
+    assert "Finish(m.Score" not in build, "the race is not NiceCeil'd"
     for panel in ("m.Damage", "m.Dps", "m.HitPct", "m.BlockPct", "m.Ping", "m.Fps"):
-        assert panel in finish_loop, panel
-    assert build.count("FinishRace(m, env, missing)") == 1
+        assert build.count("Finish(" + panel + ", MissingText(m.Kind, ") == 1, panel
+    assert build.count("FinishRace(m, env, MissingText(m.Kind, MET_SCORE))") == 1
     race = _cs_body(model, "private static void FinishRace(Model m, Envelope env, string missing)")
     assert "p.MaxY = RaceTop(m.Kind, env.Games, recorded, out unknown);" in race and "p.Dots.Add(" in race
     assert "NiceCeil" not in race
@@ -2134,3 +2134,182 @@ def test_the_lever_turns_the_open_sets_page_after_the_measure():
     assert "openSelector = selector;" in op and "openKey = key;" in op
     cl = _cs_body(view, "public static void Close()")
     assert "devPage = -1;" in cl and "openSelector = null;" in cl
+
+
+# -- round 2 L1: an empty chart says whether the set or the mode lacks it -----
+
+def test_an_empty_chart_says_whether_the_set_or_the_mode_lacks_it():
+    """Round 2 L1: no report surface reads "not recorded for this mode" any
+    more; every chart, bar set, table and the game-length strip takes its
+    empty text from MissingText(kind, metric) with its own metric."""
+    model = PLUGIN / "SessionReportModel.cs"
+    view = PLUGIN / "SessionReportView.cs"
+    for p in sorted(PLUGIN.glob("*.cs")):
+        if p.name in ("I18nCatalogues.cs", "I18nSourceKeys.g.cs"):
+            continue
+        assert "not recorded for this mode" not in strip_comments_only(p.read_text(encoding="utf-8")), p.name
+    mt = _cs_body(model, "private static string MissingText(string kind, string metric)")
+    assert "MissingReason(kind, metric) == MISSING_MODE" in mt
+    assert 'I18n.Tr("not supported for this mode")' in mt and 'I18n.Tr("not recorded for this set")' in mt
+    build = _cs_body(model, "internal static Model Build(Envelope env)")
+    for panel, met in (("m.Damage", "MET_DAMAGE"), ("m.Dps", "MET_DAMAGE"), ("m.HitPct", "MET_HIT"),
+                       ("m.BlockPct", "MET_BLOCK"), ("m.Ping", "MET_PING"), ("m.Fps", "MET_FPS")):
+        assert build.count(f"Finish({panel}, MissingText(m.Kind, {met}));") == 1, panel
+    assert "FinishRace(m, env, MissingText(m.Kind, MET_SCORE));" in build
+    assert "m.StripMissing = MissingText(m.Kind, MET_DURATION);" in build
+    assert "Finish(pn," not in build, "no panel keeps a shared text"
+    totals = _cs_body(model, "private static void BuildTotalsPages(Model m, Envelope env)")
+    assert "m.Combat.Missing = MissingText(m.Kind, MET_COMBAT);" in totals
+    assert "m.Play.Missing = MissingText(m.Kind, MET_PLAY);" in totals
+    for bars, met in (("m.DamageBars", "MET_DAMAGE_TOTAL"), ("m.KillsBars", "MET_KILLS"),
+                      ("m.GoldBars", "MET_GOLD"), ("m.XpBars", "MET_XP")):
+        at = totals.index(bars + " = MakeBars(")
+        call = totals[at:totals.index(";", at)]
+        assert call.rstrip().endswith(f"MissingText(m.Kind, {met}))"), call
+    make = _cs_body(model, "private static Bars MakeBars(string title")
+    assert "if (!any) b.Missing = missing;" in make
+    players = _cs_body(view, "private static void DrawPlayersPage(Rect body, SessionReportModel.Model m)")
+    assert "m.Combat, m.Combat.Missing);" in players and "m.Play, m.Play.Missing);" in players
+    strip = _cs_body(view, "private static void DrawStrip(Rect r, SessionReportModel.Model m)")
+    assert '"<color=#8FA3B8>" + m.StripMissing + "</color>"' in strip
+
+
+def _carries_lists():
+    """The client's per-mode lists, read from SessionReportRules.cs: the
+    metric constants and each CARRIES_<MODE> array, as sets of names."""
+    text = strip_comments_only((PLUGIN / "SessionReportRules.cs").read_text(encoding="utf-8"))
+    consts = dict(re.findall(r'\b(MET_[A-Z_]+) = "([a-z_]+)"', text))
+    assert len(consts) == 13, consts
+    lists = {}
+    for mode, body in re.findall(r"private static readonly string\[\] CARRIES_([A-Z0-9]+) = \{([^}]*)\};", text):
+        lists[mode] = {consts[n.strip()] for n in body.split(",") if n.strip()}
+    assert sorted(lists) == ["1V1", "FFA", "OVT", "TEAM"], sorted(lists)
+    return consts, lists
+
+
+_SAT_NS = uuid.UUID("5e55a0e0-0000-4000-8000-000000000001")
+_SAT_MID = str(uuid.uuid5(_SAT_NS, "match"))
+
+
+def _sat_value(k):
+    """A populated value for any column a report loader reads."""
+    if k in ("id", "match_id"):
+        return _SAT_MID
+    if k == "player_id":
+        return str(uuid.uuid5(_SAT_NS, "t1a_id"))     # the 2v2 telemetry row of seat t1a
+    if k.endswith("_id"):
+        return str(uuid.uuid5(_SAT_NS, k))
+    if k in ("started_at", "ended_at"):
+        return T0
+    if k == "duration_s":
+        return 600
+    if k == "timeline":
+        return FFA_TIMELINE
+    if k == "point_times":
+        return "60,120,180"
+    if k == "point_timeline":
+        return "1:0,1:1,2:1"
+    if k.endswith("timeline"):
+        return "0:0,5:3,9:6" if ("hit" in k or "block" in k) else "0,10,20"
+    if k.endswith("end_stats"):
+        return END_STATS
+    if k == "rules":
+        return None
+    if k in ("is_ranked", "all_ranked", "settings_known"):
+        return True
+    if k in ("absent", "solo_extra_pick", "same_card_rule", "sudden_death"):
+        return False
+    if k == "slot":
+        return 0
+    if k == "color_hex":
+        return "#FFFFFF"
+    if k.endswith("active_seconds"):
+        return 30.0
+    if k.startswith("rating"):
+        return 1500.0
+    if k == "total_rows":
+        return 1
+    return 3
+
+
+class _Saturated(dict):
+    """A row in which every column is populated, except the `drop` suffixes."""
+
+    def __init__(self, drop=()):
+        super().__init__()
+        self.drop = tuple(drop)
+
+    def __getitem__(self, k):
+        return None if self.drop and k.endswith(self.drop) else _sat_value(k)
+
+    def get(self, k, default=None):
+        return self[k]
+
+    def __contains__(self, k):
+        return True
+
+    def __bool__(self):
+        return True     # `tele_by.get(...) or {}` must keep it
+
+
+def _loader_metrics(monkeypatch, consts, mode, drop=()):
+    """Run the server's loader for `mode` on saturated rows and name the
+    metrics its games carry (the client's metric names)."""
+    async def _rows(db, sql, params):
+        return [_Saturated(drop)]
+    monkeypatch.setattr(main, "_report_rows", _rows)
+    key, cpid = _SAT_MID, str(uuid.uuid5(_SAT_NS, "caller"))
+    if mode == "1V1":
+        games = asyncio.run(main._report_load_1v1(None, "match", key, cpid))[0]
+    elif mode == "TEAM":
+        games = asyncio.run(main._report_load_team(None, "match", key, cpid))[0]
+    elif mode == "OVT":
+        games = asyncio.run(main._report_load_ovt(None, "match", key, cpid))[0]
+    else:
+        games = asyncio.run(main._report_load_ffa(None, key, cpid))[0]
+    assert games, mode
+    got = set()
+    stream = {"damage": "MET_DAMAGE", "score": "MET_SCORE", "shots": "MET_HIT", "hits": "MET_HIT",
+              "blocks": "MET_BLOCK", "blocks_ok": "MET_BLOCK", "ping": "MET_PING", "fps": "MET_FPS",
+              "kills": "MET_KILLS"}
+    gold_mode = {"1V1": "1v1", "TEAM": "team", "OVT": "ovt"}.get(mode)
+    for game in games:
+        sid_of = {s["pid"]: "7656119%010d" % i for i, s in enumerate(game["slots"])}
+        out = main._report_game_json(game, sid_of, {})
+        for name in out["available"]:
+            got.add(consts[stream[name]])
+        for tot in out["totals"].values():
+            if tot:
+                got.add(consts["MET_COMBAT"])
+            if "damage" in tot:
+                got.add(consts["MET_DAMAGE_TOTAL"])
+            if "kills" in tot or ("deaths" in tot and mode == "1V1"):
+                got.add(consts["MET_KILLS"])
+        if out["xp"]:
+            got.add(consts["MET_XP"])
+        if out["scores"]:
+            got.add(consts["MET_PLAY"])
+        if out["duration_s"] > 0:
+            got.add(consts["MET_DURATION"])
+        # Gold is the ledger's per-game record (1v1 / 2v2 / 1v2) or the FFA
+        # row's gold_gained - read outside the loader's games statement.
+        if (gold_mode in main._REPORT_GAME_GOLD_REASONS
+                or (mode == "FFA" and all(s.get("gold_gained") is not None for s in game["slots"]))):
+            got.add(consts["MET_GOLD"])
+    return got
+
+
+def test_the_modes_carry_lists_are_what_the_server_loaders_read(monkeypatch):
+    """Round 2 L1, executed: each mode's CARRIES list in the client is exactly
+    what the server's loader for that mode can put on a game - so "not
+    supported for this mode" is said only of a metric no set of the mode can
+    carry, and every other gap reads "not recorded for this set"."""
+    consts, lists = _carries_lists()
+    for mode in ("1V1", "TEAM", "OVT", "FFA"):
+        got = _loader_metrics(monkeypatch, consts, mode)
+        assert got == lists[mode], (mode, "loader only", sorted(got - lists[mode]),
+                                    "client only", sorted(lists[mode] - got))
+    # Control: the saturation is what produces a metric - the 1v2 loader with
+    # its damage timelines empty carries no damage at all.
+    bare = _loader_metrics(monkeypatch, consts, "OVT", drop=("_damage_timeline",))
+    assert consts["MET_DAMAGE"] not in bare and consts["MET_DAMAGE"] in lists["OVT"], sorted(bare)

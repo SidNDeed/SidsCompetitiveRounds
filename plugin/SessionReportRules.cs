@@ -1047,6 +1047,54 @@ namespace CompetitiveRounds
             return haveModel ? PLAYBACK_REPORT : PLAYBACK_SCREENS;
         }
 
+        // Round 2 L1: the report's metric names, one per chart / bar set /
+        // table whose data can be absent.
+        internal const string MET_DAMAGE = "damage", MET_SCORE = "score", MET_HIT = "hit", MET_BLOCK = "block",
+                              MET_PING = "ping", MET_FPS = "fps", MET_DAMAGE_TOTAL = "damage_total",
+                              MET_KILLS = "kills", MET_XP = "xp", MET_COMBAT = "combat", MET_GOLD = "gold",
+                              MET_PLAY = "play", MET_DURATION = "duration";
+        internal const int MISSING_SET = 1, MISSING_MODE = 2;
+
+        // What a set of each mode CAN carry: what the server's loader for that
+        // mode puts on a game (backend/api/main.py _report_load_1v1 / _team /
+        // _ovt / _ffa - the timeline streams, the totals counters, XP; 1v1
+        // kills are the other fighter's recorded deaths) plus what every mode
+        // records (gold, picks and points, game length).
+        // backend/tests/test_session_report.py executes the four loaders on
+        // saturated rows and compares with these lists, in both directions.
+        private static readonly string[] CARRIES_1V1 = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
+            MET_DAMAGE_TOTAL, MET_KILLS, MET_XP, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
+        private static readonly string[] CARRIES_TEAM = { MET_DAMAGE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
+            MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
+        private static readonly string[] CARRIES_OVT = { MET_DAMAGE, MET_GOLD, MET_PLAY, MET_DURATION };
+        private static readonly string[] CARRIES_FFA = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
+            MET_DAMAGE_TOTAL, MET_KILLS, MET_XP, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
+
+        /// <summary>Round 2 L1: whether some set of `kind` can carry `metric`.
+        /// A kind this build does not know makes no claim about its mode (true:
+        /// the set simply has none).</summary>
+        internal static bool ModeCarries(string kind, string metric)
+        {
+            string[] carries;
+            switch (kind)
+            {
+                case "ranked": case "casual": carries = CARRIES_1V1; break;
+                case "team": carries = CARRIES_TEAM; break;
+                case "ovt": carries = CARRIES_OVT; break;
+                case "ffa": carries = CARRIES_FFA; break;
+                default: return true;
+            }
+            return Array.IndexOf(carries, metric) >= 0;
+        }
+
+        /// <summary>Round 2 L1: why a set of `kind` shows no `metric` -
+        /// MISSING_SET when the mode carries it (this set has none recorded),
+        /// MISSING_MODE only when no set of the mode can carry it.</summary>
+        internal static int MissingReason(string kind, string metric)
+        {
+            return ModeCarries(kind, metric) ? MISSING_SET : MISSING_MODE;
+        }
+
         /// <summary>Round 2 M4: whether a dev lever that replays a recorded set
         /// may run against the API this client is configured for - ONLY a
         /// local test server: exactly "localhost", or a loopback address

@@ -552,9 +552,8 @@ namespace CompetitiveRounds
         {
             const float gap = 10f;
             float h1 = (body.height - gap) * 0.5f;
-            string missing = I18n.Tr("not recorded for this mode");
-            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Combat, missing);
-            DrawTable(new Rect(body.x, body.y + h1 + gap, body.width, body.height - h1 - gap), m.Play, missing);
+            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Combat, m.Combat.Missing);
+            DrawTable(new Rect(body.x, body.y + h1 + gap, body.width, body.height - h1 - gap), m.Play, m.Play.Missing);
         }
 
         /// <summary>Per game: damage and kills, one bar per player per game.</summary>
@@ -607,7 +606,7 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(r.x + r.width * 0.5f, r.y + 2f, r.width * 0.5f - 8f, 22f), m.StripKey, stSmallR);
             if (m.Strip.Count == 0 || m.StripTotal <= 0f)
             {
-                GUI.Label(r, "<color=#8FA3B8>" + I18n.Tr("not recorded for this mode") + "</color>", stCenter);
+                GUI.Label(r, "<color=#8FA3B8>" + m.StripMissing + "</color>", stCenter);
                 return;
             }
             var bar = new Rect(r.x + 8f, r.y + 32f, r.width - 16f, 40f);

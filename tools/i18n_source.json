@@ -2871,7 +2871,8 @@
   "not blocking: 51 damage + return impulse",
   "not enough data (4+ picks)",
   "not recorded (older block format)",
-  "not recorded for this mode",
+  "not recorded for this set",
+  "not supported for this mode",
   "nothing",
   "nothing - vanilla has no surface for them",
   "now: <b>{0}</b>",
@@ -17390,9 +17391,14 @@
    "location": "Build",
    "kind": "Tr"
   },
-  "not recorded for this mode": {
-   "surface": "SessionReportModel, SessionReportView",
-   "location": "Build, DrawPlayersPage, DrawStrip +1",
+  "not recorded for this set": {
+   "surface": "SessionReportModel",
+   "location": "MissingText",
+   "kind": "Tr"
+  },
+  "not supported for this mode": {
+   "surface": "SessionReportModel",
+   "location": "MissingText",
    "kind": "Tr"
   },
   "nothing": {

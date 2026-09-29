@@ -61,6 +61,7 @@ namespace CompetitiveRounds
             OvtCases(r);
             FfaCases(r);
             PresenceCases(r);
+            ProvenanceCases(r);
             RobustnessCases(r);
             OverlayCases(r);
             LayoutCases(r);
@@ -212,6 +213,95 @@ namespace CompetitiveRounds
             var l = new List<string>();
             foreach (int i in Standings(g, e.Players)) l.Add(e.Players[i].Name + " " + g.Scores[e.Players[i].Id].ToString(INV));
             return string.Join(",", l.ToArray());
+        }
+
+        // Round 2 L1: the metrics one parsed game records, in the report's
+        // metric names (harness-only: the plugin never needs this list).
+        private static HashSet<string> RecordedMetrics(string kind, Game g)
+        {
+            var o = new HashSet<string>();
+            foreach (var pl in g.Timelines)
+            {
+                if (pl.Value == null) continue;
+                foreach (var st in pl.Value)
+                {
+                    if (st.Value == null || st.Value.Count == 0) continue;
+                    switch (st.Key)
+                    {
+                        case "damage": o.Add(MET_DAMAGE); break;
+                        case "score": o.Add(MET_SCORE); break;
+                        case "shots": case "hits": o.Add(MET_HIT); break;
+                        case "blocks": case "blocks_ok": o.Add(MET_BLOCK); break;
+                        case "ping": o.Add(MET_PING); break;
+                        case "fps": o.Add(MET_FPS); break;
+                        case "kills": o.Add(MET_KILLS); break;
+                        default: o.Add("stream:" + st.Key); break;
+                    }
+                }
+            }
+            foreach (var pl in g.Totals)
+            {
+                if (pl.Value == null || pl.Value.Count == 0) continue;
+                o.Add(MET_COMBAT);
+                if (pl.Value.ContainsKey("damage")) o.Add(MET_DAMAGE_TOTAL);
+                if (pl.Value.ContainsKey("kills")) o.Add(MET_KILLS);
+                if (pl.Value.ContainsKey("deaths") && (kind == "ranked" || kind == "casual")) o.Add(MET_KILLS);
+            }
+            if (g.Xp.Count > 0) o.Add(MET_XP);
+            if (g.Gold.Count > 0) o.Add(MET_GOLD);
+            if (g.Scores.Count > 0 || g.Picks.Count > 0) o.Add(MET_PLAY);
+            if (g.DurationS > 0f) o.Add(MET_DURATION);
+            return o;
+        }
+
+        private static void ProvenanceCases(SelfTestResult r)
+        {
+            // The same-mode pair: the captured 1v2 series carries a damage
+            // stream; the same set with that stream taken out carries none.
+            const string OVT_DAMAGE = "{\"damage\":[[80.0,0],[160.0,200],[240.0,380]]}";
+            int spliced = 0;
+            for (int at = OVT_SERIES.IndexOf(OVT_DAMAGE, StringComparison.Ordinal); at >= 0;
+                 at = OVT_SERIES.IndexOf(OVT_DAMAGE, at + 1, StringComparison.Ordinal)) spliced++;
+            var withDmg = Parse(OVT_SERIES);
+            var without = Parse(OVT_SERIES.Replace(OVT_DAMAGE, "{}").Replace("\"available\":[\"damage\"]", "\"available\":[]"));
+            bool hasA = false, hasB = false;
+            if (withDmg != null) foreach (var g in withDmg.Games) hasA |= RecordedMetrics(withDmg.Kind, g).Contains(MET_DAMAGE);
+            if (without != null) foreach (var g in without.Games) hasB |= RecordedMetrics(without.Kind, g).Contains(MET_DAMAGE);
+            Check(r, "provenance: a 1v2 set with no damage reads 'not recorded for this set' - its same-mode pair carries damage",
+                  spliced == 2 && withDmg != null && without != null && hasA && !hasB
+                  && withDmg.Kind == "ovt" && without.Kind == "ovt"
+                  && MissingReason("ovt", MET_DAMAGE) == MISSING_SET,
+                  "spliced " + spliced + " with " + hasA + " without " + hasB + " reason " + MissingReason("ovt", MET_DAMAGE));
+            // Control: a metric no set of the mode can carry reads 'not
+            // supported for this mode'; the same metric in a mode that carries
+            // it reads 'not recorded for this set'; an unknown kind claims nothing.
+            int[] got = {
+                MissingReason("ovt", MET_PING), MissingReason("ovt", MET_COMBAT), MissingReason("ovt", MET_SCORE),
+                MissingReason("team", MET_KILLS), MissingReason("team", MET_SCORE), MissingReason("team", MET_XP),
+                MissingReason("ranked", MET_PING), MissingReason("casual", MET_KILLS), MissingReason("ffa", MET_SCORE),
+                MissingReason("team", MET_HIT), MissingReason("sometime-later", MET_PING),
+            };
+            int[] want = { MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE,
+                           MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET };
+            bool same = got.Length == want.Length;
+            for (int i = 0; same && i < got.Length; i++) same = got[i] == want[i];
+            var gs = new List<string>();
+            foreach (var x in got) gs.Add(x.ToString(CultureInfo.InvariantCulture));
+            Check(r, "provenance (control): a metric no set of the mode can carry reads 'not supported for this mode'",
+                  same, "got " + string.Join(",", gs.ToArray()));
+            // Every metric a captured set records is one its mode carries -
+            // the lists never call a recorded metric unsupported.
+            var bad = new List<string>();
+            foreach (var fx in new[] { RANKED_SERIES, CASUAL_SESSION, TEAM_SERIES, OVT_SERIES, FFA_LOBBY })
+            {
+                var e = Parse(fx);
+                if (e == null) { bad.Add("unparsed"); continue; }
+                foreach (var g in e.Games)
+                    foreach (var met in RecordedMetrics(e.Kind, g))
+                        if (!ModeCarries(e.Kind, met)) bad.Add(e.Kind + ":" + met);
+            }
+            Check(r, "provenance: every metric a captured set records is one its mode carries",
+                  bad.Count == 0, bad.Count == 0 ? "all carried" : string.Join(" ", bad.ToArray()));
         }
 
         private static void RobustnessCases(SelfTestResult r)
