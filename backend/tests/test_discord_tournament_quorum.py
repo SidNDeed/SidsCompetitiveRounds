@@ -159,15 +159,18 @@ async def entrants_of(env, n, tag="e"):
 # -- item 3: one eligibility predicate ------------------------------------------------------------
 
 def test_item3_eight_votes_with_one_active_ban_read_7_of_8_on_every_surface(monkeypatch, tmp_path):
-    """Eight entrants vote for the one slot; one of them is banned after signing
-    up (the production ban route). /tournaments/current's tally - the in-game
-    tab and every Discord line built from it - reads 7; the agreement
-    announcement is not reached; the bot holds every queued availability
-    notice (no DM, no ack) and logs 7 of 8; and the lock pushes back with the
-    best slot at 7. The decisive line is the first assertion: without the one
-    predicate the tally read 8 and the DMs went out."""
+    """Nine entrants, eight of whom vote for the one slot; one voter is banned
+    after signing up (the production ban route), so eight ELIGIBLE entrants
+    remain and the lock's signup gate passes - its decision is the tally.
+    /tournaments/current's tally - the in-game tab and every Discord line
+    built from it - reads 7; the agreement announcement is not reached; the
+    bot holds every queued availability notice (no DM, no ack) and logs 7 of
+    8; and the lock pushes back because no start time had 8 agreeing - it
+    picks no slot and removes nobody (the ninth entrant, who did not vote,
+    is still signed up). The decisive line is the first assertion: without
+    the one predicate the tally read 8 and the DMs went out."""
     async def body(env):
-        people = await entrants_of(env, 8)
+        people = await entrants_of(env, 9)
         tid, slot = await sync_tournament(env, people, 8)
         await env.ban(people[3])
         await queue_notices(env)
@@ -182,11 +185,15 @@ def test_item3_eight_votes_with_one_active_ban_read_7_of_8_on_every_surface(monk
         assert not [c for c in rig.calls if c.path == "/internal/tournament-notices/ack"]
         queued = await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.tournament_notices WHERE tournament_id = CAST(:t AS uuid)"
                                " AND notified_at IS NULL", {"t": tid})
-        assert queued == 8
+        assert queued == 9
         status, start = await lock(env, tid)
         assert (status, start) == ("voting", None), (status, start)
-        pushed = await env.val(f"SELECT content FROM {SCHEMA}.pending_channel_posts ORDER BY id DESC LIMIT 1")
-        assert pushed and "pushed back" in pushed, pushed
+        kept = await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.tournament_signups WHERE tournament_id = CAST(:t AS uuid)"
+                             " AND player_id = CAST(:p AS uuid)", {"t": tid, "p": people[8].id})
+        assert kept == 1, "the lock removed the entrant who did not vote: it picked a slot on 8 votes"
+        pushed = (await env.rows(f"SELECT content FROM {SCHEMA}.pending_channel_posts"
+                                 " ORDER BY created_at, id"))[-1]["content"]
+        assert "pushed back: no start time had 8 players agreeing on it." in pushed, pushed
     e2e(monkeypatch, tmp_path, body)
 
 
