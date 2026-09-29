@@ -24,10 +24,27 @@ namespace CompetitiveRounds
         public static string SessionToken { get; private set; }
         private static float _sessionExpiresAt = -1f;    // Time.realtimeSinceStartup
         private static Callback<GetTicketForWebApiResponse_t> _webTicketCb;
-        private static bool _requestInFlight;
-        private static float _requestStartedAt = -999f;
         private static float _lastAttemptAt = -999f;
         private static bool _loggedUnavailable;
+
+        // One Steam web-API ticket at a time (board row 27 round 2, the
+        // no-token residual). A ticket is HELD from the request until its
+        // exchange ends, and every end cancels it with Steam: the answer
+        // (a session or a refusal), a transport failure or timeout, a refusal
+        // before the post, a failed ticket callback, or abandonment. Before
+        // this the latch cleared at the ticket CALLBACK, so while exchanges
+        // timed out (20 s) a new ticket was requested every 4 s and none was
+        // ever cancelled; the 2026-09-28 note in MaybeRefresh records twenty
+        // such tickets followed by no further ticket for the rest of the
+        // session, and the round-2 witness S4 repeated it (20 tickets, then
+        // none after the restore).
+        private static bool _ticketHeld;
+        private static HAuthTicket _ticket;
+        private static int _ticketSerial;
+        private static float _ticketSince = -999f;
+        // Longer than the exchange's own 20 s request timeout plus the ticket
+        // callback, so only a ticket whose end never arrived is abandoned.
+        private const float TicketAbandonSeconds = 45f;
 
         public static bool HasFreshToken =>
             !string.IsNullOrEmpty(SessionToken)
@@ -41,10 +58,12 @@ namespace CompetitiveRounds
         {
             try
             {
-                // Un-latch a lost ticket callback (Steam hiccup): a request in
-                // flight >30s is presumed dead, allow a fresh mint.
-                if (_requestInFlight && Time.realtimeSinceStartup - _requestStartedAt > 30f)
-                    _requestInFlight = false;
+                // A held ticket whose end never arrived (a lost callback, a
+                // coroutine that died with its host) is abandoned and
+                // cancelled here, so the next one supersedes it and never
+                // stacks on it.
+                if (_ticketHeld && Time.realtimeSinceStartup - _ticketSince > TicketAbandonSeconds)
+                    EndTicket(_ticketSerial, "abandoned after " + TicketAbandonSeconds.ToString("0") + " s");
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown" || sid.StartsWith("photon_")) return;
                 // No ticket while the api would refuse to exchange it (the
@@ -63,7 +82,7 @@ namespace CompetitiveRounds
                     ApiClient.NoteTicketExchangeRefused();
                     return;
                 }
-                if (HasFreshToken || _requestInFlight) return;
+                if (HasFreshToken || _ticketHeld) return;
                 // Hammer until the FIRST session lands (enforced actions 401
                 // without one, so the startup window must be short); relax to
                 // a 60s pre-expiry refresh cadence once established.
@@ -72,9 +91,10 @@ namespace CompetitiveRounds
                 _lastAttemptAt = Time.realtimeSinceStartup;
                 if (_webTicketCb == null)
                     _webTicketCb = Callback<GetTicketForWebApiResponse_t>.Create(OnWebTicket);
-                SteamUser.GetAuthTicketForWebApi("competitive-rounds");
-                _requestInFlight = true;
-                _requestStartedAt = Time.realtimeSinceStartup;
+                _ticket = SteamUser.GetAuthTicketForWebApi("competitive-rounds");
+                _ticketHeld = true;
+                _ticketSerial++;
+                _ticketSince = Time.realtimeSinceStartup;
             }
             catch (Exception ex)
             {
@@ -88,22 +108,54 @@ namespace CompetitiveRounds
 
         private static void OnWebTicket(GetTicketForWebApiResponse_t cb)
         {
-            _requestInFlight = false;
+            // Only the held ticket's callback counts. A late callback for a
+            // ticket already ended (abandoned, so already cancelled) is dropped:
+            // exchanging it would put a second exchange beside the held one.
+            if (!_ticketHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;
+            int serial = _ticketSerial;
             try
             {
                 if (cb.m_eResult != EResult.k_EResultOK || cb.m_cubTicket <= 0 || cb.m_rgubTicket == null)
                 {
                     Plugin.Log.LogWarning($"[STEAM-AUTH] ticket callback failed: {cb.m_eResult}");
+                    EndTicket(serial, "callback failed");
                     return;
                 }
                 string hex = BitConverter.ToString(cb.m_rgubTicket, 0, cb.m_cubTicket).Replace("-", "");
                 Plugin.Log.LogInfo($"[STEAM-AUTH] web ticket minted ({cb.m_cubTicket} bytes) — exchanging for session");
-                ApiClient.PostSteamAuth(hex);
+                ApiClient.PostSteamAuth(hex, outcome => EndTicket(serial, outcome));
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[STEAM-AUTH] ticket handling error: {ex.Message}");
+                EndTicket(serial, "handling error");
             }
+        }
+
+        /// <summary>The held ticket's exchange has ended (`outcome` names how):
+        /// cancel the ticket with Steam and release the one-ticket latch. A
+        /// serial that is no longer the held ticket's (already ended, or
+        /// superseded) changes nothing, so an end reported twice, or late,
+        /// can never release a newer ticket.</summary>
+        internal static void EndTicket(int serial, string outcome)
+        {
+            if (!_ticketHeld || serial != _ticketSerial) return;
+            _ticketHeld = false;
+            bool cancelled = false;
+            try
+            {
+                if (_ticket.m_HAuthTicket != 0)
+                {
+                    SteamUser.CancelAuthTicket(_ticket);
+                    cancelled = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[STEAM-AUTH] ticket {serial} cancel failed: {ex.Message}");
+            }
+            Plugin.Log.LogInfo($"[STEAM-AUTH] ticket {serial} ended ({outcome}); "
+                               + (cancelled ? "cancelled with Steam" : "no ticket handle to cancel"));
         }
 
         public static void SetSession(string token, int expiresInSeconds)

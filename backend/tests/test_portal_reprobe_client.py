@@ -185,15 +185,15 @@ def test_no_steam_ticket_is_requested_while_the_api_would_refuse_to_exchange_it(
     gate = "if (!ApiClient.TicketExchangeAllowed())"
     assert refresh.count(gate) == 1, refresh
     at = refresh.index(gate)
-    assert at < refresh.index("if (HasFreshToken || _requestInFlight) return;"), refresh
+    assert at < refresh.index("if (HasFreshToken || _ticketHeld) return;"), refresh
     assert at < refresh.index("_lastAttemptAt = Time.realtimeSinceStartup;"), refresh
-    assert at < refresh.index('SteamUser.GetAuthTicketForWebApi("competitive-rounds");'), refresh
+    assert at < refresh.index('_ticket = SteamUser.GetAuthTicketForWebApi("competitive-rounds");'), refresh
     branch = refresh[at:refresh.index("}", at)]
     assert "ApiClient.NoteTicketExchangeRefused();" in branch and "return;" in branch, branch
     whole = code_of(API)
     assert whole.count(
         "internal static bool TicketExchangeAllowed() => CredentialedTransportAllowed(baseUrl);") == 1
-    post = code_of(API, "public static void PostSteamAuth(string ticketHex)")
+    post = code_of(API, "public static void PostSteamAuth(string ticketHex, Action<string> onEnded)")
     refuse = "if (!TicketExchangeAllowed())"
     assert post.count(refuse) == 1, post
     assert "CredentialedTransportAllowed(" not in post, "PostSteamAuth asks a second rule"
@@ -206,6 +206,60 @@ def test_no_steam_ticket_is_requested_while_the_api_would_refuse_to_exchange_it(
     assert "[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint" in note, note
     assert whole.count(SIGN_IN_TOAST) == 1, "the sign-in notice is shown from more than one place"
 
+
+
+def test_every_steam_ticket_is_cancelled_when_its_exchange_ends_and_one_is_held_at_a_time():
+    """The no-token residual (board row 27 round 2): while ticket exchanges
+    timed out, SteamAuth released its latch at the ticket CALLBACK, so a new
+    ticket was requested every 4 s beside exchanges still running for 20 s,
+    and no ticket was ever cancelled. Twenty such tickets were followed by no
+    further ticket for the rest of the session (the 2026-09-28 note in
+    MaybeRefresh; witness S4 again), so a session back on the secure route
+    could not sign in. Now one ticket is held from its request until its
+    exchange ends; every end (answered, failed or timed out, not sent, a failed
+    callback, a handling error, abandonment) cancels it with Steam; and only
+    the held ticket's own end can release the latch."""
+    auth = code_of(STEAMAUTH)
+    assert "_requestInFlight" not in auth, "the callback-time latch is back"
+    refresh = code_of(STEAMAUTH, "public static void MaybeRefresh()")
+    gate = "if (HasFreshToken || _ticketHeld) return;"
+    mint = '_ticket = SteamUser.GetAuthTicketForWebApi("competitive-rounds");'
+    assert refresh.count(gate) == 1 and refresh.count(mint) == 1, refresh
+    assert refresh.index(gate) < refresh.index(mint) < refresh.index("_ticketHeld = true;"), refresh
+    assert refresh.index(mint) < refresh.index("_ticketSerial++;"), refresh
+    abandon = "if (_ticketHeld && Time.realtimeSinceStartup - _ticketSince > TicketAbandonSeconds)"
+    assert refresh.count(abandon) == 1 and refresh.index(abandon) < refresh.index(gate), refresh
+    after = refresh[refresh.index(abandon) + len(abandon):]
+    assert after.lstrip().startswith("EndTicket(_ticketSerial,"), "abandonment does not end (cancel) the ticket"
+    # Abandonment only for an end that never arrives: past the exchange's own timeout.
+    limit = float(re.search(r"const float TicketAbandonSeconds = ([0-9.]+)f;", auth).group(1))
+    raw = code_of(API, "private static IEnumerator PostRequestRaw(")
+    timeout = int(re.search(r"request\.timeout = (\d+);", raw).group(1))
+    assert limit > timeout + 10, (limit, timeout)
+    # The only release of the latch is EndTicket, which cancels, and a stale serial changes nothing.
+    assert auth.count("_ticketHeld = false;") == 1, "the latch is released somewhere other than EndTicket"
+    end = code_of(STEAMAUTH, "internal static void EndTicket(int serial, string outcome)")
+    guard = "if (!_ticketHeld || serial != _ticketSerial) return;"
+    assert end.count(guard) == 1 and "_ticketHeld = false;" in end, end
+    assert end.index(guard) < end.index("_ticketHeld = false;") < end.index("SteamUser.CancelAuthTicket(_ticket);"), end
+    # The callback: only the held ticket, and every path ends it.
+    cb = code_of(STEAMAUTH, "private static void OnWebTicket(GetTicketForWebApiResponse_t cb)")
+    held = "if (!_ticketHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;"
+    assert cb.count(held) == 1 and cb.index(held) < cb.index("int serial = _ticketSerial;"), cb
+    failed = cb[cb.index("ticket callback failed"):]
+    assert failed.index('EndTicket(serial, "callback failed");') < failed.index("return;"), cb
+    assert "ApiClient.PostSteamAuth(hex, outcome => EndTicket(serial, outcome));" in cb, cb
+    assert 'EndTicket(serial, "handling error");' in cb[cb.index("catch (Exception ex)"):], cb
+    # The exchange reports its end exactly once on every path.
+    post = code_of(API, "public static void PostSteamAuth(string ticketHex, Action<string> onEnded)")
+    assert "if (ended) return;" in post and post.index("if (ended) return;") < post.index("ended = true;"), post
+    assert '{ end("not sent: no identity"); return; }' in post, post
+    refused = post[post.index("if (!TicketExchangeAllowed())"):]
+    assert refused.index('end("not sent: plaintext base");') < refused.index("return;"), post
+    fin = post[post.index("finally"):]
+    assert fin.index('end(success ? "answered" : "failed");') < fin.index("}"), post
+    assert 'end("not started");' in post[post.index("catch (Exception ex)"):], post
+    assert post.count("return;") == 4, "a new early return in PostSteamAuth must end the ticket first"
 
 def test_a_401_clears_only_a_session_token_the_request_carried():
     """StampVersionHeader withholds the session token on plaintext-to-public

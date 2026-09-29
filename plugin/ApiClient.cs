@@ -22185,11 +22185,21 @@ namespace CompetitiveRounds
         }
 
         /// <summary>July 21 item 4: exchange a Steam web-API auth ticket for a
-        /// server session token. Called from SteamAuth's ticket callback.</summary>
-        public static void PostSteamAuth(string ticketHex)
+        /// server session token. Called from SteamAuth's ticket callback.
+        /// `onEnded` is called exactly once, on every path, with how the
+        /// exchange ended (board row 27 round 2): SteamAuth cancels the ticket
+        /// there and only then may request the next one.</summary>
+        public static void PostSteamAuth(string ticketHex, Action<string> onEnded)
         {
+            bool ended = false;
+            Action<string> end = outcome =>
+            {
+                if (ended) return;
+                ended = true;
+                try { onEnded?.Invoke(outcome); } catch (Exception ex) { Plugin.Log.LogWarning($"[STEAM-AUTH] ticket end hook threw: {ex.Message}"); }
+            };
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { end("not sent: no identity"); return; }
             // F1 (Codex r3): never exchange a Steam ticket over plaintext to a
             // PUBLIC host — the returned 24h bearer would be capturable in
             // transit. SteamAuth asks TicketExchangeAllowed before it requests
@@ -22199,25 +22209,41 @@ namespace CompetitiveRounds
             if (!TicketExchangeAllowed())
             {
                 NoteTicketExchangeRefused();
+                end("not sent: plaintext base");
                 return;
             }
             string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"ticket_hex\":\"{Escape(ticketHex)}\",\"mod_version\":\"{Escape(Plugin.ModVersion ?? "0.0.0")}\"}}";
-            Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/auth/steam",
-                json,
-                (success, response) =>
-                {
-                    if (!success)
+            try
+            {
+                Plugin.Instance.StartCoroutine(PostRequest(
+                    $"{baseUrl}/api/v1/auth/steam",
+                    json,
+                    (success, response) =>
                     {
-                        Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange failed: {response}");
-                        return;
+                        try
+                        {
+                            if (!success)
+                            {
+                                Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange failed: {response}");
+                                return;
+                            }
+                            string token = ExtractJsonString(response, "session_token");
+                            int expiresIn = ExtractJsonInt(response, "expires_in");
+                            if (!string.IsNullOrEmpty(token)) SteamAuth.SetSession(token, expiresIn > 0 ? expiresIn : 86400);
+                            else Plugin.Log.LogWarning("[STEAM-AUTH] session response had no token");
+                        }
+                        finally
+                        {
+                            end(success ? "answered" : "failed");
+                        }
                     }
-                    string token = ExtractJsonString(response, "session_token");
-                    int expiresIn = ExtractJsonInt(response, "expires_in");
-                    if (!string.IsNullOrEmpty(token)) SteamAuth.SetSession(token, expiresIn > 0 ? expiresIn : 86400);
-                    else Plugin.Log.LogWarning("[STEAM-AUTH] session response had no token");
-                }
-            ));
+                ));
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange not started: {ex.Message}");
+                end("not started");
+            }
         }
 
         // Paths that MUST work before consent is granted (version probe so we can auto-update
