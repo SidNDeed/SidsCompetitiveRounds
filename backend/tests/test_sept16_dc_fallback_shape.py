@@ -3011,6 +3011,37 @@ def test_mod_version_advertises_no_series_status_capability():
     returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
     assert len(returns) == 1, [ast.unparse(r) for r in returns]
     answer = returns[0].value
+    # Since the connect-failure landing the route builds the same mapping as
+    # `body` and sets ONE key more, "join_region_guard", only while
+    # JOIN_REGION_GUARD (the joiner's region guard; it ships False). A dict
+    # literal cannot carry a conditional key except through a ** entry, whose
+    # key this pin could not name, so the pin is restated for that shape
+    # rather than the route rewritten: the one return is `body`; `body` is
+    # bound exactly once, to a dict literal, which the checks below read; the
+    # only other write to it is body['join_region_guard'] = 1, alone under
+    # `if JOIN_REGION_GUARD:`; and no method is called on it. Any other key --
+    # the series-status flag above all -- still turns this red.
+    if isinstance(answer, ast.Name):
+        assert answer.id == "body", ast.unparse(returns[0])
+        binds = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                 and any(isinstance(t, ast.Name) and t.id == "body"
+                         for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+        assert len(binds) == 1 and isinstance(binds[0], ast.Assign), [
+            ast.unparse(b) for b in binds]
+        writes = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                  and any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                          and t.value.id == "body"
+                          for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+        assert [ast.unparse(w) for w in writes] == ["body['join_region_guard'] = 1"], [
+            ast.unparse(w) for w in writes]
+        guards = [n for n in ast.walk(node) if isinstance(n, ast.If) and n.body == writes]
+        assert len(guards) == 1 and ast.unparse(guards[0].test) == "JOIN_REGION_GUARD", [
+            ast.unparse(g.test) for g in guards]
+        calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                 and n.func.value.id == "body"]
+        assert calls == [], [ast.unparse(c) for c in calls]
+        answer = binds[0].value
     assert isinstance(answer, ast.Dict), ast.unparse(returns[0])
     keys = sorted(ast.unparse(k) for k in answer.keys)
     assert keys == sorted(["'version'", "'min_version'",
