@@ -3772,7 +3772,15 @@ namespace CompetitiveRounds
             {
                 var actor = list[i];
                 if (actor == null) continue;
-                if (RoomActors.IsSpectator(actor)) continue;
+                // The replicated property, read on every call, like the saw and
+                // grow quorums in this file (the #432 sweep the 886bed8 client
+                // half made of every cross-seat roster filter). IsSpectator
+                // answers from a cache written at THIS seat's first sight of the
+                // actor, so two seats that first looked at different moments
+                // could count different fighters: two rules for one round
+                // boundary. The doc above already named the replicated prop as
+                // the basis; this is the line that now reads it.
+                if (RoomActors.IsSpectatorReplicated(actor)) continue;
                 fighterCount++;
                 object v = null;
                 var props = actor.CustomProperties;

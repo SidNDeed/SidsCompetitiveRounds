@@ -365,7 +365,14 @@ namespace CompetitiveRounds
                 // may still be simulating. Treat it as a seat that does not
                 // advertise.
                 if (p == null) return false;
-                if (RoomActors.IsSpectator(p)) continue;
+                // A CONFIRMED spectator, read from the replicated property on
+                // every call (RoomActors.IsSpectatorReplicated), the basis the
+                // 886bed8 client half's #432 sweep gave every cross-seat roster
+                // filter. IsSpectator's first-sight cache is per-seat state: a
+                // spectator whose properties were not yet readable when this
+                // seat first looked would stay counted here and fail this census
+                // on this seat alone, while seats that looked later repair.
+                if (RoomActors.IsSpectatorReplicated(p)) continue;
 
                 var props = p.CustomProperties;
                 object v;

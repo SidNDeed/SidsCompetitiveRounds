@@ -658,9 +658,10 @@ namespace CompetitiveRounds
         ///
         /// <para>WHICH ONE A CALLER WANTS. Use this where the answer must AGREE
         /// with another seat's and a wrong answer only ever REFUSES something —
-        /// every capability quorum (the saw and grow quorums, PoisonSync's
-        /// capability census and its roster-quarantine edge gates), and the DC
-        /// census. Keep <see cref="IsSpectator"/> where the answer is LOCAL to
+        /// every capability quorum (the saw and grow quorums, the weapon-cooldown
+        /// and proximity-victim quorums, PoisonSync's capability census and its
+        /// roster-quarantine edge gates), and the DC census. Keep
+        /// <see cref="IsSpectator"/> where the answer is LOCAL to
         /// this seat or GRANTS a role that only this seat acts on: the master
         /// client's spectator validation and kick, the face re-send, the
         /// spectator render/ownership predicates. Those are decisions one seat
