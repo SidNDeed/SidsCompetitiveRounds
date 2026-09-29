@@ -46321,8 +46321,9 @@ def _ffa_settings_frozen(raw):
     (ffa_matches.settings_frozen, migration 360), or None. NULL (a game
     recorded before 360, or one whose lobby settings were unknown) reads as
     None, and so does anything that is not exactly the six keys at their
-    types (bool is not accepted as a number), so the caller falls back to
-    the lobby row instead of rendering a shape it cannot vouch for."""
+    types (bool is not accepted as a number). The caller decides what None
+    means: only a NULL column falls back to the lobby row; a non-NULL value
+    this rejects reads as unknown (_ffa_settings_block)."""
     if raw is None:
         return None
     try:
@@ -46342,17 +46343,21 @@ def _ffa_settings_block(row):
     """The FFA `settings` object every FFA history surface returns, from a row
     carrying the game's settings_frozen plus the lobby columns
     _FFA_SETTINGS_COLS names: the block the game's own row froze when it was
-    recorded (migration 360), else, for a game recorded before 360, the lobby
-    row's (_ffa_settings_live). The lobby's settings are written only while it
-    is open and once when it starts, but a history that reads another table's
-    CURRENT state describes a game by whatever that row says now; the frozen
-    block is the game's own record. The row MUST carry settings_frozen (a
-    KeyError, not a silent fall back to the lobby, when a surface forgets to
-    select it). ONE definition for every FFA history surface (#330)."""
-    frozen = _ffa_settings_frozen(row["settings_frozen"])
-    if frozen is not None:
-        return frozen
-    return _ffa_settings_live(row)
+    recorded (migration 360); for a game whose column is NULL (recorded
+    before 360, or with its lobby settings unknown) the lobby row's
+    (_ffa_settings_live), which is what every game read before 360. The
+    lobby's settings are written only while it is open and once when it
+    starts, but a history that reads another table's CURRENT state describes
+    a game by whatever that row says now; the frozen block is the game's own
+    record. A NON-NULL value that is not the six keys at their types is
+    unknown (None) and never the lobby row: that game froze something, and
+    the lobby's later values are not it. The row MUST carry settings_frozen
+    (a KeyError, not a silent fall back to the lobby, when a surface forgets
+    to select it). ONE definition for every FFA history surface (#330)."""
+    raw = row["settings_frozen"]
+    if raw is None:
+        return _ffa_settings_live(row)
+    return _ffa_settings_frozen(raw)
 
 
 def _ffa_settings_to_freeze(lobby):

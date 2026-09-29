@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 import sys
 
 import pytest
@@ -85,9 +86,33 @@ def test_a_game_recorded_before_360_reads_the_lobby_row():
     json.dumps(dict(PLAYED, card_cap=5.0)),
     json.dumps(dict(PLAYED, sudden_death=None)),
 ])
-def test_a_block_that_is_not_the_six_keys_at_their_types_reads_the_lobby_row(bad):
+def test_a_non_null_block_that_is_not_the_six_keys_at_their_types_reads_unknown_not_the_lobby_row(bad):
+    """Round 2 (L1): only a NULL column is a legacy row that reads the lobby;
+    a game that froze SOMETHING malformed is unknown, never the lobby's later
+    values (LATER here is a known, valid lobby row)."""
     assert main._ffa_settings_frozen(bad) is None
-    assert main._ffa_settings_block(_row(bad)) == LATER
+    assert main._ffa_settings_block(_row(bad)) is None
+
+
+def test_an_empty_frozen_object_reads_unknown_while_null_still_reads_the_lobby():
+    assert main._ffa_settings_block(_row("{}")) is None
+    assert main._ffa_settings_block(_row({})) is None           # a decoding driver's dict
+    assert main._ffa_settings_block(_row(None)) == LATER        # the legacy fallback stays
+
+
+def test_no_other_reader_falls_back_to_the_lobby_row():
+    """The lobby read (_ffa_settings_live) has exactly two callers: the block's
+    NULL branch and the writer's freeze; every history surface goes through
+    the block."""
+    import re as _re
+    src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+    calls = [m.start() for m in _re.finditer(r"\b_ffa_settings_live\(", src)]
+    defs = [m.start() for m in _re.finditer(r"^def _ffa_settings_live\(", src, _re.M)]
+    assert len(defs) == 1 and len(calls) == 3, (len(defs), len(calls))
+    block = _src("_ffa_settings_block")
+    assert block.count("_ffa_settings_live(row)") == 1
+    assert "if raw is None:" in block and block.index("if raw is None:") < block.index("_ffa_settings_live(row)")
+    assert "_ffa_settings_live(" in _src("_ffa_settings_to_freeze")
 
 
 def test_the_row_must_carry_the_frozen_column():
@@ -147,7 +172,7 @@ def test_migration_360_is_additive_idempotent_and_deploys_first():
 def test_the_live_checks_here_carry_no_skip_mark():
     mod = sys.modules[__name__]
     names = [n for n in dir(mod) if n.startswith("test_pg_")]
-    assert len(names) == 2
+    assert len(names) == 3   # round 2 added the five-surface malformed-block check
     for name in names:
         marks = {m.name for m in getattr(getattr(mod, name), "pytestmark", [])}
         assert "skip" not in marks and "skipif" not in marks, name
@@ -295,3 +320,129 @@ def test_pg_the_history_answers_with_the_settings_the_game_was_played_under():
         "the history read the lobby's current row instead of the game's own record")
     assert games[str(game1)]["settings"] == LATER
     assert len(rep) == 1 and rep[0]["settings"] == PLAYED
+
+
+def _settings_of(payload, match_id):
+    """The settings block for match_id wherever a surface's answer carries it
+    (a dict with an id-like key equal to match_id and a 'settings' key)."""
+    found = []
+
+    def walk(v):
+        if hasattr(v, "model_dump"):
+            v = v.model_dump()
+        elif hasattr(v, "dict") and not isinstance(v, dict):
+            v = v.dict()
+        if isinstance(v, dict):
+            if "settings" in v and any(str(v.get(k)) == match_id for k in ("match_id", "id", "game_id")):
+                found.append(v["settings"])
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                walk(x)
+    walk(payload)
+    return found
+
+
+# The anchor fixture holds only the FFA tables. Three surfaces also read other
+# modes' tables (by-code tries 1v1, 2v2 and 1v2 first; recent-multimode lists
+# 2v2 and 1v2 series) and side tables (bets, titles, ratings, cards). Those
+# statements answer EMPTY here; every statement that reads ffa_matches or
+# ffa_lobbies -- and so every one that selects settings_frozen -- runs for real.
+_STUBBED_TABLES = {"matches", "team_matches", "ovt_matches", "team_series", "ovt_series",
+                   "ranked_series", "ffa_bets", "shop_items", "glicko_ratings", "ffa_match_cards"}
+_TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+([a-z_]+)")
+
+
+class _EmptyResult:
+    def mappings(self):
+        return self
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
+
+    def fetchall(self):
+        return []
+
+    def first(self):
+        return None
+
+    def scalar(self):
+        return None
+
+
+class _OtherTablesEmpty:
+    """A session whose statements on _STUBBED_TABLES answer empty; the rest
+    pass through. Counts the statements that selected settings_frozen."""
+
+    def __init__(self, db):
+        self._db = db
+        self.frozen_reads = 0
+        self.stubbed = []
+
+    async def execute(self, stmt, *a, **k):
+        flat = " ".join(str(stmt).split())
+        tables = set(_TABLE_RE.findall(flat))
+        if tables & _STUBBED_TABLES:
+            assert "settings_frozen" not in flat and not tables & {"ffa_matches", "ffa_lobbies"}, flat[:200]
+            self.stubbed.append(sorted(tables & _STUBBED_TABLES))
+            return _EmptyResult()
+        if "settings_frozen" in flat:
+            self.frozen_reads += 1
+        return await self._db.execute(stmt, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def test_pg_an_empty_frozen_object_reads_unknown_on_all_five_surfaces():
+    """Round 2 (L1): the game's row holds {} (non-NULL, not the six keys) and
+    the lobby then changes to LATER. Every FFA history surface answers the
+    game's settings as unknown (None), never the lobby's later values; the
+    fixture's pre-360 game (NULL) still reads the lobby row."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, game1 = await _fixture_with_360()
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(_SET_LOBBY), _lobby_params(PLAYED))
+                # by-code selects it on the FFA branch; the anchor fixture lacks it
+                await conn.execute(text(
+                    "ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS invalidation_reason TEXT"))
+            resp = await _call_endpoint(sm, _endpoint_report(
+                ROW_B, S1, "rm_211531_r2", with_slots=True))
+            mid = str(resp.match_id)
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "UPDATE ffa_matches SET settings_frozen = CAST('{}' AS jsonb) WHERE id = :m"), {"m": mid})
+                await conn.execute(text(_SET_LOBBY), _lobby_params(LATER))
+            async with sm() as raw_db:
+                db = _OtherTablesEmpty(raw_db)
+                ranked = bool((await db.execute(text(
+                    "SELECT is_ranked FROM ffa_matches WHERE id = :m"), {"m": mid})).scalar())
+                code = mid.replace("-", "")[:12]
+                by_code = await main.get_match_by_code(code, db)
+                multimode = await main.get_recent_multimode_series(minutes=43200, limit=200, db=db)
+                recent = await main.ffa_recent(page=0, page_size=30, ranked=ranked,
+                                               participant_steam_id=None, db=db)
+                hist = await main.player_ffa_history(S1, 15, db)
+                rep, _slots = await main._report_load_ffa(db, mid, str(pids[S1]))
+            return mid, str(game1), ranked, by_code, multimode, recent, hist, rep, db.frozen_reads
+        finally:
+            await engine.dispose()
+
+    mid, g1, ranked, by_code, multimode, recent, hist, rep, frozen_reads = run(go())
+    assert ranked, "the fixture's game is casual: recent-multimode lists ranked games only"
+    assert frozen_reads == 5, "each of the five surfaces reads settings_frozen for real: %d" % frozen_reads
+    surfaces = {"by-code": by_code, "recent-multimode": multimode, "ffa/recent": recent,
+                "ffa-history": hist, "report": rep}
+    for name, payload in surfaces.items():
+        got = _settings_of(payload, mid)
+        assert got, (name, "the surface did not return the game")
+        assert all(s is None for s in got), (name, got)
+    # the legacy NULL row on the same lobby still reads the lobby row
+    assert _settings_of(hist, g1) == [LATER]
