@@ -2267,6 +2267,33 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestQueueReport failed: {ex.Message}"); }
         }
+
+        private static string _testStaleTokenLast;
+
+        /// <summary>Witness lever (Codex round 1 LOW 1's control): each new
+        /// value of [Broadcast] TestStaleToken replaces the held session token
+        /// with a random one the server never issued. Called from the broadcast
+        /// lever tick.</summary>
+        internal static void TickTestStaleToken()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestStaleToken == null) return;
+                string want = (Plugin.BroadcastTestStaleToken.Value ?? "").Trim();
+                if (_testStaleTokenLast == null) { _testStaleTokenLast = want; return; }
+                if (string.Equals(want, _testStaleTokenLast, StringComparison.Ordinal)) return;
+                _testStaleTokenLast = want;
+                if (want.Length == 0) return;
+                var bytes = new byte[32];
+                using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+                string fake = Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+                bool done = SteamAuth.ReplaceTokenForWitness(fake);
+                Plugin.Log.LogWarning(done
+                    ? $"[SCR] TestStaleToken ({want}): the held session token was replaced by one the server never issued"
+                    : $"[SCR] TestStaleToken ({want}): no session held; nothing replaced");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestStaleToken failed: {ex.Message}"); }
+        }
         /// <summary>How long a portal press that just restored the secure route
         /// waits for SteamAuth to land a session before minting anyway.</summary>
         private const float PortalSessionWaitSeconds = 15f;
@@ -2563,22 +2590,27 @@ namespace CompetitiveRounds
         /// route and by every press after a restore.</summary>
         private static IEnumerator OpenPortalWhenSessionReady()
         {
+            // A USABLE session, not a nonempty token (Codex round 1 LOW 1): a
+            // token that expired while the session sat on the backup is still
+            // nonempty, and minting with it only earns a refusal. The mint
+            // itself then covers a token the server has dropped (a fresh-looking
+            // one it no longer knows): MintPortalSessionAndOpen re-mints once.
             float until = Time.realtimeSinceStartup + PortalSessionWaitSeconds;
             while (!PortalSessionReady() && Time.realtimeSinceStartup < until)
             {
                 try { SteamAuth.MaybeRefresh(); } catch { }
                 yield return new WaitForSecondsRealtime(0.5f);
             }
-            MintPortalSessionAndOpen();
+            MintPortalSessionAndOpen(true);
         }
 
-        /// <summary>A known local identity and a session token: what the portal
+        /// <summary>A known local identity and a fresh session: what the portal
         /// mint needs before it is worth sending.</summary>
         private static bool PortalSessionReady()
         {
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return false;
-            return !string.IsNullOrEmpty(SteamAuth.SessionToken);
+            return SteamAuth.HasFreshToken;
         }
 
         /// <summary>Bug 392 item A step 2: whether the server has said it
@@ -5917,14 +5949,19 @@ namespace CompetitiveRounds
                     Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());
                     return;
                 default:
-                    MintPortalSessionAndOpen();
+                    MintPortalSessionAndOpen(true);
                     return;
             }
         }
 
         /// <summary>The mint and the browser hand-off, behind the same gate. The
-        /// base is read once, so the token is minted and opened on one host.</summary>
-        private static void MintPortalSessionAndOpen()
+        /// base is read once, so the token is minted and opened on one host.
+        /// `remintOnRefusal`: when the server refuses the session the request
+        /// carried (PostRequest has already dropped that token), sign in again
+        /// and mint once more, so one press opens exactly one portal tab
+        /// (Codex round 1 LOW 1). The second mint passes false: a second
+        /// refusal is reported, never looped.</summary>
+        private static void MintPortalSessionAndOpen(bool remintOnRefusal)
         {
             if (Plugin.Instance == null) return;
             string sid = MatchTracker.LocalSteamId;
@@ -5941,7 +5978,14 @@ namespace CompetitiveRounds
                 (success, response) =>
                 {
                     string token = success ? ExtractJsonString(response, "token") : null;
-                    if (string.IsNullOrEmpty(token))
+                    var act = SecureRouteRules.PortalMintAction(success, token, response, remintOnRefusal);
+                    if (act == SecureRouteRules.MintAction.RemintOnce && Plugin.Instance != null)
+                    {
+                        Plugin.Log.LogInfo("[I18N] portal mint refused the session; signing in again and minting once more");
+                        Plugin.Instance.StartCoroutine(RemintThenOpenPortal());
+                        return;
+                    }
+                    if (act != SecureRouteRules.MintAction.Open)
                     {
                         CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
                         return;
@@ -5949,6 +5993,20 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[I18N] portal opened over {portalBase}");
                     Application.OpenURL($"{portalBase}/translate#token={token}");
                 }));
+        }
+
+        /// <summary>After the portal mint refused the session: wait (bounded)
+        /// for the session SteamAuth mints to replace the dropped one, then mint
+        /// once more without a further retry.</summary>
+        private static IEnumerator RemintThenOpenPortal()
+        {
+            float until = Time.realtimeSinceStartup + PortalSessionWaitSeconds;
+            while (!PortalSessionReady() && Time.realtimeSinceStartup < until)
+            {
+                try { SteamAuth.MaybeRefresh(); } catch { }
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+            MintPortalSessionAndOpen(false);
         }
 
         // R2-5: chat scrollback request generation. A refetch (reconnect,
@@ -22022,7 +22080,11 @@ namespace CompetitiveRounds
                 if (!CredentialedTransportAllowed(req.url)) return;
                 string body = null;
                 try { body = req.downloadHandler?.text; } catch { }
-                if (body == null || !body.Contains("session_required")) return;
+                // Both refusal wordings (Codex round 1 LOW 1): the enforced
+                // writes say session_required, the portal mint says
+                // "steam session required", and missing the second left a
+                // dropped token in place for the next press to fail on too.
+                if (!SecureRouteRules.IsSessionRefusal(body)) return;
                 SteamAuth.InvalidateSessionIf(sentToken);
                 Plugin.Log.LogWarning("[STEAM-AUTH] server rejected session (401) — re-minting on next heartbeat");
             }

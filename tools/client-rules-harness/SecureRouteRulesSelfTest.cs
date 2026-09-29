@@ -681,8 +681,27 @@ namespace CompetitiveRounds
                       neverRun == "still queued after 400 sends, attempt 0", neverRun);
             }
 
-            // -- K: the portal press (Codex round 1 LOW 2) ------------------------
+            // -- R and K: the portal press (Codex round 1 LOW 1 and LOW 2) --------
             {
+                bool a = IsSessionRefusal("HTTP 401: {\"detail\":\"steam session required\"}");
+                bool b = IsSessionRefusal("HTTP 401: {\"detail\":\"session_required\"}");
+                bool n1 = IsSessionRefusal("HTTP 401: {\"detail\":\"ticket_verification_failed\"}");
+                bool n2 = IsSessionRefusal("HTTP 403: {\"detail\":\"banned\"}");
+                Check(r, "R1 both refusal wordings (the portal mint's and the enforced writes') read as a session refusal",
+                      a && b, "portal=" + a + " writes=" + b);
+                Check(r, "R1c control: other refusals are not session refusals",
+                      !n1 && !n2, "ticket=" + n1 + " banned=" + n2);
+                const string refusedPortal = "HTTP 401: {\"detail\":\"steam session required\"}";
+                var first = PortalMintAction(false, null, refusedPortal, true);
+                var second = PortalMintAction(false, null, refusedPortal, false);
+                var opened = PortalMintAction(true, "tok", "{\"token\":\"tok\"}", true);
+                var banned = PortalMintAction(false, null, "HTTP 403: {\"detail\":\"banned\"}", true);
+                var noTok = PortalMintAction(true, null, "{}", true);
+                Check(r, "R2 a mint refused for its session re-mints once, and the second refusal is reported, never looped",
+                      first == MintAction.RemintOnce && second == MintAction.Fail && opened == MintAction.Open,
+                      "first=" + first + " second=" + second + " token=" + opened);
+                Check(r, "R2c control: a refusal that is not about the session, and an answer without a token, are reported",
+                      banned == MintAction.Fail && noTok == MintAction.Fail, "banned=" + banned + " noToken=" + noTok);
 
                 var clock = new FakeClock();
                 var route = BackupRoute(clock, TRetry);

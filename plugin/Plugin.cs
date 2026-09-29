@@ -172,6 +172,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestSecureUrl;      // broadcast seat only -- an https address the secure-route check probes instead of the default one (board row 27 witnesses)
         internal static ConfigEntry<string> BroadcastTestBackupUrl;      // broadcast seat only -- a plaintext address that replaces the backup for one launch: the local witness harness of board row 27 round 2
         internal static ConfigEntry<string> BroadcastTestQueueReport;    // broadcast seat only -- each new value posts BepInEx/config/scr-portal-report.json as a match report through the real send and outbox path (board row 27 round 2 harness)
+        internal static ConfigEntry<string> BroadcastTestStaleToken;     // broadcast seat only -- each new value replaces the held session token with one the server never issued (board row 27 round 2 witness)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<string> BroadcastTestReporterElectionSentinel; // broadcast seat only — any new value runs the 2v2 DC reporter-election self-test once
         internal static ConfigEntry<string> BroadcastTestAutoLogConsentSentinel; // broadcast seat only — any new value runs the automatic-log consent-abort self-test once
@@ -1121,6 +1122,10 @@ namespace CompetitiveRounds
             BroadcastTestQueueReport = Config.Bind(
                 "Broadcast", "TestQueueReport", "",
                 "Broadcast seat only, local witness harness: each new non-empty value (the value at launch never fires) posts the match report in BepInEx/config/scr-portal-report.json to the current api through the same send, failure and outbox path a finished 1v1 game uses. Only while TestBackupUrl is set. Clear it when done."
+            );
+            BroadcastTestStaleToken = Config.Bind(
+                "Broadcast", "TestStaleToken", "",
+                "Broadcast seat only: each new non-empty value (the value at launch never fires) replaces the held session token with a random one the server never issued, keeping its local expiry, so a witness can press the portal button with a token the server refuses. Clear it when done."
             );
             BroadcastTestPlayerCards = Config.Bind(
                 "Broadcast", "TestPlayerCards", "",
@@ -2594,6 +2599,7 @@ namespace CompetitiveRounds
             TickTestQuit();
             TickTestPress();
             ApiClient.TickTestQueueReport();
+            ApiClient.TickTestStaleToken();
             string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
             if (raw == _lastTestOpenTab) return;
             if (Time.realtimeSinceStartup < 6f) return;   // let the menu and the overlay's page build settle

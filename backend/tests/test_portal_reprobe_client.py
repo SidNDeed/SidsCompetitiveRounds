@@ -251,11 +251,11 @@ def test_a_press_after_a_restore_waits_for_the_first_secure_session():
     assert press.count(case) == 1, press
     block = press[press.index(case):press.index("return;", press.index(case))]
     assert "Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());" in block, block
-    assert press.count("MintPortalSessionAndOpen();") == 1, press
-    assert press.index("MintPortalSessionAndOpen();") > press.index(call), press
+    assert press.count("MintPortalSessionAndOpen(true);") == 1, press
+    assert press.index("MintPortalSessionAndOpen(true);") > press.index(call), press
     wait = code_of(API, "private static IEnumerator OpenPortalWhenSessionReady()")
     assert "while (!PortalSessionReady() && Time.realtimeSinceStartup < until)" in wait, wait
-    assert wait.index("MintPortalSessionAndOpen();") > wait.index("while ("), wait
+    assert wait.index("MintPortalSessionAndOpen(true);") > wait.index("while ("), wait
     finish = code_of(API, "private static void FinishPortalPress(SecureRouteRules.Conclusion c)")
     assert "host.StartCoroutine(OpenPortalWhenSessionReady());" in finish, finish
 
@@ -335,11 +335,37 @@ def test_the_portal_press_asks_for_the_identity_only_before_a_mint():
     assert "SecureRouteText.PlaintextOverride(baseUrl)" in refuse, refuse
 
 
+def test_a_refused_portal_session_is_dropped_and_minted_again_once():
+    """LOW 1: the wait after a restore accepted any nonempty token, and the
+    portal mint's refusal ("steam session required") did not match the
+    client's invalidation literal, so a stale token stayed and the press failed.
+    The wait asks for a fresh session and a known identity; the reject handler
+    reads both wordings; the mint re-mints once on a session refusal, and the
+    re-mint passes false so a second refusal is reported, not looped."""
+    reject = code_of(API, "private static void HandleSessionReject(UnityWebRequest req, string sentToken)")
+    assert "if (!SecureRouteRules.IsSessionRefusal(body)) return;" in reject, reject
+    assert 'body.Contains("session_required")' not in reject, reject
+    ready = code_of(API, "private static bool PortalSessionReady()")
+    assert "return SteamAuth.HasFreshToken;" in ready and '"unknown"' in ready, ready
+    mint = code_of(API, "private static void MintPortalSessionAndOpen(bool remintOnRefusal)")
+    assert "SecureRouteRules.PortalMintAction(success, token, response, remintOnRefusal)" in mint, mint
+    remint = mint[mint.index("if (act == SecureRouteRules.MintAction.RemintOnce"):]
+    remint = remint[:remint.index("return;")]
+    assert "StartCoroutine(RemintThenOpenPortal());" in remint, remint
+    assert mint.index("act != SecureRouteRules.MintAction.Open") < mint.index("Application.OpenURL("), mint
+    again = code_of(API, "private static IEnumerator RemintThenOpenPortal()")
+    assert "while (!PortalSessionReady() && Time.realtimeSinceStartup < until)" in again, again
+    assert "MintPortalSessionAndOpen(false);" in again and "MintPortalSessionAndOpen(true);" not in again, again
+    whole = code_of(API)
+    assert whole.count("MintPortalSessionAndOpen(false);") == 1, "a second no-retry mint site"
+    assert "MintPortalSessionAndOpen();" not in whole, "a mint site that says nothing about the retry"
+
+
 def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
-    """The local harness (TestBackupUrl, TestQueueReport) changes nothing
-    for a player: the harness is armed only when the
+    """The local harness (TestBackupUrl, TestQueueReport) and the stale-token
+    lever change nothing for a player: the harness is armed only when the
     boot-safe broadcast identity holds, the report lever does nothing unless
-    the harness is armed, both levers are ticked only from the broadcast lever
+    the harness is armed, all three are ticked only from the broadcast lever
     tick, and a harness session never sends a report queued under the
     compiled addresses (OutboxSendUrl adds them only outside the harness)."""
     arm = code_of(API, "private static string RouteHarnessBackup()")
@@ -350,12 +376,12 @@ def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
     tick = code_of(PLUGIN_CS, "private void TickTestOpenTab()")
     gate = "if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;"
     assert tick.count(gate) == 1, tick
-    for lever in ("ApiClient.TickTestQueueReport();",):
+    for lever in ("ApiClient.TickTestQueueReport();", "ApiClient.TickTestStaleToken();"):
         assert tick.count(lever) == 1 and tick.index(gate) < tick.index(lever), tick
     plugin = code_of(PLUGIN_CS)
-    for lever in ("TickTestQueueReport()",):
+    for lever in ("TickTestQueueReport()", "TickTestStaleToken()"):
         assert plugin.count(lever) == 1, "%s is called from somewhere else too" % lever
     init = code_of(API, "public static void Initialize(string url)")
     assert init.index("_routeHarnessBackup = RouteHarnessBackup();") < init.index("StartBootProbe();"), init
-    for key in ("\"TestBackupUrl\", \"\"", "\"TestQueueReport\", \"\""):
+    for key in ("\"TestBackupUrl\", \"\"", "\"TestQueueReport\", \"\"", "\"TestStaleToken\", \"\""):
         assert key in plugin, "%s is not empty by default" % key

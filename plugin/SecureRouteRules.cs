@@ -488,7 +488,18 @@ namespace CompetitiveRounds
             return !(routeCanReturn && !requestCouldCarrySession && answered401);
         }
 
-        // -- The portal press (Codex round 1, LOW 2) ---------------------------
+        /// <summary>Whether a 401 body is the server refusing the session the
+        /// request carried. Two routes word it differently: the enforced
+        /// writes answer "session_required", the portal mint answers "steam
+        /// session required".</summary>
+        internal static bool IsSessionRefusal(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return false;
+            return body.IndexOf("session_required", StringComparison.Ordinal) >= 0
+                || body.IndexOf("steam session required", StringComparison.Ordinal) >= 0;
+        }
+
+        // -- The portal press (Codex round 1, LOW 1 and LOW 2) -----------------
 
         internal enum PressAction
         {
@@ -496,7 +507,7 @@ namespace CompetitiveRounds
             ShowChecking,
             /// <summary>No route and a plaintext base: name the address.</summary>
             RefusePlaintext,
-            /// <summary>Wait (bounded) for a known identity and a session token, then mint.</summary>
+            /// <summary>Wait (bounded) for a known identity and a fresh session, then mint.</summary>
             WaitThenMint,
             MintNow,
         }
@@ -513,6 +524,22 @@ namespace CompetitiveRounds
             if (!baseIsHttps) return PressAction.RefusePlaintext;
             if (restored || !identityKnown) return PressAction.WaitThenMint;
             return PressAction.MintNow;
+        }
+
+        internal enum MintAction { Open, RemintOnce, Fail }
+
+        /// <summary>What the portal mint's answer means. A token opens the
+        /// portal. A 401 refusing the session the request carried re-mints
+        /// ONCE when the press may (the first mint of a press), so a token the
+        /// server has dropped costs no second press (LOW 1); anything else,
+        /// and a second refusal, is reported.</summary>
+        internal static MintAction PortalMintAction(bool success, string token, string response, bool mayRemint)
+        {
+            if (success && !string.IsNullOrEmpty(token)) return MintAction.Open;
+            if (!success && mayRemint && response != null
+                && response.StartsWith("HTTP 401", StringComparison.Ordinal) && IsSessionRefusal(response))
+                return MintAction.RemintOnce;
+            return MintAction.Fail;
         }
 
         /// <summary>The local witness harness's stand-in for the secure route:

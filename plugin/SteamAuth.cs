@@ -114,6 +114,19 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[STEAM-AUTH] session established (expires in {expiresInSeconds}s)");
         }
 
+        /// <summary>Witness lever only (board row 27 round 2, [Broadcast]
+        /// TestStaleToken, broadcast identity): replace the held token with one
+        /// the server has never issued, keeping the local expiry, so the seat
+        /// holds exactly what a server-dropped session looks like from here: a
+        /// nonempty, locally fresh token the server refuses. No-op without a
+        /// session.</summary>
+        internal static bool ReplaceTokenForWitness(string token)
+        {
+            if (string.IsNullOrEmpty(SessionToken) || string.IsNullOrEmpty(token)) return false;
+            SessionToken = token;
+            return true;
+        }
+
         /// <summary>Server rejected our session (hard-enforce mode) — drop it so
         /// the next MaybeRefresh mints a fresh ticket immediately.</summary>
         public static void InvalidateSession()
