@@ -477,6 +477,38 @@ async def _player_id_banned(db: AsyncSession, player_id) -> bool:
     return row is not None
 
 
+# ONE eligibility predicate for a sync tournament's start-time votes (Discord
+# fix round 3, item 3; Codex round 2 LOW 1). A vote counts when its slot is far
+# enough out for the lock to pick it (MIN_SLOT_NOTICE_HOURS after the decision,
+# less the hour of slack lock_tournament allows), its voter holds a CURRENT
+# signup (confirmed or speculative), and that player carries no active ban.
+# /tournaments/current's time_slot_tallies - the in-game tab and every Discord
+# line built from it, the bot's availability-DM trigger among them - the
+# agreement announcement and lock_tournament's decision all read it here, so
+# no surface can show a count the lock will not honour.
+_ELIGIBLE_SLOT_TALLY_SQL = """
+    SELECT v.slot_ts, COUNT(*) AS votes
+      FROM tournament_time_votes v
+      JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
+                                AND ts.player_id = v.player_id
+     WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
+       AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                        JOIN players p ON p.steam_id = pb.steam_id
+                       WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
+     GROUP BY v.slot_ts
+     ORDER BY v.slot_ts
+"""
+
+
+async def _eligible_slot_tallies(db: AsyncSession, tournament_id, now: datetime) -> list:
+    """[(slot_ts, votes)] in slot order: every slot's count of eligible votes
+    as of `now` (_ELIGIBLE_SLOT_TALLY_SQL)."""
+    min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
+    rows = (await db.execute(text(_ELIGIBLE_SLOT_TALLY_SQL),
+                             {"tid": tournament_id, "min_start": min_start})).all()
+    return [(r.slot_ts, int(r.votes)) for r in rows]
+
+
 async def _get_player_by_steam(db: AsyncSession, steam_id: str) -> Player:
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
@@ -912,17 +944,14 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         # "only after the caller has voted" anti-snoop gate predates
         # mandatory voting and starved exactly the audience that needs the
         # data most.)
-        # Future slots only — the lock's agreement tally ignores past slots,
-        # so counting them here would show "best time: N/8" progress that
-        # can never actually lock (client topTally scans ALL tallies).
-        tq = text("""
-            SELECT slot_ts, COUNT(*) AS votes
-            FROM tournament_time_votes
-            WHERE tournament_id = :tid AND slot_ts > :now
-            GROUP BY slot_ts ORDER BY slot_ts
-        """)
-        tallies = [TournamentTimeSlotTally(slot_ts=r.slot_ts, votes=r.votes)
-                   for r in (await db.execute(tq, {"tid": t.id, "now": datetime.now(timezone.utc)})).all()]
+        # The lock's own tally (Discord fix round 3, item 3): the one
+        # eligibility predicate, _eligible_slot_tallies - a slot the lock
+        # could pick, a current signup's vote, no active ban - so "best time:
+        # N/8" here, in the in-game tab (client topTally scans ALL tallies)
+        # and in every Discord line built from this answer, is the count the
+        # lock will honour.
+        tallies = [TournamentTimeSlotTally(slot_ts=slot, votes=votes)
+                   for slot, votes in await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))]
 
     # Per-requester region (Aug 13). The top-level photon_region is the field
     # every client reads to decide which Photon region to force before joining
@@ -1052,25 +1081,16 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         # strict 24h bar would disqualify it every single week. A tick >1h
         # late pushes back instead (notice couldn't be given). A past-slot
         # win would also insta-start + mass-forfeit; this bar covers that
-        # a fortiori.
-        min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
-        tallies = (await db.execute(text("""
-            SELECT v.slot_ts, COUNT(*) AS votes
-            FROM tournament_time_votes v
-            JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
-                                      AND ts.player_id = v.player_id
-            WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
-              -- round-19 find 1: a banned entrant's vote must not push a
-              -- slot over the threshold the ELIGIBLE roster cannot reach
-              AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                               JOIN players p ON p.steam_id = pb.steam_id
-                              WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
-            GROUP BY v.slot_ts ORDER BY votes DESC
-        """), {"tid": t.id, "min_start": min_start})).all()
+        # a fortiori. That bar, the current-signup rule and the ban exclusion
+        # (round-19 find 1: a banned entrant's vote must not push a slot over
+        # the threshold the ELIGIBLE roster cannot reach) are the one
+        # eligibility predicate every row-32 surface reads (Discord fix
+        # round 3, item 3): _eligible_slot_tallies.
+        tallies = await _eligible_slot_tallies(db, t.id, now)
         agree_count = 0
         if tallies:
-            top_votes = int(tallies[0].votes)
-            top_slots = [r.slot_ts for r in tallies if int(r.votes) == top_votes]
+            top_votes = max(votes for _slot, votes in tallies)
+            top_slots = [slot for slot, votes in tallies if votes == top_votes]
             agree_count = top_votes
             if top_votes >= t.min_players:
                 winning_slot = random.choice(top_slots)
@@ -4312,29 +4332,13 @@ async def _sync_agreement_reached(db: AsyncSession, t: Tournament) -> bool:
     stable in the useful direction: the feed says "a time has been agreed", the
     lock decides which, and the lock's own DM tells everyone the answer.
 
-    The eligibility rules still match the lock's tally, because a claim of
-    agreement that the lock would not honour is still a lie:
-      * only slots far enough out to be lockable (MIN_SLOT_NOTICE_HOURS),
-      * only votes from CURRENT signups,
-      * banned entrants excluded, so a banned vote cannot push a slot over a
-        threshold the eligible roster cannot reach.
+    The eligibility rules are the lock's tally itself, because a claim of
+    agreement that the lock would not honour is still a lie: the one
+    predicate, _eligible_slot_tallies (lockable slots, CURRENT signups, no
+    active ban).
     """
-    now = datetime.now(timezone.utc)
-    min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
-    rows = (await db.execute(text("""
-        SELECT v.slot_ts, COUNT(*) AS votes
-        FROM tournament_time_votes v
-        JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
-                                  AND ts.player_id = v.player_id
-        WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
-          AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                           JOIN players p ON p.steam_id = pb.steam_id
-                          WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
-        GROUP BY v.slot_ts
-        HAVING COUNT(*) >= :minp
-        ORDER BY v.slot_ts
-    """), {"tid": t.id, "min_start": min_start, "minp": int(t.min_players)})).all()
-    return bool(rows)
+    tallies = await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))
+    return any(votes >= int(t.min_players) for _slot, votes in tallies)
 
 
 async def _maybe_announce_sync_agreement(db: AsyncSession, t: Tournament) -> None:
