@@ -2322,6 +2322,15 @@ namespace CompetitiveRounds
             // Aug 12 item 2c: BEFORE the throttle, exactly like the 1v1 tab's
             // ticker — a 0.7s glitter cannot live behind a 2s gate.
             TickPodiumSparkle();
+            // THE DC-DEFERRAL BANNER'S READ, AND IT IS HERE FOR THE SAME REASON THE
+            // QUEUE PANELS ARE (#62). It used to be called from RefreshTeamTab,
+            // which runs on a dirty flip rather than per frame, so its 2 s interval
+            // was counted in repaints: the survivor's countdown moved at whatever
+            // rate other traffic happened to redraw the tab. BEFORE the throttle,
+            // like the sparkle above, because the poll carries its own unscaled 2 s
+            // deadline and a second gate here would only make the cadence this
+            // ticker's business as well as its own.
+            ApiClient.UpdateTeamSeriesStatePoll(force: false);
             if (Time.unscaledTime < teamTabRefreshAt) return;
             teamTabRefreshAt = Time.unscaledTime + 2f;
             // v1.37 host lobbies: one-shot membership rediscovery + the
@@ -26500,10 +26509,22 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 15f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 60));
             UIFactory.SetWordWrap(txtTeamMembers, true);
 
-            // DC sticky-team grace banner: when a player drops mid-series, the
-            // server enters a 5-minute window where the same 4 can re-queue and
-            // resume the existing series with the same teams. Otherwise the
-            // remaining team takes the series win by forfeit at the deadline.
+            // DC DEFERRAL BANNER. When a 2v2 seat drops and the survivor's report
+            // is PARKED by the server rather than applied, this line tells the
+            // survivor the series is held and shows the time the read-only status
+            // route hands over. It renders nothing of its own; the render block,
+            // which owns the derivation, is in RefreshTeamTab.
+            //
+            // WHAT THIS IS NOT, because the wording here used to say both and both
+            // are dead on this branch: there is no 5-minute window in which the same
+            // four re-queue and resume — that belonged to the legacy dc_paused flow,
+            // retired in v1.30.0, and the window that does exist is bug 245's
+            // resume relock at roughly thirty minutes (SendTeamDcReport's own
+            // summary in ApiClient). And the bound passing is not a forfeit: the
+            // series completes to the other team only where that team had already
+            // won a game AND the abandoned one carries >= 2 total points, so the
+            // ordinary outcome of a parked report is status='dc_incomplete' for the
+            // admin panel, which is a win for nobody.
             txtTeamDcGrace = UIFactory.CreateText("TDC", statusBox.transform, "",
                 16f, new Color(1f, 0.7f, 0.3f), UIFactory.AlignMidLeft,
                 sizeDelta: new Vector2(900, 26));
@@ -27197,6 +27218,92 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             WriteTeamHistScrollY(y);
         }
 
+        /// <summary>THE BANNER'S OWN WITNESS. The status read's positive line says
+        /// a box answered that read AS a read; it says nothing about what this file
+        /// draws, and a bundle has to be able to tell "the read worked" from "the
+        /// survivor was told something" (#342, #438). This is the line for the
+        /// second, and it names the fields the render came from so a reader can
+        /// check the derivation rather than take it.
+        ///
+        /// <para>The tab re-renders on a dirty flip rather than per frame, and an
+        /// answer that changes the banner's inputs asks for one — so this speaks on
+        /// a CHANGE of what the banner shows and not on every draw. The remaining
+        /// seconds are deliberately NOT part of the change key: a countdown ticking
+        /// once every 2 s would otherwise make this line a log flood, and its value
+        /// is in the transition.</para>
+        ///
+        /// <para>WHAT THE OFF LINE MAY SAY. Three different inputs put the banner
+        /// off with the cache naming this series and no latch: an answer that
+        /// carried dc_deferred=false, an answer of the status route that carried no
+        /// complete deferral state, and an answer of the LIFECYCLE state read, which
+        /// carries none of the three keys and stamps the cache all the same. Only
+        /// the first measured the row. The other two are the same fail-to-OFF and
+        /// this line says so, because a witness that spells "nothing answered this"
+        /// as "the route said false" hands a triage a denial nobody made (#342,
+        /// #351).</para>
+        ///
+        /// <para>AND THE CACHE-MISMATCH CASE IS TWO STATES, NOT ONE — the round-7
+        /// correction. A cache whose ForId names ANOTHER series and a cache with no
+        /// ForId at all both fail the same gate, and the previous wording reported
+        /// both as "a different series". The second is what the id setter leaves
+        /// behind: for a newly adopted series, before its first answer, ForId is
+        /// null and there is no other series. The line names each state, and the
+        /// change key holds them apart so the second does not suppress the first
+        /// (#342: a witness is judged by what it can tell apart).</para></summary>
+        private static string _dcBannerWitnessKey = null;
+
+        private static void LogDcBannerWitness(string seriesId, bool shown,
+                                               bool cacheIsThisSeries, bool latchedDark)
+        {
+            // "No cached series at all" and "a cache describing another series" are
+            // two different states that both make cacheIsThisSeries false, and the
+            // off line names them apart — so the key has to hold them apart too, or
+            // the second would be suppressed by the first (#342).
+            bool noCachedSeries = string.IsNullOrEmpty(ApiClient.LastSeriesStateForId);
+            string key = (seriesId ?? "-") + "|" + (shown ? "on" : "off")
+                         + "|" + (cacheIsThisSeries ? "c" : "-")
+                         + (noCachedSeries ? "0" : "s")
+                         + (latchedDark ? "d" : "-")
+                         + (ApiClient.LastSeriesDcDeferred ? "f" : "-")
+                         + (ApiClient.LastSeriesDcDeferredFieldsPresent ? "p" : "-");
+            if (key == _dcBannerWitnessKey) return;
+            _dcBannerWitnessKey = key;
+            if (string.IsNullOrEmpty(seriesId)) return;
+            if (shown)
+                Plugin.Log.LogInfo("[2v2] DC banner SHOWN for series " + seriesId
+                    + " — rendered from the status route's own fields and from nothing "
+                    + "else: dc_deferred=true, dc_deferred_seconds_remaining="
+                    + ApiClient.LastSeriesDcDeferredSecondsRemaining
+                    + ", dc_deferred_bound_seconds="
+                    + ApiClient.LastSeriesDcDeferredBoundSeconds
+                    + ". No clock of this client's own and no local copy of the bound "
+                    + "went into it");
+            else
+                Plugin.Log.LogInfo("[2v2] DC banner OFF for series " + seriesId + " — "
+                    + (latchedDark
+                        ? "the status read for this series is latched dark, so there is no "
+                          + "current deferral state to draw and the last one is not kept"
+                        : !cacheIsThisSeries
+                            ? (noCachedSeries
+                                ? "the status cache describes NO series — no answer has been "
+                                  + "applied since this one was adopted, and the id change "
+                                  + "cleared what the previous answer left. This is the state "
+                                  + "before the first answer, not a denial about this series"
+                                : "the status cache describes a DIFFERENT series ("
+                                  + ApiClient.LastSeriesStateForId + "), so nothing in "
+                                  + "it describes this one")
+                            : ApiClient.LastSeriesDcDeferredFieldsPresent
+                                ? "the last answer for this series carried dc_deferred=false, "
+                                  + "so as of that answer the series held no deferral marker "
+                                  + "the sweep could still act on"
+                                : "the last answer for this series carried no deferral state "
+                                  + "at all — the three fields were absent from it, which is "
+                                  + "read as NOT deferred. The lifecycle state read carries "
+                                  + "none of them and a status answer can be missing them; "
+                                  + "either way this is about the ANSWER and says nothing "
+                                  + "about whether the row holds a marker"));
+        }
+
         private static void RefreshTeamTab()
         {
             // Preserve the Recent-2v2-Series scroll position across this re-render
@@ -27274,27 +27381,108 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyStartBtn, teamLobbyLeaveBtn, teamLobbyPrefBtn,
                 teamLobbyRulesRow, teamLobbyFfBtn, teamLobbyScBtn);
 
-            // DC grace banner. Driven by ApiClient.LastSeriesStateStatus etc. —
-            // poll the most-recent series's state when we have one cached and
-            // the user might be in a sticky-team requeue window.
-            ApiClient.UpdateTeamSeriesStatePoll(force: false);
-            int dcRemaining = ApiClient.LastSeriesDcGraceSeconds;
-            string dcStatus = ApiClient.LastSeriesStateStatus;
+            // DC BANNER — WHAT IT RENDERS FROM. The read that feeds it is NOT
+            // dispatched here: this method runs on a dirty flip, and a 2 s interval
+            // counted in repaints is not 2 s (#62). The poll runs from
+            // MaybeRefreshTeamTab, the tab's per-frame ticker, on an unscaled
+            // wall-clock deadline, and it is load-bearing three ways — the frozen
+            // team-colour stamp (TeamColorIdentity reads those statics), the status
+            // cache the assembly loop reads, and the banner below. What this block
+            // owns is the derivation.
+            //
+            // THE PREDICATE THAT USED TO BE HERE IS DELETED, NOT PATCHED. It was
+            // `status == "dc_paused" && remaining > 0`, and no box could satisfy
+            // it: no statement in the api sets status='dc_paused'; the flow that
+            // did was retired in v1.30.0 (2026-07-12), and the comment beside the
+            // one UPDATE that still names the value says new DCs no longer enter
+            // it; dc_grace_until is only ever written NULL; and the primary holds
+            // no team_series row in that status at all. For three rounds the
+            // else-branch was the only branch that ran, for every series on every
+            // box, while a 2v2 survivor sat inside the deferral window the status
+            // route reports and was told nothing. THE BOUND IS NOT RESTATED HERE AS
+            // A NUMBER: this file renders the bound the answer carried and keeps no
+            // copy of it, in the prose no more than in the code, so there is no
+            // second place for the constant to drift out of step with the server's
+            // (#342). A deleted mechanism beats a patched one (#310, #389),
+            // and the test that used to REQUIRE this predicate now rejects it.
+            //
+            // WHAT IT RENDERS FROM NOW: the three fields the read-only status
+            // route carries, and nothing else — dc_deferred,
+            // dc_deferred_seconds_remaining and dc_deferred_bound_seconds. The
+            // names, the types and the DERIVATION are the cross-lane contract's
+            // (§7.2), and the derivation is that lane's to demonstrate, not a
+            // claim this file can make about another tree: what is checked from
+            // here is that every field this block reads is one that route emits,
+            // by a test that resolves the server tree and reads its return
+            // statement (#341, #444, #635 — two halves of one contract are
+            // grepped for the same literals, never described twice).
+            //
+            // WHAT THIS FILE THEREFORE DOES NOT DO: keep a copy of the bound, run
+            // a countdown of its own, or recompute anything from a local clock.
+            // It renders the numbers it was handed, which is why a box answering a
+            // different bound renders that bound.
+            //
+            // THE PREDICATE IS dc_deferred, NOT A POSITIVE REMAINING TIME. A
+            // marker whose bound has passed but which no sweep tick has settled
+            // yet answers dc_deferred=true with zero seconds remaining, and that
+            // survivor is still waiting — gating on `remaining > 0` would hide the
+            // banner in precisely the state it exists for, which is the deleted
+            // defect in a new spelling.
+            //
+            // TWO GATES BESIDE IT, BOTH FAILING TO OFF:
+            //  * the cache must describe THIS series. The status fields are one
+            //    shared cache written by whichever answer arrived last, so a late
+            //    answer for a previous series must not paint the current one's
+            //    banner (the ForId discipline, Codex r2 f8). This is also why the
+            //    latch's own clear is confined to the cached series: the
+            //    cross-series case is refused HERE rather than patched there.
+            //  * the series must not be latched dark. A latch means no box
+            //    answered this series' read AS a read, so there is no current
+            //    deferral state at all and the last one must not stay on screen.
             var dcBanner = (txtTeamDcGrace as Component)?.gameObject;
             if (dcBanner != null)
             {
-                if (dcStatus == "dc_paused" && dcRemaining > 0)
+                string dcSeries = ApiClient.ActiveTeamSeriesId;
+                bool dcCacheIsThisSeries = !string.IsNullOrEmpty(dcSeries)
+                    && ApiClient.LastSeriesStateForId == dcSeries;
+                bool dcLatchedDark = ApiClient.SeriesStatusLatchedDark(dcSeries);
+                bool dcShow = dcCacheIsThisSeries && !dcLatchedDark
+                              && ApiClient.LastSeriesDcDeferred;
+                if (dcShow)
                 {
-                    int mm = dcRemaining / 60, ss = dcRemaining % 60;
+                    int dcRemaining = ApiClient.LastSeriesDcDeferredSecondsRemaining;
+                    int dcBound = ApiClient.LastSeriesDcDeferredBoundSeconds;
                     int t1w = ApiClient.LastSeriesT1Wins, t2w = ApiClient.LastSeriesT2Wins;
+                    // At zero the countdown does not render 0:00 and does not count
+                    // up: the bound has passed and the series is waiting on the
+                    // sweep, which is a different sentence from "nine seconds left".
+                    //
+                    // THE BOUND IS RENDERED BESIDE IT, from the route's own field,
+                    // which is what makes the remaining time legible ("2:31 of
+                    // 7:00" rather than a number out of nowhere) and is the
+                    // proportional use the contract reserves that field for. It is
+                    // not a constant here: a box answering a different bound
+                    // renders that bound. A body that somehow carried no bound
+                    // renders the remaining time alone rather than "of 0:00".
+                    string clock;
+                    if (dcRemaining <= 0)
+                        clock = I18n.Tr("any moment now");
+                    else if (dcBound > 0)
+                        clock = string.Format("{0}:{1} / {2}:{3}",
+                            dcRemaining / 60, (dcRemaining % 60).ToString("D2"),
+                            dcBound / 60, (dcBound % 60).ToString("D2"));
+                    else
+                        clock = string.Format("{0}:{1}",
+                            dcRemaining / 60, (dcRemaining % 60).ToString("D2"));
                     UIFactory.SetTextRaw(txtTeamDcGrace,
-                        I18n.TrF("<color=#FFB347>Series paused — same 4 can re-queue to resume</color>  <color=#FF6688>{0}:{1}</color>  <color=#888>(score {2}-{3})</color>", mm, ss.ToString("D2"), t1w, t2w));
+                        I18n.TrF("<color=#FFB347>Series held — waiting on the final result</color>  <color=#FF6688>{0}</color>  <color=#888>(score {1}-{2})</color>", clock, t1w, t2w));
                     dcBanner.SetActive(true);
                 }
                 else
                 {
                     dcBanner.SetActive(false);
                 }
+                LogDcBannerWitness(dcSeries, dcShow, dcCacheIsThisSeries, dcLatchedDark);
             }
 
             // In Queue panel — refresh from /team/queue/list (2s throttle).

@@ -249,14 +249,104 @@ namespace CompetitiveRounds
         private static int localFreezeCount = 0;
         private static int localFreezeFocusedCount = 0;   // resumed WITH focus = window-drag signature
         private static float localFreezeTotalSec = 0f;
-        // Counters trip at 0.5s so the server-side local_freeze_* series stays
-        // comparable across builds; the LOG trips at 0.2s so the shorter hitch class
-        // players describe as "stuttery" is present in a bundle at all (#359). The
-        // log is capped — that report was already 27% diagnostic noise by line count.
+        // Counters trip at 0.5s; the per-event LOG trips at 0.2s; and since r2 a
+        // bounded AGGREGATE covers the 50-199 ms band, which is the class report
+        // #359 is actually about. That report's own bundle holds 94.9% of 32,917
+        // frames under 17 ms and only EIGHT frames at or above 200 ms, while 1,666
+        // sit in the 17-100 ms band and the worst in-combat class was 50-199 ms,
+        // 125 times. A 0.2s trip therefore could not observe the reported stutter
+        // at all: it is a threshold the evidence sits below (#342 — a check that
+        // cannot fail is worse than no check).
+        //
+        // VOLUME, stated as a cap rather than a hope. That report was already 27%
+        // diagnostic noise by line count, so the band cannot be logged per event:
+        //   * at most FREEZE_BAND_EXEMPLAR_CAP (10) individual band lines, so a
+        //     bundle carries examples with their dt and focus state;
+        //   * then aggregates only — one [FREEZE-BAND] summary per 60 s of
+        //     tracking, at most FREEZE_BAND_SUMMARY_CAP (12) per match, and only
+        //     when the band actually moved since the last one.
+        // Worst case is 22 added lines per match, against the 60 the >0.2s log may
+        // already spend.
+        //
+        // PER MATCH IS THE UNIT, and until this round it was not: `_freezeLogged`
+        // was initialised once and never reset, so FREEZE_LOG_CAP was a
+        // PER-PROCESS budget. A player's first match of a session could spend all
+        // 60 lines and every later match in that session reported no freeze line
+        // at all — the bundle from the match someone actually complained about
+        // then reads exactly like a match with no stalls in it. The reset below
+        // sits beside the counters' own reset, so all three caps (event lines,
+        // band exemplars, band summaries) are spent and refilled per match, which
+        // is the unit every sentence above already claimed.
         private const float FREEZE_COUNT_SEC = 0.5f;
         private const float FREEZE_LOG_SEC = 0.2f;
+        private const float FREEZE_BAND_SEC = 0.05f;
         private const int FREEZE_LOG_CAP = 60;
+        private const int FREEZE_BAND_EXEMPLAR_CAP = 10;
+        private const int FREEZE_BAND_SUMMARY_CAP = 12;
+        private const float FREEZE_BAND_SUMMARY_SEC = 60f;
         private static int _freezeLogged = 0;
+        private static int _bandCount = 0, _bandMaxMs = 0, _bandLogged = 0;
+        private static int _bandSummaries = 0, _bandSummarisedCount = 0;
+        private static float _bandTotalSec = 0f, _bandSummaryAt = -999f;
+
+        /// <summary>THE COUNTING-SEMANTIC EPOCH for local_freeze_count /
+        /// local_freeze_focused_count / local_freeze_total_sec.
+        ///
+        /// <para>Every build before this one tripped the freeze detector from
+        /// <c>Math.Max(dt, wallGap)</c> with both sources sampled every tick, so one
+        /// stall was counted TWICE — on the resume tick by the stopwatch and on the
+        /// next tick by unscaledDeltaTime. Every figure those builds reported is
+        /// inflated about 2x. The numbers are not wrong in a way a reader can see:
+        /// they are the same three columns, in the same range, and a mixed-era
+        /// comparison looks like a real difference between two players.</para>
+        ///
+        /// <para>A build label cannot separate the eras — a locally built DLL
+        /// reports the last shipped version (#301) — so the producer tags its own
+        /// output, exactly as BULLET_STATS_EPOCH does for the bullet counters.
+        /// 1 = the doubled definition; 2 = the monotonic single-trip definition.
+        /// 0 = the field was never sent, i.e. a client older than the tag, which is
+        /// UNKNOWN and must not be laundered into either era.</para>
+        ///
+        /// <para>SERVER SIDE IS OUT OF SCOPE for this client pass. The wire contract
+        /// this half establishes: `local_freeze_epoch` and `opp_freeze_epoch`,
+        /// integers, on the match-report body, plus cr_gstats field 24 carrying the
+        /// peer's value. Both are additive; the deployed schema ignores fields it
+        /// does not declare, so an old server keeps working and a new one can
+        /// partition the series.</para></summary>
+        internal const int FREEZE_COUNT_EPOCH = 2;
+
+        /// <summary>The epoch the PEER's freeze counters were produced under, via
+        /// cr_gstats field 24. 0 = the peer never sent it.</summary>
+        public static int OppFreezeEpoch { get; private set; }
+
+        /// <summary>True only when the peer's freeze counters were produced by our
+        /// own counting definition. Anything else — a silent old client, a garbled
+        /// field, an era we do not understand — is UNKNOWN.</summary>
+        public static bool OppFreezeCountersUsable => OppFreezeEpoch == FREEZE_COUNT_EPOCH;
+
+        /// <summary>One bounded aggregate line for the 50-199 ms band. `final` is
+        /// the match-end flush, which ignores the interval but still respects the
+        /// cap and still refuses to print a summary of nothing.</summary>
+        private static void FlushFreezeBandSummary(bool final)
+        {
+            try
+            {
+                if (_bandCount <= _bandSummarisedCount) return;          // nothing new to say
+                if (_bandSummaries >= FREEZE_BAND_SUMMARY_CAP) return;
+                float now = Time.unscaledTime;
+                if (!final && now - _bandSummaryAt < FREEZE_BAND_SUMMARY_SEC) return;
+                _bandSummaryAt = now;
+                _bandSummaries++;
+                int since = _bandCount - _bandSummarisedCount;
+                _bandSummarisedCount = _bandCount;
+                Plugin.Log.LogInfo($"[FREEZE-BAND] {(int)(FREEZE_BAND_SEC * 1000)}-"
+                    + $"{(int)(FREEZE_LOG_SEC * 1000) - 1}ms gaps: +{since} since the last summary, "
+                    + $"{_bandCount} this match, worst={_bandMaxMs}ms, total={_bandTotalSec:F2}s"
+                    + (_bandSummaries == FREEZE_BAND_SUMMARY_CAP
+                        ? " (summary cap reached — counting continues)" : ""));
+            }
+            catch { }
+        }
         private static readonly List<int> pingSamples = new List<int>();        // 3s cadence, aggregates reported
         private static int localRecvGapCount = 0;
         private static int localRecvGapMaxMs = 0;
@@ -1929,7 +2019,7 @@ namespace CompetitiveRounds
             if (_lastTickStopwatchMs >= 0)
             {
                 float wallGap = (nowMs - _lastTickStopwatchMs) / 1000f;
-                if (wallGap > FREEZE_LOG_SEC && !inPickPhase)
+                if (wallGap > FREEZE_BAND_SEC && !inPickPhase)
                 {
                     bool focused = false;
                     try { focused = Application.isFocused; } catch { }
@@ -1940,15 +2030,37 @@ namespace CompetitiveRounds
                         localFreezeTotalSec += wallGap;
                         if (focused) localFreezeFocusedCount++;
                     }
-                    if (_freezeLogged < FREEZE_LOG_CAP)
+                    if (wallGap > FREEZE_LOG_SEC)
                     {
-                        _freezeLogged++;
-                        Plugin.Log.LogInfo($"[FREEZE-DIAG] gap={wallGap:F2}s dt={dt:F2} focused={focused} counted={counted} n={localFreezeCount}"
-                            + (_freezeLogged == FREEZE_LOG_CAP ? " (log cap reached — counting continues)" : ""));
+                        if (_freezeLogged < FREEZE_LOG_CAP)
+                        {
+                            _freezeLogged++;
+                            Plugin.Log.LogInfo($"[FREEZE-DIAG] gap={wallGap:F2}s dt={dt:F2} focused={focused} counted={counted} n={localFreezeCount}"
+                                + (_freezeLogged == FREEZE_LOG_CAP ? " (log cap reached — counting continues)" : ""));
+                        }
+                    }
+                    else
+                    {
+                        // #359's band. The three local_freeze_* counters deliberately
+                        // do NOT move here — their 0.5s definition is what the epoch
+                        // above pins, and widening it would produce a third era of
+                        // numbers wearing the same column names.
+                        _bandCount++;
+                        _bandTotalSec += wallGap;
+                        int bandMs = (int)(wallGap * 1000f);
+                        if (bandMs > _bandMaxMs) _bandMaxMs = bandMs;
+                        if (_bandLogged < FREEZE_BAND_EXEMPLAR_CAP)
+                        {
+                            _bandLogged++;
+                            Plugin.Log.LogInfo($"[FREEZE-BAND] gap={wallGap:F3}s dt={dt:F3} focused={focused} n={_bandCount}"
+                                + (_bandLogged == FREEZE_BAND_EXEMPLAR_CAP
+                                    ? " (examples done — summaries only from here)" : ""));
+                        }
                     }
                 }
             }
             _lastTickStopwatchMs = nowMs;
+            FlushFreezeBandSummary(false);
             if (dt <= 0f || dt > 1f) return; // skip pause / first-frame outliers (freeze recorded above)
             fpsFrameCount++;
             fpsTimeAccum += dt;
@@ -2377,9 +2489,20 @@ namespace CompetitiveRounds
                 // this payload gates on parts.Length >= N, so appending is
                 // backward-compatible: an old peer simply never sees it.
                 $"|{BULLET_STATS_EPOCH}" +
-                // Field 24 - round 2 finding 3 freeze-counting epoch, for fields
-                // 9-10 (PeerFreezeStats). Appended on the same terms.
-                $"|{FREEZE_STATS_EPOCH}";
+                // Field 24 — the counting-semantic epoch for fields 9/10
+                // (local_freeze_count / local_freeze_focused_count). Same
+                // append-only contract: every consumer gates on parts.Length,
+                // so an old peer simply never sees it and reads as UNKNOWN.
+                // ONE field, declared by two lanes (the 886bed8 client half and
+                // v1.41.0 beta round 2 finding 3), so ONE value: the receiver
+                // reads it into OppFreezeEpoch, which the match report carries
+                // as opp_freeze_epoch, AND through PeerFreezeStats into
+                // OppFreezeStatsEpoch, which decides whether the peer's two
+                // counters ride that report at all. PeerFreezeStats.Epoch
+                // therefore names this same definition, and the
+                // [FREEZE-EPOCH-SENTINEL]'s builder check fails if the two
+                // numbers ever part.
+                $"|{FREEZE_COUNT_EPOCH}";
         }
 
         private static void BroadcastGstatsImmediate()
@@ -2569,6 +2692,14 @@ namespace CompetitiveRounds
                                     oppFreezeFocusedCount = _fzFocused;
                                     OppFreezeStatsEpoch = _fzEpoch;
                                     oppRecvGapCount = int.Parse(parts[10]);
+                                    // Field 24: which counting definition produced the
+                                    // two freeze numbers just read. Absent = 0 = UNKNOWN,
+                                    // never "the same as ours".
+                                    int _oppFreezeEra = 0;
+                                    if (parts.Length >= 24)
+                                        int.TryParse(parts[23], System.Globalization.NumberStyles.Integer,
+                                                     System.Globalization.CultureInfo.InvariantCulture, out _oppFreezeEra);
+                                    OppFreezeEpoch = _oppFreezeEra;
                                 }
                                 else if (parts.Length >= 6 && parts[0] == "0" && parts[1] == "0")
                                 {
@@ -6676,6 +6807,8 @@ namespace CompetitiveRounds
                     localFreezeCount: localFreezeCount,
                     localFreezeFocusedCount: localFreezeFocusedCount,
                     localFreezeTotalSec: localFreezeTotalSec,
+                    localFreezeEpoch: FREEZE_COUNT_EPOCH,
+                    oppFreezeEpoch: OppFreezeEpoch,
                     localPingAvg: pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
                     localPingMax: pingSamples.Count > 0 ? pingSamples.Max() : 0,
                     // July 22 item 3: latency timelines for the history hover chart.
@@ -7015,10 +7148,15 @@ namespace CompetitiveRounds
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
+            FlushFreezeBandSummary(true);
+            _freezeLogged = 0;   // the >0.2s cap is per MATCH, like the two below it
+            _bandCount = 0; _bandMaxMs = 0; _bandLogged = 0; _bandTotalSec = 0f;
+            _bandSummaries = 0; _bandSummarisedCount = 0; _bandSummaryAt = -999f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
             oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
             OppFreezeStatsEpoch = 0;   // round 2 finding 3: unknown until a peer says otherwise
+            OppFreezeEpoch = 0;
             _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
             _activationSuccessCredited = true;
@@ -8842,10 +8980,15 @@ namespace CompetitiveRounds
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
+            FlushFreezeBandSummary(true);
+            _freezeLogged = 0;   // the >0.2s cap is per MATCH, like the two below it
+            _bandCount = 0; _bandMaxMs = 0; _bandLogged = 0; _bandTotalSec = 0f;
+            _bandSummaries = 0; _bandSummarisedCount = 0; _bandSummaryAt = -999f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
             oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
             OppFreezeStatsEpoch = 0;   // round 2 finding 3: unknown until a peer says otherwise
+            OppFreezeEpoch = 0;
             _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
             _activationSuccessCredited = true;

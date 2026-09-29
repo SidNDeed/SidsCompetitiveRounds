@@ -14853,6 +14853,17 @@ _RANKED_CANDIDATE_SQL = """
       -- formation budget goes on one refusal and the poll 503s, while an
       -- eligible peer sits unmatched behind it in the ORDER BY.
       --
+      -- WARNING. Do not put a colon-prefixed token in a comment inside a
+      -- SQL literal that goes through text(). SQLAlchemy scans the ENTIRE
+      -- string for bind names and does not skip a double-dash comment, so a
+      -- review citation written with a leading colon becomes a required bind
+      -- that no caller supplies, and every execute raises
+      -- InvalidRequestError. That is exactly what happened here - ranked 1v1
+      -- discovery could not run at all, which is why the citation above names
+      -- no number. Proven with construct_params against a comment-stripped
+      -- negative control, and pinned by
+      -- backend/tests/test_sql_literals_have_no_phantom_binds.py.
+      --
       -- Round 1 gave the OVT, FFA and TEAM predicates exactly this clause
       -- and missed the 1v1 one. That asymmetry IS the finding -- 1v1 is the
       -- busiest queue and the only one that had the gate without the filter.
@@ -45370,8 +45381,19 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
 
     # ── Difficulty inputs (bug #129) ──────────────────────────────────────
     # Opponents' 1v1 Glicko drives the tier multiplier; guarded exactly like
-    # 2v2's fetch so a ratings hiccup degrades to x1.0-at-1500 instead of
-    # failing the report.
+    # 2v2's fetch so a ratings hiccup degrades to the 1500 DEFAULT RATING
+    # instead of failing the report.
+    #
+    # That default is Intermediate **x1.5**, NOT x1.0: the multiplier table's
+    # 1500 row is `>=` and the substituted value is exactly 1500 (see
+    # `_tier_mult_for`). A hiccup here is therefore NOT economically neutral —
+    # it pays the Intermediate multiplier on XP and gold.
+    #
+    # This line used to read "x1.0-at-1500", which is the exact sentence
+    # `_tier_mult_for`'s own docstring records as having hidden the
+    # 1v2-vs-2v2 economy gap for a release (bug #129) — written again, in the
+    # feature that bug was about. Do not restate the multiplier here; name the
+    # RATING and let the one table own the mapping.
     # begin_nested, not a bare try/except (#235, and review-confirmed): under
     # asyncpg a caught statement error still leaves the TRANSACTION aborted, so
     # the "degrade to 1500" promise below would be a lie — the very next

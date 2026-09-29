@@ -246,21 +246,32 @@ namespace CompetitiveRounds
     /// damage, force, screen shake, spark and the RNG stream are all stock, and particle
     /// playback is local.</para>
     ///
-    /// <para>DELIBERATE DEVIATION, and it is half of the defect above. Correcting (b) —
-    /// letting the saw fall through to a LIVE enemy the corpse was masking — was
-    /// implemented, reviewed and then withdrawn: it makes a patched seat deal damage
-    /// that an unpatched peer in the same room never deals, so the two seats' health
-    /// totals diverge permanently and can hand them different round winners. Saws are
-    /// spawned per seat by a plain local <c>Instantiate</c> (<c>Block.Spawn</c>), so
-    /// there is no owner to arbitrate. Making it safe needs a whole-room capability
-    /// quorum on a replicated prop, the <c>GrowNormalize</c> pattern below, which is a
-    /// mechanics change rather than a defect fix — Sid's call, not this patch's. Until
-    /// then a live enemy sharing a radius with a corpse is skipped exactly as vanilla
-    /// skips it. The reported symptoms (particles left behind, a saw "activated" by a
-    /// corpse) are entirely (a), and (a) is fixed here.</para>
+    /// <para>THE OTHER HALF NOW HAS ITS OWN PATCH. Correcting (b) — letting the saw
+    /// fall through to a LIVE enemy the corpse was masking — was withdrawn once
+    /// because it makes a patched seat deal damage an unpatched peer never deals, so
+    /// two seats' health totals diverge permanently and can hand them different round
+    /// winners. Saws are spawned per seat by a plain local <c>Instantiate</c>
+    /// (<c>Block.Spawn</c>), so there is no owner to arbitrate. That is a whole-room
+    /// capability question, and it is answered as one: <see cref="SawLiveTargetPatch"/>
+    /// applies the fall-through ONLY while every fighter in the room advertises
+    /// <c>cr_saw1</c>, on the <c>GrowNormalize</c> quorum pattern. Where the quorum
+    /// fails, nothing changes and a live enemy sharing a radius with a corpse is
+    /// skipped exactly as vanilla skips it.</para>
     ///
-    /// <para>Among LIVE candidates the vanilla "last in list wins" order is likewise
-    /// preserved rather than switched to nearest-first — also mechanics, also Sid's.</para></summary>
+    /// <para>THIS postfix stays UNGATED and keeps its own job: particle playback is
+    /// local presentation. The two compose without overlapping, and the composition
+    /// is enforced rather than argued: Harmony runs postfixes before finalizers, so
+    /// this one executes INSIDE the fall-through patch's reordering window, and it
+    /// returns immediately while that window is open
+    /// (<c>SawLiveTargetPatch.WindowOpen</c>). Nothing is lost by returning — the
+    /// window only opens when a living player was in range and was therefore chosen,
+    /// which is the case this postfix has nothing to say about. When a corpse is
+    /// alone in range the fall-through deliberately does not engage, the window
+    /// stays shut, and this postfix is the whole fix.</para>
+    ///
+    /// <para>Among LIVE candidates the vanilla "last in list wins" order is preserved
+    /// rather than switched to nearest-first: that is a mechanics change with no defect
+    /// behind it, so it is a product decision and not this patch's to take.</para></summary>
     [HarmonyPatch(typeof(Saw), "Update")]
     internal static class SawDeadTargetPatch
     {
@@ -301,6 +312,21 @@ namespace CompetitiveRounds
                 if (__instance == null || PlayerManager.instance == null
                     || PlayerManager.instance.players == null || __instance.parts == null) return;
 
+                // Harmony runs every postfix BEFORE any finalizer, so this one runs
+                // inside the fall-through patch's window, over the roster that patch
+                // ordered. Stand down there rather than re-deriving a target from it:
+                // the window only opens when a living player was in range and was
+                // therefore chosen, so there is no corpse in the slot to correct, and
+                // this postfix's verdict must not become a function of the other
+                // patch's quorum.
+                //
+                // The stand-down is COUNTED, not only performed: "the postfix stood
+                // down inside the window" is the one half of the masking invariant
+                // that cannot be read off the roster afterwards, and a witness line
+                // that asserted it instead of measuring it would be a check that
+                // cannot fail (#342).
+                if (SawLiveTargetPatch.WindowOpen) { SawLiveTargetPatch.NotePostfixStoodDown(); return; }
+
                 bool faithful;
                 Player vanillaTarget = Select(__instance, out faithful);
                 if (!faithful) return;                     // vanilla's own edge case, vanilla's to handle
@@ -339,6 +365,490 @@ namespace CompetitiveRounds
         {
             if (original != null) return exception;
             return VanillaFixSupport.Cleanup("SawDeadTarget", exception);
+        }
+    }
+
+    /// <summary>The whole-room capability behind bug #380's second half. Same
+    /// protocol as <c>PoisonSync</c> and <c>GrowNormalize</c>, and the same
+    /// reasons for every part of it.
+    ///
+    /// <para>KEY NAMING: a key is never reused for changed semantics. cr_saw1
+    /// means "this seat skips dead players when the saw picks a target". A
+    /// later rule change takes cr_saw2, so a mixed room falls back to vanilla
+    /// targeting on EVERY seat rather than running two rules at once.</para>
+    ///
+    /// <para>BASIS: the raw <c>PhotonNetwork.PlayerList</c> filtered by the
+    /// replicated spectator prop, read from the property on every call
+    /// (<c>RoomActors.IsSpectatorReplicated</c>).
+    ///
+    /// NOT <c>RoomActors.ActiveFighters</c>, whose frozen-roster filter is LOCAL
+    /// state, so two seats freezing at different moments classify a prop-less
+    /// actor differently and split the rule in steady state. That question was
+    /// settled for <c>GrowNormalize.Quorum</c> and <c>PoisonSync.ScanRoster</c>
+    /// and is not re-opened here.
+    ///
+    /// And NOT <c>RoomActors.IsSpectator</c>, which this round stopped using:
+    /// that helper answers from a cache written at FIRST SIGHT of an actor and
+    /// never re-read, so it is also per-seat state — the very property the
+    /// paragraph above rejects, one layer down. The role cannot change inside a
+    /// room (staged pre-join, never cleared mid-room), so re-reading it costs
+    /// nothing and removes the one way two seats could hold different
+    /// rosters.</para>
+    ///
+    /// <para>FAIL-CLOSED on every arm: a disabled mod, a patch that never
+    /// attached, an empty roster (every(∅) must not apply), or one fighter
+    /// without the prop, all answer false — which is today's vanilla
+    /// behaviour and costs nothing but the defect staying unfixed for that
+    /// room (#430).</para></summary>
+    internal static class SawTargetSync
+    {
+        internal const string CapabilityProp = "cr_saw1";
+        internal const int CapabilityValue = 1;
+
+        /// <summary>Set by the fall-through patch's own cleanup. Advertising a
+        /// capability whose patch never attached is the one state this
+        /// protocol must not reach.</summary>
+        internal static bool PatchesLive;
+
+        private static bool _staged, _stageFailedPermanently, _deferLogged;
+        private static string _lastLogKey = "";
+        private static int _verdictFrame = -1;
+        private static bool _verdict;
+
+        /// <summary>Stage pre-join only. An in-room write is the racy path the
+        /// protocol forbids, and a merge landing mid-join is present locally
+        /// and never delivered to peers — a silently false-capable client,
+        /// the worst state this can be in. Idle client states provably precede
+        /// any join op's parameter snapshot.
+        ///
+        /// <para>AND NOT BEFORE THE COMPATIBILITY VERDICT, which lands about three
+        /// seconds into the process. A join inside that window used to snapshot
+        /// <c>cr_saw1=1</c> from a seat the verdict then disabled, leaving an
+        /// IN-ROOM revoke as the only correction — the write this protocol
+        /// forbids. Staging waits for the verdict now; the tick retry does it a
+        /// few ticks later, and a room joined before the verdict plays vanilla
+        /// targeting for that room, which is exactly what the refusal costs
+        /// (#430). The deferral is LOGGED, once: "not staged" and "staging
+        /// refused, and why" are different facts and only the second can be read
+        /// out of a bundle (#342). Same gate and same shape as
+        /// GrowNormalize.StageCapability.</para></summary>
+        internal static void StageCapability(string source)
+        {
+            try
+            {
+                if (_staged || _stageFailedPermanently) return;
+                if (!PatchesLive) return;   // still attaching; the tick retries
+                if (Plugin.modDisabled)
+                {
+                    _stageFailedPermanently = true;
+                    return;
+                }
+                if (!Plugin.compatCheckComplete)
+                {
+                    if (!_deferLogged)
+                    {
+                        _deferLogged = true;
+                        Plugin.Log.LogInfo("[SAW-CAP] deferred staging " + CapabilityProp
+                            + " (" + source + ") — the compatibility verdict is not in yet; "
+                            + "a room joined before it plays vanilla targeting, and the tick "
+                            + "stages this once the verdict clears");
+                    }
+                    return;
+                }
+                if (PhotonNetwork.InRoom)
+                {
+                    Plugin.Log.LogError("[SAW-CAP] refusing to stage while in a room ("
+                        + source + ") — an in-room write is the racy path this protocol forbids");
+                    return;
+                }
+                var st = PhotonNetwork.NetworkClientState;
+                if (st != Photon.Realtime.ClientState.Disconnected
+                    && st != Photon.Realtime.ClientState.PeerCreated
+                    && st != Photon.Realtime.ClientState.ConnectedToMasterServer
+                    && st != Photon.Realtime.ClientState.JoinedLobby)
+                    return;   // connecting/joining: wait for a clean moment
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, CapabilityValue }
+                });
+                _staged = true;
+                Plugin.Log.LogInfo("[SAW-CAP] staged " + CapabilityProp + "=" + CapabilityValue
+                    + " pre-join (" + source + ", state=" + st + ")");
+            }
+            catch (Exception ex)
+            {
+                _stageFailedPermanently = true;
+                Plugin.Log.LogError("[SAW-CAP] staging failed, saw target fall-through "
+                    + "disabled for this session: " + ex.Message);
+            }
+        }
+
+        /// <summary>Withdraw on compat-disable: peers must not count us capable
+        /// when the patch will not run.</summary>
+        internal static void RevokeCapability()
+        {
+            try
+            {
+                if (!_staged) return;
+                _staged = false;
+                _stageFailedPermanently = true;   // never re-stage this session
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, 0 }
+                });
+                Plugin.Log.LogWarning("[SAW-CAP] revoked " + CapabilityProp
+                    + " — mod disabled, vanilla saw targeting everywhere");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[SAW-CAP] revoke failed: " + ex.Message); }
+        }
+
+        private static bool AllFightersCapable(out int fighterCount, out int missingActor)
+        {
+            fighterCount = 0;
+            missingActor = -1;
+            var list = PhotonNetwork.PlayerList;
+            if (list == null || list.Length == 0) return false;
+            bool all = true;
+            for (int i = 0; i < list.Length; i++)
+            {
+                var actor = list[i];
+                if (actor == null) continue;
+                if (RoomActors.IsSpectatorReplicated(actor)) continue;
+                fighterCount++;
+                object v = null;
+                var props = actor.CustomProperties;
+                if (props != null) props.TryGetValue(CapabilityProp, out v);
+                if (!(v is int) || (int)v != CapabilityValue)
+                {
+                    all = false;
+                    if (missingActor < 0) missingActor = actor.ActorNumber;
+                }
+            }
+            if (fighterCount == 0) return false;
+            return all;
+        }
+
+        /// <summary>Answered once per FRAME, not once per saw: several saws in
+        /// one room would otherwise walk the actor list several times for an
+        /// answer that cannot change between them, and two saws in one frame
+        /// must not be able to disagree. The verdict is logged on CHANGE, so a
+        /// sitting carries one line per state it was actually in.</summary>
+        internal static bool ShouldApply()
+        {
+            if (_verdictFrame == Time.frameCount) return _verdict;
+            _verdictFrame = Time.frameCount;
+            _verdict = Compute();
+            return _verdict;
+        }
+
+        private static bool Compute()
+        {
+            try
+            {
+                if (Plugin.modDisabled || !PatchesLive) return false;
+                bool offline = false;
+                try { offline = PhotonNetwork.OfflineMode; } catch { }
+                if (offline)
+                {
+                    Note("apply", "offline", 1, -1);
+                    return true;   // the whole room is this client, by construction
+                }
+                if (!PhotonNetwork.InRoom) return false;
+                int fighters, missing;
+                bool all = AllFightersCapable(out fighters, out missing);
+                Note(all ? "apply" : "vanilla", "online", fighters, missing);
+                return all;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("SawTargetSync", ex);
+                return false;
+            }
+        }
+
+        private static void Note(string verdict, string where, int fighters, int missingActor)
+        {
+            try
+            {
+                string key = verdict + "|" + where + "|" + fighters + "|" + missingActor;
+                if (key == _lastLogKey) return;
+                _lastLogKey = key;
+                Plugin.Log.LogInfo("[SAW-TARGET] " + verdict + " (" + where + ", fighters="
+                    + fighters.ToString(CultureInfo.InvariantCulture)
+                    + (missingActor >= 0
+                        ? ", first actor without " + CapabilityProp + "="
+                          + missingActor.ToString(CultureInfo.InvariantCulture)
+                        : "") + ")");
+            }
+            catch { }
+        }
+
+        internal static void ResetForRoomChange()
+        {
+            _lastLogKey = ""; _verdictFrame = -1;
+            // The masking witness line's budget belongs to the same room edge.
+            try { SawLiveTargetPatch.ResetForRoomChange(); } catch { }
+        }
+    }
+
+    /// <summary>Bug #380, second half: a corpse must never hold the saw's target
+    /// slot while a live enemy is in the same radius.
+    ///
+    /// <para>MECHANISM. Vanilla's <c>Saw.Update</c> loop (decompile
+    /// <c>Saw.cs:29-36</c>) walks <c>PlayerManager.instance.players</c>, accepts any
+    /// non-owner in range and assigns without a break, so the LAST in-list match wins
+    /// and <c>data.dead</c> is never consulted. <c>HealthHandler.TakeDamage</c> discards
+    /// the damage for a corpse, so a live enemy the corpse outranks receives nothing.
+    /// This patch REORDERS that one list in place — every corpse moved ahead of every
+    /// living player, relative order inside each group untouched — so vanilla's own
+    /// selector, its own ordering rule and its own arithmetic run unchanged and land
+    /// on a living player whenever one is in range. A FINALIZER puts the game's order
+    /// back.</para>
+    ///
+    /// <para>WHY A REORDER, AND NOT THE LIVE-ONLY LIST THIS PATCH FIRST USED. A
+    /// prefix cannot hand the selector a private list; it can only change what the
+    /// GAME's roster field holds, and that field stays changed for the WHOLE of
+    /// <c>Saw.Update</c> — the inline damage call included, and everything ROUNDS
+    /// reaches from it, up to and including death and round-end bookkeeping. A
+    /// live-only list makes that window a state the game never otherwise has: a
+    /// roster with players missing, where a lookup by id comes back null and a count
+    /// is short. A reorder changes no membership, no count, and not even the list
+    /// object's identity, so nothing can observe it except code that reads ORDER —
+    /// and order is exactly the input vanilla's "last match wins" rule consults.</para>
+    ///
+    /// <para>WHAT ELSE RUNS INSIDE THE WINDOW, stated rather than assumed: every
+    /// postfix on the same method, because Harmony runs all postfixes before any
+    /// finalizer. The one that exists is this file's own corpse-particle postfix, and
+    /// it stands down while the window is open (<see cref="WindowOpen"/>) instead of
+    /// re-running its selector over a roster this patch arranged — when the
+    /// fall-through engages, a living target was in range and was chosen, so there is
+    /// by construction no corpse in the slot for it to correct.</para>
+    ///
+    /// <para>A FINALIZER, NOT A POSTFIX, for the restore: a postfix does not run when
+    /// the original throws, and leaving the roster in this patch's order after an
+    /// unrelated exception would hand the rest of the round an ordering the game did
+    /// not choose. The finalizer runs either way and returns the exception untouched.
+    /// It restores only while the membership is unchanged — if the frame's own
+    /// bookkeeping added or removed a player inside the window, the list is now ITS
+    /// business, and re-imposing a stale order on it would be the same class of
+    /// mistake this whole paragraph exists to avoid.</para>
+    ///
+    /// <para>WHY THE RNG OBJECTION NO LONGER APPLIES (it is what withdrew attempt 1).
+    /// Vanilla's target branch ends in <c>GameFeel((normalized + Random.onUnitSphere)
+    /// ...)</c> — one draw from the shared <c>UnityEngine.Random</c> stream — and it
+    /// reaches that line for a corpse too. A patch that suppressed the branch skipped a
+    /// draw and put the stream out of phase with every other seat, which later surfaces
+    /// as different gun spread. This one engages ONLY when a live target is also in
+    /// range, so vanilla enters the target branch in both worlds and takes exactly the
+    /// same single draw; when a corpse is alone in range nothing is reordered and the
+    /// corpse is still selected, drawing exactly as vanilla draws. The stream is
+    /// therefore in phase with an unpatched seat in every case.</para>
+    ///
+    /// <para>WHAT IS NOT IN PHASE, and why the quorum is required anyway: the damage.
+    /// A capable seat damages the live target; a vanilla seat does not, and health is
+    /// never streamed, so the two would diverge permanently and the seat that
+    /// over-damages ends the round for everyone. <see cref="SawTargetSync"/> applies
+    /// this only when EVERY fighter advertises cr_saw1. Effects that fire from a real
+    /// hit (procs, lifesteal) then fire on every seat identically, because every seat
+    /// ran the same loop over the same roster in the same order.</para>
+    ///
+    /// <para>DEFERS LIKE THE POSTFIX DOES. A null entry or a null <c>data</c> is
+    /// something vanilla would dereference and this replica would have to invent
+    /// behaviour for, so the reorder is abandoned and the frame runs stock.</para></summary>
+    [HarmonyPatch(typeof(Saw), "Update")]
+    internal static class SawLiveTargetPatch
+    {
+        /// <summary>The game's OWN order, held between this patch's prefix and its
+        /// finalizer so the finalizer can put it back. Re-used rather than allocated
+        /// per frame: a corpse lying next to a live target produces this case on
+        /// EVERY frame of a round, and it never outlives the window.</summary>
+        private static readonly List<Player> _order = new List<Player>();
+
+        /// <summary>True while <c>PlayerManager.instance.players</c> holds this
+        /// patch's order instead of the game's. Unity is single threaded and
+        /// <c>Saw.Update</c> is not re-entrant, so at most one window is open — but
+        /// the window is NOT empty: the original method's whole call tree runs in it,
+        /// and so does every postfix on the method (Harmony orders postfixes before
+        /// finalizers). What it guarantees is only this: the roster is the same list
+        /// object, with the same members and the same count, in a different
+        /// order.</summary>
+        private static bool _masked;
+
+        /// <summary>For the corpse-particle postfix, which shares this method and
+        /// therefore runs inside the window. See the class doc.</summary>
+        internal static bool WindowOpen { get { return _masked; } }
+
+        /// <summary>The list object the window was opened over. The masking claim
+        /// is "the SAME list, same members, same count, different order", and the
+        /// first of those four is the one that is otherwise unmeasurable after the
+        /// fact — so it is held rather than assumed.</summary>
+        private static List<Player> _maskedList;
+        private static int _postfixStandDowns;
+        private static int _maskedLines;
+
+        /// <summary>Counted by the companion postfix when it stands down inside a
+        /// window. Part of the witness line below.</summary>
+        internal static void NotePostfixStoodDown() { _postfixStandDowns++; }
+
+        /// <summary>The witness line's budget is per ROOM, like the verdict line
+        /// beside it: a per-process budget spent in a session's first room leaves
+        /// the second room's bundle reading exactly like a room where the patch
+        /// never attached.</summary>
+        internal static void ResetForRoomChange() { _maskedLines = 0; }
+
+        [HarmonyPrefix]
+        private static void BeforeUpdate(Saw __instance)
+        {
+            // The finalizer always runs, so a window is never left open across
+            // frames; this is the belt-and-braces a future early return must not be
+            // able to defeat.
+            _masked = false;
+            _order.Clear();
+            try
+            {
+                if (__instance == null || PlayerManager.instance == null) return;
+                var players = PlayerManager.instance.players;
+                if (players == null || players.Count == 0) return;
+
+                // The cheap local scan FIRST: the quorum walk only happens on the
+                // frames where a corpse is actually masking something.
+                bool corpseInRange = false, liveInRange = false;
+                float reach = __instance.range * __instance.transform.localScale.x;
+                for (int i = 0; i < players.Count; i++)
+                {
+                    Player p = players[i];
+                    if (p == null) return;            // vanilla's own edge case, vanilla's to handle
+                    if (p == __instance.owner) continue;
+                    if (p.data == null) return;       // cannot classify it: run stock
+                    if (Vector3.Distance(p.transform.position, __instance.transform.transform.position) >= reach) continue;
+                    if (p.data.dead) corpseInRange = true; else liveInRange = true;
+                }
+                // Both halves are required. No corpse: nothing to hide. No live target:
+                // hiding the corpse would move vanilla out of its target branch and cost
+                // the frame's RNG draw — see the class doc.
+                if (!corpseInRange || !liveInRange) return;
+                if (!SawTargetSync.ShouldApply()) return;
+
+                // Snapshot the game's order, then partition the SAME list in place:
+                // corpses first, the living after them, each group keeping its
+                // relative order. Vanilla takes the LAST match, so a living player in
+                // range now outranks every corpse in range, while the order it would
+                // have chosen from among the living is exactly the one it had.
+                _order.Clear();
+                for (int i = 0; i < players.Count; i++) _order.Add(players[i]);
+                int w = 0;
+                for (int i = 0; i < _order.Count; i++)
+                {
+                    Player q = _order[i];
+                    if (q != null && q.data != null && q.data.dead) players[w++] = q;
+                }
+                for (int i = 0; i < _order.Count; i++)
+                {
+                    Player q = _order[i];
+                    if (!(q != null && q.data != null && q.data.dead)) players[w++] = q;
+                }
+                _masked = true;
+                _maskedList = players;
+                _postfixStandDowns = 0;
+            }
+            catch (Exception ex)
+            {
+                // Restore before reporting. The catch is only reachable before the
+                // partition today, but a future edit must not be able to make that
+                // false, and a half-written roster is the one state worth the paranoia.
+                RestoreOrder();
+                VanillaFixSupport.LogError("SawLiveTarget", ex);
+            }
+        }
+
+        /// <summary>Put the game's own order back — and only while the list still
+        /// holds the same players. A membership change inside the window means the
+        /// frame's own bookkeeping rewrote the roster, and overwriting THAT with a
+        /// stale snapshot is worse than leaving a permuted order behind: the order is
+        /// cosmetic to everything but vanilla's saw loop, the membership is not.</summary>
+        private static void RestoreOrder()
+        {
+            if (!_masked) { _order.Clear(); _maskedList = null; return; }
+            _masked = false;
+            try
+            {
+                var pm = PlayerManager.instance;
+                var players = pm != null ? pm.players : null;
+                // Identity FIRST. If the game swapped the list object itself, the
+                // members below could all match and the write would still be into
+                // a list this window never touched.
+                bool sameList = players != null && ReferenceEquals(players, _maskedList);
+                bool sameCount = players != null && players.Count == _order.Count;
+                bool sameSet = sameList && sameCount;
+                if (sameSet)
+                    for (int i = 0; i < _order.Count; i++)
+                        if (!players.Contains(_order[i])) { sameSet = false; break; }
+                if (!sameSet)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "SawLiveTarget",
+                        "the roster changed while a saw frame was masked (same-list="
+                        + (sameList ? "true" : "false") + ", "
+                        + (players == null ? "null" : players.Count.ToString(CultureInfo.InvariantCulture))
+                        + " now, " + _order.Count.ToString(CultureInfo.InvariantCulture)
+                        + " at entry) — leaving the game's own list exactly as it is",
+                        5);
+                    return;
+                }
+                for (int i = 0; i < _order.Count; i++) players[i] = _order[i];
+                // The positive half, bounded per room. Without this line a bundle can
+                // show that the quorum was evaluated ([SAW-TARGET] apply) and still
+                // say nothing about whether a frame was ever masked or put back
+                // (#438).
+                //
+                // EVERY TERM IS PRINTED FROM THE VARIABLE THAT DECIDED IT. Three of
+                // them used to be string literals reading "true", on the reasoning
+                // that the guard above had already proved them — which is a claim
+                // about this line's POSITION, not about anything it measures, and it
+                // made a witness line that could not come back false (#342, #302).
+                // The guard does still make all three true today, so the values are
+                // not expected to vary; that is not the point. The point is that if
+                // a later edit relaxes or reorders that guard — dropping the
+                // ReferenceEquals identity term is the one its own comment warns
+                // about — this line prints `same-list=false` and the capture shows
+                // the restore writing into a list the window never masked, instead
+                // of printing a reassuring constant over the top of it.
+                if (_maskedLines < 3)
+                {
+                    _maskedLines++;
+                    bool sameMembers = sameSet;
+                    Plugin.Log.LogInfo("[SAW-TARGET] masked/restored same-list="
+                        + (sameList ? "true" : "false")
+                        + " same-count=" + (sameCount ? "true" : "false")
+                        + " same-members=" + (sameMembers ? "true" : "false")
+                        + " postfix-stand-down="
+                        + _postfixStandDowns.ToString(CultureInfo.InvariantCulture)
+                        + " (roster=" + _order.Count.ToString(CultureInfo.InvariantCulture)
+                        + ", " + _maskedLines.ToString(CultureInfo.InvariantCulture)
+                        + "/3 this room)");
+                }
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("SawLiveTarget", ex); }
+            finally { _order.Clear(); _maskedList = null; }
+        }
+
+        [HarmonyFinalizer]
+        private static Exception AfterUpdate(Exception __exception)
+        {
+            RestoreOrder();
+            return __exception;   // observe only; containment is not this patch's job
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) SawTargetSync.PatchesLive = true;
+            return VanillaFixSupport.Cleanup("SawLiveTarget", exception);
         }
     }
 
@@ -1589,11 +2099,17 @@ namespace CompetitiveRounds
     /// component's frame — no damage-suppression path exists either way,
     /// but the containment is broader than "incoming dispatch".
     ///
-    /// SWALLOW-ONLY, strictly better than the status quo: today the NRE
-    /// aborts RPCA_DoHit at some statement AND kills the rest of the Photon
-    /// batch; with the finalizer the body aborts at the same statement and
-    /// the batch survives. No new divergence is introduced — whatever this
-    /// client missed was already missed the moment the throw happened.
+    /// WHAT THE CONTAINMENT IS WORTH, corrected (r2 LOW). This paragraph
+    /// used to say the NRE "kills the rest of the Photon batch" and that the
+    /// finalizer rescues it. The mechanism note at the top of this class says
+    /// the OPPOSITE, and that one is the verified reading: Dispatch()'s loop
+    /// RECORDS the exception and KEEPS DRAINING (production logs carry
+    /// "Caught 2 exception(s)" aggregates, impossible under an abort). So
+    /// there was never a batch to rescue, and one comment asserted both. What
+    /// the guard actually removes is the per-fault cost the top note
+    /// enumerates: exception + stack-capture construction, the multi-line log
+    /// burst, the AggregateException rethrow unwinding out of FixedUpdate,
+    /// and the faulting command's skipped post-callback cleanup.
     /// #322's DoDamage rule, stated precisely (review r1 find 2 corrected
     /// this comment's first draft): an exception thrown INSIDE DoDamage —
     /// after its health commit, before its death RPC — DOES propagate up
@@ -1601,13 +2117,35 @@ namespace CompetitiveRounds
     /// (e.g. a negative-health live replica) remains reachable. It is
     /// reachable IDENTICALLY without this guard: vanilla never caught the
     /// throw either, so the replica state is byte-for-byte the same in both
-    /// worlds. The swallow changes exactly one thing — that already-thrown
-    /// exception no longer takes the rest of Photon's dispatch batch with
-    /// it. No new state exists.
+    /// worlds. No new state exists.
     ///
-    /// UNGATED (#151/#286): a local crash guard has no cross-client
-    /// semantics, and gating would exclude the room-code games where most
-    /// rated play happens.</summary>
+    /// TWO REFUSALS, because a swallow is only a LOCAL act on one of the two
+    /// entry paths. Each is a class, not a line (#432):
+    ///   * FAULT CLASS (r2 HIGH). Only a NullReferenceException is contained
+    ///     — the diagnosed fault is an unchecked GetPhotonView / collider /
+    ///     effect-list dereference for an object this seat already retired.
+    ///     Every other type says something happened that this guard never
+    ///     modelled, and these bodies mutate card stats, block state and
+    ///     projectile fields BEFORE they throw; continuing past an unmodelled
+    ///     fault hides partially applied state instead of the frame that
+    ///     produced it. Re-raised unchanged, which is vanilla exactly.
+    ///   * ENTRY PATH (r2 HIGH). RpcTarget.All executes the LOCAL leg
+    ///     synchronously inside PhotonNetwork.RPC, so a fault there does not
+    ///     land in Photon's dispatch loop at all — it lands in game code's
+    ///     own tail (RayCastTrail.Update and its siblings). That tail can
+    ///     SEND, so letting it continue where vanilla unwinds it is a
+    ///     difference every other seat can observe, on a seat whose peers may
+    ///     be unmodded. RpcLocalSendDepthPatch answers which leg a body is on
+    ///     from a fact rather than an inference, and the local leg re-raises:
+    ///     the caller tail is then skipped deterministically, exactly as it is
+    ///     on an unmodded seat.
+    ///
+    /// UNGATED, and now truthfully so (#151/#286): with both refusals in place
+    /// the containment reaches only an INCOMING dispatch, where this seat has
+    /// no caller tail and Photon's loop drains either way — nothing another
+    /// seat can observe changes, so there is no cross-client semantic to gate
+    /// on. Gating would also exclude the room-code games where most rated play
+    /// happens.</summary>
     [HarmonyPatch]
     internal static class RpcDispatchGuardPatch
     {
@@ -1647,21 +2185,52 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception, MethodBase __originalMethod)
         {
-            if (__exception != null)
+            if (__exception == null) return null;
+            // PER-MEMBER budget on every arm. A single shared key would let the
+            // noisiest body spend the whole allowance and leave the rarer members
+            // invisible — which is how the unguarded majority stayed unseen in
+            // the first place.
+            string who = __originalMethod != null ? __originalMethod.Name : "unknown RPC";
+
+            // REFUSAL 1 — fault class. See the class doc.
+            if (!(__exception is NullReferenceException))
             {
-                NetDiag.CountRpcSwallow();
-                string who = __originalMethod != null ? __originalMethod.Name : "unknown RPC";
-                // PER-MEMBER budget. A single shared key would let the noisiest
-                // body spend the whole allowance and leave the rarer members
-                // invisible — which is how the unguarded majority stayed unseen
-                // in the first place.
+                NetDiag.CountRpcReraise();
                 VanillaFixSupport.DiagLimited(
-                    "RpcDispatchGuard-" + who,
+                    "RpcDispatchGuard-class-" + who,
                     who + " threw " + __exception.GetType().Name +
-                    " — swallowed so it does not escape Photon's dispatch into FixedUpdate (" +
+                    " — OUTSIDE the contained null/order class, re-raised unchanged so a " +
+                    "partially applied body is not hidden (" + __exception.Message + ")",
+                    20);
+                return __exception;
+            }
+
+            // REFUSAL 2 — entry path. An unavailable discriminator is the same
+            // answer as "this could be the local leg": the guard contains nothing
+            // rather than guess (#276 — the unhandled case fails toward vanilla).
+            if (!RpcLocalSendDepthPatch.Available || RpcLocalSendDepthPatch.InLocalSend)
+            {
+                NetDiag.CountRpcReraise();
+                VanillaFixSupport.DiagLimited(
+                    "RpcDispatchGuard-path-" + who,
+                    who + " threw " + __exception.GetType().Name +
+                    (RpcLocalSendDepthPatch.Available
+                        ? " on the LOCAL leg of this seat's own RpcTarget.All send — re-raised so the "
+                          + "caller tail unwinds exactly as it does on an unmodded seat ("
+                        : " and the send-path discriminator never attached — re-raised, so this session "
+                          + "contains nothing at all (") +
                     __exception.Message + ")",
                     20);
+                return __exception;
             }
+
+            NetDiag.CountRpcSwallow();
+            VanillaFixSupport.DiagLimited(
+                "RpcDispatchGuard-" + who,
+                who + " threw " + __exception.GetType().Name +
+                " on an incoming dispatch — swallowed so it does not escape Photon's dispatch " +
+                "into FixedUpdate (" + __exception.Message + ")",
+                20);
             return null;
         }
 
@@ -1670,6 +2239,73 @@ namespace CompetitiveRounds
         {
             if (original != null) return exception;
             return VanillaFixSupport.Cleanup("RpcDispatchGuard", exception);
+        }
+    }
+
+    /// <summary>Which ENTRY PATH an RPC body is running on, as a fact rather
+    /// than an inference — the input RpcDispatchGuardPatch's second refusal
+    /// needs.
+    ///
+    /// <para><c>PhotonNetwork.RPC</c> is the single send-side funnel:
+    /// <c>PhotonView.RPC</c> and <c>RpcSecure</c> both reach it, and an
+    /// <c>RpcTarget.All</c> send runs the LOCAL leg synchronously inside that
+    /// call. A depth counter held for the length of the call therefore answers
+    /// exactly one question, with no stack walking and no heuristics: is the
+    /// body below us the local leg of a send THIS seat initiated, or an
+    /// incoming dispatch? The two have different cross-client consequences,
+    /// and only the second is a purely local event (see the guard's doc).</para>
+    ///
+    /// <para>FAILURE DIRECTION (#276, #430). When no overload resolves,
+    /// <see cref="Available"/> stays false and the guard re-raises everything.
+    /// The cost of that refusal is precisely today's vanilla behaviour — the
+    /// per-fault exception noise comes back — and it is announced at attach
+    /// rather than degrading in silence (#83). The counter is ThreadStatic so
+    /// an off-main-thread send (there is none today) cannot leak depth into
+    /// the dispatch thread's answer.</para></summary>
+    [HarmonyPatch]
+    internal static class RpcLocalSendDepthPatch
+    {
+        [ThreadStatic] private static int _depth;
+
+        /// <summary>True once the patch attached. False means the guard must
+        /// contain nothing.</summary>
+        internal static bool Available;
+
+        internal static bool InLocalSend { get { return _depth > 0; } }
+
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            var list = new List<MethodBase>();
+            foreach (var m in typeof(PhotonNetwork).GetMethods(AccessTools.all))
+                if (m.Name == "RPC" && !m.IsGenericMethodDefinition) list.Add(m);
+            if (list.Count == 0)
+                throw new Exception("RPC send-path discriminator resolved no PhotonNetwork.RPC "
+                    + "overload — the dispatch guard cannot tell its own send's local leg from an "
+                    + "incoming dispatch and will contain nothing this session");
+            return list;
+        }
+
+        [HarmonyPrefix]
+        private static void Before() { _depth++; }
+
+        /// <summary>A finalizer, not a postfix: the decrement has to run even
+        /// when the send itself threw, or one fault would pin the counter above
+        /// zero and silently disable the containment for the rest of the
+        /// session. Returns the exception untouched — this patch observes, it
+        /// never contains.</summary>
+        [HarmonyFinalizer]
+        private static Exception After(Exception __exception)
+        {
+            if (_depth > 0) _depth--;
+            return __exception;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) Available = true;
+            return VanillaFixSupport.Cleanup("RpcLocalSendDepth", exception);
         }
     }
 
@@ -1967,10 +2603,17 @@ namespace CompetitiveRounds
         private static float _lastLog = -999f;
         private static int _lastFrame;
         private static int _rpcSwallows, _lastRpcSwallows;
+        private static int _rpcReraises, _lastRpcReraises;
         private static int _poolSwallows, _lastPoolSwallows;
         private static int _orphanSkips, _lastOrphanSkips;
 
         internal static void CountRpcSwallow() { _rpcSwallows++; }
+        /// <summary>A fault the dispatch guard deliberately did NOT contain —
+        /// outside the null/order class, or on this seat's own send leg. Counted
+        /// separately because "the guard is attached" and "the guard contained
+        /// this" are different facts, and a bundle that cannot tell them apart
+        /// cannot tell an inert discriminator from a room that never faulted.</summary>
+        internal static void CountRpcReraise() { _rpcReraises++; }
         internal static void CountPoolSwallow() { _poolSwallows++; }
         internal static void CountOrphanSerialization() { _orphanSkips++; }
         // SpectatorPatches' existing mute counts the same PUN missing-view
@@ -2003,6 +2646,7 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogInfo(
                     $"[NET] ping={ping}ms fps~{fps} actors={actors}" +
                     $" rpcSwallow=+{_rpcSwallows - _lastRpcSwallows}" +
+                    $" rpcReraise=+{_rpcReraises - _lastRpcReraises}" +
                     $" poolSwallow=+{_poolSwallows - _lastPoolSwallows}" +
                     $" orphanSer=+{_orphanSkips - _lastOrphanSkips}");
             }
@@ -2011,6 +2655,7 @@ namespace CompetitiveRounds
             _lastLog = now;
             _lastFrame = Time.frameCount;
             _lastRpcSwallows = _rpcSwallows;
+            _lastRpcReraises = _rpcReraises;
             _lastPoolSwallows = _poolSwallows;
             _lastOrphanSkips = _orphanSkips;
         }
@@ -2471,10 +3116,28 @@ namespace CompetitiveRounds
         internal static bool PatchesLive;
         private static bool _staged;
         private static bool _stageFailedPermanently;
+        private static bool _deferLogged;
 
         /// <summary>Identical state rules to PoisonSync.StageCapability (#287):
-        /// refuse in-room, merge only while Disconnected/PeerCreated, one-shot,
-        /// retried from the persistent tick.</summary>
+        /// refuse in-room, merge only from an IDLE client state, one-shot, retried
+        /// from the persistent tick.
+        ///
+        /// <para>The idle set is FOUR states, not two, and this note named two of
+        /// them for as long as the gate had four. What #287 actually requires is
+        /// "never merge MID-JOIN" — a merge landing after LoadBalancingClient has
+        /// snapshotted enterRoomParams but before room entry is silently undelivered.
+        /// <c>Disconnected</c> and <c>PeerCreated</c> were the whole idle set only
+        /// while these capabilities staged at Awake; every one of them now stages
+        /// AFTER the compatibility verdict, by which time ROUNDS may already be
+        /// sitting on the master server or in the lobby. <c>ConnectedToMasterServer</c>
+        /// and <c>JoinedLobby</c> are equally safe — no join op is in flight and the
+        /// local merge rides the next one's snapshot — and all four capabilities
+        /// admit the same four states, which is what <c>InIdleClientState()</c> is.
+        /// Narrowing this gate back to the pair the old wording named is what stopped
+        /// PoisonSync staging at all once its staging moved behind the verdict: the
+        /// pair excluded every state the verdict actually lands in, and the
+        /// capability was inert for the session with nothing in the log saying so
+        /// (#342, and the fifth HIGH of the round before this one).</para></summary>
         internal static void StageCapability(string source)
         {
             try
@@ -2496,7 +3159,21 @@ namespace CompetitiveRounds
                 // join a room, so staging still always precedes the first
                 // connect. (This is why there is no "Awake" stage call for
                 // cr_grow2, unlike cr_pois2.)
-                if (!Plugin.compatCheckComplete) return;
+                //
+                // The refusal SPEAKS now, once, like the three siblings: this gate
+                // was silent, and a silent refusal is indistinguishable in a bundle
+                // from a stage that was never attempted (#342).
+                if (!Plugin.compatCheckComplete)
+                {
+                    if (!_deferLogged)
+                    {
+                        _deferLogged = true;
+                        Plugin.Log.LogInfo("[GROW-CAP] deferred staging " + CapabilityProp
+                            + " (" + source + ") — the compatibility verdict is not in yet; "
+                            + "the tick stages it once the verdict clears");
+                    }
+                    return;
+                }
 
                 if (PhotonNetwork.InRoom)
                 {
@@ -2507,12 +3184,17 @@ namespace CompetitiveRounds
 
                 // #287's actual invariant is "never merge MID-JOIN" (a merge
                 // landing after LoadBalancingClient snapshots enterRoomParams
-                // but before room entry is silently undelivered). PoisonSync
-                // stages at Awake where Disconnected/PeerCreated suffices;
-                // cr_grow2 stages AFTER the compat verdict (see above), by
-                // which time ROUNDS may already sit idle on the master server
-                // — an equally safe state (no join in flight; the local merge
-                // rides the next join op's snapshot). Idle states only:
+                // but before room entry is silently undelivered). Every
+                // capability here stages AFTER the compat verdict, by which
+                // time ROUNDS may already sit idle on the master server or in
+                // the lobby — equally safe states (no join in flight; the
+                // local merge rides the next join op's snapshot), and all four
+                // capabilities now admit the same set. The narrower
+                // Disconnected/PeerCreated pair this note used to attribute to
+                // PoisonSync was correct only while PoisonSync staged at Awake
+                // alone; once its staging moved behind the verdict too, the
+                // pair excluded every state the verdict actually lands in and
+                // the capability stopped staging at all. Idle states only:
                 var st = PhotonNetwork.NetworkClientState;
                 if (!InIdleClientState())
                     return;   // connecting/joining: wait for a clean moment, do not merge now
@@ -2630,7 +3312,13 @@ namespace CompetitiveRounds
             {
                 var actor = list[i];
                 if (actor == null) continue;
-                if (RoomActors.IsSpectator(actor)) continue;
+                // Sibling of the saw quorum's own filter, swept with it (#432): a
+                // quorum every seat has to compute the same way cannot be built on
+                // RoomActors.IsSpectator, whose answer is cached at this seat's
+                // first sight of the actor. Both directions of a misread cost the
+                // same nothing here — an actor counted as a fighter does not carry
+                // cr_grow2, so the quorum simply fails and the room plays vanilla.
+                if (RoomActors.IsSpectatorReplicated(actor)) continue;
                 fighterCount++;
                 var props = actor.CustomProperties;
                 object v = null;
@@ -2853,6 +3541,22 @@ namespace CompetitiveRounds
                 // seconds of process startup.
                 GrowNormalize.StageCapability("pre-join");
                 GrowNormalize.SyncRankedIntent("pre-join");
+                // cr_saw1 rides the same fence for the same reason: a join racing
+                // the first post-attach tick would otherwise snapshot no saw prop
+                // at all and the seat reads incapable for that whole room, which
+                // drops the WHOLE room to vanilla targeting.
+                SawTargetSync.StageCapability("pre-join");
+                // And the 2v2 DC election generation, for the same ordering reason:
+                // a survivor whose cr_dc2 is not in the join snapshot reads as a seat
+                // running the older election, which drops the WHOLE room to the floor
+                // rule for that sitting.
+                DcReportSync.StageCapability("pre-join");
+                // ALL FOUR calls above now refuse before the compatibility verdict,
+                // not just the Grow pair: a capability staged by a seat the verdict
+                // then disables can only be withdrawn by an in-room write, which is
+                // the racy path every one of these protocols forbids. Each logs its
+                // own deferral once, so the refusal is readable rather than inferred
+                // from an absence.
                 // #379's capability rides the same fence, for the same reason
                 // and with the same one-shot self-guard: a join racing the
                 // first post-compat tick would otherwise snapshot no cr_wcd1

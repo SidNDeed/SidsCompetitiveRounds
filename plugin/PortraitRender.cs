@@ -387,6 +387,18 @@ namespace CompetitiveRounds
         /// <summary>One-shot: an out-of-range saved preset has been written back
         /// as -1, so it is not re-logged or re-written on every read.</summary>
         private static bool _presetMigrated;
+        /// <summary>When discovery last swept the portrait objects
+        /// (Time.realtimeSinceStartup), -999 before the first sweep. The sweep
+        /// walks every loaded CharacterCreatorPortrait, so it is not free to run
+        /// on every call — but it is not permitted to run ONCE either (see
+        /// PresetSlotCount). The rate limit itself is <c>_presetSlotsRetryAt</c>;
+        /// this stamp is how RunPresetSlotSentinel tells a count answered from the
+        /// cache from one derived again.</summary>
+        private static float _presetSweptAt = -999f;
+        /// <summary>The provisional count in force (below
+        /// <c>PresetSlotsFallback</c>), 0 once the count is final. The sentinel
+        /// checks that it clears when a complete row is derived.</summary>
+        private static int _presetProvisional;
 
         /// <summary>How many preset slots a player can actually AUTHOR (bug #370).
         ///
@@ -424,6 +436,24 @@ namespace CompetitiveRounds
         /// asks.</para></summary>
         internal static int PresetSlotCount()
         {
+            // ONLY A CREDIBLE COUNT IS FINAL. The 886bed8 client half (an r2 LOW)
+            // and v1.41.0 beta round 3 finding 10 found the same defect in r5's
+            // method and fixed it twice; this is the one mechanism the merge
+            // keeps. r5 removed the magnitude floor and cached whatever discovery
+            // returned, which made the two "self-heals on the next visit"
+            // guarantees below false for the case they were written for: a row
+            // caught mid-build reports two to seven, that number became
+            // process-lifetime state, PresetCountIsCredible() was false forever,
+            // and Tick()'s publish arm answered "waiting for the character
+            // creator" for the rest of the session while a perfectly valid saved
+            // preset never rendered. r5's objection to the floor was COST, not
+            // correctness -- re-sweeping every portrait object on every call --
+            // so the answer is a rate limit rather than a freeze: a provisional
+            // count answers from the cache, and discovery runs again at most once
+            // every PresetSlotsRetrySeconds until it produces one that can be
+            // trusted. _presetSweptAt records when a sweep last ran and
+            // _presetProvisional the provisional count in force (0 once the count
+            // is final); RunPresetSlotSentinel reads both.
             if (_presetSlots >= PresetSlotsFallback) return _presetSlots;
             float now = Time.realtimeSinceStartup;
             if (_presetSlots > 0)
@@ -431,6 +461,7 @@ namespace CompetitiveRounds
                 if (now < _presetSlotsRetryAt) return _presetSlots;
                 _presetSlotsRetryAt = now + PresetSlotsRetrySeconds;
             }
+            _presetSweptAt = now;
             int slots = 0;
             try
             {
@@ -485,6 +516,19 @@ namespace CompetitiveRounds
             catch { }
             if (faces == null) return Mathf.Min(slots, PresetSlotsFallback);
             if (slots > faces.Length) slots = faces.Length;
+            if (slots < PresetSlotsFallback)
+            {
+                // Below the count this build ships knowing about. Answer with it,
+                // but as a PROVISIONAL value: a half-built row and a genuinely
+                // smaller future creator are indistinguishable from here, and only
+                // one of them stops changing. It is cached below, and derived again
+                // once the retry window stamped here has passed;
+                // PresetCountIsCredible() stays false either way, so neither
+                // irreversible consumer acts on it.
+                _presetProvisional = slots;
+                _presetSlotsRetryAt = now + PresetSlotsRetrySeconds;
+            }
+            else _presetProvisional = 0;
             // NO MAGNITUDE FLOOR HERE (r5 method change). r4 returned the shipped
             // count for any discovery below it, on the reasoning that a small row is
             // a half-built row. Two things were wrong with that. A genuinely complete
@@ -506,7 +550,6 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[PC] preset slots discovered: {slots}"
                     + (slots < PresetSlotsFallback ? " (provisional: derived again until the row is complete)" : ""));
             _presetSlots = slots;
-            if (slots < PresetSlotsFallback) _presetSlotsRetryAt = now + PresetSlotsRetrySeconds;
             return slots;
         }
 
@@ -527,14 +570,15 @@ namespace CompetitiveRounds
         /// <summary>[PRESET-SLOT-SENTINEL] (v1.41.0 beta round 3, finding 10): runs
         /// PresetSlotCount against the game's REAL portrait row. It derives the count from
         /// scratch, then plants a provisional sighting of a partial row (three slots) and
-        /// checks that it is answered from the cache inside the retry window and derived
-        /// again from the real row once the window has passed. Both fields it moves are put
-        /// back. Inconclusive, not failed, when no complete row exists to derive from.</summary>
+        /// checks that it is answered from the cache inside the retry window, with no
+        /// sweep, and derived again from the real row by a sweep once the window has
+        /// passed, which also clears the provisional record. The four fields it moves are
+        /// put back. Inconclusive, not failed, when no complete row exists to derive from.</summary>
         internal static string RunPresetSlotSentinel(out bool pass)
         {
             pass = false;
-            int savedSlots = _presetSlots;
-            float savedAt = _presetSlotsRetryAt;
+            int savedSlots = _presetSlots, savedProvisional = _presetProvisional;
+            float savedAt = _presetSlotsRetryAt, savedSwept = _presetSweptAt;
             try
             {
                 _presetSlots = 0; _presetSlotsRetryAt = 0f;
@@ -542,24 +586,34 @@ namespace CompetitiveRounds
                 if (_presetSlots < PresetSlotsFallback)
                     return $"INCONCLUSIVE: no complete portrait row to derive from (answer {real}, cached {_presetSlots})";
                 var fails = new List<string>();
-                _presetSlots = 3; _presetSlotsRetryAt = Time.realtimeSinceStartup + 60f;
+                _presetSlots = 3; _presetProvisional = 3; _presetSlotsRetryAt = Time.realtimeSinceStartup + 60f;
+                _presetSweptAt = -1f;   // a sweep overwrites this with a time, which is never negative
                 int held = PresetSlotCount();
-                if (held != 3 || PresetCountIsCredible())
-                    fails.Add($"inside the window: {held}, credible {PresetCountIsCredible()} (want 3, False)");
+                bool sweptInside = _presetSweptAt != -1f;
+                if (held != 3 || PresetCountIsCredible() || sweptInside)
+                    fails.Add($"inside the window: {held}, credible {PresetCountIsCredible()}, swept {sweptInside} (want 3, False, False)");
                 _presetSlotsRetryAt = Time.realtimeSinceStartup - 1f;
+                _presetSweptAt = -1f;
                 int again = PresetSlotCount();
-                if (again != real || !PresetCountIsCredible())
-                    fails.Add($"after the window: {again}, credible {PresetCountIsCredible()} (want {real}, True)");
+                bool sweptAfter = _presetSweptAt >= 0f;
+                if (again != real || !PresetCountIsCredible() || !sweptAfter || _presetProvisional != 0)
+                    fails.Add($"after the window: {again}, credible {PresetCountIsCredible()}, swept {sweptAfter}, "
+                              + $"provisional {_presetProvisional} (want {real}, True, True, 0)");
                 int settled = PresetSlotCount();
                 if (settled != real) fails.Add($"once final: {settled} (want {real})");
                 pass = fails.Count == 0;
                 return pass
-                    ? $"PASS: 3 checks (a partial row's count is held inside the window and derived again from the "
-                      + $"real row after it, which has {real} slots; the derived count is then final)"
+                    ? $"PASS: 3 checks (a partial row's count is held inside the window with no sweep, and derived "
+                      + $"again by a sweep of the real row after it, which has {real} slots; the derived count is then "
+                      + "final and the provisional record clear)"
                     : "FAIL: " + string.Join("; ", fails);
             }
             catch (Exception ex) { return "FAIL: threw " + ex.Message; }
-            finally { _presetSlots = savedSlots; _presetSlotsRetryAt = savedAt; }
+            finally
+            {
+                _presetSlots = savedSlots; _presetSlotsRetryAt = savedAt;
+                _presetProvisional = savedProvisional; _presetSweptAt = savedSwept;
+            }
         }
 
         internal static void DevPresetSlotSentinelTest()
@@ -800,7 +854,17 @@ namespace CompetitiveRounds
         /// uploaded the capture taken under the old value. Pairs of ad-hoc
         /// checks are exactly how the next one gets forgotten, so there is one
         /// key and one comparison. (The picture setting was a term until
-        /// 2026-09-13; there is no such setting any more.)</summary>
+        /// 2026-09-13; there is no such setting any more.)
+        ///
+        /// <para>-1 (Follow) IS a value of this key, deliberately, and the claim
+        /// made for #370 is narrower than it was once written (r2 LOW). What holds
+        /// is that -1 never crosses the wire, never reaches a filename and never
+        /// enters the server-visible descriptor: BuildDescriptor resolves it to the
+        /// selected character's face ids, and neither schemas.py nor main.py has a
+        /// preset field at all. What does NOT hold is "-1 never enters a cache
+        /// key" — this is a process-local staleness key, and Follow must be able
+        /// to invalidate it when the player changes the selected character, so
+        /// excluding -1 would be a defect rather than hygiene.</para></summary>
         private static string StateKey()
         {
             return (MatchTracker.LocalSteamId ?? "")

@@ -357,7 +357,7 @@
   "<color=#FFB347>2v2 History</color>",
   "<color=#FFB347>2v2:</color> {0}W / {1}L ({2})  <color=#888>Rating:</color> {3:F0}  <color=#888>Peak:</color> {4:F0}",
   "<color=#FFB347>2v2:</color> {0}W/{1}L",
-  "<color=#FFB347>Series paused — same 4 can re-queue to resume</color>  <color=#FF6688>{0}:{1}</color>  <color=#888>(score {2}-{3})</color>",
+  "<color=#FFB347>Series held — waiting on the final result</color>  <color=#FF6688>{0}</color>  <color=#888>(score {1}-{2})</color>",
   "<color=#FFB347>solo won</color>",
   "<color=#FFC8F0>=  DANCES  =</color>",
   "<color=#FFCC44>In {0}'s lobby</color> - waiting for the host to start ({1} in).",
@@ -2277,6 +2277,7 @@
   "Steam sign-in still pending - try again in a moment.",
   "Steel Gradient",
   "Still checking your Discord link - try again in a moment.",
+  "Still finishing your last spectate request - try again in a moment.",
   "Still joining - one moment...",
   "Still leaving the 1v2 queue — try again in a moment.",
   "Still leaving the 2v2 queue — try again in a moment.",
@@ -2736,6 +2737,7 @@
   "also locks when any game is decided",
   "always earns x1.5 pay",
   "an empty slot - no crash, no fallback",
+  "any moment now",
   "art submitted in-game",
   "artist sets price + stock",
   "as DUO (w/ {0}) vs {1}",
@@ -4778,7 +4780,7 @@
    "location": "RefreshSession",
    "kind": "TrF"
   },
-  "<color=#FFB347>Series paused — same 4 can re-queue to resume</color>  <color=#FF6688>{0}:{1}</color>  <color=#888>(score {2}-{3})</color>": {
+  "<color=#FFB347>Series held — waiting on the final result</color>  <color=#FF6688>{0}</color>  <color=#888>(score {1}-{2})</color>": {
    "surface": "NativeUI",
    "location": "RefreshTeamTab",
    "kind": "TrF"
@@ -5240,7 +5242,7 @@
   },
   "A player in this game has spectating disabled.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "A player's mod is too old for these settings - they need to update, or turn the setting off.": {
@@ -5625,7 +5627,7 @@
   },
   "All spectator seats are taken.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "All-time: {0} games ({1}W-{2}L), series {3}-{4}": {
@@ -8950,7 +8952,7 @@
   },
   "Game ended": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Game over - {0} wins": {
@@ -10100,7 +10102,7 @@
   },
   "Leave your current game first.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Leave your custom 1v2 lobby first.": {
@@ -10670,7 +10672,7 @@
   },
   "Mode closed": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Mode: <color=#88CCFF>vanilla music</color>": {
@@ -11325,7 +11327,7 @@
   },
   "Not ready yet": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Not started": {
@@ -12065,7 +12067,7 @@
   },
   "Player opted out": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Player removed from the lobby.": {
@@ -13500,7 +13502,7 @@
   },
   "Seats full": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Secure connection unavailable - signed-in features are disabled this session.": {
@@ -13685,7 +13687,7 @@
   },
   "Session expired": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Session games": {
@@ -14350,7 +14352,7 @@
   },
   "Steam session expired — try again in a moment.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.": {
@@ -14376,6 +14378,11 @@
   "Still checking your Discord link - try again in a moment.": {
    "surface": "MailUI",
    "location": "ToggleMailRelay",
+   "kind": "Tr"
+  },
+  "Still finishing your last spectate request - try again in a moment.": {
+   "surface": "ApiClient",
+   "location": "RequestSpectateGrantCore",
    "kind": "Tr"
   },
   "Still joining - one moment...": {
@@ -14795,17 +14802,17 @@
   },
   "That game is no longer live.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "That game is not ready to watch yet.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "That mode is not accepting spectators right now.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "That pack is not available any more": {
@@ -15770,7 +15777,7 @@
   },
   "Update required": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Update the mod first": {
@@ -15785,7 +15792,7 @@
   },
   "Update the mod to watch this game.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Updates": {
@@ -16475,7 +16482,7 @@
   },
   "You're in a game": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "You're in a live {0} game — finish or leave it first.": {
@@ -16671,6 +16678,11 @@
   "an empty slot - no crash, no fallback": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
+   "kind": "Tr"
+  },
+  "any moment now": {
+   "surface": "NativeUI",
+   "location": "RefreshTeamTab",
    "kind": "Tr"
   },
   "art submitted in-game": {

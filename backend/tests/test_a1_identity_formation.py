@@ -414,6 +414,7 @@ def test_members_with_no_player_id_are_skipped_not_refused():
 import ast as _ast
 import io as _io
 import inspect as _inspect
+import functools as _functools
 from sqlalchemy.exc import DBAPIError as _DBAPIError
 import re as _re
 
@@ -1050,11 +1051,21 @@ _NOT_A_FORMATION = {
 }
 
 
+_CALL_NAME = _re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+# Memoised: main.py cannot change mid-run, and this suite ALREADY depends
+# on that (#676 -- a mid-run edit makes inspect.getsource return another
+# function's body and the failures look real), so the cache makes an
+# assumption the file already relies on explicit rather than adding a new
+# one. Without it every caller re-parses a 3 MB, 57k-line file from disk.
+@_functools.lru_cache(maxsize=None)
 def _main_tree():
     return _ast.parse(_io.open(_inspect.getsourcefile(main),
                                encoding="utf-8", newline="").read())
 
 
+@_functools.lru_cache(maxsize=None)
 def _function_spans():
     """{name: (first line, last line)} for every def in main.py."""
     out = {}
@@ -1070,6 +1081,7 @@ def _body_lines(name, spans, lines):
             if not lines[i].lstrip().startswith("#")]
 
 
+@_functools.lru_cache(maxsize=None)
 def commitment_points():
     """(acquirers, gaters) over main.py, gaters closed under calls.
 
@@ -1089,10 +1101,15 @@ def commitment_points():
                 acquirers.setdefault(name, []).append(n)
             if _GATE.search(ln):
                 gaters.add(name)
-        calls[name] = {other for other in spans
-                       if other != name
-                       and _re.search(r"\b" + _re.escape(other) + r"\s*\(",
-                                      "\n".join(l for _n, l in body))}
+        # Was: for every span, scan the body once per OTHER span. At 966
+        # spans that is ~933k regex searches, each one re-joining the body
+        # string inside the comprehension -- minutes per call. One findall
+        # of 'identifier followed by (' intersected with the span names
+        # asks the same question once, and every name the old pattern could
+        # match is an identifier this one captures.
+        body_src = "\n".join(l for _n, l in body)
+        calls[name] = {m for m in _CALL_NAME.findall(body_src)
+                       if m != name and m in spans}
     grew = True
     while grew:
         grew = False

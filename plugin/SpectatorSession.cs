@@ -18,8 +18,13 @@ namespace CompetitiveRounds
     /// PHASE 0 SCOPE: this file establishes the contract (role property,
     /// session statics, staging rules) and the local-role flag that
     /// RoomActors reads. It does NOT yet join rooms, suppress spawning, or
-    /// render — those are Phases 1-3. Nothing here has any effect until
-    /// something sets IsLocalSpectator, so it is inert in the shipped build.
+    /// render — those are Phases 1-3.
+    ///
+    /// CORRECTED 2026-09-18 (Codex b4yssbnuh): the claim that used to close
+    /// this paragraph — "nothing here has any effect until something sets
+    /// IsLocalSpectator, so it is inert in the shipped build" — is stale. The
+    /// live grant path sets IsLocalSpectator = true at :213, so this file is
+    /// ACTIVE in shipped spectator sessions and its statics are load-bearing.
     /// </summary>
     /// <summary>
     /// ── RESIDUAL RISK REGISTER (accepted after Codex rounds 1-2) ────────
