@@ -41,9 +41,10 @@ namespace CompetitiveRounds
         //
         // Round 3 (Codex round 2 LOW 5): the latch is SecureRouteRules.TicketLatch
         // and is released only after the cancel returns. A cancel that throws
-        // keeps the handle held-but-failed; the next refresh tick retries it
-        // once and then retires the handle with a log line; no successor ticket
-        // is requested while a handle is unretired (harness MT6-MT8).
+        // keeps the handle held-but-failed, and the refresh ticks retry it (the
+        // next tick, then at most once every 30 s) until it returns. Round 4
+        // (Codex round 3 LOW 4): the handle is never retired uncancelled, so no
+        // successor ticket is requested beside it (harness MT6-MT9).
         private static readonly SecureRouteRules.TicketLatch _latch = new SecureRouteRules.TicketLatch();
         private static HAuthTicket _ticket;
 
@@ -65,9 +66,9 @@ namespace CompetitiveRounds
             {
                 // A held ticket whose end never arrived (a lost callback, a
                 // coroutine that died with its host) is abandoned and
-                // cancelled here, and a cancel that failed is retried once and
-                // then retired, so the next ticket supersedes the old one and
-                // never stacks on it.
+                // cancelled here, and a cancel that failed is retried here until
+                // it returns, so a next ticket only ever follows a cancelled one
+                // and never stacks on it.
                 string note = _latch.Tick(Time.realtimeSinceStartup, CancelHeldTicket, out bool tickFailed);
                 if (note != null)
                 {

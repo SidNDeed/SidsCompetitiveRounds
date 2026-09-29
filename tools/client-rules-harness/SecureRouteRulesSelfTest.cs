@@ -1184,18 +1184,52 @@ namespace CompetitiveRounds
                           + " requestedAtRetry=" + (requestedAtCancel.Count > 1 ? requestedAtCancel[1] : -1)
                           + " freeDuringCancel=" + string.Join(",", freeDuringCancel) + " lines=" + string.Join(" / ", lines));
 
-                // MT6b: the cancel throws twice: retired with a line, never a third attempt.
+                // MT6b (Codex round 3 LOW 4's falsifier): both cancels throw
+                // while ticket creation stays available. The handle stays held:
+                // no successor ticket beside it (round 3 retired it here and
+                // requested ticket 2, overwriting the only handle to ticket 1).
                 reset(2);
                 refreshTick(0.0);
                 bool failed6b;
                 latch.End(1, "failed", cancel, out failed6b);
-                refreshTick(3.0);                                   // retry fails: retired, then ticket 2
-                int cancelsAfterRetire = cancels;
+                refreshTick(3.0);                                   // the retry fails too: still held
                 refreshTick(6.0); refreshTick(9.0);
-                Check(r, "MT6b a cancel that throws twice is retired with a log line on the next tick, never tried a third time",
-                      failed6b && cancelsAfterRetire == 2 && cancels == 2 && requestedAtCancel[1] == 1 && requested == 2
-                          && lines.Count == 1 && lines[0].Contains("retired uncancelled") && latch.Serial == 2,
-                      "cancels=" + cancels + " requested=" + requested + " lines=" + string.Join(" / ", lines));
+                Check(r, "MT6b both cancels throw: the handle stays held, no successor is requested (requested=1), one line",
+                      failed6b && cancels == 2 && requested == 1 && latch.Serial == 1 && !latch.MayRequest
+                          && latch.State == TicketState.CancelFailed && !freeDuringCancel.Contains(true)
+                          && lines.Count == 1 && lines[0].Contains("still uncancelled after 1 retry"),
+                      "cancels=" + cancels + " requested=" + requested + " state=" + latch.State + " lines=" + string.Join(" / ", lines));
+
+                // MT9: the cancel throws twice and succeeds on the third attempt
+                // (the first bounded retry, CancelRetrySeconds after the second):
+                // exactly one successor, only after it.
+                reset(2);
+                refreshTick(0.0);
+                bool failed9;
+                latch.End(1, "failed", cancel, out failed9);
+                for (double t9 = 3.0; t9 <= 30.0; t9 += 3.0) refreshTick(t9);   // retry at 3 fails; none again before 33
+                int cancelsBefore = cancels, requestedBefore = requested;
+                for (double t9 = 33.0; t9 <= 60.0; t9 += 3.0) refreshTick(t9);  // retry at 33 succeeds; ticket 2
+                Check(r, "MT9 a cancel that succeeds on the third attempt frees the latch, then exactly one successor",
+                      failed9 && cancelsBefore == 2 && requestedBefore == 1 && cancels == 3 && requestedAtCancel[2] == 1
+                          && requested == 2 && latch.Serial == 2 && latch.IsHeld && !freeDuringCancel.Contains(true)
+                          && lines.Count == 2 && lines[1].Contains("cancelled with Steam on the retry (2)"),
+                      "cancels=" + cancelsBefore + "->" + cancels + " requested=" + requestedBefore + "->" + requested
+                          + " lines=" + string.Join(" / ", lines));
+
+                // MT9b: a cancel that never succeeds, ticked every 3 s for an
+                // hour: retried on its bound, the latch refused throughout, no
+                // successor, and the log bounded.
+                reset(int.MaxValue);
+                refreshTick(0.0);
+                bool failed9b;
+                latch.End(1, "failed", cancel, out failed9b);
+                for (double t9 = 3.0; t9 <= 3600.0; t9 += 3.0) refreshTick(t9);
+                int bound = 1 + (int)(3600.0 / TicketLatch.CancelRetrySeconds) + 1;
+                Check(r, "MT9b a cancel that never succeeds: retried on its 30 s bound for an hour, never a successor, the log bounded",
+                      failed9b && requested == 1 && latch.State == TicketState.CancelFailed && cancels >= 100 && cancels <= bound
+                          && lines.Count <= 2 + cancels / TicketLatch.CancelRetryLogEvery,
+                      "cancels=" + cancels + " (bound " + bound + ") requested=" + requested + " lines=" + lines.Count);
 
                 // MT6c control: a cancel that succeeds frees the latch at once.
                 reset(0);

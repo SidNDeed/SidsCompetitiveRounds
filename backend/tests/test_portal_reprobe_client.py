@@ -229,7 +229,7 @@ def test_every_steam_ticket_is_cancelled_when_its_exchange_ends_and_one_is_held_
     took = "_latch.Took(Time.realtimeSinceStartup);"
     for s in (tick, gate, mint, took):
         assert refresh.count(s) == 1, (s, refresh)
-    # The latch's tick (abandonment, and the one retry of a failed cancel) runs
+    # The latch's tick (abandonment, and the retries of a failed cancel) runs
     # before the gate; the ticket is taken only after the request returned.
     assert refresh.index(tick) < refresh.index(gate) < refresh.index(mint) < refresh.index(took), refresh
     # Abandonment only for an end that never arrives: past the exchange's own timeout.
@@ -259,6 +259,20 @@ def test_every_steam_ticket_is_cancelled_when_its_exchange_ends_and_one_is_held_
     caught = caught[:caught.index("return ")]
     assert "State = TicketState.CancelFailed;" in caught and "TicketState.Free" not in caught, caught
     assert "internal bool MayRequest => State == TicketState.Free;" in rules, "a successor may be requested beside a held or failed handle"
+    # Round 4 (Codex round 3 LOW 4): a retry of a failed cancel that throws
+    # again never frees the latch (round 3 retired the handle there, and the
+    # next tick requested a successor beside it: MT6b expected requested=2).
+    # The retry is bounded (CancelRetrySeconds) and only a cancel that returns
+    # frees the latch (harness MT6b, MT9, MT9b).
+    tick_fn = code_of(RULES, "internal string Tick(double now, Func<bool> cancel, out bool failed)")
+    failed_branch = tick_fn[tick_fn.index("if (State == TicketState.CancelFailed)"):tick_fn.index("if (State == TicketState.Held && now - Since > TicketAbandonSeconds)")]
+    retry_catch = failed_branch[failed_branch.index("catch (Exception ex)"):]
+    retry_catch = retry_catch[:retry_catch.index("State = TicketState.Free;")]
+    assert "TicketState.Free" not in retry_catch.replace("State = TicketState.Free;", ""), retry_catch
+    assert "NextCancelAt = now + CancelRetrySeconds;" in retry_catch, retry_catch
+    assert failed_branch.count("State = TicketState.Free;") == 1, failed_branch
+    assert failed_branch.index("try { cancel(); }") < failed_branch.index("State = TicketState.Free;"), failed_branch
+    assert "if (NextCancelAt >= 0 && now < NextCancelAt) return null;" in failed_branch, failed_branch
     # The callback: only the held ticket, and every path ends it.
     cb = code_of(STEAMAUTH, "private static void OnWebTicket(GetTicketForWebApiResponse_t cb)")
     held = "if (!_latch.IsHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;"

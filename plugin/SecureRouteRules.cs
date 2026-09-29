@@ -611,15 +611,22 @@ namespace CompetitiveRounds
         /// One Steam web-API ticket at a time. A ticket is held from its request
         /// until its exchange ends, and the latch is released only AFTER the
         /// ticket's cancel returns. A cancel that throws keeps the handle
-        /// held-but-failed (CancelFailed); the next refresh tick retries the
-        /// cancel once, and then the handle is retired either way, with a log
-        /// line. No successor ticket may be requested while a handle is held or
-        /// unretired (MayRequest). SteamAuth owns the handle and passes the
-        /// cancel in: it returns false when there is no handle to cancel and
-        /// throws when the cancel fails.
+        /// held-but-failed (CancelFailed); the refresh ticks retry the cancel,
+        /// the first time on the next tick and then at most once every
+        /// CancelRetrySeconds, until it returns. No successor ticket may be
+        /// requested while a handle is held or uncancelled (MayRequest).
+        /// SteamAuth owns the handle and passes the cancel in: it returns false
+        /// when there is no handle to cancel and throws when the cancel fails.
         /// </summary>
         internal sealed class TicketLatch
         {
+            /// <summary>The bound on retrying a failed cancel.</summary>
+            internal const double CancelRetrySeconds = 30;
+
+            /// <summary>A retry that fails again is logged on the first retry
+            /// and then every this many retries.</summary>
+            internal const int CancelRetryLogEvery = 10;
+
             internal TicketState State { get; private set; } = TicketState.Free;
             internal int Serial { get; private set; }
             internal double Since { get; private set; } = -999;
@@ -675,33 +682,54 @@ namespace CompetitiveRounds
                 catch (Exception ex)
                 {
                     State = TicketState.CancelFailed;
+                    CancelRetries = 0;
+                    NextCancelAt = -1;   // the next refresh tick retries at once
                     failed = true;
                     return "[STEAM-AUTH] ticket " + Serial + " ended (" + outcome + "); cancel failed: " + ex.Message
-                         + "; kept held, the cancel is retried once on the next refresh tick";
+                         + "; kept held, the cancel is retried on the next refresh tick";
                 }
                 State = TicketState.Free;
                 return "[STEAM-AUTH] ticket " + Serial + " ended (" + outcome + "); "
                      + (had ? "cancelled with Steam" : "no ticket handle to cancel");
             }
 
+            /// <summary>Retries of the failed cancel so far.</summary>
+            internal int CancelRetries { get; private set; }
+
+            /// <summary>When the failed cancel may be retried next; negative for
+            /// the next tick.</summary>
+            internal double NextCancelAt { get; private set; } = -1;
+
             /// <summary>Run at the top of every refresh tick, before the request
-            /// gate. A failed cancel is retried exactly once and the handle is
-            /// then retired either way; a held ticket past TicketAbandonSeconds
-            /// is ended as abandoned (which cancels it).</summary>
+            /// gate. A failed cancel is retried on the next tick and then at
+            /// most once every CancelRetrySeconds for as long as it keeps
+            /// failing: the handle stays CancelFailed, so no successor ticket is
+            /// ever requested beside an uncancelled one (Codex round 3 LOW 4:
+            /// retiring it after the second failure let a successor overwrite
+            /// the only handle to it). Only a cancel that returns frees the
+            /// latch; within a process nothing else does (a new process starts
+            /// with a new latch). A retry that fails logs on the first retry and
+            /// then every CancelRetryLogEvery-th. A held ticket past
+            /// TicketAbandonSeconds is ended as abandoned (which cancels it).</summary>
             internal string Tick(double now, Func<bool> cancel, out bool failed)
             {
                 failed = false;
                 if (State == TicketState.CancelFailed)
                 {
+                    if (NextCancelAt >= 0 && now < NextCancelAt) return null;
+                    CancelRetries++;
                     try { cancel(); }
                     catch (Exception ex)
                     {
-                        State = TicketState.Free;   // retired: one retry, never a third attempt
+                        NextCancelAt = now + CancelRetrySeconds;   // still held: no successor beside it
+                        if (CancelRetries != 1 && CancelRetries % CancelRetryLogEvery != 0) return null;
                         failed = true;
-                        return "[STEAM-AUTH] ticket " + Serial + " retired uncancelled: the retry failed too (" + ex.Message + ")";
+                        return "[STEAM-AUTH] ticket " + Serial + " still uncancelled after " + CancelRetries + " retr"
+                             + (CancelRetries == 1 ? "y" : "ies") + " (" + ex.Message + "); no new ticket until it is cancelled, retried every "
+                             + (int)CancelRetrySeconds + " s";
                     }
                     State = TicketState.Free;
-                    return "[STEAM-AUTH] ticket " + Serial + " cancelled with Steam on the retry";
+                    return "[STEAM-AUTH] ticket " + Serial + " cancelled with Steam on the retry (" + CancelRetries + ")";
                 }
                 if (State == TicketState.Held && now - Since > TicketAbandonSeconds)
                     return End(Serial, "abandoned after " + (int)TicketAbandonSeconds + " s", cancel, out failed);
