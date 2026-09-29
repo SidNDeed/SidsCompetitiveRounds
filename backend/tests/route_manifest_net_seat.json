@@ -610,7 +610,7 @@
           ],
           "main",
           "submit_match",
-          "45b307b41b4f066b9b500b33734c2d749a217148"
+          "8accd4daee7672d2e6dcb1e6de72ec1e10abacd9"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -646,7 +646,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "a9d7eb69e3bd31f73a9fafba554165700dc4c59f"
+          "fbcdd7489791f12119914f97a3c0c80f1a73faf7"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -2443,7 +2443,7 @@
           ],
           "main",
           "queue_poll",
-          "ccc08b4fe197fc9d4df99745a5ec6f5a49ff79e3"
+          "e386669d9948abe12ff3eab943ea09b95cd0038d"
         ],
         [
           "/api/v1/queue/ready",
