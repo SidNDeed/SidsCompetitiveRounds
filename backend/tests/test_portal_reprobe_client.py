@@ -398,6 +398,25 @@ def test_a_restored_retry_goes_out_only_with_the_session_and_a_tokenless_one_spe
     assert "return requestCarriedToken;" in rules, rules
 
 
+def test_a_press_refused_for_a_plaintext_base_says_why_in_one_log_line():
+    """Codex round 2 LOW 3: the RefusePlaintext branch showed a toast and wrote
+    nothing to the log, so a report of "the button does nothing" had no line to
+    read. The branch writes exactly one line, built by
+    SecureRouteRules.PlaintextRefusalLine: the base reduced to scheme://host:port
+    and the reason, never the raw address (harness N1)."""
+    press = code_of(API, "public static void OpenTranslatePortal()")
+    refuse = press[press.index("case SecureRouteRules.PressAction.RefusePlaintext:"):]
+    refuse = refuse[:refuse.index("return;")]
+    assert refuse.count("Plugin.Log.") == 1, refuse
+    assert "Plugin.Log.LogInfo(SecureRouteRules.PlaintextRefusalLine(baseUrl));" in refuse, refuse
+    assert refuse.index("SecureRouteText.PlaintextOverride(baseUrl)") < refuse.index("PlaintextRefusalLine"), refuse
+    line = code_of(RULES, "internal static string PlaintextRefusalLine(string baseUrl)")
+    assert "CredentialFreeBase(baseUrl)" in line and "baseUrl +" not in line, line
+    free = code_of(RULES, "internal static string CredentialFreeBase(string url)")
+    assert 'return parsed.Scheme + "://" + parsed.Host + ":" + parsed.Port;' in free, free
+    assert "return url" not in free and "TrimBase(url);" not in free.replace("Uri.TryCreate(TrimBase(url)", ""), free
+
+
 def test_both_portal_waits_outlast_the_auth_exchange_they_wait_for():
     """Codex round 2 LOW 2: the press after a restore and the re-mint after a
     refused session waited 15 s for a session the exchange could land up to

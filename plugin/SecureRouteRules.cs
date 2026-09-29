@@ -589,6 +589,26 @@ namespace CompetitiveRounds
             return PressAction.MintNow;
         }
 
+        /// <summary>The one log line a portal press refused for a plaintext
+        /// base writes (Codex round 2 LOW 3): the base as scheme://host:port
+        /// (CredentialFreeBase) and the reason. The address may carry user
+        /// info, a path or a query; none of them reaches the log.</summary>
+        internal static string PlaintextRefusalLine(string baseUrl)
+        {
+            return "[SCR] portal button: not opened; the server address " + CredentialFreeBase(baseUrl)
+                 + " is plaintext, and the portal token is only sent over https";
+        }
+
+        /// <summary>An address reduced to scheme://host:port: no user info,
+        /// path, query or fragment. An address that does not parse is not
+        /// echoed at all.</summary>
+        internal static string CredentialFreeBase(string url)
+        {
+            Uri parsed;
+            if (!Uri.TryCreate(TrimBase(url), UriKind.Absolute, out parsed)) return "(an address that does not parse)";
+            return parsed.Scheme + "://" + parsed.Host + ":" + parsed.Port;
+        }
+
         internal enum MintAction { Open, RemintOnce, Fail }
 
         /// <summary>What the portal mint's answer means. A token opens the

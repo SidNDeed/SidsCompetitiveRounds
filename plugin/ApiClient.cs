@@ -6002,8 +6002,11 @@ namespace CompetitiveRounds
                 case SecureRouteRules.PressAction.RefusePlaintext:
                     // No check can help: an explicit plaintext BaseUrl (no
                     // route), so the gate names the address instead of
-                    // promising one.
+                    // promising one. One log line says why nothing opened
+                    // (Codex round 2 LOW 3), with the base reduced to
+                    // scheme://host:port so no credential reaches the log.
                     CompetitiveUI.ShowNotification(SecureRouteText.PlaintextOverride(baseUrl), Color.yellow, 8f);
+                    Plugin.Log.LogInfo(SecureRouteRules.PlaintextRefusalLine(baseUrl));
                     return;
                 case SecureRouteRules.PressAction.WaitThenMint:
                     // Back from the backup (the first secure session may not

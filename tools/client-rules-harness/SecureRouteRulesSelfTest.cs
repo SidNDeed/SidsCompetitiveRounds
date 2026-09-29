@@ -920,6 +920,26 @@ namespace CompetitiveRounds
                       "never ended@" + ended + " early ended@" + lastEnd);
             }
 
+            // -- N: the plaintext refusal's log line (Codex round 2 LOW 3) --------
+            {
+                string withCreds = PlaintextRefusalLine("http://ops:hunter2@example.org:8080/api/v1?key=sentinel-7781#frag");
+                string lan = PlaintextRefusalLine("http://192.168.72.102:8443/");
+                string junk = PlaintextRefusalLine("not a url sentinel-7781");
+                bool clean = withCreds.Contains("http://example.org:8080 ")
+                             && withCreds.IndexOf("hunter2", StringComparison.Ordinal) < 0
+                             && withCreds.IndexOf("ops", StringComparison.Ordinal) < 0
+                             && withCreds.IndexOf("sentinel-7781", StringComparison.Ordinal) < 0
+                             && withCreds.IndexOf("/api", StringComparison.Ordinal) < 0
+                             && withCreds.IndexOf("frag", StringComparison.Ordinal) < 0
+                             && withCreds.Contains("plaintext") && withCreds.Contains("https")
+                             && withCreds.IndexOf('\n') < 0 && withCreds.IndexOf('\r') < 0;
+                Check(r, "N1 the plaintext refusal's log line names the base as scheme://host:port and the reason, with no credential",
+                      clean, withCreds);
+                Check(r, "N1c control: a plain LAN base is named as it is, and an address that does not parse is not echoed",
+                      lan.Contains("http://192.168.72.102:8443 ") && junk.IndexOf("sentinel-7781", StringComparison.Ordinal) < 0,
+                      lan + " || " + junk);
+            }
+
             // -- H: the local witness harness's route ------------------------------
             {
                 const string loop = "http://127.0.0.1:18555";
