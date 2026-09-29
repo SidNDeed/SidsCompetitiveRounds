@@ -3954,9 +3954,12 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset set threw: {ex.Message}"); }
         }
 
-        /// <summary>Item 13: the two server rows' paint as a function of the
-        /// value (null = /pc/me has not answered yet), so the settings pane can
-        /// render the recommended value through the same literals.</summary>
+        /// <summary>Item 13: the server rows' paint as a function of the value
+        /// (null = /pc/me has not answered yet), so the settings pane can render
+        /// the recommended value through the same literals. There are THREE
+        /// server rows, each with its own painter: collection_public
+        /// (PaintCollectionPublic), announce (PaintAnnounce) and trades_open
+        /// (PaintTrades, the card-trading row SPcTrd that merge pass 1 added).</summary>
         internal static void PaintCollectionPublic(object t, bool? on)
         {
             UIFactory.SetText(t, on == null
@@ -4073,8 +4076,11 @@ namespace CompetitiveRounds
             SetSetting(key, !SettingValue(me, key));
         }
 
-        /// <summary>Item 13: the value-taking writer of the two server rows
-        /// (the settings page's switches). A value equal to the cached one
+        /// <summary>Item 13: the value-taking writer of the three server rows
+        /// (the settings page's switches): collection_public, announce and
+        /// trades_open, the three branches of SettingValue and ApplySetting;
+        /// only trades_open re-reads the open proposals after a successful
+        /// write (OnTradesOpenToggled). A value equal to the cached one
         /// sends nothing. Everything else is the toggle's contract unchanged:
         /// single flight, optimistic, rolled back on failure.</summary>
         internal static void SetSetting(string key, bool value)
