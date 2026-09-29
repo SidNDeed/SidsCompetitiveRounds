@@ -1120,6 +1120,36 @@ namespace CompetitiveRounds
             return System.Net.IPAddress.TryParse(host.Trim('[', ']'), out ip) && System.Net.IPAddress.IsLoopback(ip);
         }
 
+        /// <summary>Round 4 LOW 2: whether a report-status answer may replace
+        /// the broadcaster's target, and with what. The server answers each
+        /// game with the account's own watch GRANT (mode and roster together)
+        /// and the report read accepts only a granted tuple, so an answer is
+        /// adopted WHOLE or not at all - never its roster under the target's
+        /// old mode. Adoptable: a mode the broadcaster plays (1v1, 2v2, ffa)
+        /// with a roster of at least two distinct steam ids, exactly two for
+        /// a 1v1 (the read compares a sourceless 1v1's played pair with the
+        /// granted roster exactly). `ids` is the roster in the answer's
+        /// order; on refusal `playMode` is "" and `ids` empty.</summary>
+        internal static bool StatusTarget(string mode, string rosterCsv, out string playMode, out string[] ids)
+        {
+            playMode = "";
+            ids = new string[0];
+            string m = (mode ?? "").Trim().ToLowerInvariant();
+            if (m != "1v1" && m != "2v2" && m != "ffa") return false;
+            var list = new List<string>();
+            foreach (var part in (rosterCsv ?? "").Split(','))
+            {
+                string id = part.Trim();
+                if (id.Length == 0) continue;
+                if (list.Contains(id)) return false;
+                list.Add(id);
+            }
+            if (list.Count < 2 || (m == "1v1" && list.Count != 2)) return false;
+            playMode = m;
+            ids = list.ToArray();
+            return true;
+        }
+
         /// <summary>A game the broadcaster may anchor the watched set's report
         /// on: its id, its end (server UTC) and the steam ids of the players
         /// who PLAYED it (an FFA frozen-roster ghost is not one).</summary>

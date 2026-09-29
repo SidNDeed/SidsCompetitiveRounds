@@ -59951,18 +59951,26 @@ async def broadcast_report_status(
     # never updated or deleted), not its lease row, which the validation
     # sweep deletes once the seat's authorization has ended.
     # Any other id is omitted, exactly as an id with no row is.
+    # Round 4 LOW 2: what a game answers with is the account's own GRANT -
+    # the mode, roster and start its watch was recorded under - never the
+    # spectate game row's current tuple, which every participant attest
+    # rewrites in place: the client retargets its report to this answer, and
+    # the report read accepts only a granted tuple. A game the seat was
+    # observed under more than one tuple of answers its latest grant. The
+    # row gives only ended_at, the terminal proof this route exists for.
     games = (await db.execute(text("""
-        SELECT g.id, g.mode, g.started_at, g.ended_at, g.roster
+        SELECT DISTINCT ON (g.id)
+               g.id, l.mode, l.game_started_at AS started_at, g.ended_at, l.roster
           FROM spectate_games g
+          JOIN spectate_watch_grants l
+            ON l.game_id = g.id AND l.spectator_steam_id = CAST(:sid AS text)
          WHERE g.id = ANY(CAST(:gids AS uuid[]))
-           AND EXISTS (SELECT 1 FROM spectate_watch_grants l
-                        WHERE l.game_id = g.id
-                          AND l.spectator_steam_id = CAST(:sid AS text))
+         ORDER BY g.id, l.granted_at DESC, l.id DESC
     """), {"gids": requested, "sid": steam_id})).mappings().all()
     by_id = {g["id"]: g for g in games}
 
     # Display names for every roster member across all found games, in one
-    # query. The roster steam-id CSV is returned exactly as stored: the
+    # query. The granted roster CSV is returned exactly as stored: the
     # broadcast seat is already trusted with roster ids at grant time
     # (SpectateGameInfo.roster), so exposing them here to the SAME
     # authenticated seat adds no new exposure.
@@ -59977,7 +59985,7 @@ async def broadcast_report_status(
         names_by_sid = {r["steam_id"]: (r["display_name"] or "?") for r in rows}
 
     out = []
-    for gid in requested:  # request order; ids with no row (or no lease of this account) are omitted
+    for gid in requested:  # request order; ids with no row (or no grant of this account) are omitted
         g = by_id.get(gid)
         if g is None:
             continue

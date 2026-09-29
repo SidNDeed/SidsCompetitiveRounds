@@ -634,12 +634,21 @@ namespace CompetitiveRounds
                         if (e != _current) _queue.RemoveAt(q);
                         continue;
                     }
-                    if (sm == "1v1" || sm == "2v2" || sm == "ffa") e.mode = sm;
                     // R1 f6: identity fill from the server's VALIDATED roster
                     // (the grant response carries none; the activation-side
                     // cache scan reached nothing on the autonomous seat).
                     // roster CSV + names are index-aligned (server contract).
-                    ApplyRosterFromStatus(e, s);
+                    // Round 4 LOW 2: the answer is this account's watch GRANT
+                    // (mode and roster together), the only tuple the report
+                    // read accepts, so it replaces the target WHOLE or not at
+                    // all (SessionReportRules.StatusTarget).
+                    string playMode;
+                    string[] grantIds;
+                    if (SessionReportRules.StatusTarget(s.mode, s.roster, out playMode, out grantIds))
+                    {
+                        e.mode = playMode;
+                        ApplyRosterFromStatus(e, grantIds, s.names);
+                    }
                     DateTime started;
                     if (TryParseUtc(s.started_at, out started)) e.startedAtUtc = started;
                     DateTime ended;
@@ -663,42 +672,34 @@ namespace CompetitiveRounds
         /// have come from a stale UI cache); a set-equal roster just upgrades
         /// placeholder names to the server's display names. Ratings are
         /// roster-ALIGNED display data, so any roster change clears them.</summary>
-        private static void ApplyRosterFromStatus(Entry e, ApiClient.BroadcastReportStatusEntry s)
+        private static void ApplyRosterFromStatus(Entry e, string[] ids, List<string> names)
         {
-            if (string.IsNullOrEmpty(s.roster)) return;
-            var parts = s.roster.Split(',');
-            var ids = new List<string>(parts.Length);
-            for (int i = 0; i < parts.Length; i++)
-            {
-                string id = parts[i].Trim();
-                if (id.Length > 0) ids.Add(id);
-            }
-            if (ids.Count == 0) return;
+            if (ids == null || ids.Length == 0) return;
             bool sameSet = false;
-            if (HasIdentity(e) && e.rosterIds.Length == ids.Count)
+            if (HasIdentity(e) && e.rosterIds.Length == ids.Length)
             {
                 sameSet = true;
                 var have = new HashSet<string>(e.rosterIds, StringComparer.Ordinal);
-                for (int i = 0; i < ids.Count; i++)
+                for (int i = 0; i < ids.Length; i++)
                     if (!have.Contains(ids[i])) { sameSet = false; break; }
             }
             if (!sameSet)
             {
-                e.rosterIds = ids.ToArray();
-                e.names = NormalizeNames(s.names != null ? s.names.ToArray() : null, e.rosterIds);
+                e.rosterIds = (string[])ids.Clone();
+                e.names = NormalizeNames(names != null ? names.ToArray() : null, e.rosterIds);
                 e.ratings = new float[0];
                 e.reportId = MakeReportId(e.incarnation, e.rosterIds);
                 return;
             }
             // Same set: adopt server display names aligned to OUR slot order
             // (ratings stay — they are aligned to e.rosterIds).
-            if (s.names == null || s.names.Count == 0) return;
+            if (names == null || names.Count == 0) return;
             for (int i = 0; i < e.rosterIds.Length; i++)
             {
-                for (int j = 0; j < ids.Count && j < s.names.Count; j++)
+                for (int j = 0; j < ids.Length && j < names.Count; j++)
                 {
                     if (!string.Equals(ids[j], e.rosterIds[i], StringComparison.Ordinal)) continue;
-                    string nm = s.names[j];
+                    string nm = names[j];
                     if (!string.IsNullOrEmpty(nm) && nm != "?") e.names[i] = nm;
                     break;
                 }

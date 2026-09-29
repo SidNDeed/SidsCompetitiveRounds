@@ -1201,6 +1201,35 @@ def test_a_validation_whose_grant_write_fails_is_not_answered_ok(lab, seat):
     assert _report(seat, viewer=STEAM["A"], match=ID["KL"]) == _report("A", match=ID["KL"])
 
 
+# -- round 4 LOW 2: status answers the granted tuple, not the live row -----------
+
+def test_report_status_answers_the_granted_tuple_after_the_room_changes(lab, seat):
+    """Round 4 LOW 2, the reviewer's falsifier, through the routes. A
+    validates the seat on the live room A-B around K1 (the grant records
+    A-B); an attest then rewrites the room row to A-C. Status still answers
+    the granted A-B with A's and B's names, and the tuple it answers is one
+    the report read accepts: K1 (A against B) is served to the seat as A's
+    own envelope, while A's game against C (KC, inside the window) is
+    refused. Control: once the master validates the seat under A-C, status
+    answers that latest grant."""
+    (_m, k1_end, _s), (_m2, kc_end, _s2) = _facts("K1", "KC")
+    assert _inside(kc_end, k1_end), "control: KC ends inside the room's window"
+    w = _LiveWatch(seat, "K1")
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+    ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
+    _lab_sql("UPDATE spectate_games SET roster = $2 WHERE id = $1 RETURNING 1", w.wid, ac)
+    got = w.status()
+    assert [(r["mode"], r["roster"]) for r in got] == [("1v1", ab)], got
+    assert got[0]["names"] == [NAME[k] for k in sorted("AB", key=lambda k: STEAM[k])]
+    assert _report(seat, viewer=STEAM["A"], match=ID["K1"]) == _report("A", match=ID["K1"])
+    assert _refused(seat, viewer=STEAM["A"], match=ID["KC"]) == (404, "not_found")
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert [(r["mode"], r["roster"]) for r in w.status()] == [("1v1", ac)], "control: the latest grant"
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
 # -- /health `session_report` against the lab database ---------------------------
 
 def test_the_health_word_reads_what_the_labs_database_has(lab):

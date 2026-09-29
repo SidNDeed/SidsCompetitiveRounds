@@ -1938,21 +1938,46 @@ def test_the_watched_binding_is_a_named_report_statement():
 
 class _StatusDb:
     """report-status's two statements over a spectate world with watched-grant
-    holders. The games statement must carry the grant predicate, or every row
-    answers."""
+    holders. A grant is a holder's steam id (a grant of the game row's own
+    tuple) or a dict of the holder's granted tuple (sid, mode, roster,
+    game_started_at, granted_at). The games statement must JOIN the grants
+    and answer each game with the caller's latest GRANT's tuple (round 4
+    LOW 2), or the fake refuses it."""
+
+    GAMES_SQL = ("SELECT DISTINCT ON (g.id) g.id, l.mode, l.game_started_at AS started_at, g.ended_at, l.roster "
+                 "FROM spectate_games g JOIN spectate_watch_grants l "
+                 "ON l.game_id = g.id AND l.spectator_steam_id = CAST(:sid AS text) "
+                 "WHERE g.id = ANY(CAST(:gids AS uuid[])) "
+                 "ORDER BY g.id, l.granted_at DESC, l.id DESC")
 
     def __init__(self, games, grants, names):
         self.games, self.grants, self.names = games, grants, names
         self.statements = []
 
+    def _grants_of(self, g, sid):
+        out = []
+        for n, gr in enumerate(self.grants.get(g["id"], ())):
+            if isinstance(gr, str):
+                gr = {"sid": gr, "mode": g["mode"], "roster": g["roster"],
+                      "game_started_at": g["started_at"], "granted_at": T0 + timedelta(seconds=n)}
+            if gr["sid"] == sid:
+                out.append(gr)
+        return out
+
     async def execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
         self.statements.append((sql, params))
         if "FROM spectate_games g" in sql:
-            rows = [g for g in self.games if g["id"] in params["gids"]]
-            if ("AND EXISTS (SELECT 1 FROM spectate_watch_grants l WHERE l.game_id = g.id "
-                    "AND l.spectator_steam_id = CAST(:sid AS text))") in sql:
-                rows = [g for g in rows if params["sid"] in self.grants.get(g["id"], ())]
+            assert self.GAMES_SQL in sql, "unexpected games statement: " + sql[:240]
+            rows = []
+            for g in self.games:
+                if g["id"] not in params["gids"]:
+                    continue
+                mine = self._grants_of(g, params["sid"])
+                if mine:
+                    last = max(mine, key=lambda gr: gr["granted_at"])
+                    rows.append({"id": g["id"], "mode": last["mode"], "started_at": last["game_started_at"],
+                                 "ended_at": g["ended_at"], "roster": last["roster"]})
             return _Res(rows)
         if "FROM players" in sql:
             return _Res([{"steam_id": s, "display_name": n} for s, n in self.names.items() if s in params["sids"]])
@@ -1984,6 +2009,50 @@ def test_report_status_answers_only_games_the_seat_watched(broadcast_session):
     assert ei.value.status_code == 403 and ei.value.detail == "broadcast_only"
 
 
+def test_report_status_answers_the_granted_tuple_not_the_live_row(broadcast_session):
+    """Round 4 LOW 2: the seat's grant recorded the watch under roster A-B;
+    the spectate game row has since been rewritten to A-C (a participant
+    attest). Status answers the GRANTED tuple - mode, roster, names and
+    start - and only ended_at from the row. Controls: with a second grant
+    under A-C (the seat observed there too) the latest grant answers, and a
+    game whose only grant is another account's is omitted."""
+    g1, g2 = uuid.uuid4(), uuid.uuid4()
+    third = "76561190000000777"
+    ab, ac = ",".join(sorted((CALLER, OPP))), ",".join(sorted((CALLER, third)))
+    end = T0 + timedelta(minutes=9)
+    live = [{"id": g1, "mode": "1v1", "started_at": T0 + timedelta(minutes=2), "ended_at": end, "roster": ac},
+            {"id": g2, "mode": "1v1", "started_at": T0, "ended_at": end, "roster": ac}]
+    granted = {"sid": BROADCAST, "mode": "1v1", "roster": ab, "game_started_at": T0, "granted_at": T0}
+    names = {CALLER: "A", OPP: "B", third: "C"}
+    got = _status(_StatusDb(live, {g1: [granted], g2: [OTHER]}, names), [g1, g2])
+    assert got == [{"game_id": str(g1), "mode": "1v1", "started_at": T0.isoformat(), "ended_at": end.isoformat(),
+                    "roster": ab, "names": [names[s] for s in ab.split(",")]}], got
+    later = dict(granted, roster=ac, granted_at=T0 + timedelta(minutes=5))
+    both = _status(_StatusDb(live, {g1: [later, granted]}, names), [g1])
+    assert [(r["roster"], r["names"]) for r in both] == [(ac, [names[s] for s in ac.split(",")])], both
+
+
+def test_the_broadcaster_retargets_only_to_the_granted_tuple():
+    """Round 4 LOW 2, the client half: ApplyStatus changes the queued
+    target's mode and roster only through SessionReportRules.StatusTarget
+    (executed in the rules harness: the answer is adopted whole, mode and
+    roster together, or not at all), and ApplyRosterFromStatus takes the
+    ids StatusTarget returned, never the answer's raw roster."""
+    post = PLUGIN / "PostSessionReport.cs"
+    apply = _cs_body(post, "private static void ApplyStatus(List<ApiClient.BroadcastReportStatusEntry> list)")
+    gate = "if (SessionReportRules.StatusTarget(s.mode, s.roster, out playMode, out grantIds))"
+    assert apply.count(gate) == 1
+    tail = apply[apply.index(gate):]
+    block = tail[:tail.index("}") + 1]
+    assert "e.mode = playMode;" in block and "ApplyRosterFromStatus(e, grantIds, s.names);" in block
+    assert apply.count("e.mode =") == 1 and apply.count("ApplyRosterFromStatus(") == 1
+    assert "s.roster" not in apply.replace(gate, ""), "the raw roster reaches the target only through StatusTarget"
+    src = strip_comments_only(post.read_text(encoding="utf-8"))
+    assert len(re.findall(r"(?<![\w.])ApplyRosterFromStatus\(", src)) - 1 == 1, "one caller, ApplyStatus"
+    roster = _cs_body(post, "private static void ApplyRosterFromStatus(Entry e, string[] ids, List<string> names)")
+    assert re.search(r"\.roster\b", roster) is None, "no raw roster field is read there"
+
+
 def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
     """Round 3 N1: spectate_watch_grants is written only by the validation
     route, after the lease validated as observed, as INSERT ... ON CONFLICT DO
@@ -2013,7 +2082,7 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
         "a failed grant write refuses the validation"
     assert val.count("ok = True") == 1
     status = " ".join(inspect.getsource(main.broadcast_report_status).split())
-    assert "FROM spectate_watch_grants l" in status and "spectate_leases" not in status
+    assert "JOIN spectate_watch_grants l" in status and "spectate_leases" not in status
     assert "spectate_leases" not in main._REPORT_WATCHED_SQL
     sql = root / "backend" / "sql"
     mig = (sql / "364_spectate_watch_grants.sql").read_text(encoding="utf-8")

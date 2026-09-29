@@ -646,6 +646,40 @@ namespace CompetitiveRounds
             Check(r, "broadcast (control): a live stream plays the report or the screens; the dev entry plays down; a probe that throws defers",
                   okUp == PLAYBACK_REPORT && failUp == PLAYBACK_SCREENS && devDown == PLAYBACK_REPORT && thrown == PLAYBACK_DEFER,
                   "live: success " + okUp + ", failure " + failUp + "; dev entry down " + devDown + "; throwing probe " + thrown);
+
+            // Round 4 LOW 2: report-status answers the account's watch GRANT,
+            // the only tuple the report read accepts; the broadcaster adopts
+            // it whole (mode and roster together) or not at all.
+            string m2, mf, m1;
+            string[] i2, iF, i1;
+            bool t2 = StatusTarget("2v2", A + "," + C + "," + B + "," + D, out m2, out i2);
+            bool tf = StatusTarget(" FFA ", A + ", " + B + "," + E, out mf, out iF);
+            bool t1 = StatusTarget("1v1", B + "," + A, out m1, out i1);
+            Check(r, "broadcast: a status answer replaces the target as its granted tuple, mode and roster together",
+                  t2 && m2 == "2v2" && string.Join(",", i2) == A + "," + C + "," + B + "," + D
+                  && tf && mf == "ffa" && string.Join(",", iF) == A + "," + B + "," + E
+                  && t1 && m1 == "1v1" && string.Join(",", i1) == B + "," + A,
+                  "2v2 " + t2 + " " + m2 + " " + i2.Length + "; ffa " + tf + " " + mf + " " + iF.Length + "; 1v1 " + t1 + " " + m1 + " " + i1.Length);
+            var kept = new List<string>();
+            foreach (var mode in new[] { "", null, "1v2", "ovt", "3v3" })
+            {
+                string pm;
+                string[] ids;
+                if (!StatusTarget(mode, A + "," + B + "," + C, out pm, out ids) && pm == "" && ids.Length == 0)
+                    kept.Add(mode == null ? "null" : "'" + mode + "'");
+            }
+            Check(r, "broadcast: a status roster without a mode the broadcaster plays is never adopted under the old mode",
+                  kept.Count == 5, "target kept for " + kept.Count + " of 5: " + string.Join(" ", kept.ToArray()));
+            string pa, pb, pc, pd;
+            string[] ia, ib, ic, id4;
+            bool three = StatusTarget("1v1", A + "," + B + "," + C, out pa, out ia);
+            bool twice = StatusTarget("1v1", A + "," + A, out pb, out ib);
+            bool one = StatusTarget("ffa", A, out pc, out ic);
+            bool gaps = StatusTarget("1v1", "," + A + ",," + B + ",", out pd, out id4);
+            Check(r, "broadcast: a 1v1 status answer names exactly two distinct players",
+                  !three && !twice && !one && gaps && string.Join(",", id4) == A + "," + B,
+                  "1v1 of three " + three + "; 1v1 of one player twice " + twice + "; ffa of one " + one
+                  + "; 1v1 with empty entries " + gaps + " (" + id4.Length + " ids)");
         }
 
         private const int FIXED_PAGES_FOR_TEST = 6;

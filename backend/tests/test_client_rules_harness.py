@@ -272,9 +272,10 @@ def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
     # broadcast playback, 71 with round 2's presence rules (M1), 73 with its
     # unknown race target (M2), 75 with its playback gate (M3), 77 with the
     # watched-set lever's api rule (M4), 80 with the missing-data
-    # provenance (L1) and 82 with round 3's score-race pairs for 2v2 and 1v2
-    # (L1); the floor is that count (#342). Raise it when cases are added.
-    assert run >= 82, "the SessionReportRules suite shrank to %d cases" % run
+    # provenance (L1), 82 with round 3's score-race pairs for 2v2 and 1v2
+    # (L1) and 85 with round 4's status-target rule (LOW 2); the floor is
+    # that count (#342). Raise it when cases are added.
+    assert run >= 85, "the SessionReportRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -773,6 +774,21 @@ def test_the_watched_set_lever_runs_only_against_a_local_api(harness_run, name):
     """Round 2 M4: SessionReportRules.DevLeverApiAllowed, executed - the
     TestWatchedSet lever refuses the public host and the LAN production
     addresses, and runs against a local test api only."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "broadcast: a status answer replaces the target as its granted tuple, mode and roster together",
+    "broadcast: a status roster without a mode the broadcaster plays is never adopted under the old mode",
+    "broadcast: a 1v1 status answer names exactly two distinct players",
+])
+def test_the_broadcaster_retargets_only_to_a_granted_tuple(harness_run, name):
+    """Round 4 LOW 2: SessionReportRules.StatusTarget, executed - a
+    report-status answer (the account's watch grant, the only tuple the
+    report read accepts) replaces the broadcaster's target whole or not at
+    all; test_session_report.py pins that ApplyStatus changes the target only
+    through it."""
     line = _named_case(harness_run, name, "sessionreport")
     assert line.startswith("[sessionreport] PASS"), line
 
