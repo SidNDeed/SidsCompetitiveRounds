@@ -1498,7 +1498,7 @@
           ],
           "main",
           "broadcast_report_status",
-          "80c076817a33fa67ed7a059bebafea4df0df110f"
+          "f6260bea217a7bc9859349bfff64de4a7a15efaa"
         ],
         [
           "/api/v1/broadcast/target",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "health_check",
-          "02e4e9080664629d7850f5de7ed04f5d09390af0"
+          "83b667aa9236b7aa2f50ebb2fdffc16c2205723f"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3089,7 +3089,7 @@
           ],
           "main",
           "get_set_report",
-          "c15196725189fc077ec221d5eb3d911806b7dea2"
+          "ffe2a9ff76e282ffc1288e46d516890f415a60f5"
         ],
         [
           "/api/v1/admin/pc/portrait/clear",
