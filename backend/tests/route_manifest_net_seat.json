@@ -511,7 +511,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "842b55114fce393098f693ac27fe7c534d4df2c0"
+          "96189d9e494ff9a96dcdff9e4a1453b40e92cb94"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -1813,7 +1813,7 @@
           ],
           "main",
           "health_check",
-          "8389e39d68720281ff4272e37a636f478594db87"
+          "c22536bb33867851543983d3ca87124a4883cc03"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3473,7 +3473,7 @@
       [
         "main",
         "lifespan",
-        "9b466a6ceec054c15553d82316a43a81e240ee1f"
+        "292d7ef959eb47221de0cc95c14b2f260af1b07e"
       ]
     ]
   },
