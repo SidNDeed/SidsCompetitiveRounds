@@ -2868,6 +2868,13 @@ LIVENESS_VETO_READERS = {
     # The ffa poll's body runs as _ffa_queue_poll_inner since the
     # connect-failure landing (ffa_queue_poll wraps it and reads no veto).
     "_ffa_queue_poll_inner": "OPEN",
+    # The connect-failure assembly verdict: it reads the veto inside the
+    # assembly lock step (_asm_lock, the ffa lobby row FOR NO KEY UPDATE) and
+    # holds no team_series lock, and a start-short / reform / dissolve write
+    # through _asm_apply_decision rests on the read. The same class as the ffa
+    # poll and leave: no publisher locks an ffa row, so it cannot be
+    # serialized against one.
+    "_ffa_assembly_verdict": "OPEN",
     "_ffa_game_in_progress_tristate": "HELPER",
     "_ffa_poll_locked_payload": "REPORTED",
 }
