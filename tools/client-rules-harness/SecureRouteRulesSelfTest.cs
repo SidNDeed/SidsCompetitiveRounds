@@ -1174,14 +1174,16 @@ namespace CompetitiveRounds
                 // in the window after a line break, handed the RAW text (the
                 // line may not rely on its caller having scrubbed).
                 string[] leads = { json, hdr, kv, bare, tkt };
-                bool each = true; string worst = "";
+                bool each = true; string worst = null; string last = ""; int cleanCount = 0;
                 foreach (var lead in leads)
                 {
                     string l = OutboxTokenlessFailureLine("HTTP 401: \r\n" + lead + "\r\n" + (char)0x2028 + "tail", 1, 94);
-                    if (!(clean(l) && oneLine(l) && l.Length <= OutboxGiveBackLineMax)) { each = false; worst = l; }
+                    if (clean(l) && oneLine(l) && l.Length <= OutboxGiveBackLineMax) cleanCount++;
+                    else { each = false; worst = l; }
+                    last = l;
                 }
                 Check(r, "M4b each sentinel first after a CR/LF, raw text: the line scrubs and flattens by itself",
-                      each, worst);
+                      each, cleanCount + " of " + leads.Length + " clean; " + (worst != null ? "failing line=" + worst : "last line=" + last));
                 // M4c: a JSON token member opening inside the line's room and
                 // closing after it: cut first, its closing quote is gone and
                 // the pattern cannot see it.

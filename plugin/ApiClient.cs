@@ -1943,7 +1943,7 @@ namespace CompetitiveRounds
                 p.restoreDueAt = -1f;   // this send keeps any restore's promise
                 p.attempts++;
                 // Linear-ish backoff, capped at 4x the base interval. Measured
-                // from now rather than from the top of the pass — an earlier
+                // from now rather than from the top of the pass - an earlier
                 // entry's attempt can have taken most of a minute.
                 p.nextAt = Time.realtimeSinceStartup
                            + OUTBOX_RETRY_SECONDS

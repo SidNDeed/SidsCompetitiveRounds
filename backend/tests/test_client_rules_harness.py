@@ -325,9 +325,21 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     "M2 a bare token-shaped value, a session header, a token pair and a Steam ticket are all redacted",
     # round 3: the ticket latch is released only after the cancel (Codex round 2 LOW 5)
     "MT6 a cancel that throws once keeps the handle; the next tick cancels it, and no successor is requested before that",
-    "MT6b a cancel that throws twice is retired with a log line on the next tick, never tried a third time",
+    "MT6b both cancels throw: the handle stays held, no successor is requested (requested=1), one line",
     "MT7 a repeated end of a failed handle, and a late end of an old serial, change nothing",
     "MT8 a held ticket whose end never arrives is abandoned (cancelled) past the exchange's timeout, then superseded",
+    # round 4 (Codex round 3 HIGH 1 and LOWs 1-5)
+    "O4d a 2xx to a retry that did not carry the session token removes nothing and spends nothing",
+    "O10 a tokenless 2xx without a row leaves the entry queued: nothing removed, no attempt spent, 0 rows",
+    "O10b then the restore and the session: exactly one token-bearing settlement, one row, an empty outbox",
+    "W1d a ticket callback later than 5 s and an exchange inside its 20 s: one press mints once, with the session",
+    "N1d a valid 253-character host: the whole line stays within its declared maximum, the host cut with a marker",
+    "M3 FormatRequestError's text into the mint line: an authorization= value and a credential straddling character 300 are both gone, 240 held",
+    "MT9 a cancel that succeeds on the third attempt frees the latch, then exactly one successor",
+    "MT9b a cancel that never succeeds: retried on its 30 s bound for an hour, never a successor, the log bounded",
+    "M4 a tokenless 401 with CR/LF and JSON, header, key=value, bare-token and Steam-ticket sentinels: one bounded line, none of them",
+    "M4b each sentinel first after a CR/LF, raw text: the line scrubs and flattens by itself",
+    "M4c a credential straddling the line's own cut is scrubbed before the cut",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",
     "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",
