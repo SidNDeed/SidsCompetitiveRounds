@@ -556,24 +556,38 @@ namespace CompetitiveRounds
         /// lands can arrive up to this long after the ticket goes out.</summary>
         internal const int SteamAuthExchangeTimeoutSeconds = 20;
 
-        /// <summary>Slack over the exchange's timeout for the ticket request
-        /// ahead of it and the poll interval.</summary>
+        /// <summary>Slack over the exchange's timeout for the poll interval and
+        /// the frame between the ticket callback and the exchange's POST.</summary>
         internal const float SessionWaitMarginSeconds = 5f;
 
-        /// <summary>How long a portal press waits for a session before it
-        /// mints anyway (Codex round 2 LOW 2). Derived from the exchange's own
-        /// timeout, so a session the exchange lands inside its window is always
-        /// waited for: one press, one tab. Both waits (the press after a
-        /// restore and the re-mint after a refused session) read it through
-        /// KeepWaitingForSession.</summary>
+        /// <summary>The base of a portal press's wait for a session (Codex
+        /// round 2 LOW 2): derived from the exchange's own timeout. Both waits
+        /// (the press after a restore and the re-mint after a refused session)
+        /// read it through KeepWaitingForSession, which extends it while a
+        /// sign-in the wait depends on is still inside its own bounds.</summary>
         internal const float PortalSessionWaitSeconds = SteamAuthExchangeTimeoutSeconds + SessionWaitMarginSeconds;
 
         /// <summary>Whether a portal readiness wait begun at `started` keeps
-        /// polling at `now`: until the session is ready, never past
-        /// PortalSessionWaitSeconds.</summary>
-        internal static bool KeepWaitingForSession(double started, double now, bool ready)
+        /// polling at `now` (Codex round 3 LOW 1). Never once the session is
+        /// ready. Otherwise for PortalSessionWaitSeconds, and past that for as
+        /// long as a Steam ticket requested inside that window is still inside
+        /// its own bounds (TicketLatch.ExchangeRunning): its asynchronous
+        /// callback within TicketCallbackBoundSeconds of the request, then its
+        /// exchange within the exchange's timeout plus the margin of the
+        /// callback. The deadline used to start before the ticket was even
+        /// requested while the exchange's 20 s started only at the callback, so
+        /// a callback at 6 s plus a valid 19 s exchange landed after the wait
+        /// had minted without the session. Composed bound: a ticket requested
+        /// at the press is waited for until at most 25 + 25 = 50 s after it,
+        /// and no wait outlives PortalSessionWaitSeconds +
+        /// TicketCallbackBoundSeconds + SteamAuthExchangeTimeoutSeconds +
+        /// SessionWaitMarginSeconds = 75 s (a ticket requested at the very end
+        /// of the base window). `latch` null reads as no ticket.</summary>
+        internal static bool KeepWaitingForSession(double started, double now, bool ready, TicketLatch latch)
         {
-            return !ready && now - started < PortalSessionWaitSeconds;
+            if (ready) return false;
+            if (now - started < PortalSessionWaitSeconds) return true;
+            return latch != null && latch.ExchangeRunning(now, started + PortalSessionWaitSeconds);
         }
 
         // -- The one-ticket latch (board row 27 round 2; Codex round 2 LOW 5) --
@@ -583,6 +597,13 @@ namespace CompetitiveRounds
         /// exchange's own timeout plus the ticket callback, so only a ticket
         /// whose end never arrived is abandoned.</summary>
         internal const double TicketAbandonSeconds = SteamAuthExchangeTimeoutSeconds + 25;
+
+        /// <summary>The bound on Steam's asynchronous ticket callback: the
+        /// part of TicketAbandonSeconds that is not the exchange's timeout, so
+        /// a callback inside it leaves the exchange its whole timeout before
+        /// the ticket could be abandoned. A portal wait does not wait for an
+        /// outstanding callback past it.</summary>
+        internal const double TicketCallbackBoundSeconds = TicketAbandonSeconds - SteamAuthExchangeTimeoutSeconds;
 
         internal enum TicketState { Free, Held, CancelFailed }
 
@@ -606,13 +627,38 @@ namespace CompetitiveRounds
             internal bool MayRequest => State == TicketState.Free;
             internal bool IsHeld => State == TicketState.Held;
 
+            /// <summary>When the held ticket's callback arrived; negative until
+            /// it has.</summary>
+            internal double CallbackAt { get; private set; } = -1;
+
             /// <summary>A ticket was requested (after the request returned).</summary>
             internal int Took(double now)
             {
                 State = TicketState.Held;
                 Serial++;
                 Since = now;
+                CallbackAt = -1;
                 return Serial;
+            }
+
+            /// <summary>The held ticket's callback arrived and its exchange is
+            /// about to be posted. Only the held serial's first callback counts.</summary>
+            internal void CallbackArrived(int serial, double now)
+            {
+                if (State == TicketState.Held && serial == Serial && CallbackAt < 0) CallbackAt = now;
+            }
+
+            /// <summary>Whether a sign-in a portal wait depends on is still inside
+            /// its own bounds at `now` (Codex round 3 LOW 1): a ticket is held
+            /// that was requested no later than `requestedBy`, and either its
+            /// callback is outstanding within TicketCallbackBoundSeconds of the
+            /// request, or its exchange started at the callback and is within
+            /// the exchange's timeout plus SessionWaitMarginSeconds.</summary>
+            internal bool ExchangeRunning(double now, double requestedBy)
+            {
+                if (State != TicketState.Held || Since > requestedBy) return false;
+                if (CallbackAt < 0) return now - Since < TicketCallbackBoundSeconds;
+                return now - CallbackAt < SteamAuthExchangeTimeoutSeconds + SessionWaitMarginSeconds;
             }
 
             /// <summary>The held ticket's exchange ended (`outcome` names how).

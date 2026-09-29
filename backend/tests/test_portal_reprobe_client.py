@@ -325,7 +325,7 @@ def test_a_press_after_a_restore_waits_for_the_first_secure_session():
     assert press.count("MintPortalSessionAndOpen(true);") == 1, press
     assert press.index("MintPortalSessionAndOpen(true);") > press.index(call), press
     wait = code_of(API, "private static IEnumerator OpenPortalWhenSessionReady()")
-    assert "while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady()))" in wait, wait
+    assert "while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))" in wait, wait
     assert wait.index("MintPortalSessionAndOpen(true);") > wait.index("while ("), wait
     finish = code_of(API, "private static void FinishPortalPress(SecureRouteRules.Conclusion c)")
     assert "host.StartCoroutine(OpenPortalWhenSessionReady());" in finish, finish
@@ -510,7 +510,7 @@ def test_both_portal_waits_outlast_the_auth_exchange_they_wait_for():
     whole = code_of(API)
     assert "PortalSessionWaitSeconds = 15f" not in whole, "the 15 s wait is back"
     assert "private const float PortalSessionWaitSeconds" not in whole, "a second wait constant"
-    loop = "while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady()))"
+    loop = "while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))"
     assert whole.count(loop) == 2, "the two readiness waits do not both read the one bound"
     for sig in ("private static IEnumerator OpenPortalWhenSessionReady()",
                 "private static IEnumerator RemintThenOpenPortal()"):
@@ -523,6 +523,36 @@ def test_both_portal_waits_outlast_the_auth_exchange_they_wait_for():
     assert "callback, json, null, onTokenStamped, timeoutSeconds);" in post, post
     raw = code_of(API, "private static IEnumerator PostRequestRaw(")
     assert raw.count("request.timeout = timeoutSeconds;") == 1 and "request.timeout = 20;" not in raw, raw
+
+
+def test_the_portal_wait_covers_the_ticket_callback_and_the_exchange_it_started():
+    """Codex round 3 LOW 1: the 25 s wait's deadline started before the press's
+    first poll requested the Steam ticket, while the exchange's own 20 s
+    timeout started only at Steam's asynchronous ticket callback, so a
+    callback at 6 s plus a valid 19 s exchange landed after the wait had
+    minted without the session. The wait now reads the one-ticket latch: past
+    its base it keeps waiting while a ticket requested inside the base window
+    is inside its own bounds, the callback within TicketCallbackBoundSeconds of
+    the request and then the exchange within its timeout plus the margin from
+    the callback (TicketLatch.ExchangeRunning; harness W1d, W1dc)."""
+    keep = code_of(RULES, "internal static bool KeepWaitingForSession(double started, double now, bool ready, TicketLatch latch)")
+    assert "if (ready) return false;" in keep, keep
+    assert "if (now - started < PortalSessionWaitSeconds) return true;" in keep, keep
+    assert "return latch != null && latch.ExchangeRunning(now, started + PortalSessionWaitSeconds);" in keep, keep
+    running = code_of(RULES, "internal bool ExchangeRunning(double now, double requestedBy)")
+    assert "if (CallbackAt < 0) return now - Since < TicketCallbackBoundSeconds;" in running, running
+    assert "return now - CallbackAt < SteamAuthExchangeTimeoutSeconds + SessionWaitMarginSeconds;" in running, running
+    rules = code_of(RULES)
+    assert ("internal const double TicketCallbackBoundSeconds = TicketAbandonSeconds - SteamAuthExchangeTimeoutSeconds;"
+            in rules), rules
+    took = code_of(RULES, "internal int Took(double now)")
+    assert "CallbackAt = -1;" in took, took
+    cb = code_of(STEAMAUTH, "private static void OnWebTicket(GetTicketForWebApiResponse_t cb)")
+    arrived = "_latch.CallbackArrived(serial, Time.realtimeSinceStartup);"
+    assert cb.count(arrived) == 1, cb
+    assert cb.index("int serial = _latch.Serial;") < cb.index(arrived) < cb.index("ApiClient.PostSteamAuth(hex"), cb
+    assert cb.index(arrived) < cb.index("ticket callback failed"), cb
+    assert "internal static SecureRouteRules.TicketLatch Latch => _latch;" in code_of(STEAMAUTH), "the waits cannot read the latch"
 
 
 def test_a_give_back_after_a_restore_never_cancels_the_restore_s_promise():
@@ -595,7 +625,7 @@ def test_a_refused_portal_session_is_dropped_and_minted_again_once():
     assert "StartCoroutine(RemintThenOpenPortal());" in remint, remint
     assert mint.index("act != SecureRouteRules.MintAction.Open") < mint.index("Application.OpenURL("), mint
     again = code_of(API, "private static IEnumerator RemintThenOpenPortal()")
-    assert "while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady()))" in again, again
+    assert "while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))" in again, again
     assert "MintPortalSessionAndOpen(false);" in again and "MintPortalSessionAndOpen(true);" not in again, again
     whole = code_of(API)
     assert whole.count("MintPortalSessionAndOpen(false);") == 1, "a second no-retry mint site"

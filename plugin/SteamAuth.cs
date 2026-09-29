@@ -47,6 +47,10 @@ namespace CompetitiveRounds
         private static readonly SecureRouteRules.TicketLatch _latch = new SecureRouteRules.TicketLatch();
         private static HAuthTicket _ticket;
 
+        /// <summary>The one-ticket latch, read (never driven) by the portal's
+        /// session waits: whether a sign-in they depend on is still running.</summary>
+        internal static SecureRouteRules.TicketLatch Latch => _latch;
+
         public static bool HasFreshToken =>
             !string.IsNullOrEmpty(SessionToken)
             && Time.realtimeSinceStartup < _sessionExpiresAt - 3600f;   // refresh 1h before expiry
@@ -117,6 +121,9 @@ namespace CompetitiveRounds
             // exchanging it would put a second exchange beside the held one.
             if (!_latch.IsHeld || cb.m_hAuthTicket.m_HAuthTicket != _ticket.m_HAuthTicket) return;
             int serial = _latch.Serial;
+            // The exchange's own timeout starts here, not at the request: a
+            // portal wait keeps waiting for it (SecureRouteRules.KeepWaitingForSession).
+            _latch.CallbackArrived(serial, Time.realtimeSinceStartup);
             try
             {
                 if (cb.m_eResult != EResult.k_EResultOK || cb.m_cubTicket <= 0 || cb.m_rgubTicket == null)

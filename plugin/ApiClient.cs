@@ -2672,7 +2672,7 @@ namespace CompetitiveRounds
             // itself then covers a token the server has dropped (a fresh-looking
             // one it no longer knows): MintPortalSessionAndOpen re-mints once.
             float started = Time.realtimeSinceStartup;
-            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady()))
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))
             {
                 try { SteamAuth.MaybeRefresh(); } catch { }
                 yield return new WaitForSecondsRealtime(0.5f);
@@ -6092,7 +6092,7 @@ namespace CompetitiveRounds
         private static IEnumerator RemintThenOpenPortal()
         {
             float started = Time.realtimeSinceStartup;
-            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady()))
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))
             {
                 try { SteamAuth.MaybeRefresh(); } catch { }
                 yield return new WaitForSecondsRealtime(0.5f);

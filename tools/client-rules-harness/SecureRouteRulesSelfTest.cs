@@ -955,7 +955,7 @@ namespace CompetitiveRounds
                 Func<double, bool> mintCarriesSession = d =>
                 {
                     double t = 0;
-                    while (KeepWaitingForSession(0, t, t >= d)) t += 0.5;
+                    while (KeepWaitingForSession(0, t, t >= d, null)) t += 0.5;
                     lastEnd = t;
                     return t >= d;
                 };
@@ -978,6 +978,70 @@ namespace CompetitiveRounds
                       !never && ended >= PortalSessionWaitSeconds && ended < PortalSessionWaitSeconds + 0.5
                           && at5 && lastEnd == 5.0,
                       "never ended@" + ended + " early ended@" + lastEnd);
+
+                // W1d (Codex round 3 LOW 1's falsifier): the wait's first poll at
+                // or after `reqAt` requests the ticket (SteamAuth.MaybeRefresh, as
+                // the wait calls it every 0.5 s; later than 0 when the latch or
+                // the refresh backoff was busy at the press); Steam's callback
+                // arrives `cb` seconds after the request and the exchange answers
+                // `ex` seconds after that, inside its own 20 s timeout. The wait
+                // then mints once. `fail`: the exchange FAILS then (no session).
+                int mints = 0;
+                Func<double, double, double, bool, bool> press = (reqAt, cbDelay, ex, fail) =>
+                {
+                    var latch = new TicketLatch();
+                    Func<bool> cancelOk = () => true;
+                    bool session = false, requested = false;
+                    double t = 0, cb = double.MaxValue;
+                    mints = 0;
+                    while (true)
+                    {
+                        if (latch.IsHeld && latch.CallbackAt < 0 && t >= cb) latch.CallbackArrived(latch.Serial, cb);
+                        if (latch.IsHeld && latch.CallbackAt >= 0 && t >= cb + ex)
+                        {
+                            bool f0;
+                            session = !fail;
+                            latch.End(latch.Serial, fail ? "failed" : "answered", cancelOk, out f0);
+                        }
+                        if (!KeepWaitingForSession(0, t, session, latch)) break;
+                        bool f1;
+                        latch.Tick(t, cancelOk, out f1);
+                        if (!session && !requested && t >= reqAt && latch.MayRequest)
+                        {
+                            latch.Took(t);
+                            requested = true;
+                            cb = t + cbDelay;
+                        }
+                        t += 0.5;
+                    }
+                    mints++;
+                    lastEnd = t;
+                    return session;
+                };
+                var gotD = new StringBuilder();
+                bool allD = true;
+                foreach (var ce in new[] { new[] { 0, 6.5, 19.5 }, new[] { 0, 10.0, 19.9 }, new[] { 0, 24.0, 19.9 },
+                                           new[] { 10.0, 20.0, 15.0 } })
+                {
+                    bool ok = press(ce[0], ce[1], ce[2], false);
+                    allD &= ok && mints == 1;
+                    gotD.Append("request=").Append(ce[0]).Append(" callback+").Append(ce[1]).Append(" exchange=").Append(ce[2])
+                        .Append(ok ? ":session@" : ":none@").Append(lastEnd).Append(" mints=").Append(mints).Append(' ');
+                }
+                Check(r, "W1d a ticket callback later than 5 s and an exchange inside its 20 s: one press mints once, with the session",
+                      allD && TicketCallbackBoundSeconds >= 24.0,
+                      gotD.ToString().Trim() + " callbackBound=" + TicketCallbackBoundSeconds);
+                bool noCb = press(0, 1000.0, 1.0, false);
+                double noCbEnd = lastEnd;
+                bool lateCb = press(0, 30.0, 1.0, false);
+                double lateEnd = lastEnd;
+                bool failed = press(0, 10.0, 19.0, true);
+                double failEnd = lastEnd;
+                Check(r, "W1dc control: an outstanding callback is waited for only within its bound, and a failed exchange ends the wait",
+                      !noCb && noCbEnd >= TicketCallbackBoundSeconds && noCbEnd < TicketCallbackBoundSeconds + 0.5
+                          && !lateCb && lateEnd < 30.0
+                          && !failed && failEnd >= 29.0 && failEnd < 29.5,
+                      "no callback ended@" + noCbEnd + " callback at 30 ended@" + lateEnd + " failed at 29 ended@" + failEnd);
             }
 
             // -- N: the plaintext refusal's log line (Codex round 2 LOW 3) --------
