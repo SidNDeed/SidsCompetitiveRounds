@@ -539,6 +539,31 @@ namespace CompetitiveRounds
 
         // -- The portal press (Codex round 1, LOW 1 and LOW 2) -----------------
 
+        /// <summary>The Steam session exchange's own request timeout
+        /// (PostSteamAuth passes it to its POST). A session that the exchange
+        /// lands can arrive up to this long after the ticket goes out.</summary>
+        internal const int SteamAuthExchangeTimeoutSeconds = 20;
+
+        /// <summary>Slack over the exchange's timeout for the ticket request
+        /// ahead of it and the poll interval.</summary>
+        internal const float SessionWaitMarginSeconds = 5f;
+
+        /// <summary>How long a portal press waits for a session before it
+        /// mints anyway (Codex round 2 LOW 2). Derived from the exchange's own
+        /// timeout, so a session the exchange lands inside its window is always
+        /// waited for: one press, one tab. Both waits (the press after a
+        /// restore and the re-mint after a refused session) read it through
+        /// KeepWaitingForSession.</summary>
+        internal const float PortalSessionWaitSeconds = SteamAuthExchangeTimeoutSeconds + SessionWaitMarginSeconds;
+
+        /// <summary>Whether a portal readiness wait begun at `started` keeps
+        /// polling at `now`: until the session is ready, never past
+        /// PortalSessionWaitSeconds.</summary>
+        internal static bool KeepWaitingForSession(double started, double now, bool ready)
+        {
+            return !ready && now - started < PortalSessionWaitSeconds;
+        }
+
         internal enum PressAction
         {
             /// <summary>A check was begun or joined: show "Checking...".</summary>

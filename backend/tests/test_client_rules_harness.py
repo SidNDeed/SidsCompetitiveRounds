@@ -272,7 +272,7 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     # 46 cases on the commit that added the suite, 72 since round 2 added
     # the J, O, R, K and H cases; the floor is that count, not one far
     # below it (#342). Raise it when cases are added.
-    assert run >= 80, "the SecureRouteRules suite shrank to %d cases" % run
+    assert run >= 82, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -316,6 +316,8 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     "K1 a press on the backup while the local identity is unknown still starts the check and shows it",
     "K2 a press on an explicit plaintext address while the identity is unknown still names the address",
     "H1 a player's route never checks a plaintext address, loopback included",
+    # round 3: the readiness wait outlasts its own auth exchange (Codex round 2 LOW 2)
+    "W1 a session the exchange lands 16-19.9 s after the press is waited for: the one mint carries it",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",
     "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",

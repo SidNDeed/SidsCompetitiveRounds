@@ -885,6 +885,41 @@ namespace CompetitiveRounds
                       k3c == PressAction.MintNow && k4 == PressAction.WaitThenMint, "known=" + k3c + " restored=" + k4);
             }
 
+            // -- W: the portal's readiness wait outlasts its own auth exchange ------
+            // (Codex round 2 LOW 2.) A press restores the route at t = 0 and the
+            // ticket goes out at once; the exchange answers after d seconds,
+            // anywhere inside its own timeout. The wait polls every 0.5 s as
+            // ApiClient's two waits do, then mints once, with or without it.
+            {
+                double lastEnd = 0;
+                Func<double, bool> mintCarriesSession = d =>
+                {
+                    double t = 0;
+                    while (KeepWaitingForSession(0, t, t >= d)) t += 0.5;
+                    lastEnd = t;
+                    return t >= d;
+                };
+                var got = new StringBuilder();
+                bool all = true;
+                foreach (double d in new[] { 16.0, 17.0, 18.0, 19.0, 19.9 })
+                {
+                    bool ok = mintCarriesSession(d);
+                    all &= ok;
+                    got.Append("d=").Append(d).Append(ok ? ":session@" : ":none@").Append(lastEnd).Append(' ');
+                }
+                Check(r, "W1 a session the exchange lands 16-19.9 s after the press is waited for: the one mint carries it",
+                      all && PortalSessionWaitSeconds >= SteamAuthExchangeTimeoutSeconds + SessionWaitMarginSeconds
+                          && SessionWaitMarginSeconds > 0,
+                      got.ToString().Trim() + " wait=" + PortalSessionWaitSeconds + " exchange=" + SteamAuthExchangeTimeoutSeconds);
+                bool never = mintCarriesSession(1000.0);
+                double ended = lastEnd;
+                bool at5 = mintCarriesSession(5.0);
+                Check(r, "W1c control: a session that never lands ends the wait at the bound; an early one ends it at once",
+                      !never && ended >= PortalSessionWaitSeconds && ended < PortalSessionWaitSeconds + 0.5
+                          && at5 && lastEnd == 5.0,
+                      "never ended@" + ended + " early ended@" + lastEnd);
+            }
+
             // -- H: the local witness harness's route ------------------------------
             {
                 const string loop = "http://127.0.0.1:18555";

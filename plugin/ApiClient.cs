@@ -2361,9 +2361,6 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestStaleToken failed: {ex.Message}"); }
         }
-        /// <summary>How long a portal press that just restored the secure route
-        /// waits for SteamAuth to land a session before minting anyway.</summary>
-        private const float PortalSessionWaitSeconds = 15f;
 
         /// <summary>The address a check probes: the compiled secure default, or,
         /// on the broadcast identity only, [Broadcast] TestSecureUrl when it
@@ -2662,8 +2659,8 @@ namespace CompetitiveRounds
             // nonempty, and minting with it only earns a refusal. The mint
             // itself then covers a token the server has dropped (a fresh-looking
             // one it no longer knows): MintPortalSessionAndOpen re-mints once.
-            float until = Time.realtimeSinceStartup + PortalSessionWaitSeconds;
-            while (!PortalSessionReady() && Time.realtimeSinceStartup < until)
+            float started = Time.realtimeSinceStartup;
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady()))
             {
                 try { SteamAuth.MaybeRefresh(); } catch { }
                 yield return new WaitForSecondsRealtime(0.5f);
@@ -6089,8 +6086,8 @@ namespace CompetitiveRounds
         /// once more without a further retry.</summary>
         private static IEnumerator RemintThenOpenPortal()
         {
-            float until = Time.realtimeSinceStartup + PortalSessionWaitSeconds;
-            while (!PortalSessionReady() && Time.realtimeSinceStartup < until)
+            float started = Time.realtimeSinceStartup;
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady()))
             {
                 try { SteamAuth.MaybeRefresh(); } catch { }
                 yield return new WaitForSecondsRealtime(0.5f);
@@ -22325,7 +22322,8 @@ namespace CompetitiveRounds
                         {
                             end(success ? "answered" : "failed");
                         }
-                    }
+                    },
+                    timeoutSeconds: SecureRouteRules.SteamAuthExchangeTimeoutSeconds
                 ));
             }
             catch (Exception ex)
@@ -22767,12 +22765,15 @@ namespace CompetitiveRounds
         /// out, whether StampVersionHeader attached X-Session-Token to it (the
         /// header itself is read back): the outbox's spend rule asks what the
         /// request carried, not what its address could have carried.</param>
+        /// <param name="timeoutSeconds">The request's timeout. The session
+        /// exchange passes SecureRouteRules.SteamAuthExchangeTimeoutSeconds,
+        /// which the portal's readiness wait is derived from.</param>
         private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,
-                                               Action<bool> onTokenStamped = null)
+                                               Action<bool> onTokenStamped = null, int timeoutSeconds = 20)
         {
             return PostRequestRaw(url,
                                   string.IsNullOrEmpty(json) ? null : Encoding.UTF8.GetBytes(json),
-                                  callback, json, null, onTokenStamped);
+                                  callback, json, null, onTokenStamped, timeoutSeconds);
         }
 
         /// <summary>The response text a request aborted by
@@ -22800,7 +22801,8 @@ namespace CompetitiveRounds
                                                   Action<bool, string> callback,
                                                   string sensitiveProbe = null,
                                                   Func<bool> abortIf = null,
-                                                  Action<bool> onTokenStamped = null)
+                                                  Action<bool> onTokenStamped = null,
+                                                  int timeoutSeconds = 20)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
@@ -22815,7 +22817,7 @@ namespace CompetitiveRounds
                 request.SetRequestHeader("Content-Type", "application/json");
                 StampVersionHeader(request);
                 string _sentTok = SteamAuth.SessionToken;
-                request.timeout = 20;
+                request.timeout = timeoutSeconds;
                 if (onTokenStamped != null)
                 {
                     bool stamped = false;
