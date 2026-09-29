@@ -1028,6 +1028,100 @@ def test_the_lock_order_is_the_players_row_then_the_prints_in_id_order(env):
     _scenario(env, body)
 
 
+def _first(log, pred, what):
+    hits = [i for i, s in enumerate(log) if pred(s)]
+    assert hits, "statement missing from the batch's log: " + what
+    return hits[0]
+
+
+def test_the_key_is_locked_between_the_players_row_and_the_prints(env):
+    """Finding 1, the statement trace: on a first submission AND on a replay,
+    the batch takes the players row FOR NO KEY UPDATE, then the advisory
+    lock on the (player, key) value, then the key's row FOR NO KEY UPDATE,
+    and only then (first submission) the prints; never FOR UPDATE (#202)."""
+    async def body(ctx):
+        me = await _player(1)
+        subject = await _player(2)
+        ids = [await _print(me, subject, "common") for _ in range(3)]
+        k = _key()
+        assert (await _batch(ctx, "a", me, k, ids))[0] == 200
+        again = await _batch(ctx, "b", me, k, ids)
+        assert again[0] == 200 and again[1]["replayed"] is True, again
+        for name, prints in (("a", True), ("b", False)):
+            log = [_flat(s) for s in ctx.statements(name)]
+            players = _first(log, lambda s: s.startswith("SELECT id FROM players") and s.endswith("FOR NO KEY UPDATE"),
+                             "the players row lock")
+            value = _first(log, lambda s: s.startswith("SELECT pg_advisory_xact_lock(hashtextextended("),
+                           "the advisory lock on the key's value")
+            row = _first(log, lambda s: "FROM pc_shard_batches" in s and s.startswith("SELECT print_ids"),
+                         "the key row read")
+            assert log[row].endswith("FOR NO KEY UPDATE"), "the key row is read without its lock: " + log[row]
+            assert players < value < row, (name, players, value, row)
+            assert not any(s.endswith("FOR UPDATE") and not s.endswith("NO KEY UPDATE") for s in log), name
+            gate = [i for i, s in enumerate(log) if "FROM pc_prints" in s and s.endswith("ORDER BY id FOR NO KEY UPDATE")]
+            if prints:
+                assert gate and row < gate[0], (name, row, gate)
+            else:
+                assert not gate, "a replay locked the prints"
+    _scenario(env, body)
+
+
+def test_two_first_submissions_of_one_key_credit_once(env):
+    """Finding 1, concurrency: two sessions submit one key for one list at
+    once. The first is paused after its gate (it holds the players row, the
+    key's value and the prints); the second WAITS on a lock; once the first
+    commits the second answers the recorded result (replayed) and credits
+    nothing: one row, one credit."""
+    async def body(ctx):
+        me = await _player(1, shards=0)
+        subject = await _player(2)
+        ids = [await _print(me, subject, "epic"), await _print(me, subject, "uncommon")]
+        k = _key()
+        g = ctx.gate("first", "_pc_discard_gate", "post")
+        t1 = asyncio.create_task(_batch(ctx, "first", me, k, ids), name="first")
+        await ctx.reached(g, "the first submission's gate")
+        t2 = asyncio.create_task(_batch(ctx, "second", me, k, list(reversed(ids))), name="second")
+        assert await ctx.lock_or_done("second", t2) == "lock"
+        g.go.set()
+        first, second = await t1, await t2
+        assert first[0] == 200 and first[1]["replayed"] is False and first[1]["shards_gained"] == 165, first
+        assert second[0] == 200 and second[1]["replayed"] is True and second[1]["shards_gained"] == 165, second
+        assert await _shards(me) == 165
+        assert [(r["batch_key"], r["prints"], r["shards_gained"]) for r in await _batches(me)] == [(k, 2, 165)]
+    _scenario(env, body)
+
+
+def test_a_row_for_the_key_that_appears_anyway_answers_409_and_rolls_back(env):
+    """Finding 1, the last line of defence: a row for the key written by a
+    transaction outside the route's locks (still uncommitted when the batch
+    reaches its record) makes the batch wait on the primary key; once that
+    row commits, the batch answers 409 key_reused -- never a 500 -- and
+    everything it did is rolled back: the prints live, the balance as it
+    was, only the other row."""
+    async def body(ctx):
+        me = await _player(1, shards=6)
+        subject = await _player(2)
+        ids = [await _print(me, subject, "rare"), await _print(me, subject, "common")]
+        k = _key()
+        other = await _connect("other")
+        try:
+            tx = other.transaction()
+            await tx.start()
+            await other.execute("INSERT INTO pc_shard_batches (player_id, batch_key, print_ids, prints, shards_gained) "
+                                "VALUES ($1::uuid, $2, $3, 1, 5)", me.pid, k, str(uuid.uuid4()))
+            t = asyncio.create_task(_batch(ctx, "a", me, k, ids), name="a")
+            assert await ctx.lock_or_done("a", t) == "lock"
+            await tx.commit()
+            answer = await t
+        finally:
+            await other.close()
+        assert _err(answer) == (409, "key_reused"), answer
+        assert await _discarded(ids) == {i: (False, None) for i in ids}
+        assert await _shards(me) == 6
+        assert [(r["batch_key"], r["prints"]) for r in await _batches(me)] == [(k, 1)]
+    _scenario(env, body)
+
+
 def test_a_single_discard_racing_a_batch_over_the_same_print_pays_once(env):
     """The batch is paused after its gate (it holds the players row and the
     prints); a single discard of one of its prints waits on a lock, and once

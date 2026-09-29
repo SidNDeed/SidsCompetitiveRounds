@@ -27144,17 +27144,23 @@ async def pc_discard_batch(
     database is read (422): a key that is not 8 to 64 of [A-Za-z0-9-]
     (bad_key), no prints (no_prints), more than the cap (too_many), an id
     that is not a UUID (bad_print_id), one print twice (duplicate_print).
-    Then, under the caller's players-row lock:
+    Then, under the caller's players-row lock and the key's own locks
+    (the advisory lock on the (player, key) value, then the key's row FOR
+    NO KEY UPDATE when it exists):
       * a key already committed with the same SET of prints answers the
         stored total again and credits nothing (replayed: true); with a
-        different set it is refused, nothing done (409 key_reused);
+        different set it is refused, nothing done (409 key_reused) --
+        however old the key is, because its row is never pruned;
       * the gate the single route shares (_pc_discard_gate) locks every
         print in print-id order; one print not the caller's or already
         discarded refuses the whole batch, nothing discarded (404
         not_owned, naming them);
       * each print's conditional discard at its rarity's value, their
         delivery leases dropped, ONE delta credit of the total (never an
-        absolute write, #326) and the key's row, committed together.
+        absolute write, #326) and the key's row, committed together; a
+        row for the key that is there anyway (the primary key on (player,
+        key) is the last line of defence) rolls all of it back and answers
+        409 key_reused, never a 500.
     503 shard_batch_unavailable while migration 361 has not run on this box
     (checked before the first lock or write)."""
     key, ids = await _pc_batch_body(request)
@@ -27180,9 +27186,24 @@ async def pc_discard_batch(
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
     order = sorted(norm)
     joined = ",".join(order)
+    # The key (asks-b round 2, finding 1). Lock order: the players row
+    # (above), then the key, then the prints. The key's row may not exist
+    # yet, and no statement can lock a row that is not there (#207), so the
+    # key is first serialized on its VALUE -- a transaction-scoped advisory
+    # lock on (player, key), which exists before the row does -- and then
+    # its row, when committed, is read FOR NO KEY UPDATE (#202). Two first
+    # submissions of one key through this route cannot both find no row and
+    # both write one, and a key's answer never rests on a row another
+    # transaction may change under it. (The players-row lock above already
+    # serializes one player's batches; the key's own locks keep this rule
+    # from resting on that alone, and the primary key catches a writer that
+    # takes neither.)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(CAST(:k AS text), 0))"),
+                     {"k": "pc-shard-key:" + pid + ":" + key})
     prior = (await db.execute(text("""
         SELECT print_ids, prints, shards_gained FROM pc_shard_batches
          WHERE player_id = CAST(:pid AS uuid) AND batch_key = CAST(:key AS text)
+           FOR NO KEY UPDATE
     """), {"pid": pid, "key": key})).mappings().first()
     if prior is not None:
         if prior["print_ids"] != joined:
@@ -27228,10 +27249,19 @@ async def pc_discard_batch(
         UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer)
          WHERE id = CAST(:pid AS uuid) RETURNING pc_shards
     """), {"value": total, "pid": pid})).scalar_one()
-    await db.execute(text("""
+    # The primary key (player_id, batch_key) is the last line of defence:
+    # a row for this key that is there anyway (a writer outside the locks
+    # above) leaves nothing written here, and the whole batch -- discards,
+    # leases and credit -- rolls back with a 409, never a 500.
+    recorded = (await db.execute(text("""
         INSERT INTO pc_shard_batches (player_id, batch_key, print_ids, prints, shards_gained)
         VALUES (CAST(:pid AS uuid), CAST(:key AS text), CAST(:ids AS text), CAST(:n AS integer), CAST(:total AS integer))
-    """), {"pid": pid, "key": key, "ids": joined, "n": len(order), "total": total})
+        ON CONFLICT (player_id, batch_key) DO NOTHING
+        RETURNING batch_key
+    """), {"pid": pid, "key": key, "ids": joined, "n": len(order), "total": total})).scalar_one_or_none()
+    if recorded is None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "key_reused"})
     await db.commit()
     print(f"[PC-DISCARD-BATCH] player={steam_id} key={key} prints={len(order)} shards=+{total} balance={shards}")
     return {"status": "discarded", "replayed": False, "key": key, "prints": len(order), "shards_gained": total,
