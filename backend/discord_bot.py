@@ -9067,15 +9067,18 @@ async def _pc_buy_player(ctx, me):
     once when a purchase is first sent, so the journal can name the player
     the purchase is for; None after telling the caller why no purchase
     starts (not linked, or the link could not be read - nothing is sent to
-    the api then, so nothing was charged)."""
-    status, body = await _pc_api("GET", f"/players/by-discord/{me}")
-    steam = body.get("steam_id") if status == 200 and isinstance(body, dict) else None
+    the api then, so nothing was charged). The read is the account link
+    every linked-account command makes (/players/by-discord, through
+    _faq_discord_link, which tells a 404 from a failed read), not a Player
+    Cards call: every _pc_api call stays an internal Player Cards route."""
+    state, link = await _faq_discord_link(me)
+    steam = link.get("steam_id") if state == "ok" and isinstance(link, dict) else None
     if isinstance(steam, str) and steam:
         return steam
-    if status == 404:
+    if state == "unlinked":
         await ctx.send(_pc_not_linked(ctx, ctx.author))
     else:
-        print(f"[PC-BUY] the player linked to a buyer could not be read (HTTP {status})")
+        print(f"[PC-BUY] the player linked to a buyer could not be read ({state})")
         await ctx.send(_PC_BUY_NO_PLAYER)
     return None
 

@@ -52,7 +52,7 @@ UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it
 OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_refusal", "_pc_open_and_show",
                                "_pc_reveal_opened", "cmd_pc_buypack", "_pc_open_verdict", "_pc_buy_pending",
                                "_pc_buy_pending_write", "_pc_buy_and_show", "_pc_buy_player",
-                               "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver"}
+                               "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver", "_faq_discord_link"}
 # _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
 # the test's own folder instead of the container's /opt/bot-state
 OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
