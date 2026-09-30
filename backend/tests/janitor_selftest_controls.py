@@ -75,7 +75,15 @@ L10 = T + "test_pg_a_semicolon_joined_two_command_statement_fails_and_never_exec
 L11 = T + "test_pg_the_semicolon_plants_one_command_control_executes_and_rolls_back"
 BUILD_SITE = "_JANITOR_SELFTEST_BUILD = 1\n"
 BUILD_ARG = "                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,\n"
-CACHED_ARM = "                              pc_trading=_pc_trading_word_cached(),\n"
+WORD_ARG = "                              janitor_selftest=_janitor_selftest_marker(),\n"
+# The two health_check arms pass the lane's two words as one contiguous pair
+# (BUILD_ARG then WORD_ARG) in both arms, so an arm-specific plant needs the line
+# that FOLLOWS the pair, which differs by arm: the connected arm passes the local
+# ffa_finishing_count, the degraded arm the cached _FFA_FINISHING_COUNT_LAST.
+# Anchoring on the line BEFORE the pair broke at the LAND merge of main cd8d846,
+# which put pc_motion there in both arms; --sites proves each needle once.
+CONNECTED_NEXT = "                              ffa_finishing_count=ffa_finishing_count,\n"
+CACHED_NEXT = "                              ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,\n"
 WORD_SITE = '    return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)\n'
 STANDBY_UPDATE_SITE = ('            _janitor_selftest_report.update({\n'
                        '                "status": "skipped",\n'
@@ -214,14 +222,10 @@ PLANTS = [
     {"name": "M16-word-dropped-from-the-connected-arm",
      "why": "the connected arm no longer passes the word: its answer cannot be built",
      "file": MAIN,
-     # Anchored on the word's own line and the connected arm's next keyword.
-     # Since the LAND merge of main 82c0da6 that is ffa_finishing_count, whose
-     # connected-arm value (the local ffa_finishing_count) differs from the
-     # degraded arm's (_FFA_FINISHING_COUNT_LAST), so the pair names the
-     # connected arm only; --sites proves it occurs exactly once.
-     "old": ("                              janitor_selftest=_janitor_selftest_marker(),\n"
-             "                              ffa_finishing_count=ffa_finishing_count,\n"),
-     "new": "                              ffa_finishing_count=ffa_finishing_count,\n",
+     # Anchored on the word's own line and the connected arm's next keyword
+     # (CONNECTED_NEXT, see its comment above); --sites proves it occurs once.
+     "old": WORD_ARG + CONNECTED_NEXT,
+     "new": CONNECTED_NEXT,
      "red": [L9, P8], "green": [P7]},
     {"name": "M17-schema-field-dropped",
      "why": "HealthResponse no longer declares the word: the payload drops the key",
@@ -242,9 +246,9 @@ PLANTS = [
     {"name": "M20-build-marker-reads-the-verdict",
      "why": "the connected arm reports the verdict word as the build marker: it then "
             "differs by role, the train's edge refusal (the negative control)",
-     "file": MAIN, "old": "                              pc_trading=await _pc_trading_word(db),\n" + BUILD_ARG,
-     "new": ("                              pc_trading=await _pc_trading_word(db),\n"
-             "                              janitor_selftest_build=_janitor_selftest_marker(),\n"),
+     "file": MAIN, "old": BUILD_ARG + WORD_ARG + CONNECTED_NEXT,
+     "new": ("                              janitor_selftest_build=_janitor_selftest_marker(),\n"
+             + WORD_ARG + CONNECTED_NEXT),
      "red": [L9, P9], "green": [P7, P8]},
     {"name": "T4-inert-twin-at-the-build-marker",
      "why": "the same constant, parenthesised: nothing may redden",
@@ -256,7 +260,7 @@ PLANTS = [
      "red": [L9, P9], "green": [P7, P8]},
     {"name": "M22-build-marker-dropped-from-the-degraded-arm",
      "why": "the degraded arm no longer passes the build marker: its answer cannot be built",
-     "file": MAIN, "old": CACHED_ARM + BUILD_ARG, "new": CACHED_ARM,
+     "file": MAIN, "old": BUILD_ARG + WORD_ARG + CACHED_NEXT, "new": WORD_ARG + CACHED_NEXT,
      "red": [L9, P8, P9], "green": [P7]},
     {"name": "M23-schema-build-field-dropped",
      "why": "HealthResponse no longer declares the build marker: the payload drops the key",
