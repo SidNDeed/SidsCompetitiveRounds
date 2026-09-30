@@ -1498,7 +1498,7 @@
           ],
           "main",
           "broadcast_report_status",
-          "c0d79b982337eac10bc4092c64af38a8430f478c"
+          "7065dd53413203f0b351584969ad39086985704e"
         ],
         [
           "/api/v1/broadcast/target",
@@ -2623,7 +2623,7 @@
           ],
           "main",
           "spectate_validate",
-          "393a448d62cc891599343a4bbba1be984201e4fa"
+          "a7bae8ab7443886565a92f28050f7ff996272376"
         ],
         [
           "/api/v1/team-bets",
