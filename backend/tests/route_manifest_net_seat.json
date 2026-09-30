@@ -160,7 +160,7 @@
           ],
           "main",
           "admin_grant_achievement",
-          "4c188c0b40ed7a3f047ac7dd85c1e879e3b50ee1"
+          "2cb3e04c2ebfe4e8504c3d4fa25e71d7044d5dc0"
         ],
         [
           "/api/v1/admin/i18n/grants",
@@ -367,7 +367,7 @@
           ],
           "main",
           "admin_resolve_team_series",
-          "ba7f98e3a36d0575b895522bd3b4f3924a5cf9ec"
+          "54f5244a3f018538ece67692b1e4d2317b67c222"
         ],
         [
           "/api/v1/admin/unban",
@@ -511,7 +511,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "5039e4c2e6e5fa8afe6c11aae167821705b5a02c"
+          "2fa68b13a3fbe6f20f7c262cf699554c2ed64c49"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -610,7 +610,7 @@
           ],
           "main",
           "submit_match",
-          "8accd4daee7672d2e6dcb1e6de72ec1e10abacd9"
+          "785ac438d72f851315c98150f64fc415005d6a45"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -1177,7 +1177,7 @@
           ],
           "main",
           "submit_team_match",
-          "4ff12330e3a6251ddcf369afcef919a13da8a54c"
+          "872c608d710a1d82acddc986427fd859017c4dc0"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "5e3777aa6c1c6191804a63bebb0d586478cb2baa"
+          "6b36477978ae7aed57b45b4c5f8c18858d1f85b6"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1273,7 +1273,7 @@
           ],
           "main",
           "get_achievement_definitions",
-          "1648052c7c3ae051996a7ac8f32dbdf825743c2b"
+          "7bbbea6216da9f22fd58204a33a6faad7a5d864f"
         ],
         [
           "/api/v1/achievements/unlock",
@@ -1282,7 +1282,7 @@
           ],
           "main",
           "unlock_achievement",
-          "bdf5e0e354b403297d586a9bab805fae8f7d9cc7"
+          "6bed1afb8bc8d0c250f9b47fb9a1d6e1cc1c4813"
         ],
         [
           "/api/v1/achievements/{key}/earners",
@@ -1291,7 +1291,7 @@
           ],
           "main",
           "get_achievement_earners",
-          "6c048b2f951f15a289a4f1d60c5048072e02c755"
+          "bc050cb28612d34320824c4d3fb5997f93f20bc8"
         ],
         [
           "/api/v1/achievements/{steam_id}",
@@ -1300,7 +1300,7 @@
           ],
           "main",
           "get_player_achievements",
-          "999aa26eec1233611fe450a9377f1e85ccbf097a"
+          "2ff5ee87ab2a2c572f0638121b051f8875c7e109"
         ],
         [
           "/api/v1/alerts/active",
@@ -1921,7 +1921,7 @@
           ],
           "main",
           "i18n_review",
-          "4ea9b8bc53324954292a898642734accf87d3a16"
+          "b65f4822a22a6df5d9836dbb2f85d999a6e87d45"
         ],
         [
           "/api/v1/internal/booster-grant",
@@ -3449,7 +3449,7 @@
       [
         "main",
         "lifespan",
-        "4e4a034202b7035d1a1230c7ed6b70d689750101"
+        "a8f786c914471aeb856f5bb60fc06d803cd9dbf2"
       ]
     ]
   },
