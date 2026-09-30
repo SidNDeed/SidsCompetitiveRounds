@@ -563,10 +563,10 @@ namespace CompetitiveRounds
 
             /// <summary>A read of the series `seriesId`, from either route
             /// ApiClient.ObserveSeriesStateAnswer is fed by: the lifecycle
-            /// team/series/{id}/state, or the read-only .../status, whose answer
-            /// carries the two win counts but not `relocked` or
-            /// `two_points_on_record`, so a status read is a read of the games
-            /// and never of the sitting.
+            /// team/series/{id}/state, or the read-only .../status. Both answers
+            /// carry the two win counts, and the win counts are all a read of
+            /// either route is taken for: the sitting keys (`relocked`,
+            /// `two_points_on_record`) are not read from either since round 11.
             /// `hasWins`: the answer carried both win counts (the canceled and
             /// dc_incomplete answers carry neither, and a missing field parses as
             /// 0, which is not a read). Never lowers what an earlier read showed.
