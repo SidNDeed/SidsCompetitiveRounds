@@ -44,7 +44,7 @@ FUNCS = {
     "_tsync_tally", "_tsync_tally_for", "_tsync_times", "_tsync_progress", "_tsync_rule",
     "_tsync_signups_open_text", "poll_tournaments", "_tavail_embed", "_ack_tournament_notices",
     "poll_tournament_notices", "_build_tournament_board_embed", "_publish_tournament_board",
-    "_faq_tournaments", "_faq_resolve_answer",
+    "_faq_tournaments", "_faq_resolve_answer", "_tavail_still_live",
 }
 ASSIGNS = {
     "ASYNC_DEADLINE_DAYS", "_TSYNC_VOTE_HOW", "_tournament_state", "_notified_completed",
@@ -81,6 +81,7 @@ class Api:
         self.watch = list(watch)
         self.notices = list(notices)
         self.acked = []
+        self.rechecks = []                    # the notice id of every pre-send read (round 4, fix 5)
         self.current_reads = []               # the query of every /tournaments/current read
 
     async def __call__(self, call):
@@ -98,7 +99,11 @@ class Api:
         if call.method == "GET" and path == "/tournaments/internal/watch":
             return H.Reply(200, json={"tournaments": self.watch})
         if call.method == "GET" and path == "/internal/tournament-notices":
-            return H.Reply(200, json={"notices": [n for n in self.notices if n["notice_id"] not in self.acked]})
+            live = [n for n in self.notices if n["notice_id"] not in self.acked]
+            if "notice_id" in query:
+                self.rechecks.append(query["notice_id"])
+                live = [n for n in live if n["notice_id"] == query["notice_id"]]
+            return H.Reply(200, json={"notices": live})
         if call.method == "POST" and path == "/internal/tournament-notices/ack":
             self.acked.extend(call.payload["notice_ids"])
             return H.Reply(200, json={"acked": len(call.payload["notice_ids"])})

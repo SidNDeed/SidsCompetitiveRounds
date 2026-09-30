@@ -12281,6 +12281,18 @@ async def _ack_tournament_notices(entries):
         print(f"[TAVAIL] ack error: {ex}")
 
 
+async def _tavail_still_live(nid):
+    """Discord fix round 4, fix 5 (Codex round 3 LOW 4): is availability
+    check `nid` still to be sent - its entrant still signed up and eligible,
+    the notice still unsent? The server's own answer: the notice feed of that
+    one notice (every condition of the feed applies). True / False; None when
+    the read got no usable answer (the notice is read again next tick)."""
+    data = await api_get(f"/internal/tournament-notices?unnotified=true&notice_id={urllib.parse.quote(str(nid))}")
+    if not isinstance(data, dict) or not isinstance(data.get("notices"), list):
+        return None
+    return any(isinstance(n, dict) and str(n.get("notice_id")) == str(nid) for n in data["notices"])
+
+
 @tasks.loop(seconds=30)
 async def poll_tournament_notices():
     """Own fully-guarded loop (learning #129 — never chained onto
@@ -12455,6 +12467,18 @@ async def poll_tournament_notices():
                 continue
             if user is None:
                 continue
+            if ntype == "availability_check":
+                # Round 4, fix 5: the feed's entrant check ran when the feed
+                # was read, and this tick has awaited the tally and the user
+                # since; ask the server again as the LAST step before the
+                # send, so an entrant who left or was banned meanwhile gets no
+                # DM. A refused or unanswered check sends and acks nothing.
+                live = await _tavail_still_live(nid)
+                if live is not True:
+                    print(f"[TAVAIL] availability check {nid} not sent: "
+                          + ("its entrant is no longer signed up and eligible" if live is False
+                             else "the pre-send check got no answer; read again next tick"))
+                    continue
             try:
                 # allowed_mentions on every send (#261) — the match-result
                 # embeds carry player-authored names.

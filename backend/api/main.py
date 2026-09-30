@@ -36979,6 +36979,7 @@ def _tournament_availability_live_sql():
 @app.get("/api/v1/internal/tournament-notices", tags=["Internal"])
 async def internal_tournament_notices(
     unnotified: bool = Query(True),
+    notice_id: str | None = Query(None, max_length=64),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -36988,11 +36989,23 @@ async def internal_tournament_notices(
     lookups. Durable ack pattern
     (learning #105) — ack via POST /internal/tournament-notices/ack after the
     DM lands (or is permanently undeliverable); transient failures don't ack
-    so the next tick retries. Rows are queued by tournament_tick."""
+    so the next tick retries. Rows are queued by tournament_tick.
+    `notice_id` (Discord fix round 4, fix 5; Codex round 3 LOW 4): the feed
+    of that one notice under every condition below. The bot reads it as the
+    last step before each availability-check DM - after it has built the
+    message and resolved the user - so a notice whose entrant left or was
+    banned since the feed was read is not sent."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     where = "tn.notified_at IS NULL" if unnotified else "TRUE"
+    one = {}
+    if notice_id is not None:
+        try:
+            one = {"nid": str(uuid.UUID(notice_id))}
+        except ValueError:
+            raise HTTPException(status_code=422, detail="bad notice_id")
+        where += " AND tn.id = CAST(:nid AS uuid)"
     live = _tournament_availability_live_sql()
     # A deadline row can sit between enqueue and poll while its match finishes
     # or gets extended. Revalidate the live match/deadline here so the delivery
@@ -37054,7 +37067,7 @@ async def internal_tournament_notices(
                )
            )
       ORDER BY tn.created_at ASC
-         LIMIT 20"""))).mappings().all()
+         LIMIT 20"""), one)).mappings().all()
     return {
         "notices": [
             {

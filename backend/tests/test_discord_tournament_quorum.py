@@ -439,3 +439,58 @@ def test_low5r4_the_queue_counts_and_queues_only_eligible_entrants(monkeypatch, 
                               " WHERE tournament_id = CAST(:t AS uuid)", {"t": tid})
         assert sorted(r["p"] for r in rows) == sorted(str(p.id) for i, p in enumerate(people) if i != 3), rows
     e2e(monkeypatch, tmp_path, body)
+
+
+# -- round 4, fix 5: the notice is re-validated at the send ------------------------------------------
+# Codex round 3 LOW 4: the api checked the signup while building the feed, and the bot then awaited the
+# tally and the user before sending the cached row. The bot now asks the server again as the last step
+# before each availability-check DM.
+
+def test_low4r4_an_unsignup_between_the_feed_read_and_the_send_gets_no_dm(monkeypatch, tmp_path):
+    """The reviewer's falsifier. Nine entrants agree on the slot and their
+    checks are queued; the bot reads the feed, and before it sends anything
+    one entrant leaves through the production unsignup route (committed);
+    the tick then runs on: the leaver gets no DM, the other eight get theirs,
+    and each DM's last request was that notice's own pre-send check. The
+    decisive line is the first assertion: without the check the stale row
+    was sent."""
+    async def body(env):
+        people = await entrants_of(env, 9)
+        tid, slot = await sync_tournament(env, people, 9)
+        await queue_notices(env)
+        leaver = people[2]
+        base = H.asgi_handler(env)
+        paused = {}
+
+        async def api(call):
+            reply = await base(call)
+            if (call.method == "GET" and call.path.startswith("/internal/tournament-notices?")
+                    and "notice_id=" not in call.path and not paused):
+                paused["at"] = call.path
+                r = await env.client.post(f"/api/v1/tournaments/{tid}/unsignup", json={"steam_id": leaver.steam},
+                                          headers=env.mod_headers(leaver))
+                assert r.status_code == 200, (r.status_code, r.text[:300])
+            return reply
+        rig = R.rig_for(api)
+        last = []
+        real_get_user = rig.client.get_user
+
+        def get_user(uid):
+            user = real_get_user(uid)
+            real_send = user.send
+
+            async def send(**kw):
+                last.append(rig.calls[-1].path)
+                return await real_send(**kw)
+            user.send = send
+            return user
+        rig.client.get_user = get_user
+        await tick(rig)
+        by_did = {str(p.discord): p.tag for p in people}
+        got = sorted(by_did.get(str(d.uid), f"?{d.uid}") for d in rig.client.dms)
+        assert leaver.tag not in got, f"the former entrant was sent the check: DMs to {got}"
+        assert got == sorted(p.tag for i, p in enumerate(people) if i != 2), got
+        assert len(last) == 8 and all("notice_id=" in p for p in last), last
+        checks = [c for c in rig.calls if "notice_id=" in c.path]
+        assert len(checks) == 9 and all(c.status == 200 for c in checks), [(c.path, c.status) for c in checks]
+    e2e(monkeypatch, tmp_path, body)
