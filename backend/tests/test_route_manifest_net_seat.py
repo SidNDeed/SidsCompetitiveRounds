@@ -1013,7 +1013,32 @@ def test_the_helper_closure_stays_affordable():
     # The bound moves to 88 -- ~6% over the measurement, the headroom the
     # moves above gave -- for that reason and no other; the median and
     # worst bounds stay.
-    assert code_p90 <= 88, f"p90 code closure {code_p90} of {total}"
+    #
+    # Connect-failure LAND, sitting 2, merge claude/janitor-selftest 17ca44d
+    # (main cd8d846, the dance cards) into the lane (2026-09-30): the same
+    # walk with the same route seeds over each tree's own backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   base 82c0da6                          377   21 / 82 / 326
+    #   lane e966ed7                          381   22 / 83 / 326
+    #   trunk 17ca44d                         382   22 / 83 / 326
+    #   merge c8ffa2f                         386   22 / 90 / 326
+    #
+    # Again the rank alone: at n = 386 the p90 is the 39th route from the
+    # top. The trunk's five dance motion routes (the motion PNG 285, the
+    # motion preview GIF 282, GET /api/v1/pc-face/motion 125, POST
+    # /api/v1/pc/portrait/motion 118, POST /api/v1/pc/dance 32) now sit in
+    # the ranking beside the lane's four (connect 268, assembly 266, release
+    # 93, POST /api/v1/admin/ffa-g3-seats 14): four of the trunk's five are
+    # above the lane's rank and three of the lane's four above the trunk's,
+    # and the route at the rank is now GET /api/v1/ovt/queue/poll/{steam_id}
+    # at 90 (90 on both sides), with the lane's release at 93 just above it.
+    # Checked route by route, every count at the merge is the trunk's plus
+    # the lane's minus the base's (or the one side's, for a route only one
+    # side has): the merge adds no binding of its own. The bound moves to 95,
+    # ~6% over the measurement, for that reason and no other; the median and
+    # worst bounds stay (22 against 24, 326 against 335).
+    assert code_p90 <= 95, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1151,7 +1176,27 @@ def test_the_helper_closure_stays_affordable():
     # model reaches. The bound moves to 177, ~6% over the measurement; the
     # median and worst bounds stay (the worst route measures 459 against
     # 460).
-    assert all_p90 <= 177, f"p90 closure {all_p90} of {total}"
+    #
+    # Connect-failure LAND, sitting 2, merge claude/janitor-selftest 17ca44d
+    # (main cd8d846) into the lane (2026-09-30), the same walk, whole
+    # closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   base 82c0da6                          377   75 / 165 / 459
+    #   lane e966ed7                          381   76 / 167 / 459
+    #   trunk 17ca44d                         382   76 / 167 / 459
+    #   merge c8ffa2f                         386   76 / 175 / 459
+    #
+    # The same rank effect: the trunk's five motion routes (397, 394, 216,
+    # 204, 100) and the lane's four (connect 379, assembly 377, release 153,
+    # admin G3 seats 55) are in one ranking, and the 39th from the top is
+    # POST /api/v1/admin/team/series/{series_id}/resolve at 175, 175 on both
+    # sides. Every count on a route both sides have is the trunk's plus the
+    # lane's minus the base's. The measurement is inside the old bound of
+    # 177 by 2; the bound moves to 185, ~6% over it, the headroom
+    # convention of every entry above; the median and worst bounds stay (76
+    # against 90, 459 against 460).
+    assert all_p90 <= 185, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
