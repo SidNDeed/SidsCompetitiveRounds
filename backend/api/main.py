@@ -36965,6 +36965,17 @@ async def internal_tournament_checkin_response(
     return result
 
 
+def _tournament_availability_live_sql():
+    """The condition (over a tournament_notices row aliased `tn`) under which
+    an availability check may still be delivered: its player is a current
+    ELIGIBLE entrant of its tournament - tournaments._ELIGIBLE_ENTRANT_SQL,
+    the quorum's one domain (Discord fix round 4, fix 4)."""
+    from tournaments import _ELIGIBLE_ENTRANT_SQL
+    return ("EXISTS (SELECT 1 FROM tournament_signups ts"
+            " WHERE ts.tournament_id = tn.tournament_id AND ts.player_id = tn.player_id"
+            f" AND {_ELIGIBLE_ENTRANT_SQL})")
+
+
 @app.get("/api/v1/internal/tournament-notices", tags=["Internal"])
 async def internal_tournament_notices(
     unnotified: bool = Query(True),
@@ -36982,6 +36993,7 @@ async def internal_tournament_notices(
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     where = "tn.notified_at IS NULL" if unnotified else "TRUE"
+    live = _tournament_availability_live_sql()
     # A deadline row can sit between enqueue and poll while its match finishes
     # or gets extended. Revalidate the live match/deadline here so the delivery
     # boundary never emits the now-stale prompt; hidden rows remain available
@@ -37005,15 +37017,14 @@ async def internal_tournament_notices(
           JOIN players p ON p.id = tn.player_id
           JOIN tournaments t ON t.id = tn.tournament_id
          WHERE {where}
-           -- An availability check goes only to a CURRENT entrant (Discord
-           -- fix round 3, item 4): the bot sends from this read, so a notice
-           -- that outlived its signup is never delivered. Unsignup also
-           -- deletes the unsent row; a re-signup re-arms this one.
+           -- An availability check goes only to a CURRENT ELIGIBLE entrant
+           -- (Discord fix round 3, item 4; round 4, fix 4: confirmed, no
+           -- active ban - the quorum's own domain): a notice that outlived
+           -- its signup, or whose entrant was banned, is never delivered.
+           -- Unsignup also deletes the unsent row; a re-signup re-arms it.
            AND (
                tn.notice_type <> 'availability_check'
-               OR EXISTS (SELECT 1 FROM tournament_signups ts
-                           WHERE ts.tournament_id = tn.tournament_id
-                             AND ts.player_id = tn.player_id)
+               OR {live}
            )
            AND (
                tn.notice_type <> 'deadline_checkin'

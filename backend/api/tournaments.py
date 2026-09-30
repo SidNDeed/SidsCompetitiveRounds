@@ -3289,7 +3289,12 @@ async def _queue_availability_notices(db: AsyncSession) -> None:
     a no-op. Guards: never queued under 24h out (too late to be actionable —
     a player who never got one because signups filled late just gets the
     existing lock DM), never for tournaments outside 'voting', never under
-    quorum."""
+    quorum. Round 4, fix 4 (Codex round 3 LOW 5): the quorum and the
+    recipients are the eligible entrants (_ELIGIBLE_ENTRANT_SQL: confirmed,
+    no active ban), so a banned entrant is never queued, and an entrant who
+    becomes eligible later is queued by the next tick (ON CONFLICT keeps
+    every row already queued). The notice feed re-checks the same predicate
+    at delivery (main.py internal_tournament_notices)."""
     now = datetime.now(timezone.utc)
     ts = (await db.execute(
         select(Tournament).where(Tournament.status == "voting")
@@ -3301,8 +3306,7 @@ async def _queue_availability_notices(db: AsyncSession) -> None:
         hours_until = (anchor - now).total_seconds() / 3600.0
         if not (24.0 <= hours_until <= 96.0):
             continue
-        confirmed = await _confirmed_count(db, t.id)
-        if confirmed < t.min_players:
+        if len(await _eligible_entrant_ids(db, t.id)) < t.min_players:
             continue
         payload = json.dumps({
             "kind": t.kind,
@@ -3316,7 +3320,7 @@ async def _queue_availability_notices(db: AsyncSession) -> None:
             "INSERT INTO tournament_notices (tournament_id, player_id, notice_type, payload) "
             "SELECT ts.tournament_id, ts.player_id, 'availability_check', :payload "
             "  FROM tournament_signups ts "
-            " WHERE ts.tournament_id = :tid AND ts.is_speculative = FALSE "
+            f" WHERE ts.tournament_id = :tid AND {_ELIGIBLE_ENTRANT_SQL} "
             "ON CONFLICT (tournament_id, player_id, notice_type) DO NOTHING"
         ), {"payload": payload, "tid": t.id})
 

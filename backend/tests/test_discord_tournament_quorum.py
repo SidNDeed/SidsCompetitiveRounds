@@ -185,7 +185,7 @@ def test_item3_eight_votes_with_one_active_ban_read_7_of_8_on_every_surface(monk
         assert not [c for c in rig.calls if c.path == "/internal/tournament-notices/ack"]
         queued = await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.tournament_notices WHERE tournament_id = CAST(:t AS uuid)"
                                " AND notified_at IS NULL", {"t": tid})
-        assert queued == 9
+        assert queued == 8   # round 4, fix 4: the banned entrant is never queued
         status, start = await lock(env, tid)
         assert (status, start) == ("voting", None), (status, start)
         kept = await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.tournament_signups WHERE tournament_id = CAST(:t AS uuid)"
@@ -200,19 +200,22 @@ def test_item3_eight_votes_with_one_active_ban_read_7_of_8_on_every_surface(monk
 def test_item3_an_eighth_eligible_vote_reaches_the_quorum_on_every_surface(monkeypatch, tmp_path):
     """The same field, and a ninth entrant, not banned, signs up and votes for
     the slot: every surface reads 8 - the tally, the agreement, the bot's DMs
-    (the queued notices go out, naming the slot) - and the lock takes it."""
+    (the queued notices go out, naming the slot, to exactly the eight eligible
+    entrants since round 4, fix 4) - and the lock takes it."""
     async def body(env):
         people = await entrants_of(env, 9)
         tid, slot = await sync_tournament(env, people[:8], 8)
         await env.ban(people[3])
         await queue_notices(env)
         await vote(env, tid, people[8], slot)
+        await queue_notices(env)   # the next tick's queueing (round 4, fix 4: seven eligible queued nothing)
         unix = int(slot.timestamp())
         assert tallies_of(await current(env, people[0])) == [(unix, 8)]
         assert await agreement(env, tid) is True
         rig = bot_over(env)
         await tick(rig)
-        assert len(rig.client.dms) == 8, [d.uid for d in rig.client.dms]
+        by_did = {str(p.discord): i for i, p in enumerate(people)}
+        assert sorted(by_did.get(str(d.uid), -1) for d in rig.client.dms) == [0, 1, 2, 4, 5, 6, 7, 8],             [d.uid for d in rig.client.dms]
         assert {d.content for d in rig.client.dms} == {
             f"Are you still available to play in the **Synchronized tournament** at <t:{unix}:F>?"}
         status, start = await lock(env, tid)
@@ -385,4 +388,54 @@ def test_low3r4_the_eligible_entrants_are_the_confirmed_unbanned_ones(monkeypatc
         tid, slot, people = await field_with_a_speculative_entrant(env)
         got = await in_app(env, lambda db, T: T._eligible_entrant_ids(db, tid))
         assert {str(p) for p in got} == {str(p.id) for p in people[9:16]}, got
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- round 4, fix 4: availability notices go to exactly the eligible entrants ------------------------
+# Codex round 3 LOW 5: the queue counted and queued every confirmed signup, banned ones included, and
+# the feed's re-check tested the signup's existence only. Both now read the one eligibility predicate.
+
+def test_low5r4_the_notices_reach_the_eligible_entrants_the_banned_one_absent_the_replacement_present(
+        monkeypatch, tmp_path):
+    """The reviewer's falsifier with exact recipients. Eight confirmed entrants
+    vote for the slot and their checks are queued; one is banned; a ninth
+    entrant signs up and supplies the eighth eligible vote; the tick queues
+    again (as tournament_tick does every 30 s). The DMs go to exactly the
+    seven unbanned originals and the replacement - the banned entrant gets
+    none. The decisive line is the assertion: without the predicate in the
+    feed the banned entrant was sent the check."""
+    async def body(env):
+        people = await entrants_of(env, 9)
+        tid, slot = await sync_tournament(env, people[:8], 8)
+        await queue_notices(env)
+        await env.ban(people[3])
+        await vote(env, tid, people[8], slot)
+        await queue_notices(env)
+        assert await env.val(AVAIL_UNSENT, {"t": tid, "p": people[8].id}) == 1, "the replacement has no check queued"
+        rig = bot_over(env)
+        await tick(rig)
+        by_did = {str(p.discord): p.tag for p in people}
+        got = sorted(by_did.get(str(d.uid), f"?{d.uid}") for d in rig.client.dms)
+        want = sorted(p.tag for i, p in enumerate(people) if i != 3)
+        assert got == want, f"DMs to {got}"
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_low5r4_the_queue_counts_and_queues_only_eligible_entrants(monkeypatch, tmp_path):
+    """Eight confirmed entrants, one banned before the first queueing: seven
+    eligible is under the quorum, so nothing is queued; a ninth, eligible,
+    entrant makes eight and the next queueing queues exactly those eight."""
+    async def body(env):
+        people = await entrants_of(env, 9)
+        tid, slot = await sync_tournament(env, people[:8], 8)
+        await env.ban(people[3])
+        await queue_notices(env)
+        unsent = (f"SELECT COUNT(*) FROM {SCHEMA}.tournament_notices WHERE tournament_id = CAST(:t AS uuid)"
+                  " AND notice_type = 'availability_check' AND notified_at IS NULL")
+        assert await env.val(unsent, {"t": tid}) == 0, "checks queued under the eligible quorum"
+        await vote(env, tid, people[8], slot)
+        await queue_notices(env)
+        rows = await env.rows(f"SELECT player_id::text AS p FROM {SCHEMA}.tournament_notices"
+                              " WHERE tournament_id = CAST(:t AS uuid)", {"t": tid})
+        assert sorted(r["p"] for r in rows) == sorted(str(p.id) for i, p in enumerate(people) if i != 3), rows
     e2e(monkeypatch, tmp_path, body)
