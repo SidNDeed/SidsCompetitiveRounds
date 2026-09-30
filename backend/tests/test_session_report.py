@@ -2070,7 +2070,9 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
     assert "ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING" in val
     # Round 4 LOW 1: the binding and the grant share one savepoint, and ok is
     # answered only after both, outside the handler that drops the lease on
-    # any failure of either - so ok=True always carries a durable grant.
+    # any failure of either - so ok=True to a request that carried its
+    # observed tuple always carries a durable grant (round 5 MEDIUM 1: the
+    # released request shape records no watch; see the test below).
     bind = val.index("UPDATE spectate_leases SET bound_actor = :actor")
     ins = val.index("INSERT INTO spectate_watch_grants")
     sp = val.rindex("async with db.begin_nested():", 0, bind)
@@ -2106,6 +2108,53 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
                          "TRUNCATE SPECTATE_WATCH_GRANTS", "DROP TABLE IF EXISTS SPECTATE_WATCH_GRANTS",
                          "DROP TABLE SPECTATE_WATCH_GRANTS"):
                 assert verb not in low, (f.name, verb)
+
+
+def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
+    """Round 5 MEDIUM 1, the source half (the PG tests execute it): the
+    validation route compares the master's observed tuple with the live row
+    it read under the room lock BEFORE any write of the request (drains,
+    tombstone clearance, the lease sweep, bindings, grants), and on a
+    mismatch rolls back and answers the typed retry result; the grant insert
+    runs only for a request that carried a tuple. The client sends the tuple
+    it reads with its snapshot, derived by the same two helpers as its
+    attest, and handles the retry before the results are parsed (so no kick
+    and no roster publish), re-snapshotting a bounded number of times."""
+    val = " ".join(inspect.getsource(main.spectate_validate).split())
+    lock = val.index("SELECT pg_advisory_xact_lock(hashtext(:k))")
+    read = val.index("FROM spectate_games WHERE room_name = :room AND ended_at IS NULL")
+    check = val.index("if records_watch and not _spectate_observed_tuple_is_live( game, req.observed_mode, "
+                      "req.observed_roster): await db.rollback() return {\"status\": \"retry\", "
+                      "\"reason\": \"participants_changed\", \"results\": []}")
+    assert lock < read < check
+    for write in ("await _spectate_record_drains(db, game)", "DELETE FROM spectate_drain_tombstones",
+                  "DELETE FROM spectate_leases", "UPDATE spectate_leases", "INSERT INTO spectate_watch_grants"):
+        assert val.index(write) > check, write
+    assert val.count("records_watch = req.observed_mode is not None") == 1
+    assert val.count("if lease is not None and records_watch: await db.execute(text(\"\"\" "
+                     "INSERT INTO spectate_watch_grants") == 1
+    # the comparison: the mode and the fighter set of the live row, nothing looser
+    cmp_src = " ".join(inspect.getsource(main._spectate_observed_tuple_is_live).split())
+    assert "observed_mode == game[\"mode\"]" in cmp_src
+    assert "seen == sorted(set(_spectate_roster_list(game[\"roster\"])))" in cmp_src
+    fields = main.SpectateValidateBody.model_fields
+    assert fields["observed_mode"].default is None and fields["observed_roster"].default is None
+
+    api = strip_comments_only((PLUGIN / "ApiClient.cs").read_text(encoding="utf-8"))
+    body = _cs_body(PLUGIN / "ApiClient.cs", "private static void SpectateValidateActors(int attempt)")
+    assert "GameStateWatcher.SpectateModeOfRoomPrefix(roomAtSend)" in body
+    assert "GameStateWatcher.SpectateFighterIds(RoomActors.ActiveFighters())" in body
+    assert '\\"observed_mode\\":' in body and '\\"observed_roster\\":' in body
+    retry = body.index('if (ExtractJsonString(resp, "status") == "retry")')
+    assert retry < body.index('int arr = resp.IndexOf("\\"results\\"", StringComparison.Ordinal);')
+    assert body.count("if (attempt < SPECTATE_VALIDATE_RETRY_MAX)") == 1
+    assert body.count("SpectateValidateRetryAfter(attempt + 1, roomAtSend)") == 1
+    assert re.search(r"internal const int SPECTATE_VALIDATE_RETRY_MAX = [1-5];", api)
+    assert "public static void SpectateValidateActors() { SpectateValidateActors(0); }" in api
+    tick = _cs_body(PLUGIN / "GameStateWatcher.cs", "private static void TickSpectateAttest()")
+    assert tick.count("string mode = SpectateModeOfRoomPrefix(room);") == 1
+    assert tick.count("var sids = SpectateFighterIds(fighters);") == 1
+    assert "sids.Sort(" not in tick and "StartsWith(\"team_\"" not in tick, "one derivation, shared"
 
 
 # -- board row 30g: the broadcaster pages through the session report ------------

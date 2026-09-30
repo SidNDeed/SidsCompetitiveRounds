@@ -12,7 +12,11 @@
 -- One row per (spectate game, spectator steam id, mode, source, roster) that
 -- a master validation observed: the validation route writes it whenever a
 -- validation binds that spectator's lease to an actor (the lease was
--- validated as OBSERVED in the room), as INSERT ... ON CONFLICT DO NOTHING,
+-- validated as OBSERVED in the room) AND the request carried the participant
+-- tuple the master read with that spectator snapshot, verified equal to the
+-- live room row under the room lock (round 5 MEDIUM 1: a request whose tuple
+-- differs writes nothing and is answered retry; the released clients' shape,
+-- which carries no tuple, records no watch), as INSERT ... ON CONFLICT DO NOTHING,
 -- so a room whose roster or source changes while the seat watches (a code
 -- room where one fighter is replaced, an FFA lobby losing a member) leaves
 -- one row per tuple the seat was observed under, and a repeated validation

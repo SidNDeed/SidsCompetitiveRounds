@@ -1944,6 +1944,15 @@ class SpectateValidateBody(BaseModel):
     steam_id: str = Field(min_length=1, max_length=32)
     room_name: str = Field(min_length=1, max_length=64)
     spectators: list[SpectateValidateEntry] = Field(default_factory=list, max_length=8)
+    # Session report round 5 MEDIUM 1: the participant tuple the master read
+    # from its own room when it took this spectator inventory - the room's
+    # mode and its fighters' steam ids, sorted and comma-joined exactly as
+    # its attest sends them. The route grants a watch only when this tuple is
+    # the live room row's under the room lock. Both absent is the request
+    # shape of every released client (1.40.3 and earlier): it is answered as
+    # before, and writes no grant. One without the other is refused (422).
+    observed_mode: str | None = Field(default=None, min_length=3, max_length=8)
+    observed_roster: str | None = Field(default=None, max_length=400)
 
 
 class AllowSpectatorsBody(BaseModel):

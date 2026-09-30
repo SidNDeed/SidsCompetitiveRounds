@@ -25042,8 +25042,31 @@ namespace CompetitiveRounds
         /// each claimed spectator actor holds a live lease for THIS room.
         /// Invalid actors are kicked; valid names are published as a room
         /// property for the roster display (names only — no credentials).
-        /// Called on spectator entry and from the periodic attest ticker.</summary>
-        public static void SpectateValidateActors()
+        /// Called on spectator entry and from the periodic attest ticker.
+        /// Session report round 5 MEDIUM 1: the request also carries the
+        /// participant tuple this master reads with the spectator snapshot
+        /// (observed_mode, observed_roster, derived as the attest derives
+        /// them); the server records a watch only when that tuple is still
+        /// the live room row's, and otherwise answers status "retry", on
+        /// which the master takes a fresh snapshot and sends again, at most
+        /// SPECTATE_VALIDATE_RETRY_MAX times.</summary>
+        public static void SpectateValidateActors() { SpectateValidateActors(0); }
+
+        internal const int SPECTATE_VALIDATE_RETRY_MAX = 3;
+        internal const float SPECTATE_VALIDATE_RETRY_DELAY_S = 2f;
+
+        private static IEnumerator SpectateValidateRetryAfter(int attempt, string room)
+        {
+            yield return new WaitForSecondsRealtime(SPECTATE_VALIDATE_RETRY_DELAY_S);
+            try
+            {
+                if (string.Equals(Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "", room, StringComparison.Ordinal))
+                    SpectateValidateActors(attempt);
+            }
+            catch { }
+        }
+
+        private static void SpectateValidateActors(int attempt)
         {
             try
             {
@@ -25056,11 +25079,24 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(SteamAuth.SessionToken)) return;
 
                 string roomAtSend = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
+                // The participant tuple of THIS snapshot (round 5 MEDIUM 1):
+                // the mode the room's prefix names (a room with none is a
+                // code room, spectatable only as a 1v1) and the fighters'
+                // ids in the attest's canonical order. With no fighter id to
+                // report, the old request shape goes out: the seats are still
+                // validated, and no watch is recorded.
+                string seenMode = GameStateWatcher.SpectateModeOfRoomPrefix(roomAtSend);
+                if (seenMode.Length == 0) seenMode = "1v1";
+                string seenRoster = string.Join(",",
+                    GameStateWatcher.SpectateFighterIds(RoomActors.ActiveFighters()).ToArray());
                 var sb = new StringBuilder();
                 sb.Append('{')
                   .Append($"\"steam_id\":\"{Escape(sid)}\",")
-                  .Append($"\"room_name\":\"{Escape(roomAtSend)}\",")
-                  .Append("\"spectators\":[");
+                  .Append($"\"room_name\":\"{Escape(roomAtSend)}\",");
+                if (seenRoster.Length > 0)
+                    sb.Append($"\"observed_mode\":\"{Escape(seenMode)}\",")
+                      .Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");
+                sb.Append("\"spectators\":[");
                 bool first = true;
                 for (int i = 0; i < specs.Length; i++)
                 {
@@ -25087,6 +25123,23 @@ namespace CompetitiveRounds
                         {
                             if (!string.Equals(Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "", roomAtSend, StringComparison.Ordinal))
                                 return;
+                        }
+                        catch { return; }
+                        // Round 5 MEDIUM 1: the room's participants changed
+                        // between this snapshot and the server's read. Nothing
+                        // was validated and nothing is rejected - no kick, no
+                        // roster publish (its results are empty) - and a
+                        // fresh snapshot goes out after a short delay, a
+                        // bounded number of times; the periodic tick after
+                        // that is the next attempt.
+                        try
+                        {
+                            if (ExtractJsonString(resp, "status") == "retry")
+                            {
+                                if (attempt < SPECTATE_VALIDATE_RETRY_MAX)
+                                    Plugin.Instance.StartCoroutine(SpectateValidateRetryAfter(attempt + 1, roomAtSend));
+                                return;
+                            }
                         }
                         catch { return; }
                         try

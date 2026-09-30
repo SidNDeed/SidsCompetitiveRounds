@@ -1455,6 +1455,40 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The spectate mode a room's name prefix names ("" for a
+        /// name with none: a code room, which attests as 1v1 only while
+        /// RankedCodeRoom1v1InProgress). Shared by the attest ticker and the
+        /// master's spectator validation (session report round 5 MEDIUM 1),
+        /// so the tuple a validation reports observing is derived exactly as
+        /// the attest that wrote the room row derived it.</summary>
+        internal static string SpectateModeOfRoomPrefix(string room)
+        {
+            room = room ?? "";
+            return room.StartsWith("ranked_", StringComparison.Ordinal) ? "1v1"
+                : room.StartsWith("sct-", StringComparison.Ordinal) ? "1v1"
+                : room.StartsWith("team_", StringComparison.Ordinal) ? "2v2"
+                : room.StartsWith("ovt_", StringComparison.Ordinal) ? "1v2"
+                : room.StartsWith("ffa_", StringComparison.Ordinal) ? "ffa"
+                : "";
+        }
+
+        /// <summary>The fighters' steam ids in the canonical roster order:
+        /// sorted ordinal, so every fighter produces the identical byte
+        /// sequence (design section 6.3). Shared by the attest ticker and the
+        /// master's spectator validation (session report round 5 MEDIUM 1).</summary>
+        internal static List<string> SpectateFighterIds(Photon.Realtime.Player[] fighters)
+        {
+            var sids = new List<string>(fighters != null ? fighters.Length : 0);
+            if (fighters == null) return sids;
+            foreach (var f in fighters)
+            {
+                var s = RoomActors.SteamIdOf(f);
+                if (!string.IsNullOrEmpty(s)) sids.Add(s);
+            }
+            sids.Sort(StringComparer.Ordinal);
+            return sids;
+        }
+
         private static void TickSpectateAttest()
         {
             try
@@ -1472,13 +1506,7 @@ namespace CompetitiveRounds
                 // room fallback trust). Seat reservation needs no bump here:
                 // the QueueJoiner creates every sct- room with
                 // fighterTarget + SEAT_CAP MaxPlayers like the queue rooms.
-                string mode =
-                    room.StartsWith("ranked_", StringComparison.Ordinal) ? "1v1"
-                    : room.StartsWith("sct-", StringComparison.Ordinal) ? "1v1"
-                    : room.StartsWith("team_", StringComparison.Ordinal) ? "2v2"
-                    : room.StartsWith("ovt_", StringComparison.Ordinal) ? "1v2"
-                    : room.StartsWith("ffa_", StringComparison.Ordinal) ? "ffa"
-                    : "";
+                string mode = SpectateModeOfRoomPrefix(room);
                 bool codeRoom = false;
                 if (mode.Length == 0)
                 {
@@ -1564,15 +1592,7 @@ namespace CompetitiveRounds
                 }
                 else target = 2;
 
-                var sids = new List<string>(fighters.Length);
-                foreach (var f in fighters)
-                {
-                    var s = RoomActors.SteamIdOf(f);
-                    if (!string.IsNullOrEmpty(s)) sids.Add(s);
-                }
-                // Canonical roster string: sorted ordinal — every fighter must
-                // produce the identical byte sequence (design §6.3).
-                sids.Sort(StringComparer.Ordinal);
+                var sids = SpectateFighterIds(fighters);
                 if (sids.Count != target) return;   // roster incomplete — nothing to attest yet
 
                 // Roster-freeze catch-up: code rooms never pass the

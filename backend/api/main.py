@@ -58528,6 +58528,19 @@ def _spectate_roster_list(roster: str) -> list:
     return [s for s in (roster or "").split(",") if s]
 
 
+def _spectate_observed_tuple_is_live(game, observed_mode: str, observed_roster: str) -> bool:
+    """Session report round 5 MEDIUM 1: True when the participant tuple a
+    master observed with its spectator inventory is the live spectate game
+    row's own: the same mode and the same set of fighter steam ids. The row
+    holds its roster canonical (sorted, distinct: the attest refuses any
+    other), and the master sends it built the way its attest builds it, so
+    the comparison is of the distinct sorted ids of both; an empty observed
+    roster matches nothing."""
+    seen = sorted(set(_spectate_roster_list(observed_roster)))
+    return bool(seen) and observed_mode == game["mode"] \
+        and seen == sorted(set(_spectate_roster_list(game["roster"])))
+
+
 async def _spectate_mandatory_class(db: AsyncSession, game) -> str:
     """Classify only an exact, live sync-tournament room binding as mandatory."""
     # DEPLOY GATE: Sid sign-off required (async tournament narrowing)
@@ -60254,6 +60267,24 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
         raise HTTPException(status_code=403, detail="not_a_participant")
     await _assert_no_service_subject(
         db, affected_steam_ids=_spectate_roster_list(game["roster"]))
+    # Session report round 5 MEDIUM 1: the spectator inventory below and the
+    # tuple a grant records must belong to ONE observation. The master sends
+    # the participant tuple it read with the inventory (observed_mode,
+    # observed_roster); a participant attest may have rewritten the live row
+    # in place since then (a delayed request, a fighter replaced), so the
+    # tuple is compared here, under the room lock the attest also takes,
+    # with the row this request just read. A mismatch writes nothing - no
+    # drain, no sweep, no binding, no grant - and answers the typed retry
+    # result; the master re-snapshots and sends again (bounded, client side).
+    # Absent (every released client) keeps the old answer and writes no
+    # grant: that request carries no observation to record.
+    if (req.observed_mode is None) != (req.observed_roster is None):
+        raise HTTPException(status_code=422, detail="observed_tuple_incomplete")
+    records_watch = req.observed_mode is not None
+    if records_watch and not _spectate_observed_tuple_is_live(
+            game, req.observed_mode, req.observed_roster):
+        await db.rollback()
+        return {"status": "retry", "reason": "participants_changed", "results": []}
     observed_sids = {entry.steam_id for entry in req.spectators[:8] if entry.steam_id}
 
     # Materialize every authorization-ended current-row actor as a durable
@@ -60307,12 +60338,17 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
             # reach it: spectate_watch_grants (migration 364), one immutable
             # row per game, spectator and (mode, source, roster) tuple - the
             # tuple of the room row this request read under the room's lock -
-            # the entitlement the broadcast seat's report reads rest on. The
-            # binding and the grant share ONE savepoint, so an answer of
-            # ok=True always carries a durable grant: when the grant insert
-            # fails (a transient error, or the API deployed before 364) the
-            # binding rolls back with it and this actor is answered ok=False,
-            # exactly as a failed binding is.
+            # the entitlement the broadcast seat's report reads rest on.
+            # Round 5 MEDIUM 1: the grant is written only by a request that
+            # carried the tuple it observed (records_watch), already proven
+            # above to be the row's; the old request shape binds and answers
+            # as it always did and records no watch, so its ok=True carries
+            # no grant (that seat's report is refused: fail closed). For a
+            # request that carried its tuple, the binding and the grant share
+            # ONE savepoint, so its answer of ok=True always carries a durable
+            # grant: when the grant insert fails (a transient error, or the
+            # API deployed before 364) the binding rolls back with it and
+            # this actor is answered ok=False, exactly as a failed binding is.
             lease = None
             try:
                 async with db.begin_nested():
@@ -60327,7 +60363,7 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                     """), {"gid": str(game["id"]), "sid": entry.steam_id,
                            "actor": entry.actor_number,
                            "pmin": max(int(game.get("protocol_min") or 1), SPECTATE_PROTOCOL)})).first()
-                    if lease is not None:
+                    if lease is not None and records_watch:
                         await db.execute(text("""
                             INSERT INTO spectate_watch_grants
                                 (game_id, spectator_steam_id, mode, source_ref, roster,

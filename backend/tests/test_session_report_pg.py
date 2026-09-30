@@ -1022,7 +1022,17 @@ class _LiveWatch:
     minutes before `game_key`'s end, and a live, unbound lease of `seat` on
     it; validate(...) is A (a fighter of the room) validating the listed
     spectators through POST /api/v1/spectate/validate, status() the seat's
-    GET /api/v1/broadcast/report-status for the game."""
+    GET /api/v1/broadcast/report-status for the game.
+
+    Round 5 MEDIUM 1: a validation carries the participant tuple the master
+    observed with its snapshot. validate(observed) sends the tuple of the
+    live row at the moment of the call (a master whose snapshot is current);
+    validate(observed, seen=w.snapshot()) sends a snapshot taken earlier (a
+    delayed request); seen=OLD_SHAPE sends the released clients' shape, with
+    no tuple at all. attest(key, roster) is fighter `key`'s participant
+    attest of the room, the route that rewrites the live row in place."""
+
+    OLD_SHAPE = object()
 
     def __init__(self, seat, game_key):
         (_m, self.end, _s), = _facts(game_key)
@@ -1043,10 +1053,29 @@ class _LiveWatch:
                 await conn.close()
         asyncio.run(_setup())
 
-    def validate(self, observed):
+    def snapshot(self):
+        """The participant tuple A's room shows now: the live row's mode and
+        roster (what the room's fighters last attested)."""
+        return (_lab_sql("SELECT mode FROM spectate_games WHERE id = $1", self.wid),
+                _lab_sql("SELECT roster FROM spectate_games WHERE id = $1", self.wid))
+
+    def validate(self, observed, seen=None):
+        tup = {}
+        if seen is not self.OLD_SHAPE:
+            mode, roster = seen if seen is not None else self.snapshot()
+            tup = {"observed_mode": mode, "observed_roster": roster}
         body = main.SpectateValidateBody(steam_id=STEAM["A"], room_name=self.room,
-                                         spectators=[{"actor_number": 3, "steam_id": s} for s in observed])
+                                         spectators=[{"actor_number": 3, "steam_id": s} for s in observed],
+                                         **tup)
         return _lab_call(lambda db: main.spectate_validate(body, request=None, db=db))
+
+    def attest(self, key, roster):
+        body = main.SpectateAttestBody(steam_id=STEAM[key], mode="1v1", room_name=self.room, actor_number=2,
+                                       fighter_target=2, phase="battle", roster=roster)
+        return _lab_call(lambda db: main.spectate_participant_attest(body, request=None, db=db))
+
+    def bound(self):
+        return _lab_sql("SELECT bound_actor FROM spectate_leases WHERE game_id = $1", self.wid)
 
     def status(self):
         return _lab_call(lambda db: main.broadcast_report_status(request=None, steam_id=self.seat,
@@ -1226,6 +1255,95 @@ def test_report_status_answers_the_granted_tuple_after_the_room_changes(lab, sea
     assert _refused(seat, viewer=STEAM["A"], match=ID["KC"]) == (404, "not_found")
     assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
     assert [(r["mode"], r["roster"]) for r in w.status()] == [("1v1", ac)], "control: the latest grant"
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
+# -- round 5 MEDIUM 1: the inventory and the granted tuple are one observation ---
+
+def test_a_delayed_validation_grants_no_tuple_the_master_never_observed(lab, seat):
+    """Round 5 MEDIUM 1, the reviewer's falsifier, through the routes. Master
+    A snapshots its room while it is A-B (sourceless 1v1 around K1): the seat
+    is in the inventory, and A-B is the tuple the snapshot carries. Before
+    that request reaches the server, a same-room participant attest (C, the
+    replacement fighter) rewrites the live row to A-C. The delayed validation
+    then arrives: it is answered with the typed retry result and writes
+    nothing - no grant of any tuple for the seat (so no A-C grant), and the
+    lease is not bound - and A's game against C (KC, inside the window) is
+    refused to the seat. Controls: the attest did rewrite the row; KC ends
+    inside the window; A's own request for KC is served."""
+    (_m, k1_end, _s), (_m2, kc_end, _s2) = _facts("K1", "KC")
+    assert _inside(kc_end, k1_end), "control: KC ends inside the room's window"
+    w = _LiveWatch(seat, "K1")
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+    ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
+    snap = w.snapshot()
+    assert snap == ("1v1", ab)
+    assert w.attest("C", ac) == {"status": "ok"}
+    assert w.snapshot() == ("1v1", ac), "control: the attest rewrote the live row in place"
+    got = w.validate([seat], seen=snap)
+    assert got == {"status": "retry", "reason": "participants_changed", "results": []}, got
+    assert w.grants() == 0, "no grant of any tuple for the seat"
+    assert _lab_sql("SELECT count(*) FROM spectate_watch_grants WHERE game_id = $1 AND spectator_steam_id = $2"
+                    " AND roster = $3", w.wid, seat, ac) == 0, "no A-C grant"
+    assert w.bound() is None, "the mismatched request bound nothing"
+    assert w.status() == []
+    assert _refused(seat, viewer=STEAM["A"], match=ID["KC"]) == (404, "not_found")
+    assert _games(_report("A", match=ID["KC"])), "control: A's own request is served"
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
+def test_a_validation_whose_observed_tuple_is_live_records_that_tuple(lab, seat):
+    """Round 5 MEDIUM 1, the negative control on the verifying comparison: a
+    validation whose snapshot tuple IS the live row's is answered ok and
+    records exactly that tuple. The room is A-B; the master's current
+    snapshot validates the seat (ok, bound, one A-B grant); C's attest makes
+    the room A-C and the master's fresh snapshot (the client's retry) is
+    answered ok and records A-C. The comparison is of the fighters as a set
+    (an unsorted observed roster of the same ids matches); a tuple of the
+    wrong mode, or an empty roster, does not."""
+    w = _LiveWatch(seat, "K1")
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+    ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
+    assert w.validate([seat], seen=("2v2", ab))["status"] == "retry", "wrong mode"
+    assert w.validate([seat], seen=("1v1", ""))["status"] == "retry", "empty roster"
+    assert w.grants() == 0 and w.bound() is None
+    got = w.validate([seat], seen=("1v1", ",".join(sorted((STEAM["A"], STEAM["B"]), reverse=True))))
+    assert [r["ok"] for r in got["results"]] == [True] and "status" not in got, got
+    assert w.bound() == 3
+    assert _lab_sql("SELECT string_agg(roster, '|') FROM spectate_watch_grants"
+                    " WHERE game_id = $1 AND spectator_steam_id = $2", w.wid, seat) == ab
+    assert w.attest("C", ac) == {"status": "ok"}
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True], "the fresh snapshot is answered ok"
+    assert _lab_sql("SELECT string_agg(roster, '|' ORDER BY roster) FROM spectate_watch_grants"
+                    " WHERE game_id = $1 AND spectator_steam_id = $2", w.wid, seat) == "|".join(sorted((ab, ac)))
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
+def test_the_released_request_shape_keeps_its_answer_and_records_no_watch(lab, seat):
+    """Round 5 MEDIUM 1: every released client (1.40.3 and earlier) sends the
+    validation without a tuple. That request keeps its answer - the seat is
+    validated ok with its display name field, and its lease is bound, as
+    before - and records no watch (no grant: the request carries no
+    observation to record), so the report is refused to the seat. A request
+    carrying only half of a tuple is refused 422. Control: the same seat
+    validated with the current tuple is granted and served."""
+    w = _LiveWatch(seat, "K2")
+    got = w.validate([seat], seen=_LiveWatch.OLD_SHAPE)
+    assert list(got) == ["results"] and [(r["actor_number"], r["ok"]) for r in got["results"]] == [(3, True)]
+    assert "display_name" in got["results"][0]
+    assert w.bound() == 3 and w.grants() == 0
+    assert _refused(seat, viewer=STEAM["A"], match=ID["K2"]) == (404, "not_found")
+    half = main.SpectateValidateBody(steam_id=STEAM["A"], room_name=w.room, observed_mode="1v1",
+                                     spectators=[{"actor_number": 3, "steam_id": seat}])
+    with pytest.raises(HTTPException) as ei:
+        _lab_call(lambda db: main.spectate_validate(half, request=None, db=db))
+    assert ei.value.status_code == 422 and ei.value.detail == "observed_tuple_incomplete"
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert w.grants() == 1
+    assert _report(seat, viewer=STEAM["A"], match=ID["K2"]) == _report("A", match=ID["K2"])
     _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
              w.end + timedelta(minutes=1))
 
