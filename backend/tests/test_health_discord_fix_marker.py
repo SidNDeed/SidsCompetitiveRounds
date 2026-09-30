@@ -14,7 +14,7 @@ live-PostgreSQL rows run the real probe against a renamed column and a
 renamed table, then against the mended schema.
 
 bot -- the startup witness [DISCORD-FIX]: printed by on_ready just before
-[BOT-READY], stamped with the process's gen, naming the purchase journal's
+[BOT-READY] (only the dance cards' [BOT-FEATURE] line between), stamped with the process's gen, naming the purchase journal's
 volume as the process finds it ("mounted" or "NOT mounted"), the journal's
 unsettled count, the replay policy and the sync availability-check rule.
 """
@@ -299,13 +299,24 @@ def test_the_witness_never_raises_it_says_it_failed(tmp_path):
         witness(tmp_path, mounted=True, ismount=broken, source=mutated)
 
 
+# The other whole-line signal on_ready prints between this witness and
+# [BOT-READY]: the dance cards' [BOT-FEATURE] line, which its own test holds
+# immediately before the ready line (test_pc_bot_card_gif_signal).
+_SIBLING_SIGNALS = ("print(_pc_card_gif_signal(), flush=True)",)
+
+
 def _witness_then_ready(source) -> bool:
-    """on_ready's last two statements: the witness print, then [BOT-READY]."""
+    """on_ready's last statement is [BOT-READY], and the unconditional
+    statements just before it are the witness print followed only by the
+    sibling signal lines."""
     for node in ast.parse(source).body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "on_ready":
-            *_, witness_stmt, ready_stmt = node.body
-            return (ast.unparse(witness_stmt) == "print(_pc_fix_ready_line())"
-                    and ast.unparse(ready_stmt).startswith("print('[BOT-READY] '"))
+            *head, ready_stmt = node.body
+            if not ast.unparse(ready_stmt).startswith("print('[BOT-READY] '"):
+                return False
+            while head and ast.unparse(head[-1]) in _SIBLING_SIGNALS:
+                head.pop()
+            return bool(head) and ast.unparse(head[-1]) == "print(_pc_fix_ready_line())"
     raise AssertionError("no on_ready")
 
 

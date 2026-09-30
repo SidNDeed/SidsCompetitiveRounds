@@ -1122,7 +1122,8 @@ def test_the_internal_key_gate_is_the_first_statement_of_every_internal_pc_route
     import ast
     import textwrap
     for fn in (main.internal_pc_lease, main.internal_pc_lease_check, main.internal_pc_lease_release,
-               main.internal_pc_face_print, main.internal_pc_face_preview, main.internal_pc_face_back):
+               main.internal_pc_face_print, main.internal_pc_face_preview, main.internal_pc_face_back,
+               main.internal_pc_motion_preview):
         body = ast.parse(textwrap.dedent(_src(fn))).body[0].body
         if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             body = body[1:]   # the docstring
@@ -1402,10 +1403,17 @@ def test_the_card_and_its_preview_read_one_snapshot():
     reads cannot pair an old-rank embed with a new-rank picture."""
     card = _src(main.internal_pc_card)
     assert "s.id AS snapshot_id" in card and '"snapshot_id": int(row["snapshot_id"])' in card
-    prev = _src(main.internal_pc_face_preview)
-    assert "snapshot_id: int | None = Query(None, ge=1)" in prev
-    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in prev
-    assert '{"pid": player_ref, "snap": snapshot_id}' in prev
+    # the member read is the one preview read both preview routes call (dance
+    # cards B13, round 2): the face preview and the motion preview GIF pin the
+    # same snapshot the same way, each passing the snapshot it was told
+    read = _src(main._pc_preview_read)
+    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in read
+    assert '{"pid": player_ref, "snap": snapshot_id}' in read
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        prev = _src(fn)
+        assert "snapshot_id: int | None = Query(None, ge=1)" in prev, fn.__name__
+        assert prev.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+        assert "pc_pool_members" not in prev, fn.__name__
 
 
 @pytest.mark.parametrize("gone, lookups, admin_w, target_w", [

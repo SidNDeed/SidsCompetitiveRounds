@@ -309,15 +309,22 @@ def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
     src = _main_code()
     # FIVE readers decide membership since the merge, and each interpolates the
     # one word: the snapshot's pool CTE, the open's live re-check, the public
-    # pool summary, the bot's /card and that card's face preview. Counted on the
+    # pool summary, the bot's /card and that card's preview read (one helper
+    # since dance cards B13, round 2, which both preview routes call). Counted on the
     # interpolation spelling -- under either quoting, since the preview builds
     # its statement from single-quoted pieces -- so the number IS the reader
     # count and does not move with prose. The preview joined this count on
     # 2026-09-15: it interpolated _PC_POOL_STEAM_ID_SQL, which is one half of
     # the merged word, while answering not_in_pool.
     assert len(re.findall(r'(?:WHERE|AND) (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 5
-    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_read):
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', inspect.getsource(fn))) == 1, fn.__name__
+    # The two preview routes decide membership through that one read and carry
+    # no membership clause of their own, so neither can drift from the other.
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        route = inspect.getsource(fn)
+        assert route.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+        assert "_PC_POOL_MEMBER_SQL" not in route and "_PC_POOL_STEAM_ID_SQL" not in route, fn.__name__
     # Card trading (migration 353) reads the word a sixth time: the trader word
     # opens with it, so a trade party is a pool member by the same fragment,
     # composed once into _PC_TRADER_OK_SQL and nowhere else.
@@ -560,8 +567,9 @@ def test_janitor_takes_the_first_snapshot_when_none_exists(monkeypatch):
     today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
     db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
     _run(main._pc_snapshot_janitor_step())
-    # retention, the blob janitor, the edition rollover, then the snapshot
-    assert taken == ["first"] and db.committed == 4
+    # retention, the blob janitor, the motion janitor's two candidate reads
+    # (dance cards S3.6), the edition rollover, then the snapshot
+    assert taken == ["first"] and db.committed == 6
     # the rollover ran, and ran BEFORE the due read -- it is deliberately not
     # behind the snapshot's due gate, so its position in the log is the
     # property under test and not an implementation detail
@@ -591,13 +599,14 @@ def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
     # already done today: last snapshot after 00:05 today — retention still runs (c3 F)
     db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today))
     _run(main._pc_snapshot_janitor_step())
-    # retention + the rollover; no snapshot
-    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 3
+    # retention, the motion janitor's two reads + the rollover; no snapshot
+    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 5
     assert db.count(ROLL_KEY) == 1
-    # lock held elsewhere: no snapshot (retention and the rollover committed)
+    # lock held elsewhere: no snapshot (retention, the motion janitor's two
+    # reads and the rollover committed)
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today + timedelta(minutes=1), today), lock=False)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.committed == 3
+    assert taken == [] and db.committed == 5
 
 
 def test_the_rollover_runs_on_a_pass_that_takes_no_snapshot(monkeypatch):
@@ -648,7 +657,7 @@ def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
 
     monkeypatch.setattr(main, "_pc_take_snapshot", _take)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 3
+    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 5
 
 
 # ── the wire shape ───────────────────────────────────────────────────────────
@@ -864,6 +873,8 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
         ("/api/v1/pc/portrait", ("POST",)),
+        ("/api/v1/pc/portrait/motion", ("POST",)),   # dance cards: the motion upload (S2.6)
+        ("/api/v1/pc/dance", ("POST",)),              # dance cards: the selection (S2.10)
         # card trading (migration 353): the five player routes
         ("/api/v1/pc/trades/propose", ("POST",)),
         ("/api/v1/pc/trades/accept", ("POST",)),
@@ -883,6 +894,7 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/internal/pc/lease/{lease_id}", ("DELETE",)),
         ("/api/v1/internal/pc/face/print/{print_id}/{locale}", ("GET",)),
         ("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", ("GET",)),
+        ("/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif", ("GET",)),   # dance cards: the /card GIF (S6.2)
         ("/api/v1/internal/pc/face/back", ("GET",)),
         # the Discord collection reveal's reads (build notes, FINDING 9)
         ("/api/v1/internal/pc/packs", ("GET",)),
@@ -1012,9 +1024,13 @@ def test_titles_and_rank_names_resolve_against_the_rounded_rating():
     snap = inspect.getsource(main._pc_take_snapshot)
     assert "_pc_board_rating(rating)," in snap
     # pinned per FUNCTION, never file-wide (#279): the tier helper, the bot's /card answer, and the preview
-    # drawing through the helper rather than its own expression
+    # read (both preview routes draw through it since dance cards B13) drawing through the helper rather
+    # than its own expression
     assert inspect.getsource(main._pc_rank_name).count("_rank_name_for(_pc_board_rating(rating))") == 1
     assert inspect.getsource(main.internal_pc_card).count("_rank_name_for(_pc_board_rating(rating))") == 1
-    preview = inspect.getsource(main.internal_pc_face_preview)
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        route = inspect.getsource(fn)
+        assert "_pc_rank_name(" not in route and "_rank_name_for(" not in route, fn.__name__
+    preview = inspect.getsource(main._pc_preview_read)
     assert "rank_name = _pc_rank_name(rating)" in preview and "_rank_name_for(" not in preview
     assert 'subtitle = _pc_shop_title(member["title"], rank_name)' in preview and '"subtitle": subtitle' in preview

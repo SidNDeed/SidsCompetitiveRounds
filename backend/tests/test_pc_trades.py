@@ -14,8 +14,14 @@ statement (each file's own transaction honoured, a statement that fails on an
 empty database recorded, not fatal), the ORM creates the tables no migration
 creates, the replay runs again, the ORM's missing columns are added -- all
 but the ones 353 itself adds to older tables, which the ORM maps since F63
-and which 353 alone may create -- and 353 is applied whole: the pre-353
-schema is fingerprinted, then the full one.
+and which 353 alone may create -- then every migration numbered above 353
+is replayed the same way (the routes this module drives read their objects:
+358's players.active_dance_id and pc_motions), and a statement of theirs that
+fails fails the build, and 353 is applied whole: the pre-353 schema (every
+object but 353's) is fingerprinted, then the full one. None of the later
+files touches an object 353 creates, so replaying them before it leaves the
+schema 353 finds and the one it leaves as they are in numbered order; one
+that did would fail its replay here.
 The build is reused while the migrations, models.py and this harness are
 unchanged and the schema still fingerprints as built; anything else rebuilds
 it. Before any DROP or CREATE the harness CENSUSES every schema the role's
@@ -95,7 +101,7 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 
 SCHEMA = "pc_trades_t"
 HARNESS_TABLE = "pc_trades_harness"
-HARNESS_VERSION = "2"
+HARNESS_VERSION = "3"
 SQL_DIR = BACKEND / "sql"
 MIGRATION = SQL_DIR / "353_pc_trades.sql"
 MIGRATION_NUMBER = 353
@@ -385,7 +391,7 @@ async def _replay(conn, files):
 
 def _harness_key():
     h = hashlib.sha256()
-    for p in _numbered(upto=MIGRATION_NUMBER):
+    for p in _numbered():
         h.update(p.name.encode())
         h.update(p.read_bytes())
     h.update((BACKEND / "api" / "models.py").read_bytes())
@@ -463,6 +469,8 @@ async def _build():
         await _orm(_create_all)
         await _replay(conn, files)
         await _orm(_orm_columns)
+        count, failures = await _replay(conn, _numbered(above=MIGRATION_NUMBER))
+        assert not failures, ("a migration above 353 failed its replay before 353", failures)
         fp_pre = await _fingerprint(conn)
         await conn.execute(MIGRATION.read_text(encoding="utf-8"))
         fp_full = await _fingerprint(conn)
