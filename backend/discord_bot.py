@@ -8858,6 +8858,9 @@ _PC_BUY_PAUSED = "Buying packs here is paused right now - nothing was charged."
 _PC_BUY_MOVED = ("Your Discord account is now linked to a different player, so your earlier purchase stays with"
                  " the player it was made for - nothing was charged to the player linked now.")
 _PC_BUY_NO_PLAYER = "Couldn't start a purchase right now - nothing was charged. Try again in a moment."
+_PC_BUY_REBOUND = ("Your earlier purchase was for the player your Discord account was linked to then, and it is"
+                   " linked to a different player now - so that pack is not shown here, and nothing was bought or"
+                   " charged now. Your next `/buypack` shows it once your account is linked to that player again.")
 
 
 def _pc_open_verdict(status, body, replayed=False):
@@ -9160,10 +9163,22 @@ async def _pc_buy_deliver(ctx, me, entry, earlier):
     is delivered - the library's send returned, with the pack or with the
     line saying it is open and where to see it; a send that raises leaves
     it settled in the journal, and the next /buypack delivers it from
-    there, sending nothing that could buy."""
+    there, sending nothing that could buy.
+    Round 4, LOW 2: the reveal reads the pack of the JOURNALED player (the
+    read names entry["player"]); when the Discord id is linked to another
+    player now, the api refuses the read (412 player_changed) and the entry
+    is neither delivered nor taken out: one line says why, with no pointer
+    at /pack (which reads the player linked now), and the reveal is
+    delivered once the binding matches again."""
     s = entry["settled"]
     head = f"**Pack bought for {s['price']} {s['pay']}**"
-    await _pc_reveal_opened(ctx, s["pack_id"], ("Your earlier purchase went through - " + head) if earlier else head)
+    outcome = await _pc_reveal_opened(ctx, s["pack_id"], ("Your earlier purchase went through - " + head)
+                                      if earlier else head, player=entry["player"])
+    if outcome == "rebound":
+        print(f"[PC-BUY] purchase {entry['nonce'][:8]} is bought and kept in the journal: the Discord id is now"
+              " linked to another player than the one it was bought for")
+        await ctx.send(_PC_BUY_REBOUND)
+        return
     _pc_buy_forget(me, entry["nonce"])
 
 
@@ -9673,7 +9688,9 @@ async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params
     step 6, an awaitable factory answering (status, body); `render(answer,
     note)` builds the post from the re-read's answer alone. Returns "posted",
     or why nothing but one line may be posted: "private" (the re-read
-    answered 403), "unreachable" (0), "pacing" (429) or "moved"."""
+    answered 403), "unreachable" (0), "pacing" (429), "rebound" (412
+    player_changed: a read that named its player found the Discord id linked
+    to another one - round 4, LOW 2) or "moved"."""
     prints = _pc_reveal_prints(first, kind) or []
     before_view, before_drawn = _pc_reveal_view(first), _pc_reveal_drawn(prints)
     image, meta, note, leases, started = None, {}, None, {}, None
@@ -9704,6 +9721,8 @@ async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params
         again_prints = _pc_reveal_prints(again, kind) if st == 200 else None
         if again_prints is None:
             print(f"[PC-REVEAL] {kind} ref={ref} not posted: the re-read answered HTTP {st}")
+            if st == 412 and _pc_detail(again).get("error") == "player_changed":
+                return "rebound"
             return {403: "private", 0: "unreachable", 429: "pacing"}.get(st, "moved")
         moved_view = [m for m, b, a in zip(_PC_VIEW_MEMBERS, before_view, _pc_reveal_view(again)) if b != a]
         if kind == "binder" and [p.get("print_id") for p in prints] != [p.get("print_id") for p in again_prints]:
@@ -9830,12 +9849,15 @@ async def _pc_reveal_pack(ctx, index, private):
         await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
 
 
-async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral):
+async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral, player=None):
     """Steps 2-7 of a pack reveal whose step 1 answered `first` for `pack_id`:
     /pack's, and the reveal of a pack /daily or /buypack just opened. The
     final re-read names the pack, never the index: a pack opened in between
-    moves every index by one."""
+    moves every index by one. `player` (round 4, LOW 2): the re-read names
+    the player the pack must belong to."""
     params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
+    if player is not None:
+        params["player_steam_id"] = player
 
     async def _reread():
         return await _pc_api("GET", "/internal/pc/packs", params=params, timeout=5.0)
@@ -9848,23 +9870,37 @@ async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral
 _PC_OPENED_UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it."
 
 
-async def _pc_reveal_opened(ctx, pack_id, head):
+async def _pc_reveal_opened(ctx, pack_id, head, player=None):
     """The reveal of a pack this command just opened (/daily, D1; /buypack,
     D2): /pack's steps, with step 1 reading that pack by its id - never by an
     index, which a pack opened meanwhile would move - and `head` in place of
     the index. Whatever keeps it from posting, the pack is already the
-    player's: the one line says so and points at /pack."""
+    player's: the one line says so and points at /pack. Returns "posted",
+    "unshown" (that line was sent) or, when `player` is named (a bought
+    pack's journaled player, round 4 LOW 2) and the Discord id is linked to
+    another player now, "rebound" - nothing was sent: /pack would read the
+    player linked now."""
     me, locale = str(ctx.author.id), _pc_locale_of(ctx)
-    status, first = await _pc_api("GET", "/internal/pc/packs",
-                                  params={"discord_id": me, "pack_id": pack_id, "locale": locale})
+    params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
+    if player is not None:
+        params["player_steam_id"] = player
+    status, first = await _pc_api("GET", "/internal/pc/packs", params=params)
+    if status == 412 and _pc_detail(first).get("error") == "player_changed":
+        print(f"[PC-OPEN] pack={pack_id} not shown: the Discord id is now linked to another player")
+        return "rebound"
     if status != 200 or _pc_reveal_prints(first, "pack") is None:
         print(f"[PC-OPEN] pack={pack_id} opened, not shown: the read answered HTTP {status}")
         await _pc_reveal_say(ctx, _PC_OPENED_UNSHOWN)
-        return
+        return "unshown"
     outcome = await _pc_reveal_pack_run(ctx, me, locale, pack_id, first,
-                                        lambda answer, note: _pc_reveal_pack_text(answer, 1, note, head=head), False)
+                                        lambda answer, note: _pc_reveal_pack_text(answer, 1, note, head=head), False,
+                                        player=player)
+    if outcome == "rebound":
+        return "rebound"
     if outcome != "posted":
         await _pc_reveal_say(ctx, _PC_OPENED_UNSHOWN)
+        return "unshown"
+    return "posted"
 
 
 async def _pc_reveal_binder(ctx, member, page):

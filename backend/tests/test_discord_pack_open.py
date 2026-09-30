@@ -59,7 +59,8 @@ OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_re
 # the test's own folder instead of the container's /opt/bot-state
 OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
                                    "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED",
-                                   "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER", "_pc_buy_journal_lock", "_PC_BUY_KEEP"}
+                                   "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER", "_pc_buy_journal_lock", "_PC_BUY_KEEP",
+                                   "_PC_BUY_REBOUND"}
 
 
 def e2e(monkeypatch, tmp_path, fn, **kw):
@@ -1743,3 +1744,96 @@ def test_m1r4_every_journal_writer_keeps_the_other_buyers_entries(tmp_path):
     ns["_pc_buy_forget"]("1", mine["nonce"])
     assert journal(rig) == {"2": theirs}
     assert ns["_pc_buy_entry"]("2") == (True, theirs) and ns["_pc_buy_entry"]("1") == (True, None)
+
+
+# -- Round 4, LOW 2: a settled entry is delivered for the player it was bought for ----------------
+# Codex round 3 LOW 2: _pc_buy_deliver ignored entry["player"] and the reveal read the pack through the
+# Discord id's CURRENT player, so after a rebind the read answered 404, the "/pack shows it" line went
+# out and the entry of the earlier player was discarded undelivered. The reveal's reads now name the
+# journaled player, the api refuses them (412 player_changed) while the Discord id resolves to another,
+# and the entry stays until the binding matches again.
+
+class ProcessEnded(BaseException):
+    """The bot process ending mid-command: not an Exception, so nothing in the bot catches it."""
+
+
+def dies_at_the_reveal_read(state):
+    """The process ends at the first pack read of the reveal - after the api's
+    answer is settled in the journal, before anything is sent."""
+    async def stub(call):
+        if call.method == "GET" and call.path == PACKS and call.params.get("pack_id") and not state.get("died"):
+            state["died"] = True
+            raise ProcessEnded("the process ended before the reveal")
+        return None
+    return stub
+
+
+def test_low2r4_a_settled_entry_waits_for_its_player_and_is_revealed_when_the_binding_matches(
+        monkeypatch, tmp_path):
+    """The reviewer's falsifier. A's purchase is settled in the journal and its
+    reveal never delivered; the Discord id is rebound to B: a /buypack neither
+    marks nor discards the entry, sends one line with no pointer at /pack,
+    and buys nothing; rebound to A: the same pack is revealed, with zero
+    purchase requests, and the entry leaves. The decisive line is the first
+    assertion after the rebind to B: read through the player linked now, the
+    reveal answered 404 and the entry was discarded."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        before = rig_over(env, dies_at_the_reveal_read({}))
+        with pytest.raises(ProcessEnded):
+            await buypack(before, d, "gold")
+        (buy,) = calls_to(before, OPEN)
+        bought = json.loads(buy.reply.body)["pack_id"]
+        settled = journal(before)
+        assert settled == {d: {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+                               "settled": {"pack_id": bought, "pay": "gold", "price": price}}}, settled
+        await env.rebind(d, other)
+        deal(env, subs)
+        moved = rig_over(env)
+        await buypack(moved, d, "gold")
+        assert journal(moved) == settled, f"the entry was not kept for its player: {journal(moved)}"
+        assert [s.content for s in moved.sent] == [moved.ns["_PC_BUY_REBOUND"]], [s.content for s in moved.sent]
+        assert "/pack" not in moved.ns["_PC_BUY_REBOUND"] and all(ord(ch) < 128 for ch in moved.ns["_PC_BUY_REBOUND"])
+        assert calls_to(moved, OPEN) == []
+        reads = [c for c in calls_to(moved, PACKS, "GET") if c.params.get("pack_id")]
+        assert [(c.params["pack_id"], c.params.get("player_steam_id"), c.status) for c in reads] == \
+            [(bought, own.steam, 412)], [(c.params, c.status) for c in reads]
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+        await env.rebind(d, own)
+        back = rig_over(env)
+        await buypack(back, d, "gold")
+        assert calls_to(back, OPEN) == []
+        revealed = [c.params["pack_id"] for c in calls_to(back, PACKS, "GET") if c.params.get("pack_id")]
+        assert revealed and set(revealed) == {bought}, revealed
+        assert len(back.sent) == 1 and back.sent[0].file is not None, [s.content for s in back.sent]
+        assert back.sent[0].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert journal(back) == {}
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_low2r4_the_pack_read_refuses_a_player_the_discord_id_no_longer_resolves_to(monkeypatch, tmp_path):
+    """The server half: GET /internal/pc/packs naming a player answers that
+    player's pack while the Discord id resolves to it, and 412 player_changed
+    - before any read - once it resolves to another; without the name the
+    read is the Discord id's current player's, as before."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        r = await buy_internal(env, d, "low2r4-" + secrets.token_hex(8), "gold", player_steam_id=own.steam)
+        assert r.status_code == 200, r.text[:300]
+        pack = r.json()["pack_id"]
+
+        async def read(**extra):
+            return await env.client.get("/api/v1" + PACKS, headers=env.ihead(),
+                                        params={"discord_id": str(d), "pack_id": pack, **extra})
+        ok = await read(player_steam_id=own.steam)
+        assert ok.status_code == 200 and ok.json()["packs"][0]["pack_id"] == pack, ok.text[:300]
+        await env.rebind(d, other)
+        refused = await read(player_steam_id=own.steam)
+        assert refused.status_code == 412 and refused.json()["detail"] == {
+            "error": "player_changed", "player_steam_id": own.steam}, refused.text[:300]
+        plain = await read()
+        assert plain.status_code == 404, plain.text[:300]
+    e2e(monkeypatch, tmp_path, body)

@@ -30640,6 +30640,7 @@ async def internal_pc_packs(
     index: int | None = Query(None, ge=1, le=2147483647),
     limit: int = Query(5, ge=1, le=10),
     locale: str | None = Query(None, max_length=16),
+    player_steam_id: str | None = Query(None, min_length=1, max_length=32),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -30659,10 +30660,16 @@ async def internal_pc_packs(
     `before`. `actor_ref` is the resolved players.id, compared by the bot
     across its reads. The renderer gate comes first, as on the strip route: this
     answer keys every face it lists (face_rev), and a box that cannot key a
-    face answers the reason instead of a list without keys."""
+    face answers the reason instead of a list without keys.
+    `player_steam_id` (Discord fix round 4, LOW 2): the reveal of a purchase
+    the bot journaled names the player it was bought for, and a Discord id
+    now linked to another player is refused 412 player_changed before any
+    read, so the reveal never reads through the player linked now."""
     _require_internal_key(x_internal_key)
     _pc_require_renderer()
     actor = await _pc_player_by_discord(db, discord_id)
+    if player_steam_id is not None and str(actor.steam_id) != player_steam_id:
+        raise HTTPException(status_code=412, detail={"error": "player_changed", "player_steam_id": player_steam_id})
     await _assert_no_service_subject(db, affected_player_ids=[actor.id])
     pid = str(actor.id)
     cursor = (before or "").strip()
