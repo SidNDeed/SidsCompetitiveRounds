@@ -16,6 +16,8 @@ import os
 import re
 from pathlib import Path
 
+import pytest
+
 from _cs_structure import code_of
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -491,6 +493,102 @@ def test_a_tokenless_2xx_never_removes_a_queued_report():
     assert stamp < read < retry.index("onTokenStamped(stamped);") < retry.index("request.SendWebRequest()"), retry
 
 
+# Codex round 4 HIGH 1: every caller that settles a match report, with the
+# route it posts to. The four production reporters and the witness harness's
+# report (which posts exactly as ReportMatch does).
+MATCH_REPORTERS = [
+    ("1v1", "public static void ReportMatch(", '$"{baseUrl}/api/v1/matches"'),
+    ("2v2", "public static void ReportTeamMatch(", '$"{baseUrl}/api/v1/team/matches"'),
+    ("1v2", "public static void ReportOvtMatch(", '$"{baseUrl}/api/v1/ovt/matches"'),
+    ("ffa", "public static void ReportFfaMatch(", '$"{baseUrl}/api/v1/ffa/matches"'),
+    ("witness", "internal static void TickTestQueueReport()", '$"{baseUrl}/api/v1/matches"'),
+]
+
+
+def test_a_first_send_2xx_settles_a_match_report_only_when_it_carried_the_token():
+    """Codex round 4 HIGH 1: PostRequestWithRetry maps every Unity success to
+    callback(true), and the reporters queued a report only in their failure
+    arms, so a tokenless 2xx on any attempt of the loop (the public plaintext
+    backup withholds the token; a sink answering 200 without recording a row)
+    settled a report no server recorded. PostMatchReportWithRetry applies the
+    outbox's settlement rule to the first send: it keeps what the ANSWERING
+    request carried (SecureRouteRules.ReportSendCarried, fed by onTokenStamped
+    before every attempt) and hands a tokenless 2xx to the caller as a failure,
+    so the failure arm queues the same body under the same key. The harness
+    cases O11-O11g execute the rule and the loop; this test pins the wrapper
+    and the rule's source."""
+    wrapper = code_of(API, "private static IEnumerator PostMatchReportWithRetry(")
+    assert wrapper.count("var carried = new SecureRouteRules.ReportSendCarried();") == 1, wrapper
+    check = "if (ok && !carried.Settles(ok))"
+    assert wrapper.count(check) == 1, wrapper
+    refused = wrapper[wrapper.index(check):wrapper.index("return;", wrapper.index(check))]
+    assert "callback(false, SecureRouteRules.TokenlessReportAnswer);" in refused, refused
+    assert "callback(true" not in wrapper, wrapper
+    passed = wrapper.index("callback(ok, resp);")
+    assert wrapper.index(check) < passed, "the answer reaches the caller before the carried check"
+    assert re.search(r"return PostRequestWithRetry\(url, json, \(ok, resp\) =>", wrapper), wrapper
+    assert wrapper.count("}, maxRetries, retryDelay, stopOnTerminalRefusal, carried.Stamped);") == 1, wrapper
+    rule = code_of(RULES, "internal sealed class ReportSendCarried")
+    stamped = rule[rule.index("internal void Stamped(bool carried)"):rule.index("internal bool Settles(")]
+    assert "_answeringRequestCarried = carried;" in stamped and "||" not in stamped and "|=" not in stamped, stamped
+    settles = rule[rule.index("internal bool Settles("):]
+    assert "return OutboxAnswerFor(answered2xx, _answeringRequestCarried) == OutboxAnswer.Settle;" in settles, settles
+    marker = code_of(RULES)
+    at = marker.index("internal const string TokenlessReportAnswer = ")
+    value = marker[at:marker.index(";", at)]
+    assert "HTTP" not in value and not re.search(r"\b\d{3}\b", value), value
+    # The loop answers once, for the attempt that answered, after that
+    # attempt's stamp was reported.
+    retry = code_of(API, "private static IEnumerator PostRequestWithRetry(")
+    assert retry.count("callback(true, request.downloadHandler.text);") == 1, retry
+    assert retry.index("onTokenStamped(stamped);") < retry.index("callback(true, request.downloadHandler.text);"), retry
+
+
+@pytest.mark.parametrize("mode,signature,route", MATCH_REPORTERS, ids=[m[0] for m in MATCH_REPORTERS])
+def test_each_match_reporter_settles_only_through_the_carried_rule(mode, signature, route):
+    """Per reporter (Codex round 4 HIGH 1): the first send goes through
+    PostMatchReportWithRetry, never PostRequestWithRetry directly, to the
+    reporter's route, and the failure arm (the arm a tokenless 2xx now
+    reaches) queues the same body under the same route."""
+    body = code_of(API, signature)
+    assert body.count("PostMatchReportWithRetry(") == 1, "%s: the first send does not use the carried rule" % mode
+    assert "PostRequestWithRetry(" not in body, "%s: a direct PostRequestWithRetry settles on any 2xx" % mode
+    call = body.index("PostMatchReportWithRetry(")
+    head = body[call:call + 200]
+    assert route in head or ("url, json" in head and 'string url = ' + route + ";" in body), (mode, head)
+    enqueue = "EnqueueFailedReport(" + route + ", json);"
+    assert body.count(enqueue) == 1, "%s: the failure arm does not queue the same body under the same route" % mode
+    assert call < body.index(enqueue), mode
+
+
+def test_no_other_caller_settles_a_match_report_on_a_bare_2xx():
+    """The class sweep behind Codex round 4 HIGH 1: no PostRequestWithRetry or
+    PostRequest call posts to a match-report route except through the carried
+    rule, and every enqueue of a match-report route sits in a reporter that
+    uses it (the macro evidence and the disconnect report queue first and take
+    the copy out only for a carried 2xx, pinned by
+    test_a_tokenless_2xx_never_removes_a_queued_report)."""
+    whole = code_of(API)
+    route = re.compile(r'/api/v1/(?:team/|ovt/|ffa/)?matches"')
+    for m in re.finditer(r"\bPostRequest(?:WithRetry)?\(", whole):
+        seg = whole[m.end():m.end() + 160]
+        assert not route.search(seg), "a match report sent without the carried rule: " + whole[m.start():m.end() + 160]
+    users = [m.start() for m in re.finditer(r"\bPostMatchReportWithRetry\(", whole)]
+    definition = whole.index("private static IEnumerator PostMatchReportWithRetry(")
+    users = [u for u in users if u != definition + len("private static IEnumerator ")]
+    assert len(users) == len(MATCH_REPORTERS), "PostMatchReportWithRetry has %d callers" % len(users)
+    spans = []
+    for _, signature, _ in MATCH_REPORTERS:
+        body = code_of(API, signature)
+        at = whole.index(body)
+        spans.append((at, at + len(body)))
+    assert all(any(a <= u < b for a, b in spans) for u in users), "a carried first send outside the reporters"
+    enqueues = list(re.finditer(r'EnqueueFailedReport\(\$"\{baseUrl\}/api/v1/(?:team/|ovt/|ffa/)?matches", json\);', whole))
+    assert len(enqueues) == len(MATCH_REPORTERS), "%d enqueues of a match route" % len(enqueues)
+    for m in enqueues:
+        assert any(a <= m.start() < b for a, b in spans), "a match route queued outside the reporters: " + m.group(0)
+
+
 def test_a_press_refused_for_a_plaintext_base_says_why_in_one_log_line():
     """Codex round 2 LOW 3: the RefusePlaintext branch showed a toast and wrote
     nothing to the log, so a report of "the button does nothing" had no line to
@@ -745,7 +843,7 @@ def test_the_round_2_witness_levers_act_on_the_broadcast_account_only():
     assert arm.index("BroadcastMode.IsBroadcastIdentityAtBoot()") < arm.index("return lever;"), arm
     queue = code_of(API, "internal static void TickTestQueueReport()")
     assert "if (_routeHarnessBackup == null || Plugin.Instance == null)" in queue, queue
-    assert queue.index("_routeHarnessBackup == null") < queue.index("PostRequestWithRetry("), queue
+    assert queue.index("_routeHarnessBackup == null") < queue.index("PostMatchReportWithRetry("), queue
     tick = code_of(PLUGIN_CS, "private void TickTestOpenTab()")
     gate = "if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;"
     assert tick.count(gate) == 1, tick

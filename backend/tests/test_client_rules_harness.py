@@ -271,8 +271,9 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # 46 cases on the commit that added the suite, 72 since round 2 added
     # the J, O, R, K and H cases; the floor is that count, not one far
-    # below it (#342). Raise it when cases are added.
-    assert run >= 92, "the SecureRouteRules suite shrank to %d cases" % run
+    # below it (#342). Raise it when cases are added (116 since round 5 added
+    # O11-O11g).
+    assert run >= 116, "the SecureRouteRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -340,6 +341,14 @@ def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
     "M4 a tokenless 401 with CR/LF and JSON, header, key=value, bare-token and Steam-ticket sentinels: one bounded line, none of them",
     "M4b each sentinel first after a CR/LF, raw text: the line scrubs and flattens by itself",
     "M4c a credential straddling the line's own cut is scrubbed before the cut",
+    # round 5 (Codex round 4 HIGH 1): a first send's 2xx settles only when it carried the token
+    "O11 a first send answered 2xx without the token and without a row is not settled: one durable entry, 0 rows",
+    "O11b then the restore and the session: exactly one token-bearing POST, one row, an empty outbox",
+    "O11c attempt one fails and attempt two is a tokenless 2xx without a row: queued, then delivered once with the token",
+    "O11d attempts one and two fail and attempt three is a tokenless 2xx: queued, then delivered once with the token",
+    "O11e attempt one carried a stale token (401) and attempt two went out without it: its 2xx is not settled",
+    "O11f control: a first send that carried the token and was answered 2xx settles at once, one row, nothing queued",
+    "O11g control: against the enforcing sink the three tokenless attempts fail, the report is queued and delivered once",
     # every catalogue
     "L-es every secure-route sentence is translated in the es catalogue, holes filled",
     "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",

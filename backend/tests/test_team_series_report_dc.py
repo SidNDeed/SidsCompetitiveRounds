@@ -4044,7 +4044,7 @@ def test_the_match_report_carries_the_anchor_and_voids_from_the_row_it_locked():
     assert body.index("if (!string.IsNullOrEmpty(gameAnchor))") < body.index(append)
     assert body.index(append) < body.index("string canonical =")
     assert '$"{photonRoomId ?? ""}:{winnerTeam}:{seriesId}";' in body
-    assert body.index("NoteTeamReportSent(seriesId);") < body.index("PostRequestWithRetry(")
+    assert body.index("NoteTeamReportSent(seriesId);") < body.index("PostMatchReportWithRetry(")
 
     watcher = _read(os.path.join(_PLUGIN_DIR, "GameStateWatcher.cs"))
     start = watcher.index("private static void TryAskTeamFirstGame(")

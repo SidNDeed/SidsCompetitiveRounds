@@ -525,6 +525,43 @@ namespace CompetitiveRounds
             return answered2xx ? OutboxAnswer.Settle : OutboxAnswer.Spend;
         }
 
+        /// <summary>The same rule for a match report's FIRST send (Codex round
+        /// 4 HIGH 1). PostRequestWithRetry tells onTokenStamped, before every
+        /// attempt goes out, whether StampVersionHeader attached the session
+        /// token to it, and answers its caller once, for the attempt that
+        /// answered. This keeps the latest word only, so it describes the
+        /// request that answered and never an earlier attempt of the loop (a
+        /// first attempt that carried a stale token and was refused 401 clears
+        /// that token, and the next attempt goes out without it). Settles asks
+        /// OutboxAnswerFor about that request: only a 2xx to a request that
+        /// carried the token settles the report at once. A 2xx to a tokenless
+        /// request, on any attempt, says nothing about whether an enforcing
+        /// server recorded the report, so the reporter handles it as it
+        /// handles a failure: the same body is queued under the same key, and
+        /// the outbox delivers it later by one send that carries the
+        /// token.</summary>
+        internal sealed class ReportSendCarried
+        {
+            private bool _answeringRequestCarried;
+
+            internal void Stamped(bool carried)
+            {
+                _answeringRequestCarried = carried;
+            }
+
+            internal bool Settles(bool answered2xx)
+            {
+                return OutboxAnswerFor(answered2xx, _answeringRequestCarried) == OutboxAnswer.Settle;
+            }
+        }
+
+        /// <summary>What a reporter's failure arm is handed for a 2xx that
+        /// did not settle. It carries no status in the "HTTP code:" shape, so
+        /// no terminal-refusal test reads it as a refusal
+        /// (FfaReportRules.IsTerminalRefusal) and every arm queues the
+        /// report.</summary>
+        internal const string TokenlessReportAnswer = "answered 2xx without the session token; not taken as recorded";
+
         /// <summary>When a given-back entry falls due again (Codex round 2
         /// LOW 1). A retry sent on the backup can still be in flight when the
         /// route is restored and the entry is promised a look within 20 s

@@ -263,6 +263,69 @@ namespace CompetitiveRounds
             return run;
         }
 
+        /// <summary>One attempt of a match report's first send, as a case
+        /// scripts it. Timeout: the transport failed. StaleToken401: the
+        /// request carried a token the server refused, which clears it
+        /// (HandleSessionReject), so later attempts go out without one.
+        /// Answered: the sink answers (a request with the token 200 and one
+        /// row; a tokenless one per the sink).</summary>
+        private enum FirstAttempt { Timeout, StaleToken401, Answered }
+
+        private sealed class FirstSendRun
+        {
+            internal int Attempts, CarriedAttempts, TokenlessOk, Rows;
+            internal bool SettledAtOnce, Queued;
+            internal OutboxRun Outbox;
+            internal int TotalRows { get { return Rows + (Outbox == null ? 0 : Outbox.Rows); } }
+            internal string Describe()
+            {
+                return "attempts=" + Attempts + " carriedAttempts=" + CarriedAttempts + " tokenless2xx=" + TokenlessOk
+                       + " rowsAtFirstSend=" + Rows + " settledAtOnce=" + SettledAtOnce + " queued=" + Queued
+                       + " totalRows=" + TotalRows
+                       + (Outbox == null ? " outbox=none" : " || outbox: " + Outbox.Describe());
+            }
+        }
+
+        /// <summary>ApiClient.PostMatchReportWithRetry over one finished game:
+        /// PostRequestWithRetry's attempts (three at most), each stamped
+        /// (ReportSendCarried.Stamped with what the attempt carried) before
+        /// it goes out, the loop ending at the first 2xx; then the wrapper's
+        /// callback (ReportSendCarried.Settles) and the reporter's two arms:
+        /// settled at once, or queued by the failure arm (EnqueueFailedReport,
+        /// a fresh entry with no attempt spent), which OutboxComposition then
+        /// carries from the backup through the restore at 300 s with the
+        /// session held. `carriesAtStart`: the first attempt goes out with the
+        /// token (the secure base with a session); false is the public
+        /// plaintext backup, where StampVersionHeader withholds it.</summary>
+        private static FirstSendRun FirstSendThenOutbox(bool carriesAtStart, Sink sink, params FirstAttempt[] script)
+        {
+            var run = new FirstSendRun();
+            var carried = new ReportSendCarried();
+            bool token = carriesAtStart, ok = false;
+            for (int attempt = 1; attempt <= 3 && attempt <= script.Length; attempt++)
+            {
+                run.Attempts++;
+                bool stamped = token;
+                carried.Stamped(stamped);
+                if (stamped) run.CarriedAttempts++;
+                var kind = script[attempt - 1];
+                if (kind == FirstAttempt.StaleToken401) { token = false; continue; }
+                if (kind == FirstAttempt.Timeout) continue;
+                ok = stamped || sink == Sink.Tokenless200;
+                if (ok && stamped) run.Rows++;
+                if (ok && !stamped) run.TokenlessOk++;
+                if (ok) break;
+            }
+            if (ok && carried.Settles(ok))
+            {
+                run.SettledAtOnce = true;
+                return run;
+            }
+            run.Queued = true;
+            run.Outbox = OutboxComposition(0, 0.0, false, sink);
+            return run;
+        }
+
         private static string Times(List<double> ts)
         {
             var parts = new List<string>();
@@ -902,6 +965,45 @@ namespace CompetitiveRounds
                       o10c.TokenlessOkAnswers == 0 && o10c.QueuedAtRestore && o10c.Settled == 1 && o10c.Rows == 1
                           && !o10c.QueuedAtEnd,
                       o10c.Describe());
+
+                // O11, Codex round 4 HIGH 1's falsifier: the tokenless-200 /
+                // no-row sink is on BEFORE the first send, so the report never
+                // starts out queued. The first send's 2xx must not settle it:
+                // one durable entry, then after the restore exactly one
+                // token-bearing POST, one row, an empty outbox.
+                Func<FirstSendRun, bool> queuedThenOnce = f =>
+                    !f.SettledAtOnce && f.Queued && f.Rows == 0 && f.TokenlessOk == 1 && f.Outbox != null
+                    && f.Outbox.QueuedAtRestore && f.Outbox.RowsAtRestore == 0 && f.Outbox.SettledTokenless == 0
+                    && f.Outbox.Settled == 1 && f.Outbox.CarriedSends == 1 && f.TotalRows == 1
+                    && !f.Outbox.QueuedAtEnd && !f.Outbox.Dropped;
+                var o11 = FirstSendThenOutbox(false, Sink.Tokenless200, FirstAttempt.Answered);
+                Check(r, "O11 a first send answered 2xx without the token and without a row is not settled: one durable entry, 0 rows",
+                      !o11.SettledAtOnce && o11.Queued && o11.Rows == 0 && o11.Attempts == 1
+                          && o11.Outbox != null && o11.Outbox.QueuedAtRestore && o11.Outbox.RowsAtRestore == 0,
+                      o11.Describe());
+                Check(r, "O11b then the restore and the session: exactly one token-bearing POST, one row, an empty outbox",
+                      queuedThenOnce(o11), o11.Describe());
+                var o11two = FirstSendThenOutbox(false, Sink.Tokenless200, FirstAttempt.Timeout, FirstAttempt.Answered);
+                Check(r, "O11c attempt one fails and attempt two is a tokenless 2xx without a row: queued, then delivered once with the token",
+                      o11two.Attempts == 2 && queuedThenOnce(o11two), o11two.Describe());
+                var o11three = FirstSendThenOutbox(false, Sink.Tokenless200,
+                                                   FirstAttempt.Timeout, FirstAttempt.Timeout, FirstAttempt.Answered);
+                Check(r, "O11d attempts one and two fail and attempt three is a tokenless 2xx: queued, then delivered once with the token",
+                      o11three.Attempts == 3 && queuedThenOnce(o11three), o11three.Describe());
+                var o11stale = FirstSendThenOutbox(true, Sink.Tokenless200, FirstAttempt.StaleToken401, FirstAttempt.Answered);
+                Check(r, "O11e attempt one carried a stale token (401) and attempt two went out without it: its 2xx is not settled",
+                      o11stale.Attempts == 2 && o11stale.CarriedAttempts == 1 && queuedThenOnce(o11stale),
+                      o11stale.Describe());
+                var o11carried = FirstSendThenOutbox(true, Sink.Tokenless200, FirstAttempt.Answered);
+                Check(r, "O11f control: a first send that carried the token and was answered 2xx settles at once, one row, nothing queued",
+                      o11carried.SettledAtOnce && !o11carried.Queued && o11carried.Rows == 1 && o11carried.Outbox == null,
+                      o11carried.Describe());
+                var o11enf = FirstSendThenOutbox(false, Sink.Enforcing,
+                                                 FirstAttempt.Answered, FirstAttempt.Answered, FirstAttempt.Answered);
+                Check(r, "O11g control: against the enforcing sink the three tokenless attempts fail, the report is queued and delivered once",
+                      !o11enf.SettledAtOnce && o11enf.Queued && o11enf.Attempts == 3 && o11enf.TokenlessOk == 0
+                          && o11enf.Outbox.Settled == 1 && o11enf.TotalRows == 1 && !o11enf.Outbox.QueuedAtEnd,
+                      o11enf.Describe());
             }
 
             // -- R and K: the portal press (Codex round 1 LOW 1 and LOW 2) --------

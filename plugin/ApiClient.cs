@@ -2292,8 +2292,9 @@ namespace CompetitiveRounds
         /// <summary>The harness's report (Codex round 1 HIGH 1's control): each
         /// new value of [Broadcast] TestQueueReport posts the body in
         /// BepInEx/config/scr-portal-report.json to the current base exactly as
-        /// ReportMatch posts a finished 1v1 game (PostRequestWithRetry, then
-        /// EnqueueFailedReport on failure), so the outbox that carries it is
+        /// ReportMatch posts a finished 1v1 game (PostMatchReportWithRetry, then
+        /// EnqueueFailedReport on failure or on a 2xx that did not carry the
+        /// session token), so the outbox that carries it is
         /// the real one. ReportMatch itself is fenced off the broadcast
         /// identity, which is why the body comes from a file. Called from the
         /// broadcast lever tick; does nothing unless the harness is armed.</summary>
@@ -2316,7 +2317,7 @@ namespace CompetitiveRounds
                 string json = File.ReadAllText(path).Trim();
                 string url = $"{baseUrl}/api/v1/matches";
                 Plugin.Log.LogInfo($"[SCR] TestQueueReport ({want}): posting the harness report to {url} ({json.Length} bytes)");
-                Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, json, (success, response) =>
+                Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(url, json, (success, response) =>
                 {
                     if (success)
                     {
@@ -8825,7 +8826,7 @@ namespace CompetitiveRounds
                 preflightRetiredThrough = preflightGeneration;
             ClearActiveSeries();
 
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(
                 $"{baseUrl}/api/v1/matches",
                 json,
                 (success, response) =>
@@ -15808,7 +15809,7 @@ namespace CompetitiveRounds
             // v1.41.0 beta round 8, finding F31: into the report ledger before
             // the first send (TeamReportsClean).
             NoteTeamReportSent(seriesId);
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(
                 $"{baseUrl}/api/v1/team/matches", json,
                 (success, response) =>
                 {
@@ -17054,7 +17055,7 @@ namespace CompetitiveRounds
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[1v2-REPORT] submitting series={seriesId} winner=side{winnerSide} {soloRounds}-{duoRounds}");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
             {
                 if (ok)
                 {
@@ -21656,7 +21657,7 @@ namespace CompetitiveRounds
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[FFA-REPORT] submitting lobby={lobbyId} n={players.Count} winner={winnerSteam}");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ffa/matches", json, (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ffa/matches", json, (ok, resp) =>
             {
                 if (ok)
                 {
@@ -23065,6 +23066,35 @@ namespace CompetitiveRounds
                         callback(false, FormatRequestError(request));
                 }
             }
+        }
+
+        /// <summary>PostRequestWithRetry for a match report (Codex round 4
+        /// HIGH 1): the settlement rule the outbox applies to a queued report,
+        /// applied to the first send. `callback(true, ...)` is given only for a
+        /// 2xx to a request that carried the session token
+        /// (SecureRouteRules.ReportSendCarried, fed by onTokenStamped before
+        /// every attempt). A 2xx from any attempt that did not carry it reaches
+        /// the caller as a failure with SecureRouteRules.TokenlessReportAnswer,
+        /// so the caller's failure arm queues the same body under the same key,
+        /// exactly as it queues every failure, and the player sees the queued
+        /// outcome. The loop stops at that answer: another attempt would go out
+        /// the same way. Every caller that settles a match report uses this,
+        /// never PostRequestWithRetry directly.</summary>
+        private static IEnumerator PostMatchReportWithRetry(string url, string json, Action<bool, string> callback,
+                                                            int maxRetries = 3, float retryDelay = 2f,
+                                                            bool stopOnTerminalRefusal = false)
+        {
+            var carried = new SecureRouteRules.ReportSendCarried();
+            return PostRequestWithRetry(url, json, (ok, resp) =>
+            {
+                if (ok && !carried.Settles(ok))
+                {
+                    Plugin.Log.LogWarning("[OUTBOX] a match report was answered 2xx without the session token; not taken as recorded, it is queued for a send with the token");
+                    callback(false, SecureRouteRules.TokenlessReportAnswer);
+                    return;
+                }
+                callback(ok, resp);
+            }, maxRetries, retryDelay, stopOnTerminalRefusal, carried.Stamped);
         }
 
         // ── Discord Linking ──────────────────────────────────────
