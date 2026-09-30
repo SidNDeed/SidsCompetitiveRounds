@@ -423,6 +423,16 @@ MUTANTS = [
     {"name": "rig_undo_no_retry", "file": "DanceMotionCore.cs",
      "edits": [("internal static int UndoEach<K>(", "attempt < UndoAttempts", "attempt < 1")],
      "targets": ["rig_undo_retry_restores_same_pass"], "controls": ["rig_undo_clean", "remember_key_stable"]},
+    # RR-LAND-1 (Codex LAND LOW 1): a baseline write forgets the delta it supersedes.
+    # (a) the forget removed -- the LAND tree's behaviour: the owed delta survives the
+    # write and the later restore subtracts it from the new baseline
+    {"name": "rig_baseline_no_forget", "file": "DanceMotionCore.cs",
+     "edits": [("internal static void WriteBaseline<K>(", "forget(k);", "")],
+     "targets": ["rig_baseline_write_supersedes_owed"], "controls": ["rig_baseline_write_clean", "rig_undo_clean"]},
+    # (b) the forget before the write: a write that throws has already dropped the owed delta
+    {"name": "rig_baseline_forget_first", "file": "DanceMotionCore.cs",
+     "edits": [("internal static void WriteBaseline<K>(", "write(k);\n            forget(k);", "forget(k);\n            write(k);")],
+     "targets": ["rig_baseline_write_supersedes_owed"], "controls": ["rig_baseline_write_clean", "rig_undo_clean"]},
     # PlayerCardMotionCore
     {"name": "t39_clip_keyed_by_binding", "file": "PlayerCardMotionCore.cs",
      "edits": [("internal Clip Get(string printId, int bindSeq)", "string key = printId;", "string key = printId + \"#\" + bindSeq;")],

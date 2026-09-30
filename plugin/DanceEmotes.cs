@@ -848,6 +848,18 @@ namespace CompetitiveRounds
             return n;
         }
 
+        /// <summary>RR-LAND-1: the capture's baseline write of one arm target
+        /// (DanceMotionCore.WriteBaseline): the position set, then the arm
+        /// delta still remembered for that target, if any, forgotten -- the
+        /// baseline supersedes it. Without the forget, an entry whose undo
+        /// threw on both attempts of RestorePortraitRig stayed remembered
+        /// across the write, and the next Prefix subtracted it from the new
+        /// baseline. A write that throws leaves the entry owed.</summary>
+        internal static void WriteArmBaseline(Transform target, Vector3 baseline)
+        {
+            DanceMotionCore.WriteBaseline(target, k => { k.position = baseline; }, k => { armApplied.Remove(k); });
+        }
+
         /// <summary>Finding L1, the teardown order (round two): the rig's
         /// remembered deltas are inverse-applied FIRST, while PortraitPose still
         /// names the rig, and PortraitPose is cleared AFTER, in a finally -- so

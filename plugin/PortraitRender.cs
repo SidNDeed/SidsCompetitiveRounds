@@ -2300,7 +2300,7 @@ namespace CompetitiveRounds
                     if ((h.rig.transform.position.x > rx) == (a.transform.position.x > rx)) { g.gunSide++; continue; }   // the gun side, as Update decides it
                     Vector3 rest = a.transform.parent.TransformPoint(a.startPos);
                     if ((a.target.position - rest).sqrMagnitude > e2 || a.velolcity.sqrMagnitude > e2 || a.sinceRaise < 0.3f) g.armMoved = true;
-                    a.target.position = rest;
+                    DanceEmotes.WriteArmBaseline(a.target, rest);   // forgets a dance delta still owed on it (RR-LAND-1)
                     a.velolcity = Vector3.zero;
                     if (a.sinceRaise < 0.3f) a.sinceRaise = 0.3f;
                     g.free++;
@@ -3910,9 +3910,10 @@ namespace CompetitiveRounds
                     for (int k = 0; k < n; k++)
                     {
                         float t = k * ms / 1000f;
-                        // L1: undo the rig's remembered deltas once, then the baseline
+                        // L1: undo the rig's remembered deltas once, then the baseline,
+                        // which forgets any delta still owed (RR-LAND-1)
                         DanceEmotes.RestorePortraitRig(rigRoot);
-                        armL.target.position = baseL; armR.target.position = baseR;
+                        DanceEmotes.WriteArmBaseline(armL.target, baseL); DanceEmotes.WriteArmBaseline(armR.target, baseR);
                         armL.velolcity = Vector3.zero; armR.velolcity = Vector3.zero;
                         Vector2 body, al, ar; float rot;
                         DanceEmotes.EvaluateClamped(idx, t, out body, out rot, out al, out ar);

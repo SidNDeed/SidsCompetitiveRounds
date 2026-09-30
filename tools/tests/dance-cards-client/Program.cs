@@ -126,6 +126,8 @@ namespace DanceCardsClientTests
             Add("rig_undo_retry_restores_same_pass", () => RigUndo(RigFault.FirstAttempt));
             Add("rig_undo_kept_owed_until_restored", () => RigUndo(RigFault.EveryAttempt));
             Add("rig_undo_clean", () => RigUndo(RigFault.None));
+            Add("rig_baseline_write_supersedes_owed", () => RigBaseline(true));
+            Add("rig_baseline_write_clean", () => RigBaseline(false));
             // -- PlayerCardMotionCore -------------------------------------------
             Add("read_parse", ReadParse);
             Add("atlas_shape", AtlasShapeCase);
@@ -1174,6 +1176,74 @@ namespace DanceCardsClientTests
                 + "; follow-up undid " + again + "; rig entries owed after it " + (owed.ContainsKey("r0") ? 1 : 0)
                 + ", at baseline " + (pos["r0"] == 0 && pos["r1"] == 0 && pos["r2"] == 0 && pos["r3"] == 0)
                 + ", outside kept " + owed.ContainsKey("x9") + ", failures " + failures.Count);
+        }
+
+        /// <summary>RR-LAND-1 (the Codex dance-cards LAND LOW): the capture's
+        /// Rest and T45 run the rig undo and THEN write the arm baselines; a
+        /// later restore of the same targets (the arm Prefix, Tick's restore)
+        /// follows. Four rig entries, each a VALUE at baseline 10 displaced by
+        /// its delta: r0 and r2 have every undo attempt throw while the
+        /// injection lasts (so they are still owed after the undo pass), r1
+        /// and r3 undo cleanly. The baselines are then written through the
+        /// product's DanceMotionCore.WriteBaseline, r2's write throwing before
+        /// it changes the value; then the injection lifts and the later
+        /// restore runs. Required: after the baseline write r0 is at baseline
+        /// and no longer owed (the write superseded its delta); r2, whose write
+        /// threw, is still displaced and still owed; after the later restore
+        /// every entry is at baseline and none is owed -- never baseline minus
+        /// a delta. The clean arm (no injection) is the negative control: no
+        /// entry is owed at the write, so it passes with or without the
+        /// forget.</summary>
+        private static void RigBaseline(bool fault)
+        {
+            const int B = 10;
+            string[] order = { "r0", "r1", "r2", "r3" };
+            int[] deltas = { 3, 5, 7, 11 };
+            var owed = new Dictionary<string, int>();
+            var pos = new Dictionary<string, int>();
+            for (int i = 0; i < order.Length; i++) { owed[order[i]] = deltas[i]; pos[order[i]] = B + deltas[i]; }
+            bool inject = fault;
+            var failures = new List<string>();
+            Func<int> restore = () => DanceMotionCore.UndoEach(new List<string>(owed.Keys),
+                k => false, null,
+                k =>
+                {
+                    if (inject && (k == "r0" || k == "r2")) throw new InvalidOperationException("injected undo failure on " + k);
+                    pos[k] -= owed[k];
+                },
+                k => { owed.Remove(k); },
+                (k, e) => failures.Add(k + ":" + e.GetType().Name));
+            // Rest: the undo pass, then the baseline write of every target
+            int undone = restore();
+            Check(undone == (fault ? 2 : 4), "the undo pass undid " + undone);
+            int writeThrew = 0;
+            foreach (var k in order)
+            {
+                try
+                {
+                    DanceMotionCore.WriteBaseline(k,
+                        t =>
+                        {
+                            if (inject && t == "r2") throw new InvalidOperationException("injected write failure on " + t);
+                            pos[t] = B;
+                        },
+                        t => { owed.Remove(t); });
+                }
+                catch (InvalidOperationException) { writeThrew++; }
+            }
+            Check(writeThrew == (fault ? 1 : 0), "baseline writes that threw: " + writeThrew);
+            Check(pos["r0"] == B && !owed.ContainsKey("r0"), "after the baseline write r0 is at " + pos["r0"] + ", owed " + owed.ContainsKey("r0"));
+            if (fault)
+                Check(pos["r2"] == B + 7 && owed.ContainsKey("r2"), "r2, whose write threw, is at " + pos["r2"] + ", owed " + owed.ContainsKey("r2"));
+            // the later restore of the same targets, the injection lifted
+            inject = false;
+            int again = restore();
+            Check(again == (fault ? 1 : 0), "the later restore undid " + again);
+            foreach (var k in order)
+                Check(pos[k] == B && !owed.ContainsKey(k), "after the later restore " + k + " is at " + pos[k] + " (baseline " + B + "), owed " + owed.ContainsKey(k));
+            Console.WriteLine("  rig baseline (" + (fault ? "owed at the write" : "clean") + "): undo pass " + undone + ", writes threw " + writeThrew
+                + ", later restore " + again + ", at baseline " + (pos["r0"] == B && pos["r1"] == B && pos["r2"] == B && pos["r3"] == B)
+                + ", owed " + owed.Count + ", undo failures " + failures.Count);
         }
     }
 }

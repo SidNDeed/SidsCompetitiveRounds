@@ -618,6 +618,22 @@ namespace CompetitiveRounds
         /// retry).</summary>
         internal const int UndoAttempts = 2;
 
+        /// <summary>RR-LAND-1: an authoritative baseline write supersedes the
+        /// delta remembered for the same key. `write` sets the baseline (one
+        /// assignment that lands or throws before changing the transform, the
+        /// same assumption UndoEach makes of an undo); once it has returned,
+        /// `forget` drops the remembered delta, so no later restore of that
+        /// key (the arm Prefix, Tick's restore, a teardown) subtracts it from
+        /// the baseline just written. A write that throws forgets nothing: the
+        /// transform is unchanged, its delta is still owed, and the exception
+        /// reaches the caller exactly as the bare assignment's did. The capture
+        /// writes every arm-target baseline through it (DanceEmotes.WriteArmBaseline).</summary>
+        internal static void WriteBaseline<K>(K k, Action<K> write, Action<K> forget)
+        {
+            write(k);
+            forget(k);
+        }
+
         private static void Failed<K>(Action<K, Exception> failed, K k, Exception e)
         {
             try { if (failed != null) failed(k, e); } catch { }

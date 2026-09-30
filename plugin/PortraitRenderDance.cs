@@ -686,11 +686,13 @@ namespace CompetitiveRounds
 
             /// <summary>Finding L1 then the baseline: the rig's remembered deltas
             /// undone once, the targets written back to the frozen baseline with
-            /// their spring velocity zeroed.</summary>
+            /// their spring velocity zeroed. Each baseline write forgets the
+            /// delta it supersedes (RR-LAND-1, DanceEmotes.WriteArmBaseline), so
+            /// an entry still owed after the undo is never subtracted from it.</summary>
             internal void Rest(Transform rigRoot)
             {
                 DanceEmotes.RestorePortraitRig(rigRoot);
-                L.target.position = BaseL; R.target.position = BaseR;
+                DanceEmotes.WriteArmBaseline(L.target, BaseL); DanceEmotes.WriteArmBaseline(R.target, BaseR);
                 L.velolcity = Vector3.zero; R.velolcity = Vector3.zero;
             }
         }
