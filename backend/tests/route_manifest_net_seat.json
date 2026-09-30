@@ -1259,6 +1259,15 @@
           "main",
           "team_series_state",
           "515cad0b84d26672d3db5c46de6a691f4c675752"
+        ],
+        [
+          "/api/v1/team/series/{series_id}/status",
+          [
+            "GET"
+          ],
+          "main",
+          "team_series_status_readonly",
+          "eaf0004c6efeb110fbc40c08ba5429655209d211"
         ]
       ]
     },
@@ -2191,7 +2200,7 @@
           ],
           "main",
           "get_mod_version",
-          "98831f2798f175961db88ece45d2485320d86f3c"
+          "fe54d85e5cca09ba1b43252dfcf66a4cf360ce80"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
@@ -3171,6 +3180,150 @@
           "main",
           "pc_portrait_upload",
           "9e52a94223f837bce3568eab50043a56d72aacb2"
+        ],
+        [
+          "/api/v1/admin/pc/trades",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_pc_trades",
+          "687b62163e85a86b4953bcfbdf0e41bfd0c823f5"
+        ],
+        [
+          "/api/v1/admin/pc/trades/reverse",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_pc_trade_reverse",
+          "880b0c811c62aa6c09cdfcc014ce4f92bb699c88"
+        ],
+        [
+          "/api/v1/internal/pc/binder",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_binder",
+          "bc135b61b3f9924c66eb17d19635e7cf85215663"
+        ],
+        [
+          "/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_binder_page",
+          "5c5b35ebc8605242de9c4305be785e3f7552d7d3"
+        ],
+        [
+          "/api/v1/internal/pc/packs",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_packs",
+          "d5fbe3a83521448d0f98009cd43b4663087684c6"
+        ],
+        [
+          "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_pack_strip",
+          "098d350e7ae52f49a74a5d217d2c01d10ab078d9"
+        ],
+        [
+          "/api/v1/pc/portrait/motion",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_motion_upload",
+          "08c44597fb40ab16e4372db7914c4f3546a54c25"
+        ],
+        [
+          "/api/v1/pc/dance",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_dance_select",
+          "99f4ebf1b76f96053f4b3e62aefc71e318ac1ca3"
+        ],
+        [
+          "/api/v1/pc-face/motion",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_face_motion_read",
+          "25953dce9db676a497e4db0f8d9c51388ddf78d4"
+        ],
+        [
+          "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_face_motion_atlas",
+          "f33bd745c31d95d9ac62b1131d99ed83369011ec"
+        ],
+        [
+          "/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_motion_preview",
+          "f6846732a2e7b00b5d79bdf6963234fc910deea0"
+        ],
+        [
+          "/api/v1/pc/trades",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_trades",
+          "bfad3817fbca1a4f4ea02e0d8e8c3f9488802cf6"
+        ],
+        [
+          "/api/v1/pc/trades/accept",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_accept",
+          "adde238936ec5422c63a7f4e428f3211ecf0c088"
+        ],
+        [
+          "/api/v1/pc/trades/cancel",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_cancel",
+          "f71490a5ac12c11c5ae4062dda846f9e931790be"
+        ],
+        [
+          "/api/v1/pc/trades/decline",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_decline",
+          "7625d5e1606655676d02705fb45df5428a13f96f"
+        ],
+        [
+          "/api/v1/pc/trades/propose",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_trade_propose",
+          "06bb0bfd169f116bef29b4d78d961a190570589f"
         ]
       ]
     },
@@ -3317,7 +3470,7 @@
     },
     {
       "classification": "statically-nonconsumer",
-      "reason": "Static source review (v1.41.0 lane: auto_logs, mail_discord, title_ladders): over each route's whole reached surface no W1 private Match column is named, no SQL reads the matches table and the Match model is not used, so no W1 private Match column can reach this route's output.",
+      "reason": "Static source review (v1.41.0 lane: auto_logs, mail_discord): over each route's whole reached surface no W1 private Match column is named, no SQL reads the matches table and the Match model is not used, so no W1 private Match column can reach this route's output.",
       "routes": [
         [
           "/api/v1/internal/logs/auto/prune",
@@ -3363,15 +3516,6 @@
           "auto_logs",
           "upload_auto_log",
           "5fdce19e45c6c6e64547d7b72747c67b7b9bf96a"
-        ],
-        [
-          "/api/v1/players/{steam_id}/title-ladders",
-          [
-            "GET"
-          ],
-          "title_ladders",
-          "get_title_ladders",
-          "048abf0b5609e7e94c44470ccba0b3c0eb785746"
         ]
       ]
     },
@@ -3411,6 +3555,21 @@
           "main",
           "pc_face_preview",
           "d5f253a92e2fca385c941daf8b1eb2e325a7a946"
+        ]
+      ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "title_ladders router (backend/api/title_ladders.py): one GET, /api/v1/players/{steam_id}/title-ladders. It reads players (one row by steam_id, of which only id and active_title_id are used; the row is never serialized), player_items joined to shop_items (sku), shop_items (sku, id) and title_ladder_progress (line, games, tier), and answers a fixed projection built from those values and the in-module LADDERS catalogue. Its first statement is SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY (one snapshot per request), and each rung's owned also asks main._auto_owned(steam_id, sku), a set test on the path parameter that sends no query. It reads no matches table and no Match ORM row, so no W1 seat column can reach its output. Static classification: handler-implementation drift (a Match read, or serializing the Player row) would need re-review. Enumerated only under the pinned fastapi==0.115.0 (0.141 wraps included routers as _IncludedRouter, invisible to app.routes) - the test asserts the pin.",
+      "routes": [
+        [
+          "/api/v1/players/{steam_id}/title-ladders",
+          [
+            "GET"
+          ],
+          "title_ladders",
+          "get_title_ladders",
+          "32f4c63bfbc5da44f88ed29b738f69ae80a775df"
         ]
       ]
     }
@@ -3597,21 +3756,37 @@
     "GET /api/v1/pc/card -> main.pc_card_face",
     "GET /api/v1/pc/pool -> main.pc_pool_summary",
     "POST /api/v1/admin/pc/snapshot -> main.admin_pc_snapshot",
+    "POST /api/v1/pc/trades/propose -> main.pc_trade_propose",
+    "POST /api/v1/pc/trades/accept -> main.pc_trade_accept",
+    "POST /api/v1/pc/trades/decline -> main.pc_trade_decline",
+    "POST /api/v1/pc/trades/cancel -> main.pc_trade_cancel",
+    "GET /api/v1/pc/trades -> main.pc_trades",
+    "POST /api/v1/admin/pc/trades/reverse -> main.admin_pc_trade_reverse",
+    "GET /api/v1/admin/pc/trades -> main.admin_pc_trades",
     "GET /api/v1/internal/pc/events/pending -> main.internal_pc_events_pending",
     "POST /api/v1/internal/pc/events/ack -> main.internal_pc_events_ack",
     "POST /api/v1/internal/pc/daily -> main.internal_pc_daily",
     "GET /api/v1/internal/pc/collection -> main.internal_pc_collection",
     "GET /api/v1/internal/pc/card -> main.internal_pc_card",
     "POST /api/v1/pc/portrait -> main.pc_portrait_upload",
+    "POST /api/v1/pc/portrait/motion -> main.pc_motion_upload",
+    "POST /api/v1/pc/dance -> main.pc_dance_select",
     "POST /api/v1/admin/pc/portrait/clear -> main.admin_pc_portrait_clear",
     "POST /api/v1/internal/pc/lease -> main.internal_pc_lease",
     "GET /api/v1/internal/pc/lease/{lease_id} -> main.internal_pc_lease_check",
     "DELETE /api/v1/internal/pc/lease/{lease_id} -> main.internal_pc_lease_release",
     "GET /api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png -> main.pc_face_png",
+    "GET /api/v1/pc-face/motion -> main.pc_face_motion_read",
+    "GET /api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png -> main.pc_face_motion_atlas",
     "GET /api/v1/internal/pc/face/print/{print_id}/{locale} -> main.internal_pc_face_print",
     "GET /api/v1/internal/pc/face/preview/{player_ref}/{locale} -> main.internal_pc_face_preview",
     "GET /api/v1/pc/face/preview -> main.pc_face_preview",
+    "GET /api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif -> main.internal_pc_motion_preview",
     "GET /api/v1/internal/pc/face/back -> main.internal_pc_face_back",
+    "GET /api/v1/internal/pc/packs -> main.internal_pc_packs",
+    "GET /api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png -> main.internal_pc_pack_strip",
+    "GET /api/v1/internal/pc/binder -> main.internal_pc_binder",
+    "GET /api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png -> main.internal_pc_binder_page",
     "POST /api/v1/shop/purchase -> main.purchase_item",
     "POST /api/v1/music/rate -> main.music_rate",
     "GET /api/v1/music/ratings -> main.music_ratings_public",
@@ -3722,6 +3897,7 @@
     "POST /api/v1/team/queue/preferred-team -> main.team_queue_preferred_team",
     "POST /api/v1/team/queue/ready -> main.team_queue_ready",
     "POST /api/v1/team/series/{series_id}/spawn-confirm -> main.team_series_spawn_confirm",
+    "GET /api/v1/team/series/{series_id}/status -> main.team_series_status_readonly",
     "GET /api/v1/team/series/{series_id}/state -> main.team_series_state",
     "POST /api/v1/admin/team/series/{series_id}/resolve -> main.admin_resolve_team_series",
     "GET /api/v1/admin/recent-series -> main.admin_recent_series",

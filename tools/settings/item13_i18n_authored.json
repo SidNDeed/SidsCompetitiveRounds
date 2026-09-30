@@ -257,6 +257,11 @@
     },
     {
       "class": "reason",
+      "key": "SPcDnc",
+      "text": "a dance is your own choice; None keeps the card still"
+    },
+    {
+      "class": "reason",
       "key": "SPcPre",
       "text": "follows the character you actually play"
     },
@@ -551,5 +556,5 @@
       "text": "Privacy & account"
     }
   ],
-  "total": 108
+  "total": 109
 }

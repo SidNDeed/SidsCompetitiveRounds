@@ -16,10 +16,10 @@ Three pieces live here and nothing else does:
     from it, so the table and this file cannot drift apart silently.
   * the pure rules — ``tier_for_games``, ``rungs_at_tier``, ``next_rung`` —
     which take numbers and return numbers, no database, no clock.
-  * ``record_completed_games`` — the hook the four completion paths WILL
+  * ``record_completed_games`` — the hook the four rated completion paths
     call, and the ``GET /api/v1/players/{steam_id}/title-ladders`` read route
-    the client DOES draw the progress bar from. The route is mounted; the hook
-    is not called. See WHAT IS NOT WIRED below.
+    the client draws the progress bar from. Both are reached from main.py --
+    see HOW PRODUCTION REACHES THIS MODULE below.
 
 WHAT IS NOT HERE. No mail. A rung-up should tell the player, and the system
 mail + Discord relay that would carry that message is a different item's
@@ -28,36 +28,40 @@ caller decides what to do with it. No client rendering: rung names are
 ``shop_items`` rows like every other title and render through the existing
 title path.
 
-WHAT IS NOT WIRED. This module is the DATA HALF of item 12. ``main``
-imports it for two things: it mounts ``router`` (point 2 below), and it
-reads ``GRANTED_ONLY_SKUS`` to carve the forty earned rungs out of the
-shop-owner exemption, on the ``/shop/items`` listing and on the set-active
-ownership check. ONE thing is still unwired: the hook (point 1). Earlier
-versions of this paragraph said main did not import this module at all, and
-then that it imported it only for that constant; each was true of the tree it
-was written in, and each is the kind of claim that goes stale the moment
-anything else reads from here.
+HOW PRODUCTION REACHES THIS MODULE. In three places, and no others:
 
-  1. THE HOOK. Nothing in main.py calls ``record_completed_games``. The four
-     call sites belong to a rewrite of the lease surface that is in flight in
-     another branch, and two sessions meeting inside those function bodies is
-     the failure this was deliberately kept out of. See that function's
-     docstring for the exact call shape, and note in particular that 2v2 has
-     TWO completion paths, not one.
-  2. THE ROUTER — WIRED, and this entry used to say the opposite. main.py
-     imports this module and calls ``app.include_router(title_ladders.router)``,
-     so ``GET /api/v1/players/{steam_id}/title-ladders`` IS served by a box
-     running this tree, and the client's shop Titles section reads it. The old
-     text — "main.py never calls include_router, so the route answers 404 in
-     production" — was the claim a reader used to decide the route could not
-     be the source of a 404 they were looking at. It can; that 404 is an
-     unknown account, and it now carries ``NO_ACCOUNT_MARKER`` so the client
-     can say so.
+  1. THE HOOK. main.py calls ``record_completed_games`` once in each of the
+     four rated completion paths -- ``submit_match`` (1v1),
+     ``submit_team_match`` and ``_complete_team_series_with_ratings`` (2v2:
+     the reported path and the after-the-fact settlement), and
+     ``submit_ffa_match`` (FFA) -- each call inside a savepoint of its own,
+     so a failed credit is logged as ``[LADDER-CREDIT] ... dropped`` and
+     never costs the completion. The reference_id is the 1v1 series id, the
+     team series id at both 2v2 paths, and for FFA the lobby id: one lobby is
+     one sitting, however many games it plays. 1v2 (``submit_ovt_match``)
+     reports unrated and is not hooked. ``backend/tests/test_title_ladders.py``
+     asserts the set per mode, each call's reference expression, and that
+     main.py holds exactly those four calls.
+  2. THE ROUTER. main.py includes the ``router`` defined below exactly once,
+     so ``GET /api/v1/players/{steam_id}/title-ladders`` is served;
+     ``backend/tests/test_title_ladder_route_contract.py`` pins the mount and
+     every key the client reads. Its 404 for an unknown account carries
+     ``NO_ACCOUNT_MARKER`` so the client can tell that 404 from an unmounted
+     route and say so.
+  3. THE CARVE-OUT. ``main`` reads ``GRANTED_ONLY_SKUS`` to take the forty
+     earned rungs out of the shop-owner exemption, on the ``/shop/items``
+     listing and on the set-active ownership check.
 
-Migration 331 is therefore inert on its own: every tier-1 rung lands
-``catalog_ready = FALSE``, so nothing is listed, nothing can be bought, and no
-progress row is ever written. That inertness is what makes the data half safe
-to deploy ahead of the wiring, and it is deliberate rather than incidental.
+(Earlier versions of this docstring said production did not import this
+module at all, then that it imported it for one constant and mounted no
+route, then that the hook was not called yet; each was true when written and
+went stale the moment main.py gained a reference.)
+
+Migration 331 still lists nothing: every tier-1 rung lands ``catalog_ready =
+FALSE``, so nothing is listed and nothing can be bought, and the only account
+that can wear a rung -- so the only one the hook can credit -- is the
+shop-owner exemption's. Opening the entry rungs for sale is a decision of its
+own, not a consequence of the wiring.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -407,9 +411,10 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
     chosen to match the completion paths rather than to differ from them:
     `submit_match` locks its players with `sorted(pids, key=str)` and
     `FOR NO KEY UPDATE`, and the 2v2 completion helper takes the same sorted
-    pass (#202). Those two were READ; the OVT and FFA paths were not, so
-    whoever wires those two sites should confirm the same discipline there
-    before assuming this re-locks rather than waits. The progress row is an
+    pass (#202). `submit_team_match` and `submit_ffa_match` take the same
+    sorted pass over every player they credit before their call (FFA's is the
+    players pass ahead of its placements), so at all four sites this
+    re-locks rather than waits; 1v2 is not hooked. The progress row is an
     upsert rather than a lock-then-write: it
     may not exist yet, and a gate on a row that does not exist locks nothing
     (#203/#207). `games` is only ever moved by a delta (#326).
@@ -535,6 +540,24 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
     return events
 
 
+# ── The build word main.py derives from the hook ───────────────────
+
+# The hook's own name, read off the function rather than typed a second time.
+_HOOK_NAME = record_completed_games.__name__
+
+
+def hooked_site_count(functions) -> int:
+    """How many of `functions` load the name record_completed_games in their
+    own compiled code -- the names each function's code object loads, which
+    a call of the hook does and a comment or a docstring naming it does not.
+    main.py binds its /health `ladder_hook` build word to this over the four
+    rated completion functions, and test_title_ladders.py holds main.py to
+    one awaited call of the hook in each of the four and no other reference.
+    The count lives here, beside the hook, so that main.py need not name the
+    hook anywhere else."""
+    return sum(1 for fn in functions if _HOOK_NAME in fn.__code__.co_names)
+
+
 # ── The read route ─────────────────────────────────────────────────
 
 @router.get("/api/v1/players/{steam_id}/title-ladders")
@@ -556,6 +579,21 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
     client's half is ``ApiClient.TitleLadderFailure``; until a server carrying
     this marker is deployed it presumes rather than proves, and says so.
     """
+    # One snapshot per request. The answer is built from up to five SELECTs,
+    # and under READ COMMITTED each takes its own snapshot, so a GET racing a
+    # ladder-credit commit could pair the old worn title and ownership with
+    # the new progress. REPEATABLE READ makes every read below see the
+    # snapshot taken at the first SELECT; READ ONLY makes any table write
+    # here an error. PostgreSQL refuses this statement once the transaction
+    # has run a query, so it must stay first; get_db's session has run none.
+    await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+    # Late, for the reason record_completed_games gives for its own late
+    # import: `main` imports this module at module level. `owned` asks the
+    # exemption the same function /shop/items and equip ask (#279), so an
+    # exempt account wearing an entry rung it never bought reads it as owned
+    # here too, and a granted-only rung never does.
+    from main import _auto_owned
+
     player = (await db.execute(
         select(Player).where(Player.steam_id == steam_id)
     )).scalar_one_or_none()
@@ -614,7 +652,7 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
                 "preview_color": r["preview_color"],
                 "threshold": r["threshold"],
                 "price": r["price"],
-                "owned": r["sku"] in owned_skus,
+                "owned": r["sku"] in owned_skus or _auto_owned(steam_id, r["sku"]),
                 "active": r["sku"] == active_sku,
             } for r in ld["rungs"]],
         })

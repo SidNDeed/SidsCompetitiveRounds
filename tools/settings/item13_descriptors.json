@@ -262,6 +262,11 @@
     },
     {
       "class": "reason",
+      "key": "SPcDnc",
+      "text": "a dance is your own choice; None keeps the card still"
+    },
+    {
+      "class": "reason",
       "key": "SPcPre",
       "text": "follows the character you actually play"
     },
@@ -3610,6 +3615,92 @@
         "writes_entry_as_side_effect": null
       }
     },
+    "SPcDnc": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 183,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SPcDnc",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SPcDnc_q",
+      "home": "privacy",
+      "home_label": "Privacy & account",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "a dance is your own choice; None keeps the card still",
+        "state_words": []
+      },
+      "key": "SPcDnc",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "a dance is your own choice; None keeps the card still",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "PlayerCardsUI.cs",
+          "line": null,
+          "note": "PaintDance (merge pass 3)",
+          "source": "declared",
+          "verified": false,
+          "writer": "declared"
+        },
+        "painter_token": "DanceOptionLabel",
+        "render": {
+          "expression": "PlayerCardsUI.DanceOptionLabel(\"0\")",
+          "extracted_from": "DanceOptionLabel",
+          "label": "DanceOptionLabel",
+          "label_source": "lane PlayerCardsUI.cs (merge pass 3)",
+          "not_constant_because": null,
+          "text": "None",
+          "text_source": "lane PlayerCardsUI.cs (merge pass 3)"
+        },
+        "stored": "0",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "0"
+        ],
+        "server": null,
+        "writer": "PlayerCardsUI.SetDance(long item)"
+      },
+      "reset_excluded_reason": "this value lives on the server: a bulk privacy write is one round trip per value, each able to fail on its own, and a half-failed bulk change leaves the page claiming a state the server never stored",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "\"0\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "None",
+        "type": "string",
+        "writer_value_param": "long"
+      },
+      "reset_selectors": [],
+      "row_group": "SPcDnc",
+      "stores_value": true,
+      "sub_tab_body": "SubPrivacy",
+      "target_id": "SPcDnc",
+      "writer": {
+        "applies_on_same_value": false,
+        "captured_effects": [
+          "MaybeSendDance"
+        ],
+        "kind": "server_writer",
+        "name": "PlayerCardsUI.SetDance(long item)",
+        "note": "a pick is a pending choice: MaybeSendDance sends it to POST /api/v1/pc/dance after a 1.5 s pause, so a run of picks costs one selection; nothing is written to the config",
+        "source": "PlayerCardsUI.SetDance (merge pass 3: dance cards' selection row)",
+        "writes_entry_as_side_effect": null
+      }
+    },
     "SPcPre": {
       "bulk_reset": false,
       "config": {
@@ -5289,7 +5380,8 @@
   "notes": [
     "SPcAnn records no callable server path yet: the same owed writer as SPcPub; both rows share it.",
     "SPcPub records no callable server path yet: PlayerCardsUI.SetSetting(string key, bool value) does not exist on either tree yet: the rows call ToggleSetting(key), which reads the cached value and writes its negation, so there is no parameter a reset can pass. The value-taking form is owed.",
-    "SPcTrd (card trading, trades_open) was added by the v1.41.0 merge pass 1 when the trading client lane met this table; it was not measured by the generator. It is a clone of SPcAnn (same writer PlayerCardsUI.SetSetting, same server-row exclusion from the bulk reset) with its own key, selector and reason; recommended ON is the server's column default (pc_trades_open DEFAULT true, migration 353). The row shows only while /pc/me carries trades_open; present_on is lane only."
+    "SPcTrd (card trading, trades_open) was added by the v1.41.0 merge pass 1 when the trading client lane met this table; it was not measured by the generator. It is a clone of SPcAnn (same writer PlayerCardsUI.SetSetting, same server-row exclusion from the bulk reset) with its own key, selector and reason; recommended ON is the server's column default (pc_trades_open DEFAULT true, migration 353). The row shows only while /pc/me carries trades_open; present_on is lane only.",
+    "SPcDnc (dance cards, the card's dance, pc_dance_item) was added by the v1.41.0 merge pass 3 when main's dance cards met this table; it was not measured by the generator. It is a DROPDOWN like SPcPre, with a server writer like SPcTrd (PlayerCardsUI.SetDance: a pending choice MaybeSendDance sends to POST /api/v1/pc/dance) and the server-row exclusion from the bulk reset; the recommended None is the selection's default (no dance). The row shows only while /pc/me carries the dance keys (dance_supported); present_on is lane only."
   ],
   "problems": [],
   "reset_corrections": {
@@ -5321,35 +5413,36 @@
       "SMailRelay",
       "SPerfH"
     ],
-    "help_bodies_moved": 47,
+    "help_bodies_moved": 48,
     "i18n": {
       "exclusion_reasons": 9,
       "help_bodies": 9,
       "option_words": 7,
-      "reasons": 56,
+      "reasons": 57,
       "recommendation_values": 0,
       "shared_templates": 8,
       "state_words": 6,
       "sub_tab_labels": 7,
-      "total": 111,
+      "total": 112,
       "when_to_press": 9
     },
-    "keys": 56,
+    "keys": 57,
     "operands": {
       "bool": 36,
-      "canonical_id": 7,
+      "canonical_id": 8,
       "delegate": 1,
       "enum_member": 1,
       "none": 9,
       "number": 2
     },
-    "painters_declared": 12,
+    "painters_declared": 13,
     "painters_derived": 35,
     "render_rows": [
       "SBloom",
       "SChatTtl",
       "SCursor",
       "SLang",
+      "SPcDnc",
       "SPcPre",
       "SShake"
     ],
@@ -5367,10 +5460,10 @@
       "SPerf_Stun"
     ],
     "value_less": 9,
-    "value_storing": 47,
+    "value_storing": 48,
     "writers_action": 9,
     "writers_named_new": 31,
     "writers_semantic": 9,
-    "writers_server": 7
+    "writers_server": 8
   }
 }

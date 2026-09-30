@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 374   # ASKS-B lane, board rows 24 and 25: +2 (the Settings card preview and the batch shard; 372 before); v1.41.0 beta round 11: -1 (the physical game 1 issue removed with route (a), finding M1; 373 before); v1.41.0 beta round 8: +1 (the series' physical game 1 issue, finding F31; 372 before); v1.41.0 beta round 2: +1 (the pending-DM cancellation recheck; 371 before); v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 391   # v1.41.0 merge pass 3, main cd8d846 into the beta: +17 over the beta's 374, main's dance cards +5, 886bed8 r5 +1 (the read-only team series status route), card trading +7 and Discord collection reveal +4, the title-ladder read both sides added counted once (main's side: 383); before that, the beta: ASKS-B lane, board rows 24 and 25: +2 (the Settings card preview and the batch shard; 372 before); v1.41.0 beta round 11: -1 (the physical game 1 issue removed with route (a), finding M1; 373 before); v1.41.0 beta round 8: +1 (the series' physical game 1 issue, finding F31; 372 before); v1.41.0 beta round 2: +1 (the pending-DM cancellation recheck; 371 before); v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 373   # ASKS-B lane: +2 (371 before); v1.41.0 beta round 11: -1 (372 before); v1.41.0 beta round 8: +1 (371 before); v1.41.0 beta round 2: +1 (370 before); v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 390   # v1.41.0 merge pass 3: +17 (373 before; main's side 382); ASKS-B lane: +2 (371 before); v1.41.0 beta round 11: -1 (372 before); v1.41.0 beta round 8: +1 (371 before); v1.41.0 beta round 2: +1 (370 before); v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -850,9 +850,11 @@ def test_the_helper_closure_stays_affordable():
     indexed bindings, with the walk itself taking 0.1 s once the index is built
     (~5.3 s, once per process). The bounds below sat above those with room, so
     this fails on a walk that has gone wrong rather than on ordinary growth;
-    the worst-route bounds have since moved for measured growth in bindings
-    a route really runs, each move recorded with its measurement at its
-    assertion.
+    the worst-route bounds, and the two p90 bounds (on the card trading lane
+    and, independently and to the same values, at the Discord collection
+    landing, then at the merge of the two), have since moved for measured
+    growth in bindings routes really run, each move recorded with its
+    measurement at its assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -879,7 +881,108 @@ def test_the_helper_closure_stays_affordable():
     # alone: measured 20 / 55 / 198 with data-into-data expansion, against
     # 16 / 48 / 191 before it.
     assert code_median <= 24, f"median code closure {code_median} of {total}"
-    assert code_p90 <= 75, f"p90 code closure {code_p90} of {total}"
+    # Discord collection landing (2026-09-26): the p90 moved for measured
+    # growth. The same walk with the same route seeds over each tree:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   main 9a1dd9d                          365   21 / 69 / 326
+    #   lane 5868131                          369   21 / 73 / 326
+    #   LAND-1 74af3f6 (7541261 merged)       369   21 / 73 / 326
+    #   LAND-2 852f4be through 9f52e03        369   21 / 76 / 326
+    #
+    # Main alone passes and the lane alone passes; the landed tree is the sum
+    # of the two landings. The p90 is a rank statistic -- the value at sorted
+    # position int(0.9 * n) -- and it moved while the route AT that position
+    # did not: GET /api/v1/admin/quarantine/triage/{mode}/{group_id} measures
+    # 76 on every tree above. What moved is how many routes sit above 75: 37
+    # of 369 on the landed tree, exactly the count that puts position 332 on
+    # that route (main: 33 of 365; the lane: 35 of 369). Four of the 37 are
+    # the lane's new internal routes: the collection binder (117) and its page
+    # image (280), the pack list (123) and its strip image (280), the two
+    # images reaching the card-face rendering their tiles are composited from.
+    # Two crossed 75 on main's title-ladder hook: POST
+    # /api/v1/team/series/{series_id}/report-dc 72 -> 80 and POST
+    # /api/v1/admin/team/series/{series_id}/resolve 74 -> 82, each +8 in
+    # title_ladders (record_completed_games, the three lookups it runs and the
+    # four rung tables they read) -- the ladder credit their completion paths
+    # now give. Every one is a binding its route really runs, and the median
+    # has not moved, which is where a walk gone wrong shows first (the hub
+    # case in the docstring measured median 179).
+    #
+    # The bound moves to 80, 5% over the measurement -- the ~5-6% headroom the
+    # worst bounds keep over theirs; the median and worst bounds stay.
+    #
+    # Card trading LAND (2026-09-27): measured 21 / 76 / 326 of 2654 indexed
+    # bindings over 372 routes at the merge of main 9a1dd9d into the trading
+    # lane, against 21 / 73 / 326 over the lane tip 93227a8 (372 routes) and
+    # 21 / 69 / 326 over main 9a1dd9d (365 routes), the same walk with the
+    # same route seeds over each tree's own backend/api. Neither side passes
+    # 75; the composition does. The ladder hook gives two routes at the
+    # lane's p90 rank the eight title_ladders bindings a rated completion
+    # really runs (POST /api/v1/team/series/{series_id}/report-dc 72 -> 80,
+    # POST /api/v1/admin/team/series/{series_id}/resolve 74 -> 82), both rise
+    # past the rank, and the 90th percentile becomes the next route up, GET
+    # /api/v1/admin/quarantine/triage/{mode}/{group_id} at 76, unchanged
+    # itself. On main alone the rank sits lower (69); the five player trade
+    # routes above it are what put it in this band.
+    #
+    # The bound moves to 80 -- ~5% over the measurement, the headroom the
+    # other moves in this test gave -- for that reason and no other; the
+    # median and worst bounds stay.
+    #
+    # The two moves above were made independently, one on each side of the
+    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
+    # chose 80.
+    #
+    # Card trading LAND, second merge (2026-09-27): measured 22 / 82 / 326
+    # of 2716 indexed bindings over 376 routes at the merge of main 36e8493
+    # into the trading lane (9a5b081), against 21 / 76 / 326 over the lane
+    # tip a666517 (372 routes) and over main 36e8493 (369 routes), the same
+    # walk with the same route seeds over each tree's own backend/api.
+    # Neither side passes 80; the composition does, by rank alone. The p90
+    # is the value at sorted position int(0.9 * n), the 38th route from the
+    # top at n = 376. Each side adds routes far above it -- the lane its five
+    # player trade routes (132 to 158), main its four collection routes (117
+    # to 280) -- and each side alone keeps 76 at its rank (37 and 36 routes
+    # above 76); the merged tree carries all nine, 38 routes sit above 80,
+    # and the 38th from the top is POST
+    # /api/v1/admin/team/series/{series_id}/resolve at 82, 82 on both sides
+    # too. No count is the merge's own: every route measures what it
+    # measures on the side that has it (the six that differ from main are
+    # the lane's trading reads, at their lane counts).
+    #
+    # The bound moves to 86 -- ~5% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median (22) and
+    # worst bounds stay.
+    # v1.41.0 merge pass 3 (2026-09-30), main cd8d846 into the beta at
+    # 54fec71: measured, the same walk with the same route seeds over each
+    # tree's own backend/api,
+    #
+    #   tree                         routes   code median / p90 / worst   all median / p90 / worst
+    #   beta 54fec71                    373   21 / 75 / 326               89 / 163 / 480
+    #   main cd8d846                    382   22 / 83 / 326               76 / 167 / 459
+    #   the merge                       390   22 / 90 / 326               93 / 196 / 482
+    #
+    # Over the 365 routes all three trees share, the merge measures 21 / 75 /
+    # 326 (code) and 91 / 165 / 482 (all), against the beta's 21 / 75 / 326
+    # and 90 / 163 / 480 on the same routes: no shared route's surface moved
+    # by more than a leaf or two, and the six bindings a shared route reaches
+    # on neither side are import leaves of auto_logs and mail_discord. What
+    # moved is the population. Main's seventeen new routes join it -- the
+    # dance cards' motion routes, card trading's five player routes, the
+    # Discord collection reveal's four -- and thirteen of them sit above 174
+    # overall and above 86 in code (binder page 435 / 280, pack strip 434 /
+    # 280, motion preview 418 / 282, motion atlas 411 / 285, the trade routes
+    # 251 to 279): each reaches the card-face rendering the beta's own
+    # Settings card preview reaches (432 / 282 here). On main alone the same
+    # routes sit among routes without the beta's import leaves (main's median
+    # is 76); on the merged tree they join the beta's, and the ranks move.
+    # No count is the merge's own: every route measures what it measures on
+    # the side that has it, to within those leaves.
+    #
+    # The code p90 bound moves to 95, ~5% over the measurement (90), the
+    # headroom the moves above gave, for that reason and no other.
+    assert code_p90 <= 95, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -919,7 +1022,11 @@ def test_the_helper_closure_stays_affordable():
     # they do not triple is the DRIFT: an import line changes far more rarely
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
-    assert all_median <= 90, f"median closure {all_median} of {total}"
+    # Merge pass 3 (2026-09-30): measured 93, the population move the code
+    # p90's note above sets out (over the routes the three trees share it is
+    # 91, the beta's 90). The bound moves to 98, ~5% over the measurement; the
+    # runaway it exists to catch (the data-into-data hub) measured 179.
+    assert all_median <= 98, f"median closure {all_median} of {total}"
     # v1.41.0 lane merge (2026-09-25): measured 89 / 163 / 480 of 2639 indexed
     # bindings, against 72 / 140 / 457 for the same walk over MAIN's backend/api
     # (c2d14ad, 2505). The CODE tier moved only at p90, 65 -> 74: the A1
@@ -936,7 +1043,74 @@ def test_the_helper_closure_stays_affordable():
     # the reviewed surface, which is the only direction this gate may be
     # wrong in. The bound moves to 172, the ~5% headroom the worst bound has
     # kept. The median bound stays: measured 89, it did not fail.
-    assert all_p90 <= 172, f"p90 closure {all_p90} of {total}"
+    #
+    # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
+    # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
+    # the same walk with the same route seeds over main 7541261's backend/api.
+    # The same walk over this tree WITHOUT the seven trade routes gives
+    # 72 / 140 / 457 again, so the move is those seven routes and nothing
+    # else. (The code tier: p90 69 -> 73, median 21 and worst 326 unmoved,
+    # all under the bounds above, which stay.)
+    #
+    # The five player trade routes reach 229 to 257 bindings each, 83 of them
+    # in the face modules, and they enter those modules through the bindings
+    # GET /api/v1/pc/collection enters them through (_pc_print_dict,
+    # _pc_face_inputs, _pc_labels, _pc_face_ctx, _pc_locale, _pc_renderer_fp;
+    # the same 83 face-module bindings): a trade answers with the binder's
+    # own print projection. The two admin trade routes reach 91 and 73. Seven
+    # routes join a population of 365, five of them above the old p90, and
+    # the 90th percentile moves from 140 to 151.
+    #
+    # The bound moves to 160 -- ~6% over the measurement, the headroom 335
+    # gave over 315 and 300 over 282 at the code-worst moves -- for that
+    # reason and no other. A walk that has gone wrong still fails at the
+    # median bounds first (the data-into-data hub case measured median 179),
+    # and those stay, as does the worst bound.
+    #
+    # Discord collection landing (2026-09-26): the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 9a1dd9d                          365   72 / 140 / 457
+    #   lane 5868131                          369   73 / 150 / 457
+    #   LAND-1 74af3f6 (7541261 merged)       369   73 / 151 / 457
+    #   LAND-2 852f4be through 9f52e03        369   73 / 151 / 457
+    #
+    # The same rank effect as the code p90 above, and it crossed at the first
+    # landing: 37 of 369 routes sit above 150 on the landed tree (main: 33 of
+    # 365; the lane: 36 of 369), which puts position 332 on POST
+    # /api/v1/ovt/matches, 151 on every tree above. Four of the 37 are the
+    # lane's new internal routes (216, 410, 222, 409); the one that crossed on
+    # main is POST /api/v1/team/series/{series_id}/report-dc, 146 -> 153 on
+    # the lead-forfeit hotfix -- seven code bindings, _team_game_crossed_two
+    # with the four helpers and two constants beside it, the per-game
+    # evidence that route now settles from. The bound moves to 160, 6% over
+    # the measurement; the median and worst bounds stay.
+    #
+    # The two moves above were made independently, one on each side of the
+    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
+    # chose 160.
+    #
+    # Card trading LAND, second merge (2026-09-27): measured 75 / 164 / 459
+    # over the same 376 routes of the merge 9a5b081, against 75 / 153 / 459
+    # over the lane tip a666517 and 73 / 151 / 457 over main 36e8493. The
+    # same rank effect as the code p90: 38 routes sit above 160 on the
+    # merged tree, nine of them the two sides' new routes, and the 38th from
+    # the top is POST /api/v1/team/series/{series_id}/report-dc at 164 (162
+    # on main; the +2 is models.deferred and models.text, the two import
+    # bindings F63's Player mapping added, which every route reaching the
+    # model reaches). The bound moves to 174, ~6% over the measurement; the
+    # median and worst bounds stay (the worst route, POST
+    # /api/v1/pc/packs/open, measures 459 against 460).
+    #
+    # v1.41.0 merge pass 3 (2026-09-30): measured 93 / 196 / 482 over 390
+    # routes, the population move the code p90's note sets out: the beta's
+    # 172 and main's 174 were each set over its own side (163 and 164), and
+    # 48 routes of the merged tree sit above 174 -- thirteen of them main's
+    # new routes, one the beta's Settings card preview -- which puts the 39th
+    # from the top, POST /api/v1/team/series/{series_id}/report-dc, at the
+    # rank at 196. The bound moves to 208, ~6% over the measurement; the
+    # median and worst bounds keep failing a walk gone wrong first.
+    assert all_p90 <= 208, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the

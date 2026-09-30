@@ -1789,11 +1789,12 @@ namespace CompetitiveRounds
 
         /// <summary>Rows T5-g does not set by hand, and why: a server row with
         /// no test stub would send a request (SPcTrd, card trading, also ends
-        /// the account's open proposals when it goes off); the relay needs a linked Discord
+        /// the account's open proposals when it goes off; SPcDnc, the card's dance,
+        /// sends a selection to the server); the relay needs a linked Discord
         /// (T5-e covers its refusal); the consent switch changes what the mod
         /// reports; the card preset's refresh re-renders the card portrait.</summary>
         private static readonly string[] DrvHandSetSkip =
-            { "SPrefSC", "SAllowSpec", "SAppOff", "SPcAnn", "SPcPub", "SPcTrd", "SShowDc", "SMailRelay", "SCT", "SPcPre" };
+            { "SPrefSC", "SAllowSpec", "SAppOff", "SPcAnn", "SPcPub", "SPcTrd", "SPcDnc", "SShowDc", "SMailRelay", "SCT", "SPcPre" };
 
         private static readonly string[] DrvPerfIds = { "Stun", "OOB", "HitSnd", "EdgeBn", "Menu", "BulletCap", "PoolInit" };
 

@@ -198,3 +198,27 @@ def _pc_card_themes_loaded():
         main._PC_CARD_THEMES.clear()
         main._PC_CARD_THEMES.update(before)
 
+
+@pytest.fixture(autouse=True)
+def _pc_trade_schema_unlatched():
+    """main caches a FOUND trading schema for the life of the process
+    (_PC_TRADE_SCHEMA_FOUND): migration 353 is additive, and production runs
+    one database per process. A test process runs many databases and
+    scripted sessions in one process, so a test that finds the schema on a
+    real database (any harness that applies every migration, 353 included)
+    would otherwise decide what a later test's probe answers for a scripted
+    session that carries no trading column. Every test starts with the latch
+    clear, and it is put back as it was found.
+
+    Only when `main` is already imported, as above."""
+    main = sys.modules.get("main")
+    if main is None or not hasattr(main, "_PC_TRADE_SCHEMA_FOUND"):
+        yield
+        return
+    before = main._PC_TRADE_SCHEMA_FOUND
+    main._PC_TRADE_SCHEMA_FOUND = False
+    try:
+        yield
+    finally:
+        main._PC_TRADE_SCHEMA_FOUND = before
+

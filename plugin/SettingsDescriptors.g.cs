@@ -62,6 +62,7 @@ namespace CompetitiveRounds
             new SettingsDescriptor("SNT", "SWITCH", "chatmail", true, true, "SNT", "SNT_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPColor", "SWITCH", "visuals", true, true, "SPColor", "SPColor_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPcAnn", "SWITCH", "privacy", false, true, "SPcAnn", "SPcAnn_q", "painted_literal", "ON"),
+            new SettingsDescriptor("SPcDnc", "DROPDOWN", "privacy", false, true, "SPcDnc", "SPcDnc_q", "painted_runtime", null),
             new SettingsDescriptor("SPcPre", "DROPDOWN", "privacy", false, true, "SPcPre", "SPcPre_q", "painted_runtime", null),
             new SettingsDescriptor("SPcPub", "SWITCH", "privacy", false, true, "SPcPub", "SPcPub_q", "painted_literal", "ON"),
             new SettingsDescriptor("SPcTrd", "SWITCH", "privacy", false, true, "SPcTrd", "SPcTrd_q", "painted_literal", "ON"),
@@ -130,6 +131,7 @@ namespace CompetitiveRounds
                 case "SNT": return I18n.Tr("the Home chat log updates either way; this is the pop-up");
                 case "SPColor": return I18n.Tr("off falls everyone back to orange/blue");
                 case "SPcAnn": return I18n.Tr("only rare pulls, and only in one channel");
+                case "SPcDnc": return I18n.Tr("a dance is your own choice; None keeps the card still");
                 case "SPcPre": return I18n.Tr("follows the character you actually play");
                 case "SPcPub": return I18n.Tr("lets trades find your binder");
                 case "SPcTrd": return I18n.Tr("nothing moves until you accept a proposal");
@@ -218,6 +220,7 @@ namespace CompetitiveRounds
                 case "SMailFrom":
                 case "SMailRelay":
                 case "SPcAnn":
+                case "SPcDnc":
                 case "SPcPub":
                 case "SPcTrd":
                 case "SPrefSC":

@@ -21,6 +21,7 @@ these are assertions about what the code DOES rather than about what its
 source text looks like.
 """
 
+import ast
 import asyncio
 import os
 import sys
@@ -35,6 +36,10 @@ import title_ladders as tl  # noqa: E402
 import main  # noqa: E402
 
 ROUTE_PATH = "/api/v1/players/{steam_id}/title-ladders"
+
+# The route's first statement: one REPEATABLE READ, READ ONLY snapshot per
+# request (title_ladders.py, D9).
+SNAPSHOT_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 
 # Exactly the keys plugin/ApiClient.cs ParseTitleLadders / ParseTitleLadderRung
 # read. Kept as three flat sets rather than one nested shape, because that is
@@ -116,12 +121,16 @@ class _FakePlayer:
 
 
 class _FakeDb:
-    """Answers the route's five queries in order. Deliberately positional:
-    the route's query ORDER is part of what this fixture encodes, so a
-    reordering shows up as a wrong-shaped answer rather than as a pass."""
+    """Answers the route's six statements in order: the SET TRANSACTION that
+    makes the request one snapshot -- its text asserted, and it must come
+    first -- then the five queries. Deliberately positional: the route's
+    statement ORDER is part of what this fixture encodes, so a reordering
+    shows up as a failed assertion or a wrong-shaped answer rather than as a
+    pass."""
 
     def __init__(self, player, owned_skus, item_ids, progress, active_sku):
         self._answers = [
+            _FakeResult([]),
             _FakeResult([], scalar=player),
             _FakeResult([(s,) for s in owned_skus]),
             _FakeResult(list(item_ids.items())),
@@ -130,7 +139,10 @@ class _FakeDb:
         ]
         self._i = 0
 
-    async def execute(self, *_args, **_kw):
+    async def execute(self, statement, *_args, **_kw):
+        if self._i == 0:
+            assert str(statement) == SNAPSHOT_SQL, (
+                "the route's first statement is %r, not the snapshot" % str(statement))
         r = self._answers[self._i]
         self._i += 1
         return r
@@ -180,8 +192,9 @@ def test_the_repeated_key_names_are_real():
 
 
 def test_zero_progress_answers_a_full_board_with_nothing_owned():
-    """What every account looks like until the completion hook ships: eight
-    lines, 48 rungs, games 0, tier 1, nothing owned, nothing active. The
+    """What an account with no ladder progress looks like -- any account
+    until it completes a rated series wearing a rung: eight lines, 48 rungs,
+    games 0, tier 1, nothing owned, nothing active. The
     client renders this as NOT STARTED per line -- which it can only do if
     `owned` is present and false rather than absent."""
     a = _answer()
@@ -256,3 +269,92 @@ def test_an_unknown_steam_id_is_a_404_not_an_empty_board():
     with pytest.raises(HTTPException) as exc:
         _run(tl.get_title_ladders("76561198000000002", db))
     assert exc.value.status_code == 404
+    assert db._i == 2, "the unknown id sent %d statement(s), not the SET and one read" % db._i
+
+
+# ── owned asks the shared predicate (D7) ───────────────────────────
+
+# The route's `owned`, as ast.unparse renders it: the PlayerItem answer, or
+# the exemption asked through the one function equip and /shop/items ask.
+OWNED_BY_THE_PREDICATE = "r['sku'] in owned_skus or _auto_owned(steam_id, r['sku'])"
+OWNED_LINE = '"owned": r["sku"] in owned_skus or _auto_owned(steam_id, r["sku"]),'
+
+
+def _route_function(source):
+    hits = [n for n in ast.walk(ast.parse(source))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "get_title_ladders"]
+    assert len(hits) == 1, "get_title_ladders is defined %d times" % len(hits)
+    return hits[0]
+
+
+def _owned_decision(fn):
+    """(every "owned" value in a dict literal in `fn`, unparsed; the names
+    `fn` imports from main; whether `fn` names GRANTED_ONLY_SKUS)."""
+    owned = [ast.unparse(v) for n in ast.walk(fn) if isinstance(n, ast.Dict)
+             for k, v in zip(n.keys, n.values)
+             if isinstance(k, ast.Constant) and k.value == "owned"]
+    imports = sorted(a.name for n in ast.walk(fn)
+                     if isinstance(n, ast.ImportFrom) and n.module == "main"
+                     for a in n.names)
+    names = ({n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+             | {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)})
+    return owned, imports, "GRANTED_ONLY_SKUS" in names
+
+
+def test_the_route_decides_owned_with_the_shared_predicate():
+    """D7 (#279: a flag names a line, the defect is a class). The route's
+    `owned` asks main._auto_owned -- the function equip and /shop/items ask
+    -- imported late inside the route, with the route's own steam_id; and
+    the route never names GRANTED_ONLY_SKUS, which would be the exemption
+    spelled a second time, one edit away from disagreeing with the first."""
+    fn = _route_function(open(tl.__file__, encoding="utf-8").read())
+    owned, imports, names_granted = _owned_decision(fn)
+    assert owned == [OWNED_BY_THE_PREDICATE], owned
+    assert imports == ["_auto_owned"], imports
+    assert not names_granted, "get_title_ladders names GRANTED_ONLY_SKUS"
+    assert [a.arg for a in fn.args.args][:1] == ["steam_id"], fn.args.args
+
+
+def test_the_owned_check_fails_on_the_route_without_d7():
+    """#391, the check above against two routes it must reject: D7 undone
+    (owned from the PlayerItem join alone), and the exemption restated
+    inline instead of asked."""
+    src = open(tl.__file__, encoding="utf-8").read()
+    assert src.count(OWNED_LINE) == 1, src.count(OWNED_LINE)
+    undone = src.replace(OWNED_LINE, '"owned": r["sku"] in owned_skus,')
+    owned, _imports, _named = _owned_decision(_route_function(undone))
+    assert owned == ["r['sku'] in owned_skus"], owned
+    restated = src.replace(OWNED_LINE, (
+        '"owned": r["sku"] in owned_skus or (steam_id in main.SHOP_OWNER_STEAM_IDS '
+        'and r["sku"] not in GRANTED_ONLY_SKUS),'))
+    owned, _imports, named = _owned_decision(_route_function(restated))
+    assert owned != [OWNED_BY_THE_PREDICATE] and named, (owned, named)
+
+
+def _answer_for(steam_id, active_sku=None):
+    player = _FakePlayer(steam_id)
+    if active_sku is not None:
+        player.active_title_id = 1
+    item_ids = {sku: 1000 + i for i, sku in enumerate(tl.ALL_SKUS)}
+    return _run(tl.get_title_ladders(steam_id, _FakeDb(player, (), item_ids, [], active_sku)))
+
+
+def test_the_exempt_account_reads_its_entry_rungs_owned_without_a_row():
+    """D7 on the fake, so it holds where no database is configured: the
+    exempt account (read from main, never spelled here), wearing rat rung 1
+    with no ownership row, reads every entry rung owned, that one active,
+    and no granted-only rung owned. The same answer for an ordinary id owns
+    nothing."""
+    owners = sorted(main.SHOP_OWNER_STEAM_IDS)
+    assert owners, "main.SHOP_OWNER_STEAM_IDS is empty"
+    entry = sorted(r["sku"] for ld in tl.LADDERS for r in ld["rungs"] if r["tier"] == 1)
+    a = _answer_for(owners[0], active_sku="title_ladder_rat_1")
+    owned = sorted(r["sku"] for ln in a["ladders"] for r in ln["rungs"] if r["owned"])
+    assert owned == entry, owned
+    assert not set(owned) & set(tl.GRANTED_ONLY_SKUS)
+    worn = [r for ln in a["ladders"] for r in ln["rungs"] if r["active"]]
+    assert [(r["sku"], r["owned"]) for r in worn] == [("title_ladder_rat_1", True)], worn
+    # A synthetic id below the first individual-account id: no real account.
+    b = _answer_for("76561190000000206", active_sku="title_ladder_rat_1")
+    assert not any(r["owned"] for ln in b["ladders"] for r in ln["rungs"])

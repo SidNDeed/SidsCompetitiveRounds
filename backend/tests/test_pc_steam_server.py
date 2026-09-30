@@ -4015,8 +4015,16 @@ def test_the_settings_writer_takes_no_blob_lock_and_releases_nothing(monkeypatch
 
     async def settings_of(db, pid):
         return {"revision": 6}
+
+    # trades_open (migration 353) exists only once the trading schema does:
+    # the writer asks the schema probe first, found here
+    schema = {"state": "found"}
+
+    async def trade_schema(db):
+        return schema["state"]
     monkeypatch.setattr(main, "_pc_verified_actor", actor)
     monkeypatch.setattr(main, "_pc_settings_of", settings_of)
+    monkeypatch.setattr(main, "_pc_trade_schema", trade_schema)
 
     def call(db, key, value, revision=5):
         return _run(main.pc_set_setting(request=_Req(), steam_id=STEAM, sig="s", nonce="n" * 8, revision=revision,
@@ -4043,6 +4051,17 @@ def test_the_settings_writer_takes_no_blob_lock_and_releases_nothing(monkeypatch
         with pytest.raises(HTTPException) as ei:
             call(db, key, 1)
         assert ei.value.status_code == 422 and db.log == []
+    # trading's switch while the probe does not find its schema: 503 before
+    # the actor is verified and before any write; the other keys still write
+    for state in ("missing", "partial", "unknown"):
+        schema["state"] = state
+        db = Scripted({})
+        with pytest.raises(HTTPException) as ei:
+            call(db, "trades_open", 0)
+        assert ei.value.status_code == 503 and ei.value.detail == {"error": "trading_unavailable"}, state
+        assert db.log == [] and db.committed == 0, state
+        db = Scripted({"RETURNING pc_settings_revision": [[{"pc_settings_revision": 6}]]})
+        assert call(db, "announce", 1) == {"revision": 6} and db.committed == 1, state
 
 
 def test_the_admin_clear_restarts_the_steam_unit_and_the_render_guard_refuses_the_plate():

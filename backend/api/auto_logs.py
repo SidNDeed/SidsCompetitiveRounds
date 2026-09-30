@@ -124,6 +124,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from schemas import BUG_REPORT_LOG_MAX_CHARS
+import log_redaction as _auto_logred   # the credential rule, applied before the clamp (as BugReportRequest does)
 
 router = APIRouter(prefix="/api/v1/logs", tags=["Auto Logs"])
 
@@ -240,9 +241,14 @@ class AutoLogRequest(BaseModel):
     def _clamp_log(cls, v):
         # Keep the TAIL: the events nearest the end of the match are the ones
         # worth having. Same ceiling as the bug-report bundle, imported from
-        # schemas so the two cannot drift apart.
-        if isinstance(v, str) and len(v) > BUG_REPORT_LOG_MAX_CHARS:
-            return v[-BUG_REPORT_LOG_MAX_CHARS:]
+        # schemas so the two cannot drift apart. The credential rule runs over
+        # the log as sent and the tail is cut after it, BugReportRequest's order:
+        # a cut first can split a ticket from its label, and the rule then no
+        # longer recognises the part that survives.
+        if isinstance(v, str):
+            v = _auto_logred.redact_credentials(v)
+            if len(v) > BUG_REPORT_LOG_MAX_CHARS:
+                v = v[-BUG_REPORT_LOG_MAX_CHARS:]
         return v
 
 

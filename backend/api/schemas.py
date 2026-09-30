@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+import log_redaction as _schema_logred   # the credential rule (standard library only); BugReportRequest applies it before its clamps
+
 
 # ── Match Submission ───────────────────────────────────────────
 
@@ -848,6 +850,13 @@ class HealthResponse(BaseModel):
     # §8) -- probed by the release train on both roles and read by nothing
     # else. Absent on a build older than v4.13.
     pc_fold: str | None = None
+    # pc_trading: the card-trading word (main._pc_trading_word, migration
+    # 353): ready | off | schema_missing | partial | unknown | broken --
+    # DERIVED from the accept's claim and move literals and the schema
+    # probe, never a constant (#306). The connected arm probes; the
+    # degraded arm reads only this process's cache (broken, the word of a
+    # found schema, else unknown). Absent on a build before trading.
+    pc_trading: str | None = None
     # ffa_hold_fences: which generation of the FFA readmission-hold fences this
     # build carries (main._FFA_HOLD_FENCES; 1 = migration 325's held_until /
     # held_lobby honoured by the janitor lapse sweep, the poll's 3-hour sweep
@@ -866,6 +875,21 @@ class HealthResponse(BaseModel):
     # value is what tells its build from the one before it. Absent on any
     # build before round 2.
     rj_triage: int | None = None
+    # ticket_redaction: whether this build applies the credential rule
+    # (main._TICKET_REDACTION_MARKER; 1 = log_redaction's Steam session ticket
+    # rule at the bug-report receive path before the first write, in the bundle
+    # scrub every stored-bundle door runs, and on the free-text fields every
+    # bug-report read door serves). A code constant, equal on both boxes by
+    # construction, probed by the release train and read by nothing else
+    # (#306): the batch adds no route, so this value is what tells its build
+    # from the one before it. Absent on any build before it.
+    ticket_redaction: int | None = None
+    # discord_collection: release-train verification plumbing, not a design
+    # mechanism (main._DISCORD_COLLECTION_MARKER; 1 = this build serves the
+    # Discord reveal's four internal routes). A code constant, equal on both
+    # boxes by construction, probed by the release train and read by nothing
+    # else (#306). Absent on any build before it.
+    discord_collection: int | None = None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
@@ -878,6 +902,34 @@ class HealthResponse(BaseModel):
     # it raises instead of silently leaving the key out. Absent on any build
     # before that batch, which is how the train reads the old build.
     ffa_game_number: int
+    # ovt_solo_split: whether this build refuses a 1v2 report that moves another
+    # player into the solo seat once the series holds a recorded game
+    # (main._OVT_SOLO_SPLIT; 1 = submit_ovt_match's compiled constants carry the
+    # refusal's 403 detail AND the trailing literal of its log line). DERIVED
+    # from those two strings when main is imported, never written down, so a
+    # build that lost or edited either one reads 0 (#342). The release train's
+    # build discriminator for the bug 391 batch, which adds no route and no key
+    # to a GET answer both builds serve; equal on both boxes by construction,
+    # and read by nothing else (#306). Declared without a default, so building
+    # the answer without it raises instead of silently leaving the key out.
+    # Absent on any build before that batch, which is how the train reads the
+    # old build.
+    ovt_solo_split: int
+    # lead_forfeit_pergame: whether this build settles a 2v2 lead-forfeit from
+    # the server's own per-game record (team_series_games, migrations 348/351/352) rather
+    # than the DC report's point snapshot (main._LEAD_FORFEIT_PERGAME; 1 =
+    # update_team_live_points' compiled code loads _record_team_game_points AND
+    # team_series_report_dc's loads _team_game_crossed_two). DERIVED from those
+    # two wirings when main is imported, never written down, so a build that
+    # lost either one reads 0 (#342). The release train's build discriminator
+    # for the lead-forfeit hotfix, which adds no route and no key to a GET
+    # answer both builds serve; equal on both boxes by construction, and read
+    # by nothing else (#306). It is a statement about the code only: whether
+    # migrations 348, 351 and 352 have been applied is proven by their own checks.
+    # Declared without a default, so building the answer without it raises
+    # instead of silently leaving the key out. Absent on any build before that
+    # batch, which is how the train reads the old build.
+    lead_forfeit_pergame: int
     # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
     # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
     # by migration 333). `ready` once the map is non-empty, `empty` when the
@@ -891,6 +943,61 @@ class HealthResponse(BaseModel):
     # (#441: the value a broken feature reports must not look like success).
     # Absent on any build before this batch, which is how the old build reads.
     pc_card_themes: str | None = None
+    # ladder_hook: how many of the four rated completion paths credit the worn
+    # title ladder in this build (main._LADDER_HOOK; 4 = submit_match,
+    # submit_team_match, _complete_team_series_with_ratings and
+    # submit_ffa_match each call title_ladders.record_completed_games, v1.41.0
+    # item 12). DERIVED from those four functions' compiled code when main is
+    # imported, never written down, so a build that lost a site's call reads
+    # less than 4 (#342). The release train's build discriminator for the
+    # ladder-hook batch, which adds no route and no key to a GET answer both
+    # builds serve; equal on both boxes by construction, and read by nothing
+    # else (#306). Declared without a default, so building the answer without
+    # it raises instead of silently leaving the key out. Absent on any build
+    # before that batch, which is how the train reads the old build.
+    ladder_hook: int
+    # team_dc_fallback: whether the database this box is connected to has the
+    # two columns migration 356 adds, which the 2v2 disconnect deferral reads
+    # and writes (main._team_dc_fallback_probe). 1 when a probe naming every
+    # dc_fallback_* column the deferral's SQL names runs, 0 when it fails for
+    # a missing column or table. The column list is DERIVED from that SQL
+    # when main is imported, never written down (#342). It asks the
+    # database: the connected arm probes, the degraded arm answers the last
+    # probe's value (0 before any). The release train's discriminator for
+    # the migration as the api sees it, on both roles (the standby's schema
+    # arrives by replication); read by nothing else (#306). Declared without a
+    # default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before the 2v2 deferral batch,
+    # which is how the train reads the old build.
+    team_dc_fallback: int
+    # ffa_finishing_count: whether the database this box is connected to has
+    # the four columns the ranked-FFA finishing-count rule reads and writes
+    # (board row 28; main._ffa_finishing_count_probe): ffa_lobbies.member_ids
+    # and .departed_ids, ffa_match_players.left_early and .absent. 1 when a
+    # probe naming every one of them runs, 0 when it fails for a missing
+    # column or table. The column lists are DERIVED from ffa_lobby_start's,
+    # ffa_queue_leave's and submit_ffa_match's compiled SQL when main is
+    # imported, never written down (#342). It asks the database: the
+    # connected arm probes, the degraded arm answers the last probe's value
+    # (0 before any). Migration 363 adds no column of its own -- the rule is
+    # new code over an unchanged schema -- so this is the release train's
+    # discriminator for that code, on both roles (the standby's schema
+    # arrives by replication); read by nothing else (#306). Declared without
+    # a default, so building the answer without it raises instead of
+    # silently leaving the key out. Absent on any build before this batch,
+    # which is how the train reads the old build.
+    ffa_finishing_count: int
+    # pc_motion: how many of the dance-card motion routes are registered on
+    # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
+    # per-visit motion read, the atlas, the selection and the bot's motion
+    # preview GIF -- 5 on this build. DERIVED from app.routes on every
+    # request, never written down, so a build that lost a route's
+    # registration reads fewer (#306/#342). The build discriminator for the
+    # dance-cards batch, equal on both boxes by construction and read by
+    # nothing else. Declared without a default, so building the answer
+    # without it raises instead of silently leaving the key out. Absent on
+    # any build before that batch, which is how the old build reads.
+    pc_motion: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
@@ -1065,12 +1172,26 @@ class BugReportRequest(BaseModel):
             return v[:64]
         return v
 
+    # THE CREDENTIAL RULE RUNS HERE, BEFORE EACH CLAMP (log_redaction.py). This
+    # is where the text of a bug report is first received, and the clamps below
+    # are its first cut: a Steam session ticket that straddles one can keep,
+    # after a head cut, a head of its value shorter than the rule's 32
+    # characters, and after the log's tail cut, its value without its label.
+    # Either way the rule no longer recognises what survives, and what survives
+    # is part of the credential. So the rule runs over the text as sent, then
+    # the cut.
+    # It runs on the event loop, where FastAPI has just decoded the body: over a
+    # 12 MB log, 6.6 ms with no ticket and 15.9 ms with one, against 38.6 ms for
+    # the JSON decode of the same body (measured on a development seat, 2026-09-25).
+
     @field_validator("description", "repro_steps", mode="before")
     @classmethod
     def _clamp_text(cls, v):
         # Keep the HEAD of free-text fields (the user's own words come first).
-        if isinstance(v, str) and len(v) > 8000:
-            return v[:8000]
+        if isinstance(v, str):
+            v = _schema_logred.redact_credentials(v)    # the rule, over the text as sent
+            if len(v) > 8000:
+                v = v[:8000]                            # then the head is kept
         return v
 
     @field_validator("log_text", mode="before")
@@ -1079,8 +1200,10 @@ class BugReportRequest(BaseModel):
         # Keep the TAIL of the log — the most recent events are what matter for a
         # bug report. BUG_REPORT_LOG_MAX_CHARS pre-gzip, applied as a truncation
         # and not as a 422-triggering hard cap.
-        if isinstance(v, str) and len(v) > BUG_REPORT_LOG_MAX_CHARS:
-            return v[-BUG_REPORT_LOG_MAX_CHARS:]
+        if isinstance(v, str):
+            v = _schema_logred.redact_credentials(v)    # the rule, over the log as sent
+            if len(v) > BUG_REPORT_LOG_MAX_CHARS:
+                v = v[-BUG_REPORT_LOG_MAX_CHARS:]       # then the tail is kept
         return v
 
 

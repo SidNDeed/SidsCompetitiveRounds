@@ -8,13 +8,16 @@ Pinned here, each against the requirement it answers:
   * a Player Cards session from one address leaves the sensitive bucket's
     budget (queue join, match report, bets, sign-in) whole, in either order;
   * every /api/v1/pc/ route is charged to a Player Cards bucket -- exactly the
-    upload's path to the upload bucket, every other family path (one that only
-    starts with the upload's included) to the family bucket -- and no other
-    route is; the upload and the batch shard are the only family routes that
-    take a request body (a body parameter, or a read of the body in the
-    endpoint or in a function of main it hands its request to), and the batch
-    declares no body parameter (it reads its own, under a ceiling) and is
-    family traffic;
+    upload's path to the upload bucket, exactly the motion upload's path to
+    the motion upload's bucket (dance cards S2.7), every other family path
+    (one that only starts with either upload's included) to the family
+    bucket -- and no other route is; the two uploads and the batch shard are
+    the only family routes that take a request body (a body parameter, or a
+    read of the body in the endpoint or in a function of main it hands its
+    request to), and the batch declares no body parameter (it reads its own,
+    under a ceiling) and is family traffic; the motion reads under
+    /api/v1/pc-face/motion go to the motion read bucket and every other face
+    path to the face bucket;
     /api/v1/internal/ routes and calls carrying the internal key (the bot's)
     are charged to no bucket;
   * the drop client's fastest recorded discard pace, with the margin §9
@@ -62,6 +65,8 @@ SHARED_LIMIT, SHARED_WINDOW = 20, 10.0
 DISCARD = "/api/v1/pc/prints/discard"
 UPLOAD = "/api/v1/pc/portrait"
 BATCH = "/api/v1/pc/prints/discard-batch"
+MOTION_UPLOAD = "/api/v1/pc/portrait/motion"   # dance cards (S2.7): its own exact-path bucket
+MOTION_READ = "/api/v1/pc-face/motion"         # ... and the motion reads', ahead of the face prefix
 
 
 class Gate:
@@ -73,10 +78,12 @@ class Gate:
         monkeypatch.setattr(main, "_rl_time", SimpleNamespace(monotonic=lambda: self.now))
         monkeypatch.setattr(main, "_RL_BUCKETS", defaultdict(deque))
         monkeypatch.setattr(main, "_RL_LAST_PRUNE", [0.0])
+        monkeypatch.setattr(main, "_RL_MOTION_LATCH", {})
         monkeypatch.setenv("API_SECRET_KEY", KEY)
 
     def reset(self):
         main._RL_BUCKETS.clear()
+        main._RL_MOTION_LATCH.clear()
         main._RL_LAST_PRUNE[0] = 0.0
 
     @staticmethod
@@ -196,9 +203,10 @@ def test_every_route_is_charged_to_the_bucket_its_family_names(gate):
     decided: it reads its own JSON body and refuses one past
     player_cards.PC_DISCARD_BATCH_BODY_MAX bytes, declares no body parameter
     (so FastAPI parses nothing before that ceiling), and queues nothing in
-    the render pool, so it is family traffic. A route that takes a body and
-    is not one of these two still fails here."""
-    family = upload = 0
+    the render pool, so it is family traffic. The motion upload (dance cards
+    S2.7) is decided too: its own exact-path bucket. A route that takes a
+    body and is not one of these three still fails here."""
+    family = upload = motion_upload = motion_read = 0
     with_body = set()
     for route in main.app.routes:
         path = getattr(route, "path", "")
@@ -219,21 +227,35 @@ def test_every_route_is_charged_to_the_bucket_its_family_names(gate):
                 if path == UPLOAD:
                     assert bucket == "pcu", (path, bucket)
                     upload += 1
+                elif path == MOTION_UPLOAD:
+                    assert bucket == "pcmu", (path, bucket)
+                    motion_upload += 1
                 else:
                     assert bucket == "pc", (path, bucket)
                     family += 1
                 assert gate.bucket_of(_concrete(path), method, {"X-Internal-Key": KEY}) is None, path
+            elif path == MOTION_READ or path.startswith(MOTION_READ + "/"):
+                assert bucket == "pcfm", (path, bucket)
+                motion_read += 1
             elif path in main._RATE_LIMIT_BYPASS:
                 assert bucket is None, path
             else:
                 assert bucket in ("g", "s", "f"), (path, bucket)
     # the recovery must see the family at all, or every assertion above is vacuous
-    assert family >= 10 and upload >= 1, (family, upload)
-    assert with_body == {UPLOAD, BATCH}, with_body
-    # a path that only starts with the upload's is family traffic, whatever it carries
-    for near in (UPLOAD + "s", UPLOAD + "-status", UPLOAD + "/x1"):
+    assert family >= 10 and upload >= 1 and motion_upload == 1 and motion_read == 2, (
+        family, upload, motion_upload, motion_read)
+    assert with_body == {UPLOAD, BATCH, MOTION_UPLOAD}, with_body
+    # a path that only starts with an upload's is family traffic, whatever it carries
+    for near in (UPLOAD + "s", UPLOAD + "-status", UPLOAD + "/x1",
+                 MOTION_UPLOAD + "s", MOTION_UPLOAD + "-status", MOTION_UPLOAD + "/x1"):
         for method in ("GET", "POST"):
             assert gate.bucket_of(near, method) == "pc", (near, method)
+    # the motion reads are exactly their path and the paths under it; a path
+    # that only starts with it is a face path
+    for path in (MOTION_READ, MOTION_READ + "/p/0123456789abcdef/en/card.png"):
+        assert gate.bucket_of(path) == "pcfm", path
+    for near in (MOTION_READ + "s", MOTION_READ + "-x"):
+        assert gate.bucket_of(near) == "f", near
 
 
 def _drop_client_discards(cycle, seconds, rtt=0.12):

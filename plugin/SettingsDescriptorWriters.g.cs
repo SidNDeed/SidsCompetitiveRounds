@@ -90,6 +90,7 @@ namespace CompetitiveRounds
                 case "SNT": return true;
                 case "SPColor": return true;
                 case "SPcAnn": return true;
+                case "SPcDnc": return "0";
                 case "SPcPre": return -1;
                 case "SPcPub": return true;
                 case "SPcTrd": return true;
@@ -121,6 +122,7 @@ namespace CompetitiveRounds
                 case "SChatTtl": return Plugin.ChatOverlaySecondsLabel(25f);
                 case "SCursor": return I18n.Tr(CursorColorCosmetic.ShapeLabel("default"));
                 case "SLang": return NativeUI.LanguageName(I18n.SuggestFromOs());
+                case "SPcDnc": return PlayerCardsUI.DanceOptionLabel("0");
                 case "SPcPre": return PlayerCardsUI.PresetLabel(-1);
                 case "SShake": return I18n.Tr("Full".ToUpperInvariant());
                 default: return null;

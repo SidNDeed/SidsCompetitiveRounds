@@ -341,8 +341,9 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
     """Since 2026-09-13 neither setting can withdraw a picture, so the writer
     has no exclusive-lock half and no lease wait: actor, row lock, the CAS
     write, commit. A key that could move the resolution would need the old
-    None writer back (r18 H2), which is why the SQL is pinned to the two
-    announce columns and the surface to the two keys. The route BODY takes
+    None writer back (r18 H2), which is why the SQL is pinned to the
+    announce columns and card trading's switch (migration 353, which moves
+    no picture either) and the surface to those three keys. The route BODY takes
     no advisory lock; the SHARED identity hold every player route takes
     inside `_pc_verified_actor` (c3) is kept on purpose, so a settings
     write of a player mid-deletion waits for that deletion instead of
@@ -357,7 +358,8 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
     for absent in ("pg_advisory_xact_lock", "_pc_lease_wait", "_pc_lock_portrait_blobs",
                    "_pc_release_portrait_blob", "none_write", "_pc_setting_revokes_picture"):
         assert absent not in src, absent
-    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce")
+    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce",
+                                                                      "trades_open")
     for key, sql in main._PC_SETTINGS_SQL.items():
         flat = " ".join(sql.split())
         assert ("WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer) "
@@ -368,8 +370,10 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
 
 def test_the_settings_surface_is_exactly_the_two_announce_keys():
     # a key added here without a decision about the picture would silently
-    # ride the lock-free writer above
-    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce"}
+    # ride the lock-free writer above. trades_open (migration 353) is card
+    # trading's consent switch: decided in the trading design, it moves no
+    # picture and takes no card out of a binder.
+    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce", "trades_open"}
 
 
 def test_a_ban_deletes_the_subjects_leases_under_the_identity_lock():
@@ -517,6 +521,62 @@ def test_no_player_cards_answer_carries_a_steam_or_discord_identifier():
 # keys that end in `name` and are not a player's name
 _NOT_A_PLAYER_NAME = ("rank_name", "font_name", "file_name", "band_name")
 
+# A payload key that ends in `name`, and the value it answers on its line.
+_NAME_ANSWER = re.compile(r'"([a-z_]*name)"\s*:\s*(.+?),?\s*$')
+
+# The neutral label is not a name: `_pc_neutral_name` answers the locale's
+# `pc.unnamed` label or the built-in, never a stored name, so a value that is
+# that call and nothing else discloses nothing. The collection reveal's gone
+# roster entry answers it, as its design states (build notes, FINDING 9). Only the
+# exact call is admitted, as the whole value (R1 LOW Finding 3): the value ends
+# at the call - what follows it starts with a comma or a closing bracket - so a
+# concatenation, a fallback such as `x or _pc_neutral_name()`, a conditional or
+# a slice around the call still needs its projection. The rest of the line may
+# carry no `name` and no `**` spread: a second name key on the same line is
+# never checked by the caller, and a spread can replace the key the call answers.
+_NEUTRAL_CALL = re.compile(r"_pc_neutral_name\([a-z_]*\)")
+
+
+def _neutral_only(expr):
+    s = expr.strip()
+    m = _NEUTRAL_CALL.match(s)
+    if not m:
+        return False
+    rest = s[m.end():].lstrip()
+    return rest == "" or (rest[0] in ",)]}" and "name" not in rest and "**" not in rest)
+
+
+def test_the_neutral_exemption_admits_the_exact_call():
+    """R1 LOW Finding 3, the control: the exact call is admitted, alone or as
+    the value a key answers before the next key of its line, and so is every
+    line a Player Cards function answers it on today."""
+    for expr in ("_pc_neutral_name(ctx)", "_pc_neutral_name()", "  _pc_neutral_name(ctx)  ",
+                 '_pc_neutral_name(ctx), "face_rev": None})'):
+        assert _neutral_only(expr), expr
+    found = []
+    for _name, body in _pc_functions():
+        for line in body.splitlines():
+            m = _NAME_ANSWER.search(line)
+            if m and m.group(2).strip().startswith("_pc_neutral_name("):
+                found.append(m.group(2))
+    assert found and all(_neutral_only(e) for e in found), found
+
+
+def test_the_neutral_exemption_refuses_a_stored_name_beside_the_call():
+    """R1 LOW Finding 3: a value that is the call and something more is not
+    the call. A concatenation, a fallback, a conditional, a slice, a second
+    name key on the line and a spread after the call all still need the
+    projection, so none of them is admitted."""
+    refused = ('_pc_neutral_name(ctx) + row["subject_name"]',
+               '_pc_neutral_name(ctx) or row["owner_name"]',
+               '_pc_neutral_name(ctx) if gone else row["subject_name"]',
+               '_pc_neutral_name(ctx) if row["owner_name"] is None else row["owner_name"]',
+               '_pc_neutral_name(ctx)[:0] + row["subject_name"]',
+               '_pc_neutral_name(ctx), "owner_name": row["owner_name"]}',
+               '_pc_neutral_name(ctx), **row}')
+    admitted = [e for e in refused if _neutral_only(e)]
+    assert admitted == [], f"admitted as the neutral label: {admitted}"
+
 
 def test_the_player_cards_boundary_applies_the_coverage_projection_too():
     """`public_name` is P alone, which is correct for the global display name
@@ -543,13 +603,14 @@ def test_every_player_cards_name_answer_goes_through_the_public_projection():
         projected = set(re.findall(
             r"^\s*([a-z_]+)\s*=\s*_pcp\.public_(?:render_)?name\(", body, re.M))
         for line in body.splitlines():
-            m = re.search(r'"([a-z_]*name)"\s*:\s*(.+?),?\s*$', line)
+            m = _NAME_ANSWER.search(line)
             if not m or m.group(1) in _NOT_A_PLAYER_NAME:
                 continue
             checked += 1
             expr = m.group(2)
             ok = ("public_name" in expr or "public_render_name" in expr
-                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected))
+                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected)
+                  or _neutral_only(expr))
             assert ok, (name, line.strip())
     assert checked >= 8, checked
 
@@ -1061,7 +1122,8 @@ def test_the_internal_key_gate_is_the_first_statement_of_every_internal_pc_route
     import ast
     import textwrap
     for fn in (main.internal_pc_lease, main.internal_pc_lease_check, main.internal_pc_lease_release,
-               main.internal_pc_face_print, main.internal_pc_face_preview, main.internal_pc_face_back):
+               main.internal_pc_face_print, main.internal_pc_face_preview, main.internal_pc_face_back,
+               main.internal_pc_motion_preview):
         body = ast.parse(textwrap.dedent(_src(fn))).body[0].body
         if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             body = body[1:]   # the docstring
@@ -1341,13 +1403,23 @@ def test_the_card_and_its_preview_read_one_snapshot():
     reads cannot pair an old-rank embed with a new-rank picture."""
     card = _src(main.internal_pc_card)
     assert "s.id AS snapshot_id" in card and '"snapshot_id": int(row["snapshot_id"])' in card
+    # the member read is the one preview read both preview routes call (dance
+    # cards B13, round 2): the face preview and the motion preview GIF pin the
+    # same snapshot the same way, each passing the snapshot it was told
+    read = _src(main._pc_preview_read)
+    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in read
+    assert '{"pid": player_ref, "snap": snapshot_id}' in read
+    # the face preview hands its snapshot to the drawing helper (board row 24),
+    # which hands it to the read; the motion preview hands it to the read itself
     prev = _src(main.internal_pc_face_preview)
     assert "snapshot_id: int | None = Query(None, ge=1)" in prev
-    # the route hands its snapshot to the drawing helper (board row 24), which pins the read
     assert prev.count("await _pc_preview_face(db, player_ref, loc, snapshot_id)") == 1
-    draw = _src(main._pc_preview_face)
-    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in draw
-    assert '{"pid": player_ref, "snap": snapshot_id}' in draw
+    assert "pc_pool_members" not in prev
+    for fn in (main._pc_preview_face, main.internal_pc_motion_preview):
+        src = _src(fn)
+        assert src.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+        assert "pc_pool_members" not in src, fn.__name__
+    assert "snapshot_id: int | None = Query(None, ge=1)" in _src(main.internal_pc_motion_preview)
 
 
 @pytest.mark.parametrize("gone, lookups, admin_w, target_w", [

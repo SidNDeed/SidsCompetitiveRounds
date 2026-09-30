@@ -23,6 +23,7 @@ API = ROOT / "plugin" / "ApiClient.cs"
 INFO = ROOT / "plugin" / "InfoLibrary.cs"
 NATIVE = ROOT / "plugin" / "NativeUI.cs"
 PORTRAIT = ROOT / "plugin" / "PortraitRender.cs"
+DANCE = ROOT / "plugin" / "PortraitRenderDance.cs"   # dance cards: the refresh's dance decision
 FACES = ROOT / "plugin" / "PlayerCardFaces.cs"
 RULES = ROOT / "backend" / "api" / "player_cards.py"
 
@@ -223,8 +224,12 @@ def test_the_intent_and_answer_rules_are_pinned_in_the_client():
     # trading calls (PcTradeSummary, PcTrades, PcTradePropose, PcTradeAct,
     # FetchPcCollectionOf), each fenced on the epoch it was dispatched under;
     # + PcDiscardBatch, whose balance write into the cache is fenced the same
-    # way (board row 25)
-    assert api.count("int epoch = _pcCacheEpoch;") == 11
+    # way (board row 25); + PcDanceSelect (dance cards)
+    assert api.count("int epoch = _pcCacheEpoch;") == 12
+    # dance cards: the dance pick writes the cached /pc/me only under the epoch it read
+    pick = api[api.index("public static void PcDanceSelect("):]
+    pick = pick[:pick.index("\n        }\n")]
+    assert "int epoch = _pcCacheEpoch;" in pick and "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)" in pick
     # an empty binder after an identity edge is refetched
     assert "if (view == View.Binder && ApiClient.CachedPcCollection == null && ApiClient.PcCollectionError == null)" in src
     # the title line is the translated rank tier plus the SEPARATELY translated
@@ -690,7 +695,13 @@ def test_the_renderer_fences_its_pixel_inputs_and_keeps_a_refused_request_armed(
     assert "if (Rendering || UploadInFlight || Stale(key)) yield break;" not in pr
     assert 'LastResult = "aborted"; yield break;' not in pr
     assert "private static bool Start(string why, bool upload)" in pr
-    assert 'if (Rendering || UploadInFlight || !Start(_refreshWhy ?? "preset", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }' in pr
+    # dance cards: a matured refresh goes through the dance decision (RefreshStart),
+    # which keeps a deferred one armed and otherwise falls through to Start
+    assert 'if (Rendering || UploadInFlight || !RefreshStart(_refreshWhy ?? "preset")) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }' in pr
+    dance = DANCE.read_text(encoding="utf-8")
+    rs = dance[dance.index("private static bool RefreshStart(string why)"):]
+    rs = rs[:rs.index("\n        }\n")]
+    assert "if (defer) return false;" in rs and rs.rstrip().endswith("return Start(why, true);")
     assert 'if (!Start("visit", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; _refreshWhy = "visit"; }' in pr
     assert 'catch { inp.refusal = "the face could not be copied"; return inp; }' in pr and "inp.face = f;" not in pr
     assert "private static bool AfterActivate(" in pr and "return faceOk;" in pr and "if (face != null) faceOk = false;" in pr

@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Dance cards - console harness for the client's pure halves.
+
+       It compiles the REAL plugin files, not copies, so the shipped path is
+       the tested path: plugin/ScrPng.cs (the frame PNG writer and the atlas
+       reader), plugin/DanceMotionCore.cs (the container, the matte, the
+       client's copy of the server's checks, the L2 upload order) and
+       plugin/PlayerCardMotionCore.cs (visit identity, the clip clock, the
+       request gate, the atlas budget, the decode gate). run_tests.py
+       overrides one of the three properties to point at a generated mutant;
+       the defaults below are the clean files.
+
+       The paths are deliberately RELATIVE to this file: an absolute path
+       would carry a local user directory into a tracked file and would only
+       build on one machine. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>DanceCardsClientTests</AssemblyName>
+    <RootNamespace>DanceCardsClientTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0162</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(PngSource)' == ''">
+    <PngSource>$(MSBuildThisFileDirectory)..\..\..\plugin\ScrPng.cs</PngSource>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(CoreSource)' == ''">
+    <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\DanceMotionCore.cs</CoreSource>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MotionSource)' == ''">
+    <MotionSource>$(MSBuildThisFileDirectory)..\..\..\plugin\PlayerCardMotionCore.cs</MotionSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(PngSource)" />
+    <Compile Include="$(CoreSource)" />
+    <Compile Include="$(MotionSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>
