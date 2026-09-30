@@ -54,13 +54,15 @@ OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_re
                                "_pc_reveal_opened", "cmd_pc_buypack", "_pc_open_verdict", "_pc_buy_pending",
                                "_pc_buy_pending_write", "_pc_buy_and_show", "_pc_buy_player",
                                "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver", "_faq_discord_link",
-                               "_pc_buy_journal_update", "_pc_buy_entry", "_pc_buy_record", "_pc_buy_settle"}
+                               "_pc_buy_journal_update", "_pc_buy_entry", "_pc_buy_record", "_pc_buy_settle",
+                               "_pc_buy_mark_revealing"}
 # _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
 # the test's own folder instead of the container's /opt/bot-state
 OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
                                    "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED",
                                    "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER", "_pc_buy_journal_lock", "_PC_BUY_KEEP",
-                                   "_PC_BUY_REBOUND"}
+                                   "_PC_BUY_REBOUND",
+                                   "_PC_BUY_SHOWN_BEFORE"}
 
 
 def e2e(monkeypatch, tmp_path, fn, **kw):
@@ -1494,23 +1496,20 @@ def test_m1r3_a_purchase_starts_only_when_the_buyers_player_can_be_read(monkeypa
 
 def test_item2_a_crash_between_the_answer_and_the_reveal_keeps_the_receipt_and_a_restart_delivers_it(
         monkeypatch, tmp_path):
-    """The purchase commits and is answered; the process dies inside the
-    reveal's send. A new bot process's /buypack shows exactly that pack, once,
-    and sends no purchase request. The decisive line is the first assertion
-    after the restart: under the round-2 removal order the entry is gone, the
-    restart buys a second pack, and the reveal of the first is lost."""
+    """The purchase commits and is answered; the process dies at the reveal's
+    first read, before anything is sent (round 4: a death INSIDE the send
+    leaves the entry marked, test_low1r4_...). A new bot process's /buypack
+    shows exactly that pack, once, and sends no purchase request. The
+    decisive line is the first assertion after the restart: under the
+    round-2 removal order the entry is gone, the restart buys a second pack,
+    and the reveal of the first is lost."""
     async def body(env):
         own, subs = await world(env)
         price = price_of(env, "gold")
         await set_gold(env, own, 10 * price)
-        before = rig_over(env)
-        ctx = before.ctx(own.discord)
-
-        async def dies(*a, **k):
-            raise RuntimeError("the process ended before the reveal was delivered")
-        ctx.send = dies
-        with pytest.raises(RuntimeError, match="before the reveal was delivered"):
-            await buypack(before, own.discord, "gold", ctx=ctx)
+        before = rig_over(env, dies_at_the_reveal_read({}))
+        with pytest.raises(ProcessEnded):
+            await buypack(before, own.discord, "gold")
         (first,) = calls_to(before, OPEN)
         bought = json.loads(first.reply.body)["pack_id"] if first.status == 200 else None
         after_crash = journal(before)
@@ -1532,7 +1531,8 @@ def test_item2_a_crash_between_the_answer_and_the_reveal_keeps_the_receipt_and_a
 
 def test_item2_the_settled_entry_leaves_the_journal_only_after_the_reveal_is_sent(monkeypatch, tmp_path):
     """While the reveal's send runs, the journal holds the entry marked settled
-    with the answer; once the send has returned it holds nothing."""
+    with the answer - and, since round 4 (LOW 1), marked "revealing"; once the
+    send has returned it holds nothing."""
     async def body(env):
         own, subs = await world(env)
         price = price_of(env, "gold")
@@ -1549,7 +1549,8 @@ def test_item2_the_settled_entry_leaves_the_journal_only_after_the_reveal_is_sen
         (buy,) = calls_to(rig, OPEN)
         pack_id = json.loads(buy.reply.body)["pack_id"]
         assert seen == [{own.discord: {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
-                                       "settled": {"pack_id": pack_id, "pay": "gold", "price": price}}}], seen
+                                       "settled": {"pack_id": pack_id, "pay": "gold", "price": price},
+                                       "revealing": True}}], seen
         assert journal(rig) == {} and len(rig.sent) == 1 and rig.sent[0].file is not None
     e2e(monkeypatch, tmp_path, body)
 
@@ -1836,4 +1837,68 @@ def test_low2r4_the_pack_read_refuses_a_player_the_discord_id_no_longer_resolves
             "error": "player_changed", "player_steam_id": own.steam}, refused.text[:300]
         plain = await read()
         assert plain.status_code == 404, plain.text[:300]
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 4, LOW 1: a settled reveal is never posted twice ---------------------------------------
+# Codex round 3 LOW 1: the reveal's send can reach Discord and still raise, or never return, and the
+# entry left the journal only after it returned, so a restart posted the reveal again. The direction
+# chosen: the entry is marked "revealing" under the journal lock immediately BEFORE the send, and an
+# entry carrying the mark is never revealed again - the next /buypack sends the pointer at /pack once
+# and takes it out. Worst case one reveal plus one pointer, or a pointer alone.
+
+def test_low1r4_a_reveal_whose_send_may_have_been_seen_is_never_posted_twice(monkeypatch, tmp_path):
+    """The reviewer's falsifier, adapted. The first reveal's send reaches
+    Discord (recorded as visible) and the process ends before it returns;
+    after the restart exactly one reveal was ever posted, the restart sent no
+    purchase request and read no pack, and it sent the pointer once; the
+    entry is gone. The decisive line is the first assertion after the
+    restart: without the mark the restart revealed the pack a second time."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        d = own.discord
+        before = rig_over(env)
+        ctx = before.ctx(d)
+        visible = []
+
+        async def seen_then_dies(content=None, **k):
+            visible.append(SimpleNamespace(content=content, file=k.get("file")))
+            raise ProcessEnded("the send reached Discord and the process ended before it returned")
+        ctx.send = seen_then_dies
+        with pytest.raises(ProcessEnded):
+            await buypack(before, d, "gold", ctx=ctx)
+        (buy,) = calls_to(before, OPEN)
+        bought = json.loads(buy.reply.body)["pack_id"]
+        marked = journal(before)
+        deal(env, subs)   # a deal for a second purchase, should the restart make one
+        after = rig_over(env)
+        await buypack(after, d, "gold")
+        reveals = visible + [s for s in after.sent if s.file is not None or "**Pack bought for" in (s.content or "")]
+        assert len(reveals) == 1, f"the bought pack was revealed {len(reveals)} times"
+        assert marked == {d: {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+                              "settled": {"pack_id": bought, "pay": "gold", "price": price}, "revealing": True}}, marked
+        assert [s.content for s in after.sent] == [after.ns["_PC_BUY_SHOWN_BEFORE"]], [s.content for s in after.sent]
+        assert all(ord(ch) < 128 for ch in after.ns["_PC_BUY_SHOWN_BEFORE"])
+        assert calls_to(after, OPEN) == [] and calls_to(after, PACKS, "GET") == []
+        assert journal(after) == {}
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_low1r4_a_reveal_whose_mark_cannot_be_written_is_not_sent(monkeypatch, tmp_path):
+    """The mark comes first: when it cannot be written, the reveal is not sent
+    - the pointer is - so a reveal is never on Discord without its mark."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        rig.ns["_pc_buy_mark_revealing"] = lambda me, nonce: False
+        await buypack(rig, own.discord, "gold")
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_OPENED_UNSHOWN"]], [s.content for s in rig.sent]
+        assert any("its delivery mark could not be written" in line for line in rig.logs), rig.logs
+        assert journal(rig) == {}
+        assert await holdings(env, own) == (price, 1, 1)
     e2e(monkeypatch, tmp_path, body)

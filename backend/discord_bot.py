@@ -8850,7 +8850,11 @@ _PC_OPEN_REPLAY_PAUSE_S = (2.0, 5.0)   # the pause before each replay
 # bot's state, so a purchase left unconfirmed, or bought and not yet shown,
 # outlasts a restart and a rebuild, and the next /buypack completes it with
 # its own nonce (round 2, M1) for the player it was bought for (round 3, M1),
-# or shows the pack it bought (round 3, item 2).
+# or shows the pack it bought (round 3, item 2). "revealing": true (round 4,
+# LOW 1) is written, under the journal lock, immediately BEFORE the reveal's
+# send: a send can reach Discord and still fail or never return, so an entry
+# carrying it is never revealed again - the next /buypack sends the short
+# pointer at /pack once and takes the entry out.
 _PC_BUY_PENDING_FILE = "/opt/bot-state/pc_buy_pending.json"
 _PC_BUY_UNCONFIRMED = ("Your purchase is still being confirmed. `/pack` shows the pack once it has gone through,"
                        " and your next `/buypack` completes this same purchase instead of buying another.")
@@ -8858,6 +8862,7 @@ _PC_BUY_PAUSED = "Buying packs here is paused right now - nothing was charged."
 _PC_BUY_MOVED = ("Your Discord account is now linked to a different player, so your earlier purchase stays with"
                  " the player it was made for - nothing was charged to the player linked now.")
 _PC_BUY_NO_PLAYER = "Couldn't start a purchase right now - nothing was charged. Try again in a moment."
+_PC_BUY_SHOWN_BEFORE = "Your earlier purchase went through - `/pack` shows the pack it bought."
 _PC_BUY_REBOUND = ("Your earlier purchase was for the player your Discord account was linked to then, and it is"
                    " linked to a different player now - so that pack is not shown here, and nothing was bought or"
                    " charged now. Your next `/buypack` shows it once your account is linked to that player again.")
@@ -9003,10 +9008,12 @@ def _pc_buy_pending():
         return None
     if not (isinstance(data, dict) and all(
             isinstance(k, str) and isinstance(v, dict)
-            and set(v) in ({"nonce", "pay", "player"}, {"nonce", "pay", "player", "settled"})
+            and set(v) in ({"nonce", "pay", "player"}, {"nonce", "pay", "player", "settled"},
+                           {"nonce", "pay", "player", "settled", "revealing"})
             and isinstance(v["nonce"], str) and v["nonce"] and v["pay"] in ("gold", "shards")
             and isinstance(v["player"], str) and v["player"]
             and ("settled" not in v or _pc_buy_settled_ok(v["settled"]))
+            and ("revealing" not in v or v["revealing"] is True)
             for k, v in data.items())):
         print("[PC-BUY] the purchase journal holds something other than purchases")
         return None
@@ -9096,6 +9103,14 @@ def _pc_buy_settle(me, entry):
         me, lambda cur: entry if (cur or {}).get("nonce") == entry["nonce"] else _PC_BUY_KEEP)
 
 
+def _pc_buy_mark_revealing(me, nonce):
+    """Round 4, LOW 1: the delivery-attempt mark on `me`'s settled entry of
+    `nonce`, written before its reveal is sent. True only once it is on disk."""
+    return _pc_buy_journal_update(
+        me, lambda cur: {**cur, "revealing": True} if cur is not None and cur.get("nonce") == nonce
+        and "settled" in cur else _PC_BUY_KEEP)
+
+
 def _pc_fix_ready_line():
     """The bot's startup witness for the Discord fix (round 2): the purchase
     journal's volume as THIS process finds it - a folder that is not a mount
@@ -9169,11 +9184,27 @@ async def _pc_buy_deliver(ctx, me, entry, earlier):
     player now, the api refuses the read (412 player_changed) and the entry
     is neither delivered nor taken out: one line says why, with no pointer
     at /pack (which reads the player linked now), and the reveal is
-    delivered once the binding matches again."""
+    delivered once the binding matches again.
+    Round 4, LOW 1: a send and its mark cannot be one step, so the mark goes
+    first. Immediately before the reveal's send the entry is marked
+    "revealing" (_pc_buy_mark_revealing, under the journal lock); an entry
+    found carrying that mark - its reveal was sent, and may have been seen -
+    is never revealed again: the pointer at /pack is sent once and the entry
+    leaves. The worst case is one reveal and one pointer, or a pointer alone
+    (a send that failed before Discord showed it); never two reveals, never
+    nothing, never a purchase request. A mark that cannot be written sends
+    no reveal (the pointer instead)."""
     s = entry["settled"]
+    if entry.get("revealing"):
+        print(f"[PC-BUY] purchase {entry['nonce'][:8]}: its reveal was sent before, so it is not revealed again"
+              " - the pointer at /pack instead")
+        await ctx.send(_PC_BUY_SHOWN_BEFORE)
+        _pc_buy_forget(me, entry["nonce"])
+        return
     head = f"**Pack bought for {s['price']} {s['pay']}**"
     outcome = await _pc_reveal_opened(ctx, s["pack_id"], ("Your earlier purchase went through - " + head)
-                                      if earlier else head, player=entry["player"])
+                                      if earlier else head, player=entry["player"],
+                                      before_send=lambda: _pc_buy_mark_revealing(me, entry["nonce"]))
     if outcome == "rebound":
         print(f"[PC-BUY] purchase {entry['nonce'][:8]} is bought and kept in the journal: the Discord id is now"
               " linked to another player than the one it was bought for")
@@ -9683,14 +9714,17 @@ def _pc_reveal_binder_text(answer, note):
     return _pc_reveal_compose(head, lines, note, "page")
 
 
-async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params, render, ephemeral):
+async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params, render, ephemeral,
+                         before_send=None):
     """Steps 2-7 for one reveal whose step 1 answered `first`. `reread` is
     step 6, an awaitable factory answering (status, body); `render(answer,
     note)` builds the post from the re-read's answer alone. Returns "posted",
     or why nothing but one line may be posted: "private" (the re-read
     answered 403), "unreachable" (0), "pacing" (429), "rebound" (412
     player_changed: a read that named its player found the Discord id linked
-    to another one - round 4, LOW 2) or "moved"."""
+    to another one - round 4, LOW 2), "unmarked" (`before_send`, called
+    once immediately before the first send, answered False: nothing was
+    sent - round 4, LOW 1) or "moved"."""
     prints = _pc_reveal_prints(first, kind) or []
     before_view, before_drawn = _pc_reveal_view(first), _pc_reveal_drawn(prints)
     image, meta, note, leases, started = None, {}, None, {}, None
@@ -9745,6 +9779,9 @@ async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params
         kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
         if ephemeral:
             kwargs["ephemeral"] = True
+        if before_send is not None and not before_send():
+            print(f"[PC-REVEAL] {kind} ref={ref} not posted: its delivery mark could not be written")
+            return "unmarked"
         if image is not None:
             try:
                 await asyncio.wait_for(ctx.send(render(again, None), file=discord.File(io.BytesIO(image),
@@ -9849,7 +9886,7 @@ async def _pc_reveal_pack(ctx, index, private):
         await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
 
 
-async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral, player=None):
+async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral, player=None, before_send=None):
     """Steps 2-7 of a pack reveal whose step 1 answered `first` for `pack_id`:
     /pack's, and the reveal of a pack /daily or /buypack just opened. The
     final re-read names the pack, never the index: a pack opened in between
@@ -9864,13 +9901,13 @@ async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral
 
     return await _pc_reveal_run(ctx, "pack", pack_id, first, _reread,
                                 f"/internal/pc/packs/{pack_id}/strip/{str(first.get('locale') or locale)}.png",
-                                {"discord_id": me}, render, ephemeral)
+                                {"discord_id": me}, render, ephemeral, before_send=before_send)
 
 
 _PC_OPENED_UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it."
 
 
-async def _pc_reveal_opened(ctx, pack_id, head, player=None):
+async def _pc_reveal_opened(ctx, pack_id, head, player=None, before_send=None):
     """The reveal of a pack this command just opened (/daily, D1; /buypack,
     D2): /pack's steps, with step 1 reading that pack by its id - never by an
     index, which a pack opened meanwhile would move - and `head` in place of
@@ -9879,7 +9916,7 @@ async def _pc_reveal_opened(ctx, pack_id, head, player=None):
     "unshown" (that line was sent) or, when `player` is named (a bought
     pack's journaled player, round 4 LOW 2) and the Discord id is linked to
     another player now, "rebound" - nothing was sent: /pack would read the
-    player linked now."""
+    player linked now. `before_send` goes to _pc_reveal_run (round 4, LOW 1)."""
     me, locale = str(ctx.author.id), _pc_locale_of(ctx)
     params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
     if player is not None:
@@ -9894,7 +9931,7 @@ async def _pc_reveal_opened(ctx, pack_id, head, player=None):
         return "unshown"
     outcome = await _pc_reveal_pack_run(ctx, me, locale, pack_id, first,
                                         lambda answer, note: _pc_reveal_pack_text(answer, 1, note, head=head), False,
-                                        player=player)
+                                        player=player, before_send=before_send)
     if outcome == "rebound":
         return "rebound"
     if outcome != "posted":
