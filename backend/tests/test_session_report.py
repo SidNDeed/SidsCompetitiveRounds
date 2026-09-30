@@ -1940,15 +1940,16 @@ class _StatusDb:
     """report-status's two statements over a spectate world with watched-grant
     holders. A grant is a holder's steam id (a grant of the game row's own
     tuple) or a dict of the holder's granted tuple (sid, mode, roster,
-    game_started_at, granted_at). The games statement must JOIN the grants
-    and answer each game with the caller's latest GRANT's tuple (round 4
-    LOW 2), or the fake refuses it."""
+    game_started_at, observed_seq). The games statement must JOIN the grants
+    and answer each game with the tuple of the caller's grant with the
+    greatest observed_seq (round 4 LOW 2, round 5 LOW 1), or the fake
+    refuses it."""
 
     GAMES_SQL = ("SELECT DISTINCT ON (g.id) g.id, l.mode, l.game_started_at AS started_at, g.ended_at, l.roster "
                  "FROM spectate_games g JOIN spectate_watch_grants l "
                  "ON l.game_id = g.id AND l.spectator_steam_id = CAST(:sid AS text) "
                  "WHERE g.id = ANY(CAST(:gids AS uuid[])) "
-                 "ORDER BY g.id, l.granted_at DESC, l.id DESC")
+                 "ORDER BY g.id, l.observed_seq DESC")
 
     def __init__(self, games, grants, names):
         self.games, self.grants, self.names = games, grants, names
@@ -1959,7 +1960,7 @@ class _StatusDb:
         for n, gr in enumerate(self.grants.get(g["id"], ())):
             if isinstance(gr, str):
                 gr = {"sid": gr, "mode": g["mode"], "roster": g["roster"],
-                      "game_started_at": g["started_at"], "granted_at": T0 + timedelta(seconds=n)}
+                      "game_started_at": g["started_at"], "observed_seq": n}
             if gr["sid"] == sid:
                 out.append(gr)
         return out
@@ -1975,7 +1976,7 @@ class _StatusDb:
                     continue
                 mine = self._grants_of(g, params["sid"])
                 if mine:
-                    last = max(mine, key=lambda gr: gr["granted_at"])
+                    last = max(mine, key=lambda gr: gr["observed_seq"])
                     rows.append({"id": g["id"], "mode": last["mode"], "started_at": last["game_started_at"],
                                  "ended_at": g["ended_at"], "roster": last["roster"]})
             return _Res(rows)
@@ -2022,14 +2023,17 @@ def test_report_status_answers_the_granted_tuple_not_the_live_row(broadcast_sess
     end = T0 + timedelta(minutes=9)
     live = [{"id": g1, "mode": "1v1", "started_at": T0 + timedelta(minutes=2), "ended_at": end, "roster": ac},
             {"id": g2, "mode": "1v1", "started_at": T0, "ended_at": end, "roster": ac}]
-    granted = {"sid": BROADCAST, "mode": "1v1", "roster": ab, "game_started_at": T0, "granted_at": T0}
+    granted = {"sid": BROADCAST, "mode": "1v1", "roster": ab, "game_started_at": T0, "observed_seq": 1}
     names = {CALLER: "A", OPP: "B", third: "C"}
     got = _status(_StatusDb(live, {g1: [granted], g2: [OTHER]}, names), [g1, g2])
     assert got == [{"game_id": str(g1), "mode": "1v1", "started_at": T0.isoformat(), "ended_at": end.isoformat(),
                     "roster": ab, "names": [names[s] for s in ab.split(",")]}], got
-    later = dict(granted, roster=ac, granted_at=T0 + timedelta(minutes=5))
+    later = dict(granted, roster=ac, observed_seq=2)
     both = _status(_StatusDb(live, {g1: [later, granted]}, names), [g1])
     assert [(r["roster"], r["names"]) for r in both] == [(ac, [names[s] for s in ac.split(",")])], both
+    # round 5 LOW 1: the room back on A-B, observed again (the repeat refreshed its order)
+    back = _status(_StatusDb(live, {g1: [later, dict(granted, observed_seq=3)]}, names), [g1])
+    assert [r["roster"] for r in back] == [ab], back
 
 
 def test_the_broadcaster_retargets_only_to_the_granted_tuple():
@@ -2055,11 +2059,13 @@ def test_the_broadcaster_retargets_only_to_the_granted_tuple():
 
 def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
     """Round 3 N1: spectate_watch_grants is written only by the validation
-    route, after the lease validated as observed, as INSERT ... ON CONFLICT DO
-    NOTHING on its (game, spectator, mode, source, roster) tuple, inside a
-    savepoint; no statement of the api or of any migration after 364 updates
-    or deletes it, and its key into spectate_games carries no cascade. The
-    status and report reads name it, never spectate_leases."""
+    route, after the lease validated as observed, as an INSERT on its (game,
+    spectator, mode, source, roster) tuple inside a savepoint whose conflict
+    clause (round 5 LOW 1) sets observed_seq and nothing else - a fresh
+    nextval of the sequence, drawn under the room lock; no other statement
+    of the api or of any migration after 364 updates or deletes it, and its
+    key into spectate_games carries no cascade. The status and report reads
+    name it, never spectate_leases."""
     root = PLUGIN.parent
     src = " ".join((root / "backend" / "api" / "main.py").read_text(encoding="utf-8").split())
     assert src.count("INSERT INTO spectate_watch_grants") == 1
@@ -2067,7 +2073,11 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
                  "TRUNCATE spectate_watch_grants", "ALTER TABLE spectate_watch_grants"):
         assert verb not in src, verb
     val = " ".join(inspect.getsource(main.spectate_validate).split())
-    assert "ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING" in val
+    assert ("g.started_at, nextval('spectate_watch_grants_observed_seq') FROM spectate_games g "
+            "WHERE g.id = CAST(:gid AS uuid) ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple "
+            "DO UPDATE SET observed_seq = EXCLUDED.observed_seq \"\"\"") in val
+    assert val.count("DO UPDATE") == 1 and src.count("spectate_watch_grants_observed_seq") == 1
+    assert val.index("SELECT pg_advisory_xact_lock(hashtext(:k))") < val.index("nextval(")
     # Round 4 LOW 1: the binding and the grant share one savepoint, and ok is
     # answered only after both, outside the handler that drops the lease on
     # any failure of either - so ok=True to a request that carried its
@@ -2085,6 +2095,10 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
     assert val.count("ok = True") == 1
     status = " ".join(inspect.getsource(main.broadcast_report_status).split())
     assert "JOIN spectate_watch_grants l" in status and "spectate_leases" not in status
+    # Round 5 LOW 1: the recency order is observed_seq alone - never
+    # granted_at (the transaction's start) nor id (random)
+    assert status.count("ORDER BY g.id, l.observed_seq DESC") == 1
+    assert "granted_at" not in status and "l.id" not in status
     assert "spectate_leases" not in main._REPORT_WATCHED_SQL
     sql = root / "backend" / "sql"
     mig = (sql / "364_spectate_watch_grants.sql").read_text(encoding="utf-8")
@@ -2092,14 +2106,18 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
     body = body[:body.index(");")]
     assert "REFERENCES spectate_games(id)" in body and "ON DELETE" not in body
     assert "UNIQUE (game_id, spectator_steam_id, mode, source_ref, roster)" in body
+    assert "observed_seq BIGINT NOT NULL DEFAULT nextval('spectate_watch_grants_observed_seq')" in body
+    assert mig.count("CREATE SEQUENCE IF NOT EXISTS spectate_watch_grants_observed_seq AS BIGINT CACHE 1;") == 1
     # Round 4 MEDIUM 1: 364 writes no grant. A pre-364 lease binding recorded
     # no tuple, and the spectate game row's tuple is the room's last attest,
     # so a backfill from it could grant a tuple the seat never observed; the
-    # file creates the table and its index and nothing else.
+    # file creates the table, its index and (round 5 LOW 1) the observation
+    # sequence, and nothing else.
     code = " ".join(l for l in mig.splitlines() if not l.lstrip().startswith("--")).upper()
     for verb in ("INSERT", "UPDATE", "DELETE", "SPECTATE_LEASES", "FROM SPECTATE_GAMES"):
         assert verb not in code, ("364 statement", verb)
     assert code.count("CREATE TABLE IF NOT EXISTS") == 1 and code.count("CREATE INDEX IF NOT EXISTS") == 1
+    assert code.count("CREATE SEQUENCE IF NOT EXISTS") == 1 and code.count("CREATE ") == 3
     for f in sorted(sql.glob("*.sql")):
         head = f.name.split("_")[0]
         if head.isdigit() and int(head) > 364:

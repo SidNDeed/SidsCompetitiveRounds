@@ -16,12 +16,12 @@
 -- tuple the master read with that spectator snapshot, verified equal to the
 -- live room row under the room lock (round 5 MEDIUM 1: a request whose tuple
 -- differs writes nothing and is answered retry; the released clients' shape,
--- which carries no tuple, records no watch), as INSERT ... ON CONFLICT DO NOTHING,
--- so a room whose roster or source changes while the seat watches (a code
--- room where one fighter is replaced, an FFA lobby losing a member) leaves
--- one row per tuple the seat was observed under, and a repeated validation
--- adds nothing. It carries what the watched binding compares, copied from
--- the spectate game at that moment:
+-- which carries no tuple, records no watch), as INSERT ... ON CONFLICT on the
+-- tuple DO UPDATE of observed_seq alone, so a room whose roster or source
+-- changes while the seat watches (a code room where one fighter is replaced,
+-- an FFA lobby losing a member) leaves one row per tuple the seat was
+-- observed under, and a repeated validation adds no row. It carries what the
+-- watched binding compares, copied from the spectate game at that moment:
 --   mode             the game's server-recorded mode (1v1, 2v2, 1v2, ffa)
 --   source_ref       the server-derived source identity ('' = none: 1v1 queue
 --                    and code rooms), compared with the requested game's
@@ -30,6 +30,21 @@
 --                    and where source_ref is '' it must equal the requested
 --                    game's played roster exactly
 --   game_started_at  the spectate game's start, the window's opening edge
+-- and, for report-status alone (round 5 LOW 1), the ORDER of observation:
+--   observed_seq     a value of spectate_watch_grants_observed_seq drawn by
+--                    the validation route for every validation that observes
+--                    the seat under this tuple - on the first (the insert)
+--                    and on every repeat (the conflict refreshes it) - while
+--                    that request holds the room's advisory lock, which it
+--                    keeps until it commits. Two validations of one room
+--                    therefore draw in the order they hold the lock, and a
+--                    sequence value is never reused, so the row with the
+--                    greatest observed_seq of a (game, seat) is the tuple of
+--                    the MOST RECENT successful validation, including when the
+--                    room returns to a tuple seen before. granted_at (the
+--                    transaction's start, NOW()) and id (random) order
+--                    nothing. CACHE 1 (the default, written out): a cache per
+--                    session would hand out values out of call order.
 -- The window's closing edge is the spectate game's ended_at (game_id
 -- references it; no statement deletes spectate game rows, and this key has
 -- no cascade, so the referenced row cannot go while a grant names it).
@@ -37,8 +52,10 @@
 -- RETENTION: kept for as long as the reports it authorizes exist. The report
 -- is read from the game tables (matches, team_matches, ovt_matches,
 -- ffa_matches), which no sweep deletes, so no sweep deletes a grant: no
--- statement anywhere updates or deletes this table (the lease cleanup
--- touches spectate_leases only), which is what makes the record immutable.
+-- statement anywhere deletes from this table (the lease cleanup touches
+-- spectate_leases only), and the one statement that changes a row (the
+-- validation's conflict clause) sets observed_seq and nothing else, which is
+-- what keeps the recorded tuple immutable.
 --
 -- NO BACKFILL (round 4, MEDIUM 1): a grant carries only a tuple a master
 -- validation actually observed. Before this file, a validation recorded no
@@ -73,6 +90,8 @@
 
 BEGIN;
 
+CREATE SEQUENCE IF NOT EXISTS spectate_watch_grants_observed_seq AS BIGINT CACHE 1;
+
 CREATE TABLE IF NOT EXISTS spectate_watch_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     game_id UUID NOT NULL REFERENCES spectate_games(id),
@@ -82,6 +101,7 @@ CREATE TABLE IF NOT EXISTS spectate_watch_grants (
     roster TEXT NOT NULL DEFAULT '',
     game_started_at TIMESTAMPTZ NOT NULL,
     granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    observed_seq BIGINT NOT NULL DEFAULT nextval('spectate_watch_grants_observed_seq'),
     CONSTRAINT uq_spectate_watch_grants_tuple
         UNIQUE (game_id, spectator_steam_id, mode, source_ref, roster)
 );

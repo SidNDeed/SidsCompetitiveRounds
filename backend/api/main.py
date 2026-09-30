@@ -59961,16 +59961,20 @@ async def broadcast_report_status(
     # Round 2 M4: only games this broadcast account WATCHED. Since round 3
     # (N1) that is its watched-grant record (spectate_watch_grants, migration
     # 364: written when a master validation observed the seat in the room,
-    # never updated or deleted), not its lease row, which the validation
-    # sweep deletes once the seat's authorization has ended.
+    # never deleted, its tuple never changed), not its lease row, which the
+    # validation sweep deletes once the seat's authorization has ended.
     # Any other id is omitted, exactly as an id with no row is.
     # Round 4 LOW 2: what a game answers with is the account's own GRANT -
     # the mode, roster and start its watch was recorded under - never the
     # spectate game row's current tuple, which every participant attest
     # rewrites in place: the client retargets its report to this answer, and
-    # the report read accepts only a granted tuple. A game the seat was
-    # observed under more than one tuple of answers its latest grant. The
-    # row gives only ended_at, the terminal proof this route exists for.
+    # the report read accepts only a granted tuple. Round 5 LOW 1: a game the
+    # seat was observed under more than one tuple of answers the tuple of its
+    # MOST RECENT successful validation: the greatest observed_seq, drawn
+    # under the room lock by every validation that observed the seat
+    # (refreshed on a repeat, so a room back on an earlier tuple answers
+    # that tuple). The row gives only ended_at, the terminal proof this
+    # route exists for.
     games = (await db.execute(text("""
         SELECT DISTINCT ON (g.id)
                g.id, l.mode, l.game_started_at AS started_at, g.ended_at, l.roster
@@ -59978,7 +59982,7 @@ async def broadcast_report_status(
           JOIN spectate_watch_grants l
             ON l.game_id = g.id AND l.spectator_steam_id = CAST(:sid AS text)
          WHERE g.id = ANY(CAST(:gids AS uuid[]))
-         ORDER BY g.id, l.granted_at DESC, l.id DESC
+         ORDER BY g.id, l.observed_seq DESC
     """), {"gids": requested, "sid": steam_id})).mappings().all()
     by_id = {g["id"]: g for g in games}
 
@@ -60335,8 +60339,9 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
             # this actor (fail closed), not poison the whole transaction.
             # Session report round 3 N1 / round 4 LOW 1: a lease validated as
             # OBSERVED also records the watch where the sweep above cannot
-            # reach it: spectate_watch_grants (migration 364), one immutable
-            # row per game, spectator and (mode, source, roster) tuple - the
+            # reach it: spectate_watch_grants (migration 364), one row per
+            # game, spectator and (mode, source, roster) tuple, the tuple never
+            # changed (a repeat refreshes observed_seq alone, round 5 LOW 1) - the
             # tuple of the room row this request read under the room's lock -
             # the entitlement the broadcast seat's report reads rest on.
             # Round 5 MEDIUM 1: the grant is written only by a request that
@@ -60363,16 +60368,25 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                     """), {"gid": str(game["id"]), "sid": entry.steam_id,
                            "actor": entry.actor_number,
                            "pmin": max(int(game.get("protocol_min") or 1), SPECTATE_PROTOCOL)})).first()
+                    # Round 5 LOW 1: observed_seq orders the seat's watches for
+                    # report-status. It is drawn here, while this request holds
+                    # the room lock taken above (kept to its commit), on the
+                    # first validation under a tuple and again on every repeat
+                    # (the conflict clause refreshes it and changes nothing
+                    # else), so the greatest value of a (game, seat) is its
+                    # most recent successful validation - also when the room
+                    # returns to a tuple it had before.
                     if lease is not None and records_watch:
                         await db.execute(text("""
                             INSERT INTO spectate_watch_grants
                                 (game_id, spectator_steam_id, mode, source_ref, roster,
-                                 game_started_at)
+                                 game_started_at, observed_seq)
                             SELECT g.id, CAST(:sid AS text), g.mode, g.source_ref, g.roster,
-                                   g.started_at
+                                   g.started_at, nextval('spectate_watch_grants_observed_seq')
                               FROM spectate_games g
                              WHERE g.id = CAST(:gid AS uuid)
-                            ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple DO NOTHING
+                            ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple
+                            DO UPDATE SET observed_seq = EXCLUDED.observed_seq
                         """), {"gid": str(game["id"]), "sid": entry.steam_id})
             except Exception as ex:
                 if lease is not None:
@@ -60738,8 +60752,8 @@ _REPORT_KIND_SQL = """
 # `viewer=` read answers only for the game that account WATCHED. It answers a
 # row only when a watched-grant record of the calling account exists
 # (spectate_watch_grants, migration 364, round 3 N1: written when a master
-# validation observed that seat in the spectate game's room, never updated or
-# deleted - the lease row itself is deleted by the validation sweep once its
+# validation observed that seat in the spectate game's room, never deleted,
+# its tuple never changed - the lease row itself is deleted by the validation sweep once its
 # authorization has ended, so it cannot carry the entitlement) whose
 # recorded tuple
 #   - lists the named viewer in its roster,

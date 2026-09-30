@@ -1348,6 +1348,93 @@ def test_the_released_request_shape_keeps_its_answer_and_records_no_watch(lab, s
              w.end + timedelta(minutes=1))
 
 
+# -- round 5 LOW 1: status answers the most recent observation -------------------
+
+def test_status_answers_the_room_back_on_a_tuple_it_had_before(lab, seat):
+    """Round 5 LOW 1, the reviewer's A-B -> A-C -> A-B, through the routes.
+    The master validates the seat on A-B, C's attest makes the room A-C and
+    the master validates it there, B's attest makes the room A-B again and
+    the master validates it once more. Status answers A-B - the most recent
+    successful validation - although an A-B grant already existed before
+    A-C's. Controls: the repeat added no row (two grants, one per tuple);
+    after the second validation status answered A-C; the A-B row's order was
+    refreshed past A-C's (observed_seq), its granted_at was not (the round-4
+    order, which answered A-C here)."""
+    w = _LiveWatch(seat, "K1")
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+    ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
+    seq = lambda r: _lab_sql("SELECT observed_seq FROM spectate_watch_grants WHERE game_id = $1"
+                             " AND spectator_steam_id = $2 AND roster = $3", w.wid, seat, r)
+    at = lambda r: _lab_sql("SELECT granted_at FROM spectate_watch_grants WHERE game_id = $1"
+                            " AND spectator_steam_id = $2 AND roster = $3", w.wid, seat, r)
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert w.attest("C", ac) == {"status": "ok"}
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert [r["roster"] for r in w.status()] == [ac], "control: A-C after the second validation"
+    first_ab = seq(ab)
+    assert w.attest("B", ab) == {"status": "ok"}
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert w.grants() == 2, "control: the repeat refreshed its row, it added none"
+    assert seq(ab) > seq(ac) > first_ab, "control: the repeat drew a later order"
+    assert at(ab) < at(ac), "control: granted_at still orders A-B first"
+    got = w.status()
+    assert [(r["mode"], r["roster"]) for r in got] == [("1v1", ab)], got
+    assert got[0]["names"] == [NAME[k] for k in sorted("AB", key=lambda k: STEAM[k])]
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
+def test_status_orders_overlapping_validations_by_the_room_lock(lab, seat):
+    """Round 5 LOW 1, two overlapping transactions. Validation T1 opens its
+    transaction first (its NOW() is fixed there) and waits; meanwhile
+    validation T2 observes the seat under A-C and commits, and B's attest
+    makes the room A-B. T1 then takes the room lock, observes the seat under
+    A-B and commits. The most recent observation is T1's, so status answers
+    A-B, although T1's grant carries the EARLIER granted_at (transaction
+    start). Controls: the two grants' granted_at are in the opposite order to
+    their observed_seq (the case discriminates the two orders), and T1 was
+    answered ok."""
+    from sqlalchemy import text as _text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    w = _LiveWatch(seat, "K1")
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+    ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
+    assert w.attest("C", ac) == {"status": "ok"}
+    body = main.SpectateValidateBody(steam_id=STEAM["A"], room_name=w.room, observed_mode="1v1",
+                                     observed_roster=ab, spectators=[{"actor_number": 3, "steam_id": seat}])
+
+    def _t2_then_attest():
+        assert [r["ok"] for r in w.validate([seat], seen=("1v1", ac))["results"]] == [True]
+        assert w.attest("B", ab) == {"status": "ok"}
+
+    async def _t1():
+        engine = create_async_engine(ASYNC_DSN, poolclass=NullPool,
+                                     connect_args={"server_settings": {"search_path": _LAB["schema"]}})
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+                t1_start = (await db.execute(_text("SELECT now()"))).scalar_one()   # T1 is open from here
+                await asyncio.to_thread(_t2_then_attest)                             # T2 commits meanwhile
+                return t1_start, await main.spectate_validate(body, request=None, db=db)
+        finally:
+            await engine.dispose()
+
+    t1_start, got = asyncio.run(_t1())
+    assert [r["ok"] for r in got["results"]] == [True], got
+    rows = _lab_sql("SELECT string_agg(roster || '@' || (granted_at = $3)::text, '|' ORDER BY observed_seq)"
+                    " FROM spectate_watch_grants WHERE game_id = $1 AND spectator_steam_id = $2",
+                    w.wid, seat, t1_start)
+    assert rows == ac + "@false|" + ab + "@true", ("observed order A-C then A-B; A-B stamped at T1's start", rows)
+    assert _lab_sql("SELECT (SELECT granted_at FROM spectate_watch_grants WHERE game_id = $1 AND"
+                    " spectator_steam_id = $2 AND roster = $3) < (SELECT granted_at FROM spectate_watch_grants"
+                    " WHERE game_id = $1 AND spectator_steam_id = $2 AND roster = $4)",
+                    w.wid, seat, ab, ac), "control: granted_at orders the two the other way"
+    assert [(r["mode"], r["roster"]) for r in w.status()] == [("1v1", ab)]
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
 # -- /health `session_report` against the lab database ---------------------------
 
 def test_the_health_word_reads_what_the_labs_database_has(lab):
