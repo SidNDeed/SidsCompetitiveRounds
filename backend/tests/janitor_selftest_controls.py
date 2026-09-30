@@ -214,9 +214,14 @@ PLANTS = [
     {"name": "M16-word-dropped-from-the-connected-arm",
      "why": "the connected arm no longer passes the word: its answer cannot be built",
      "file": MAIN,
+     # Anchored on the word's own line and the connected arm's next keyword.
+     # Since the LAND merge of main 82c0da6 that is ffa_finishing_count, whose
+     # connected-arm value (the local ffa_finishing_count) differs from the
+     # degraded arm's (_FFA_FINISHING_COUNT_LAST), so the pair names the
+     # connected arm only; --sites proves it occurs exactly once.
      "old": ("                              janitor_selftest=_janitor_selftest_marker(),\n"
-             "                              team_dc_fallback=team_dc_fallback)\n"),
-     "new": "                              team_dc_fallback=team_dc_fallback)\n",
+             "                              ffa_finishing_count=ffa_finishing_count,\n"),
+     "new": "                              ffa_finishing_count=ffa_finishing_count,\n",
      "red": [L9, P8], "green": [P7]},
     {"name": "M17-schema-field-dropped",
      "why": "HealthResponse no longer declares the word: the payload drops the key",
