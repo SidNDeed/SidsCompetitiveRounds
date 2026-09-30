@@ -4296,7 +4296,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:46201 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:47121 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4362,7 +4362,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:46013 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:46933 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4432,7 +4432,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:45916 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:46836 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6041,6 +6041,33 @@ _RL_PC_PREFIX = "/api/v1/pc/"
 # upload per render and at most one paced retry per visit.
 _RL_PC_UPLOAD = (20, 10.0)
 _RL_PC_UPLOAD_PATH = "/api/v1/pc/portrait"
+# Dance cards (design S2.7). The motion upload has an exact-path bucket of its
+# own, matched BEFORE the family prefix, which would otherwise take it at 90 per
+# 10 s. The stock client keeps one upload in flight and never sends before the
+# writer's retry_after (its 30 s pacing), so two per 60 s is all it uses.
+_RL_PC_MOTION_UPLOAD = (2, 60.0)
+_RL_PC_MOTION_UPLOAD_PATH = "/api/v1/pc/portrait/motion"
+# The two public motion reads -- the per-visit read (exactly this path) and the
+# atlas (under it) -- share one bucket, matched BEFORE the face prefix that also
+# matches them, so motion traffic never spends the static faces' allowance.
+_RL_PC_MOTION_READ = (60, 10.0)
+_RL_PC_MOTION_READ_PATH = "/api/v1/pc-face/motion"
+# M6 (design S2.7, S11.1). The edge's abuse jail counts 429 RESPONSES per
+# forwarded address inside its findtime, whichever bucket they come from
+# (#659). Each motion bucket answers its FIRST refusal for an address with a
+# normal 429 and latches: every later refusal from that bucket for that address
+# inside the latch answers 503 with Retry-After, which the jail does not count,
+# so one address adds at most ONE jail-counted 429 per motion bucket per latch
+# period however fast it retries. The period is the jail's findtime (10
+# minutes); the deploy precondition re-reads the daemon's live findtime and
+# maxretry and confirms its filter does not count a 503. A 503 rather than a
+# 200-shaped "still limited" body: the atlas answers an immutable image/png,
+# and a 200 at that URL is a body a cache may keep. The latch lives in this
+# process -- the api runs one worker (Dockerfile, --workers 1) and the motion
+# routes are served by the primary only; routed to a second box as well, the
+# bound would double.
+_RL_MOTION_LATCH_S = 600.0
+_RL_MOTION_LATCH = {}
 _RL_SENSITIVE_PREFIXES = (
     "/api/v1/achievements/unlock", "/api/v1/matches", "/api/v1/team/matches",
     "/api/v1/report-disconnect", "/api/v1/bets", "/api/v1/team-bets",
@@ -6094,6 +6121,12 @@ _RL_SENSITIVE_PREFIXES = (
 )
 _RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
 _RL_LAST_PRUNE = [0.0]
+# The idle prune keeps every entry still inside the LONGEST window. It used to
+# drop anything older than 30 s from every bucket, which let a 60 s bucket
+# forget half its window whenever a prune ran and admit a third motion upload
+# inside one minute.
+_RL_PRUNE_HORIZON = max(window for _limit, window in (
+    _RL_GLOBAL, _RL_SENSITIVE, _RL_FACE, _RL_PC, _RL_PC_UPLOAD, _RL_PC_MOTION_UPLOAD, _RL_PC_MOTION_READ))
 
 
 # Rate limiting has its OWN, smaller bypass (Codex wave-2 round-3 find N1):
@@ -6109,6 +6142,14 @@ _RATE_LIMIT_BYPASS = frozenset({
     "/api/v1/chat/recent",
     "/api/v1/admin/maintenance/status",
 })
+
+
+def _rl_client_address(request) -> str:
+    """The client address this limiter keys its buckets on -- the one uvicorn
+    reports (see above) -- and the address a motion derivation is admitted
+    under (dance cards S4.6, section 12 H1): ONE definition, so the job queue
+    and the rate buckets can never disagree about who an address is."""
+    return request.client.host if request.client else "unknown"
 
 
 @app.middleware("http")
@@ -6149,9 +6190,18 @@ async def rate_limit_gate(request: Request, call_next):
                 return JSONResponse(status_code=413, content={"error": "payload_too_large"})
         except ValueError:
             pass
-    ip = request.client.host if request.client else "unknown"
+    ip = _rl_client_address(request)
     now = _rl_time.monotonic()
-    if path.startswith(_RL_FACE_PREFIX):
+    latch = None
+    if path == _RL_PC_MOTION_READ_PATH or path.startswith(_RL_PC_MOTION_READ_PATH + "/"):
+        # The two motion reads, ahead of the face prefix that also matches them.
+        limit, window = _RL_PC_MOTION_READ
+        key = latch = f"{ip}|pcfm"
+    elif path == _RL_PC_MOTION_UPLOAD_PATH:
+        # Exactly the motion upload, ahead of the family prefix.
+        limit, window = _RL_PC_MOTION_UPLOAD
+        key = latch = f"{ip}|pcmu"
+    elif path.startswith(_RL_FACE_PREFIX):
         # The public face route: read-only, offline, its own bucket (v22 §2.2).
         sensitive = False
         limit, window = _RL_FACE
@@ -6173,6 +6223,15 @@ async def rate_limit_gate(request: Request, call_next):
     while dq and dq[0] < cutoff:
         dq.popleft()
     if len(dq) >= limit:
+        if latch is not None:
+            if _RL_MOTION_LATCH.get(latch, 0.0) > now:
+                # M6: this address already drew this bucket's 429 inside the
+                # latch; the excess is answered without a jail-counted status.
+                return JSONResponse(
+                    status_code=503, content={"error": "rate_limited", "retry_after": int(window)},
+                    headers={"Retry-After": str(int(window))},
+                )
+            _RL_MOTION_LATCH[latch] = now + _RL_MOTION_LATCH_S
         return JSONResponse(
             status_code=429, content={"error": "rate_limited", "retry_after": int(window)},
             headers={"Retry-After": str(int(window))},
@@ -6183,10 +6242,12 @@ async def rate_limit_gate(request: Request, call_next):
         _RL_LAST_PRUNE[0] = now
         for k in list(_RL_BUCKETS.keys()):
             d = _RL_BUCKETS[k]
-            while d and d[0] < now - 30:
+            while d and d[0] < now - _RL_PRUNE_HORIZON:
                 d.popleft()
             if not d:
                 del _RL_BUCKETS[k]
+        for k in [k for k, until in _RL_MOTION_LATCH.items() if until <= now]:
+            del _RL_MOTION_LATCH[k]
     return await call_next(request)
 
 
@@ -6816,6 +6877,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
+                              pc_motion=_pc_motion_health_word(),
                               ffa_finishing_count=ffa_finishing_count,
                               team_dc_fallback=team_dc_fallback)
     except Exception:
@@ -6838,6 +6900,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
+                              pc_motion=_pc_motion_health_word(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
 
@@ -25576,6 +25639,11 @@ try:
 except Exception as _pcf_ex:  # Pillow / regex / fonts missing: face routes answer 503, everything else boots
     _pcf = None
     print(f"[PC-FACE] renderer unavailable: {_pcf_ex}")
+try:
+    import pc_motion as _pcm   # the dance cards (imports pc_face): absent -> every motion route answers 503
+except Exception as _pcm_ex:
+    _pcm = None
+    print(f"[PC-MOTION] unavailable: {_pcm_ex}")
 
 _PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "rank on the board as shown"
 
@@ -26702,6 +26770,14 @@ async def _pc_snapshot_janitor_step() -> None:
         # ten unreferenced minutes, each under its P lock.
         await _pc_portrait_blob_janitor(db)
         await db.commit()
+        # Dance cards (S3.6): the motion cleanups, in a try of their own -- a
+        # failure there must not cost the pool its snapshot or the season its
+        # rollover below.
+        try:
+            await _pc_motion_janitor(db)
+        except Exception as ex:
+            await db.rollback()
+            print(f"[PC-MOTION] janitor error: {type(ex).__name__}")
         # The edition schedule: four-month seasons, the boundary carried by
         # pc_editions.ends_at_planned. Deliberately placed BEFORE the
         # snapshot's due gate below and not inside it -- the gate returns
@@ -27556,6 +27632,10 @@ async def pc_me(
                       "reference_id": u["reference_id"], "created_at": _pc_iso(u["created_at"])} for u in unopened],
         "pool": ({"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
                   "member_count": int(snap["member_count"])} if snap else None),
+        # Dance cards (design S2.9): three flat keys, unique at the top level.
+        # Absent when the motion module is not loaded, exactly as from an
+        # older server: the client then selects nothing and appends no suffix.
+        **(await _pc_motion_me(db, pid, steam_id) if _pcm is not None else {}),
     }
 
 
@@ -28994,6 +29074,13 @@ from fastapi.responses import Response as _PcResponse
 PC_FACE_CACHE_DIR = os.getenv("PC_FACE_CACHE_DIR", "/var/cache/pc-faces")
 _pc_face_cache = _pcp.FaceCache(PC_FACE_CACHE_DIR)
 _pc_back_cache = {"bytes": None}
+# Dance cards (design S4.6-S4.7): derived motion lives under its OWN root
+# beside the face cache's (the deploy adds its volume), in its own class; the
+# scheduler admits derivations per trusted client address (H1). Both live in
+# this process: the api runs one worker.
+PC_MOTION_CACHE_DIR = os.getenv("PC_MOTION_CACHE_DIR", "/var/cache/pc-motion")
+_pc_motion_cache = _pcm.MotionCache(PC_MOTION_CACHE_DIR) if _pcm is not None else None
+_pc_motion_jobs = _pcm.MotionScheduler() if _pcm is not None else None
 
 
 def _pc_renderer_fp():
@@ -29572,6 +29659,101 @@ async def _pc_portrait_blob_janitor(db: AsyncSession) -> int:
     return deleted
 
 
+
+# -- Dance cards: the janitor's motion cleanups (design S3.6) --------------------
+# Cleanups, not the guarantee: what a motion route serves is decided at read
+# time by pc_motion.servable (S4.9). Each arm reads its candidates and
+# commits, then takes ONE candidate per transaction: it DECLINES a row another
+# transaction holds (SKIP LOCKED -- a janitor statement that waits holds every
+# arm behind it in the same tick, #276/#430) and, once the lock is held,
+# re-checks its predicate in a statement of its own, on that statement's own
+# snapshot (#208). The candidate reads page by id, so a candidate this pass
+# declines to act on (the exemption) never hides the ones behind it. A
+# selection is never nulled because its item is not catalog_ready: readiness
+# can return, and the read predicate already serves nothing for an unready
+# item.
+_PC_MOTION_JANITOR_BATCH = 100
+_PC_MOTION_JANITOR_PAGES = 10
+# The selection's ownership has gone: no player_items row names it. The one
+# exemption predicate (_auto_owned, through pc_motion.owns_dance) is the other
+# half of ownership and is applied in Python.
+_PC_DANCE_UNOWNED_SQL = (
+    "NOT EXISTS (SELECT 1 FROM player_items pi"
+    " WHERE pi.player_id = p.id AND pi.item_id = p.active_dance_id)")
+# A stored motion that must go: its owner's selection is none or another item
+# (S3.6), or its binding to the owner's game still is broken (S3.4) and it was
+# stored more than 24 hours ago.
+_PC_MOTION_STALE_SQL = (
+    "(p.active_dance_id IS NULL OR p.active_dance_id <> m.dance_item_id"
+    " OR (m.stored_at < now() - INTERVAL '24 hours'"
+    " AND (p.pc_game_portrait_hash IS DISTINCT FROM m.static_hash"
+    " OR p.pc_game_portrait_descriptor IS DISTINCT FROM m.static_descriptor)))")
+
+
+async def _pc_motion_janitor(db: AsyncSession) -> tuple:
+    """The two cleanups of S3.6, at most _PC_MOTION_JANITOR_PAGES pages of a
+    batch each per pass: a selection whose ownership has gone is nulled, then
+    a stale motion (above) is deleted -- in that order, so a selection nulled
+    here takes its motion with it in the same pass. Returns (nulled,
+    deleted)."""
+    if _pcm is None:
+        return 0, 0
+    nulled = 0
+    after = "00000000-0000-0000-0000-000000000000"
+    for _page in range(_PC_MOTION_JANITOR_PAGES):
+        lost = (await db.execute(text(
+            "SELECT p.id, p.steam_id, p.active_dance_id, si.sku AS dance_sku FROM players p"
+            " LEFT JOIN shop_items si ON si.id = p.active_dance_id"
+            " WHERE p.active_dance_id IS NOT NULL AND p.id > CAST(:after AS uuid) AND " + _PC_DANCE_UNOWNED_SQL +
+            " ORDER BY p.id LIMIT CAST(:n AS integer)"),
+            {"after": after, "n": _PC_MOTION_JANITOR_BATCH})).mappings().all()
+        await db.commit()
+        for r in lost:
+            if _pcm.owns_dance({"dance_bought": False, "dance_sku": r["dance_sku"]}, r["steam_id"], _auto_owned):
+                continue   # the exemption owns it
+            key = {"pid": str(r["id"]), "item": int(r["active_dance_id"])}
+            held = (await db.execute(text(
+                "SELECT p.id FROM players p WHERE p.id = CAST(:pid AS uuid)"
+                " AND p.active_dance_id = CAST(:item AS bigint) FOR NO KEY UPDATE SKIP LOCKED"), key)).first()
+            if held is not None:
+                gone = (await db.execute(text(
+                    "UPDATE players p SET active_dance_id = NULL WHERE p.id = CAST(:pid AS uuid)"
+                    " AND p.active_dance_id = CAST(:item AS bigint) AND " + _PC_DANCE_UNOWNED_SQL +
+                    " RETURNING p.id"), key)).first()
+                nulled += 1 if gone is not None else 0
+            await db.commit()
+        if len(lost) < _PC_MOTION_JANITOR_BATCH:
+            break
+        after = str(lost[-1]["id"])
+    deleted = 0
+    after = "00000000-0000-0000-0000-000000000000"
+    for _page in range(_PC_MOTION_JANITOR_PAGES):
+        stale = (await db.execute(text(
+            "SELECT m.player_id FROM pc_motions m JOIN players p ON p.id = m.player_id"
+            " WHERE m.player_id > CAST(:after AS uuid) AND " + _PC_MOTION_STALE_SQL +
+            " ORDER BY m.player_id LIMIT CAST(:n AS integer)"),
+            {"after": after, "n": _PC_MOTION_JANITOR_BATCH})).mappings().all()
+        await db.commit()
+        for r in stale:
+            key = {"pid": str(r["player_id"])}
+            held = (await db.execute(text(
+                "SELECT m.player_id FROM pc_motions m WHERE m.player_id = CAST(:pid AS uuid)"
+                " FOR UPDATE SKIP LOCKED"), key)).first()
+            if held is not None:
+                gone = (await db.execute(text(
+                    "DELETE FROM pc_motions m USING players p WHERE m.player_id = CAST(:pid AS uuid)"
+                    " AND p.id = m.player_id AND " + _PC_MOTION_STALE_SQL +
+                    " RETURNING m.player_id"), key)).first()
+                deleted += 1 if gone is not None else 0
+            await db.commit()
+        if len(stale) < _PC_MOTION_JANITOR_BATCH:
+            break
+        after = str(stale[-1]["player_id"])
+    if nulled or deleted:
+        print(f"[PC-MOTION] janitor nulled {nulled} selection(s), deleted {deleted} motion(s)")
+    return nulled, deleted
+
+
 async def _pc_steam_claim(db: AsyncSession, limit: int, ids=None, never_only: bool = False) -> list:
     """Claim due players (or only these ids — the priming path) FOR NO KEY
     UPDATE SKIP LOCKED and LEASE them (v4 §1): pc_steam_attempt advances —
@@ -30064,6 +30246,17 @@ async def _pc_face_cache_expire_loop() -> None:
             raise
         except Exception as ex:
             print(f"[PC-FACE] cache expiry error: {type(ex).__name__}: {ex}")
+        # Dance cards (S4.7): the motion cache ages on the same clock, by the
+        # same limits, on both roles.
+        if _pc_motion_cache is not None:
+            try:
+                n = await asyncio.to_thread(_pc_motion_cache.expire)
+                if n:
+                    print(f"[PC-MOTION] cache expiry removed {n} file(s)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                print(f"[PC-MOTION] cache expiry error: {type(ex).__name__}")
         await asyncio.sleep(_PC_FACE_EXPIRE_EVERY_S)
 
 # A print is deliverable under a lease only while it exists, is not discarded,
@@ -30284,6 +30477,10 @@ async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days):
     locked = (await db.execute(text(
         "UPDATE players SET " + ", ".join(sets) +
         " WHERE id = CAST(:pid AS uuid) RETURNING pc_game_portrait_locked_until"), params)).scalar_one_or_none()
+    # Dance cards (S3.5): the stored motion goes with the stills, in this
+    # transaction and under the caller's identity lock, so both callers --
+    # the admin clear and data deletion -- remove it.
+    await db.execute(text("DELETE FROM pc_motions WHERE player_id = CAST(:pid AS uuid)"), {"pid": pid})
     # Release, never delete: the janitor removes a blob ten minutes after its
     # last reference went (v2 §6), so a render that read this row a moment
     # ago still finds its bytes.
@@ -30373,7 +30570,9 @@ async def pc_portrait_upload(
                EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
                p.pc_game_portrait_locked_until,
                p.active_player_color_id, p.active_player_effect_id,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+               (SELECT si.sku FROM shop_items si
+                 WHERE si.id = p.active_dance_id AND si.kind = 'dance') AS dance_sku
           FROM players p WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
            FOR NO KEY UPDATE
     """), {"pid": pid})).mappings().first()
@@ -30411,6 +30610,21 @@ async def pc_portrait_upload(
     if (color_sku or "") != parts["color"] or (effect_sku or "") != parts["effect"]:
         await db.rollback()   # the client re-checks after its next stats answer
         raise HTTPException(status_code=422, detail={"error": "descriptor_mismatch"})
+    # Dance cards (design S2.8), against the same LOCKED row. A present suffix
+    # must name a capture recipe this server derives, and the dance the player
+    # has selected; an ABSENT suffix is accepted whatever the selection -- an
+    # older client's still, which replaces the stored one and so unbinds any
+    # motion (S3.4). The suffix only describes the still: it grants nothing.
+    if parts.get("dance") is not None:
+        if _pcm is None:
+            await db.rollback()   # the recipe table is unavailable: judge it later
+            raise HTTPException(status_code=503, detail="motion_unavailable")
+        if not _pcm.recipe_known(int(parts["ar"])):
+            await db.rollback()
+            raise HTTPException(status_code=422, detail={"error": "descriptor_invalid"})
+        if parts["dance"] != row["dance_sku"]:
+            await db.rollback()
+            raise HTTPException(status_code=422, detail={"error": "descriptor_mismatch"})
     used = (await db.execute(text("""
         INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
         ON CONFLICT DO NOTHING RETURNING nonce
@@ -30443,6 +30657,397 @@ async def pc_portrait_upload(
           f"coverage={info['coverage']:.3f} replaced={bool(old and old != portrait_hash)}")
     return {"applied": True, "portrait_hash": portrait_hash, "portrait_descriptor": descriptor,
             "portrait_at": _pc_iso(at)}
+
+
+# -- Dance cards: the motion upload (design S2.6) ------------------------------
+# One bounded animation source per player, bound to the still it was captured
+# with. Three phases, so that every per-player check and every charge happens
+# BEFORE a pixel is decoded and no lock is held while frames decode: phase A
+# (one short transaction) checks, charges and claims a decode slot; phase B
+# decodes in pc_motion's own one-worker pool with no transaction open; phase C
+# (one transaction) re-reads the row, re-checks and stores. Lock order: I -> R
+# in phase A, I -> R -> M (capacity) in phase C; only phase C takes M, always
+# after its own I and R, and its SUM reads other players' rows unlocked.
+_PC_MOTION_ROW_SQL = """
+    SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
+           EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
+           p.pc_game_portrait_locked_until,
+           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+           p.active_dance_id, di.sku AS dance_sku, di.kind AS dance_kind, di.catalog_ready AS dance_ready,
+           EXISTS (SELECT 1 FROM player_items pi
+                    WHERE pi.player_id = p.id AND pi.item_id = p.active_dance_id) AS dance_bought,
+           EXTRACT(EPOCH FROM (now() - p.pc_motion_at)) AS motion_since,
+           p.pc_motion_day, p.pc_motion_day_count,
+           (now() AT TIME ZONE 'UTC')::date AS today_utc,
+           EXTRACT(EPOCH FROM ((date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day')
+                               - (now() AT TIME ZONE 'UTC'))) AS to_midnight,
+           m.source_sha256 AS m_source, m.motion_hash AS m_hash, m.static_hash AS m_static,
+           m.static_descriptor AS m_descriptor
+      FROM players p
+      LEFT JOIN shop_items di ON di.id = p.active_dance_id
+      LEFT JOIN pc_motions m ON m.player_id = p.id
+     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
+"""
+# Phase A and the selection route update `players` later in their own
+# transaction: FOR NO KEY UPDATE. Phase C never writes `players` (it upserts
+# pc_motions and sums for the capacity), so it takes the weakest lock that
+# still conflicts with a later writer's NO KEY UPDATE: FOR SHARE (M4, #202).
+_PC_MOTION_LOCK_A = " FOR NO KEY UPDATE OF p"
+_PC_MOTION_LOCK_C = " FOR SHARE OF p"
+
+_PC_MOTION_UPSERT_SQL = """
+    INSERT INTO pc_motions (player_id, motion_hash, source_sha256, bytes, byte_len, dance_item_id,
+                            motion_recipe, frame_count, frame_ms, static_hash, static_descriptor)
+    VALUES (CAST(:pid AS uuid), CAST(:h AS text), CAST(:src AS text), CAST(:b AS bytea),
+            CAST(:len AS integer), CAST(:item AS bigint), CAST(:recipe AS smallint), CAST(:n AS smallint),
+            CAST(:ms AS smallint), CAST(:sh AS text), CAST(:sd AS text))
+    ON CONFLICT (player_id) DO UPDATE SET motion_hash = EXCLUDED.motion_hash,
+      source_sha256 = EXCLUDED.source_sha256, bytes = EXCLUDED.bytes,
+      byte_len = EXCLUDED.byte_len, dance_item_id = EXCLUDED.dance_item_id,
+      motion_recipe = EXCLUDED.motion_recipe, frame_count = EXCLUDED.frame_count,
+      frame_ms = EXCLUDED.frame_ms, static_hash = EXCLUDED.static_hash,
+      static_descriptor = EXCLUDED.static_descriptor, stored_at = now()
+"""
+
+
+def _pc_motion_servable_cols(alias: str) -> str:
+    """The columns `pc_motion.servable` and `pc_motion.dance_held` read, for
+    the players row aliased `alias` -- ONE definition for every reader (/pc/me;
+    the atlas route, the per-visit read and the bot's GIF route), so no reader
+    decides servability from a column another reader does not select (#341).
+    It extends `_pc_portrait_resolve_cols`, the subject columns every face
+    reader already shares. Join with `_pc_motion_servable_joins(alias)`."""
+    return _pc_portrait_resolve_cols(alias) + f""",
+               {alias}.pc_game_portrait_descriptor AS portrait_descriptor,
+               {alias}.active_dance_id,
+               {alias}_d.sku AS dance_sku, {alias}_d.kind AS dance_kind, {alias}_d.catalog_ready AS dance_ready,
+               EXISTS (SELECT 1 FROM player_items {alias}_pi
+                        WHERE {alias}_pi.player_id = {alias}.id
+                          AND {alias}_pi.item_id = {alias}.active_dance_id) AS dance_bought,
+               {alias}_m.motion_hash AS m_hash, {alias}_m.static_hash AS m_static,
+               {alias}_m.static_descriptor AS m_descriptor, {alias}_m.dance_item_id AS m_item,
+               {alias}_m.motion_recipe AS m_recipe, {alias}_m.frame_count AS m_frames,
+               {alias}_m.frame_ms AS m_ms, {alias}_m.byte_len AS m_len
+"""
+
+
+def _pc_motion_servable_joins(alias: str) -> str:
+    return f"""
+      LEFT JOIN shop_items {alias}_d ON {alias}_d.id = {alias}.active_dance_id
+      LEFT JOIN pc_motions {alias}_m ON {alias}_m.player_id = {alias}.id
+"""
+
+
+async def _pc_motion_me(db: AsyncSession, pid: str, steam_id: str) -> dict:
+    """/pc/me's dance cards keys (design S2.9): `pc_dance_sku` and
+    `pc_dance_item` name the selection when `dance_held` (a ready dance the
+    player owns), else "" and 0; `pc_motion` is "<motion_hash>:<static_hash>:
+    <recipe>" when the stored motion is servable (S4.9), else "" -- the client
+    compares it with the still it would capture now (S1.2)."""
+    row = (await db.execute(text(
+        "SELECT " + _pc_motion_servable_cols("p") + " FROM players p" + _pc_motion_servable_joins("p")
+        + " WHERE p.id = CAST(:pid AS uuid)"), {"pid": pid})).mappings().first()
+    held = row is not None and _pcm.dance_held(row, steam_id, _auto_owned)
+    return {
+        "pc_dance_sku": row["dance_sku"] if held else "",
+        "pc_dance_item": int(row["active_dance_id"]) if held else 0,
+        "pc_motion": (f"{row['m_hash']}:{row['m_static']}:{row['m_recipe']}"
+                      if held and _pcm.servable(row, steam_id, _auto_owned) else ""),
+    }
+
+
+def _pc_motion_check(row, steam_id, header, descriptor):
+    """S2.6 steps 3-6 against a LOCKED row, in order: (status, detail) of the
+    first refusal, or None. Phase A and phase C both call this one function,
+    so the re-check after the decode (#208) cannot drift from the check
+    before it."""
+    if row is None or row["banned"]:
+        return 403, {"error": "portrait_refused"}
+    if row["lock_left"] is not None and float(row["lock_left"]) > 0:
+        return 403, {"error": "portrait_locked", "locked_until": _pc_iso(row["pc_game_portrait_locked_until"])}
+    # 4. binding: the still is the player's own game picture, and the request
+    #    names exactly its descriptor and the header exactly its hash.
+    if (not row["pc_game_portrait_hash"] or row["pc_game_portrait_descriptor"] != descriptor
+            or row["pc_game_portrait_hash"] != header["static"]):
+        return 409, {"error": "motion_unbound"}
+    # 5. selection: the header's dance is the dance the player selected.
+    if row["dance_kind"] != "dance" or row["dance_sku"] != header["dance"]:
+        return 409, {"error": "dance_not_selected"}
+    # 6. ownership: ready, and bought or covered by the one exemption predicate.
+    if not (row["dance_ready"] and _pcm.owns_dance(row, steam_id, _auto_owned)):
+        return 403, {"error": "dance_not_owned"}
+    return None
+
+
+async def _pc_motion_same(db: AsyncSession, pid: str, row, descriptor: str) -> dict:
+    """The stored motion already holds these frames for this still (S2.6 step
+    7, and phase C's same). Nothing is charged by it. L3: the still's
+    descriptor can change while its hash does not (the still writer stores
+    the new descriptor under the same hash), which would leave the motion's
+    binding false forever; so a descriptor-only difference is repaired on the
+    motion row here, in the same transaction, instead of answered unrepaired."""
+    if row["m_descriptor"] == descriptor:
+        await db.rollback()
+        return {"applied": False, "reason": "same", "motion_hash": row["m_hash"]}
+    await db.execute(text(
+        "UPDATE pc_motions SET static_descriptor = CAST(:d AS text) WHERE player_id = CAST(:pid AS uuid)"),
+        {"d": descriptor, "pid": pid})
+    await db.commit()
+    return {"applied": False, "reason": "same", "motion_hash": row["m_hash"], "rebound": True}
+
+
+async def _pc_motion_capacity_used(db: AsyncSession, pid: str) -> int:
+    """Bytes every OTHER player's stored motion holds (S2.6 phase C), read
+    under the capacity lock and without row locks."""
+    return int((await db.execute(text(
+        "SELECT COALESCE(SUM(byte_len), 0) FROM pc_motions WHERE player_id <> CAST(:pid AS uuid)"),
+        {"pid": pid})).scalar_one())
+
+
+def _pc_motion_refusal(status: int, detail: dict):
+    headers = None
+    if status == 503 and isinstance(detail, dict) and detail.get("retry_after"):
+        headers = {"Retry-After": str(int(detail["retry_after"]))}
+    return HTTPException(status_code=status, detail=detail, headers=headers)
+
+
+@app.post("/api/v1/pc/portrait/motion", tags=["Player Cards"])
+async def pc_motion_upload(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    descriptor: str = Query(..., min_length=8, max_length=_pcp.DESCRIPTOR_MAX_BYTES),
+    db: AsyncSession = Depends(get_db),
+):
+    """The motion writer (dance cards design S2): the owner's client uploads
+    ONE container of canonical-sized dance frames (application/x-scr-motion),
+    signed over pcmotion:{steam}:{nonce}:{body_sha256}:{descriptor} where the
+    server hashes the received body ITSELF. Transport and container before any
+    lock (411 / 413 / 415 / 400 / 422); phase A (identity lock, actor gate,
+    row FOR NO KEY UPDATE, refused / locked, binding, selection, ownership,
+    same, pacing, day cap, nonce, decode admission, charge, COMMIT); phase B
+    (the frame checks in the decode pool, no transaction; a refusal keeps the
+    charge); phase C (identity lock, actor gate, row FOR SHARE, steps 3-6
+    again, same, capacity, upsert, COMMIT)."""
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    cl = request.headers.get("content-length")
+    if cl is None or "chunked" in (request.headers.get("transfer-encoding") or "").lower():
+        raise HTTPException(status_code=411, detail="length_required")
+    try:
+        declared = int(cl)
+    except ValueError:
+        raise HTTPException(status_code=411, detail="length_required")
+    if declared > _pcm.MOTION_MAX_BYTES:
+        # Before the body is read (S2.2): a declared length over the cap costs
+        # the server nothing but this comparison.
+        raise HTTPException(status_code=413, detail={"error": "motion_too_large"})
+    if not _pcm.content_type_ok(request.headers.get("content-type")):
+        # M2: equality with the one type, never the still writer's prefix test.
+        raise HTTPException(status_code=415, detail=_pcm.MOTION_CONTENT_TYPE + " required")
+    body = await request.body()
+    if len(body) != declared:
+        raise HTTPException(status_code=400, detail="length_mismatch")
+    try:
+        header, frames = _pcm.parse_container(body)
+    except _pcm.MotionRefusal as r:
+        raise HTTPException(status_code=r.status, detail=r.detail)
+    if _pcp.descriptor_parse(descriptor) is None:
+        raise HTTPException(status_code=422, detail={"error": "descriptor_invalid"})
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    canon = _pcm.canon_motion(steam_id, nonce, body_sha256, descriptor)
+    del body
+
+    # -- phase A: one short transaction ------------------------------------
+    # 1. identity lock I EXCLUSIVE, then the actor gate -- whose FIRST check
+    #    is the 503 of an unconfigured HMAC key (M3), so that answer comes
+    #    before any nonce, slot or charge.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+    # 2. the row, R
+    row = (await db.execute(text(_PC_MOTION_ROW_SQL + _PC_MOTION_LOCK_A), {"pid": pid})).mappings().first()
+    # 3-6. refused / locked, binding, selection, ownership
+    refusal = _pc_motion_check(row, steam_id, header, descriptor)
+    if refusal is not None:
+        await db.rollback()
+        raise _pc_motion_refusal(*refusal)
+    # 7. same: before pacing, as the still does; nothing charged
+    if row["m_source"] == body_sha256 and row["m_static"] == header["static"]:
+        return await _pc_motion_same(db, pid, row, descriptor)
+    # 8. pacing
+    since = row["motion_since"]
+    if since is not None and float(since) < _pcp.PACING_SECONDS:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "retry_after", "retry_after": max(1, int(_pcp.PACING_SECONDS - float(since)) + 1)})
+    # 9. the day cap (409s, never 429s: no application refusal feeds the edge's jail)
+    today = row["today_utc"]
+    if row["pc_motion_day"] == today and int(row["pc_motion_day_count"] or 0) >= _pcm.MOTION_DAY_CAP:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "daily_cap", "retry_after": max(1, int(float(row["to_midnight"])) + 1)})
+    # 10. the single-use nonce (shared with the still writer's table)
+    used = (await db.execute(text("""
+        INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
+        ON CONFLICT DO NOTHING RETURNING nonce
+    """), {"pid": pid, "nonce": nonce})).scalar_one_or_none()
+    if used is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "nonce_replayed"})
+    # 11. admission: a non-blocking claim; none free rolls back everything,
+    #     so nothing is charged and the nonce stays unused.
+    token = _pcm.DECODE_ADMISSION.try_claim(pid)
+    if token is None:
+        await db.rollback()
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "reason": "admission", "retry_after": 30})
+    # 12. the charge, as a delta, then COMMIT; the claim goes to the pool with
+    #     the job, and is released here only if the job never got there.
+    submitted = False
+    try:
+        charged = (await db.execute(text("""
+            UPDATE players SET pc_motion_at = now(),
+                   pc_motion_day_count = CASE WHEN pc_motion_day = CAST(:today AS date)
+                                              THEN pc_motion_day_count + 1 ELSE 1 END,
+                   pc_motion_day = CAST(:today AS date)
+             WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL
+            RETURNING pc_motion_day_count
+        """), {"pid": pid, "today": today})).scalar_one_or_none()
+        if charged is None:
+            await db.rollback()
+            raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
+        await db.commit()
+        job = _pcm.submit_decode(_pcm.DECODE_ADMISSION, pid, token, header, frames)
+        submitted = True
+    finally:
+        if not submitted:
+            _pcm.DECODE_ADMISSION.release(pid, token)
+    del frames
+
+    # -- phase B: the frame checks, no transaction open --------------------
+    try:
+        canonical, motion_hash, stats = await _pcm.await_decode(job)
+    except _pcm.MotionRefusal as r:
+        print(f"[PC-MOTION] player={steam_id} refused in decode (charged): {r.status} {r.detail}")
+        raise _pc_motion_refusal(r.status, r.detail)
+    except Exception as ex:  # noqa: BLE001 -- any other decode failure is the conservative 503
+        print(f"[PC-MOTION] player={steam_id} decode failed (charged): {type(ex).__name__}")
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "reason": "error", "retry_after": 30})
+
+    # -- phase C: one transaction ------------------------------------------
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    await _pc_verified_actor(request, steam_id, sig, canon, db)   # the nonce is not re-checked
+    row = (await db.execute(text(_PC_MOTION_ROW_SQL + _PC_MOTION_LOCK_C), {"pid": pid})).mappings().first()
+    refusal = _pc_motion_check(row, steam_id, header, descriptor)
+    if refusal is not None:
+        await db.rollback()
+        raise _pc_motion_refusal(*refusal)
+    if row["m_hash"] == motion_hash and row["m_static"] == header["static"]:
+        return await _pc_motion_same(db, pid, row, descriptor)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_motion_capacity'))"))
+    if await _pc_motion_capacity_used(db, pid) + len(canonical) > _pcm.MOTION_CAPACITY_BYTES:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "motion_capacity"})
+    await db.execute(text(_PC_MOTION_UPSERT_SQL), {
+        "pid": pid, "h": motion_hash, "src": body_sha256, "b": canonical, "len": len(canonical),
+        "item": int(row["active_dance_id"]), "recipe": int(header["recipe"]), "n": int(header["frames"]),
+        "ms": int(header["ms"]), "sh": header["static"], "sd": descriptor})
+    await db.commit()
+    print(f"[PC-MOTION] player={steam_id} applied hash={motion_hash[:12]} dance={header['dance']} "
+          f"bytes={len(canonical)} frames={stats['frames']} secs={stats['secs']} step_max={stats['step_max']}")
+    return {"applied": True, "motion_hash": motion_hash}
+
+
+# -- Dance cards: the selection (design S2.10) ---------------------------------
+# L4 (section 12): ShopItem.id is a BIGINT (models.py) and nothing upstream of
+# the SQL cast checks a range, so the id is parsed here, BEFORE any statement:
+# canonical decimal (no sign, no leading zero, ASCII digits only, nothing
+# around it) in [0, 2^63 - 1], 0 meaning none. Anything else is the sender's
+# 422, never a database range error in its transaction.
+_PC_DANCE_ITEM_MAX = 9223372036854775807
+
+
+def _pc_dance_item_id(raw) -> int | None:
+    if not isinstance(raw, str) or len(raw) > 19 or _re.fullmatch(r"0|[1-9][0-9]*", raw) is None:
+        return None
+    value = int(raw)
+    return value if value <= _PC_DANCE_ITEM_MAX else None
+
+
+@app.post("/api/v1/pc/dance", tags=["Player Cards"])
+async def pc_dance_select(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    item_id: str = Query(..., max_length=32),
+    db: AsyncSession = Depends(get_db),
+):
+    """The dance the player's card performs (design S2.10), `item_id` 0 for
+    none; HMAC over pcdance:{steam}:{nonce}:{item_id}, strict session. Order:
+    the item id parsed before any SQL (L4); the identity lock EXCLUSIVE; the
+    actor gate (its 503 for an unconfigured key comes before the nonce, M3);
+    the players row FOR NO KEY UPDATE (this transaction updates it, M4); for a
+    non-zero id the item is a dance (else 422 item_invalid), ready (else 403
+    dance_not_ready) and owned -- bought, or the one exemption predicate
+    (else 403 dance_not_owned); an unchanged selection answers
+    {applied: false} and keeps the stored motion; the single-use nonce; then
+    the selection is written and the stored motion deleted (it was captured
+    for the old dance). It writes active_dance_id and nothing else of the
+    player: never _set_active_cosmetic, whose unknown-kind default is
+    active_title_id."""
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    item = _pc_dance_item_id(item_id)
+    if item is None:
+        raise HTTPException(status_code=422, detail={"error": "item_invalid"})
+    canon = _pcm.canon_dance(steam_id, nonce, item_id)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+    current = (await db.execute(text("""
+        SELECT p.active_dance_id FROM players p
+         WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
+           FOR NO KEY UPDATE
+    """), {"pid": pid})).mappings().first()
+    if current is None:
+        await db.rollback()
+        raise HTTPException(status_code=410, detail="Account deleted")
+    if item:
+        chosen = (await db.execute(text("""
+            SELECT si.sku AS dance_sku, si.kind AS dance_kind, si.catalog_ready AS dance_ready,
+                   EXISTS (SELECT 1 FROM player_items pi
+                            WHERE pi.player_id = CAST(:pid AS uuid) AND pi.item_id = si.id) AS dance_bought
+              FROM shop_items si WHERE si.id = CAST(:item AS bigint)
+        """), {"pid": pid, "item": item})).mappings().first()
+        if chosen is None or chosen["dance_kind"] != "dance":
+            await db.rollback()
+            raise HTTPException(status_code=422, detail={"error": "item_invalid"})
+        if not chosen["dance_ready"]:
+            await db.rollback()
+            raise HTTPException(status_code=403, detail={"error": "dance_not_ready"})
+        if not _pcm.owns_dance(chosen, steam_id, _auto_owned):
+            await db.rollback()
+            raise HTTPException(status_code=403, detail={"error": "dance_not_owned"})
+    was = current["active_dance_id"]
+    if (was or 0) == item:
+        await db.rollback()   # unchanged: the stored motion stays
+        return {"applied": False, "reason": "same", "item_id": item}
+    used = (await db.execute(text("""
+        INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
+        ON CONFLICT DO NOTHING RETURNING nonce
+    """), {"pid": pid, "nonce": nonce})).scalar_one_or_none()
+    if used is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "nonce_replayed"})
+    await db.execute(text("UPDATE players SET active_dance_id = CAST(:item AS bigint) WHERE id = CAST(:pid AS uuid)"),
+                     {"item": item or None, "pid": pid})
+    await db.execute(text("DELETE FROM pc_motions WHERE player_id = CAST(:pid AS uuid)"), {"pid": pid})
+    await db.commit()
+    print(f"[PC-DANCE] player={steam_id} selected={item or 'none'} was={was or 'none'}")
+    return {"applied": True, "item_id": item}
 
 
 @app.post("/api/v1/admin/pc/portrait/clear", tags=["Admin"])
@@ -30681,6 +31286,181 @@ async def pc_face_png(print_id: str, rev: str, locale: str, size: str, db: Async
     return _pc_png_response(data, "public, max-age=31536000, immutable")
 
 
+# -- Dance cards: the motion reads (design S4.8-S4.10, S5.2; section 12 H1, L5) --
+def _pc_print_motion_select(with_bytes: bool) -> str:
+    """_PC_PRINT_FACE_SELECT with the motion columns of the print's SUBJECT --
+    the player its card depicts, never the print's owner (S4.8 step 3, T29).
+    The face select's subject fragment is replaced by the servable columns
+    that extend it, so every face column stays and the subject is resolved
+    once. `with_bytes` adds the stored container, for a job start (L5)."""
+    frag = _pc_portrait_resolve_cols("s")
+    if _PC_PRINT_FACE_SELECT.count(frag) != 1:
+        raise RuntimeError("the print face select no longer names its subject columns exactly once")
+    # the subject's Steam id, read for `_auto_owned` (S4.9) and never emitted:
+    # the motion answers carry print ids and revisions only
+    cols = _pc_motion_servable_cols("s") + ", s.steam_id AS subject_sid"
+    if with_bytes:
+        cols += ", s_m.bytes AS m_bytes"
+    return _PC_PRINT_FACE_SELECT.replace(frag, cols, 1) + _pc_motion_servable_joins("s")
+
+
+_PC_PRINT_MOTION_SELECT = _pc_print_motion_select(False)
+_PC_PRINT_MOTION_BYTES_SELECT = _pc_print_motion_select(True)
+_PC_MOTION_WAIT_S = 20.0          # S4.8 step 5: a request awaits its job this long, then 503 motion_pending
+_PC_MOTION_RETRY_S = 10
+_PC_MOTION_READ_MAX_IDS = 11      # S5.2: ten visible tiles plus the popup's print
+
+
+def _pc_motion_rev_of(row, ctx):
+    """(spec, face_rev, motion_rev) of one print row in the context's locale.
+    motion_rev is None unless S4.9 holds for the print's SUBJECT and this box
+    can key a face. A discarded print never plays (S5.5): its motion_rev is
+    None too, so the read answers `-` and the atlas 404s."""
+    spec, _kind, _phash, face_rev = _pc_face_inputs(row, ctx)
+    if row["discarded_at"] is not None or not _pcm.servable(row, row["subject_sid"], _auto_owned):
+        return spec, face_rev, None
+    return spec, face_rev, _pcm.motion_rev(_pcm.motion_fingerprint(ctx["renderer_fp"]), face_rev, row["m_hash"])
+
+
+def _pc_motion_expect(row) -> tuple:
+    """What a job must find again when it starts (L5): the subject, the
+    motion, the still and the still's descriptor the scheduling read saw."""
+    return (str(row["subject_player_id"]), row["m_hash"], row["m_static"], row["m_descriptor"])
+
+
+def _pc_motion_sessions():
+    """The session factory a motion job opens its own session from: the
+    request that scheduled the job may be gone by the time the job starts."""
+    from database import async_session
+    return async_session
+
+
+async def _pc_motion_atlas_job(print_id: str, rev: str, locale: str, expect: tuple):
+    """The print atlas job (S4.4), run by the motion scheduler when it STARTS.
+    L5: the row is read again, container bytes included, and the job goes on
+    only while S4.9 still holds, motion_rev still recomputes to the one it
+    was scheduled under, and the subject, motion hash, still hash and still
+    descriptor are the ones the scheduling request read. Anything else
+    publishes nothing: the waiting request answers 404 and the viewer keeps
+    the static face. Returns ("done", card published, tile published) or
+    ("stale", why)."""
+    async with _pc_motion_sessions()() as db:
+        row = (await db.execute(text(_PC_PRINT_MOTION_BYTES_SELECT + " WHERE pr.id = CAST(:id AS uuid)"),
+                                {"id": print_id})).mappings().first()
+        if row is None:
+            return ("stale", "row")
+        ctx = await _pc_face_ctx(db, locale)
+    spec, _face_rev, now_rev = _pc_motion_rev_of(row, ctx)
+    if now_rev is None or now_rev != rev or _pc_motion_expect(row) != expect or row["m_bytes"] is None:
+        return ("stale", "moved")
+    deadline = time.monotonic() + _pcm.JOB_DEADLINE_S       # the job's own clock starts when it does
+    # The derivation runs on the motion worker PROCESS (S2F14): the partial and
+    # its arguments are pickled across, and the deadline -- a monotonic time,
+    # a clock the worker shares -- is checked there. The publish stays here.
+    card, tile = await _pcm.in_motion_pool(_functools.partial(
+        _pcm.derive_atlases, spec, ctx["labels"], bytes(row["m_bytes"]), deadline=deadline))
+    for size, data in (("card", card), ("tile", tile)):
+        key = _pcm.atlas_key(print_id, rev, locale, size)
+        if data is None:
+            _pcm.TOO_LARGE.add(key)
+        else:
+            await _pcm.in_motion_io(_pc_motion_cache.publish, key, data)
+    return ("done", card is not None, tile is not None)
+
+
+@app.get("/api/v1/pc-face/motion", tags=["Player Cards"])
+async def pc_face_motion_read(
+    ids: str = Query(..., max_length=_PC_MOTION_READ_MAX_IDS * 37),
+    locale: str = Query("en", max_length=32),
+    db: AsyncSession = Depends(get_db),
+):
+    """The per-visit motion read (design S5.2): up to eleven print ids, one
+    answer, never cached. Each id answers `<pid>:<face_rev>:<motion_rev>:
+    <frames>:<ms>` when S4.9 holds for the print's SUBJECT, else `<pid>:-`,
+    in request order; a discarded print, an unknown id and a box that cannot
+    key a face answer `-` too. The face_rev is `_pc_face_inputs`'s, as the
+    collection answer's is, so the client plays a clip only over the still
+    it was derived against. More than eleven ids, or any id that is not a
+    print id: 422."""
+    parts = ids.split(",")
+    if not 1 <= len(parts) <= _PC_MOTION_READ_MAX_IDS or not all(_pcp.print_id_ok(p) for p in parts):
+        raise HTTPException(status_code=422, detail={"error": "motion_ids"})
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    rows = (await db.execute(text(_PC_PRINT_MOTION_SELECT + " WHERE pr.id = ANY(CAST(:ids AS uuid[]))"),
+                             {"ids": sorted(set(parts))})).mappings().all()
+    ctx = await _pc_face_ctx(db, loc)
+    by_id = {str(r["print_id"]): r for r in rows}
+    out = []
+    for pid in parts:
+        row = by_id.get(pid)
+        face_rev = rev = None
+        if row is not None:
+            _spec, face_rev, rev = _pc_motion_rev_of(row, ctx)
+        if rev is None or face_rev is None:
+            out.append(pid + ":-")
+        else:
+            out.append(f"{pid}:{face_rev}:{rev}:{int(row['m_frames'])}:{int(row['m_ms'])}")
+    return JSONResponse({"m": "|".join(out)}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png", tags=["Player Cards"])
+async def pc_face_motion_atlas(request: Request, print_id: str, motion_rev: str, locale: str, size: str,
+                               db: AsyncSession = Depends(get_db)):
+    """The print atlas (design S4.8): public, read-only, every 200 immutable.
+    Shape first (404, no read); the renderer gate; ONE row read of the
+    print's subject, never its bytes; S4.9 false or a recomputed motion_rev
+    that differs: 404. Only then the motion cache, else the print job --
+    scheduled or joined, admitted under the limiter's own client address
+    (H1) -- awaited for at most 20 s (503 motion_pending; the job goes on). A
+    key whose encoded atlas was over its cap answers 404 motion_too_large; a
+    key whose job failed answers 503 for ten minutes, from memory (S4.10)."""
+    face_key = _pcp.face_key(print_id, motion_rev, locale, size)
+    if face_key is None or (locale != "en" and locale not in _pc_served_locales()):
+        raise HTTPException(status_code=404, detail="Not found")
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    row = (await db.execute(text(_PC_PRINT_MOTION_SELECT + " WHERE pr.id = CAST(:id AS uuid)"),
+                            {"id": print_id})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    ctx = await _pc_face_ctx(db, locale)
+    _spec, _face_rev, rev = _pc_motion_rev_of(row, ctx)
+    if rev is None or rev != motion_rev:
+        raise HTTPException(status_code=404, detail="Not found")
+    expect = _pc_motion_expect(row)
+    await db.rollback()           # the reads are done: no connection is held across a wait
+    key = _pcm.atlas_key(print_id, motion_rev, locale, size)
+    if key in _pcm.TOO_LARGE:
+        raise HTTPException(status_code=404, detail={"error": "motion_too_large"})
+    data = await asyncio.to_thread(_pc_motion_cache.read, key)
+    if data is not None:
+        return _pc_png_response(data, "public, max-age=31536000, immutable")
+    job = _pcm.job_key(print_id, motion_rev, locale)
+    left = _pc_motion_jobs.failed_for(job)
+    if left:
+        raise _pc_motion_refusal(503, {"error": "motion_failed", "retry_after": int(left) + 1})
+    try:
+        fut = _pc_motion_jobs.submit(job, _rl_client_address(request), _functools.partial(
+            _pc_motion_atlas_job, print_id, motion_rev, locale, expect))
+    except _pcm.MotionBusy:
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "retry_after": _PC_MOTION_RETRY_S})
+    outcome = await _pcm.await_job(fut, _PC_MOTION_WAIT_S)
+    if outcome is None:
+        raise _pc_motion_refusal(503, {"error": "motion_pending", "retry_after": _PC_MOTION_RETRY_S})
+    data = await asyncio.to_thread(_pc_motion_cache.read, key)
+    if data is not None:
+        return _pc_png_response(data, "public, max-age=31536000, immutable")
+    if key in _pcm.TOO_LARGE:
+        raise HTTPException(status_code=404, detail={"error": "motion_too_large"})
+    if outcome[0] == "failed":
+        raise _pc_motion_refusal(503, {"error": "motion_failed", "retry_after": int(_pcm.FAILED_HOLD_S)})
+    raise HTTPException(status_code=404, detail="Not found")
+
+
 @app.get("/api/v1/internal/pc/face/print/{print_id}/{locale}", tags=["Internal"])
 async def internal_pc_face_print(
     print_id: str, locale: str,
@@ -30708,6 +31488,68 @@ async def internal_pc_face_print(
     return resp
 
 
+async def _pc_preview_read(db: AsyncSession, player_ref: str, loc: str, snapshot_id, *, motion: bool = False):
+    """The /card preview's read of its subject and the spec it draws -- ONE
+    read for both preview routes, the face preview and the motion preview GIF
+    (dance cards S6.2), so the GIF is drawn from exactly the spec the PNG is
+    and a subject one of them refuses cannot pass the other. Returns (sub,
+    ctx, spec, kind, phash, rev), or None when the subject is not in the pool
+    or has no member row in the snapshot read. `snapshot_id` pins that member
+    read to the snapshot the caller's /card body came from (r7 L1); None
+    reads the latest. `motion` adds the columns `pc_motion.servable` reads,
+    the subject's Steam id and its id (S4.9), for the GIF route and its job."""
+    # This decides pool membership -- it answers not_in_pool -- so it carries
+    # the pool's WHOLE word and not one half of it: no row comes back for a
+    # subject the word refuses (deleted, banned, id not a SteamID64, or never
+    # ran the mod), whichever snapshot is pinned. It read _PC_POOL_STEAM_ID_SQL
+    # alone until 2026-09-15, which is the Steam half of the merged rule and
+    # not the rule. The deleted/banned re-check below is that gate said again
+    # over the row `portrait_for` resolves the picture from.
+    cols, joins = _PC_PORTRAIT_RESOLVE_COLS, ""
+    if motion:
+        cols = _pc_motion_servable_cols("p") + ", p.steam_id AS subject_sid, p.id AS subject_player_id"
+        joins = _pc_motion_servable_joins("p")
+    sub = (await db.execute(text(
+        "SELECT p.display_name, " + cols +
+        " FROM players p" + joins + " WHERE p.id = CAST(:pid AS uuid) AND " + _PC_POOL_MEMBER_SQL), {"pid": player_ref})).mappings().first()
+    if sub is None or sub["subject_deleted"] or sub["subject_banned"]:
+        return None
+    member = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
+          FROM pc_pool_members m
+         WHERE m.player_id = CAST(:pid AS uuid)
+           AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))
+    """), {"pid": player_ref, "snap": snapshot_id})).mappings().first()
+    if member is None:
+        return None
+    ctx = await _pc_face_ctx(db, loc)
+    labels = ctx["labels"]
+    kind, phash = _pcp.portrait_for(sub)
+    name = _pcp.public_render_name(sub["display_name"])
+    rating = _pc_num(member["rating"])
+    board_rating = _pc_board_rating(rating) if rating is not None else None
+    # The same projection a minted face gets (v4 section 6): the tier in the
+    # RANK slot, the equipped shop title as the subtitle.
+    rank_name = _pc_rank_name(rating)
+    title = rank_name
+    subtitle = _pc_shop_title(member["title"], rank_name)
+    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
+    spec = {
+        "band": member["rarity"], "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "subtitle": subtitle,
+        "rating": int(board_rating) if board_rating is not None else None,
+        "pool_rank": int(member["pool_rank"]),
+        "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
+        "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
+        "foil": False, "signed": False, "sign": None,
+        "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
+        "top_card": _pcp.coverage_strip(member["top_card"] or ""),
+        "top_card_rgb": _PC_CARD_THEMES.get(_pcp.coverage_strip(member["top_card"] or "")),
+    }
+    rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
+    return sub, ctx, spec, kind, phash, rev
+
+
 @app.get("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", tags=["Internal"])
 async def internal_pc_face_preview(
     player_ref: str, locale: str,
@@ -30728,51 +31570,13 @@ async def internal_pc_face_preview(
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     loc = _pcp.effective_locale(locale, _pc_served_locales())
     await _pc_steam_prime([player_ref])   # v2 §7: the preview shows the picture, not the plate, on a first look
-    # This decides pool membership -- it answers not_in_pool -- so it carries
-    # the pool's WHOLE word and not one half of it: no row comes back for a
-    # subject the word refuses (deleted, banned, id not a SteamID64, or never
-    # ran the mod), whichever snapshot is pinned. It read _PC_POOL_STEAM_ID_SQL
-    # alone until 2026-09-15, which is the Steam half of the merged rule and
-    # not the rule. The deleted/banned re-check below is that gate said again
-    # over the row `portrait_for` resolves the picture from.
-    sub = (await db.execute(text(
-        "SELECT p.display_name, " + _PC_PORTRAIT_RESOLVE_COLS +
-        " FROM players p WHERE p.id = CAST(:pid AS uuid) AND " + _PC_POOL_MEMBER_SQL), {"pid": player_ref})).mappings().first()
-    if sub is None or sub["subject_deleted"] or sub["subject_banned"]:
+    # Pool membership, the member row of the pinned snapshot and the spec:
+    # the one preview read the motion preview GIF shares (_pc_preview_read).
+    read = await _pc_preview_read(db, player_ref, loc, snapshot_id)
+    if read is None:
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
-    member = (await db.execute(text("""
-        SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
-          FROM pc_pool_members m
-         WHERE m.player_id = CAST(:pid AS uuid)
-           AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))
-    """), {"pid": player_ref, "snap": snapshot_id})).mappings().first()
-    if member is None:
-        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
-    ctx = await _pc_face_ctx(db, loc)
+    _sub, ctx, spec, _kind, phash, rev = read
     labels = ctx["labels"]
-    kind, phash = _pcp.portrait_for(sub)
-    name = _pcp.public_render_name(sub["display_name"])
-    rating = _pc_num(member["rating"])
-    board_rating = _pc_board_rating(rating) if rating is not None else None
-    # The same projection a minted face gets (v4 §6): the tier in the RANK
-    # slot, the equipped shop title as the subtitle.
-    rank_name = _pc_rank_name(rating)
-    title = rank_name
-    subtitle = _pc_shop_title(member["title"], rank_name)
-    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
-    spec = {
-        "band": member["rarity"], "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
-        "subtitle": subtitle,
-        "rating": int(board_rating) if board_rating is not None else None,
-        "pool_rank": int(member["pool_rank"]),
-        "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
-        "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
-        "foil": False, "signed": False, "sign": None,
-        "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
-        "top_card": _pcp.coverage_strip(member["top_card"] or ""),
-        "top_card_rgb": _PC_CARD_THEMES.get(_pcp.coverage_strip(member["top_card"] or "")),
-    }
-    rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
     bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
     key = f"preview/{player_ref}/{rev}/{loc}/{bucket}.png"
     pbytes = await _pc_portrait_bytes(db, phash)
@@ -30781,6 +31585,116 @@ async def internal_pc_face_preview(
     data = await _pc_face_cache.get_or_render(
         key, _functools.partial(_pcf.render_face, spec, labels, pbytes, "card"))
     return _pc_png_response(data, "private, max-age=60")
+
+
+def _pc_gif_response(data: bytes, rev: str, still: str):
+    """The motion preview's warm answer (S6.2): private and a minute at most
+    -- the URL names the subject, not the picture -- with the preview's motion
+    revision and the still the motion is bound to, which the bot checks
+    against its lease before it posts."""
+    return _PcResponse(content=data, media_type="image/gif",
+                       headers={"Cache-Control": "private, max-age=60", "Content-Length": str(len(data)),
+                                "X-Motion-Rev": rev, "X-Motion-Static-Hash": still})
+
+
+async def _pc_motion_preview_job(player_ref: str, snapshot_id, locale: str, rev: str, expect: tuple):
+    """The /card preview GIF job (S4.5), run by the motion scheduler when it
+    STARTS. L5 holds here as for the print job: the subject is read again
+    through the one preview read, and the job goes on only while S4.9 still
+    holds, the preview's motion revision still recomputes to the one it was
+    scheduled under, and the subject, motion hash, still hash and still
+    descriptor are the ones the scheduling request read; the container is
+    read by that motion hash and the still by its hash. Anything else
+    publishes nothing. The derivation runs on the motion worker process
+    (S2F14) and the publish here. Returns ("done", the ladder's size or None)
+    or ("stale", why)."""
+    async with _pc_motion_sessions()() as db:
+        read = await _pc_preview_read(db, player_ref, locale, snapshot_id, motion=True)
+        if read is None:
+            return ("stale", "row")
+        sub, ctx, spec, _kind, phash, preview_rev = read
+        container = (await db.execute(text(
+            "SELECT bytes FROM pc_motions WHERE player_id = CAST(:pid AS uuid) AND motion_hash = CAST(:h AS text)"),
+            {"pid": player_ref, "h": sub["m_hash"]})).scalar_one_or_none()
+        still = await _pc_portrait_bytes(db, phash)
+    now_rev = None
+    if _pcm.servable(sub, sub["subject_sid"], _auto_owned):
+        now_rev = _pcm.motion_preview_rev(_pcm.motion_fingerprint(ctx["renderer_fp"]), preview_rev, sub["m_hash"])
+    if now_rev is None or now_rev != rev or _pc_motion_expect(sub) != expect or container is None or still is None:
+        return ("stale", "moved")
+    deadline = time.monotonic() + _pcm.JOB_DEADLINE_S       # the job's own clock starts when it does
+    size, data = await _pcm.in_motion_pool(_functools.partial(
+        _pcm.derive_preview_gif, spec, ctx["labels"], still, bytes(container), deadline=deadline))
+    key = _pcm.preview_key(player_ref, rev, locale)
+    if data is None:
+        _pcm.TOO_LARGE.add(key)
+    else:
+        await _pcm.in_motion_io(_pc_motion_cache.publish, key, data)
+    return ("done", size)
+
+
+@app.get("/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif", tags=["Internal"])
+async def internal_pc_motion_preview(
+    request: Request, player_ref: str, locale: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+    snapshot_id: int | None = Query(None, ge=1),
+    lease_id: str = Query("", max_length=64),
+):
+    """The /card motion preview GIF (dance cards S6.2). The subject is read
+    exactly as the face preview reads it -- the one preview read, with the
+    pool's whole word and its SteamID64 rule, and the member row of
+    `snapshot_id` -- and the lease is read, never written: unexpired, naming
+    this subject, its portrait_hash the motion's static_hash. Then the S4.9
+    predicate. Any of these false: 404. Warm: 200 image/gif, private for a
+    minute, with X-Motion-Rev and X-Motion-Static-Hash. Cold: the preview job
+    is scheduled or joined and the answer is 404 motion_cold AT ONCE -- this
+    route never renders, and never waits on a render, inside the bot's send
+    window. The key moves with every input of the picture (the preview's
+    motion revision over preview_rev), so a warm file is never another
+    picture's; the file is never the authority -- the row is read first."""
+    _require_internal_key(x_internal_key)
+    if not (_pcp.print_id_ok(player_ref) and _pcp.print_id_ok(lease_id)):
+        raise HTTPException(status_code=404, detail="Not found")
+    if _pcm is None:
+        raise HTTPException(status_code=503, detail="motion_unavailable")
+    _pc_require_renderer()
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    lease = (await db.execute(text("""
+        SELECT (l.until > now()) AS unexpired, l.portrait_hash AS leased_hash
+          FROM pc_delivery_leases l
+         WHERE l.id = CAST(:lease AS uuid) AND l.subject_id = CAST(:pid AS uuid)
+    """), {"lease": lease_id, "pid": player_ref})).mappings().first()
+    if lease is None or not lease["unexpired"]:
+        raise HTTPException(status_code=404, detail="Not found")
+    read = await _pc_preview_read(db, player_ref, loc, snapshot_id, motion=True)
+    if read is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    sub, ctx, _spec, _kind, _phash, preview_rev = read
+    if (not _pcm.servable(sub, sub["subject_sid"], _auto_owned) or not lease["leased_hash"]
+            or lease["leased_hash"] != sub["m_static"]):
+        raise HTTPException(status_code=404, detail="Not found")
+    rev = _pcm.motion_preview_rev(_pcm.motion_fingerprint(ctx["renderer_fp"]), preview_rev, sub["m_hash"])
+    key = _pcm.preview_key(player_ref, rev, loc) if rev else None
+    if key is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    expect = _pc_motion_expect(sub)
+    still = sub["m_static"]
+    await db.rollback()           # the reads are done: no connection is held while the scheduler is asked
+    if key in _pcm.TOO_LARGE:
+        raise HTTPException(status_code=404, detail={"error": "motion_too_large"})
+    data = await asyncio.to_thread(_pc_motion_cache.read, key)
+    if data is not None:
+        return _pc_gif_response(data, rev, still)
+    left = _pc_motion_jobs.failed_for(key)
+    if left:
+        raise _pc_motion_refusal(503, {"error": "motion_failed", "retry_after": int(left) + 1})
+    try:
+        _pc_motion_jobs.submit(key, _rl_client_address(request), _functools.partial(
+            _pc_motion_preview_job, player_ref, snapshot_id, loc, rev, expect))
+    except _pcm.MotionBusy:
+        raise _pc_motion_refusal(503, {"error": "motion_busy", "retry_after": _PC_MOTION_RETRY_S})
+    raise HTTPException(status_code=404, detail={"error": "motion_cold"})
 
 
 @app.get("/api/v1/internal/pc/face/back", tags=["Internal"])
@@ -37797,6 +38711,12 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("DELETE FROM pc_delivery_leases WHERE subject_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_portrait_nonces WHERE player_id = :pid"), {"pid": pid})
     await _pc_clear_portrait_unit(db, str(pid), lock_days=None)
+    # Dance cards (S3.5): the clear unit above removed the stored motion; the
+    # selection and the motion counters are reset here. The row is
+    # anonymised, never deleted (#437), so no foreign key action is relied on.
+    await db.execute(text(
+        "UPDATE players SET active_dance_id = NULL, pc_motion_at = NULL, pc_motion_day = NULL,"
+        " pc_motion_day_count = 0 WHERE id = CAST(:pid AS uuid)"), {"pid": str(pid)})
     # Music ratings (design-v4-report M15). EXPLICIT delete per the #437 audit
     # rule: this endpoint ANONYMIZES the players row rather than deleting it,
     # so music_ratings' ON DELETE CASCADE never fires — an ondelete clause is
@@ -57175,6 +58095,29 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
 _LADDER_HOOK_SITES = (submit_match, submit_team_match,
                       _complete_team_series_with_ratings, submit_ffa_match)
 _LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
+
+
+# Dance cards (design S11.3): `pc_motion` on /health is how many of the
+# motion routes are REGISTERED on this app when /health is asked -- the
+# motion upload (S2.1), the per-visit motion read (S5.2), the atlas (S4.8),
+# the selection (S2.10) and the bot's motion preview GIF (S6.2). The key is
+# absent on any build before the batch and reads 5 on this one -- the build
+# discriminator S11.3 gives the release train -- and a build that lost a
+# route's registration reads fewer. DERIVED on every call, never written
+# down (#306, #342): a handler that is defined but not registered does not
+# count, and a comment or a docstring cannot move it. The tuple holds the
+# handlers themselves, so it is bound here, after the last of them.
+_PC_MOTION_ROUTES = (pc_motion_upload, pc_face_motion_read, pc_face_motion_atlas, pc_dance_select,
+                     internal_pc_motion_preview)
+
+
+def _pc_motion_health_word() -> int:
+    """How many of _PC_MOTION_ROUTES are the endpoint of a route registered
+    on the app now; both health_check arms call it on every request. The
+    endpoints are compared by identity, so a route whose endpoint cannot be
+    hashed cannot make /health raise."""
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return sum(1 for fn in _PC_MOTION_ROUTES if id(fn) in registered)
 
 
 @app.get("/api/v1/team/players/{steam_id}/team-stats", response_model=TeamStatsResponse, tags=["Team Matches"])

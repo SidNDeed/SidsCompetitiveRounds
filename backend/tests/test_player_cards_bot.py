@@ -43,6 +43,8 @@ def test_every_internal_route_the_bot_calls_is_registered_by_the_api():
     assert '@app.get("/api/v1/internal/pc/lease/{lease_id}"' in MAIN_SRC and '@app.delete("/api/v1/internal/pc/lease/{lease_id}"' in MAIN_SRC
     assert BOT_SRC.count('f"/internal/pc/face/print/{') == 2 and '@app.get("/api/v1/internal/pc/face/print/{print_id}/{locale}"' in MAIN_SRC
     assert BOT_SRC.count('f"/internal/pc/face/preview/{') == 1 and '@app.get("/api/v1/internal/pc/face/preview/{player_ref}/{locale}"' in MAIN_SRC
+    # dance cards (S6.2): /card's motion preview GIF
+    assert BOT_SRC.count('f"/internal/pc/motion/preview/{') == 1 and '@app.get("/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif"' in MAIN_SRC
     assert '_pc_api_bytes("/internal/pc/face/back")' in BOT_SRC and '@app.get("/api/v1/internal/pc/face/back"' in MAIN_SRC
     # the Discord reveal: two JSON reads, and the two image routes as f-string paths
     for read in ("packs", "binder"):

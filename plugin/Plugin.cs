@@ -2239,6 +2239,7 @@ namespace CompetitiveRounds
             if (raw.Length == 0) return;
             if (raw.StartsWith("portrait:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevRun(raw.Substring(9)); return; }   // portrait renderer (v22 section 5.7)
             if (raw.StartsWith("shot:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevShot(raw.Substring(5)); return; }        // window capture from this seat (#622)
+            if (raw.StartsWith("motion:", StringComparison.OrdinalIgnoreCase)) { PlayerCardMotion.DevRun(raw.Substring(7)); return; }     // dance cards playback levers (design S8)
             if (raw.StartsWith("ui:", StringComparison.OrdinalIgnoreCase))
             {
                 // open the mod page on a tab so the seat can screenshot its own UI
@@ -2423,6 +2424,17 @@ namespace CompetitiveRounds
             if (v == "wheel") { CompetitiveUI.DevForceDanceWheel(); return; }
             if (v.StartsWith("preview:", StringComparison.Ordinal))
             { DanceEmotes.TogglePreview(v.Substring(8).Trim()); return; }
+            // Dance cards build step 0 (design S11.1): the live body-channel
+            // probe, Floss on the local sandbox body. OFFLINE ONLY (the probe
+            // refuses otherwise). "bodyprobe" or "bodyprobe:<tag>".
+            if (v == "bodyprobe" || v.StartsWith("bodyprobe:", StringComparison.Ordinal))
+            {
+                var ptag = new System.Text.StringBuilder();
+                foreach (char ch in (v.Length > 10 ? v.Substring(10) : ""))
+                    if (ptag.Length < 24 && ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) ptag.Append(ch);
+                StartCoroutine(DanceStep0Probe.BodyProbe(ptag.Length == 0 ? "live" : ptag.ToString()));
+                return;
+            }
             if (v.StartsWith("play:", StringComparison.Ordinal))
             {
                 int idx;
@@ -2842,6 +2854,11 @@ namespace CompetitiveRounds
             // id Poll's TryResolveOpponent just resolved; self-gated to one
             // request per room incarnation.
             try { H2HSummary.Tick(); } catch { }
+            // Dance cards S2F5 (round two): the capture path's one discarded
+            // warm-up per process, from boot. Driven from THIS persistent tick,
+            // not NativeUI.Tick (which returns at once unless a page is open),
+            // so it can run before the first real capture wherever the player goes.
+            try { PortraitRender.DanceWarmTick(); } catch { }
 
             /* [FONT] HeavyTextSelfTest (bug #351). Driven from THIS persistent
              * tick and not from NativeUI.Tick, which early-returns unless the

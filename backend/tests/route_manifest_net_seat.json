@@ -700,7 +700,7 @@
           ],
           "main",
           "pc_me",
-          "2212779de92d53fcdf8b89bf73150c7e70e0e258"
+          "19e16d4b781a31dbf530e21e65305a63ef584364"
         ],
         [
           "/api/v1/pc/packs",
@@ -943,7 +943,7 @@
           ],
           "main",
           "delete_player_data",
-          "f6bd18d84508841947882301c6f86fdb875333ae"
+          "4a40cea98f2438adc94d8f88149e2e8e55b4c0ec"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1813,7 +1813,7 @@
           ],
           "main",
           "health_check",
-          "c22536bb33867851543983d3ca87124a4883cc03"
+          "81293dc0adc83de238e5a975871ac85b4b99ceba"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3143,7 +3143,7 @@
           ],
           "main",
           "admin_pc_portrait_clear",
-          "123c47521e5b6100b640cb8c6928207a47ac836a"
+          "0d331a62302f70e17aba7766405b4fb026d512b3"
         ],
         [
           "/api/v1/internal/pc/face/back",
@@ -3161,7 +3161,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "251b1540cd3549c03415a2f4612bf86d0fe425ec"
+          "60602ca7b32d9985d9703a46fbf1b2d612161257"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3233,7 +3233,52 @@
           ],
           "main",
           "pc_portrait_upload",
-          "3caa2b8200f15b29ef8407232e73d70ec57c0c7d"
+          "73aa3478177ec22db7bb1f5db6544b31a38902cf"
+        ],
+        [
+          "/api/v1/pc/portrait/motion",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_motion_upload",
+          "08c44597fb40ab16e4372db7914c4f3546a54c25"
+        ],
+        [
+          "/api/v1/pc/dance",
+          [
+            "POST"
+          ],
+          "main",
+          "pc_dance_select",
+          "99f4ebf1b76f96053f4b3e62aefc71e318ac1ca3"
+        ],
+        [
+          "/api/v1/pc-face/motion",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_face_motion_read",
+          "25953dce9db676a497e4db0f8d9c51388ddf78d4"
+        ],
+        [
+          "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
+          [
+            "GET"
+          ],
+          "main",
+          "pc_face_motion_atlas",
+          "f33bd745c31d95d9ac62b1131d99ed83369011ec"
+        ],
+        [
+          "/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_pc_motion_preview",
+          "f6846732a2e7b00b5d79bdf6963234fc910deea0"
         ],
         [
           "/api/v1/pc/trades",
@@ -3449,7 +3494,7 @@
       [
         "main",
         "rate_limit_gate",
-        "b08dbe739f954dd241d945a205255f7e5b7c8a55"
+        "f065649e5f96c29aed9efc3c51174e4d4fa4c0be"
       ],
       [
         "main",
@@ -3473,7 +3518,7 @@
       [
         "main",
         "lifespan",
-        "292d7ef959eb47221de0cc95c14b2f260af1b07e"
+        "f1a0a1e892ba45301cd45caa52dc07e9d1c492d8"
       ]
     ]
   },
@@ -3628,13 +3673,18 @@
     "GET /api/v1/internal/pc/collection -> main.internal_pc_collection",
     "GET /api/v1/internal/pc/card -> main.internal_pc_card",
     "POST /api/v1/pc/portrait -> main.pc_portrait_upload",
+    "POST /api/v1/pc/portrait/motion -> main.pc_motion_upload",
+    "POST /api/v1/pc/dance -> main.pc_dance_select",
     "POST /api/v1/admin/pc/portrait/clear -> main.admin_pc_portrait_clear",
     "POST /api/v1/internal/pc/lease -> main.internal_pc_lease",
     "GET /api/v1/internal/pc/lease/{lease_id} -> main.internal_pc_lease_check",
     "DELETE /api/v1/internal/pc/lease/{lease_id} -> main.internal_pc_lease_release",
     "GET /api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png -> main.pc_face_png",
+    "GET /api/v1/pc-face/motion -> main.pc_face_motion_read",
+    "GET /api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png -> main.pc_face_motion_atlas",
     "GET /api/v1/internal/pc/face/print/{print_id}/{locale} -> main.internal_pc_face_print",
     "GET /api/v1/internal/pc/face/preview/{player_ref}/{locale} -> main.internal_pc_face_preview",
+    "GET /api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif -> main.internal_pc_motion_preview",
     "GET /api/v1/internal/pc/face/back -> main.internal_pc_face_back",
     "GET /api/v1/internal/pc/packs -> main.internal_pc_packs",
     "GET /api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png -> main.internal_pc_pack_strip",
