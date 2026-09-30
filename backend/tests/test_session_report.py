@@ -2105,19 +2105,26 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
     body = mig[mig.index("CREATE TABLE IF NOT EXISTS spectate_watch_grants"):]
     body = body[:body.index(");")]
     assert "REFERENCES spectate_games(id)" in body and "ON DELETE" not in body
-    assert "UNIQUE (game_id, spectator_steam_id, mode, source_ref, roster)" in body
+    assert "UNIQUE (game_id, generation, spectator_steam_id, mode, source_ref, roster)" in body
     assert "observed_seq BIGINT NOT NULL DEFAULT nextval('spectate_watch_grants_observed_seq')" in body
     assert mig.count("CREATE SEQUENCE IF NOT EXISTS spectate_watch_grants_observed_seq AS BIGINT CACHE 1;") == 1
     # Round 4 MEDIUM 1: 364 writes no grant. A pre-364 lease binding recorded
     # no tuple, and the spectate game row's tuple is the room's last attest,
     # so a backfill from it could grant a tuple the seat never observed; the
-    # file creates the table, its index and (round 5 LOW 1) the observation
-    # sequence, and nothing else.
-    code = " ".join(l for l in mig.splitlines() if not l.lstrip().startswith("--")).upper()
-    for verb in ("INSERT", "UPDATE", "DELETE", "SPECTATE_LEASES", "FROM SPECTATE_GAMES"):
-        assert verb not in code, ("364 statement", verb)
+    # file creates the table, its index, (round 5 LOW 1) the observation
+    # sequence and (round 7 MEDIUM 1) the room generation - its sequence, the
+    # spectate_games column and the trigger that owns it - and no statement
+    # inserts, updates or deletes a row (the trigger's own event list names
+    # INSERT and UPDATE; no INSERT INTO, UPDATE ... SET or DELETE FROM).
+    code = " ".join(" ".join(l for l in mig.splitlines() if not l.lstrip().startswith("--")).split()).upper()
+    for verb in (r"\bINSERT\s+INTO\b", r"\bUPDATE\s+\w+\s+SET\b", r"\bDELETE\b", r"\bTRUNCATE\b",
+                 r"SPECTATE_LEASES", r"\bFROM\s+SPECTATE_GAMES\b"):
+        assert not re.search(verb, code), ("364 statement", verb)
     assert code.count("CREATE TABLE IF NOT EXISTS") == 1 and code.count("CREATE INDEX IF NOT EXISTS") == 1
-    assert code.count("CREATE SEQUENCE IF NOT EXISTS") == 1 and code.count("CREATE ") == 3
+    assert code.count("CREATE SEQUENCE IF NOT EXISTS") == 2 and code.count("CREATE OR REPLACE FUNCTION") == 1
+    assert code.count("CREATE OR REPLACE TRIGGER") == 1 and code.count("CREATE ") == 6
+    assert code.count("ALTER TABLE SPECTATE_GAMES ADD COLUMN IF NOT EXISTS GENERATION BIGINT NOT NULL DEFAULT "
+                      "NEXTVAL('SPECTATE_GAMES_GENERATION_SEQ');") == 1 and code.count("ALTER TABLE") == 1
     for f in sorted(sql.glob("*.sql")):
         head = f.name.split("_")[0]
         if head.isdigit() and int(head) > 364:
@@ -2173,8 +2180,11 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     flat = " ".join(body.split())
     assert flat.count('if (seenMode.Length == 0) seenMode = "1v1";') == 1
     assert flat.count("bool sendTuple = seenRoster.Length > 0 && SpectateAttestAnswerFor( "
-                      "roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource);") == 1
+                      "roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource, out seenGeneration);") == 1
+    # round 7: the generation goes out as a bare number, and only a value
+    # SpectateGenerationToken accepted (digits) can reach it
     assert flat.count(r'if (sendTuple) sb.Append($"\"observed_game_id\":\"{Escape(seenGameId)}\",") '
+                      r'.Append($"\"observed_generation\":{seenGeneration},") '
                       r'.Append($"\"observed_mode\":\"{Escape(seenMode)}\",") '
                       r'.Append($"\"observed_source_ref\":\"{Escape(seenSource)}\",") '
                       r'.Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");') == 1
@@ -2188,10 +2198,33 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     assert 'ExtractJsonString(resp, "status") != "ok"' in note
     assert 'spectateAttestAnswerGameId = ExtractJsonString(resp, "game_id");' in note
     assert 'spectateAttestAnswerSourceRef = ExtractJsonString(resp, "source_ref");' in note
+    # round 7: the generation is kept only when it is a digits token, and an
+    # answer without one clears the room's answer like any refusal
+    assert 'string generation = ExtractJsonIdToken(resp, "generation");' in note
+    assert "|| !SpectateGenerationToken(generation))" in note
+    assert "spectateAttestAnswerGeneration = generation;" in note
+    assert "spectateAttestAnswerGeneration = \"\";" in note
     answer_for = " ".join(_cs_body(PLUGIN / "ApiClient.cs", "internal static bool SpectateAttestAnswerFor("
                                    "string room, string mode, string roster,").split())
     for kept in ("spectateAttestAnswerRoom", "spectateAttestAnswerMode", "spectateAttestAnswerRoster"):
         assert answer_for.count("if (!string.Equals(%s," % kept) == 1, kept
+    assert answer_for.count("if (!SpectateGenerationToken(spectateAttestAnswerGeneration)) return false;") == 1
+    assert answer_for.count("generation = spectateAttestAnswerGeneration;") == 1
+    token = " ".join(_cs_body(PLUGIN / "ApiClient.cs", "internal static bool SpectateGenerationToken(string s)").split())
+    assert "if (string.IsNullOrEmpty(s) || s.Length > 18 || s[0] == '0') return false;" in token
+    assert "if (s[i] < '0' || s[i] > '9') return false;" in token
+    # round 7 MEDIUM 1 (a): the attest takes the room lock BEFORE it resolves
+    # the source it writes, and answers what it read back from the row it
+    # wrote, under that lock, before its commit
+    att = " ".join(inspect.getsource(main.spectate_participant_attest).split())
+    lock_at = att.index("SELECT pg_advisory_xact_lock(hashtext(:k))")
+    assert att.count("SELECT pg_advisory_xact_lock(") == 1
+    assert lock_at < att.index("await _spectate_authoritative_roster(db, req.mode, req.room_name)")
+    assert att.count("_spectate_authoritative_roster(") == 1
+    wrote = att.index("SELECT id, source_ref, generation FROM spectate_games WHERE id = :gid")
+    assert lock_at < wrote < att.index("await db.commit()") and att.count("await db.commit()") == 1
+    assert att.count('return {"status": "ok", "game_id": str(wrote["id"]), "source_ref": wrote["source_ref"], '
+                     '"generation": int(wrote["generation"])}') == 1
     attest = " ".join(_cs_body(PLUGIN / "ApiClient.cs", "public static void SpectateAttest(").split())
     assert attest.count("NoteSpectateAttestAnswer(ok, resp, attestedRoom, attestedMode, attestedRoster);") == 1
     assert 'string attestedMode = mode ?? "", attestedRoster = rosterCsv ?? "", attestedRoom = roomName ?? "";' \
@@ -2267,7 +2300,7 @@ def test_the_grant_copies_no_room_value_it_did_not_compare():
     exprs = dict(zip(cols, _sql_list(select)))
     assert len(_sql_list(select)) == len(cols)
     for g in grant_cols:
-        assert re.fullmatch(r"CAST\(:%s AS (text|uuid)\)" % g, exprs[g]), (g, exprs[g])
+        assert re.fullmatch(r"CAST\(:%s AS (text|uuid|bigint)\)" % g, exprs[g]), (g, exprs[g])
     assert exprs["spectator_steam_id"] == "CAST(:sid AS text)"
     assert exprs["game_started_at"] == "g.started_at"
     assert exprs["observed_seq"] == "nextval('spectate_watch_grants_observed_seq')"
@@ -2290,6 +2323,32 @@ def test_the_grant_copies_no_room_value_it_did_not_compare():
     assert set(table) - set(cols) == {"id", "granted_at"}, sorted(table)
     assert "DEFAULT gen_random_uuid()" in table["id"] and "DEFAULT NOW()" in table["granted_at"]
     assert set(cols) <= set(table)
+    # Round 7 MEDIUM 1 (b): the grant's unique tuple is the definition's
+    # columns and the seat, so a return of the room to earlier values (a new
+    # generation) is a new grant row and the recorded generation never changes
+    unique = re.search(r"UNIQUE \(([^)]*)\)", body).group(1)
+    assert [c.strip() for c in unique.split(",")] == [grant_cols[0], grant_cols[1]] + \
+        ["spectator_steam_id"] + grant_cols[2:], unique
+    # ... and the room row's generation: the definition carries it, and the
+    # trigger of 364 draws a new one on every INSERT and on every UPDATE that
+    # changes any OTHER spectate_games column of the definition, keeps the old
+    # one otherwise, and replaces whatever value a statement supplied
+    row_cols = [r for _f, r, _g in tup]
+    assert "generation" in row_cols and ("observed_generation", "generation", "generation") in tup
+    fn = mig[mig.index("CREATE OR REPLACE FUNCTION spectate_games_generation_advance()"):]
+    fn = " ".join(fn[:fn.index("$$;")].split())
+    advanced = re.findall(r"NEW\.(\w+) IS DISTINCT FROM OLD\.(\w+)", fn)
+    assert all(a == b for a, b in advanced) and sorted(a for a, _b in advanced) == \
+        sorted(set(row_cols) - {"generation"}), advanced
+    cond = fn[fn.index("ELSIF ") + 6:fn.index(" THEN NEW.generation := nextval('spectate_games_generation_seq');"
+                                               " ELSE")]
+    assert cond.split(" OR ") == ["NEW.%s IS DISTINCT FROM OLD.%s" % (c, c) for c, _o in advanced], cond
+    assert fn.count("IF TG_OP = 'INSERT' THEN NEW.generation := nextval('spectate_games_generation_seq');") == 1
+    assert fn.count("ELSE NEW.generation := OLD.generation; END IF; RETURN NEW;") == 1
+    assert fn.count("NEW.generation :=") == 3 and fn.count("nextval(") == 2
+    trig = " ".join(mig[mig.index("CREATE OR REPLACE TRIGGER"):].split())
+    assert trig.startswith("CREATE OR REPLACE TRIGGER trg_spectate_games_generation BEFORE INSERT OR UPDATE ON "
+                           "spectate_games FOR EACH ROW EXECUTE FUNCTION spectate_games_generation_advance();")
     # started_at is never written after the row's insert (nor the id)
     src = " ".join((PLUGIN.parent / "backend" / "api" / "main.py").read_text(encoding="utf-8").split())
     updates = [m.start() for m in re.finditer(r"UPDATE spectate_games\b", src)]

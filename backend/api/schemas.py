@@ -1950,12 +1950,16 @@ class SpectateValidateBody(BaseModel):
     # its attest sends them. Round 6 MEDIUM 1: beside them, the room row's
     # game id and server-derived source, as the server answered the master's
     # last participant attest of that same mode and roster. The route grants
-    # a watch only when all four are the live room row's under the room
+    # a watch only when all of them are the live room row's under the room
     # lock, and records these values (main._SPECTATE_GRANT_OBSERVED_TUPLE).
-    # All four absent is the request shape of every released client (1.40.3
-    # and earlier): it is answered as before, and writes no grant. Some
-    # without the others is refused (422).
+    # Round 7 MEDIUM 1: and the room row's generation from that same attest
+    # answer (migration 364: it only increases, and advances on every change
+    # of any other value here). All five absent is the request shape of every
+    # released client (1.40.3 and earlier): it is answered as before, and
+    # writes no grant. Some without the others is refused (422), including
+    # round 6's four without the generation.
     observed_game_id: str | None = Field(default=None, max_length=64)
+    observed_generation: int | None = Field(default=None, ge=1, le=9223372036854775807)
     observed_mode: str | None = Field(default=None, min_length=3, max_length=8)
     observed_source_ref: str | None = Field(default=None, max_length=64)
     observed_roster: str | None = Field(default=None, max_length=400)

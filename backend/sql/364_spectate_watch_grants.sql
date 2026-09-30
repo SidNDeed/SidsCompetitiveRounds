@@ -9,8 +9,9 @@
 -- the room, so ordinary cleanup could make a watched game vanish from the
 -- status list and its report answer 404.
 --
--- One row per (spectate game, spectator steam id, mode, source, roster) that
--- a master validation observed: the validation route writes it whenever a
+-- One row per (spectate game, room generation, spectator steam id, mode,
+-- source, roster) that a master validation observed (the generation since
+-- round 7, below): the validation route writes it whenever a
 -- validation binds that spectator's lease to an actor (the lease was
 -- validated as OBSERVED in the room) AND the request carried the participant
 -- tuple the master read with that spectator snapshot, verified equal to the
@@ -20,11 +21,15 @@
 -- tuple DO UPDATE of observed_seq alone, so a room whose roster or source
 -- changes while the seat watches (a code room where one fighter is replaced,
 -- an FFA lobby losing a member) leaves one row per tuple the seat was
--- observed under, and a repeated validation adds no row. It carries what the
--- watched binding compares: the game id, mode, source and roster the request
--- observed, each compared equal to the live room row before the write and
--- written from the request (round 6 MEDIUM 1), and the game's start by that
--- game id:
+-- observed under, and a repeated validation of the same generation adds no
+-- row. It carries what the watched binding compares: the game id,
+-- generation, mode, source and roster the request observed, each compared
+-- equal to the live room row before the write and written from the request
+-- (round 6 MEDIUM 1; the generation since round 7), and the game's start by
+-- that game id:
+--   generation       the room row's generation the request observed and the
+--                    server compared (round 7 MEDIUM 1); a room that returns
+--                    to an earlier tuple is a new generation, so a new row
 --   mode             the game's server-recorded mode (1v1, 2v2, 1v2, ffa)
 --   source_ref       the server-derived source identity ('' = none: 1v1 queue
 --                    and code rooms), compared with the requested game's
@@ -44,7 +49,9 @@
 --                    sequence value is never reused, so the row with the
 --                    greatest observed_seq of a (game, seat) is the tuple of
 --                    the MOST RECENT successful validation, including when the
---                    room returns to a tuple seen before. granted_at (the
+--                    room returns to a tuple seen before (since round 7 that
+--                    return is a new generation, so its row is a new one with
+--                    a later value). granted_at (the
 --                    transaction's start, NOW()) and id (random) order
 --                    nothing. CACHE 1 (the default, written out): a cache per
 --                    session would hand out values out of call order.
@@ -75,6 +82,31 @@
 -- whose every validation ran before the api that writes grants; the seat's
 -- report queue holds only its recent watches.
 --
+-- THE ROOM ROW'S GENERATION (round 7 MEDIUM 1). Comparing field values
+-- against a row that participant attests rewrite in place cannot tell a row
+-- that stayed on source X from one that went X, Y and back to X, so this file
+-- also gives spectate_games a generation that only increases:
+--   spectate_games.generation  a value of spectate_games_generation_seq,
+--                    drawn by the BEFORE trigger below on every INSERT and on
+--                    every UPDATE that changes any room value a grant carries
+--                    (id, mode, source_ref, roster: the spectate_games columns
+--                    of main._SPECTATE_GRANT_OBSERVED_TUPLE other than
+--                    generation itself); every other UPDATE keeps the old
+--                    value. The trigger owns the column: a value an INSERT or
+--                    UPDATE supplies for it is replaced, so no statement that
+--                    fires the trigger can set it back (a session that turns
+--                    triggers off, e.g. a restore with triggers disabled, is
+--                    outside this and is not an api path).
+--                    A sequence value is never reused, so a row that returns
+--                    to an earlier tuple carries a generation it never had.
+-- The participant attest answers the generation of the row it wrote; the
+-- master echoes it in its validation beside the tuple, and the validation
+-- grants a watch only when the generation AND every tuple value equal the
+-- live row's under the room lock. A grant records the generation it was
+-- issued for (spectate_watch_grants.generation, part of its unique tuple).
+-- Existing rows take distinct values from the column default when it is
+-- added; a re-run adds nothing (IF NOT EXISTS, CREATE OR REPLACE).
+--
 -- REQUIRES spectate_games and spectate_leases (194, 210). Written by
 -- POST /api/v1/spectate/validate; read by GET /api/v1/report (viewer=, the
 -- _REPORT_WATCHED_SQL statement) and GET /api/v1/broadcast/report-status.
@@ -88,16 +120,45 @@
 -- is stated at the grant write in spectate_validate (main.py). The API from
 -- before this file never names the table.
 --
--- Idempotent: IF NOT EXISTS only (the file writes no rows), one explicit
--- transaction (#340).
+-- Idempotent: IF NOT EXISTS / CREATE OR REPLACE only (the file inserts,
+-- updates and deletes no rows; adding the generation column fills it on the
+-- existing spectate game rows from its default), one explicit transaction
+-- (#340).
 
 BEGIN;
 
 CREATE SEQUENCE IF NOT EXISTS spectate_watch_grants_observed_seq AS BIGINT CACHE 1;
 
+CREATE SEQUENCE IF NOT EXISTS spectate_games_generation_seq AS BIGINT CACHE 1;
+
+ALTER TABLE spectate_games
+    ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT nextval('spectate_games_generation_seq');
+
+CREATE OR REPLACE FUNCTION spectate_games_generation_advance() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.generation := nextval('spectate_games_generation_seq');
+    ELSIF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.mode IS DISTINCT FROM OLD.mode
+       OR NEW.source_ref IS DISTINCT FROM OLD.source_ref
+       OR NEW.roster IS DISTINCT FROM OLD.roster THEN
+        NEW.generation := nextval('spectate_games_generation_seq');
+    ELSE
+        NEW.generation := OLD.generation;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE OR REPLACE TRIGGER trg_spectate_games_generation
+    BEFORE INSERT OR UPDATE ON spectate_games
+    FOR EACH ROW EXECUTE FUNCTION spectate_games_generation_advance();
+
 CREATE TABLE IF NOT EXISTS spectate_watch_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     game_id UUID NOT NULL REFERENCES spectate_games(id),
+    generation BIGINT NOT NULL,
     spectator_steam_id VARCHAR(32) NOT NULL,
     mode VARCHAR(8) NOT NULL,
     source_ref VARCHAR(64) NOT NULL DEFAULT '',
@@ -106,7 +167,7 @@ CREATE TABLE IF NOT EXISTS spectate_watch_grants (
     granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     observed_seq BIGINT NOT NULL DEFAULT nextval('spectate_watch_grants_observed_seq'),
     CONSTRAINT uq_spectate_watch_grants_tuple
-        UNIQUE (game_id, spectator_steam_id, mode, source_ref, roster)
+        UNIQUE (game_id, generation, spectator_steam_id, mode, source_ref, roster)
 );
 
 CREATE INDEX IF NOT EXISTS idx_spectate_watch_grants_spectator

@@ -24328,21 +24328,30 @@ namespace CompetitiveRounds
         // attest sent. A master's spectator validation carries the game id
         // and source only while its snapshot shows that same room, mode and
         // roster (SpectateAttestAnswerFor); the server grants a watch only
-        // when all four are still the live row's.
+        // when all four are still the live row's. Round 7 MEDIUM 1: the
+        // answer also carries the row's generation (an integer that only
+        // increases and advances on every change of the row's game id, mode,
+        // source or roster), kept and sent beside them; the server grants a
+        // watch only when it too is still the live row's.
         private static string spectateAttestAnswerRoom = "", spectateAttestAnswerMode = "",
-            spectateAttestAnswerRoster = "", spectateAttestAnswerGameId = "", spectateAttestAnswerSourceRef = "";
+            spectateAttestAnswerRoster = "", spectateAttestAnswerGameId = "", spectateAttestAnswerSourceRef = "",
+            spectateAttestAnswerGeneration = "";
 
         internal static void NoteSpectateAttestAnswer(bool ok, string resp, string room, string mode, string roster)
         {
             resp = resp ?? "";
+            string generation = ExtractJsonIdToken(resp, "generation");
             // Any other answer (a refusal, a transport failure, a server
-            // from before this answer named the row) leaves no answer to
-            // send: the next validation goes out without a tuple.
+            // from before this answer named the row, or one without a
+            // generation of 1 to 18 digits) leaves no answer to send: the
+            // next validation goes out without a tuple.
             if (!ok || ExtractJsonString(resp, "status") != "ok"
-                || !resp.Contains("\"game_id\":\"") || !resp.Contains("\"source_ref\":\""))
+                || !resp.Contains("\"game_id\":\"") || !resp.Contains("\"source_ref\":\"")
+                || !SpectateGenerationToken(generation))
             {
                 if (string.Equals(spectateAttestAnswerRoom, room, StringComparison.Ordinal))
-                    spectateAttestAnswerRoom = spectateAttestAnswerGameId = spectateAttestAnswerSourceRef = "";
+                    spectateAttestAnswerRoom = spectateAttestAnswerGameId = spectateAttestAnswerSourceRef =
+                        spectateAttestAnswerGeneration = "";
                 return;
             }
             spectateAttestAnswerRoom = room ?? "";
@@ -24350,18 +24359,31 @@ namespace CompetitiveRounds
             spectateAttestAnswerRoster = roster ?? "";
             spectateAttestAnswerGameId = ExtractJsonString(resp, "game_id");
             spectateAttestAnswerSourceRef = ExtractJsonString(resp, "source_ref");
+            spectateAttestAnswerGeneration = generation;
+        }
+
+        // A generation the validation may send as a bare JSON number: 1 to 18
+        // ASCII digits, not starting with 0 (the server's sequence starts at 1).
+        internal static bool SpectateGenerationToken(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > 18 || s[0] == '0') return false;
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] < '0' || s[i] > '9') return false;
+            return true;
         }
 
         internal static bool SpectateAttestAnswerFor(string room, string mode, string roster,
-                                                     out string gameId, out string sourceRef)
+                                                     out string gameId, out string sourceRef, out string generation)
         {
-            gameId = sourceRef = "";
+            gameId = sourceRef = generation = "";
             if (spectateAttestAnswerGameId.Length == 0) return false;
+            if (!SpectateGenerationToken(spectateAttestAnswerGeneration)) return false;
             if (!string.Equals(spectateAttestAnswerRoom, room ?? "", StringComparison.Ordinal)) return false;
             if (!string.Equals(spectateAttestAnswerMode, mode ?? "", StringComparison.Ordinal)) return false;
             if (!string.Equals(spectateAttestAnswerRoster, roster ?? "", StringComparison.Ordinal)) return false;
             gameId = spectateAttestAnswerGameId;
             sourceRef = spectateAttestAnswerSourceRef;
+            generation = spectateAttestAnswerGeneration;
             return true;
         }
 
@@ -25143,9 +25165,12 @@ namespace CompetitiveRounds
                 // or the snapshot's roster is not the one last attested) the
                 // old request shape goes out and an attest is asked for now,
                 // so the next validation carries the whole tuple.
-                string seenGameId = "", seenSource = "";
+                // Round 7 MEDIUM 1: with them, the row's generation from that
+                // same answer (digits only, SpectateGenerationToken), so the
+                // server can tell a row that moved and came back.
+                string seenGameId = "", seenSource = "", seenGeneration = "";
                 bool sendTuple = seenRoster.Length > 0 && SpectateAttestAnswerFor(
-                    roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource);
+                    roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource, out seenGeneration);
                 if (!sendTuple && seenRoster.Length > 0) GameStateWatcher.RequestSpectateAttestSoon();
                 var sb = new StringBuilder();
                 sb.Append('{')
@@ -25153,6 +25178,7 @@ namespace CompetitiveRounds
                   .Append($"\"room_name\":\"{Escape(roomAtSend)}\",");
                 if (sendTuple)
                     sb.Append($"\"observed_game_id\":\"{Escape(seenGameId)}\",")
+                      .Append($"\"observed_generation\":{seenGeneration},")
                       .Append($"\"observed_mode\":\"{Escape(seenMode)}\",")
                       .Append($"\"observed_source_ref\":\"{Escape(seenSource)}\",")
                       .Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");

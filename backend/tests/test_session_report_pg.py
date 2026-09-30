@@ -71,6 +71,7 @@ import json
 import os
 import random
 import re
+import threading
 import urllib.parse as _urlparse
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -826,7 +827,9 @@ async def _watch(game_key, holder, roster_keys, mode=None, source=None, span=Non
         await _ins(conn, "spectate_leases", game_id=wid, spectator_steam_id=holder,
                    token_hash=uuid.uuid4().hex, join_expires_at=end, heartbeat_expires_at=end,
                    revoked_at=end + timedelta(minutes=1), bound_actor=3)
-        await _ins(conn, "spectate_watch_grants", game_id=wid, spectator_steam_id=holder,
+        # round 7: the grant carries the generation the row had when observed
+        gen = await conn.fetchval("SELECT generation FROM spectate_games WHERE id = $1", wid)
+        await _ins(conn, "spectate_watch_grants", game_id=wid, generation=gen, spectator_steam_id=holder,
                    game_started_at=start, **tup)
         return wid
     finally:
@@ -1057,9 +1060,10 @@ class _LiveWatch:
         """The tuple A's master holds now (round 6: all four values of
         main._SPECTATE_GRANT_OBSERVED_TUPLE): the live row's mode and roster
         (what the room's fighters last attested) and its game id and source
-        (what the server answered the last attest)."""
-        row = _lab_sql("SELECT json_build_object('game_id', CAST(id AS text), 'mode', mode,"
-                       " 'source_ref', source_ref, 'roster', roster)::text"
+        (what the server answered the last attest); round 7: and its
+        generation (from the same answer)."""
+        row = _lab_sql("SELECT json_build_object('game_id', CAST(id AS text), 'generation', generation,"
+                       " 'mode', mode, 'source_ref', source_ref, 'roster', roster)::text"
                        " FROM spectate_games WHERE room_name = $1 AND ended_at IS NULL", self.room)
         return json.loads(row)
 
@@ -1174,9 +1178,12 @@ def test_migration_364_grants_no_tuple_the_seat_never_observed(lab, seat):
     assert w.grants() == 0
     ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
     _lab_sql("UPDATE spectate_games SET roster = $2 WHERE id = $1 RETURNING 1", w.wid, ac)
+    gen_before = w.snapshot()["generation"]
     first, second = _apply_364(), _apply_364()
     assert w.grants() == 0, "no grant for a binding that recorded no tuple (neither A-C nor A-B)"
     assert first[0] == first[1] and second[0] == second[1], ("364 wrote rows", first, second)
+    # round 7: a re-run changes no row's generation (IF NOT EXISTS / CREATE OR REPLACE only)
+    assert w.snapshot()["generation"] == gen_before, "364's re-run moved a room row's generation"
     assert _refused(seat, viewer=STEAM["A"], match=ID["KC"]) == (404, "not_found")
     assert _games(_report("A", match=ID["KC"])), "control: A's own request is served"
     assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
@@ -1286,7 +1293,10 @@ def test_a_delayed_validation_grants_no_tuple_the_master_never_observed(lab, sea
     snap = w.snapshot()
     assert (snap["mode"], snap["roster"]) == ("1v1", ab)
     assert w.attest("C", ac)["status"] == "ok"
-    assert w.snapshot() == {**snap, "roster": ac}, "control: the attest rewrote the live row in place"
+    now = w.snapshot()
+    assert now == {**snap, "roster": ac, "generation": now["generation"]}, \
+        "control: the attest rewrote the live row in place"
+    assert now["generation"] > snap["generation"], "control: the roster change advanced the generation"
     got = w.validate([seat], seen=snap)
     assert got == {"status": "retry", "reason": "participants_changed", "results": []}, got
     assert w.grants() == 0, "no grant of any tuple for the seat"
@@ -1355,7 +1365,17 @@ def test_the_released_request_shape_keeps_its_answer_and_records_no_watch(lab, s
     with pytest.raises(HTTPException) as ei:
         _lab_call(lambda db: main.spectate_validate(r5, request=None, db=db))
     assert ei.value.status_code == 422 and ei.value.detail == "observed_tuple_incomplete"
-    assert w.grants() == 0
+    # round 7: round 6's four values without the generation are a partial
+    # tuple as well (never released either)
+    snap = w.snapshot()
+    r6 = main.SpectateValidateBody(steam_id=STEAM["A"], room_name=w.room, observed_game_id=snap["game_id"],
+                                   observed_mode=snap["mode"], observed_source_ref=snap["source_ref"],
+                                   observed_roster=snap["roster"],
+                                   spectators=[{"actor_number": 3, "steam_id": seat}])
+    with pytest.raises(HTTPException) as ei:
+        _lab_call(lambda db: main.spectate_validate(r6, request=None, db=db))
+    assert ei.value.status_code == 422 and ei.value.detail == "observed_tuple_incomplete"
+    assert w.grants() == 0 and w.bound() == 3
     assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
     assert w.grants() == 1
     assert _report(seat, viewer=STEAM["A"], match=ID["K2"]) == _report("A", match=ID["K2"])
@@ -1369,7 +1389,7 @@ SOURCE_X, SOURCE_Y = "r6-series-x", "r6-series-y"
 # one value per spectate_games column of main._SPECTATE_GRANT_OBSERVED_TUPLE that
 # differs from _LiveWatch's row (a column added to the definition without one
 # here fails the parametrized test below with a KeyError)
-OTHER_ROW_VALUE = {"id": "00000000-0000-4000-8000-000000000006", "mode": "2v2",
+OTHER_ROW_VALUE = {"id": "00000000-0000-4000-8000-000000000006", "generation": 999999999999, "mode": "2v2",
                    "source_ref": "r6-other-source", "roster": None}
 
 
@@ -1394,7 +1414,9 @@ def test_a_delayed_validation_grants_no_source_the_master_never_observed(lab, se
     snap = w.snapshot()
     assert snap["source_ref"] == SOURCE_X
     _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, SOURCE_Y)
-    assert w.snapshot() == {**snap, "source_ref": SOURCE_Y}, "control: only the source changed"
+    now = w.snapshot()
+    assert now == {**snap, "source_ref": SOURCE_Y, "generation": now["generation"]}, \
+        "control: only the source changed (and with it the generation, round 7)"
     got = w.validate([seat], seen=snap)
     assert got == {"status": "retry", "reason": "participants_changed", "results": []}, got
     assert _grant_rows(w, source_ref=SOURCE_Y) == 0, "no Y grant"
@@ -1444,8 +1466,9 @@ def test_a_validation_from_before_the_room_row_turned_over_grants_nothing(lab, s
     _lab_sql("UPDATE spectate_leases SET revoked_at = clock_timestamp() WHERE game_id = $1 RETURNING 1", w.wid)
     answer = w.attest("A", snap["roster"])
     new = w.snapshot()
-    assert answer == {"status": "ok", "game_id": new["game_id"], "source_ref": ""}
-    assert new["game_id"] != snap["game_id"] and new == {**snap, "game_id": new["game_id"]}
+    assert answer == {"status": "ok", "game_id": new["game_id"], "source_ref": "", "generation": new["generation"]}
+    assert new["game_id"] != snap["game_id"] and new == {**snap, "game_id": new["game_id"],
+                                                          "generation": new["generation"]}
 
     async def _lease():
         conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
@@ -1479,11 +1502,190 @@ def test_the_attest_answer_names_the_row_it_wrote(lab, seat):
     w = _LiveWatch(seat, "K1")
     ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
     _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, SOURCE_X)
+    before = w.snapshot()["generation"]
     got = w.attest("B", ab)
-    assert got == {"status": "ok", "game_id": str(w.wid), "source_ref": ""}, got
-    assert w.snapshot() == {"game_id": str(w.wid), "mode": "1v1", "source_ref": "", "roster": ab}
+    now = w.snapshot()
+    assert got == {"status": "ok", "game_id": str(w.wid), "source_ref": "", "generation": now["generation"]}, got
+    assert now == {"game_id": str(w.wid), "generation": now["generation"], "mode": "1v1", "source_ref": "",
+                   "roster": ab}
+    assert now["generation"] > before, "round 7: the attest changed the source, so the generation advanced"
+    # an attest that changes no grant-carried value keeps the generation, and answers it
+    again = w.attest("A", ab)
+    assert again == got and w.snapshot() == now, again
     _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
              w.end + timedelta(minutes=1))
+
+
+# -- round 7 MEDIUM 1: a monotonic room generation, the source resolved under the lock --
+
+def _answer_seen(answer):
+    """The tuple a master sends after `answer` (a participant attest's answer):
+    the answer's game id, source and generation; mode and roster as the room
+    shows them (unchanged in these cases)."""
+    return {"game_id": answer["game_id"], "source_ref": answer["source_ref"], "generation": answer["generation"]}
+
+
+def _source_resolver(monkeypatch, room, truth, pause_first=None):
+    """Replace the attest's source resolution for `room` by `truth["ref"]`,
+    read at the moment of the call (a 1v1 room: no server roster). With
+    pause_first=(resolved, release), the first call signals `resolved` after
+    reading its value and then waits for `release` before returning it (the
+    delayed attest). Returns the list of values resolved, in call order."""
+    real = main._spectate_authoritative_roster
+    calls = []
+
+    async def _resolve(db, mode, room_name):
+        if room_name != room:
+            return await real(db, mode, room_name)
+        ref = truth["ref"]
+        calls.append(ref)
+        if pause_first is not None and len(calls) == 1:
+            resolved, release = pause_first
+            resolved.set()
+            assert await asyncio.to_thread(release.wait, 60), "the delayed attest was never released"
+        return None, ref
+    monkeypatch.setattr(main, "_spectate_authoritative_roster", _resolve)
+    return calls
+
+
+def test_a_stale_attest_cannot_rewrite_the_room_or_authorize_its_source(lab, seat, monkeypatch):
+    """Round 7 MEDIUM 1 (a), the reviewer's falsifier. Fighter A's attest
+    resolves the room's source X and is then delayed; the room's source
+    becomes Y (a same-room continuation) and fighter B's attest records it;
+    only then is A's attest released. X does not rewrite the row: the row
+    ends on Y, and B's attest waited for the room lock A's attest held while
+    it resolved (the resolution is inside the serialization, so B resolved Y
+    after A committed). The master holding A's (X) answer then validates the
+    seat: retry, no X grant, no grant, nothing bound. Controls: A's attest
+    did write X first (its answer names X and an earlier generation than
+    B's); the master holding B's answer is granted exactly Y."""
+    w = _LiveWatch(seat, "K1")
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+    truth = {"ref": SOURCE_X}
+    resolved, release = threading.Event(), threading.Event()
+    calls = _source_resolver(monkeypatch, w.room, truth, pause_first=(resolved, release))
+    answers, errors = {}, []
+
+    def _attest(tag, key):
+        try:
+            answers[tag] = w.attest(key, ab)
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append((tag, repr(exc)))
+
+    tx = threading.Thread(target=_attest, args=("x", "A"))
+    tx.start()
+    try:
+        assert resolved.wait(60), "control: the delayed attest resolved its source"
+        truth["ref"] = SOURCE_Y
+        ty = threading.Thread(target=_attest, args=("y", "B"))
+        ty.start()
+        ty.join(3)
+        y_waited = ty.is_alive()
+    finally:
+        release.set()
+    tx.join(120)
+    ty.join(120)
+    assert not tx.is_alive() and not ty.is_alive() and not errors, errors
+    assert calls == [SOURCE_X, SOURCE_Y], calls
+    assert y_waited, "B's attest committed while A's attest held a source it resolved before B's change"
+    assert w.snapshot()["source_ref"] == SOURCE_Y, "the stale X rewrote the room row"
+    assert answers["x"]["source_ref"] == SOURCE_X and answers["y"]["source_ref"] == SOURCE_Y, answers
+    assert answers["y"]["generation"] > answers["x"]["generation"], answers
+    got = w.validate([seat], seen=_answer_seen(answers["x"]))
+    assert got == {"status": "retry", "reason": "participants_changed", "results": []}, got
+    assert _grant_rows(w, source_ref=SOURCE_X) == 0, "an X grant exists"
+    assert w.grants() == 0 and w.bound() is None and w.status() == []
+    assert [r["ok"] for r in w.validate([seat], seen=_answer_seen(answers["y"]))["results"]] == [True]
+    assert w.grants() == 1 and _grant_rows(w, source_ref=SOURCE_Y, generation=answers["y"]["generation"]) == 1
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
+def test_a_room_back_on_an_observed_tuple_grants_nothing_to_the_old_observation(lab, seat, monkeypatch):
+    """Round 7 MEDIUM 1 (b), X -> Y -> X. The master's snapshot is taken
+    while the row holds source X; the row then goes to Y and back to X, so
+    every compared value but the generation is the snapshot's again. The
+    delayed validation is answered the typed retry and writes nothing (no
+    grant, no X grant, nothing bound). The same through the attest route:
+    the attest answers for X, Y and X again carry three different
+    generations, and a validation under the first answer is answered retry.
+    Controls: the values are the snapshot's and the generation is later;
+    the fresh snapshot is granted, with the row's current generation."""
+    w = _LiveWatch(seat, "K1")
+    _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, SOURCE_X)
+    snap = w.snapshot()
+    for ref in (SOURCE_Y, SOURCE_X):
+        _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, ref)
+    now = w.snapshot()
+    assert now == {**snap, "generation": now["generation"]} and now["generation"] > snap["generation"], (snap, now)
+    got = w.validate([seat], seen=snap)
+    assert got == {"status": "retry", "reason": "participants_changed", "results": []}, got
+    assert w.grants() == 0 and _grant_rows(w, source_ref=SOURCE_X) == 0 and w.bound() is None
+    assert w.status() == []
+    # through the attest route: X, Y, X
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+    truth = {"ref": SOURCE_X}
+    _source_resolver(monkeypatch, w.room, truth)
+    seen = []
+    for ref in (SOURCE_X, SOURCE_Y, SOURCE_X):
+        truth["ref"] = ref
+        answer = w.attest("A", ab)
+        assert answer["source_ref"] == ref, answer
+        seen.append(answer)
+    assert len({a["generation"] for a in seen}) == 3 and seen[0]["generation"] < seen[2]["generation"], seen
+    got = w.validate([seat], seen=_answer_seen(seen[0]))
+    assert got == {"status": "retry", "reason": "participants_changed", "results": []}, got
+    assert w.grants() == 0 and w.bound() is None
+    assert [r["ok"] for r in w.validate([seat], seen=_answer_seen(seen[2]))["results"]] == [True], "control"
+    assert w.grants() == 1 and _grant_rows(w, source_ref=SOURCE_X, generation=seen[2]["generation"]) == 1
+    _lab_sql("UPDATE spectate_games SET ended_at = $2 WHERE id = $1 RETURNING 1", w.wid,
+             w.end + timedelta(minutes=1))
+
+
+_GENERATION_CHANGE = {"id": None, "mode": "2v2", "source_ref": "r7-other-source", "roster": None}
+
+
+@pytest.mark.parametrize("column", [r for _f, r, _g in main._SPECTATE_GRANT_OBSERVED_TUPLE if r != "generation"])
+def test_the_room_generation_advances_on_every_change_of_a_grant_carried_value(lab, column):
+    """Round 7 MEDIUM 1 (b), per room value of the one definition: an UPDATE
+    that changes it draws a later generation; the same UPDATE writing the
+    value the row already holds keeps it. Negative controls in the same case:
+    updates of columns a grant does not carry (phase, last_attest_at,
+    protocol_min, room_region) keep the generation; a statement that
+    supplies a generation (lower, or far higher) does not set it - with no
+    grant-carried change the row keeps its own, with one it draws the next;
+    an INSERT that supplies one is given a drawn value instead."""
+    wid, room = uuid.uuid4(), "g" + uuid.uuid4().hex[:12]
+    ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
+
+    async def _go():
+        conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+        try:
+            await _ins(conn, "spectate_games", id=wid, mode="1v1", source_ref="", room_name=room, roster=ab,
+                       generation=0, started_at=T0, ended_at=None)
+            gen = lambda: conn.fetchval("SELECT generation FROM spectate_games WHERE room_name = $1", room)
+            g0 = await gen()
+            assert g0 >= 1, "the INSERT's supplied generation was kept"
+            for stmt in ("phase = 'battle'", "last_attest_at = clock_timestamp()", "protocol_min = 3",
+                         "room_region = 'eu'", "generation = 1", "generation = 9000000000000000"):
+                await conn.execute("UPDATE spectate_games SET %s WHERE room_name = $1" % stmt, room)
+                assert await gen() == g0, ("a change of no grant-carried value moved the generation", stmt)
+            await conn.execute("UPDATE spectate_games SET %s = %s WHERE room_name = $1" % (column, column), room)
+            assert await gen() == g0, "the same value written again moved the generation"
+            new = _GENERATION_CHANGE[column]
+            if column == "id":
+                new = uuid.uuid4()
+            elif column == "roster":
+                new = ",".join(sorted((STEAM["A"], STEAM["C"])))
+            await conn.execute("UPDATE spectate_games SET %s = $2, generation = 1 WHERE room_name = $1" % column,
+                               room, new)
+            g1 = await gen()
+            assert g1 > g0 and g1 != 1, ("the change did not draw a later generation", column)
+            await conn.execute("UPDATE spectate_games SET ended_at = clock_timestamp() WHERE room_name = $1", room)
+            assert await gen() == g1
+        finally:
+            await conn.close()
+    asyncio.run(_go())
 
 
 # -- round 5 LOW 1: status answers the most recent observation -------------------
@@ -1494,17 +1696,20 @@ def test_status_answers_the_room_back_on_a_tuple_it_had_before(lab, seat):
     the master validates it there, B's attest makes the room A-B again and
     the master validates it once more. Status answers A-B - the most recent
     successful validation - although an A-B grant already existed before
-    A-C's. Controls: the repeat added no row (two grants, one per tuple);
-    after the second validation status answered A-C; the A-B row's order was
-    refreshed past A-C's (observed_seq), its granted_at was not (the round-4
-    order, which answered A-C here)."""
+    A-C's. Controls: after the second validation status answered A-C; round
+    7: the room back on A-B is a later generation, so its observation is a
+    third row whose order is the latest (the first A-B row keeps its own);
+    a repeat within that generation added no row and refreshed its order
+    (observed_seq). The two overlapping transactions below discriminate
+    observed_seq from granted_at."""
     w = _LiveWatch(seat, "K1")
     ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
     ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
-    seq = lambda r: _lab_sql("SELECT observed_seq FROM spectate_watch_grants WHERE game_id = $1"
+    # round 7: a roster (the tuple) of one generation; the latest row of it
+    seq = lambda r: _lab_sql("SELECT max(observed_seq) FROM spectate_watch_grants WHERE game_id = $1"
                              " AND spectator_steam_id = $2 AND roster = $3", w.wid, seat, r)
-    at = lambda r: _lab_sql("SELECT granted_at FROM spectate_watch_grants WHERE game_id = $1"
-                            " AND spectator_steam_id = $2 AND roster = $3", w.wid, seat, r)
+    first_seq = lambda r: _lab_sql("SELECT min(observed_seq) FROM spectate_watch_grants WHERE game_id = $1"
+                                   " AND spectator_steam_id = $2 AND roster = $3", w.wid, seat, r)
     assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
     assert w.attest("C", ac)["status"] == "ok"
     assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
@@ -1512,9 +1717,17 @@ def test_status_answers_the_room_back_on_a_tuple_it_had_before(lab, seat):
     first_ab = seq(ab)
     assert w.attest("B", ab)["status"] == "ok"
     assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
-    assert w.grants() == 2, "control: the repeat refreshed its row, it added none"
-    assert seq(ab) > seq(ac) > first_ab, "control: the repeat drew a later order"
-    assert at(ab) < at(ac), "control: granted_at still orders A-B first"
+    # round 7: the room back on A-B is a later generation, so the seat's
+    # observation there is a row of its own (the first A-B row keeps its
+    # generation and its order); a repeat within one generation adds no row
+    # and draws a later order for that row (round 5 LOW 1's refresh)
+    assert w.grants() == 3, "control: the return to A-B is a new generation and a new row"
+    assert _lab_sql("SELECT count(DISTINCT generation) FROM spectate_watch_grants WHERE game_id = $1"
+                    " AND spectator_steam_id = $2 AND roster = $3", w.wid, seat, ab) == 2
+    assert first_seq(ab) == first_ab and seq(ab) > seq(ac) > first_ab, "control: the new row's order is the latest"
+    before_repeat = seq(ab)
+    assert [r["ok"] for r in w.validate([seat])["results"]] == [True]
+    assert w.grants() == 3 and seq(ab) > before_repeat, "control: the repeat refreshed its row, it added none"
     got = w.status()
     assert [(r["mode"], r["roster"]) for r in got] == [("1v1", ab)], got
     assert got[0]["names"] == [NAME[k] for k in sorted("AB", key=lambda k: STEAM[k])]
@@ -1540,13 +1753,12 @@ def test_status_orders_overlapping_validations_by_the_room_lock(lab, seat):
     ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
     ac = ",".join(sorted((STEAM["A"], STEAM["C"])))
     assert w.attest("C", ac)["status"] == "ok"
-    body = main.SpectateValidateBody(steam_id=STEAM["A"], room_name=w.room, observed_mode="1v1",
-                                     observed_roster=ab, observed_game_id=str(w.wid), observed_source_ref="",
-                                     spectators=[{"actor_number": 3, "steam_id": seat}])
 
     def _t2_then_attest():
         assert [r["ok"] for r in w.validate([seat], seen={"roster": ac})["results"]] == [True]
-        assert w.attest("B", ab)["status"] == "ok"
+        answer = w.attest("B", ab)
+        assert answer["status"] == "ok"
+        return answer
 
     async def _t1():
         engine = create_async_engine(ASYNC_DSN, poolclass=NullPool,
@@ -1554,7 +1766,12 @@ def test_status_orders_overlapping_validations_by_the_room_lock(lab, seat):
         try:
             async with async_sessionmaker(engine, expire_on_commit=False)() as db:
                 t1_start = (await db.execute(_text("SELECT now()"))).scalar_one()   # T1 is open from here
-                await asyncio.to_thread(_t2_then_attest)                             # T2 commits meanwhile
+                answer = await asyncio.to_thread(_t2_then_attest)                    # T2 commits meanwhile
+                # T1's master observed A-B under the generation B's attest answered (round 7)
+                body = main.SpectateValidateBody(steam_id=STEAM["A"], room_name=w.room, observed_mode="1v1",
+                                                 observed_roster=ab, observed_game_id=str(w.wid),
+                                                 observed_source_ref="", observed_generation=answer["generation"],
+                                                 spectators=[{"actor_number": 3, "steam_id": seat}])
                 return t1_start, await main.spectate_validate(body, request=None, db=db)
         finally:
             await engine.dispose()

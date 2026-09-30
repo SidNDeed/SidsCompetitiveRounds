@@ -58536,10 +58536,16 @@ def _spectate_roster_list(roster: str) -> list:
 # binds exactly that mapping and reads no tuple column from the room row, so
 # a value can reach a grant only through this definition, i.e. only after it
 # was compared. The request's values come from the master: mode and roster
-# from its own room at the snapshot, game id and source from the server's
-# answer to its last participant attest of that same mode and roster.
+# from its own room at the snapshot, game id, generation and source from the
+# server's answer to its last participant attest of that same mode and
+# roster. Round 7 MEDIUM 1: the generation (migration 364's
+# spectate_games.generation, drawn by that table's trigger on every change of
+# any other room value here and never reused) makes the comparison exclude a
+# row that left the observed tuple and came back to it: equal values under a
+# later generation are a different observation.
 _SPECTATE_GRANT_OBSERVED_TUPLE = (
     ("observed_game_id", "id", "game_id"),
+    ("observed_generation", "generation", "generation"),
     ("observed_mode", "mode", "mode"),
     ("observed_source_ref", "source_ref", "source_ref"),
     ("observed_roster", "roster", "roster"),
@@ -58560,9 +58566,12 @@ _SPECTATE_GRANT_OTHER_COLUMNS = {
 def _spectate_observed_canon(column: str, value) -> str:
     """The comparable form of one observed-tuple value: a roster as its
     distinct fighter ids sorted and comma-joined (the form the attest stores:
-    it refuses any other), a game id lower-cased, anything else as text."""
+    it refuses any other), a game id lower-cased, a generation as an integer
+    (the grant column is BIGINT), anything else as text."""
     if column == "roster":
         return ",".join(sorted(set(_spectate_roster_list(value))))
+    if column == "generation":
+        return None if value is None else int(value)
     text_value = "" if value is None else str(value)
     return text_value.lower() if column == "id" else text_value
 
@@ -59082,6 +59091,20 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
         raise HTTPException(status_code=401, detail="session_required")
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
 
+    # Serialize per-room (attests from all fighters land within the same
+    # second) - advisory lock on the room name, then resolve, then upsert
+    # game + attest. Session report round 7 MEDIUM 1: the lock is taken
+    # BEFORE the source is resolved, so every value this attest writes to the
+    # room row is resolved inside the serialization that protects the row
+    # (#208: resolve after the lock, not before it). Each attest's resolution
+    # and write are then one step in the room's order: an attest that waited
+    # on the lock resolves from what is committed when it holds it, so it
+    # cannot write back a source resolved before a later attest's change
+    # committed. The resolver only reads (no row lock), so taking the room
+    # lock first adds no lock-order edge.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                     {"k": f"spectate:{req.room_name}"})
+
     # Server-authoritative roster check (fail CLOSED when a mapping should
     # exist): the claimed roster must be members of the room's real locked
     # group, and the claimed room must actually belong to this mode's flow.
@@ -59095,10 +59118,6 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
             raise HTTPException(status_code=409, detail="roster_mismatch")
     await _assert_no_service_subject(db, affected_steam_ids=roster)
 
-    # Serialize per-room (attests from all fighters land within the same
-    # second) — advisory lock on the room name, then upsert game + attest.
-    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
-                     {"k": f"spectate:{req.room_name}"})
     game = (await db.execute(text("""
         SELECT id, roster, room_name, room_region FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
@@ -59178,15 +59197,23 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
            "region": req.region, "target": req.fighter_target,
            "cap": req.room_capacity, "proto": req.spectator_protocol,
            "roster": req.roster, "phase": req.phase[:16]})
-    await db.commit()
     # Session report round 6 MEDIUM 1: the answer names the room row this
     # attest wrote - its game id and the server-derived source it now holds
     # for this caller's mode and roster (the client cannot derive the source
-    # itself). A master sends both back with its next spectator validation,
-    # beside the mode and roster it observes then, and the validation grants
-    # a watch only when all four are still the live row's. Released clients
-    # read only a transport failure from this answer.
-    return {"status": "ok", "game_id": str(game["id"]), "source_ref": derived_ref[:64]}
+    # itself). Round 7 MEDIUM 1: and the row's generation after this attest's
+    # writes, all three read from the row itself while this request still
+    # holds the room lock (the trigger of 364 drew a new generation if this
+    # attest changed a grant-carried value). A master sends them back with
+    # its next spectator validation, beside the mode and roster it observes
+    # then, and the validation grants a watch only when all five are still
+    # the live row's. Released clients read only a transport failure from
+    # this answer.
+    wrote = (await db.execute(text("""
+        SELECT id, source_ref, generation FROM spectate_games WHERE id = :gid
+    """), {"gid": str(game["id"])})).mappings().first()
+    await db.commit()
+    return {"status": "ok", "game_id": str(wrote["id"]), "source_ref": wrote["source_ref"],
+            "generation": int(wrote["generation"])}
 
 
 @app.post("/api/v1/spectate/close", tags=["Spectate"])
@@ -60312,7 +60339,7 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
                      {"k": f"spectate:{req.room_name}"})
     game = (await db.execute(text("""
-        SELECT id, roster, mode, source_ref, room_name, room_region, protocol_min
+        SELECT id, generation, roster, mode, source_ref, room_name, room_region, protocol_min
           FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
     """), {"room": req.room_name})).mappings().first()
@@ -60325,11 +60352,15 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
     # Session report round 5 MEDIUM 1 / round 6 MEDIUM 1: the spectator
     # inventory below and the tuple a grant records must belong to ONE
     # observation. The master sends the tuple it holds with the inventory
-    # (_SPECTATE_GRANT_OBSERVED_TUPLE: game id, mode, source, roster); a
-    # participant attest may have rewritten the live row in place since then
-    # (a delayed request, a fighter replaced, a new series in the same room),
-    # so every value of it is compared here, under the room lock the attest
-    # also takes, with the row this request just read. A mismatch in any one
+    # (_SPECTATE_GRANT_OBSERVED_TUPLE: game id, generation, mode, source,
+    # roster); a participant attest may have rewritten the live row in place
+    # since then (a delayed request, a fighter replaced, a new series in the
+    # same room), so every value of it is compared here, under the room lock
+    # the attest also takes, with the row this request just read. The
+    # generation (round 7) differs whenever any other value changed since
+    # the attest answer the master holds, including a change that later
+    # returned to the same values, so equal values alone never pass for an
+    # observation made before the row moved. A mismatch in any one
     # writes nothing - no drain, no sweep, no binding, no grant - and answers
     # the typed retry result; the master re-snapshots and sends again
     # (bounded, client side). All absent (every released client) keeps the
@@ -60394,7 +60425,8 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
             # Session report round 3 N1 / round 4 LOW 1: a lease validated as
             # OBSERVED also records the watch where the sweep above cannot
             # reach it: spectate_watch_grants (migration 364), one row per
-            # game, spectator and (mode, source, roster) tuple, the tuple never
+            # game, spectator and (generation, mode, source, roster) tuple
+            # (the generation since round 7), the tuple never
             # changed (a repeat refreshes observed_seq alone, round 5 LOW 1) -
             # the entitlement the broadcast seat's report reads rest on.
             # Round 5 / round 6 MEDIUM 1: the grant is written only by a
@@ -60434,9 +60466,10 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                     if lease is not None and grant_tuple is not None:
                         await db.execute(text("""
                             INSERT INTO spectate_watch_grants
-                                (game_id, mode, source_ref, roster,
+                                (game_id, generation, mode, source_ref, roster,
                                  spectator_steam_id, game_started_at, observed_seq)
-                            SELECT CAST(:game_id AS uuid), CAST(:mode AS text),
+                            SELECT CAST(:game_id AS uuid), CAST(:generation AS bigint),
+                                   CAST(:mode AS text),
                                    CAST(:source_ref AS text), CAST(:roster AS text),
                                    CAST(:sid AS text),
                                    g.started_at, nextval('spectate_watch_grants_observed_seq')
