@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_lobby_assembly",
-          "25069a15fa004e3a3aebb65be815aabb1ce87b8b"
+          "7960d99e1e909429616f9f0c0ed919e82d6421f9"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/connect",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "ffa_lobby_connect",
-          "6450f2d7bf6eaca5e0098e9947678efcf48c46ad"
+          "e3b29a222848c9504c3f7d30eddfd964e5fdd932"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/release",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "c9a28281489f0de79001fe8004106e40c05005ca"
+          "e171ee66cd18a67fb00012e196d11217311438ee"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1822,7 +1822,7 @@
           ],
           "main",
           "ffa_queue_poll",
-          "1f71ab8de09e1827a22f0a28d7f97a5ece47142b"
+          "1a62213cdd68c14763baea23e510500fd779f5c2"
         ],
         [
           "/api/v1/ffa/queue/recent-joins",
@@ -1849,7 +1849,7 @@
           ],
           "main",
           "health_check",
-          "d22be9f36ec3f134b3461d1188248313c86065d5"
+          "35a2a3690c93dd87be10cddad9c37604289d6f46"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2821,7 +2821,7 @@
           ],
           "main",
           "team_queue_poll",
-          "710f7cbdd38562d22107b094d6de17a9af7cac17"
+          "c89719f2ce917e867a9cc854ecc633a3071e373d"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3563,7 +3563,7 @@
       [
         "main",
         "lifespan",
-        "602a48119bf3a56fc8c74bc9c21dbc1da0f4561b"
+        "c0c37b546991371639eda6a67d80f3cc5c18091c"
       ]
     ]
   },
