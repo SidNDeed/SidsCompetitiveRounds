@@ -614,17 +614,20 @@ def test_priming_waits_for_its_deadline_and_the_attempt_finishes_behind_it(monke
     monkeypatch.setenv("PC_STEAM_SWEEP", "off")
     _run(main._pc_steam_prime([str(PID)]))
     assert claims == []
-    # pack open, its two completed-open replays (a repeated pack id, a repeated nonce), pack result, the /card preview
-    assert MAIN_SRC.count("await _pc_steam_prime(") == 5
-    opened = inspect.getsource(main.pc_open_pack)
+    # pack open (after its commit, best effort), the committed answer that every replay and the
+    # result route share (a repeated pack id, a repeated nonce, /pc/packs/result), the /card preview
+    assert MAIN_SRC.count("await _pc_steam_prime(") == 3
+    opened = inspect.getsource(main._pc_open_for)
+    assert opened.count("await _pc_steam_prime(subjects)") == 1
+    assert opened.count("await _pc_committed_answer(db, row, locale)") == 3   # the void and both replays
+    assert "await _pc_committed_answer(db, row, _pc_locale(request))" in inspect.getsource(main.pc_pack_result)
+    committed = inspect.getsource(main._pc_committed_answer)
     replay = 'await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))'
-    assert opened.count(replay) == 2
-    at = 0
-    for _ in range(2):   # each replay primes under the done check and BEFORE the answer is built (v4 §5)
-        i = opened.index(replay, at)
-        assert opened.rfind('if row["status"] == "done":', 0, i) > opened.rfind("await _pc_pack_answer(", 0, i)
-        assert 0 < opened.find("await _pc_pack_answer(", i) < opened.find('if row["status"] == "done":', i)
-        at = i + 1
+    assert committed.count(replay) == 1
+    # a replay primes under the done check and BEFORE its answer is built (v4 section 5)
+    i = committed.index(replay)
+    assert committed.rfind('if row["status"] == "done":', 0, i) > committed.rfind("await _pc_pack_answer(", 0, i)
+    assert 0 < committed.find("await _pc_pack_answer(", i)
 
 
 # ── the sweep's words ──────────────────────────────────────────────────

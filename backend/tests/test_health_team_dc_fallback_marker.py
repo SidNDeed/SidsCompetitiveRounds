@@ -109,7 +109,15 @@ def _cache_restored(monkeypatch):
     """Every test here may run the probe, which writes main's cache; the
     value the suite had before comes back afterwards."""
     monkeypatch.setattr(main, "_TEAM_DC_FALLBACK_LAST", main._TEAM_DC_FALLBACK_LAST)
+    monkeypatch.setattr(main, "_DISCORD_FIX_LAST", main._DISCORD_FIX_LAST)
     yield
+
+
+# The discord_fix marker's probe (main._discord_fix_probe) is a bare execute
+# on the same session, sent after this marker's probe, so on the connected
+# arm this fake records it too; the exact lists below name it rather than
+# filter it. Its cache is restored by the fixture above.
+SIBLING = main._DISCORD_FIX_PROBE
 
 
 # -- sessions that stand in for the database -----------------------------------
@@ -270,7 +278,7 @@ def test_the_connected_arm_probes_after_select_1_and_answers_1(monkeypatch):
     db = _Session()
     answer = _run(main.health_check(db=db)).model_dump()
     assert (answer["status"], answer["database"], answer["team_dc_fallback"]) == ("ok", "connected", 1)
-    assert db.sent == ["SELECT 1", PROBE], db.sent
+    assert db.sent == ["SELECT 1", PROBE, SIBLING], db.sent
     assert db.rollbacks == 0 and main._TEAM_DC_FALLBACK_LAST == 1
 
 
@@ -282,7 +290,7 @@ def test_a_missing_column_or_table_reads_0_and_the_box_stays_ok(monkeypatch, kin
     db = _Session(probe_raises=_sa_wrapped(driver))
     answer = _run(main.health_check(db=db)).model_dump()
     assert (answer["status"], answer["database"], answer["team_dc_fallback"]) == ("ok", "connected", 0)
-    assert db.sent == ["SELECT 1", PROBE], db.sent
+    assert db.sent == ["SELECT 1", PROBE, SIBLING], db.sent
     assert db.rollbacks == 1 and main._TEAM_DC_FALLBACK_LAST == 0
 
 
@@ -656,7 +664,11 @@ def _controls():
            "        _TEAM_DC_FALLBACK_LAST = 0\n")],
          "dc_fallback_at,dc_fallback_player_id",
          ["test_a_missing_column_or_table_reads_0_and_the_box_stays_ok[column]",
-          "test_a_missing_column_or_table_reads_0_and_the_box_stays_ok[table]"] + list(_ZERO_CASES)),
+          "test_a_missing_column_or_table_reads_0_and_the_box_stays_ok[table]"] + list(_ZERO_CASES)
+         # The discord_fix probe is a bare statement sent after this one on the
+         # same session, so a transaction this probe left failed now fails the
+         # route's own answer (degraded) on the first request of the pool test.
+         + ["test_pg_requests_after_a_probe_on_a_one_connection_pool_answer[both-absent]"]),
         ("degraded-arm-unwired",
          [("                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST)\n",
            "                              team_dc_fallback=0)\n")],

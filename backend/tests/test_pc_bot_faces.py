@@ -277,9 +277,13 @@ def test_the_drain_leases_each_print_group_with_its_events_and_acks_with_the_lea
     assert "leases.append(lease[0])" in src
 
 
-def test_the_daily_answer_carries_the_canonical_back_without_a_lease():
+def test_the_daily_answer_is_the_pack_it_opened_and_takes_no_lease_itself():
+    """Fix round 1, D1: /daily claims, opens and shows its pack. The picture is the
+    reveal's strip, drawn under the reveal's own leases; the command takes none, and
+    the canonical back no longer rides on it - there is a revealed pack to show."""
     src = _fn(BOT_SRC, "cmd_pc_daily")
-    assert "await _pc_back_bytes()" in src and "_pc_lease(" not in src
+    assert "_pc_lease(" not in src and "_pc_back_bytes" not in src
+    assert "await _pc_open_and_show(ctx, {\"pack_id\": str(pack_id)}," in src
     back = _fn(BOT_SRC, "_pc_back_bytes")
     assert '_pc_api_bytes("/internal/pc/face/back")' in back and "3600" in back
 

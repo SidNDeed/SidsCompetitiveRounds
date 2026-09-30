@@ -718,7 +718,7 @@
           ],
           "main",
           "pc_open_pack",
-          "252cf43e752f4cb02f5a4777a31c6af790469f80"
+          "85d246bb93c7dc58b3822b34013a0a37c62f42ea"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -727,7 +727,7 @@
           ],
           "main",
           "pc_pack_result",
-          "f3c2673b129dc1bd2b44bd738d860744ff1bf99a"
+          "6a8c187ff81a7027f45ed0c5a9bd0d2d416b15f1"
         ],
         [
           "/api/v1/pc/pool",
@@ -1516,7 +1516,7 @@
           ],
           "main",
           "broadcast_target",
-          "047669b1f91d6235e7159635e8e547de7c313e25"
+          "34bcf664831a36e56b1522831f84381ec50f8cf4"
         ],
         [
           "/api/v1/chat/moderate/bridge-unmute",
@@ -1813,7 +1813,7 @@
           ],
           "main",
           "health_check",
-          "70addb78e888ce8e087963864bc76a6424b5368a"
+          "d22be9f36ec3f134b3461d1188248313c86065d5"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2146,7 +2146,7 @@
           ],
           "main",
           "internal_tournament_notices",
-          "e4a37daa722f64251a2ccc0514edaa556a0c708f"
+          "c04722074f1e2be2b1f2103229514a8f23718601"
         ],
         [
           "/api/v1/internal/tournament-notices/ack",
@@ -2587,7 +2587,7 @@
           ],
           "main",
           "spectate_games",
-          "ff78d61751ffd1e63ffb84754532b13c3691143c"
+          "110872f49321147f77c21f8b30c52b1743cfc186"
         ],
         [
           "/api/v1/spectate/grant",
@@ -2596,7 +2596,7 @@
           ],
           "main",
           "spectate_grant",
-          "c5e7f10778e57872f11fa4d362855b32332c22d8"
+          "eb70d2fa2774dcd4dd89062c0de8a2626996ccc8"
         ],
         [
           "/api/v1/spectate/heartbeat",
@@ -2749,7 +2749,7 @@
           ],
           "main",
           "team_queue_join",
-          "7009cd6f82ed4d1f8b117b691c0940a1e78c4c7d"
+          "43553e77a236801e546d93c8e26bd64618fee7a9"
         ],
         [
           "/api/v1/team/queue/leave",
@@ -2785,7 +2785,7 @@
           ],
           "main",
           "team_queue_poll",
-          "25b8610874918d045452885a935c46f111d365e0"
+          "710f7cbdd38562d22107b094d6de17a9af7cac17"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_pc_daily",
-          "03bf4ca832d8332baa8b5767a530c9f6699b1177"
+          "daa549ed7e06e87ef986eccbb2e6194060163f06"
         ],
         [
           "/api/v1/internal/pc/events/ack",
@@ -3206,7 +3206,16 @@
           ],
           "main",
           "internal_pc_packs",
-          "d5fbe3a83521448d0f98009cd43b4663087684c6"
+          "c5c946bfdac4f23ea0564bf0a9350aa4e24a76eb"
+        ],
+        [
+          "/api/v1/internal/pc/packs/open",
+          [
+            "POST"
+          ],
+          "main",
+          "internal_pc_open_pack",
+          "e60fb4ace34f6eace7e7ad0a6dec72bf5501aeb5"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
@@ -3338,7 +3347,7 @@
           ],
           "tournaments",
           "get_current",
-          "efedc507997abd4f6e0491e9d5450ea7dcb079f0"
+          "fbe91966948c70cee014d8303dfbf08ab9fb8719"
         ],
         [
           "/api/v1/tournaments/history",
@@ -3410,7 +3419,7 @@
           ],
           "tournaments",
           "force_vote",
-          "6874c921bf75bfc457d93a7d0b03d04f5f6c37e4"
+          "33e15b8768cc0a20baa1ae813f43aa4d19750894"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit",
@@ -3428,7 +3437,7 @@
           ],
           "tournaments",
           "play_now",
-          "f99c67389bdc31404f2f0e752fafddbb36ea6068"
+          "13dda8ed410ef5cfe407f9c63ded8b24c9971234"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/ready",
@@ -3437,7 +3446,7 @@
           ],
           "tournaments",
           "ready",
-          "853290b1f4acb1a514681a76451932de85ffdcfc"
+          "8ad4cddf6a0d68d01feeba43dcb83412b065bfdb"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/signup",
@@ -3446,7 +3455,7 @@
           ],
           "tournaments",
           "signup",
-          "542bf8912a6ab79ab6fc7448b69686593a495ac7"
+          "e280a50a161657a4d92e5a4fa83e63ea8d2e234d"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -3455,7 +3464,7 @@
           ],
           "tournaments",
           "time_vote",
-          "baa63063920b3182bc0304e66f81913603da19fc"
+          "bda6847d5b438da59e659d027fdeddc72f647a7c"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/unsignup",
@@ -3464,7 +3473,7 @@
           ],
           "tournaments",
           "unsignup",
-          "20a29d39c78cd4b093f7128d1f32fb8ea377c03d"
+          "56c6de049cad6a8e45cd1aa63effbad49ae16634"
         ]
       ]
     },
@@ -3518,7 +3527,7 @@
       [
         "main",
         "lifespan",
-        "a62086481c657e964c9a125b7b9b858c69901c9a"
+        "602a48119bf3a56fc8c74bc9c21dbc1da0f4561b"
       ]
     ]
   },
@@ -3670,6 +3679,7 @@
     "GET /api/v1/internal/pc/events/pending -> main.internal_pc_events_pending",
     "POST /api/v1/internal/pc/events/ack -> main.internal_pc_events_ack",
     "POST /api/v1/internal/pc/daily -> main.internal_pc_daily",
+    "POST /api/v1/internal/pc/packs/open -> main.internal_pc_open_pack",
     "GET /api/v1/internal/pc/collection -> main.internal_pc_collection",
     "GET /api/v1/internal/pc/card -> main.internal_pc_card",
     "POST /api/v1/pc/portrait -> main.pc_portrait_upload",

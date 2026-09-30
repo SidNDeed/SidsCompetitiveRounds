@@ -64,6 +64,7 @@ if not _gen_os.environ.get("BOT_GEN"):
 import os, asyncio, aiohttp, discord, json, io, threading, re, time
 import random, ssl as ssl_mod
 import urllib.parse
+import secrets
 from typing import Literal
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -477,6 +478,9 @@ async def on_ready():
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
+    # The Discord fix's witness (round 2), read by the release train: the
+    # purchase journal's volume and the fixed behaviour, stamped with gen.
+    print(_pc_fix_ready_line())
     # The batch's bot arm (dance cards, round two): this build's positive
     # signal, one whole line carrying the ready line's generation, printed
     # just before it (_pc_card_gif_signal, beside /card).
@@ -794,6 +798,29 @@ async def _faq_top_player(message):
                  f"🥉 {entries[2]['display_name']} ({entries[2]['rating']})")
     line += "\nFull board: `/lb`, the #scr-leaderboard channel, or F5 → Leaderboard in-game."
     return line
+
+
+async def _faq_tournaments(message):
+    """Dynamic (board row 32): the static tournaments answer and, while a
+    sync tournament is in voting, one line with its start rule, how far
+    the vote has got and how to vote. In-game (message None) the static
+    answer alone - Discord's <t:...> timestamps do not render there - and
+    the static answer alone whenever the tally cannot be read."""
+    answer = next(e["answer"] for e in FAQ_ENTRIES if e["key"] == "tournaments")
+    if message is None:
+        return answer
+    try:
+        voting = [t for t in (_watch_cache or {}).get("tournaments") or []
+                  if isinstance(t, dict) and (t.get("kind") or "sync") == "sync"
+                  and t.get("status") == "voting"]
+        tally = await _tsync_tally_for(voting[0]) if voting else None
+    except Exception as ex:
+        print(f"[FAQ] tournaments tally read failed: {ex}")
+        tally = None
+    if tally is None:
+        return answer
+    return (f"{answer}\n**Current sync tournament:** {_tsync_rule(tally['min_players'], tally)} "
+            f"{_TSYNC_VOTE_HOW}")
 
 
 async def _faq_discord_link(discord_id):
@@ -1256,8 +1283,11 @@ FAQ_ENTRIES = [
                    "no Ready Up.\n"
                    "**Prizes scale with signups**: at 8 players 1st gets 1000g/5000xp, growing to double at 16. "
                    "The final sync time locks in **2 days before the default start** (so you always get 24h+ "
-                   "notice), and you'll get an availability-check DM 1-4 days before that lock (link your "
-                   "account with `/link` to receive it). Live status board: the #scr-tournaments channel."),
+                   "notice). Once 8 players agree on one time you'll get an availability-check DM that names "
+                   "that time, before the lock (link your account with `/link` to receive it). "
+                   "Live status board: the #scr-tournaments channel."),
+        # Row 32: in Discord the answer also carries the live sync tally.
+        "handler": _faq_tournaments,
     },
     {
         "key": "more_gold",
@@ -8539,11 +8569,17 @@ async def _pc_api_bytes(path, params=None, timeout=10.0, max_bytes=_PC_FACE_MAX_
                     parsed = {}
                 meta.update(parsed)
                 return r.status, None, meta
+            # Every refused 200 below says why in one line: the drain posts a
+            # 200 without a usable body as "no picture yet", and a silent
+            # refusal is how a text-only post leaves no trace (D3).
+            where = f"API GET {path.split('?')[0]} -> HTTP 200"
             cl = r.headers.get("Content-Length")
             if cl is None:
+                print(f"{where} without a Content-Length: body refused")
                 return r.status, None, meta
             declared = int(cl)
             if declared <= 0 or declared > max_bytes:
+                print(f"{where} declaring {declared} bytes, outside 1..{max_bytes}: body refused")
                 return r.status, None, meta
             # `read(n)` answers UP TO n bytes. A body that arrives in more
             # than one buffer — which is every face over a few kilobytes —
@@ -8553,9 +8589,11 @@ async def _pc_api_bytes(path, params=None, timeout=10.0, max_bytes=_PC_FACE_MAX_
             # the body is not LONGER than declared.
             try:
                 data = await r.content.readexactly(declared)
-            except asyncio.IncompleteReadError:
+            except asyncio.IncompleteReadError as short:
+                print(f"{where} with {len(short.partial)} of its {declared} bytes: body refused")
                 return r.status, None, meta
             if await r.content.read(1):
+                print(f"{where} longer than its {declared} bytes: body refused")
                 return r.status, None, meta
             return r.status, data, meta
     except Exception as e:
@@ -8710,6 +8748,28 @@ async def _pc_leases(subject_refs):
     return None, undeliverable, past_deadline
 
 
+def _pc_receipt(msg, attached, why=None):
+    """One post as Discord stored it, from the Message its API answered with:
+    each attachment's name, content type, size and pixel size, and the first
+    embed's image as Discord resolved it - or, for a post sent without a
+    picture, why. The drain used to discard this answer, so no log could tell
+    a stored picture from none (Discord fix round 1, D3). No URL is printed:
+    Discord's carry the channel."""
+    if not attached:
+        return f"posted without a picture ({why or 'none to attach'})"
+    if msg is None:
+        return "posted; Discord answered without a message to read"
+    atts = []
+    for a in list(getattr(msg, "attachments", None) or []):
+        atts.append(f"{getattr(a, 'filename', None)} {getattr(a, 'content_type', None)} "
+                    f"{getattr(a, 'size', None)} B {getattr(a, 'width', None)}x{getattr(a, 'height', None)}")
+    embeds = list(getattr(msg, "embeds", None) or [])
+    image = getattr(embeds[0], "image", None) if embeds else None
+    shown = (f"{getattr(image, 'width', None)}x{getattr(image, 'height', None)}"
+             if image is not None and getattr(image, "url", None) else "none")
+    return f"stored by Discord: attachments [{'; '.join(atts) or 'none'}], embed image {shown}"
+
+
 def _pc_upload_cap(ctx):
     """The most bytes /card's motion preview may carry (M5, S6.3): the face
     cap or this destination's upload limit, whichever is lower -- never the
@@ -8725,7 +8785,7 @@ def _pc_upload_cap(ctx):
 
 
 async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
-                        require_lease=False):
+                        require_lease=False, receipt=None, no_face=None):
     """ONE send under the lease: the lease is re-validated immediately before
     the send and the bytes are dropped when it is gone; the send runs under
     the lease's deadline; the lease is released afterwards, sent or not.
@@ -8734,6 +8794,8 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
     under a lease that is present, unexpired and still live at the api right
     before the send, and returns False otherwise (r6 H1/M2: a line that names
     people is authorised as a whole, both names re-read, or not posted).
+    With `receipt` (a log label) the send's own answer is logged: what
+    Discord stored (_pc_receipt), or `no_face`, why no picture went (D3).
     Returns True when the send ran."""
     # `lease` is `_pc_lease`'s answer: (lease_id, deadline) and, since the
     # drain needed to know WHY a lease was refused, a third field this does
@@ -8762,34 +8824,522 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
         kwargs["file"] = discord.File(io.BytesIO(face), filename=filename)
     try:
         budget = _pc_lease_left(deadline) if (attach or require_lease) else 45.0   # a required lease bounds the whole send
-        await asyncio.wait_for(sender(**kwargs), timeout=budget)
+        msg = await asyncio.wait_for(sender(**kwargs), timeout=budget)
+        if receipt:
+            try:
+                line = _pc_receipt(msg, attach, no_face)
+            except Exception as ex:   # a log line must never fail a post that went out
+                line = f"posted; the receipt could not be read ({type(ex).__name__})"
+            print(f"{receipt} {line}")
     finally:
         await _pc_lease_release(lease_id)
     return True
 
 
-@bot.hybrid_command(name="daily", description="Claim today's free Player Cards pack (it opens in the mod)")
+@bot.hybrid_command(name="daily", description="Claim and open today's free Player Cards pack")
 async def cmd_pc_daily(ctx):
     """One claim per UTC day, decided by the api's clock (the same claim the
-    mod's own Daily button makes); the pack itself opens in-game."""
+    mod's own Daily button makes), then the pack opens here and the cards it
+    dealt are shown (Discord fix round 1, D1). The claim and the open are two
+    requests, each idempotent: a /daily that stopped between them leaves
+    today's pack unopened, and the next /daily opens it."""
     await _maybe_defer(ctx)
     status, body = await _pc_api("POST", "/internal/pc/daily", params={"discord_id": str(ctx.author.id)})
-    if status == 200 and isinstance(body, dict):
-        text_line = (f"🎴 Today's pack is yours — open it in-game (F5 → Collection). "
-                     f"Next one {_pc_when(body.get('next_reset_utc'))}.")
-        back = await _pc_back_bytes()   # the canonical back rides along (§6); no lease: it is nobody's picture
-        if back:
-            await ctx.send(content=text_line, file=discord.File(io.BytesIO(back), filename="pack.png"))
-        else:
-            await ctx.send(text_line)
-        return
     d = _pc_detail(body)
-    if status == 404 and d.get("error") == "not_linked":
+    if status == 200 and isinstance(body, dict):
+        reset, pack_id = body.get("next_reset_utc"), body.get("pack_id")
+    elif status == 409 and d.get("error") == "already_claimed" and d.get("pack_status") == "unopened":
+        # Claimed today and never opened - by a /daily that stopped before its
+        # open, or in the mod by a claim whose open did not go through: it is
+        # still today's pack, and it opens now.
+        reset, pack_id = d.get("next_reset_utc"), d.get("pack_id")
+    elif status == 404 and d.get("error") == "not_linked":
         await ctx.send(_pc_not_linked(ctx, ctx.author)); return
-    if status == 409 and d.get("error") == "already_claimed":
-        await ctx.send(f"🎴 Already claimed today — the next pack unlocks {_pc_when(d.get('next_reset_utc'))}.")
+    elif status == 409 and d.get("error") == "already_claimed":
+        await ctx.send(f"Already claimed today - the next pack unlocks {_pc_when(d.get('next_reset_utc'))}."
+                       " `/pack` shows your latest pack.")
         return
-    await ctx.send("❌ Couldn't claim today's pack right now — try again in a moment.")
+    else:
+        await ctx.send("Couldn't claim today's pack right now - try again in a moment."); return
+    if not pack_id:
+        await ctx.send("Today's pack is claimed but could not be opened right now - `/daily` again opens it.")
+        return
+    await _pc_open_and_show(ctx, {"pack_id": str(pack_id)},
+                            f"**Today's pack** (the next one unlocks {_pc_when(reset)})")
+
+
+_PC_OPEN_TIMEOUT_S = 20.0   # the open rolls, mints and pre-renders: the api's own work, not a picture read
+_PC_OPEN_SENDS = 3          # one open request and up to two replays of the same key (Discord fix round 2, M1)
+_PC_OPEN_REPLAY_PAUSE_S = (2.0, 5.0)   # the pause before each replay
+# The purchases /buypack has sent and not yet finished, by Discord id:
+# {"<id>": {"nonce": ..., "pay": ..., "player": <Steam id>}}, and, once the api
+# has answered it with its pack, "settled": {"pack_id", "price", "pay"} until
+# the reveal is delivered. It lives on the volume compose mounts for the
+# bot's state, so a purchase left unconfirmed, or bought and not yet shown,
+# outlasts a restart and a rebuild, and the next /buypack completes it with
+# its own nonce (round 2, M1) for the player it was bought for (round 3, M1),
+# or shows the pack it bought (round 3, item 2). "revealing": true (round 4,
+# LOW 1) is written, under the journal lock, immediately BEFORE the reveal's
+# send: a send can reach Discord and still fail or never return, so an entry
+# carrying it is never revealed again - the next /buypack sends the short
+# pointer at /pack once and takes the entry out.
+_PC_BUY_PENDING_FILE = "/opt/bot-state/pc_buy_pending.json"
+_PC_BUY_UNCONFIRMED = ("Your purchase is still being confirmed. `/pack` shows the pack once it has gone through,"
+                       " and your next `/buypack` completes this same purchase instead of buying another.")
+_PC_BUY_PAUSED = "Buying packs here is paused right now - nothing was charged."
+_PC_BUY_MOVED = ("Your Discord account is now linked to a different player, so your earlier purchase stays with"
+                 " the player it was made for - nothing was charged to the player linked now.")
+_PC_BUY_NO_PLAYER = "Couldn't start a purchase right now - nothing was charged. Try again in a moment."
+_PC_BUY_SHOWN_BEFORE = "Your earlier purchase went through - `/pack` shows the pack it bought."
+_PC_BUY_REBOUND = ("Your earlier purchase was for the player your Discord account was linked to then, and it is"
+                   " linked to a different player now - so that pack is not shown here, and nothing was bought or"
+                   " charged now. Your next `/buypack` shows it once your account is linked to that player again.")
+
+
+def _pc_open_verdict(status, body, replayed=False):
+    """What one answer of POST /internal/pc/packs/open settles (Discord fix
+    round 2, M1). "opened": a 200 carrying the pack. "refused": a refusal
+    with a known reason that the key cannot outlive - a purchase the api
+    rejected before its debit, which it records on the nonce (402, or 409
+    with status "rejected": the daily cap, no cards to deal), a held pack's
+    recorded state (409 with status "unopened", 410 voided), and a refusal
+    of the caller (not linked, banned, a service account, a deleted
+    account). The caller's refusals come before the api reads the key, so
+    they settle it only when no earlier send of it went unanswered
+    (`replayed` False): after one, that send may have committed.
+    "moved" (round 3, M1): a purchase whose Discord id is now linked to
+    another player than the one the purchase names - the api refuses it
+    before any write (412 player_changed), and the key belongs to the
+    player it was bought for, whatever became of it.
+    "unconfirmed": everything else - no answer at all (status 0: refused,
+    or cut short by the timeout), any 5xx, a 200 without a usable body, a
+    key still in progress, any other status or token."""
+    if status == 200:
+        return "opened" if isinstance(body, dict) and body.get("pack_id") else "unconfirmed"
+    d = _pc_detail(body)
+    err = d.get("error")
+    if status == 412 and err == "player_changed":
+        return "moved"
+    if err == "in_progress":
+        return "unconfirmed"
+    if status == 402 and err in ("insufficient_gold", "insufficient_shards"):
+        return "refused"
+    if status == 409 and d.get("status") in ("rejected", "unopened"):
+        return "refused"
+    if status == 410 and err == "voided":
+        return "refused"
+    caller = ((status == 404 and err == "not_linked") or (status == 410 and err == "Account deleted")
+              or (status == 403 and err in ("banned", "service_account_forbidden")))
+    if caller and not replayed:
+        return "refused"
+    return "unconfirmed"
+
+
+async def _pc_open_pack_api(params, replayed=False):
+    """(verdict, status, body) of POST /internal/pc/packs/open, under the one
+    retry policy both doors share (Discord fix round 2, M1): an answer
+    _pc_open_verdict calls unconfirmed is followed by a replay of the SAME
+    key - the pack id, or the purchase's nonce and pay - after a pause, up
+    to _PC_OPEN_SENDS sends in all. The key is the claim (pc_packs' status,
+    or the purchase's nonce): a key whose earlier send committed is answered
+    with that committed row - the pack and what it cost - and one whose
+    earlier send is still running waits for it at the claim, so a replay
+    never opens or buys a second pack. `replayed` says a send of this key
+    went unanswered before this call (a purchase an earlier /buypack left
+    unconfirmed)."""
+    status, body = 0, None
+    what = f"pack {params['pack_id']}" if params.get("pack_id") else f"purchase {str(params.get('nonce'))[:8]}"
+    for attempt in range(_PC_OPEN_SENDS):
+        if attempt:
+            await asyncio.sleep(_PC_OPEN_REPLAY_PAUSE_S[attempt - 1])
+        status, body = await _pc_api("POST", "/internal/pc/packs/open", params=params, timeout=_PC_OPEN_TIMEOUT_S)
+        verdict = _pc_open_verdict(status, body, replayed)
+        if verdict != "unconfirmed":
+            return verdict, status, body
+        replayed = True
+        print(f"[PC-OPEN] {what}: unconfirmed (HTTP {status}) after send {attempt + 1} of {_PC_OPEN_SENDS}")
+    return "unconfirmed", status, body
+
+
+def _pc_open_refusal(ctx, status, body, bought=False):
+    """The one line for an open that did not open, read by status and token.
+    A held pack the api could not open stays the player's, unopened; a
+    purchase the api refused was not charged (its rejections all come
+    before the debit), and any other answer to a purchase leaves it
+    unconfirmed, which its line says (M1)."""
+    d = _pc_detail(body)
+    err = d.get("error")
+    price = d.get("price")
+    if status == 402 and err in ("insufficient_gold", "insufficient_shards"):
+        what = "gold" if err == "insufficient_gold" else "shards"
+        cost = f" - a pack costs {price} {what}" if isinstance(price, int) and not isinstance(price, bool) else ""
+        return f"Not enough {what}{cost}. Nothing was charged."
+    if status == 409 and err == "daily_cap":
+        cap = d.get("cap")
+        return (f"Today's limit of bought packs is {cap} - it resets at 00:00 UTC."
+                if isinstance(cap, int) and not isinstance(cap, bool) else
+                "Today's limit of bought packs is reached - it resets at 00:00 UTC.")
+    if status == 409 and d.get("status") == "rejected":
+        return "No cards could be dealt right now, so the pack was not bought and nothing was charged."
+    if (status == 404 and err == "not_linked") or (status == 410 and err == "Account deleted"):
+        return _pc_not_linked(ctx, ctx.author)
+    if status == 403 and err in ("banned", "service_account_forbidden"):
+        return "Player Cards are closed to this account."
+    if bought:
+        return _PC_BUY_UNCONFIRMED
+    if status == 409 and err == "in_progress":
+        return "That pack is being opened right now - `/pack` shows it in a moment."
+    if status == 409 and d.get("status") == "unopened":
+        return "No cards could be dealt right now - the pack stays yours, unopened; `/daily` tries again."
+    if status == 503:
+        return "Card pictures cannot be drawn on the server right now, so nothing was opened - try again later."
+    if status == 0:
+        return ("The card service did not answer - `/daily` again opens today's pack,"
+                " or `/pack` shows it if it opened.")
+    return "Couldn't open the pack right now - try again in a moment."
+
+
+async def _pc_open_and_show(ctx, key, head):
+    """Open one held pack for the caller - `key` is {"pack_id": ...} - and
+    show what it dealt under `head`, or say in one line why it did not open.
+    A purchase goes through _pc_buy_and_show, which keeps its nonce until
+    the api settles it."""
+    me, locale = str(ctx.author.id), _pc_locale_of(ctx)
+    verdict, status, body = await _pc_open_pack_api({"discord_id": me, "locale": locale, **key})
+    if verdict == "opened":
+        await _pc_reveal_opened(ctx, str(body["pack_id"]), head)
+        return
+    await ctx.send(_pc_open_refusal(ctx, status, body))
+
+
+def _pc_buy_settled_ok(s):
+    """A journal entry's "settled" part: the pack the api answered, and what it cost."""
+    return (isinstance(s, dict) and set(s) == {"pack_id", "price", "pay"}
+            and isinstance(s["pack_id"], str) and s["pack_id"] and s["pay"] in ("gold", "shards")
+            and (s["price"] is None or (isinstance(s["price"], int) and not isinstance(s["price"], bool))))
+
+
+def _pc_buy_pending():
+    """The purchases in the journal (_PC_BUY_PENDING_FILE) as {discord id:
+    {"nonce", "pay", "player"[, "settled"]}}: {} when there is no file yet,
+    None when it cannot be read or holds anything else - /buypack then buys
+    nothing, since a purchase it cannot see might be one it would buy a
+    second time. An entry without the player it was bought for (the round-2
+    shape) is something else: a replay of it could not name its player."""
+    try:
+        with open(_PC_BUY_PENDING_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as ex:
+        print(f"[PC-BUY] the purchase journal could not be read ({type(ex).__name__}: {ex})")
+        return None
+    if not (isinstance(data, dict) and all(
+            isinstance(k, str) and isinstance(v, dict)
+            and set(v) in ({"nonce", "pay", "player"}, {"nonce", "pay", "player", "settled"},
+                           {"nonce", "pay", "player", "settled", "revealing"})
+            and isinstance(v["nonce"], str) and v["nonce"] and v["pay"] in ("gold", "shards")
+            and isinstance(v["player"], str) and v["player"]
+            and ("settled" not in v or _pc_buy_settled_ok(v["settled"]))
+            and ("revealing" not in v or v["revealing"] is True)
+            for k, v in data.items())):
+        print("[PC-BUY] the purchase journal holds something other than purchases")
+        return None
+    return data
+
+
+def _pc_buy_pending_write(pending):
+    """Write the purchase journal whole - a temporary file, fsync, os.replace
+    - and read it back: True only when the file now holds `pending` on the
+    mounted volume. A folder that is not a mount point is the container's
+    own layer, which a rebuild deletes, so a journal there would only look
+    durable: it is refused. Called only by _pc_buy_journal_update, under the
+    journal lock, with the journal it read inside that lock (round 4, M1)."""
+    folder = os.path.dirname(_PC_BUY_PENDING_FILE)
+    if not os.path.ismount(folder):
+        print(f"[PC-BUY] {folder} is not a mounted volume: the purchase journal would not survive a rebuild")
+        return False
+    tmp = _PC_BUY_PENDING_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(pending, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _PC_BUY_PENDING_FILE)
+    except Exception as ex:
+        print(f"[PC-BUY] the purchase journal could not be written ({type(ex).__name__}: {ex})")
+        return False
+    if _pc_buy_pending() != pending:
+        print("[PC-BUY] the purchase journal read back different from what was written")
+        return False
+    return True
+
+
+# Discord fix round 4, M1 (Codex round 3 MEDIUM 1): the journal holds every
+# buyer's entry in one file, so a writer that read it, awaited something, and
+# wrote back what it read would put back a stale copy of the OTHER buyers'
+# entries - a nonce another buyer committed could vanish, and that buyer's
+# next /buypack would draw a fresh one and buy again. Every change of the
+# journal is therefore one read-modify-write under this ONE process-wide lock:
+# the read is taken inside the lock, the change is computed from that read and
+# written before the lock is released, and nothing in between awaits. The lock
+# is never held across the link lookup, the purchase request or a Discord
+# send: the writers below are synchronous and take it only for their own
+# read-modify-write.
+_pc_buy_journal_lock = threading.Lock()
+_PC_BUY_KEEP = object()   # a change that writes nothing
+
+
+def _pc_buy_journal_update(me, change):
+    """One read-modify-write of the purchase journal (round 4, M1): under
+    _pc_buy_journal_lock, read the journal, give `change` the entry `me` holds
+    in THAT read (None when it holds none), and write the journal back with
+    `me`'s entry replaced by what `change` returns - None takes it out,
+    _PC_BUY_KEEP writes nothing. Every other buyer's entry is written back as
+    this read found it. True only when the new journal was written and read
+    back; False when the journal cannot be read, `change` kept it, or the
+    write failed."""
+    with _pc_buy_journal_lock:
+        pending = _pc_buy_pending()
+        if pending is None:
+            return False
+        after = change(pending.get(me))
+        if after is _PC_BUY_KEEP:
+            return False
+        now = {k: v for k, v in pending.items() if k != me}
+        if after is not None:
+            now[me] = after
+        return _pc_buy_pending_write(now)
+
+
+def _pc_buy_entry(me):
+    """(readable, `me`'s journal entry or None), read under the journal lock."""
+    with _pc_buy_journal_lock:
+        pending = _pc_buy_pending()
+    return (pending is not None), (None if pending is None else pending.get(me))
+
+
+def _pc_buy_record(me, entry):
+    """Write-ahead: `me`'s new purchase entry, only while `me` holds none."""
+    return _pc_buy_journal_update(me, lambda cur: entry if cur is None else _PC_BUY_KEEP)
+
+
+def _pc_buy_settle(me, entry):
+    """`me`'s entry replaced by `entry` (its settled form), only while `me`
+    still holds that entry's nonce."""
+    return _pc_buy_journal_update(
+        me, lambda cur: entry if (cur or {}).get("nonce") == entry["nonce"] else _PC_BUY_KEEP)
+
+
+def _pc_buy_mark_revealing(me, nonce):
+    """Round 4, LOW 1: the delivery-attempt mark on `me`'s settled entry of
+    `nonce`, written before its reveal is sent. True only once it is on disk."""
+    return _pc_buy_journal_update(
+        me, lambda cur: {**cur, "revealing": True} if cur is not None and cur.get("nonce") == nonce
+        and "settled" in cur else _PC_BUY_KEEP)
+
+
+def _pc_fix_ready_line():
+    """The bot's startup witness for the Discord fix (round 2): the purchase
+    journal's volume as THIS process finds it - a folder that is not a mount
+    point refuses every purchase, so "NOT mounted" is the reading a release
+    must stop on - how many purchases the journal holds unsettled and how
+    many bought ones still await their reveal (round 3, item 2); the replay
+    policy and the purchase's player binding (round 3, M1); the sync
+    availability-check rule (board row 32). Stamped
+    with the process's gen, as [BOT-READY] is (r7 M2). Its only job is to be
+    read by the release train. It never raises: a witness that cannot be
+    built says so in its own line, and on_ready still reaches [BOT-READY]."""
+    try:
+        mounted = os.path.ismount(os.path.dirname(_PC_BUY_PENDING_FILE))
+        pending = _pc_buy_pending()
+        shown = 0 if pending is None else sum(1 for v in pending.values() if "settled" in v)
+        held = ("unreadable" if pending is None
+                else f"{len(pending) - shown} unsettled, {shown} bought and awaiting their reveal")
+        return (f"[DISCORD-FIX] gen={_BOT_GEN} purchase journal {_PC_BUY_PENDING_FILE}: "
+                f"{'mounted' if mounted else 'NOT mounted'}, {held}; an unanswered open sends its key "
+                f"{_PC_OPEN_SENDS} times; every purchase names the player it was bought for; "
+                f"sync availability checks wait for a start time with min_players votes")
+    except Exception as ex:
+        return f"[DISCORD-FIX] gen={_BOT_GEN} witness failed: {type(ex).__name__}: {ex}"
+
+
+async def _pc_buy_player(ctx, me):
+    """The Steam id of the player `me` (a Discord id) is linked to now, read
+    once when a purchase is first sent, so the journal can name the player
+    the purchase is for; None after telling the caller why no purchase
+    starts (not linked, or the link could not be read - nothing is sent to
+    the api then, so nothing was charged). The read is the account link
+    every linked-account command makes (/players/by-discord, through
+    _faq_discord_link, which tells a 404 from a failed read), not a Player
+    Cards call: every _pc_api call stays an internal Player Cards route."""
+    state, link = await _faq_discord_link(me)
+    steam = link.get("steam_id") if state == "ok" and isinstance(link, dict) else None
+    if isinstance(steam, str) and steam:
+        return steam
+    if state == "unlinked":
+        await ctx.send(_pc_not_linked(ctx, ctx.author))
+    else:
+        print(f"[PC-BUY] the player linked to a buyer could not be read ({state})")
+        await ctx.send(_PC_BUY_NO_PLAYER)
+    return None
+
+
+def _pc_buy_forget(me, nonce):
+    """Take `me`'s purchase `nonce` out of the journal (a later entry of
+    `me` is left alone). A write that fails leaves it there, and the next
+    /buypack reads its outcome again. One locked read-modify-write (round 4,
+    M1): every other buyer's entry is kept as the read inside the lock found it."""
+    held = {}
+
+    def change(cur):
+        held["mine"] = (cur or {}).get("nonce") == nonce
+        return None if held["mine"] else _PC_BUY_KEEP
+    if not _pc_buy_journal_update(me, change) and held.get("mine"):
+        print(f"[PC-BUY] purchase {nonce[:8]} is finished but still in the journal:"
+              " the next /buypack reads its outcome again")
+
+
+async def _pc_buy_deliver(ctx, me, entry, earlier):
+    """The reveal of a bought pack from its journal entry's "settled" part
+    (round 3, item 2). The entry leaves the journal only AFTER the reveal
+    is delivered - the library's send returned, with the pack or with the
+    line saying it is open and where to see it; a send that raises leaves
+    it settled in the journal, and the next /buypack delivers it from
+    there, sending nothing that could buy.
+    Round 4, LOW 2: the reveal reads the pack of the JOURNALED player (the
+    read names entry["player"]); when the Discord id is linked to another
+    player now, the api refuses the read (412 player_changed) and the entry
+    is neither delivered nor taken out: one line says why, with no pointer
+    at /pack (which reads the player linked now), and the reveal is
+    delivered once the binding matches again.
+    Round 4, LOW 1: a send and its mark cannot be one step, so the mark goes
+    first. Immediately before the reveal's send the entry is marked
+    "revealing" (_pc_buy_mark_revealing, under the journal lock); an entry
+    found carrying that mark - its reveal was sent, and may have been seen -
+    is never revealed again: the pointer at /pack is sent once and the entry
+    leaves. The worst case is one reveal and one pointer, or a pointer alone
+    (a send that failed before Discord showed it); never two reveals, never
+    nothing, never a purchase request. A mark that cannot be written sends
+    no reveal (the pointer instead)."""
+    s = entry["settled"]
+    if entry.get("revealing"):
+        print(f"[PC-BUY] purchase {entry['nonce'][:8]}: its reveal was sent before, so it is not revealed again"
+              " - the pointer at /pack instead")
+        await ctx.send(_PC_BUY_SHOWN_BEFORE)
+        _pc_buy_forget(me, entry["nonce"])
+        return
+    head = f"**Pack bought for {s['price']} {s['pay']}**"
+    outcome = await _pc_reveal_opened(ctx, s["pack_id"], ("Your earlier purchase went through - " + head)
+                                      if earlier else head, player=entry["player"],
+                                      before_send=lambda: _pc_buy_mark_revealing(me, entry["nonce"]))
+    if outcome == "rebound":
+        print(f"[PC-BUY] purchase {entry['nonce'][:8]} is bought and kept in the journal: the Discord id is now"
+              " linked to another player than the one it was bought for")
+        await ctx.send(_PC_BUY_REBOUND)
+        return
+    _pc_buy_forget(me, entry["nonce"])
+
+
+async def _pc_buy_and_show(ctx, me, pay):
+    """/buypack's purchase (Discord fix round 2, M1). A purchase an earlier
+    /buypack left unconfirmed is completed first, with its own nonce and pay,
+    and this command buys nothing else; otherwise a fresh nonce is drawn and
+    written to the journal BEFORE the first send, and nothing is sent when
+    that write fails. The nonce leaves the journal only when the api settles
+    it - a refusal (its line follows), or the pack, whose entry is marked
+    settled and leaves only once its reveal is delivered (round 3, item 2:
+    _pc_buy_deliver). An unconfirmed purchase stays in the journal, and the
+    player is told it is being confirmed and where to see it.
+    Round 3, M1: the journal entry names the player the purchase is for -
+    the Discord id's player when the nonce is drawn - and every send of the
+    nonce, the first, the automatic replays and a later /buypack's, names
+    that player; the api answers it only from that player's key and refuses
+    it (412 player_changed, "moved") when the Discord id is now linked to
+    another player. A moved purchase is settled as the earlier player's: its
+    entry leaves the journal, one line says so, and no nonce is drawn for
+    the player linked now on its account.
+    Round 4, M1: the journal is never written from this function's own read.
+    The write-ahead entry, the settled mark and the removal each go through
+    one locked read-modify-write (_pc_buy_record, _pc_buy_settle,
+    _pc_buy_forget), so another buyer's entry written while this purchase
+    awaited its link lookup, its request or its reveal is kept."""
+    readable, held = _pc_buy_entry(me)
+    if not readable:
+        await ctx.send(_PC_BUY_PAUSED)
+        return
+    if held is not None and "settled" in held:
+        # round 3, item 2: bought, and its reveal never delivered (a crash or a
+        # failed send between the answer and the reveal) - shown from the
+        # journal; nothing is sent that could buy
+        await _pc_buy_deliver(ctx, me, held, True)
+        return
+    if held is not None:
+        key, player = {"nonce": held["nonce"], "pay": held["pay"]}, held["player"]
+    else:
+        player = await _pc_buy_player(ctx, me)
+        if player is None:
+            return
+        key = {"nonce": secrets.token_hex(16), "pay": pay}
+        if not _pc_buy_record(me, {**key, "player": player}):
+            await ctx.send(_PC_BUY_PAUSED)
+            return
+    verdict, status, body = await _pc_open_pack_api(
+        {"discord_id": me, "locale": _pc_locale_of(ctx), **key, "player_steam_id": player},
+        replayed=held is not None)
+    if verdict == "unconfirmed":
+        print(f"[PC-BUY] purchase {key['nonce'][:8]} stays in the journal, unconfirmed (HTTP {status})")
+        await ctx.send(_PC_BUY_UNCONFIRMED)
+        return
+    if verdict == "opened" and str(body.get("player_steam_id") or "") != player:
+        print(f"[PC-BUY] purchase {key['nonce'][:8]} was answered for another player than its journal names:"
+              " it stays in the journal, unconfirmed")
+        await ctx.send(_PC_BUY_UNCONFIRMED)
+        return
+    if verdict == "opened":
+        price = body.get("price")
+        entry = {**key, "player": player, "settled": {
+            "pack_id": str(body["pack_id"]), "pay": body.get("pay") if body.get("pay") in ("gold", "shards")
+            else key["pay"], "price": price if isinstance(price, int) and not isinstance(price, bool) else None}}
+        if not _pc_buy_settle(me, entry):
+            print(f"[PC-BUY] purchase {key['nonce'][:8]} is settled but its answer is not in the journal:"
+                  " the next /buypack reads its outcome again")
+        await _pc_buy_deliver(ctx, me, entry, held is not None)
+        return
+    _pc_buy_forget(me, key["nonce"])
+    if verdict == "moved":
+        print(f"[PC-BUY] purchase {key['nonce'][:8]} settled as the earlier player's: the Discord id is now"
+              f" linked to another player (recorded {_pc_detail(body).get('recorded')})")
+        await ctx.send(_PC_BUY_MOVED)
+        return
+    line = _pc_open_refusal(ctx, status, body, bought=True)
+    await ctx.send(("Your earlier purchase did not go through: " + line) if held is not None else line)
+
+
+_pc_buying = set()   # Discord user ids with a /buypack in flight: a double send buys once, not twice
+
+
+@bot.hybrid_command(name="buypack", description="Buy a Player Cards pack with gold or shards, and open it")
+@app_commands.describe(pay="What to pay with (default: gold)")
+async def cmd_pc_buypack(ctx, pay: Literal["gold", "shards"] = "gold"):
+    """One paid pack (Discord fix round 1, D2 - a scope addition Sid asked for
+    on 2026-09-28): the mod's own purchase through /internal/pc/packs/open -
+    the api's price (the mod's), its daily cap, its conditional delta debit
+    and gold ledger row - keyed on a nonce drawn here and kept until the api
+    settles it (round 2, M1: _pc_buy_and_show), so a purchase whose answer
+    went missing is completed with its own nonce rather than bought again;
+    then the same reveal as /daily."""
+    await _maybe_defer(ctx)
+    me = str(ctx.author.id)
+    if pay not in ("gold", "shards"):
+        await ctx.send("Pay with `gold` or `shards`."); return
+    if me in _pc_buying:
+        await ctx.send("One moment - your last purchase is still going through."); return
+    _pc_buying.add(me)
+    try:
+        await _pc_buy_and_show(ctx, me, pay)
+    finally:
+        _pc_buying.discard(me)
 
 
 @bot.hybrid_command(name="collection", description="A Player Cards binder: counts by rarity and the best prints")
@@ -9202,13 +9752,15 @@ def _pc_reveal_compose(head, lines, note, what):
     return head + "\n" + _pc_fit_field(lines, cap=max(1, room)) + tail
 
 
-def _pc_reveal_pack_text(answer, index, note):
+def _pc_reveal_pack_text(answer, index, note, head=None):
     """The /pack post, rendered from the re-read alone: the pack line, then one
     line per slot - slot number, rarity, name, marks, NEW or duplicate. A slot
     whose print is gone reads the roster's rarity and the neutral label the
-    api supplies for it."""
+    api supplies for it. `head`, when given, names the pack in place of its
+    index: the reveal of a pack /daily (D1) or /buypack (D2) just opened."""
     pack = answer["packs"][0]
-    head = f"**Pack {int(index)}** - {_pc_name(pack.get('source'))}, opened {_pc_when(pack.get('opened_at'))}"
+    label = f"**Pack {int(index)}**" if head is None else head
+    head = f"{label} - {_pc_name(pack.get('source'))}, opened {_pc_when(pack.get('opened_at'))}"
     lines = []
     for p in pack.get("prints") or []:
         if p.get("gone"):
@@ -9247,12 +9799,17 @@ def _pc_reveal_binder_text(answer, note):
     return _pc_reveal_compose(head, lines, note, "page")
 
 
-async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params, render, ephemeral):
+async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params, render, ephemeral,
+                         before_send=None):
     """Steps 2-7 for one reveal whose step 1 answered `first`. `reread` is
     step 6, an awaitable factory answering (status, body); `render(answer,
     note)` builds the post from the re-read's answer alone. Returns "posted",
     or why nothing but one line may be posted: "private" (the re-read
-    answered 403), "unreachable" (0), "pacing" (429) or "moved"."""
+    answered 403), "unreachable" (0), "pacing" (429), "rebound" (412
+    player_changed: a read that named its player found the Discord id linked
+    to another one - round 4, LOW 2), "unmarked" (`before_send`, called
+    once immediately before the first send, answered False: nothing was
+    sent - round 4, LOW 1) or "moved"."""
     prints = _pc_reveal_prints(first, kind) or []
     before_view, before_drawn = _pc_reveal_view(first), _pc_reveal_drawn(prints)
     image, meta, note, leases, started = None, {}, None, {}, None
@@ -9283,6 +9840,8 @@ async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params
         again_prints = _pc_reveal_prints(again, kind) if st == 200 else None
         if again_prints is None:
             print(f"[PC-REVEAL] {kind} ref={ref} not posted: the re-read answered HTTP {st}")
+            if st == 412 and _pc_detail(again).get("error") == "player_changed":
+                return "rebound"
             return {403: "private", 0: "unreachable", 429: "pacing"}.get(st, "moved")
         moved_view = [m for m, b, a in zip(_PC_VIEW_MEMBERS, before_view, _pc_reveal_view(again)) if b != a]
         if kind == "binder" and [p.get("print_id") for p in prints] != [p.get("print_id") for p in again_prints]:
@@ -9305,6 +9864,9 @@ async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params
         kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
         if ephemeral:
             kwargs["ephemeral"] = True
+        if before_send is not None and not before_send():
+            print(f"[PC-REVEAL] {kind} ref={ref} not posted: its delivery mark could not be written")
+            return "unmarked"
         if image is not None:
             try:
                 await asyncio.wait_for(ctx.send(render(again, None), file=discord.File(io.BytesIO(image),
@@ -9389,8 +9951,8 @@ async def _pc_reveal_pack(ctx, index, private):
         return
     total = int(first.get("total") or 0)
     if total == 0:
-        await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims today's free pack, and it opens"
-                                  " in the mod.", ephemeral)
+        await _pc_reveal_say(ctx, "No opened packs yet - `/daily` claims and opens today's free pack.",
+                             ephemeral)
         return
     if index > total:
         await _pc_reveal_say(ctx, f"You have {total} opened pack{'s' if total != 1 else ''}:"
@@ -9403,19 +9965,64 @@ async def _pc_reveal_pack(ctx, index, private):
         await _pc_reveal_say(ctx, _pc_reveal_refusal(ctx, status, first, "pack"), ephemeral)
         return
     pack_id = str(first["packs"][0].get("pack_id"))
-    # The final re-read names the pack, never the index: a pack opened in
-    # between moves every index by one.
+    outcome = await _pc_reveal_pack_run(ctx, me, locale, pack_id, first,
+                                        lambda answer, note: _pc_reveal_pack_text(answer, index, note), ephemeral)
+    if outcome != "posted":
+        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
+
+
+async def _pc_reveal_pack_run(ctx, me, locale, pack_id, first, render, ephemeral, player=None, before_send=None):
+    """Steps 2-7 of a pack reveal whose step 1 answered `first` for `pack_id`:
+    /pack's, and the reveal of a pack /daily or /buypack just opened. The
+    final re-read names the pack, never the index: a pack opened in between
+    moves every index by one. `player` (round 4, LOW 2): the re-read names
+    the player the pack must belong to."""
     params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
+    if player is not None:
+        params["player_steam_id"] = player
 
     async def _reread():
         return await _pc_api("GET", "/internal/pc/packs", params=params, timeout=5.0)
 
-    outcome = await _pc_reveal_run(ctx, "pack", pack_id, first, _reread,
-                                   f"/internal/pc/packs/{pack_id}/strip/{str(first.get('locale') or locale)}.png",
-                                   {"discord_id": me}, lambda answer, note: _pc_reveal_pack_text(answer, index, note),
-                                   ephemeral)
+    return await _pc_reveal_run(ctx, "pack", pack_id, first, _reread,
+                                f"/internal/pc/packs/{pack_id}/strip/{str(first.get('locale') or locale)}.png",
+                                {"discord_id": me}, render, ephemeral, before_send=before_send)
+
+
+_PC_OPENED_UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it."
+
+
+async def _pc_reveal_opened(ctx, pack_id, head, player=None, before_send=None):
+    """The reveal of a pack this command just opened (/daily, D1; /buypack,
+    D2): /pack's steps, with step 1 reading that pack by its id - never by an
+    index, which a pack opened meanwhile would move - and `head` in place of
+    the index. Whatever keeps it from posting, the pack is already the
+    player's: the one line says so and points at /pack. Returns "posted",
+    "unshown" (that line was sent) or, when `player` is named (a bought
+    pack's journaled player, round 4 LOW 2) and the Discord id is linked to
+    another player now, "rebound" - nothing was sent: /pack would read the
+    player linked now. `before_send` goes to _pc_reveal_run (round 4, LOW 1)."""
+    me, locale = str(ctx.author.id), _pc_locale_of(ctx)
+    params = {"discord_id": me, "pack_id": pack_id, "locale": locale}
+    if player is not None:
+        params["player_steam_id"] = player
+    status, first = await _pc_api("GET", "/internal/pc/packs", params=params)
+    if status == 412 and _pc_detail(first).get("error") == "player_changed":
+        print(f"[PC-OPEN] pack={pack_id} not shown: the Discord id is now linked to another player")
+        return "rebound"
+    if status != 200 or _pc_reveal_prints(first, "pack") is None:
+        print(f"[PC-OPEN] pack={pack_id} opened, not shown: the read answered HTTP {status}")
+        await _pc_reveal_say(ctx, _PC_OPENED_UNSHOWN)
+        return "unshown"
+    outcome = await _pc_reveal_pack_run(ctx, me, locale, pack_id, first,
+                                        lambda answer, note: _pc_reveal_pack_text(answer, 1, note, head=head), False,
+                                        player=player, before_send=before_send)
+    if outcome == "rebound":
+        return "rebound"
     if outcome != "posted":
-        await _pc_reveal_say(ctx, _pc_reveal_unposted(outcome, "pack"), ephemeral)
+        await _pc_reveal_say(ctx, _PC_OPENED_UNSHOWN)
+        return "unshown"
+    return "posted"
 
 
 async def _pc_reveal_binder(ctx, member, page):
@@ -9485,7 +10092,7 @@ async def cmd_pc_binder(ctx, member: discord.Member = None, page: int = 1):
 
 _pc_events_sent = {}   # event id -> True once posted (a failed ack never re-posts; bounded below)
 _pc_face_tries = {}    # first event id of a print group -> ticks spent waiting for its picture
-_PC_FACE_TRIES = 3     # ~90 s at this loop's 30 s period, then the line posts without one
+_PC_FACE_TRIES = 3     # ticks deferred at most: ~3 min at this loop's 60 s period, then the line posts without one
 
 
 def _pc_event_lines(events):
@@ -9580,7 +10187,7 @@ async def poll_pc_events():
                 # handout; a busy subject is leased again).
                 first = by_id.get(ids[0], {})
                 p = first.get("print") or {}
-                face, lease, again = None, (None, None), False
+                face, lease, again, why, gone = None, (None, None), False, None, False
                 if first.get("subject_ref"):
                     lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)
                     again = bool(lease[2])
@@ -9588,12 +10195,34 @@ async def poll_pc_events():
                 # when the api's sixty-second hold ran out (Steam pictures v3
                 # §8). The line posts without a face rather than attach the
                 # plate for good — an attachment cannot be swapped later.
+                if not p.get("print_id"):
+                    why = "the event names no print"
+                elif not first.get("face_ready", True):
+                    why = "the subject's picture was unresolved when the hold ran out (face_ready false)"
                 if lease[0] and p.get("print_id") and first.get("face_ready", True):
                     st, face, _ = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
                                                    params={"size": "card"})
                     if st != 200:
                         face = None
                         again = st == 0 or st == 409 or st >= 500
+                        gone = st == 404
+                        why = f"the face route answered HTTP {st}"
+                    elif face is None:
+                        # A 200 whose body the reader refused (it printed why):
+                        # a transport fault, not "this print has no picture" -
+                        # retried like a 5xx, never posted text-only at once (D3).
+                        again, why = True, "the face route answered HTTP 200 without a usable body"
+                # A 404 is the print discarded between the handout and the GET
+                # (look design v22 section 6 (2)): post NOTHING, ack NOTHING and
+                # release the lease. The pending query leaves discarded prints
+                # out, so the group is not handed out again; the groups behind
+                # it are still posted this tick (Discord fix round 2, L1).
+                if gone:
+                    _pc_face_tries.pop(ids[0], None)
+                    await _pc_lease_release(lease[0])
+                    print(f"[PC-EVENTS] face for {ids} answered HTTP 404 (the print is gone) - nothing posted,"
+                          " nothing acked, lease released")
+                    continue
                 # "Busy for two seconds" is not "has no picture". A transient
                 # refusal leaves the group QUEUED and unacked so the next tick
                 # can post it properly — but only so many times: an api that
@@ -9603,8 +10232,16 @@ async def poll_pc_events():
                     await _pc_lease_release(lease[0])
                     print(f"[PC-EVENTS] no picture for {ids[0]} yet (try {_pc_face_tries[ids[0]]}) — next tick")
                     break
-                _pc_face_tries.pop(ids[0], None)
-                if not await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease, require_lease=True):
+                tries = _pc_face_tries.pop(ids[0], None)
+                if face is None and why and tries:
+                    why = f"{why}, retried {tries} times"
+                # v22 section 6: the face is bound INTO an embed (attachment://),
+                # never a loose attachment; the line stays the message text (D3).
+                embed = None
+                if face is not None:
+                    embed = discord.Embed(color=_PC_RARITY_COLOR.get(str(p.get("rarity") or ""), 0x95A5A6))
+                if not await _pc_send_face(ch.send, content=text_line[:2000], embed=embed, face=face, lease=lease,
+                                           require_lease=True, receipt=f"[PC-EVENTS] line for {ids}", no_face=why):
                     # No live lease at the send: not posted, not acked, not
                     # remembered as sent -- the api's next handout resolves a
                     # deleted or banned party, a busy one is leased again.
@@ -10741,6 +11378,89 @@ def _fmt_pt_rel(iso_str):
         return iso_str
 
 
+# -- The sync start rule, stated with its live tally (board row 32) ----------
+# A sync tournament starts only when min_players (8) players agree on ONE of
+# the offered start times: signing up is not agreeing. Every message the bot
+# composes about a sync tournament in voting states that rule, how far the
+# vote has got ("N of 8 agree on <time> so far") and how to vote. The tally is
+# the in-game tab's own: /tournaments/current's public time_slot_tallies,
+# which that route computes only for a caller (any registered player).
+
+_TSYNC_VOTE_HOW = "Vote for every time you can make in F5 -> Tournaments."
+
+
+async def _tsync_tally(steam_id=None):
+    """The current sync tournament's start-time tally, as the in-game tab
+    reads it: {"tournament_id", "status", "min_players", "votes" (the top
+    slot's count, 0 when no slot has a vote), "slots" (the unix seconds of
+    every slot holding that count, in time order)}. `steam_id` is any
+    registered player's; without one the answer carries no votes, which is
+    right only when nobody has signed up. None when the read fails."""
+    query = {"kind": "sync"}
+    if steam_id:
+        query["steam_id"] = str(steam_id)
+    data = await api_get("/tournaments/current?" + urllib.parse.urlencode(query))
+    if not isinstance(data, dict) or not data.get("tournament_id"):
+        return None
+    counts = {}
+    for row in data.get("time_slot_tallies") or []:
+        if not isinstance(row, dict):
+            continue
+        slot, votes = _unix_ts(row.get("slot_ts")), row.get("votes")
+        if slot is not None and isinstance(votes, int) and not isinstance(votes, bool) and votes > 0:
+            counts[slot] = counts.get(slot, 0) + votes
+    top = max(counts.values(), default=0)
+    need = data.get("min_players")
+    return {"tournament_id": str(data["tournament_id"]), "status": data.get("status"),
+            "min_players": need if isinstance(need, int) and not isinstance(need, bool) and need > 0 else 8,
+            "votes": top, "slots": sorted(slot for slot, votes in counts.items() if top and votes == top)}
+
+
+async def _tsync_tally_for(t):
+    """The tally of watch entry `t` (a sync tournament), read with one of its
+    signups' Steam ids (no signup, no vote); None when the read fails or
+    /tournaments/current answers another tournament."""
+    signers = [s for s in (t.get("signups") or []) if isinstance(s, dict) and s.get("steam_id")]
+    tally = await _tsync_tally(signers[0]["steam_id"] if signers else None)
+    if tally is None or tally["tournament_id"] != str(t.get("tournament_id")):
+        return None
+    return tally
+
+
+def _tsync_times(slots):
+    """The tied top slots as one phrase: '<A>', '<A> or <B>', or '<A> or N other times'."""
+    shown = [f"<t:{slot}:F>" for slot in slots]
+    if len(shown) <= 2:
+        return " or ".join(shown)
+    return f"{shown[0]} or {len(shown) - 1} other times"
+
+
+def _tsync_progress(tally):
+    """How far the vote has got: 'N of 8 agree on <time> so far'."""
+    need, votes = tally["min_players"], tally["votes"]
+    if votes <= 0 or not tally["slots"]:
+        return f"0 of {need} agree on a time so far"
+    if votes < need:
+        return f"{votes} of {need} agree on {_tsync_times(tally['slots'])} so far"
+    return f"{votes} players agree on {_tsync_times(tally['slots'])} so far - enough to lock it"
+
+
+def _tsync_rule(min_players, tally=None):
+    """The start rule in one sentence and, given a tally, how far the vote has got."""
+    rule = f"It starts when {min_players} players agree on one start time"
+    return f"{rule}: {_tsync_progress(tally)}." if tally is not None else f"{rule}."
+
+
+def _tsync_signups_open_text(t, tally):
+    """The channel post that opens a sync tournament's signups: the start
+    rule with the live tally (the rule alone when the tally could not be
+    read), the default start, how to vote, and when signups close."""
+    need = tally["min_players"] if tally is not None else (t.get("min_players") or 8)
+    return (f"**Tournament signups open.** {_tsync_rule(need, tally)} "
+            f"Default start: {_fmt_pt(t.get('default_start_ts'))}. {_TSYNC_VOTE_HOW} "
+            f"Signups close {_fmt_pt(t.get('lock_at'))}.")
+
+
 async def _promote_role(member, base_name, x2_name):
     """Grant base_name on first placement; on repeat placements, swap base -> x2.
     Idempotent: if member already has x2_name, nothing changes."""
@@ -10837,11 +11557,8 @@ async def poll_tournaments():
                     f"Signups close {_fmt_pt(t['lock_at'])}. Sign up in-game via the Tournaments → ASYNC tab."
                 )
             else:
-                await _announce_in_channel(
-                    f"**Tournament signups open.** Default start: {_fmt_pt(t['default_start_ts'])}. "
-                    f"Vote on alternate times or sign up in-game via the Tournaments tab. "
-                    f"Signups close {_fmt_pt(t['lock_at'])}."
-                )
+                # Row 32: the start rule, the live tally and how to vote.
+                await _announce_in_channel(_tsync_signups_open_text(t, await _tsync_tally_for(t)))
         # voting -> locked -> DM every signup what actually happens next.
         #
         # This MUST branch on kind. Until Aug 2026 it did not, and every async
@@ -11221,6 +11938,7 @@ async def nag_pending_async_matches():
 # custom_id in the message does not.
 
 _tavail_seen_notice_ids = set()  # process-lifetime re-ack guard
+_tavail_held = {}  # sync tournament id -> the tally its held availability checks were last logged at (row 32)
 
 
 def _unix_ts(v):
@@ -11325,7 +12043,7 @@ def _tdlc_message(opponent_name, deadline_unix, extension_available):
     )
 
 
-def _tavail_embed(kind, start_unix, lock_unix):
+def _tavail_embed(kind, start_unix, lock_unix, tally=None):
     if kind == "async":
         lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
         desc = (f"Signups close {lock_str}.\n\n"
@@ -11338,16 +12056,18 @@ def _tavail_embed(kind, start_unix, lock_unix):
     start_str = f"<t:{start_unix}:F>" if start_unix else "(time TBD)"
     lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
     # Wording contract (learning #130): "have ROUNDS open", never "be in the
-    # tab". July 17 round 3: the DEFAULT time shown is provisional — the
-    # final time is vote-decided at lock (>= 24h before play), so say so and
-    # point at the vote.
-    desc = (f"Default start: {start_str}\n"
-            f"⏰ The FINAL time locks in {lock_str} — it'll be whichever voted "
-            f"slot 8+ players agree on, always at least a day before play. "
-            f"Make sure your available times are picked in F5 → Tournaments!\n\n"
+    # tab". Row 32 (2026-09-28): the check names the time it asks about - the
+    # start time holding min_players votes, from the tally the notice loop
+    # read - with the start rule and how far the vote has got; the final time
+    # is still decided at the lock (>= 24h before play). The default start is
+    # shown only when no tally is handed in.
+    asked = _tsync_times(tally["slots"]) if tally is not None and tally["slots"] else start_str
+    desc = (f"Asked about: {asked}\n"
+            f"{_tsync_rule(tally['min_players'] if tally is not None else 8, tally)} "
+            f"The time locks in {lock_str}, always at least a day before play. {_TSYNC_VOTE_HOW}\n\n"
             "All matches are played back-to-back in one sitting (~2 hours, "
             "short skippable breaks between your matches). You only need "
-            "ROUNDS open at the main menu at the start time — the mod "
+            "ROUNDS open at the main menu at the start time - the mod "
             "auto-connects you to each match.")
     return discord.Embed(title="🏆 Synchronized tournament — availability check", description=desc, color=0xFAA61A)
 
@@ -11683,6 +12403,18 @@ async def _ack_tournament_notices(entries):
         print(f"[TAVAIL] ack error: {ex}")
 
 
+async def _tavail_still_live(nid):
+    """Discord fix round 4, fix 5 (Codex round 3 LOW 4): is availability
+    check `nid` still to be sent - its entrant still signed up and eligible,
+    the notice still unsent? The server's own answer: the notice feed of that
+    one notice (every condition of the feed applies). True / False; None when
+    the read got no usable answer (the notice is read again next tick)."""
+    data = await api_get(f"/internal/tournament-notices?unnotified=true&notice_id={urllib.parse.quote(str(nid))}")
+    if not isinstance(data, dict) or not isinstance(data.get("notices"), list):
+        return None
+    return any(isinstance(n, dict) and str(n.get("notice_id")) == str(nid) for n in data["notices"])
+
+
 @tasks.loop(seconds=30)
 async def poll_tournament_notices():
     """Own fully-guarded loop (learning #129 — never chained onto
@@ -11695,6 +12427,7 @@ async def poll_tournament_notices():
         if not data or not data.get("notices"):
             return
         to_ack = []
+        tick_tally = {}   # row 32: the sync tournament's tally, read at most once per tick
         for n in data["notices"]:
             if not isinstance(n, dict):
                 continue
@@ -11795,9 +12528,34 @@ async def poll_tournament_notices():
                 lock_unix = _unix_ts(payload.get("lock_ts")) or _unix_ts(n.get("lock_at"))
                 if kind == "async":
                     content = "Are you still in for the **Async tournament**?"
+                    embed = _tavail_embed(kind, start_unix, lock_unix)
                 else:
-                    content = "Are you still available to play in the **Synchronized tournament**?"
-                embed = _tavail_embed(kind, start_unix, lock_unix)
+                    # Row 32: the sync check asks about a TIME, so it goes out
+                    # only once some start time has min_players votes, and it
+                    # names that time. Until then the notice stays queued -
+                    # unacked, read again next tick; a tournament that is no
+                    # longer the sync one in voting drops it.
+                    if "sync" not in tick_tally:
+                        tick_tally["sync"] = await _tsync_tally(steam)
+                    tally = tick_tally["sync"]
+                    if tally is None:
+                        continue
+                    if tally["tournament_id"] != str(tid) or tally["status"] != "voting":
+                        print(f"[TAVAIL] availability check {nid} for tournament {str(tid)[:8]} dropped:"
+                              " it is no longer the sync tournament in voting")
+                        _tavail_seen_notice_ids.add(skey)
+                        to_ack.append((nid, rev))
+                        continue
+                    if tally["votes"] < tally["min_players"]:
+                        held = (tally["votes"], tuple(tally["slots"]))
+                        if _tavail_held.get(str(tid)) != held:
+                            _tavail_held[str(tid)] = held
+                            print(f"[TAVAIL] availability checks for tournament {str(tid)[:8]} held until a"
+                                  f" start time has {tally['min_players']} votes: {_tsync_progress(tally)}")
+                        continue
+                    content = ("Are you still available to play in the **Synchronized tournament** at "
+                               f"{_tsync_times(tally['slots'])}?")
+                    embed = _tavail_embed(kind, start_unix, lock_unix, tally)
                 view = _tavail_view(tid, steam)
             elif _is_deadline_checkin:
                 deadline_unix = _unix_ts(payload.get("deadline_epoch")
@@ -11831,6 +12589,18 @@ async def poll_tournament_notices():
                 continue
             if user is None:
                 continue
+            if ntype == "availability_check":
+                # Round 4, fix 5: the feed's entrant check ran when the feed
+                # was read, and this tick has awaited the tally and the user
+                # since; ask the server again as the LAST step before the
+                # send, so an entrant who left or was banned meanwhile gets no
+                # DM. A refused or unanswered check sends and acks nothing.
+                live = await _tavail_still_live(nid)
+                if live is not True:
+                    print(f"[TAVAIL] availability check {nid} not sent: "
+                          + ("its entrant is no longer signed up and eligible" if live is False
+                             else "the pre-send check got no answer; read again next tick"))
+                    continue
             try:
                 # allowed_mentions on every send (#261) — the match-result
                 # embeds carry player-authored names.
@@ -12427,9 +13197,10 @@ def _bracket_progress_lines(t, max_lines=28):
 _TOURNEY_HOW_IT_WORKS = {
     "sync": (
         "Weekly bracket played in ONE sitting. Sign up in-game "
-        "(F5 → Tournaments), vote on the start time, then just have ROUNDS "
-        "open at the main menu when it starts — the mod auto-connects you to "
-        "each match. Miss your ready window and you forfeit that match."
+        "(F5 -> Tournaments) and vote for every start time you can make: it "
+        "starts when 8 players agree on one time. Then have ROUNDS open at "
+        "the main menu - the mod auto-connects you to each match. Miss your "
+        "ready window and you forfeit that match."
     ),
     "async": (
         "No fixed play time. Sign up in-game (F5 → Tournaments); when signups "
@@ -12441,7 +13212,7 @@ _TOURNEY_HOW_IT_WORKS = {
 }
 
 
-def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
+def _build_tournament_board_embed(t, kind: str, tally=None) -> discord.Embed:
     """One embed per tournament kind, mirroring the in-game Sync/Async page."""
     kind_label = "Sync" if kind == "sync" else "Async"
     emoji = "🏆" if kind == "sync" else "🌀"
@@ -12469,7 +13240,9 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
         if kind == "sync":
             lines.append(f"Default start: {_fmt_pt(t.get('scheduled_start_ts') or t.get('default_start_ts'))}")
             lines.append(f"Signups + time voting close: {_fmt_pt(t.get('lock_at'))}")
-            lines.append("_Start-time voting is open in-game (F5 → Tournaments)._")
+            # Row 32: the start rule, how far the vote has got, how to vote.
+            lines.append(_tsync_rule(tally["min_players"] if tally is not None else min_p, tally))
+            lines.append(_TSYNC_VOTE_HOW)
         else:
             lines.append(f"Signups close: {_fmt_pt(t.get('lock_at'))} — the bracket starts then; "
                          f"each match has a {ASYNC_DEADLINE_DAYS}-day deadline.")
@@ -12534,9 +13307,12 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
     # Two embeds share ONE message's 6000-char total budget (Discord counts
     # across all embeds, fields included), so each description gets 2600 —
     # not the 4096 single-embed cap. Worst case, measured rather than
-    # estimated: 2 × 2582 truncated descriptions (2580 + the "\n…" appended
-    # below) + the two "How it works" values (sync 250, async 314) + their
-    # 15-char names + the two titles ≈ 5795, leaving ~200 spare. That margin
+    # estimated: 2 x 2582 truncated descriptions (2580 + the newline and
+    # ellipsis appended below) + the two "How it works" values (sync 294,
+    # async 314) + their 15-char names + the two titles = 5837, leaving ~160
+    # spare: board row 32 grew the sync blurb from 250 to 294 to state the
+    # start rule, and test_discord_tournament_start_rule.py re-measures the
+    # total. That margin
     # is REAL — the async blurb grew by 54 chars in Aug 2026 and ate a fifth
     # of it. Re-measure before growing either blurb much further, or drop the
     # description cap in the same edit; overshooting 6000 makes Discord reject
@@ -12585,8 +13361,12 @@ async def _publish_tournament_board():
         done = [t for t in tournaments if t.get("kind") == kind and t.get("status") == "completed"]
         return done[-1] if done else None
 
+    sync_t = pick("sync")
+    # Row 32: the sync board states the start rule with the live tally.
+    sync_tally = (await _tsync_tally_for(sync_t)
+                  if sync_t is not None and sync_t.get("status") == "voting" else None)
     embeds = [
-        _build_tournament_board_embed(pick("sync"), "sync"),
+        _build_tournament_board_embed(sync_t, "sync", sync_tally),
         _build_tournament_board_embed(pick("async"), "async"),
     ]
     # Living-message management — same shape as publish_lb.

@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 383   # dance cards: +5 (the motion upload, the selection, the motion read, the atlas, the motion preview GIF; 378 before); 886bed8 r5: +1, the read-only team series status route (377 before); card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 384   # LAND of main cd8d846: dance cards' +5 (the motion upload, the selection, the motion read, the atlas, the motion preview GIF; 379 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route (378 before); Discord fix round 1: +1 (the bot's pack open, internal/pc/packs/open; 377 before); card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 382   # dance cards: +5 (377 before); 886bed8 r5: +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (376 before); card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 383   # LAND of main cd8d846: dance cards' +5 (378 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (377 before); Discord fix round 1: +1 (376 before); card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -954,7 +954,27 @@ def test_the_helper_closure_stays_affordable():
     # The bound moves to 86 -- ~5% over the measurement, the headroom the
     # moves above gave -- for that reason and no other; the median (22) and
     # worst bounds stay.
-    assert code_p90 <= 86, f"p90 code closure {code_p90} of {total}"
+    #
+    # Discord fix round 4 LAND (2026-09-30): measured 22 / 88 / 328 of 2940
+    # indexed bindings over 383 routes at the lane tip after its merges of
+    # main 82c0da6 and cd8d846, against 22 / 85 / 328 over the lane before
+    # them (ceddd3d, 377 routes) and 22 / 83 / 326 over main cd8d846 (382
+    # routes), the same walk with the same route seeds over each tree's own
+    # backend/api. Neither side passes 86; the composition does. The p90 is
+    # the value at sorted position int(0.9 * n), the 39th route from the top
+    # at n = 383. The lane's tournament routes keep their lane counts, above
+    # main's (signup 95 / 88, unsignup 90 / 82, time-vote 85 / 82, play-now
+    # 83 / 79, spectate/games 87 / 83: the row-32 start rule and round 4's
+    # one eligibility predicate), and main's dance cards add five routes and
+    # take POST /api/v1/pc/portrait from 86 to 88 (its motion writer); the
+    # 39th from the top is that route, at 88, 88 on main. Every count is the
+    # one its side measures; the only composed count, GET /api/v1/health (83:
+    # both sides' health words), sits below the rank.
+    #
+    # The bound moves to 92 -- ~5% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median (22) and
+    # worst bounds stay.
+    assert code_p90 <= 92, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1074,7 +1094,18 @@ def test_the_helper_closure_stays_affordable():
     # That last one widens the reviewed surface rather than narrowing it, which
     # is the only direction this gate may be wrong in. The bound moves to 460,
     # the same ~5% headroom 420 gave over 401 and 400 gave over 383.
-    assert all_worst <= 460, f"worst closure {all_worst} of {total}"
+    # Discord fix (2026-09-28): the same route measured 459 at the lane base
+    # 64885ef, 460 at the round-1 tip d4a284d and 461 at round 2's 12952d5 -
+    # one code binding per round, each one the route really runs:
+    # main._pc_open_for (round 1: the open path this route and the bot's
+    # POST /api/v1/internal/pc/packs/open share, keyed by the purchase's
+    # nonce) and main._pc_committed_answer (round 2: the recorded outcome a
+    # replayed key, a pack voided at open and /pc/packs/result answer, so no
+    # work after a purchase commits can fail its answer). Code tier 326 ->
+    # 327 -> 328, under its bound; median 75 and p90 164 -> 166 under
+    # theirs. The bound moves to 484, the same ~5% headroom 460 gave over
+    # 439, for that reason and no other.
+    assert all_worst <= 484, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
