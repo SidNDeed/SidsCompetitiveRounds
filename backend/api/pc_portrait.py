@@ -29,7 +29,7 @@ PORTRAIT_SIZE = 1180                     # the upload's edge (§1.7)
 PC_PORTRAIT_MAX_BYTES = 1 << 20          # 1 MiB upload cap; re-applied to the canonical bytes (r18 M6)
 PC_FACE_MAX_BYTES = 4 << 20              # card ceiling (§1.6)
 PC_TILE_MAX_BYTES = 1 << 20              # tile ceiling (§1.6)
-DESCRIPTOR_MAX_BYTES = 320               # r18 H4: lossless offsets need room
+DESCRIPTOR_MAX_BYTES = 384               # r18 H4: lossless offsets need room; + the dance suffix (dance cards S2.8)
 PACING_SECONDS = 30                      # one accepted upload per player per 30 s (§1.7)
 LEASE_SECONDS = 60                       # a delivery lease's life (§6)
 LEASE_RESERVE_SECONDS = 3                # the bot's deadline = until - reserve (r18 H2)
@@ -59,7 +59,13 @@ DESCRIPTOR_RE = re.compile(
     r"\|skin=(?P<skin>0)"
     r"\|anim=(?P<anim>[01])"
     r"\|g=(?P<game>[0-9A-Za-z._-]{1,24})"
-    r"\|r=(?P<recipe>[0-9]{1,3})$"
+    r"\|r=(?P<recipe>[0-9]{1,3})"
+    # Dance cards (design S2.8): the optional anchored suffix of a dancer's
+    # still -- the selected dance's sku and the motion capture recipe (`ar`).
+    # Without it the grammar is exactly the one before this release, so a
+    # non-dancer's descriptor, and an older client's, is unchanged. The writer
+    # checks both halves against its locked row; the grammar only shapes them.
+    r"(?:\|dance=(?P<dance>dance_[a-z]{1,24})\|ar=(?P<ar>[1-9][0-9]{0,2}))?$"
 )
 
 

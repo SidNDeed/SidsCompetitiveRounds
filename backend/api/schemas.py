@@ -954,6 +954,37 @@ class HealthResponse(BaseModel):
     # silently leaving the key out. Absent on any build before this batch,
     # which is how the train reads the old build.
     ffa_finishing_count: int
+    # pc_motion: how many of the dance-card motion routes are registered on
+    # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
+    # per-visit motion read, the atlas, the selection and the bot's motion
+    # preview GIF -- 5 on this build. DERIVED from app.routes on every
+    # request, never written down, so a build that lost a route's
+    # registration reads fewer (#306/#342). The build discriminator for the
+    # dance-cards batch, equal on both boxes by construction and read by
+    # nothing else. Declared without a default, so building the answer
+    # without it raises instead of silently leaving the key out. Absent on
+    # any build before that batch, which is how the old build reads.
+    pc_motion: int
+    # janitor_selftest: the verdict of this api process's boot janitor SQL
+    # self-test (main._janitor_selftest_marker; 1 = it ran and every statement
+    # passed, 0 = it ran and did not pass, 2 = skipped on the read replica,
+    # 3 = not finished yet). DERIVED from the report the self-test recorded,
+    # never written down (#342), and ROLE-AWARE by design: the primary reads 1
+    # once its self-test has passed and the standby reads 2, so the release
+    # train asserts it per role; read by nothing else (#306). Declared without
+    # a default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before it, which is how the
+    # train reads the old build.
+    janitor_selftest: int
+    # janitor_selftest_build: release-train verification plumbing, not a
+    # design mechanism (main._JANITOR_SELFTEST_BUILD; 1 = this build checks
+    # each janitor statement by its class and reports janitor_selftest). A
+    # code constant, equal on both boxes by construction, so the train can
+    # read it through the edge where janitor_selftest differs by role;
+    # probed by the release train and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead
+    # of silently leaving the key out. Absent on any build before it.
+    janitor_selftest_build: int
     # connect_failure: how many of the connect-failure design's eight I2
     # writers (the lock, the poll, connect, assembly, the leave, the verdict,
     # the report and the release) are wired to their seat-row write in this

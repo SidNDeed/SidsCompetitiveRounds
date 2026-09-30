@@ -115,6 +115,12 @@ services:
       # actually gets (#438/#443: nothing reaches the process unless it is
       # named here).
       PC_FACE_CACHE_DIR: ${PC_FACE_CACHE_DIR:-/var/cache/pc-faces}
+      # PC_MOTION_CACHE_DIR: where derived dance-motion atlases are cached on
+      # disk (S4.7: its own root beside the face cache's, its own 1 GiB cap).
+      # It must name the mount below: deriving one print's atlases costs tens
+      # of seconds on the single motion worker. The code carries the same
+      # path as its fallback (#438/#443, as above).
+      PC_MOTION_CACHE_DIR: ${PC_MOTION_CACHE_DIR:-/var/cache/pc-motion}
       # PC_STEAM_SWEEP: "off" pauses the Steam profile-picture sweep (the
       # health word reads paused:env); unset or anything else runs it. Named
       # here so a value in .env reaches the process at all (#438/#443).
@@ -127,6 +133,9 @@ services:
       # The face cache survives a rebuild the same way: a named volume, so
       # a deploy does not re-render every face the next binder asks for.
       - pc-faces:/var/cache/pc-faces
+      # The motion cache too, on its own volume: an api rebuild must not
+      # send every viewed print back through the motion worker.
+      - pc-motion:/var/cache/pc-motion
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:
@@ -191,4 +200,6 @@ volumes:
   pgdata:
     driver: local
   pc-faces:
+    driver: local
+  pc-motion:
     driver: local
