@@ -11,7 +11,8 @@ def _one_line_print(*args, **kwargs):
     """Every log line is ONE line (r9 L8): a relayed message or a name that
     carries CR/LF must not split into lines that could read as the lifecycle
     markers the deploy train parses. Only the container's shell (the boot
-    line) and on_ready (the ready line) print markers."""
+    line) and on_ready (the dance-cards feature line, then the ready line)
+    print markers."""
     _gen_builtins.print(*(str(a).replace("\r", " ").replace("\n", " ") for a in args), **kwargs)
 
 
@@ -476,6 +477,10 @@ async def on_ready():
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
+    # The batch's bot arm (dance cards, round two): this build's positive
+    # signal, one whole line carrying the ready line's generation, printed
+    # just before it (_pc_card_gif_signal, beside /card).
+    print(_pc_card_gif_signal(), flush=True)
     # The deploy train's witness (r6 M6): its only job is to be probed. The
     # stamp binds the line to THIS process (r7 M2): a retained log tail can
     # carry an earlier incarnation's line after a crash-restart.
@@ -8465,6 +8470,11 @@ def _pc_not_linked(ctx, target):
 # bytes: the text still goes out, the picture does not.
 _PC_FACE_MAX_BYTES = 4 * 1024 * 1024
 _PC_LEASE_RESERVE_S = 3.0
+# Dance cards (S6.3): /card asks for its motion preview only while the lease
+# has more than this left beyond the send reserve -- 2 s for the fetch and
+# 10 s of margin for a GIF send -- and gives that one request 2 s.
+_PC_MOTION_GIF_MARGIN_S = 12.0
+_PC_MOTION_GIF_TIMEOUT_S = 2.0
 # The composite byte route's refusals that mean "a healthy box, come back
 # shortly": a portrait released mid-render, the composite gate full, the cold
 # composite at the api's 30 s ceiling. The retry predicate is membership in
@@ -8564,9 +8574,11 @@ async def _pc_back_bytes():
 
 
 async def _pc_lease(subject_ref, print_id=None, event_ids=None, *, timeout=None):
-    """(lease_id, deadline, transient, status) - deadline on the monotonic clock,
-    `until` minus the reserve - or (None, None, transient, status) when no lease could
-    be taken: the send then carries no picture.
+    """(lease_id, deadline, transient, status, portrait_hash) - deadline on the
+    monotonic clock, `until` minus the reserve; portrait_hash the picture the
+    lease authorises, as the api resolved it under the subject's identity lock
+    (None for a subject with no picture) - or (None, None, transient, status,
+    None) when no lease could be taken: the send then carries no picture.
 
     `transient` distinguishes "not right now" from "not ever". 409 means the
     subject's identity lock is held by a writer for a moment; 0 means the api
@@ -8577,7 +8589,7 @@ async def _pc_lease(subject_ref, print_id=None, event_ids=None, *, timeout=None)
     a 404 from a 422. `timeout`, when given, is that request's ceiling;
     absent, the request is exactly the one every shipped caller makes."""
     if not subject_ref:
-        return None, None, False, None
+        return None, None, False, None, None
     payload = {"subject_ref": str(subject_ref)}
     if print_id:
         payload["print_id"] = str(print_id)
@@ -8586,7 +8598,7 @@ async def _pc_lease(subject_ref, print_id=None, event_ids=None, *, timeout=None)
     st, body = await _pc_api("POST", "/internal/pc/lease", payload=payload,
                              **({} if timeout is None else {"timeout": float(timeout)}))
     if st != 200 or not isinstance(body, dict) or not body.get("lease_id"):
-        return None, None, (st == 409 or st == 0 or st >= 500), st
+        return None, None, (st == 409 or st == 0 or st >= 500), st, None
     try:
         until = datetime.fromisoformat(str(body.get("until")).replace("Z", "+00:00"))
         if until.tzinfo is None:
@@ -8594,7 +8606,9 @@ async def _pc_lease(subject_ref, print_id=None, event_ids=None, *, timeout=None)
         left = (until - datetime.now(timezone.utc)).total_seconds()
     except Exception:
         left = 30.0
-    return str(body["lease_id"]), time.monotonic() + (left - _PC_LEASE_RESERVE_S), False, st
+    still = body.get("portrait_hash")
+    return (str(body["lease_id"]), time.monotonic() + (left - _PC_LEASE_RESERVE_S), False, st,
+            still if isinstance(still, str) and still else None)
 
 
 def _pc_lease_left(deadline):
@@ -8681,7 +8695,7 @@ async def _pc_leases(subject_refs):
         if remaining <= 0:
             past_deadline.add(ref)
             continue
-        lease_id, deadline, _transient, status = await _pc_lease(ref, timeout=min(2.0, remaining))
+        lease_id, deadline, _transient, status, *_rest = await _pc_lease(ref, timeout=min(2.0, remaining))
         if status == 200 and lease_id:
             leased[ref] = (lease_id, deadline)
         elif status == 404:
@@ -8694,6 +8708,20 @@ async def _pc_leases(subject_refs):
           f"past_deadline={len(past_deadline)} other={len(other)}")
     await _pc_lease_release_all([lease_id for lease_id, _deadline in leased.values()])
     return None, undeliverable, past_deadline
+
+
+def _pc_upload_cap(ctx):
+    """The most bytes /card's motion preview may carry (M5, S6.3): the face
+    cap or this destination's upload limit, whichever is lower -- never the
+    cap alone. In a guild, the guild's own limit; elsewhere (a DM), Discord's
+    default. A limit that cannot be read is no limit to trust: 0, and no GIF
+    is asked for."""
+    try:
+        guild = getattr(ctx, "guild", None)
+        limit = int(guild.filesize_limit if guild is not None else discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES)
+    except Exception:
+        return 0
+    return max(0, min(_PC_FACE_MAX_BYTES, limit))
 
 
 async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
@@ -8890,8 +8918,65 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
     st, face, _ = await _pc_api_bytes(f"/internal/pc/face/preview/{ref}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
     if st != 200:
         face = None
-    if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=True):
+    # Dance cards (S6.3): the motion preview, when the api holds it warm. Asked
+    # for only over a preview PNG in hand, under a lease that names a picture
+    # and has more than _PC_MOTION_GIF_MARGIN_S left beyond the send reserve:
+    # ONE request, its own 2 s ceiling, at most _pc_upload_cap bytes. Posted
+    # only as a 200 whose X-Motion-Static-Hash is the picture the lease
+    # authorised; any other outcome posts the PNG exactly as before, and the
+    # same lease revalidation gates either send.
+    filename = "card.png"
+    leased_still = (tuple(lease) + (None,) * 5)[4]
+    if face is not None and leased_still and _pc_lease_left(lease[1]) > _PC_MOTION_GIF_MARGIN_S:
+        cap = _pc_upload_cap(ctx)
+        if cap > 0:
+            gst, gif, gmeta = await _pc_api_bytes(f"/internal/pc/motion/preview/{ref}/{_pc_locale_of(ctx)}.gif",
+                                                  params={"snapshot_id": snap_id, "lease_id": lease[0]},
+                                                  timeout=_PC_MOTION_GIF_TIMEOUT_S, max_bytes=cap)
+            if gst == 200 and gif is not None and gmeta.get("x-motion-static-hash") == leased_still:
+                face, filename = gif, "card.gif"
+    if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, filename=filename, require_lease=True):
         await ctx.send("❌ That card isn't available right now — try again in a moment.")
+
+
+# Dance cards, round two (the integrator's addendum): the rebuilt bot's
+# positive signal for the release train's bot arm. The train's witness
+# ([BOT-BOOT] and [BOT-READY], matched by generation) proves that a new
+# process started, not which build it runs, so on_ready prints ONE more whole
+# line just before its ready line, with the same generation:
+#     [BOT-FEATURE] card_motion_gif=<n> -- gen=<gen>
+# <n> is DERIVED from /card's compiled callback, never written down (#306,
+# #342): 1 when its code (nested code included) loads every name of
+# _PC_CARD_GIF_NAMES -- the GIF branch's margin, its request timeout and the
+# upload cap that bounds its bytes, which nothing else in /card uses -- 0 on a
+# build whose /card lost that branch, and the exception's type name when the
+# derivation fails -- never 1, so it cannot pass for the new build, and it
+# never stops the ready line. Names, not text: a comment or a docstring cannot
+# move it. A build before this batch prints no such line. Its only job is to
+# be probed.
+_PC_CARD_GIF_NAMES = frozenset({"_PC_MOTION_GIF_MARGIN_S", "_PC_MOTION_GIF_TIMEOUT_S", "_pc_upload_cap"})
+
+
+def _pc_card_gif_word(command) -> int:
+    """1 when the compiled callback of `command` (a discord.py command, or a
+    plain function) loads every name of _PC_CARD_GIF_NAMES, nested code
+    included; else 0."""
+    fn = getattr(command, "callback", command)
+    names, todo = set(), [fn.__code__]
+    while todo:
+        code = todo.pop()
+        names.update(code.co_names)
+        todo.extend(c for c in code.co_consts if isinstance(c, type(code)))
+    return 1 if _PC_CARD_GIF_NAMES <= names else 0
+
+
+def _pc_card_gif_signal() -> str:
+    """The one whole line on_ready prints just before [BOT-READY] (above)."""
+    try:
+        word = str(_pc_card_gif_word(cmd_pc_card))
+    except Exception as exc:   # the probe must never stop the ready line
+        word = "error:" + type(exc).__name__
+    return "[BOT-FEATURE] card_motion_gif=" + word + " -- gen=" + _BOT_GEN
 
 
 def _pc_reveal_hex32(ref):

@@ -218,6 +218,7 @@ namespace CompetitiveRounds
             string verb = spec.Split(',')[0].Trim().ToLowerInvariant();
             if (verb == "gradebake") { Plugin.Instance.StartCoroutine(GradeBakeRun(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET))); return; }
             if (verb == "gradeswatch") { Plugin.Instance.StartCoroutine(GradeSwatchRun(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET))); return; }
+            if (verb == "dance") { DanceDevRun(spec); return; }   // dance cards: the capture in local mode and its VM tests (PortraitRenderDanceDev.cs)
             Plugin.Instance.StartCoroutine(Run(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET)));
         }
 
@@ -396,6 +397,10 @@ namespace CompetitiveRounds
             _renderClaim.Clear();
             _cleanupOwed = false;
             try { Application.logMessageReceived -= OnLog; } catch { }
+            // A dance job that never unwound left its pose set: its rig's
+            // remembered deltas undone first, then the pose cleared, before the
+            // rig goes (design S1.3; L1's order, DanceEmotes.EndPortraitPose).
+            try { var pp = DanceEmotes.PortraitPose; DanceEmotes.EndPortraitPose(pp.HasValue ? pp.Value.RigRoot : null); } catch { }
             try { Teardown(new StringBuilder()); } catch { }
             try { DestroyGradeObjects(); } catch { }
             try { Plugin.Log.LogInfo("[PORTRAIT] force-abort: " + why); } catch { }
@@ -462,7 +467,10 @@ namespace CompetitiveRounds
                 // that matures while a render or an upload is busy, or that
                 // Start refuses (a match, no prefab or identity yet), stays
                 // armed and is tried again five seconds later.
-                if (Rendering || UploadInFlight || !Start(_refreshWhy ?? "preset", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }
+                // A dancer's refresh goes through the dance decision (RefreshStart,
+                // PortraitRenderDance.cs): a base still sent over a bound motion
+                // would unbind it.
+                if (Rendering || UploadInFlight || !RefreshStart(_refreshWhy ?? "preset")) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }
                 _refreshAt = -1f;
                 return;
             }
@@ -479,6 +487,10 @@ namespace CompetitiveRounds
             // spin; the next visit (or a preset change) tries again, which is
             // what makes "art not loaded yet" self-correcting.
             if (want == null) return;
+            // Dance cards (design S1.2): a selected, owned dance decides here --
+            // the dance job, a current dance picture, or a Fallback whose still
+            // is current; otherwise the product path below, as before.
+            if (DanceVisit(me, want)) return;
             if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want)
             {
                 LastResult = "picture current";
@@ -728,9 +740,9 @@ namespace CompetitiveRounds
 
             // The server's cap, checked here rather than after a capture that
             // would only earn a 422 and leave the previous face in place.
-            if (System.Text.Encoding.UTF8.GetByteCount(inp.descriptor) > 320)
+            if (System.Text.Encoding.UTF8.GetByteCount(inp.descriptor) > DESCRIPTOR_MAX_BYTES)
             {
-                inp.refusal = "the descriptor exceeds 320 bytes";
+                inp.refusal = "the descriptor exceeds " + DESCRIPTOR_MAX_BYTES + " bytes";
                 inp.descriptor = null;
             }
             return inp;
@@ -761,6 +773,34 @@ namespace CompetitiveRounds
             var inp = Capture(preset);
             if (inp.refusal != null) { LastResult = "no picture: " + inp.refusal; return null; }
             return inp.descriptor;
+        }
+
+        /// <summary>The server's descriptor cap (pc_portrait.DESCRIPTOR_MAX_BYTES):
+        /// 384 on both sides from the dance cards release on, which leaves room
+        /// for the dance suffix (design S2.8).</summary>
+        internal const int DESCRIPTOR_MAX_BYTES = 384;
+
+        /// <summary>A dancer's still descriptor (dance cards design S2.8, S1.4
+        /// step 9): the base descriptor with the anchored suffix
+        /// `|dance=SKU|ar=MOTION_RECIPE`, or null when the sku is not one the
+        /// grammar accepts or the result exceeds the cap. Only the dance job
+        /// appends it, and only for the dance `/pc/me` names as selected; every
+        /// other descriptor -- a non-dancer's, one for an older server, one from a
+        /// seat that cannot dance -- is the base one, unchanged.</summary>
+        internal static string DanceDescriptor(string descriptor, string danceSku)
+        {
+            if (string.IsNullOrEmpty(descriptor) || !DanceSkuOk(danceSku)) return null;
+            string d = descriptor + "|dance=" + danceSku + "|ar=" + DanceEmotes.MOTION_RECIPE.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return System.Text.Encoding.UTF8.GetByteCount(d) > DESCRIPTOR_MAX_BYTES ? null : d;
+        }
+
+        /// <summary>The grammar's dance group: `dance_` and then 1 to 24 of a-z.</summary>
+        private static bool DanceSkuOk(string sku)
+        {
+            if (sku == null || sku.Length < 7 || sku.Length > 30 || !sku.StartsWith("dance_", StringComparison.Ordinal)) return false;
+            for (int i = 6; i < sku.Length; i++)
+                if (sku[i] < 'a' || sku[i] > 'z') return false;
+            return true;
         }
 
         private static string Off(Vector2 v) => R(v.x) + "," + R(v.y);
@@ -1074,6 +1114,8 @@ namespace CompetitiveRounds
             bool ground = true, color = true, effect = true, unlit = false;
             bool rawlegs = false, nopin = false, pinall = false, swaprb = false, lightprobe = false, poseprobe = false, psinfo = false;
             float pad = 1.3f;
+            // dance cards step 0 / T45 (DanceProbeFrames, below): the dance frames after the still
+            bool dances = false; string danceMode = "pose", l1Mode = "guarded"; List<int> danceOnly = null; int danceLag = 3, danceHold = 1;
             List<int> sweep = null; List<int> salts = null;
             string colorOverride = null, effectOverride = null, faceOverride = null, tag = "run", grade = "compiled";
             for (int i = 1; i < parts.Length; i++)
@@ -1103,6 +1145,13 @@ namespace CompetitiveRounds
                 else if (p.StartsWith("effect=")) effectOverride = p.Substring(7);
                 else if (p.StartsWith("face=")) faceOverride = p.Substring(5);   // e:m:d:d2[:dx:dy] item ids (+ detail offset)
                 else if (p.StartsWith("tag=")) tag = SafeTag(p.Substring(4));
+                else if (p == "dances") dances = true;                                  // step 0 / T45: pose every dance after the still
+                else if (p == "dancemode=pose" || p == "dancemode=nopose" || p == "dancemode=still") danceMode = p.Substring(10);
+                else if (p == "l1=guarded" || p == "l1=unguarded" || p == "l1=roomexit" || p == "l1=roomexitmutant"
+                         || p == "l1=forceabort" || p == "l1=forceabortmutant" || p == "l1=finally" || p == "l1=finallymutant") l1Mode = p.Substring(3);
+                else if (p.StartsWith("only=")) danceOnly = ParseInts(p.Substring(5), 0, DanceEmotes.Defs.Length - 1, DanceEmotes.Defs.Length, rep);
+                else if (p.StartsWith("lag=") && int.TryParse(p.Substring(4), out iv)) danceLag = Mathf.Clamp(iv, 0, 3);
+                else if (p.StartsWith("hold=") && int.TryParse(p.Substring(5), out iv)) danceHold = Mathf.Clamp(iv, 1, 4);   // whole frames each pose is held before its render
                 else rep.Append("unknown option: ").Append(p).Append('\n');
             }
             rep.Append("portrait spike ").Append(DateTime.UtcNow.ToString("u"))
@@ -1205,6 +1254,18 @@ namespace CompetitiveRounds
                 RenderMatte(cam, size, tag, rep, devTable, gradeName);                 // _matte (ungraded, this rig's pinned pose) and _graded, from one capture
                 if (!nopin) rep.Append(ParticlePinReport());
                 rep.Append(GradeProbeLine()).Append('\n');
+                if (dances)
+                {
+                    var it = DanceProbeFrames(rep, clone, cam, size, tag, danceMode, l1Mode, danceOnly, danceLag, danceHold, gen);
+                    // Every frame the probe yields is fenced HERE as well, like every other
+                    // yield of this lever: its first wait has no fence of its own.
+                    while (it.MoveNext())
+                    {
+                        yield return it.Current;
+                        _renderClaim.Beat(gen, DEV_BUDGET);
+                        if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("aborted: ").Append(blocked).Append('\n'); yield break; }
+                    }
+                }
                 if (sweep != null && nopin) rep.Append("sweep: skipped (nopin leaves the particles unpinned)\n");
                 else if (sweep != null)
                 {
@@ -2858,6 +2919,29 @@ namespace CompetitiveRounds
         private static bool ComputeBounds(StringBuilder rep, GameObject clone, float pad, out Bounds fit)
         {
             fit = new Bounds(PARK, Vector3.one);
+            Bounds use;
+            if (!SolidBounds(rep, clone, out use)) return false;
+            fit = SquareFit(use, pad);
+            rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(fit.size.x.ToString("F2")).Append('\n');
+            return true;
+        }
+
+        /// <summary>The square frame around `use`, padded: its side is the
+        /// longer of use's two sizes (at least 0.5) times `pad`.</summary>
+        private static Bounds SquareFit(Bounds use, float pad)
+        {
+            float side = Mathf.Max(use.size.x, use.size.y, 0.5f) * pad;
+            return new Bounds(new Vector3(use.center.x, use.center.y, PARK.z), new Vector3(side, side, 1f));
+        }
+
+        /// <summary>The bounds the frame is fitted to, unsquared: the solid
+        /// renderers (body, limbs, gun, orb) and the reserved gun box, or every
+        /// renderer when there is no solid one. False when there are none. The
+        /// dance capture unites these over every pose (design S1.4 step 4)
+        /// before squaring once.</summary>
+        private static bool SolidBounds(StringBuilder rep, GameObject clone, out Bounds use)
+        {
+            use = new Bounds(PARK, Vector3.one);
             try
             {
                 bool anyA = false, anyB = false;
@@ -2893,10 +2977,7 @@ namespace CompetitiveRounds
                 // Frame on the SOLID renderers (body, limbs, gun, orb): particle systems report
                 // emitter-sized bounds (±6 units here) that would shrink the character to a
                 // third of the frame. The aura may bleed past the edge; the body may not.
-                var use = anyA ? a : b;
-                float side = Mathf.Max(use.size.x, use.size.y, 0.5f) * pad;
-                fit = new Bounds(new Vector3(use.center.x, use.center.y, PARK.z), new Vector3(side, side, 1f));
-                rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(side.ToString("F2")).Append('\n');
+                use = anyA ? a : b;
                 return true;
             }
             catch (Exception ex) { rep.Append("bounds threw: ").Append(ex.Message).Append('\n'); return false; }
@@ -3043,24 +3124,32 @@ namespace CompetitiveRounds
             {
                 texB = Grab(cam, Color.black, size);
                 texW = Grab(cam, Color.white, size);
-                var b = texB.GetPixels32(); var w = texW.GetPixels32();
-                var o = new Color32[b.Length];
-                int nLit = 0, nPartial = 0;
-                for (int i = 0; i < b.Length; i++)
-                {
-                    int d = (w[i].r - b[i].r) + (w[i].g - b[i].g) + (w[i].b - b[i].b);
-                    int a = 255 - d / 3;                       // 255 where opaque, 0 where only the clear colour shows
-                    if (a < 0) a = 0; else if (a > 255) a = 255;
-                    if (a == 0) { o[i] = new Color32(0, 0, 0, 0); continue; }
-                    o[i] = new Color32(Un(b[i].r, a), Un(b[i].g, a), Un(b[i].b, a), (byte)a);
-                    if (a > PROBE_FLOOR) nLit++;
-                    if (a < 250) nPartial++;
-                }
-                lit = (float)nLit / Mathf.Max(1, b.Length);
-                partial = (float)nPartial / Mathf.Max(1, b.Length);
-                return o;
+                return MatteOfPasses(texB.GetPixels32(), texW.GetPixels32(), out lit, out partial);
             }
             finally { foreach (var t in new[] { texB, texW }) if (t != null) UnityEngine.Object.Destroy(t); }
+        }
+
+        /// <summary>The #630 difference matte of one black and one white pass,
+        /// as straight RGBA. MattePixels' arithmetic, split out so the dance
+        /// capture's calibration can hold DanceMotionCore.Matte (the frames'
+        /// byte matte) to it on the same pass pair.</summary>
+        private static Color32[] MatteOfPasses(Color32[] b, Color32[] w, out float lit, out float partial)
+        {
+            var o = new Color32[b.Length];
+            int nLit = 0, nPartial = 0;
+            for (int i = 0; i < b.Length; i++)
+            {
+                int d = (w[i].r - b[i].r) + (w[i].g - b[i].g) + (w[i].b - b[i].b);
+                int a = 255 - d / 3;                       // 255 where opaque, 0 where only the clear colour shows
+                if (a < 0) a = 0; else if (a > 255) a = 255;
+                if (a == 0) { o[i] = new Color32(0, 0, 0, 0); continue; }
+                o[i] = new Color32(Un(b[i].r, a), Un(b[i].g, a), Un(b[i].b, a), (byte)a);
+                if (a > PROBE_FLOOR) nLit++;
+                if (a < 250) nPartial++;
+            }
+            lit = (float)nLit / Mathf.Max(1, b.Length);
+            partial = (float)nPartial / Mathf.Max(1, b.Length);
+            return o;
         }
 
         /// <summary>First 6 bytes of the PNG's SHA-256 in hex (the upload
@@ -3185,6 +3274,7 @@ namespace CompetitiveRounds
             _root = null;
             _legs.Clear(); _groundTop = float.NaN; _pinned.Clear(); _leftOut.Clear();
             try { StopLightProbe(); } catch { }
+            try { DanceReleaseTargets(); } catch { }   // the dance job's frame, still and ring targets (PortraitRenderDance.cs)
         }
 
         private static GameObject[] SafeRoots()
@@ -3247,5 +3337,305 @@ namespace CompetitiveRounds
         private static string FaceStr(PlayerFace f) => f == null ? "null"
             : "eye=" + f.eyeID + "@" + f.eyeOffset + " mouth=" + f.mouthID + "@" + f.mouthOffset
               + " detail=" + f.detailID + "@" + f.detailOffset + " detail2=" + f.detail2ID + "@" + f.detail2Offset;
+    }
+
+    /// <summary>Dance cards build step 0 (design S11.1) and VM test T45
+    /// (`body_channel_probe`), on the portrait rig. A dev option of the
+    /// `portrait:run,...` lever (Run): after the still, every dance of the
+    /// capture table is posed through DanceEmotes.PortraitPose frame by frame
+    /// (t = k * ms / 1000, never a clock), the rig is rendered after each pose
+    /// and compared with the rest render.
+    ///
+    /// Options (after `dances`): `dancemode=pose` (T45: PortraitPose set for
+    /// every frame), `dancemode=nopose` (T45's mutant: PortraitPose never
+    /// set), `dancemode=still` (T45's control: a still-only run, asserting
+    /// zero motion); `l1=guarded` (the frame's Tick is the product one),
+    /// `l1=unguarded` (L1's mutant: Tick's pre-L1 hard restore instead),
+    /// `l1=roomexit` (L1's sibling sites: the product room exit,
+    /// DanceEmotes.OnRoomLeft, lands between the Arm Postfix and the render,
+    /// then the frame's Tick; the rig's pose must survive it),
+    /// `l1=roomexitmutant` (the same with RestoreAllApplied's rig scope
+    /// switched off by DanceEmotes.DevRestoreIgnoresPortrait: must FAIL),
+    /// `l1=forceabort` or `l1=finally` (L1's teardown order, round two: at
+    /// the first nonzero pose whose deltas the rig still owes, the product
+    /// ForceAbort, or this probe's own finally, ends the pose; every owed
+    /// entry must be undone while PortraitPose still names the rig and none
+    /// after it is cleared, [DANCE-T45] teardown=) or `l1=forceabortmutant` /
+    /// `l1=finallymutant` (the same teardown with
+    /// DanceEmotes.DevTeardownClearsFirst set, the order swapped: must FAIL);
+    /// `only=I:J:..` a subset of dance indexes; `lag=N` re-renders N frames
+    /// per dance one frame later (does one frame settle a pose?).
+    ///
+    /// Per frame, in the capture's own order (design S1.4 steps 4 and 7):
+    /// the rig's remembered deltas undone once (RestorePortraitRig, L1), the
+    /// frozen arm baseline written back, the pose set; one full frame
+    /// (Update, the Arm Postfix, LateUpdate) passes; the frame's Tick; the
+    /// targets read (L1: each must equal its baseline plus the clamped
+    /// Evaluate offset) and the rig rendered. None of it is reachable from
+    /// the product path.</summary>
+    internal static partial class PortraitRender
+    {
+        private const float DANCE_PROBE_MIN_OFFSET = 0.05f;   // world units: a pose this far off rest must show
+        // World units, the L1 equality. The rig stands at PARK (4000, 4000), where
+        // one float ulp is 2^-11 (about 4.9e-4) units, so a target written there
+        // cannot land nearer its exact value than that; 1e-3 is two ulps. The L1
+        // defects it must catch move a target by a whole offset (0.05 and up).
+        private const float DANCE_PROBE_EPS = 1e-3f;
+
+        private static Transform FindDeepNamed(Transform root, string name)
+        {
+            if (root == null) return null;
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+                if (t != null && t.name == name) return t;
+            return null;
+        }
+
+        private static void PixelDiff(Color32[] a, Color32[] b, out int exact, out int over8)
+        {
+            exact = 0; over8 = 0;
+            int n = Math.Min(a.Length, b.Length);
+            for (int i = 0; i < n; i++)
+            {
+                var x = a[i]; var y = b[i];
+                if (x.r == y.r && x.g == y.g && x.b == y.b && x.a == y.a) continue;
+                exact++;
+                if (Math.Abs(x.r - y.r) > PROBE_FLOOR || Math.Abs(x.g - y.g) > PROBE_FLOOR || Math.Abs(x.b - y.b) > PROBE_FLOOR) over8++;
+            }
+        }
+
+        /// <summary>T45's teardown arms (L1's order, round two): the verdict on
+        /// the one teardown the arm zeroed the counters for. PASS when the rig
+        /// owed at least one entry, every owed entry was undone while
+        /// PortraitPose still named the rig and none after it was cleared, the
+        /// pose is cleared, no entry is left and both arm targets are back on
+        /// their baselines. The swapped order passes every term but the
+        /// counters.</summary>
+        private static void DanceTeardownVerdict(string tag, string path, bool mutant, int owed, IKArmMove armL, IKArmMove armR,
+                                                 Vector3 baseL, Vector3 baseR, string sku, int k)
+        {
+            int under = DanceEmotes.DevUndoneUnderPose, after = DanceEmotes.DevUndoneAfterClear, left = DanceEmotes.AppliedEntryCount;
+            bool cleared = !DanceEmotes.PortraitPose.HasValue;
+            bool atBase = false;
+            try
+            {
+                Vector3 dL = armL.target.position - baseL, dR = armR.target.position - baseR;
+                atBase = Mathf.Abs(dL.x) < DANCE_PROBE_EPS && Mathf.Abs(dL.y) < DANCE_PROBE_EPS && Mathf.Abs(dL.z) < DANCE_PROBE_EPS
+                      && Mathf.Abs(dR.x) < DANCE_PROBE_EPS && Mathf.Abs(dR.y) < DANCE_PROBE_EPS && Mathf.Abs(dR.z) < DANCE_PROBE_EPS;
+            }
+            catch { atBase = false; }
+            bool pass = owed >= 1 && under == owed && after == 0 && cleared && left == 0 && atBase;
+            Plugin.Log.LogInfo("[DANCE-T45] teardown=" + (pass ? "PASS" : "FAIL") + " tag=" + tag + " path=" + path
+                               + " arm=" + (mutant ? "mutant(clear-first)" : "control") + " owed=" + owed + " undone-under-pose=" + under
+                               + " undone-after-clear=" + after + " pose-cleared=" + cleared + " left=" + left + " at-base=" + atBase
+                               + " dance=" + sku + " k=" + k);
+        }
+
+        private static IEnumerator DanceProbeFrames(StringBuilder rep, GameObject clone, Camera cam, int size, string tag,
+                                                    string mode, string l1, List<int> only, int lagN, int hold, int gen)
+        {
+            bool setPose = mode == "pose";
+            bool unguarded = l1 == "unguarded";
+            bool roomExit = l1 == "roomexit" || l1 == "roomexitmutant";
+            // L1's teardown order (round two): which teardown ends the pose, and its mutant
+            string teardown = l1 == "forceabort" || l1 == "forceabortmutant" ? "forceabort"
+                            : l1 == "finally" || l1 == "finallymutant" ? "finally" : null;
+            bool tdMutant = teardown != null && l1.EndsWith("mutant", StringComparison.Ordinal);
+            bool tdFinally = false; int tdOwed = -1, tdK = -1; string tdSku = "-";
+            Transform rigRoot = clone != null ? clone.transform : null;
+            IKArmMove armL = null, armR = null;
+            if (clone != null)
+                foreach (var a in clone.GetComponentsInChildren<IKArmMove>(true))
+                {
+                    if (a == null || a.target == null) continue;
+                    if (a.target.name.IndexOf("Left", StringComparison.OrdinalIgnoreCase) >= 0) armL = a; else armR = a;
+                }
+            if (hold < 1) hold = 1;
+            rep.Append("dance probe: mode=").Append(mode).Append(" l1=").Append(l1).Append(" lag=").Append(lagN).Append(" hold=").Append(hold)
+               .Append(" body-channel=").Append(DanceEmotes.PORTRAIT_BODY_CHANNEL)
+               .Append(" armL=").Append(armL != null ? armL.target.name : "none").Append(" armR=").Append(armR != null ? armR.target.name : "none").Append('\n');
+            if (rigRoot == null || armL == null || armR == null)
+            {
+                rep.Append("dance probe: FAIL rig or arm targets not found\n");
+                Plugin.Log.LogInfo("[DANCE-T45] FAIL tag=" + tag + " reason=no-arm-targets");
+                yield break;
+            }
+            Vector3 baseL = armL.target.position, baseR = armR.target.position;
+            Transform handL = FindDeepNamed(armL.transform, "Hand"), handR = FindDeepNamed(armR.transform, "Hand");
+            Color32[] rest;
+            {
+                var restTex = Grab(cam, Color.black, size);
+                rest = restTex.GetPixels32();
+                UnityEngine.Object.Destroy(restTex);
+            }
+            rep.Append("dance probe: baseL=").Append(V(baseL - PARK)).Append(" baseR=").Append(V(baseR - PARK))
+               .Append(" handL=").Append(handL != null ? V(handL.position - PARK) : "none")
+               .Append(" handR=").Append(handR != null ? V(handR.position - PARK) : "none").Append('\n');
+
+            var tsv = new StringBuilder("dance\tk\tt\talx\taly\tarx\tary\tdLx\tdLy\tdRx\tdRy\tl1_ok\tapplied\tchanged_exact\tchanged_over8\thandLx\thandLy\thandRx\thandRy\n");
+            var lagTsv = new StringBuilder("dance\tk\tlag_changed_exact\tlag_changed_over8\n");
+            int total = 0, nonzeroFrames = 0, unmovedNonzero = 0, zeroFrames = 0, zeroChanged = 0, anyChanged = 0;
+            int l1Checked = 0, l1Fail = 0, l1Pairs = 0, appliedFrames = 0, appliedMissing = 0, lagChecks = 0, lagMoved = 0;
+            double minMoving = 1.0, maxChanged = 0.0;
+            int dancesNoMotion = 0;
+            var perDance = new StringBuilder();
+            float t0 = Time.realtimeSinceStartup;
+            string blocked;
+
+            var set = new List<int>();
+            for (int i = 0; i < DanceEmotes.Defs.Length; i++) if (only == null || only.Contains(i)) set.Add(i);
+
+            yield return new WaitForEndOfFrame();
+            try
+            {
+                DanceEmotes.DevRestoreIgnoresPortrait = l1 == "roomexitmutant";
+                foreach (int idx in set)
+                {
+                    int ms = DanceEmotes.CaptureMs[idx];
+                    int n = DanceEmotes.CaptureFrames(idx);
+                    int dMoving = 0, dUnmoved = 0; double dMax = 0.0; bool prevNonzeroOk = false;
+                    for (int k = 0; k < n; k++)
+                    {
+                        float t = k * ms / 1000f;
+                        // L1: undo the rig's remembered deltas once, then the baseline
+                        DanceEmotes.RestorePortraitRig(rigRoot);
+                        armL.target.position = baseL; armR.target.position = baseR;
+                        armL.velolcity = Vector3.zero; armR.velolcity = Vector3.zero;
+                        Vector2 body, al, ar; float rot;
+                        DanceEmotes.EvaluateClamped(idx, t, out body, out rot, out al, out ar);
+                        if (setPose) DanceEmotes.PortraitPose = new DanceEmotes.PortraitPoseSpec(rigRoot, idx, t);
+                        int applied0 = DanceEmotes.PortraitArmApplied;
+                        int applied = 0;
+                        for (int h = 0; h < hold; h++)
+                        {
+                            // hold the pose `hold` whole frames; the arm delta counted in the first
+                            yield return new WaitForEndOfFrame();
+                            _renderClaim.Beat(gen, DEV_BUDGET);
+                            if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("dance probe aborted: ").Append(blocked).Append('\n'); yield break; }
+                            if (h == 0) applied = DanceEmotes.PortraitArmApplied - applied0;
+                        }
+                        // the frame's Tick: the product one (the roomexit arms run the product room
+                        // exit first), or (L1 mutant) its pre-L1 hard restore
+                        if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else { if (roomExit) DanceEmotes.OnRoomLeft(); DanceEmotes.Tick(); }
+                        Vector3 dL = armL.target.position - baseL, dR = armR.target.position - baseR;
+                        Vector2 expL = setPose ? al : Vector2.zero, expR = setPose ? ar : Vector2.zero;
+                        bool l1ok = Mathf.Abs(dL.x - expL.x) < DANCE_PROBE_EPS && Mathf.Abs(dL.y - expL.y) < DANCE_PROBE_EPS && Mathf.Abs(dL.z) < DANCE_PROBE_EPS
+                                 && Mathf.Abs(dR.x - expR.x) < DANCE_PROBE_EPS && Mathf.Abs(dR.y - expR.y) < DANCE_PROBE_EPS && Mathf.Abs(dR.z) < DANCE_PROBE_EPS;
+                        bool nonzero = Mathf.Max(al.magnitude, ar.magnitude) >= DANCE_PROBE_MIN_OFFSET;
+                        int expectApplied = setPose ? ((al != Vector2.zero ? 1 : 0) + (ar != Vector2.zero ? 1 : 0)) : 0;
+                        if (setPose && nonzero) { if (applied == expectApplied) appliedFrames++; else appliedMissing++; }
+                        if (nonzero && setPose)
+                        {
+                            l1Checked++;
+                            if (!l1ok) l1Fail++;
+                            if (l1ok && prevNonzeroOk) l1Pairs++;
+                            prevNonzeroOk = l1ok;
+                        }
+                        else if (!l1ok) l1Fail++;
+                        if (teardown != null && setPose && nonzero && l1ok && DanceEmotes.AppliedEntryCount > 0)
+                        {
+                            // L1's teardown order (round two): this pose's deltas are still owed
+                            tdOwed = DanceEmotes.AppliedEntryCount; tdK = k; tdSku = DanceEmotes.Defs[idx].Sku;
+                            if (teardown == "forceabort")
+                            {
+                                // the product ForceAbort ends the pose (and the run: its claim goes)
+                                DanceEmotes.DevUndoneUnderPose = 0; DanceEmotes.DevUndoneAfterClear = 0;
+                                DanceEmotes.DevTeardownClearsFirst = tdMutant;
+                                try { ForceAbort("T45 teardown arm " + tag); }
+                                finally { DanceEmotes.DevTeardownClearsFirst = false; }
+                                DanceTeardownVerdict(tag, "forceabort", tdMutant, tdOwed, armL, armR, baseL, baseR, tdSku, tdK);
+                            }
+                            else tdFinally = true;                   // this probe's own finally ends the pose, below
+                            yield break;
+                        }
+                        var tex = Grab(cam, Color.black, size);
+                        var px = tex.GetPixels32();
+                        UnityEngine.Object.Destroy(tex);
+                        int ce, c8; PixelDiff(rest, px, out ce, out c8);
+                        double frac = (double)ce / Math.Max(1, px.Length);
+                        total++;
+                        if (ce > 0) anyChanged++;
+                        if (frac > maxChanged) maxChanged = frac;
+                        if (frac > dMax) dMax = frac;
+                        if (nonzero)
+                        {
+                            nonzeroFrames++;
+                            if (ce > 0) { dMoving++; if (frac < minMoving) minMoving = frac; }
+                            else { dUnmoved++; unmovedNonzero++; }
+                        }
+                        else { zeroFrames++; if (ce > 0) zeroChanged++; }
+                        tsv.Append(DanceEmotes.Defs[idx].Sku).Append('\t').Append(k).Append('\t').Append(t.ToString("F3"))
+                           .Append('\t').Append(al.x.ToString("F4")).Append('\t').Append(al.y.ToString("F4"))
+                           .Append('\t').Append(ar.x.ToString("F4")).Append('\t').Append(ar.y.ToString("F4"))
+                           .Append('\t').Append(dL.x.ToString("F4")).Append('\t').Append(dL.y.ToString("F4"))
+                           .Append('\t').Append(dR.x.ToString("F4")).Append('\t').Append(dR.y.ToString("F4"))
+                           .Append('\t').Append(l1ok ? 1 : 0).Append('\t').Append(applied)
+                           .Append('\t').Append(frac.ToString("F5")).Append('\t').Append(((double)c8 / Math.Max(1, px.Length)).ToString("F5"))
+                           .Append('\t').Append(handL != null ? (handL.position.x - PARK.x).ToString("F4") : "-")
+                           .Append('\t').Append(handL != null ? (handL.position.y - PARK.y).ToString("F4") : "-")
+                           .Append('\t').Append(handR != null ? (handR.position.x - PARK.x).ToString("F4") : "-")
+                           .Append('\t').Append(handR != null ? (handR.position.y - PARK.y).ToString("F4") : "-").Append('\n');
+                        if (lagN > 0 && (k == 1 || k == n / 3 || k == (2 * n) / 3))
+                        {
+                            // the same pose one more frame: does the render move again?
+                            yield return new WaitForEndOfFrame();
+                            _renderClaim.Beat(gen, DEV_BUDGET);
+                            if ((blocked = DevLeverBlocked(gen)) != null) { rep.Append("dance probe aborted: ").Append(blocked).Append('\n'); yield break; }
+                            if (unguarded) DanceEmotes.DevUnguardedRestoreAll(); else { if (roomExit) DanceEmotes.OnRoomLeft(); DanceEmotes.Tick(); }
+                            var tex2 = Grab(cam, Color.black, size);
+                            var px2 = tex2.GetPixels32();
+                            UnityEngine.Object.Destroy(tex2);
+                            int le, l8; PixelDiff(px, px2, out le, out l8);
+                            lagChecks++;
+                            if (le > 0) lagMoved++;
+                            lagTsv.Append(DanceEmotes.Defs[idx].Sku).Append('\t').Append(k).Append('\t')
+                                  .Append(((double)le / Math.Max(1, px.Length)).ToString("F5")).Append('\t')
+                                  .Append(((double)l8 / Math.Max(1, px.Length)).ToString("F5")).Append('\n');
+                        }
+                    }
+                    if (dMax <= 0.0) dancesNoMotion++;
+                    perDance.Append("dance ").Append(DanceEmotes.Defs[idx].Sku).Append(" frames=").Append(n).Append(" ms=").Append(ms)
+                            .Append(" moving=").Append(dMoving).Append(" unmoved-nonzero=").Append(dUnmoved)
+                            .Append(" max-changed=").Append(dMax.ToString("F5")).Append('\n');
+                }
+            }
+            finally
+            {
+                DanceEmotes.DevRestoreIgnoresPortrait = false;
+                // L1's order (round two): the rig's deltas undone while the pose still
+                // names it, then the pose cleared (EndPortraitPose); the `finally` arms
+                // zero the counters for this one teardown and read them after it
+                if (tdFinally) { DanceEmotes.DevUndoneUnderPose = 0; DanceEmotes.DevUndoneAfterClear = 0; DanceEmotes.DevTeardownClearsFirst = tdMutant; }
+                try { DanceEmotes.EndPortraitPose(rigRoot); }
+                finally { DanceEmotes.DevTeardownClearsFirst = false; }
+                if (tdFinally) DanceTeardownVerdict(tag, "finally", tdMutant, tdOwed, armL, armR, baseL, baseR, tdSku, tdK);
+            }
+            rep.Append(perDance);
+            bool motionPass = set.Count > 0 && dancesNoMotion == 0 && unmovedNonzero == 0 && nonzeroFrames > 0;
+            bool stillPass = anyChanged == 0 && total > 0;
+            bool l1Pass = setPose && l1Fail == 0 && l1Pairs >= 1;
+            bool armRan = setPose && appliedMissing == 0 && appliedFrames > 0;
+            string line = "tag=" + tag + " mode=" + mode + " l1=" + l1 + " hold=" + hold + " dances=" + set.Count + " frames=" + total
+                        + " nonzero-frames=" + nonzeroFrames + " unmoved-nonzero=" + unmovedNonzero + " dances-without-motion=" + dancesNoMotion
+                        + " zero-frames=" + zeroFrames + " zero-frames-changed=" + zeroChanged
+                        + " min-moving-changed=" + (nonzeroFrames > 0 && minMoving < 1.0 ? minMoving.ToString("F5") : "-")
+                        + " max-changed=" + maxChanged.ToString("F5")
+                        + " l1-checked=" + l1Checked + " l1-fail=" + l1Fail + " l1-pairs=" + l1Pairs
+                        + " arm-update-frames=" + appliedFrames + " arm-update-missing=" + appliedMissing
+                        + " lag-checks=" + lagChecks + " lag-moved=" + lagMoved
+                        + " secs=" + (Time.realtimeSinceStartup - t0).ToString("F1");
+            rep.Append("dance probe: ").Append(line).Append('\n');
+            rep.Append("T45 motion assertion (every dance's rig frames change): ").Append(motionPass ? "PASS" : "FAIL").Append('\n');
+            rep.Append("T45 still-only assertion (zero motion): ").Append(stillPass ? "PASS" : "FAIL").Append('\n');
+            rep.Append("L1 assertion (successive nonzero targets equal Evaluate): ").Append(setPose ? (l1Pass ? "PASS" : "FAIL") : "n/a (no pose)").Append('\n');
+            rep.Append("IKArmMove.Update runs on the pinned rig (Arm Postfix applied every nonzero pose): ").Append(setPose ? (armRan ? "YES" : "NO") : "n/a (no pose)").Append('\n');
+            Plugin.Log.LogInfo("[DANCE-T45] motion=" + (motionPass ? "PASS" : "FAIL") + " still-only=" + (stillPass ? "PASS" : "FAIL")
+                               + " l1=" + (setPose ? (l1Pass ? "PASS" : "FAIL") : "n/a") + " arm-update=" + (setPose ? (armRan ? "YES" : "NO") : "n/a") + " " + line);
+            try
+            {
+                File.WriteAllText(Path.Combine(BepInEx.Paths.BepInExRootPath, "pc_portrait_dance_" + tag + ".tsv"), tsv.ToString());
+                File.WriteAllText(Path.Combine(BepInEx.Paths.BepInExRootPath, "pc_portrait_dance_" + tag + "_lag.tsv"), lagTsv.ToString());
+            }
+            catch (Exception ex) { rep.Append("dance probe tsv write threw: ").Append(ex.Message).Append('\n'); }
+        }
     }
 }
