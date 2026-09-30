@@ -373,7 +373,10 @@ def test_pg_an_unknown_steam_id_is_the_routes_own_404():
     ids, owned, before, after, answers = _run(_case([_url(UNKNOWN), unmounted]))
     (status, body, sql), (r_status, r_body, r_sql) = answers
     _log_sql("unknown steam id", sql)
-    assert (status, body) == (404, {"detail": "Player not found"}), (status, body)
+    # the v1.41.0 beta's body: the route's own 404 carries the no-account marker
+    # the client tells it apart by (title_ladders.NO_ACCOUNT_MARKER)
+    assert (status, body) == (404, {"detail": {"error": "ladder_no_account",
+                                               "message": "Player not found"}}), (status, body)
     _assert_read_only(sql, [["players"]])
     assert (r_status, r_body) == (404, {"detail": "Not Found"}), (r_status, r_body)
     assert r_sql == [], r_sql

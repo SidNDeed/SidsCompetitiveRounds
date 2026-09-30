@@ -2508,8 +2508,13 @@ def test_the_seat_binding_check_rejects_a_missing_and_a_late_binding():
 # names, under the session check's own policy (soft-fail where enforcement is
 # not armed for the caller). That class is filed in the round-9 notes and
 # not changed here; a renewer added later is unclassified and reddens this.
+# RANKED SERIES (the v1.41.0 beta's) renews both seats of a live 1v1 series
+# from its two HMAC-signed carriers, on the series' own record rather than an
+# in-match claim, so it is no publisher and seat_binding_findings does not
+# judge it.
 LEASE_RENEWERS = {
     "presence_ping": "IN-GAME",
+    "_ranked_ingame_lease_renew": "RANKED SERIES",
     "team_queue_poll": "LOBBY SEAT",
     "ovt_queue_poll": "LOBBY SEAT",
     "ffa_queue_poll": "LOBBY SEAT",
@@ -3522,16 +3527,22 @@ def test_a_supplied_representation_that_never_calls_the_route_is_refused(
     assert "calls the status route" in how, how
 
 
-def test_the_sibling_scan_switch_removes_only_that_candidate(monkeypatch):
+def test_the_sibling_scan_switch_removes_only_that_candidate(monkeypatch, tmp_path):
     """The switch takes out candidate 4 and leaves 1 to 3 standing.
 
     A switch that could take the whole binding out of the run would be the
     skipif this file deleted, under a new name (#715, #664). What it removes
     is one candidate, and the resolution says so in words a log carries: a run
     that did not scan may never read as a run that scanned and found nothing.
+
+    The root is an empty directory here: on a tree that carries the client
+    half (the v1.41.0 beta, merged main) candidate 3 answers first and the
+    resolution never reaches the lines this test reads.
     """
     monkeypatch.delenv("SCR_CROSS_LANE_CLIENT_ROOT", raising=False)
     monkeypatch.setenv("SCR_CROSS_LANE_NO_SIBLING_SCAN", "1")
+    (tmp_path / "no-client-half").mkdir()
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path / "no-client-half")
     _sources, how = _client_lane_sources()
     assert "NOT RUN" in how, how
     assert "sibling-worktree scan" in how, how
@@ -3568,6 +3579,10 @@ def test_a_sibling_scan_that_did_not_complete_is_not_a_scan_that_found_nothing(
     ATTEMPTED AND FAILED on every run would be this same defect inverted, and
     it would fail this test just as surely.
 
+    The root is an empty directory, as in the switch's test: on a tree that
+    carries the client half candidate 3 answers before the resolution reaches
+    the scan's line.
+
     The fifth is the branch the resolver's docstring has to scope itself
     against: with the tree named in the environment the scan is never on the
     candidate list, so no line is carried and none is owed. It is driven here
@@ -3577,6 +3592,8 @@ def test_a_sibling_scan_that_did_not_complete_is_not_a_scan_that_found_nothing(
     """
     monkeypatch.delenv("SCR_CROSS_LANE_CLIENT_ROOT", raising=False)
     monkeypatch.delenv("SCR_CROSS_LANE_NO_SIBLING_SCAN", raising=False)
+    (tmp_path / "no-client-half").mkdir()
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path / "no-client-half")
 
     class _Result(object):
         def __init__(self, rc, out=b""):

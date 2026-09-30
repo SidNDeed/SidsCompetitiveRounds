@@ -325,14 +325,26 @@ async def _build(case, extra_ddl=None):
 
 @contextlib.asynccontextmanager
 async def _case(extra_ddl=None):
-    """A built, sealed case schema and a session factory bound to it."""
-    async with harness.CaseSchema(DSN, "ladder_hooks") as case:
-        await _build(case, extra_ddl)
-        engine = harness.bound_engine(DSN, case.schema)
-        try:
-            yield case.schema, async_sessionmaker(engine, expire_on_commit=False)
-        finally:
-            await engine.dispose()
+    """A built, sealed case schema and a session factory bound to it.
+
+    The 1v1 podium cache (main._podium_cache, a 60 s process-wide copy) is
+    emptied for the case and put back after it: a podium read from another
+    case's players answers about a different database, and the series-gold
+    "Podium beaten x2" of two runs compared here then depended on which ran
+    first (the v1.41.0 beta's refresh reads the case's own podium)."""
+    saved = dict(main._podium_cache)
+    main._podium_cache.update({"at": 0.0, "ok": False, "ids": [], "map": {}})
+    try:
+        async with harness.CaseSchema(DSN, "ladder_hooks") as case:
+            await _build(case, extra_ddl)
+            engine = harness.bound_engine(DSN, case.schema)
+            try:
+                yield case.schema, async_sessionmaker(engine, expire_on_commit=False)
+            finally:
+                await engine.dispose()
+    finally:
+        main._podium_cache.clear()
+        main._podium_cache.update(saved)
 
 
 # -- fixtures -----------------------------------------------------------------
@@ -554,11 +566,15 @@ async def _team_dc(sm, sid, reporter, dc_player, t1_points, t2_points, room):
         # A direct call gets no FastAPI resolution: an omitted is_fallback would be
         # its Query(False) default object, which is truthy, and the handler would
         # take the 2v2 fallback deferral. This report is a real one (886bed8 LAND).
+        # It names the game token of a series the lead-forfeit test stored one for
+        # (_LF_TOKENS; the v1.41.0 beta's rule), and none elsewhere; with
+        # MATCH_HMAC_SECRET cleared the token's own signature is not checked.
         return await _call(main.team_series_report_dc, series_id=str(sid),
                            reporter_steam_id=reporter, dc_player_steam_id=dc_player,
                            t1_points_total=t1_points, t2_points_total=t2_points,
                            photon_room_id=room, is_fallback=False,
-                           hmac_sig="unsigned", db=db)
+                           hmac_sig="unsigned", game_token=_LF_TOKENS.get(str(sid)),
+                           token_sig="", db=db)
 
 
 async def _ranked_series_id(sm, ids, a=P1, b=P2):
@@ -1005,25 +1021,50 @@ async def _unbound_seat(request, steam_id, db):
     return main.SEAT_UNBOUND
 
 
+# THE GAME TOKEN (the v1.41.0 beta). A crossing is read only from the posts
+# that carried the physical game's token, counted from the series' own first
+# game (team_series.first_game_nonce, migration 359). The lead-forfeit series
+# stores the beta lab's origin (test_team_series_report_dc.LAB_FIRST), each
+# post carries game 2's token signed as the client signs it, and the DC report
+# names the same token, so the three runs differ only in which seats posted.
+LAB_FIRST = "5eed1ab00f1e2d3c"
+_LF_TOKENS = {}
+
+
 async def _lead_forfeit_series(monkeypatch, sm, ids, posters):
     """Team 1 wins game 1 of a team_lhF series through submit_team_match; then
     each seat in `posters` posts the pair 1-1 for game 2 of the stored sitting,
-    naming it (attested). Returns the series id."""
+    naming it (attested) and carrying its token. Returns the series id."""
     sid = await _team_series(sm, ids, "team_lhF")
     g1 = await _submit(sm, main.submit_team_match,
                        _report_2v2(sid, "team_lhF_000001_r1"))
     assert g1[1] is None and g1[0].series_status == "active", g1
+    async with sm() as db:
+        row = (await db.execute(text(
+            "SELECT t1_series_wins, t2_series_wins, photon_room_id FROM team_series "
+            " WHERE id = :i"), {"i": sid})).first()
+        await db.execute(text("UPDATE team_series SET first_game_nonce = :n WHERE id = :i"),
+                         {"n": LAB_FIRST, "i": sid})
+        await db.commit()
+    ordinal = main._team_game_identity(row[0], row[1], row[2])[0]
+    assert ordinal == 2, row
+    wire = "%s:%d:%d" % (main._team_game_chain_nonce(LAB_FIRST, ordinal, ordinal),
+                         ordinal, ordinal)
+    _LF_TOKENS[str(sid)] = wire
     if posters:
         monkeypatch.setattr(main, "MATCH_HMAC_SECRET", _LIVE_POINTS_SECRET)
         monkeypatch.setattr(main, "_seat_gate_for_live_points", _unbound_seat)
         for reporter in posters:
+            token_sig = main._team_game_token_mac(
+                "team-live-points-token:%s:%s:1:1:2:team_lhF:%s" % (sid, reporter, wire))
             async with sm() as db:
                 post = await _call(main.update_team_live_points, series_id=str(sid),
                                    request=None, t1_points=1, t2_points=1,
                                    reporter_steam_id=reporter,
                                    sig=_live_points_sig(str(sid), reporter, 1, 1, 2,
                                                         "team_lhF"),
-                                   game_number=2, photon_room_id="team_lhF", db=db)
+                                   game_number=2, photon_room_id="team_lhF",
+                                   game_token=wire, token_sig=token_sig, db=db)
             assert post[1] is None and post[0]["status"] == "ok", post
         monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
     return sid

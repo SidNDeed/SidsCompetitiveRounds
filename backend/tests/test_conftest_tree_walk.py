@@ -123,10 +123,15 @@ def test_one_pass_stays_affordable():
     repo. It is here so that adding a directory of binaries to one of the
     roots shows up as a failing test rather than as two slow passes per run
     that nobody attributes.
+
+    Measured at the v1.41.0 beta's merge of main cd8d846: 42.3 MiB across 725
+    files, every one tracked (main.py 3.7, I18nCatalogues.cs 3.3, the Player
+    Cards art under backend/api/assets 8.8); the ceiling moved from 40 to 48
+    MiB with it, and a directory of binaries still crosses it.
     """
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
-    assert total < 40 * 1024 * 1024, (
+    assert total < 48 * 1024 * 1024, (
         "one tree-movement pass now reads %.1f MiB across %d files, and it runs "
         "twice per session" % (total / 1048576.0, len(stamps)))
 
