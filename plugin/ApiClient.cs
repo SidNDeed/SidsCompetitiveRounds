@@ -818,185 +818,6 @@ namespace CompetitiveRounds
             get { return OutboxPath + ".tmp"; }
         }
 
-        // -- 2v2 report ledger (v1.41.0 beta round 8, finding F31) -----------
-        // One line per fact, appended and flushed to disk BEFORE the fact is
-        // acted on, beside the outbox:
-        //   sent <series>            a match report of the series is handed to
-        //                            the network (ReportTeamMatch, before its
-        //                            first send)
-        //   issued <series> <16 hex> the server issued this client the series'
-        //                            physical game 1, this nonce (before the
-        //                            issue is taken; round 9, finding M2: a
-        //                            round-8 client's "anchor <series> <8 hex>"
-        //                            line no longer parses, so the series'
-        //                            reports carry no anchor and the server
-        //                            voids the issue)
-        // The series' reporter asks the server for the series' physical game 1
-        // only while this ledger names no report of the series and the outbox
-        // queues none (TeamReportsClean): an earlier game's result may
-        // otherwise still be on its way, and the server cannot see it. Every
-        // match report carries the anchor held for its series (game_anchor);
-        // the server voids the issued game when a report it records does not
-        // (main.py, _team_first_game_void). A line that does not parse is
-        // skipped: an interrupted append can only leave the LAST line torn,
-        // and both writes come before what they record, so a torn line records
-        // a send or an issue that never happened.
-        private static string TeamLedgerPath
-        {
-            get { return Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.team-reports-sent.txt"); }
-        }
-        private static readonly HashSet<string> _teamLedgerSent = new HashSet<string>(StringComparer.Ordinal);
-        private static readonly Dictionary<string, string> _teamLedgerAnchors =
-            new Dictionary<string, string>(StringComparer.Ordinal);
-        /// <summary>Set once the ledger file was read, or found absent, in this
-        /// process. Until then no ask is made (TeamReportsClean); a read that
-        /// failed is tried again at the next ask. What this process writes is
-        /// kept in memory whether or not the file takes it.</summary>
-        private static bool _teamLedgerRead;
-        private static bool _teamLedgerWarned;
-
-        /// <summary>A series id the ledger can hold on one line
-        /// (TeamGameNumber.LedgerKey: the server's UUIDs).</summary>
-        private static bool TeamLedgerKey(string seriesId)
-        {
-            return TeamGameNumber.LedgerKey(seriesId);
-        }
-
-        private static void LoadTeamLedger()
-        {
-            if (_teamLedgerRead) return;
-            try
-            {
-                string path = TeamLedgerPath;
-                int skipped = 0;
-                if (File.Exists(path))
-                {
-                    foreach (string raw in File.ReadAllLines(path))
-                    {
-                        if (raw.Trim().Length == 0) continue;
-                        bool anchorLine;
-                        string series, anchor;
-                        if (!TeamGameNumber.ParseLedgerLine(raw, out anchorLine, out series, out anchor)) skipped++;
-                        else if (anchorLine) _teamLedgerAnchors[series] = anchor;
-                        else _teamLedgerSent.Add(series);
-                    }
-                }
-                _teamLedgerRead = true;
-                if (skipped > 0)
-                    Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} report ledger: {skipped} line(s) that do not parse"
-                                          + " were skipped");
-            }
-            catch (Exception ex)
-            {
-                if (!_teamLedgerWarned)
-                {
-                    _teamLedgerWarned = true;
-                    Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} report ledger unreadable ({ex.GetType().Name}):"
-                                          + " no series' physical game 1 is asked for until it reads");
-                }
-            }
-        }
-
-        /// <summary>Appends one line and flushes it to disk. A torn last line
-        /// (an append cut short) gets its line end first, so the new line is
-        /// never glued to it. False when the file did not take it.</summary>
-        private static bool AppendTeamLedger(string line)
-        {
-            try
-            {
-                using (var fs = new FileStream(TeamLedgerPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read))
-                {
-                    bool needBreak = false;
-                    if (fs.Length > 0)
-                    {
-                        fs.Seek(-1, SeekOrigin.End);
-                        needBreak = fs.ReadByte() != '\n';
-                    }
-                    fs.Seek(0, SeekOrigin.End);
-                    byte[] b = Encoding.ASCII.GetBytes((needBreak ? "\n" : "") + line + "\n");
-                    fs.Write(b, 0, b.Length);
-                    fs.Flush(true);
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} report ledger write failed ({ex.GetType().Name}): {line}");
-                return false;
-            }
-        }
-
-        /// <summary>A match report of `seriesId` is about to be sent: kept in
-        /// memory at once and appended to the ledger before the send. A write
-        /// that fails does not stop the send (the result matters more than the
-        /// ask it withholds): this process still remembers it, and after a
-        /// restart the report has landed (the server then refuses the ask),
-        /// is in the outbox (TeamReportsClean), or is lost.</summary>
-        private static void NoteTeamReportSent(string seriesId)
-        {
-            if (!TeamLedgerKey(seriesId)) return;
-            LoadTeamLedger();
-            _teamLedgerSent.Add(seriesId);
-            AppendTeamLedger(TeamGameNumber.LedgerSent(seriesId));
-        }
-
-        /// <summary>The server issued this client the series' physical game 1
-        /// (`nonce`): the whole nonce, the series' ANCHOR (round 9, finding
-        /// M2; round 8 kept its first 8 digits), is appended to the ledger
-        /// before the issue is taken; false, take nothing, when it cannot be.
-        /// Every match report this client sends for the series then carries
-        /// the anchor (ReportTeamMatch's game_anchor).</summary>
-        public static bool NoteTeamAnchor(string seriesId, string nonce)
-        {
-            if (!TeamLedgerKey(seriesId) || !TeamGameNumber.NonceValid(nonce)) return false;
-            LoadTeamLedger();
-            if (!AppendTeamLedger(TeamGameNumber.LedgerIssued(seriesId, nonce))) return false;
-            _teamLedgerAnchors[seriesId] = nonce;
-            return true;
-        }
-
-        /// <summary>The anchor this client holds for `seriesId`, or "".</summary>
-        public static string AnchorFor(string seriesId)
-        {
-            if (string.IsNullOrEmpty(seriesId)) return "";
-            LoadTeamLedger();
-            string a;
-            return _teamLedgerAnchors.TryGetValue(seriesId, out a) ? a : "";
-        }
-
-        /// <summary>Whether this client has sent no match report of
-        /// `seriesId` (the ledger, read) and queues none (the outbox, loaded
-        /// and certain); `why` says what is not clean otherwise. The series'
-        /// reporter asks for the series' physical game 1 only while this holds
-        /// (TeamGameNumber.Tracker.AskFirstGame), and takes the answer only if
-        /// it still does.</summary>
-        public static bool TeamReportsClean(string seriesId, out string why)
-        {
-            why = null;
-            if (!TeamLedgerKey(seriesId)) why = "no series id the ledger can hold";
-            else
-            {
-                LoadTeamLedger();
-                if (!_teamLedgerRead) why = "the report ledger cannot be read";
-                else if (_teamLedgerSent.Contains(seriesId)) why = "a report of the series was sent";
-                else if (!_outboxLoaded) why = "the report outbox is not loaded yet";
-                else if (_outboxGenerationUncertain) why = "the report outbox cannot be read";
-                else
-                {
-                    for (int i = 0; i < _pendingReports.Count; i++)
-                    {
-                        var p = _pendingReports[i];
-                        if (p != null && TeamGameNumber.QueuedReportOf(p.url, p.json, seriesId))
-                        {
-                            why = "a report of the series is queued";
-                            break;
-                        }
-                    }
-                }
-            }
-            return why == null;
-        }
-
         /// <summary>Marks the last line of a COMPLETE queue file and carries the
         /// two things load needs from it: which generation it is, and whether it
         /// is all there. A file without this line was interrupted mid-write --
@@ -15472,55 +15293,6 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <summary>v1.41.0 beta round 8, finding F31: asks the server for the
-        /// series' physical game 1 (POST /api/v1/team/series/{id}/first-game,
-        /// main.py team_series_first_game), signed over
-        /// TeamGameNumber.FirstGameCanonical. The server answers only a
-        /// verified Steam session for `requesterSteamId` (PostRequestWithRetry
-        /// stamps this seat's), issued before the series was created (SteamAuth
-        /// keeps it in memory only, so a restarted client asks on a later one
-        /// and is refused), and issues the nonce once per series.
-        /// `done(issued, nonce, reason)` runs once: issued only on an answer
-        /// that says so and carries a nonce; a refusal, a failed request or an
-        /// unreadable answer is not issued, with its reason.</summary>
-        public static void RequestTeamFirstGame(string seriesId, string requesterSteamId, string photonRoomId,
-                                                Action<bool, string, string> done)
-        {
-            string sig = ComputeHmacHex(TeamGameNumber.FirstGameCanonical(seriesId ?? "", requesterSteamId ?? "",
-                                                                          photonRoomId ?? ""));
-            string url = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/first-game"
-                         + TeamGameNumber.QueryFirstGame(Escape(requesterSteamId),
-                                                         UnityWebRequest.EscapeURL(photonRoomId ?? ""), sig);
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "", (ok, resp) =>
-            {
-                bool issued = false;
-                string nonce = "";
-                string reason;
-                try
-                {
-                    if (ok && !string.IsNullOrEmpty(resp))
-                    {
-                        issued = ExtractJsonBool(resp, "issued");
-                        nonce = ExtractJsonString(resp, "nonce") ?? "";
-                        reason = ExtractJsonString(resp, "reason") ?? "";
-                        if (issued && !TeamGameNumber.NonceValid(nonce))
-                        {
-                            issued = false;
-                            reason = "the answer carries no nonce";
-                        }
-                    }
-                    else reason = "the ask failed: " + (string.IsNullOrEmpty(resp) ? "no answer" : resp);
-                }
-                catch (Exception ex)
-                {
-                    issued = false;
-                    reason = "the answer could not be read (" + ex.GetType().Name + ")";
-                }
-                if (!issued) nonce = "";
-                done?.Invoke(issued, nonce, reason);
-            }, maxRetries: 2, retryDelay: 2f, stopOnTerminalRefusal: true));
-        }
-
         /// <summary>POST /team/series/{id}/report-dc. Called from
         /// Cr2v2DiagCallbacks.OnPlayerLeftRoom by an elected survivor: the ONE
         /// seat on the non-DC team that the census elects wherever it proves the
@@ -16182,19 +15954,14 @@ namespace CompetitiveRounds
         /// <para>Round 4, finding 1: the room the answer was both asked and
         /// received in (LastSeriesStateRoom, "" when the two differ).</para>
         ///
-        /// <para>Round 4, finding 1, and rounds 7 and 8 (F29, F31): the series'
-        /// recorded games and its sitting, for TeamGameNumber. Only an answer
-        /// that carries both win counts is a read of the games (the canceled and
-        /// dc_incomplete answers carry neither, and a missing field parses as 0),
-        /// and only one that carries both `relocked` and `two_points_on_record`
-        /// is a read of the sitting; an answer without both teaches nothing about
-        /// the sitting. The lifecycle route carries all four on this tree's
-        /// server. The status route, as the 886bed8 server half defines it,
-        /// carries the win counts and not the two sitting keys, so its answers
-        /// teach the games and nothing about the sitting (a server-merge item).
-        /// A read names no game (F31): it only saves the series' reporter an ask
-        /// for physical game 1 the server would refuse
-        /// (TeamGameNumber.Tracker.AskFirstGame).</para></summary>
+        /// <para>Round 4, finding 1: the series' recorded games, for
+        /// TeamGameNumber. Only an answer that carries both win counts is a read
+        /// of the games (the canceled and dc_incomplete answers carry neither,
+        /// and a missing field parses as 0); both routes carry the two counts.
+        /// Round 8, finding F31: a read names no physical game. Since round 11
+        /// (route a: no physical game 1 is issued) no read of either route is
+        /// a read of the sitting, so `relocked` and `two_points_on_record` are
+        /// not read here.</para></summary>
         private static void ObserveSeriesStateAnswer(string seriesId, string resp, string roomAsked)
         {
             string roomNow = "";
@@ -16205,10 +15972,7 @@ namespace CompetitiveRounds
                 string tgnLine = TeamGameNumber.Live.ObserveRead(seriesId,
                     resp.IndexOf("\"t1_series_wins\":", StringComparison.Ordinal) >= 0
                     && resp.IndexOf("\"t2_series_wins\":", StringComparison.Ordinal) >= 0,
-                    LastSeriesT1Wins, LastSeriesT2Wins,
-                    resp.IndexOf("\"relocked\":", StringComparison.Ordinal) >= 0
-                    && resp.IndexOf("\"two_points_on_record\":", StringComparison.Ordinal) >= 0,
-                    ExtractJsonBool(resp, "relocked"), ExtractJsonBool(resp, "two_points_on_record"));
+                    LastSeriesT1Wins, LastSeriesT2Wins);
                 if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
             }
             catch { }
@@ -16780,10 +16544,7 @@ namespace CompetitiveRounds
             // ordering as the fps/telemetry args above. Null = not captured
             // (field omitted). ADVISORY: outside the frozen 11-field canonical.
             string t1aEndStats = null, string t1bEndStats = null,
-            string t2aEndStats = null, string t2bEndStats = null,
-            // v1.41.0 beta round 8, finding F31: the anchor this client held for
-            // the series when the report was built (AnchorFor), or null.
-            string gameAnchor = null)
+            string t2aEndStats = null, string t2bEndStats = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             // §2c identity fence: the broadcast account never reports.
@@ -16822,15 +16583,6 @@ namespace CompetitiveRounds
             AppendTeamTelemetry(sb, "t1b", t1bTele);
             AppendTeamTelemetry(sb, "t2a", t2aTele);
             AppendTeamTelemetry(sb, "t2b", t2bTele);
-            // v1.41.0 beta round 8, finding F31; round 9, finding M2: the whole
-            // nonce of the series' issued physical game 1 as this client's
-            // report ledger held it when the report was built. ADVISORY and
-            // outside the frozen 11-field canonical below; omitted when none is
-            // held. A report the series records without the issued anchor, or
-            // on another session than the issue's (round 9, finding M1), voids
-            // that game on the server (main.py, _team_first_game_void).
-            if (!string.IsNullOrEmpty(gameAnchor))
-                sb.Append($"\"game_anchor\":\"{Escape(gameAnchor)}\",");
 
             string canonical =
                 $"{t1aSteam}:{t1bSteam}:{t2aSteam}:{t2bSteam}:" +
@@ -16843,9 +16595,6 @@ namespace CompetitiveRounds
 
             string json = sb.ToString();
             Plugin.Log.LogInfo($"Reporting 2v2 match (series={seriesId}, winner=T{winnerTeam}, {t1Rounds}-{t2Rounds})...");
-            // v1.41.0 beta round 8, finding F31: into the report ledger before
-            // the first send (TeamReportsClean).
-            NoteTeamReportSent(seriesId);
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/team/matches", json,
                 (success, response) =>

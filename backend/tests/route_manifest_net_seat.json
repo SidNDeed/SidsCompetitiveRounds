@@ -1177,7 +1177,7 @@
           ],
           "main",
           "submit_team_match",
-          "d0546bf9cac49bd1f9176ffd0b43ab55d5193efe"
+          "4ff12330e3a6251ddcf369afcef919a13da8a54c"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "727f143dcfad8ca26b81f2b5d532bd87e0f1075d"
+          "5e3777aa6c1c6191804a63bebb0d586478cb2baa"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1258,7 +1258,7 @@
           ],
           "main",
           "team_series_state",
-          "dbab085c61d2b50c7b28beed642dc6d6e2dd6ecc"
+          "515cad0b84d26672d3db5c46de6a691f4c675752"
         ]
       ]
     },
@@ -2299,7 +2299,7 @@
           ],
           "main",
           "ovt_lobby_resolve",
-          "fc619732c5c8217fb5da0cfc8c737180a766bae6"
+          "6ec1c815a29e33dd793e88379f4797d7ebb5bd73"
         ],
         [
           "/api/v1/ovt/lobby/settings",
@@ -2695,7 +2695,7 @@
           ],
           "main",
           "team_lobby_resolve",
-          "dd2a93d6862f0b7aa0ecc22ac087ee3a8f0503b3"
+          "14e4f9c6e4106843740e0d43ab1d5f4a82a5dfce"
         ],
         [
           "/api/v1/team/lobby/settings",
@@ -2776,7 +2776,7 @@
           ],
           "main",
           "team_queue_poll",
-          "bf837a61bf527fab7f03b2cad34bfb2f57004afb"
+          "06755b679d71594fbd7fb1f6b14a48bff588b791"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3389,21 +3389,6 @@
           "d00b9ea939cf26d75a15ebdf22b3da86b896dce8"
         ]
       ]
-    },
-    {
-      "classification": "statically-nonconsumer",
-      "reason": "Static source review (v1.41.0 beta round 8, finding F31: the series' physical game 1, issued once to its reporter): over the route's whole reached surface no W1 private Match column is named, no SQL reads the matches table and the Match model is not used; it answers {\"issued\": bool, \"nonce\" or \"reason\"} from team_series, players and team_series_games (its session check reads steam_sessions).",
-      "routes": [
-        [
-          "/api/v1/team/series/{series_id}/first-game",
-          [
-            "POST"
-          ],
-          "main",
-          "team_series_first_game",
-          "4495765a87cd5c0e5dfab3e9554473f5a0880ac9"
-        ]
-      ]
     }
   ],
   "entry_points": {
@@ -3622,7 +3607,6 @@
     "POST /api/v1/series/preflight -> main.series_preflight",
     "POST /api/v1/series/{series_id}/live-points -> main.update_live_points",
     "POST /api/v1/team/series/{series_id}/live-points -> main.update_team_live_points",
-    "POST /api/v1/team/series/{series_id}/first-game -> main.team_series_first_game",
     "POST /api/v1/ffa/lobbies/{lobby_id}/live-points -> main.update_ffa_live_points",
     "POST /api/v1/discord-bets -> main.place_discord_bet",
     "POST /api/v1/bets -> main.place_bet",
