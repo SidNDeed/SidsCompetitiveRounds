@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 372   # v1.41.0 beta round 11: -1 (the physical game 1 issue removed with route (a), finding M1; 373 before); v1.41.0 beta round 8: +1 (the series' physical game 1 issue, finding F31; 372 before); v1.41.0 beta round 2: +1 (the pending-DM cancellation recheck; 371 before); v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 374   # ASKS-B lane, board rows 24 and 25: +2 (the Settings card preview and the batch shard; 372 before); v1.41.0 beta round 11: -1 (the physical game 1 issue removed with route (a), finding M1; 373 before); v1.41.0 beta round 8: +1 (the series' physical game 1 issue, finding F31; 372 before); v1.41.0 beta round 2: +1 (the pending-DM cancellation recheck; 371 before); v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 371   # v1.41.0 beta round 11: -1 (372 before); v1.41.0 beta round 8: +1 (371 before); v1.41.0 beta round 2: +1 (370 before); v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 373   # ASKS-B lane: +2 (371 before); v1.41.0 beta round 11: -1 (372 before); v1.41.0 beta round 8: +1 (371 before); v1.41.0 beta round 2: +1 (370 before); v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {

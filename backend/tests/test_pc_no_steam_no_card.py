@@ -332,8 +332,9 @@ def test_one_pool_word_carries_the_steam_id_rule_for_every_membership_reader():
     # Every reader that DECIDES membership -- answers not_in_pool, or leaves a
     # member out -- carries the one word, in whatever quoting its own statement is
     # built from. The face preview is in this tuple because it is the reader that
-    # drifted: it carried the id clause alone until 2026-09-15.
-    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
+    # drifted: it carried the id clause alone until 2026-09-15. Its reader is
+    # the drawing helper both preview routes call since board row 24.
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_face):
         src = inspect.getsource(fn)
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 1, fn.__name__
         assert "_PC_NOT_BANNED_SQL" not in src and "p.deleted_at IS NULL" not in src, fn.__name__

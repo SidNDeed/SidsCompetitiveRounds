@@ -346,7 +346,26 @@ namespace CompetitiveRounds
         {
             get { return _pendingCheck || _refreshAt >= 0f || Rendering || UploadInFlight; }
         }
+
+        /// <summary>A NEW look is on its way to the server: a preset change is
+        /// still debouncing, a render that will upload is running, or an upload
+        /// is in flight. Narrower than <see cref="Preparing"/> on purpose: the
+        /// visit check that has not run yet and a preview-only render (the
+        /// stored picture already current) change nothing the server holds.
+        /// The Settings full card (board row 24) shows the live picture with a
+        /// pending note while this holds and the server's card once it clears.
+        /// Every term expires on its own, as Preparing's do.</summary>
+        internal static bool LookPending
+        {
+            get { return _refreshAt >= 0f || UploadInFlight || (Rendering && _productUploads); }
+        }
+        private static bool _productUploads;   // the product render holding the claim will upload (StartProduct)
         internal static Texture2D PreviewTex { get; private set; }   // reduce(4) of the last matte (295x295)
+        /// <summary>The descriptor of the inputs <see cref="PreviewTex"/> was
+        /// drawn from, set with it; null with it. Compared with the stored
+        /// portrait_descriptor it says whether the picture on screen is the one
+        /// the server holds.</summary>
+        internal static string PreviewDescriptor { get; private set; }
         internal static int PreviewSerial { get; private set; }
         internal static string LastResult { get; private set; } = "";
         private static int _visitId, _checkedVisit = -1;
@@ -370,7 +389,7 @@ namespace CompetitiveRounds
             // texture is destroyed and the binding invalidated in one step --
             // dropping the reference alone left the old face painted.
             var old = PreviewTex;
-            PreviewTex = null; PreviewSerial++;
+            PreviewTex = null; PreviewDescriptor = null; PreviewSerial++;
             if (old != null) { try { UnityEngine.Object.Destroy(old); } catch { } }
         }
 
@@ -1170,6 +1189,7 @@ namespace CompetitiveRounds
 
         private static IEnumerator ProductRun(string why, bool upload, int gen, bool lever)
         {
+            _productUploads = upload;   // runs inside StartProduct's StartCoroutine, before the first yield (LookPending)
             var rep = new StringBuilder();
             _errCount = 0; _errs.Clear();
             _cleanupOwed = true;
@@ -1245,7 +1265,7 @@ namespace CompetitiveRounds
                 LogGradeProbe();
                 if (lit < 0.02f || lit > 0.60f) { LastResult = "render discarded: lit " + (100f * lit).ToString("F1") + "%"; matte = null; yield break; }
                 var prev = PreviewTex;
-                PreviewTex = Reduce4(px, DEFAULT_SIZE); PreviewSerial++;
+                PreviewTex = Reduce4(px, DEFAULT_SIZE); PreviewDescriptor = descriptor; PreviewSerial++;
                 if (prev != null) UnityEngine.Object.Destroy(prev);
                 Teardown(rep);
                 yield return null;                           // deferred Destroy lands
@@ -1260,6 +1280,7 @@ namespace CompetitiveRounds
                 if (!_renderClaim.HeldByOther(gen))
                 {
                     _cleanupOwed = false;
+                    _productUploads = false;   // the upload, if any, starts below in this same step (LookPending)
                     Application.logMessageReceived -= OnLog;
                     Teardown(rep);
                 }

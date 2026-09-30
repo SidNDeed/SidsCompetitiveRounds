@@ -1186,7 +1186,7 @@ Every achievement pays <color=#7FE87F>100g</color> unless listed here:
 - <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount, Sync Champion, Async Champion.
 - <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman, Sync Finalist, Async Finalist.
 
-The FFA shutouts nest: one 5-0 win in a 5-player lobby pays Clean House (100g) + Party Crasher (300g) + Hostile Takeover (500g) in a single game. The translator achievements (Rosetta, Dragoman, Babel) trigger at 10, 100 and 1000 approved live strings.
+The FFA shutouts nest: one 5-0 win with 5 players finishing pays Clean House (100g) + Party Crasher (300g) + Hostile Takeover (500g) in a single game. The translator achievements (Rosetta, Dragoman, Babel) trigger at 10, 100 and 1000 approved live strings.
 
 <color=#8A8A93>Outside matches: Discord server boosters are paid 2000g monthly, and community artists earn a 30% royalty (rounded down to whole Gold) when another player buys their item - gifts pay none.</color>");
 
@@ -1641,14 +1641,14 @@ The rating milestones are checked whenever your 1v1 or 2v2 rating updates. FFA r
 
 The FFA six require a RANKED FFA lobby and are all server-checked.
 
-- <color=#7FD4FF>Clean House</color> - win an FFA 5-0: all five points yours and nobody else converts a full point, in a lobby that seated 3 or more players. <color=#7FE87F>100g</color>
-- <color=#7FD4FF>Party Crasher</color> - the same with 4 or more seated. <color=#7FE87F>300g</color>
-- <color=#7FD4FF>Hostile Takeover</color> - the same with 5 or more seated. <color=#7FE87F>500g</color>
+- <color=#7FD4FF>Clean House</color> - win an FFA 5-0: all five points yours and nobody else converts a full point, in a game that 3 or more players finished. <color=#7FE87F>100g</color>
+- <color=#7FD4FF>Party Crasher</color> - the same with 4 or more finishing. <color=#7FE87F>300g</color>
+- <color=#7FD4FF>Hostile Takeover</color> - the same with 5 or more finishing. <color=#7FE87F>500g</color>
 - <color=#7FD4FF>Rampage</color> - over 50 kills in one game. <color=#7FE87F>100g</color>
 - <color=#7FD4FF>Bodycount</color> - over 100 kills in one game. <color=#7FE87F>500g</color>
 - <color=#7FD4FF>Heartbreak</color> - lose a game holding 10 or more round wins that never became full points. <color=#7FE87F>300g</color>
 
-The shutouts nest: <color=#7FE87F>one 5-player shutout unlocks all three at once, 900 gold total</color>. Seated means the roster when the lobby locked, not who stayed to the end - and losers holding leftover round wins don't break your shutout; only a converted full point does. <color=#8A8A93>Kill counts only register when the game was reported by an up-to-date mod version.</color>
+The shutouts nest: <color=#7FE87F>one shutout with 5 players finishing unlocks all three at once, 900 gold total</color>. Finishing means playing the game to its end: a player who left early or never showed up doesn't count - and losers holding leftover round wins don't break your shutout; only a converted full point does. <color=#8A8A93>Kill counts only register when the game was reported by an up-to-date mod version.</color>
 
 The translator tiers come from the translation portal, not from matches. A live string is an approved translation you proposed or reviewed; doing both jobs on one string counts once. Each tier also grants its matching title (see <color=#7FD4FF>Titles</color>).
 

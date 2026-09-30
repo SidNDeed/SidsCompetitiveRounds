@@ -221,8 +221,10 @@ def test_the_intent_and_answer_rules_are_pinned_in_the_client():
     assert "PcMeDispatchedAt = dispatched;" in api and "PcMeDispatchedAt = -1f;" in api
     # + FetchPcPacks, the pack history pager (Sept 12); + the five card
     # trading calls (PcTradeSummary, PcTrades, PcTradePropose, PcTradeAct,
-    # FetchPcCollectionOf), each fenced on the epoch it was dispatched under
-    assert api.count("int epoch = _pcCacheEpoch;") == 10
+    # FetchPcCollectionOf), each fenced on the epoch it was dispatched under;
+    # + PcDiscardBatch, whose balance write into the cache is fenced the same
+    # way (board row 25)
+    assert api.count("int epoch = _pcCacheEpoch;") == 11
     # an empty binder after an identity edge is refetched
     assert "if (view == View.Binder && ApiClient.CachedPcCollection == null && ApiClient.PcCollectionError == null)" in src
     # the title line is the translated rank tier plus the SEPARATELY translated

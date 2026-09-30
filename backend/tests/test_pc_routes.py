@@ -1343,8 +1343,11 @@ def test_the_card_and_its_preview_read_one_snapshot():
     assert "s.id AS snapshot_id" in card and '"snapshot_id": int(row["snapshot_id"])' in card
     prev = _src(main.internal_pc_face_preview)
     assert "snapshot_id: int | None = Query(None, ge=1)" in prev
-    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in prev
-    assert '{"pid": player_ref, "snap": snapshot_id}' in prev
+    # the route hands its snapshot to the drawing helper (board row 24), which pins the read
+    assert prev.count("await _pc_preview_face(db, player_ref, loc, snapshot_id)") == 1
+    draw = _src(main._pc_preview_face)
+    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in draw
+    assert '{"pid": player_ref, "snap": snapshot_id}' in draw
 
 
 @pytest.mark.parametrize("gone, lookups, admin_w, target_w", [

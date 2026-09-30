@@ -10,9 +10,11 @@ Pinned here, each against the requirement it answers:
   * every /api/v1/pc/ route is charged to a Player Cards bucket -- exactly the
     upload's path to the upload bucket, every other family path (one that only
     starts with the upload's included) to the family bucket -- and no other
-    route is; the upload is the only family route that takes a request body
-    (a body parameter, or a read of the body in the endpoint or in a function
-    of main it hands its request to);
+    route is; the upload and the batch shard are the only family routes that
+    take a request body (a body parameter, or a read of the body in the
+    endpoint or in a function of main it hands its request to), and the batch
+    declares no body parameter (it reads its own, under a ceiling) and is
+    family traffic;
     /api/v1/internal/ routes and calls carrying the internal key (the bot's)
     are charged to no bucket;
   * the drop client's fastest recorded discard pace, with the margin §9
@@ -59,6 +61,7 @@ SHARED_LIMIT, SHARED_WINDOW = 20, 10.0
 
 DISCARD = "/api/v1/pc/prints/discard"
 UPLOAD = "/api/v1/pc/portrait"
+BATCH = "/api/v1/pc/prints/discard-batch"
 
 
 class Gate:
@@ -188,8 +191,13 @@ def test_every_route_is_charged_to_the_bucket_its_family_names(gate):
     bucket, so a Player Cards route added later is classified by the rule and
     a route outside the family can never land in its buckets. The upload
     bucket is the bound on the decodes a request body queues in the render
-    pool, so a second family route that takes a body fails here until someone
-    decides which bucket it belongs in."""
+    pool, so a family route that takes a body fails here until someone
+    decides which bucket it belongs in. The batch shard (board row 25) is
+    decided: it reads its own JSON body and refuses one past
+    player_cards.PC_DISCARD_BATCH_BODY_MAX bytes, declares no body parameter
+    (so FastAPI parses nothing before that ceiling), and queues nothing in
+    the render pool, so it is family traffic. A route that takes a body and
+    is not one of these two still fails here."""
     family = upload = 0
     with_body = set()
     for route in main.app.routes:
@@ -204,6 +212,10 @@ def test_every_route_is_charged_to_the_bucket_its_family_names(gate):
             elif path.startswith("/api/v1/pc/"):
                 if _takes_a_body(route):
                     with_body.add(path)
+                if path == BATCH:
+                    assert not route.dependant.body_params, (
+                        "the batch declares a body parameter: FastAPI would parse its body "
+                        "before the route's own ceiling applies")
                 if path == UPLOAD:
                     assert bucket == "pcu", (path, bucket)
                     upload += 1
@@ -217,7 +229,7 @@ def test_every_route_is_charged_to_the_bucket_its_family_names(gate):
                 assert bucket in ("g", "s", "f"), (path, bucket)
     # the recovery must see the family at all, or every assertion above is vacuous
     assert family >= 10 and upload >= 1, (family, upload)
-    assert with_body == {UPLOAD}, with_body
+    assert with_body == {UPLOAD, BATCH}, with_body
     # a path that only starts with the upload's is family traffic, whatever it carries
     for near in (UPLOAD + "s", UPLOAD + "-status", UPLOAD + "/x1"):
         for method in ("GET", "POST"):

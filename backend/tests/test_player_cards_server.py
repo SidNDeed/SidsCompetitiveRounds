@@ -316,8 +316,12 @@ def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
     # 2026-09-15: it interpolated _PC_POOL_STEAM_ID_SQL, which is one half of
     # the merged word, while answering not_in_pool.
     assert len(re.findall(r'(?:WHERE|AND) (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 5
-    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
+    # The face preview's reader is the drawing helper both preview routes call
+    # (board row 24): the bot's /card preview and the Settings full card.
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_face):
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', inspect.getsource(fn))) == 1, fn.__name__
+    for fn in (main.internal_pc_face_preview, main.pc_face_preview):
+        assert inspect.getsource(fn).count("await _pc_preview_face(db, ") == 1, fn.__name__
     # ...and the identifier appears nowhere else but its definition and the one
     # docstring that names it, so a sixth reader cannot reach the word by any
     # other spelling without failing here (comments are stripped by _main_code).
@@ -676,8 +680,8 @@ def _main_code():
     return "".join(lines)
 
 
-MUTATIONS = ("pc_open_pack", "pc_daily_claim", "pc_discard_print", "pc_set_setting")
-PRIVATE_READS = ("pc_pack_result", "pc_me")
+MUTATIONS = ("pc_open_pack", "pc_daily_claim", "pc_discard_print", "pc_discard_batch", "pc_set_setting")
+PRIVATE_READS = ("pc_pack_result", "pc_me", "pc_face_preview")
 
 
 def test_every_mutation_and_private_read_goes_through_the_verified_actor():
@@ -847,9 +851,11 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/packs/open", ("POST",)), ("/api/v1/pc/packs/result", ("GET",)),
         ("/api/v1/pc/packs", ("GET",)),   # the pack history pager (Sept 12)
         ("/api/v1/pc/daily", ("POST",)), ("/api/v1/pc/prints/discard", ("POST",)),
+        ("/api/v1/pc/prints/discard-batch", ("POST",)),   # the batch shard (board row 25)
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
         ("/api/v1/pc/portrait", ("POST",)),
+        ("/api/v1/pc/face/preview", ("GET",)),   # the Settings full-card preview (board row 24)
     }
     admin = [r for r in main.app.routes if getattr(r, "path", "") == "/api/v1/admin/pc/snapshot"]
     assert len(admin) == 1 and "_require_admin(db, admin_steam_id, \"pc_snapshot\", \"pool\", sig)" in inspect.getsource(main.admin_pc_snapshot)
@@ -988,6 +994,6 @@ def test_titles_and_rank_names_resolve_against_the_rounded_rating():
     # drawing through the helper rather than its own expression
     assert inspect.getsource(main._pc_rank_name).count("_rank_name_for(_pc_board_rating(rating))") == 1
     assert inspect.getsource(main.internal_pc_card).count("_rank_name_for(_pc_board_rating(rating))") == 1
-    preview = inspect.getsource(main.internal_pc_face_preview)
+    preview = inspect.getsource(main._pc_preview_face)   # the drawing both preview routes call (row 24)
     assert "rank_name = _pc_rank_name(rating)" in preview and "_rank_name_for(" not in preview
     assert 'subtitle = _pc_shop_title(member["title"], rank_name)' in preview and '"subtitle": subtitle' in preview
