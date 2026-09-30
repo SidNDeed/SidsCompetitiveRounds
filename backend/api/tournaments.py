@@ -477,6 +477,59 @@ async def _player_id_banned(db: AsyncSession, player_id) -> bool:
     return row is not None
 
 
+# ONE eligibility domain for a tournament's quorum (Discord fix round 4, fix
+# 3; Codex round 3 LOW 3), and it is the lock's, because the lock is the code
+# that acts: an entrant counts when it holds a CONFIRMED signup (is_speculative
+# FALSE) and carries no active ban - the roster lock_tournament brackets.
+# _ELIGIBLE_ENTRANT_SQL is that predicate over a tournament_signups row aliased
+# `ts`, and _eligible_entrant_ids answers "who counts" with it. Every quorum
+# surface reads one or the other: the slot tally below (/tournaments/current's
+# time_slot_tallies - the in-game tab and every Discord line built from it,
+# the FAQ and the bot's availability-DM decision among them), the agreement
+# announcement, lock_tournament's signup gate, slot decision and post-kick
+# recheck, the push-back sentence, the availability-notice queue and the
+# notice feed's recheck (main.py). Round 3's tally also counted speculative
+# entrants' votes while the lock's gate required confirmed ones, so a surface
+# could report a quorum the lock then refused. Recorded as the integrator's
+# default (2026-09-30): tournament rules are Sid's, and he may change it.
+_ELIGIBLE_ENTRANT_SQL = """ts.is_speculative = FALSE
+       AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                        JOIN players bp ON bp.steam_id = pb.steam_id
+                       WHERE bp.id = ts.player_id AND pb.unbanned_at IS NULL)"""
+
+# A start-time vote counts when its voter is an eligible entrant and its slot
+# is far enough out for the lock to pick it (MIN_SLOT_NOTICE_HOURS after the
+# decision, less the hour of slack lock_tournament allows).
+_ELIGIBLE_SLOT_TALLY_SQL = f"""
+    SELECT v.slot_ts, COUNT(*) AS votes
+      FROM tournament_time_votes v
+      JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
+                                AND ts.player_id = v.player_id
+     WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
+       AND {_ELIGIBLE_ENTRANT_SQL}
+     GROUP BY v.slot_ts
+     ORDER BY v.slot_ts
+"""
+
+
+async def _eligible_entrant_ids(db: AsyncSession, tournament_id) -> set:
+    """The players who count toward the tournament's quorum
+    (_ELIGIBLE_ENTRANT_SQL): the confirmed, unbanned entrants."""
+    rows = (await db.execute(text(
+        "SELECT ts.player_id FROM tournament_signups ts"
+        f" WHERE ts.tournament_id = :tid AND {_ELIGIBLE_ENTRANT_SQL}"), {"tid": tournament_id})).all()
+    return {r[0] for r in rows}
+
+
+async def _eligible_slot_tallies(db: AsyncSession, tournament_id, now: datetime) -> list:
+    """[(slot_ts, votes)] in slot order: every slot's count of eligible votes
+    as of `now` (_ELIGIBLE_SLOT_TALLY_SQL)."""
+    min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
+    rows = (await db.execute(text(_ELIGIBLE_SLOT_TALLY_SQL),
+                             {"tid": tournament_id, "min_start": min_start})).all()
+    return [(r.slot_ts, int(r.votes)) for r in rows]
+
+
 async def _get_player_by_steam(db: AsyncSession, steam_id: str) -> Player:
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
@@ -649,13 +702,56 @@ async def _confirmed_mentions(db: AsyncSession, tournament_id: uuid.UUID) -> str
     return " ".join(f"<@{d}>" for d in rows if d)
 
 
-def _signup_count_line(t: Tournament, confirmed: int) -> str:
+# Row 32's start rule, the server's half (Discord fix round 3, item 6). A
+# sync tournament starts only when min_players players agree on ONE offered
+# start time - signing up is not agreeing - so every channel line the server
+# composes about a sync tournament in voting (the signup-count line and the
+# push-back) carries the one sentence below, built by _tsync_rule from the
+# lock's own eligible tally (_eligible_slot_tallies). The bot builds the same
+# sentence for the lines it composes (discord_bot.py _tsync_rule; the bot
+# image carries discord_bot.py alone, so it cannot import this module):
+# test_row32_e pins the two byte-equal over every progress shape. ASCII only.
+TSYNC_VOTE_HOW = "Vote for every time you can make in F5 -> Tournaments."
+
+
+def _tsync_times(slots: list) -> str:
+    """The tied top slots (unix seconds, in order) as one phrase: '<A>',
+    '<A> or <B>', or '<A> or N other times'."""
+    shown = [f"<t:{slot}:F>" for slot in slots]
+    if len(shown) <= 2:
+        return " or ".join(shown)
+    return f"{shown[0]} or {len(shown) - 1} other times"
+
+
+def _tsync_rule(min_players: int, tallies: Optional[list] = None) -> str:
+    """The start rule in one sentence and, given the eligible tally
+    [(slot_ts, votes)], how far the vote has got."""
+    rule = f"It starts when {min_players} players agree on one start time"
+    if tallies is None:
+        return f"{rule}."
+    top = max((votes for _slot, votes in tallies), default=0)
+    slots = sorted(int(slot.timestamp()) for slot, votes in tallies if top and votes == top)
+    if top <= 0 or not slots:
+        progress = f"0 of {min_players} agree on a time so far"
+    elif top < min_players:
+        progress = f"{top} of {min_players} agree on {_tsync_times(slots)} so far"
+    else:
+        progress = f"{top} players agree on {_tsync_times(slots)} so far - enough to lock it"
+    return f"{rule}: {progress}."
+
+
+def _signup_count_line(t: Tournament, confirmed: int, tallies: Optional[list] = None) -> str:
     """The shared '( n / max ) players have entered ...' feed line. Async
     tournaments start the moment signups close, so they get the signup-close
-    time instead of a start time."""
+    time instead of a start time. A sync tournament still in voting states
+    the start rule with its eligible tally (`tallies`, row 32) and how to
+    vote; once locked it names the start time the vote decided."""
     line = (f"( {confirmed} / {t.max_players} ) players have entered the "
-            f"{_kind_label(t.kind)} tournament. "
-            f"{t.min_players} players required to start. ")
+            f"{_kind_label(t.kind)} tournament. ")
+    if t.kind != "async" and t.status == "voting":
+        return (line + f"{_tsync_rule(t.min_players, tallies)} {TSYNC_VOTE_HOW} "
+                f"Default start: {_dts(t.default_start_ts)}.")
+    line += f"{t.min_players} players required to start. "
     if t.kind == "async":
         line += f"Signups close {_dts(t.lock_at)}."
     else:
@@ -664,6 +760,15 @@ def _signup_count_line(t: Tournament, confirmed: int) -> str:
         # actually play at (adversarial review fix).
         line += f"Current start time is {_dts(t.scheduled_start_ts or t.default_start_ts)}."
     return line
+
+
+async def _signup_count_line_now(db: AsyncSession, t: Tournament, confirmed: int) -> str:
+    """_signup_count_line with the eligible tally read now when the line
+    states the start rule (a sync tournament in voting)."""
+    tallies = None
+    if t.kind != "async" and t.status == "voting":
+        tallies = await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))
+    return _signup_count_line(t, confirmed, tallies)
 
 
 def _bracket_tag(side: Optional[str]) -> str:
@@ -912,17 +1017,14 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         # "only after the caller has voted" anti-snoop gate predates
         # mandatory voting and starved exactly the audience that needs the
         # data most.)
-        # Future slots only — the lock's agreement tally ignores past slots,
-        # so counting them here would show "best time: N/8" progress that
-        # can never actually lock (client topTally scans ALL tallies).
-        tq = text("""
-            SELECT slot_ts, COUNT(*) AS votes
-            FROM tournament_time_votes
-            WHERE tournament_id = :tid AND slot_ts > :now
-            GROUP BY slot_ts ORDER BY slot_ts
-        """)
-        tallies = [TournamentTimeSlotTally(slot_ts=r.slot_ts, votes=r.votes)
-                   for r in (await db.execute(tq, {"tid": t.id, "now": datetime.now(timezone.utc)})).all()]
+        # The lock's own tally (Discord fix round 3, item 3; round 4, fix 3):
+        # _eligible_slot_tallies - a slot the lock could pick, the vote of a
+        # confirmed entrant with no active ban - so "best time:
+        # N/8" here, in the in-game tab (client topTally scans ALL tallies)
+        # and in every Discord line built from this answer, is the count the
+        # lock will honour.
+        tallies = [TournamentTimeSlotTally(slot_ts=slot, votes=votes)
+                   for slot, votes in await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))]
 
     # Per-requester region (Aug 13). The top-level photon_region is the field
     # every client reads to decide which Photon region to force before joining
@@ -1026,13 +1128,13 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
     # and each attempt created a new reachable deadlock class in the
     # tick/voting planes (review r20 findings 5-8) — the milliseconds-wide
     # residual on this low-stakes surface is the better trade (#242).
-    _unbanned = []
+    # Round 4, fix 3: the one eligibility domain (_eligible_entrant_ids) is
+    # this gate's, so no surface counts a quorum this gate would refuse.
+    _eligible = await _eligible_entrant_ids(db, t.id)
     for _s in signups:
-        if await _player_id_banned(db, _s.player_id):
+        if _s.player_id not in _eligible:
             print(f"[TOURNAMENT] lock: excluding banned signup {_s.id}")
-        else:
-            _unbanned.append(_s)
-    signups = _unbanned
+    signups = [_s for _s in signups if _s.player_id in _eligible]
 
     pushback_reason = None
     if len(signups) < t.min_players:
@@ -1040,8 +1142,9 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                            f"{t.min_players} required signed up)")
 
     # Item 3 (sync): at least min_players must agree on ONE slot. Votes are
-    # tallied across every signup — speculatives included, since they promote
-    # into slots freed by the kick pass below.
+    # tallied over the eligible entrants only (round 4, fix 3): a speculative
+    # entrant's vote no longer counts toward the quorum - it still keeps the
+    # entrant through the kick pass below, which may promote it.
     winning_slot = None
     if t.kind == "sync" and not force and pushback_reason is None:
         # Only slots giving real notice can win (Sid item 9): players must be
@@ -1052,25 +1155,17 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         # strict 24h bar would disqualify it every single week. A tick >1h
         # late pushes back instead (notice couldn't be given). A past-slot
         # win would also insta-start + mass-forfeit; this bar covers that
-        # a fortiori.
-        min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
-        tallies = (await db.execute(text("""
-            SELECT v.slot_ts, COUNT(*) AS votes
-            FROM tournament_time_votes v
-            JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
-                                      AND ts.player_id = v.player_id
-            WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
-              -- round-19 find 1: a banned entrant's vote must not push a
-              -- slot over the threshold the ELIGIBLE roster cannot reach
-              AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                               JOIN players p ON p.steam_id = pb.steam_id
-                              WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
-            GROUP BY v.slot_ts ORDER BY votes DESC
-        """), {"tid": t.id, "min_start": min_start})).all()
+        # a fortiori. That bar, the current-signup rule and the ban exclusion
+        # (round-19 find 1: a banned entrant's vote must not push a slot over
+        # the threshold the ELIGIBLE roster cannot reach) are the one
+        # eligibility predicate every row-32 surface reads (Discord fix
+        # round 3, item 3; round 4, fix 3: confirmed entrants only):
+        # _eligible_slot_tallies.
+        tallies = await _eligible_slot_tallies(db, t.id, now)
         agree_count = 0
         if tallies:
-            top_votes = int(tallies[0].votes)
-            top_slots = [r.slot_ts for r in tallies if int(r.votes) == top_votes]
+            top_votes = max(votes for _slot, votes in tallies)
+            top_slots = [slot for slot, votes in tallies if votes == top_votes]
             agree_count = top_votes
             if top_votes >= t.min_players:
                 winning_slot = random.choice(top_slots)
@@ -1078,7 +1173,12 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             pushback_reason = (f"no upcoming start time reached {t.min_players} "
                                f"votes (the best slot had {agree_count})")
 
-    async def _push_back(reason: str) -> None:
+    async def _push_back(reason: str, consensus: Optional[str] = None) -> None:
+        # `reason` goes to the log; a sync tournament's channel post names
+        # the consensus instead (`consensus`, row 32: "no start time had 8
+        # players agreeing on it"; a force start, which skips the vote, keeps
+        # `reason`) and states the start rule with the tally its carried
+        # votes hold at the new times.
         # Pushback path. Status stays "voting" so the cron re-enters this
         # function next week. (Round-20 find 1: factored into a closure so
         # the post-kick eligible-minimum recheck can push back too.)
@@ -1135,10 +1235,18 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             carried = (" Your time votes carried over to the same times next "
                        "week — update them in the F5 tab if that no longer "
                        "works for you." if t.kind == "sync" else "")
+            said = reason
+            if t.kind == "sync":
+                # A force start skips the time vote, so its push-back keeps
+                # the eligible count that stopped it.
+                said = consensus or (reason if force else
+                                     f"no start time had {t.min_players} players agreeing on it")
+                rule = _tsync_rule(t.min_players, await _eligible_slot_tallies(db, t.id, now))
+                when_sentence = f"{when_sentence} {rule} {TSYNC_VOTE_HOW}"
             await _queue_channel_post(
                 db,
                 f"{prefix} {_kind_label(t.kind)} tournament has been pushed "
-                f"back: {reason}. {when_sentence}{carried}")
+                f"back: {said}. {when_sentence}{carried}")
         except Exception as e:
             print(f"[TOURNAMENT] pushback feed post failed: {e}")
         # Adversarial review fix: the availability-check notices are deduped by
@@ -1224,9 +1332,9 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         # Reload the confirmed set — kicks + promotions changed it.
         # Re-apply the BAN filter (round-19 find 1: this reload restored a
         # banned entrant the initial filter had excluded).
-        signups = (await db.execute(q)).scalars().all()
-        signups = [s for s in signups
-                   if not await _player_id_banned(db, s.player_id)]
+        _eligible = await _eligible_entrant_ids(db, t.id)
+        signups = [s for s in (await db.execute(q)).scalars().all()
+                   if s.player_id in _eligible]
         # Round-20 find 1: kicks + speculative promotions + the ban filter
         # can drop the eligible roster below the minimum AFTER the initial
         # gate passed — a below-minimum bracket must push back, not lock.
@@ -1236,7 +1344,8 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         if len(signups) < t.min_players:
             await _push_back(
                 f"not enough eligible players after lock filtering "
-                f"({len(signups)} of {t.min_players} required)")
+                f"({len(signups)} of {t.min_players} required)",
+                f"fewer than {t.min_players} eligible players agreed on the start time")
             return
 
     # Prizes scale with the locked player count (item 2). prize_tier is kept
@@ -3180,7 +3289,12 @@ async def _queue_availability_notices(db: AsyncSession) -> None:
     a no-op. Guards: never queued under 24h out (too late to be actionable —
     a player who never got one because signups filled late just gets the
     existing lock DM), never for tournaments outside 'voting', never under
-    quorum."""
+    quorum. Round 4, fix 4 (Codex round 3 LOW 5): the quorum and the
+    recipients are the eligible entrants (_ELIGIBLE_ENTRANT_SQL: confirmed,
+    no active ban), so a banned entrant is never queued, and an entrant who
+    becomes eligible later is queued by the next tick (ON CONFLICT keeps
+    every row already queued). The notice feed re-checks the same predicate
+    at delivery (main.py internal_tournament_notices)."""
     now = datetime.now(timezone.utc)
     ts = (await db.execute(
         select(Tournament).where(Tournament.status == "voting")
@@ -3192,8 +3306,7 @@ async def _queue_availability_notices(db: AsyncSession) -> None:
         hours_until = (anchor - now).total_seconds() / 3600.0
         if not (24.0 <= hours_until <= 96.0):
             continue
-        confirmed = await _confirmed_count(db, t.id)
-        if confirmed < t.min_players:
+        if len(await _eligible_entrant_ids(db, t.id)) < t.min_players:
             continue
         payload = json.dumps({
             "kind": t.kind,
@@ -3207,7 +3320,7 @@ async def _queue_availability_notices(db: AsyncSession) -> None:
             "INSERT INTO tournament_notices (tournament_id, player_id, notice_type, payload) "
             "SELECT ts.tournament_id, ts.player_id, 'availability_check', :payload "
             "  FROM tournament_signups ts "
-            " WHERE ts.tournament_id = :tid AND ts.is_speculative = FALSE "
+            f" WHERE ts.tournament_id = :tid AND {_ELIGIBLE_ENTRANT_SQL} "
             "ON CONFLICT (tournament_id, player_id, notice_type) DO NOTHING"
         ), {"payload": payload, "tid": t.id})
 
@@ -4264,7 +4377,7 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     # posts ride the signup's transaction — no orphan announcements.
     try:
         confirmed = await _confirmed_count(db, tournament_id)
-        await _queue_channel_post(db, _signup_count_line(t, confirmed))
+        await _queue_channel_post(db, await _signup_count_line_now(db, t, confirmed))
         if t.kind == "async":
             # Async genuinely IS ready at a signup count: it starts when signups
             # close, so there is no time to agree on and lock_at is the truth.
@@ -4312,29 +4425,13 @@ async def _sync_agreement_reached(db: AsyncSession, t: Tournament) -> bool:
     stable in the useful direction: the feed says "a time has been agreed", the
     lock decides which, and the lock's own DM tells everyone the answer.
 
-    The eligibility rules still match the lock's tally, because a claim of
-    agreement that the lock would not honour is still a lie:
-      * only slots far enough out to be lockable (MIN_SLOT_NOTICE_HOURS),
-      * only votes from CURRENT signups,
-      * banned entrants excluded, so a banned vote cannot push a slot over a
-        threshold the eligible roster cannot reach.
+    The eligibility rules are the lock's tally itself, because a claim of
+    agreement that the lock would not honour is still a lie: the one
+    predicate, _eligible_slot_tallies (lockable slots, confirmed entrants
+    with no active ban - round 4, fix 3).
     """
-    now = datetime.now(timezone.utc)
-    min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
-    rows = (await db.execute(text("""
-        SELECT v.slot_ts, COUNT(*) AS votes
-        FROM tournament_time_votes v
-        JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
-                                  AND ts.player_id = v.player_id
-        WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
-          AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                           JOIN players p ON p.steam_id = pb.steam_id
-                          WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
-        GROUP BY v.slot_ts
-        HAVING COUNT(*) >= :minp
-        ORDER BY v.slot_ts
-    """), {"tid": t.id, "min_start": min_start, "minp": int(t.min_players)})).all()
-    return bool(rows)
+    tallies = await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))
+    return any(votes >= int(t.min_players) for _slot, votes in tallies)
 
 
 async def _maybe_announce_sync_agreement(db: AsyncSession, t: Tournament) -> None:
@@ -4419,6 +4516,17 @@ async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: A
         # signup into their slot OR collapse their matches into byes for
         # their opponents so the bracket still resolves.
         await _handle_leaving_signup(db, tournament_id, existing.id)
+    # The availability check queued for this entrant and not yet sent dies
+    # with the signup (Discord fix round 3, item 4; Codex round 2 LOW 2): a
+    # sync check can sit held for days until a start time reaches
+    # min_players, and a former entrant must not be asked. The notice feed
+    # re-checks the live signup as well (main.py internal_tournament_notices),
+    # for a notice that outlives its signup by any other road. A later
+    # re-signup queues a fresh one (_queue_availability_notices).
+    await db.execute(text(
+        "DELETE FROM tournament_notices WHERE tournament_id = :tid AND player_id = :pid"
+        " AND notice_type = 'availability_check' AND notified_at IS NULL"),
+        {"tid": tournament_id, "pid": player.id})
     await db.flush()
     # Discord feed (v1.32): departure + updated progress line. In the locked
     # branch the count can stay flat (a speculative got promoted) — the line
@@ -4428,7 +4536,7 @@ async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: A
         await _queue_channel_post(
             db,
             f"A player left the {_kind_label(t.kind)} tournament — "
-            + _signup_count_line(t, confirmed))
+            + await _signup_count_line_now(db, t, confirmed))
     except Exception as e:
         print(f"[TOURNAMENT] unsignup feed post failed: {e}")
     await db.commit()

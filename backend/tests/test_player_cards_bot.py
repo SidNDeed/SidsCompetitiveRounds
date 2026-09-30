@@ -17,7 +17,7 @@ def _fn(src, name):
 
 
 def test_the_three_commands_and_the_drain_loop_exist_once():
-    for name in ("daily", "collection", "card"):
+    for name in ("daily", "collection", "card", "buypack"):   # buypack: fix round 1, D2
         assert BOT_SRC.count(f'@bot.hybrid_command(name="{name}"') == 1, name
     assert BOT_SRC.count("@tasks.loop(seconds=60)\nasync def poll_pc_events():") == 1
     assert BOT_SRC.count("if not poll_pc_events.is_running(): poll_pc_events.start()") == 1
@@ -28,13 +28,16 @@ def test_every_internal_route_the_bot_calls_is_registered_by_the_api():
     assert paths == {'"/internal/pc/daily"', '"/internal/pc/collection"', '"/internal/pc/card"',
                      '"/internal/pc/events/pending"', '"/internal/pc/events/ack"',
                      '"/internal/pc/lease"', '"/internal/pc/face/back"',
-                     '"/internal/pc/packs"', '"/internal/pc/binder"'}
+                     '"/internal/pc/packs"', '"/internal/pc/binder"', '"/internal/pc/packs/open"'}
     for p in paths:
         full = '"/api/v1' + p[1:]
         assert (f"@app.get({full}" in MAIN_SRC) or (f"@app.post({full}" in MAIN_SRC), p
     # the two mutating routes are POSTs on both sides, the reads are GETs
     assert '_pc_api("POST", "/internal/pc/daily"' in BOT_SRC and '@app.post("/api/v1/internal/pc/daily"' in MAIN_SRC
     assert '_pc_api("POST", "/internal/pc/events/ack"' in BOT_SRC and '@app.post("/api/v1/internal/pc/events/ack"' in MAIN_SRC
+    # the bot's pack opener (fix round 1, D1): a POST on both sides, and one call site
+    assert BOT_SRC.count('_pc_api("POST", "/internal/pc/packs/open"') == 1
+    assert '@app.post("/api/v1/internal/pc/packs/open"' in MAIN_SRC
     for read in ("collection", "card", "events/pending"):
         assert f'_pc_api("GET", "/internal/pc/{read}"' in BOT_SRC and f'@app.get("/api/v1/internal/pc/{read}"' in MAIN_SRC
     # the lease and face routes (v22 section 6): the bot's f-string paths against the api's registrations
@@ -70,7 +73,7 @@ def test_the_drain_posts_then_acks_and_stops_on_a_failed_send():
 
 
 def test_identity_is_the_callers_discord_id_never_a_steam_id():
-    for name in ("cmd_pc_daily", "cmd_pc_collection", "cmd_pc_card"):
+    for name in ("cmd_pc_daily", "cmd_pc_collection", "cmd_pc_card", "cmd_pc_buypack"):
         src = _fn(BOT_SRC, name)
         assert "steam_id" not in src, name
         assert "await _maybe_defer(ctx)" in src, name
@@ -113,7 +116,9 @@ def test_every_line_that_names_people_is_sent_under_a_live_lease():
     ev = _fn(BOT_SRC, "poll_pc_events")
     assert 'if first.get("subject_ref"):' in ev
     assert 'lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)' in ev
-    assert "if not await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease, require_lease=True):" in ev
+    # fix round 1, D3: the face rides bound into an embed, and the send's receipt is logged
+    assert "if not await _pc_send_face(ch.send, content=text_line[:2000], embed=embed, face=face, lease=lease," in ev
+    assert 'require_lease=True, receipt=f"[PC-EVENTS] line for {ids}", no_face=why):' in ev
     assert "withdrawn before the send (no live lease)" in ev
     assert ev.index("withdrawn before the send") < ev.index("leases.append(lease[0])") < ev.index("_pc_events_sent[i] = True")
     card = _fn(BOT_SRC, "cmd_pc_card")

@@ -1288,8 +1288,8 @@ class _NoSession:
 def _handlers(main, pack_id, owner_ref):
     return {
         "internal_pc_packs": lambda key, db: main.internal_pc_packs(
-            discord_id="1", pack_id=None, before=None, index=None, limit=5, locale=None, x_internal_key=key,
-            db=db),
+            discord_id="1", pack_id=None, before=None, index=None, limit=5, locale=None, player_steam_id=None,
+            x_internal_key=key, db=db),
         "internal_pc_pack_strip": lambda key, db: main.internal_pc_pack_strip(
             pack_id=pack_id, locale="en", discord_id="1", x_internal_key=key, db=db),
         "internal_pc_binder": lambda key, db: main.internal_pc_binder(
@@ -1320,7 +1320,8 @@ def test_c19_the_same_handlers_with_the_key_still_answer(monkeypatch, tmp_path):
         main = env.main
         async with env.database.async_session() as db:
             packs = await main.internal_pc_packs(discord_id=owner.discord, pack_id=None, before=None, index=None,
-                                                 limit=5, locale=None, x_internal_key=H.INTERNAL_KEY, db=db)
+                                                 limit=5, locale=None, player_steam_id=None,
+                                                 x_internal_key=H.INTERNAL_KEY, db=db)
             assert packs["total"] == 1
         async with env.database.async_session() as db:
             strip = await main.internal_pc_pack_strip(pack_id=pack, locale="en", discord_id=owner.discord,

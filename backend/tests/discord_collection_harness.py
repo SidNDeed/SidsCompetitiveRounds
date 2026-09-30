@@ -46,6 +46,7 @@ import json as _json
 import os
 import re
 import secrets
+import threading
 import time as _time
 import uuid
 from pathlib import Path
@@ -877,7 +878,8 @@ REVEAL_FUNCS = frozenset({
     "_pc_reveal_drawn", "_pc_reveal_moved", "_pc_reveal_manifest", "_pc_reveal_expected",
     "_pc_reveal_check", "_pc_reveal_bytes", "_pc_reveal_revalidate", "_pc_reveal_compose",
     "_pc_reveal_pack_text", "_pc_reveal_binder_text", "_pc_reveal_run", "_pc_reveal_refusal",
-    "_pc_reveal_unposted", "_pc_reveal_pack", "_pc_reveal_binder", "cmd_pc_pack", "cmd_pc_binder",
+    "_pc_reveal_unposted", "_pc_reveal_pack", "_pc_reveal_pack_run", "_pc_reveal_binder", "cmd_pc_pack",
+    "cmd_pc_binder",
     "_pc_lease", "_pc_lease_left", "_pc_lease_live", "_pc_lease_release", "_pc_lease_release_all",
     "_pc_leases", "_pc_detail", "_pc_name", "_pc_print_line", "_pc_fit_field", "_pc_when",
     "_pc_api", "_pc_api_bytes", "_pc_not_linked", "_maybe_defer", "_pc_locale_of",
@@ -1065,7 +1067,7 @@ class BotRig:
         from datetime import datetime, timezone
         ns = {"__builtins__": __builtins__, "__name__": "dc_reveal_bot",
               "asyncio": fake_asyncio, "time": fake_time, "io": io, "re": re, "json": _json,
-              "datetime": datetime, "timezone": timezone, "discord": discord,
+              "datetime": datetime, "timezone": timezone, "discord": discord, "threading": threading,
               "aiohttp": SimpleNamespace(ClientTimeout=lambda total=None, **k: SimpleNamespace(total=total)),
               "http_session": _Session(self), "API_BASE_URL": BASE_URL, "API_SECRET_KEY": INTERNAL_KEY,
               "print": self._print}

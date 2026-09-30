@@ -857,6 +857,19 @@ class HealthResponse(BaseModel):
     # boxes by construction, probed by the release train and read by nothing
     # else (#306). Absent on any build before it.
     discord_collection: int | None = None
+    # discord_fix: release-train verification plumbing for the Discord fix
+    # (main._discord_fix_probe): 1 when this app routes the bot's pack opener
+    # to its handler and the read a replay of a purchase key runs (the pack
+    # row by player and nonce; round 2, M1) runs on this box's database, 0
+    # when either fails (a missing column or table answers 0, not
+    # "disconnected"). DERIVED from the route table and from _pc_open_for's
+    # own statement, never a constant (#342): the connected arm probes, the
+    # degraded arm answers the last probe's value (0 before any). Read by
+    # nothing else (#306). Declared without a default, so building the answer
+    # without it raises instead of silently leaving the key out. Absent on
+    # any build before the fix, which is how the release train reads the old
+    # build on both boxes.
+    discord_fix: int
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
