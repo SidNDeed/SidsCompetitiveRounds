@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "fb7e6e1b21ff1cd9fd74d703e581d6e73d1ecc21"
+          "3e2970667229a884f2719ccb72726fa4485f6369"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "0f8b8c4304b8f8bdf2cbf34cce87e1bff898cb55"
+          "4e54165fe8d20b9e1115938c6961ce745c261945"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1849,7 +1849,7 @@
           ],
           "main",
           "health_check",
-          "2eb03eaf62d98424f928fdca675fec896f9b86b3"
+          "6a76ceb6d1721ffe9caa2dbe12f28654c7db185f"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3554,7 +3554,7 @@
       [
         "main",
         "lifespan",
-        "5d1fdd6d9c7f9cffac28eb97a4df396f3093c72a"
+        "32d070d8835f4e5e1c0a63063a319242a19a9e79"
       ]
     ]
   },
