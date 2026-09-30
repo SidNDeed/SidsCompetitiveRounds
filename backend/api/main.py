@@ -4456,7 +4456,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:46388 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:46399 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4522,7 +4522,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:46200 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:46211 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4592,7 +4592,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:46103 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:46114 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6933,6 +6933,13 @@ _RJ_TRIAGE_MARKER = 2
 # the last probe's answer. The probe's column list is DERIVED from the four
 # functions that use those columns, so it is defined after the last of them,
 # team_series_report_dc.
+# Its sibling _FFA_FINISHING_COUNT_LAST (the /health `ffa_finishing_count`
+# word) asks the DATABASE too, the same way: whether this box's ffa_lobbies
+# and ffa_match_players carry the columns the ranked-FFA finishing-count rule
+# reads and writes (board row 28). The connected arm probes and the degraded
+# arm reads back the last probe's answer. The probe's column lists are
+# DERIVED from the three functions that read or write those columns, so it
+# is defined after the last of them, submit_ffa_match.
 # TICKET-REDACTION, reported on /health as `ticket_redaction`. A marker whose
 # only purpose is to be probed (#306): nothing reads it and no behaviour
 # depends on it. 1 = this build applies log_redaction's credential rule (the
@@ -6986,6 +6993,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
         team_dc_fallback = await _team_dc_fallback_probe(db)
+        ffa_finishing_count = await _ffa_finishing_count_probe(db)
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
@@ -7002,15 +7010,17 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=await _pc_trading_word(db),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
+                              ffa_finishing_count=ffa_finishing_count,
                               team_dc_fallback=team_dc_fallback)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
-        # team_dc_fallback needs the database, so this arm answers the last
-        # probe on this worker (0 before the first, which the release train
-        # reads as not proven); pc_trading answers its own cache-only form.
+        # team_dc_fallback and ffa_finishing_count both need the database, so
+        # this arm answers each one's last probe on this worker (0 before the
+        # first, which the release train reads as not proven); pc_trading
+        # answers its own cache-only form.
         # janitor_selftest is the verdict this process's boot self-test
         # recorded in memory, so it answers here unchanged.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
@@ -7026,6 +7036,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=_pc_trading_word_cached(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
+                              ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
 
 
@@ -52693,6 +52704,56 @@ def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, lis
     return ghosts, graced, log
 
 
+def _ffa_finishing_count(member_ids, departed_ids, report) -> tuple[int, int, int]:
+    """How many players FINISHED the game a report describes, for every
+    "N or more players" FFA achievement. Returns (count, server, attested).
+
+    Sid's ruling (2026-09-28, the same rule for everyone): the tier reads the
+    players present at the end of THIS game, not the sitting's seated roster.
+    The seated roster (`ffa_lobbies.member_ids`, frozen at lock) keeps every
+    seat for the whole sitting, so a seat that left in an earlier game, or
+    earlier in this one, used to count toward Clean House / Party Crasher /
+    Hostile Takeover: a 5-seat sitting with 2 players left at the end paid all
+    three tiers.
+
+    The count is the MINIMUM of two independent accounts:
+
+      * server   -- seated members minus the seats the server itself recorded
+                    as departed (`ffa_lobbies.departed_ids`, migration 159,
+                    append-only). The caller passes the array off the lobby row
+                    it locked before reading the report, and every departure
+                    writer updates that same row, so the set is exactly the
+                    departures recorded BEFORE this report; one recorded after
+                    it waits on the lock and cannot change this game's count.
+      * attested -- seats the report marks neither `left_early` nor `absent`.
+
+    WHY THE MINIMUM. `left_early` and `absent` are outside the FFA HMAC
+    canonical (_ffa_hmac_canonical), which is why the tier used to be pinned to
+    member_ids (Codex Aug-7): a count read off those flags alone would let two
+    unsigned flags turn a 3-player 5-0 into the 4- and 5-player tiers. Under
+    the minimum the flags can only LOWER the count: a seat the server recorded
+    as departed stays out whatever the report says about it, so the count
+    never exceeds the server's own account and never exceeds the old
+    `len(member_ids)`. A report that understates the count changes nothing its
+    reporter does not already decide, because the signed tallies that decide
+    the shutout at all are reporter-attested too (the signature authenticates
+    the reporting build, not gameplay truth).
+
+    Direction of the residuals, all toward FEWER tiers: a report delivered
+    late, after a seat that finished it has since departed, counts that seat
+    out (the lobby records no time or game index per departure); and a seat a
+    future readmission puts back stays counted out while departed_ids keeps no
+    removal path (#686). A seat that vanished without any recorded departure
+    counts only while the report says it stayed, and never beyond `server`.
+    """
+    seated = set(member_ids or ())
+    departed = seated & set(departed_ids or ())
+    server = len(seated) - len(departed)
+    attested = sum(1 for p in report.players
+                   if not p.left_early and not bool(getattr(p, "absent", False)))
+    return min(server, attested), server, attested
+
+
 def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
                               kills_signed: bool) -> str | None:
     """None when an incoming report says the same thing about a game as the row
@@ -53939,21 +54000,31 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 _ach_players = sorted(
                     (p for p in report.players if p.steam_id not in unrated),
                     key=lambda q: str(id_by_steam[q.steam_id]))
-                # Codex Aug-7 (HIGH): the shutout TIER must not be decided by
-                # `absent`/`left_early`, which are UNSIGNED client flags. A
-                # modified reporter could flip two carried ghosts to
-                # absent=false and turn a genuine 3-player 5-0 into the 4- and
-                # 5-player badges. `members` is the lobby's LOCK-TIME roster
-                # read from ffa_lobbies.member_ids under the lobby lock — server
-                # state the client cannot author — so the tier is decided by
-                # how many people the server SEATED, not by how many the
-                # reporter says stayed.
+                # THE TIER COUNTS THE PLAYERS WHO FINISHED THIS GAME (Sid,
+                # 2026-09-28: the same rule for everyone). Until then it was
+                # `len(members)`, the sitting's seated roster, so seats that
+                # had left counted: a 5-seat sitting with 2 players at the end
+                # paid all three tiers.
                 #
-                # This is deliberately the stricter reading of "an FFA of N
-                # people": a 5-seat lobby whose players quit is still a
-                # 5-person FFA that the winner won. The reverse (tiering on
-                # survivors) is both forgeable and rewards attrition.
-                _n_played = len(members)
+                # Why it was pinned to the roster, and still is as a BOUND:
+                # Codex Aug-7 (HIGH) -- `absent`/`left_early` are UNSIGNED
+                # client flags, outside the FFA HMAC canonical, so a count read
+                # off them alone would let two flags turn a genuine 3-player
+                # 5-0 into the 4- and 5-player badges. The count is now the
+                # MINIMUM of the server's own account (the seated roster minus
+                # the departures recorded on the row locked above, before this
+                # report) and the report's account (seats marked neither
+                # left_early nor absent), so those flags can only lower it and
+                # no flag raises a tier. The rule and its residuals live in
+                # _ffa_finishing_count.
+                #
+                # A lobby row without departed_ids cannot vouch for anyone, so
+                # it counts every seat as departed: no tier rather than a guess
+                # (every production row carries it, migration 159).
+                _n_played, _n_server, _n_attested = _ffa_finishing_count(
+                    member_set,
+                    lobby["departed_ids"] if "departed_ids" in lobby else member_set,
+                    report)
 
                 # 1-3: shutout tiers, WINNER only, nested (a 5-player 5-0
                 # unlocks all three). "5-0" = the winner converted 5 full
@@ -53979,6 +54050,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                         (5, "ffa_shutout_5")):
                         if _n_played >= _need:
                             await _grant_achievement_inline(db, _win_pid, _key)
+                    print(f"[FFA-ACH] shutout tier count {_n_played} in room "
+                          f"{report.photon_room_id}: server {_n_server} of "
+                          f"{len(member_set)} seated not recorded departed before "
+                          f"this report, reporter {report.reported_by_steam_id} "
+                          f"attests {_n_attested} present")
 
                 for _p in _ach_players:
                     _ach_pid = id_by_steam[_p.steam_id]
@@ -54200,6 +54276,146 @@ _FFA_GAME_NUMBER = _ffa_game_number_marker(
 # Its sibling _OVT_SOLO_SPLIT (the /health `ovt_solo_split` word) is derived
 # the same way, from two of submit_ovt_match's compiled string constants, and
 # is defined right after that endpoint.
+
+
+# -- The FFA finishing-count marker (/health `ffa_finishing_count`) ---------
+# Board row 28: the ranked-FFA "N or more players" shutout tiers (Clean
+# House / Party Crasher / Hostile Takeover, ffa_shutout_3/_4/_5) are tiered on
+# _ffa_finishing_count, the MINIMUM of the server's account (ffa_lobbies
+# .member_ids frozen by ffa_lobby_start, minus ffa_lobbies.departed_ids
+# appended by ffa_queue_leave) and the report's own attestation (neither
+# left_early nor absent, the same flags this endpoint persists to
+# ffa_match_players.left_early / .absent). Migration 363 revokes four awards
+# that fail this count but adds no column of its own -- the rule is new CODE
+# over an unchanged schema -- so this word says whether the database THIS box
+# is connected to still carries the columns the rule depends on: 1 when a
+# probe naming every such column runs, 0 when it fails because a column or a
+# table is missing. The batch adds no route at all, so this is the release
+# train's discriminator for it; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): the two probes name every member_ids /
+# departed_ids / left_early / absent identifier that a SQL statement among
+# ffa_lobby_start's, ffa_queue_leave's and submit_ffa_match's compiled string
+# constants names (nested code included), so a future rename in any of the
+# three moves this word on its own, never a hand-edited list. A constant
+# counts as a statement only when it opens with an upper-case SQL verb; each
+# def's own docstring is skipped whatever it opens with, and a comment is not
+# a constant at all. Which of the two tables a derived name belongs to is
+# fixed schema knowledge (member_ids and departed_ids are ffa_lobbies
+# columns, left_early and absent are ffa_match_players columns), not a guess
+# about which ones exist -- a name the scan stops finding simply drops out of
+# its table's probe.
+#
+# The probes run on the connected arm only, after its SELECT 1 and after
+# team_dc_fallback's own probe, each inside its own savepoint
+# (`db.begin_nested`, as `pc_trading` also does): a failed probe rolls back
+# only its own savepoint, leaving the caller's transaction usable, and a
+# session with no `begin_nested` at all -- this file's own narrower test
+# doubles among them -- cannot run this probe, which is a capability gap in
+# the double rather than a fact about a database, so it leaves the cache
+# exactly as the last real probe left it. Inside the savepoint, ONE class of
+# error is classified: the statement named a column or a table this database
+# does not have (SQLSTATE 42703 or 42P01, found on the error's own wrapping
+# chain, .orig and __cause__), which reads 0. Any OTHER error also leaves the
+# cache exactly as the last real probe left it, the same fallback the
+# capability gap above uses, rather than reaching health_check's own catch:
+# a caught statement error still poisons the whole transaction under asyncpg
+# (#235), so a probe sharing one with an earlier prober in this same
+# connected arm cannot assume it started clean, and a sibling's OWN failure
+# handling is not this probe's fact to report. pc_trading's schema probe
+# (_pc_trade_schema) never raises for the same reason. The degraded arm
+# cannot probe either, so both paths answer the last value a probe on this
+# worker wrote -- 0 until one has run, which the train reads as not proven.
+import asyncpg.exceptions as _ffa_fc_apg_exc
+
+_FFA_FINISHING_COUNT_STATEMENT = _re.compile(r"^\s*(?:SELECT|UPDATE|INSERT|WITH|DELETE)\b")
+_FFA_FINISHING_COUNT_NAME = _re.compile(r"\b(?:member_ids|departed_ids|left_early|absent)\b")
+_FFA_FINISHING_COUNT_SQLSTATES = frozenset({"42703", "42P01"})   # undefined_column, undefined_table
+
+
+def _ffa_finishing_count_columns(*functions) -> tuple:
+    """The member_ids / departed_ids / left_early / absent names that the SQL
+    statements among `functions`' compiled string constants use (nested code
+    objects included), sorted, each once. A statement is a constant that
+    opens with an upper-case SQL verb; each function's own docstring is
+    skipped whatever it opens with."""
+    names = set()
+    for f in functions:
+        todo = [f.__code__]
+        while todo:
+            code = todo.pop()
+            for const in code.co_consts:
+                if isinstance(const, type(code)):
+                    todo.append(const)
+                elif (isinstance(const, str) and const is not f.__doc__
+                      and _FFA_FINISHING_COUNT_STATEMENT.match(const)):
+                    names.update(_FFA_FINISHING_COUNT_NAME.findall(const))
+    return tuple(sorted(names))
+
+
+_FFA_FINISHING_COUNT_COLUMNS = _ffa_finishing_count_columns(
+    ffa_lobby_start, ffa_queue_leave, submit_ffa_match)
+_FFA_FINISHING_COUNT_LOBBY_COLUMNS = tuple(
+    c for c in _FFA_FINISHING_COUNT_COLUMNS if c in ("member_ids", "departed_ids"))
+_FFA_FINISHING_COUNT_PLAYER_COLUMNS = tuple(
+    c for c in _FFA_FINISHING_COUNT_COLUMNS if c in ("left_early", "absent"))
+_FFA_FINISHING_COUNT_PROBES = tuple(stmt for stmt in (
+    ("SELECT " + ", ".join(_FFA_FINISHING_COUNT_LOBBY_COLUMNS) + " FROM ffa_lobbies LIMIT 0"
+     if _FFA_FINISHING_COUNT_LOBBY_COLUMNS else ""),
+    ("SELECT " + ", ".join(_FFA_FINISHING_COUNT_PLAYER_COLUMNS) + " FROM ffa_match_players LIMIT 0"
+     if _FFA_FINISHING_COUNT_PLAYER_COLUMNS else "")) if stmt)
+_FFA_FINISHING_COUNT_LAST = 0
+
+
+def _ffa_finishing_count_schema_missing(exc) -> bool:
+    """True when the statement named a column or a table the database does
+    not have: the driver's own class for either, or SQLSTATE 42703 / 42P01,
+    on `exc` or on its wrapping chain (.orig and __cause__). An exception
+    merely raised while another was being handled (__context__) is not
+    wrapping it, and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, (_ffa_fc_apg_exc.UndefinedColumnError,
+                            _ffa_fc_apg_exc.UndefinedTableError)):
+            return True
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if str(state or "") in _FFA_FINISHING_COUNT_SQLSTATES:
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+async def _ffa_finishing_count_probe(db) -> int:
+    """/health `ffa_finishing_count` on the connected arm, written through to
+    the cache the degraded arm reads: 1 when both probes ran, 0 when the
+    database lacks a column or a table either one names. Each probe runs in
+    its own savepoint; a session with no `begin_nested`, or any error this
+    probe cannot classify as a missing column or table, leaves the cache
+    exactly as the last real probe left it rather than reaching
+    health_check's own catch -- never raises, the same contract
+    _pc_trade_schema documents for the same reason (#235)."""
+    global _FFA_FINISHING_COUNT_LAST
+    if not _FFA_FINISHING_COUNT_PROBES:
+        _FFA_FINISHING_COUNT_LAST = 0
+        return 0
+    begin_nested = getattr(db, "begin_nested", None)
+    if begin_nested is None:
+        return _FFA_FINISHING_COUNT_LAST
+    for stmt in _FFA_FINISHING_COUNT_PROBES:
+        try:
+            async with begin_nested():
+                await db.execute(text(stmt))
+        except Exception as exc:
+            if not _ffa_finishing_count_schema_missing(exc):
+                return _FFA_FINISHING_COUNT_LAST
+            _FFA_FINISHING_COUNT_LAST = 0
+            return 0
+    _FFA_FINISHING_COUNT_LAST = 1
+    return 1
 
 
 _FFA_LB_SORTS = {
