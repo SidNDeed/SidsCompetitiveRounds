@@ -2163,6 +2163,14 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     assert "GameStateWatcher.SpectateModeOfRoomPrefix(roomAtSend)" in body
     assert "GameStateWatcher.SpectateFighterIds(RoomActors.ActiveFighters())" in body
     assert '\\"observed_mode\\":' in body and '\\"observed_roster\\":' in body
+    # the tuple goes out whenever the snapshot has a fighter id: exactly that
+    # condition guards the two fields (a mutant that never sends them, or
+    # sends them under any other condition, fails here; round-5 control R5M1-e)
+    flat = " ".join(body.split())
+    assert flat.count('if (seenMode.Length == 0) seenMode = "1v1";') == 1
+    assert flat.count(r'if (seenRoster.Length > 0) sb.Append($"\"observed_mode\":\"{Escape(seenMode)}\",") '
+                      r'.Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");') == 1
+    assert flat.count("if (seenRoster.Length") == 1 and flat.count("observed_mode") == 1
     retry = body.index('if (ExtractJsonString(resp, "status") == "retry")')
     assert retry < body.index('int arr = resp.IndexOf("\\"results\\"", StringComparison.Ordinal);')
     assert body.count("if (attempt < SPECTATE_VALIDATE_RETRY_MAX)") == 1
