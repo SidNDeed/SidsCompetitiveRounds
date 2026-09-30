@@ -34,6 +34,11 @@ Row 24, round 2 of the review:
 Both rows:
   G9  every new string is in all four catalogues with its placeholders, and
       in the extractor's registry.
+Row 25 against card trading (v1.41.0 beta, merge pass 2):
+  G12 a print received by trade (the own binder's `traded` flag, looked up in
+      the collection by id for a pack's print) is counted in the confirmation
+      at the trade bound the last full trades read carried, never at its
+      rarity, and the question then says such cards may give fewer shards.
 """
 import json
 import re
@@ -277,6 +282,41 @@ def gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch(s):
     assert epoch < drop < first_write, "an answer to a fetch given up still commits"
 
 
+def gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value(s):
+    ui = s["ui"]
+    assert 'traded_discard_shards = PcInt(PcTopLevel(b, "traded_discard_shards"))' in s["api"], (
+        "the client no longer reads the trade bound from the full trades read")
+    val = _member(ui, "private static int ShardValueOf(")
+    assert "if (p.traded || (p.print_id != null && tradedIds.Contains(p.print_id)))" in val, (
+        "the confirmation no longer tells a print received by trade")
+    trade = _at(val, "full.bounds.traded_discard_shards", "a print received by trade is not counted at the trade bound")
+    assert "var full = ApiClient.CachedPcTrades;" in val, "a print received by trade is not counted at the trade bound"
+    rarity = _at(val, "return ShardValue(p.rarity);", "an untraded print is no longer counted at its rarity")
+    assert trade < rarity, "a print received by trade is not counted at the trade bound"
+    tot = _member(ui, "private static int ShardTotal(List<ApiClient.PcPrint> prints, List<string> ids, out int traded)")
+    assert "total += ShardValueOf(p, tradedIds);" in tot and "ShardValue(p.rarity)" not in tot, (
+        "the confirmation counts a print received by trade at its rarity")
+    assert "if (p.traded || tradedIds.Contains(p.print_id)) traded++;" in tot, (
+        "the confirmation no longer counts the prints received by trade")
+    ids = _member(ui, "private static HashSet<string> TradedIds(")
+    assert ("var col = ApiClient.CachedPcCollection;" in ids
+            and "if (p != null && p.traded && p.print_id != null) s.Add(p.print_id);" in ids), (
+        "a pack print received by trade is not looked up in the collection")
+    note = _member(ui, "private static string TradedNote(")
+    assert 'traded > 0 ? " - " + I18n.Tr("Cards received in a trade may give fewer shards when discarded.") : ""' in note, (
+        "the trade note is no longer the Info page's sentence")
+    for sig, ask, what in (
+            ("private static void OnShardPackClick(", "Click Shard pack again", "Shard pack"),
+            ("private static void OnShardSelectedClick(", "Click Shard selected again", "Shard selected")):
+        fn = _member(ui, sig)
+        assert "int total = ShardTotal(batch, ids, out traded);" in fn, (
+            "the %s question does not count the prints received by trade" % what)
+        q = _at(fn, ask, "the %s question moved" % what)
+        line = fn[q:fn.index("\n", q)]
+        assert "+ OnlyCopyNote(batch, col) + TradedNote(traded), C_WARN);" in line, (
+            "the %s question does not say a card received by trade may give fewer shards" % what)
+
+
 NEW_KEYS = [
     "Saving your new picture - your card updates here once it has been sent.",
     "Other players still see this card: your new picture was not sent (the note below says why).",
@@ -360,7 +400,8 @@ GATES = [gate_g1_the_preview_requests_the_card_variant,
          gate_g8_the_toast_names_the_credited_total,
          gate_g9_every_new_string_is_in_every_catalogue,
          gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so,
-         gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch]
+         gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch,
+         gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -502,6 +543,33 @@ MUTATIONS = [
      "",
      "            settingsCardSentAt = Now;   // when it was sent\n",
      "a sent fetch is not stamped with its time and serial"),
+    # Merge pass 2 (row 25 against card trading). MP2a restores the lane's own
+    # total (every print at its rarity): the negative control.
+    ("MP2a", gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value, "ui",
+     "                    total += ShardValueOf(p, tradedIds);\n",
+     "                    total += ShardValue(p.rarity);\n",
+     "                    total += ShardValueOf(p, tradedIds);   // trade-aware\n",
+     "the confirmation counts a print received by trade at its rarity"),
+    ("MP2b", gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value, "ui",
+     "            if (p.traded || (p.print_id != null && tradedIds.Contains(p.print_id)))\n",
+     "            if (p.traded)\n",
+     "            if (p.traded || (p.print_id != null && tradedIds.Contains(p.print_id)))   // either source\n",
+     "the confirmation no longer tells a print received by trade"),
+    ("MP2c", gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value, "ui",
+     "                    if (p != null && p.traded && p.print_id != null) s.Add(p.print_id);\n",
+     "                    if (false) s.Add(p.print_id);\n",
+     "                    if (p != null && p.traded && p.print_id != null) s.Add(p.print_id);   // by id\n",
+     "a pack print received by trade is not looked up in the collection"),
+    ("MP2d", gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value, "ui",
+     'Say(I18n.TrF("Click Shard pack again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col) + TradedNote(traded), C_WARN);',
+     'Say(I18n.TrF("Click Shard pack again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col), C_WARN);',
+     'Say(I18n.TrF("Click Shard pack again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col) + TradedNote(traded), C_WARN); ',
+     "the Shard pack question does not say a card received by trade may give fewer shards"),
+    ("MP2e", gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value, "ui",
+     "                return full != null && full.bounds != null ? Math.Max(0, full.bounds.traded_discard_shards) : 0;\n",
+     "                return ShardValue(p.rarity);\n",
+     "                return full != null && full.bounds != null ? Math.Max(0, full.bounds.traded_discard_shards) : 0;   // the bound\n",
+     "a print received by trade is not counted at the trade bound"),
 ]
 
 

@@ -2508,14 +2508,67 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The batch shard met card trading in the v1.41.0 beta (merge
+        /// pass 2): a print ever received by trade (pc_prints.acquired_by_trade,
+        /// the own binder's permanent `traded` flag) is paid
+        /// PC_TRADE["traded_discard_shards"] whatever its rarity, not its
+        /// rarity's value. The client hardcodes no trade value, so such a print
+        /// is counted at the bound the last full trades read carried, and at 0
+        /// while no read has; the question then says such cards may give fewer
+        /// shards (TradedNote). The flag is read from the print or, for a pack
+        /// answer's print, which does not carry it, from the collection by id.
+        /// Every other print is counted at its rarity (ShardValue).</summary>
+        private static int ShardValueOf(ApiClient.PcPrint p, HashSet<string> tradedIds)
+        {
+            if (p == null) return 0;
+            if (p.traded || (p.print_id != null && tradedIds.Contains(p.print_id)))
+            {
+                var full = ApiClient.CachedPcTrades;
+                return full != null && full.bounds != null ? Math.Max(0, full.bounds.traded_discard_shards) : 0;
+            }
+            return ShardValue(p.rarity);
+        }
+
+        /// <summary>The print ids the cached own collection marks as received by trade.</summary>
+        private static HashSet<string> TradedIds()
+        {
+            var s = new HashSet<string>(StringComparer.Ordinal);
+            var col = ApiClient.CachedPcCollection;
+            if (col != null)
+                foreach (var p in col.prints)
+                    if (p != null && p.traded && p.print_id != null) s.Add(p.print_id);
+            return s;
+        }
+
         private static int ShardTotal(List<ApiClient.PcPrint> prints, List<string> ids)
         {
+            int traded;
+            return ShardTotal(prints, ids, out traded);
+        }
+
+        /// <summary>The confirmation's total over the batch, and how many of its
+        /// prints were received by trade (ShardValueOf).</summary>
+        private static int ShardTotal(List<ApiClient.PcPrint> prints, List<string> ids, out int traded)
+        {
             int total = 0;
+            traded = 0;
             if (prints == null || ids == null) return 0;
             var want = new HashSet<string>(ids, StringComparer.Ordinal);
+            var tradedIds = TradedIds();
             foreach (var p in prints)
-                if (p != null && p.print_id != null && want.Remove(p.print_id)) total += ShardValue(p.rarity);
+                if (p != null && p.print_id != null && want.Remove(p.print_id))
+                {
+                    if (p.traded || tradedIds.Contains(p.print_id)) traded++;
+                    total += ShardValueOf(p, tradedIds);
+                }
             return total;
+        }
+
+        /// <summary>The question's line for a batch holding a print received by
+        /// trade: the Info page's own sentence, so the two never disagree.</summary>
+        private static string TradedNote(int traded)
+        {
+            return traded > 0 ? " - " + I18n.Tr("Cards received in a trade may give fewer shards when discarded.") : "";
         }
 
         private static ApiClient.PcPackAnswer ShownPack()
@@ -2610,10 +2663,11 @@ namespace CompetitiveRounds
             var batch = new List<ApiClient.PcPrint>();
             var want = new HashSet<string>(ids, StringComparer.Ordinal);
             foreach (var p in shown.prints) if (p != null && p.print_id != null && want.Remove(p.print_id)) batch.Add(p);
-            int total = ShardTotal(batch, ids);
+            int traded;
+            int total = ShardTotal(batch, ids, out traded);
             if (!ShardConfirmed(PackShardSet(shown.pack_id, ids)))
             {
-                Say(I18n.TrF("Click Shard pack again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col), C_WARN);
+                Say(I18n.TrF("Click Shard pack again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col) + TradedNote(traded), C_WARN);
                 return;
             }
             SendShard(id, shown.pack_id, ids, shown.pack_id);
@@ -2661,11 +2715,12 @@ namespace CompetitiveRounds
             ids.Sort(StringComparer.Ordinal);
             var batch = new List<ApiClient.PcPrint>();
             foreach (var x in ids) batch.Add(byId[x]);
-            int total = ShardTotal(batch, ids);
+            int traded;
+            int total = ShardTotal(batch, ids, out traded);
             string set = SelShardSet(ids);
             if (!ShardConfirmed(set))
             {
-                Say(I18n.TrF("Click Shard selected again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col), C_WARN);
+                Say(I18n.TrF("Click Shard selected again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col) + TradedNote(traded), C_WARN);
                 return;
             }
             // The nonce belongs to this exact selection until an answer arrives:
