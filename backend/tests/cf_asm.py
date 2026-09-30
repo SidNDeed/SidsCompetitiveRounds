@@ -16,8 +16,10 @@ the transaction it commits in) and the relation locks held before each
 COMMIT. Env.trace() writes those, the answers, the [FFA-ASM] lines and the
 fixture's rows, normalised, to CF_TRACE_DIR when that is set.
 
-Steam ids are synthetic: 765611900355xxxxx lies below the first individual
-Steam account id, so no fixture id is anyone's.
+Steam ids are fixture values from STEAM_BASE (765611900355xxxxx). As a
+SteamID64 each decodes to high word 0x010FFFFF: account type 0, not type 1
+(the individual type), so none is an individual account id by construction.
+test_cf_fixture_steam_ids.py asserts that decode.
 """
 
 import contextvars

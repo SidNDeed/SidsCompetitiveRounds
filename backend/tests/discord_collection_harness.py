@@ -29,8 +29,10 @@ marker table is someone else's and is never dropped. The terminates, drops
 and truncates go through ONE sender, send_destructive, which refuses unless
 the census ran first on the same record.
 
-Synthetic identities only: SteamID64s from STEAM_BASE (inside the individual
-range, outside every prefix a real account carries), Discord ids from
+Synthetic identities only: SteamID64s from STEAM_BASE, which decodes to
+type 1, instance 1, account numbers from 4139734272 up: inside steamid64's
+individual interval, which the pool's range check requires (nothing here
+states which account numbers Steam has issued); Discord ids from
 DISCORD_BASE, names composed here.
 """
 

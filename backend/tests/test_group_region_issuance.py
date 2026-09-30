@@ -43,7 +43,7 @@ MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "307_player_region_pin
 A = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 C = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
-STEAM = "76561198000000007"
+STEAM = "76561192000000007"
 
 NEAR = {"us": 60, "eu": 35}     # eu beats us by 25 for this seat
 FAR = {"us": 60, "eu": 300}     # eu is unplayable for this seat

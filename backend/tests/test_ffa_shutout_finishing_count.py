@@ -618,7 +618,7 @@ def test_the_harness_refuses_before_anything_destructive():
         (_FakeCensusConn(census=[_row(HARNESS_SCHEMA, "shop_items", "r")]), "shop_items"),
         (_FakeCensusConn(census=[_row(HARNESS_SCHEMA, "players_steam_idx", "i", "players",
                                       "public")]), "players_steam_idx"),
-        (_FakeCensusConn(players=True, strangers=["76561198000000000"]), "not this harness's seats"),
+        (_FakeCensusConn(players=True, strangers=["76561191000000000"]), "not this harness's seats"),
     ]
     for conn, why in cases:
         with pytest.raises(RuntimeError) as ex:
