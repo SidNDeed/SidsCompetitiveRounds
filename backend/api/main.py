@@ -58528,17 +58528,61 @@ def _spectate_roster_list(roster: str) -> list:
     return [s for s in (roster or "").split(",") if s]
 
 
-def _spectate_observed_tuple_is_live(game, observed_mode: str, observed_roster: str) -> bool:
-    """Session report round 5 MEDIUM 1: True when the participant tuple a
-    master observed with its spectator inventory is the live spectate game
-    row's own: the same mode and the same set of fighter steam ids. The row
-    holds its roster canonical (sorted, distinct: the attest refuses any
-    other), and the master sends it built the way its attest builds it, so
-    the comparison is of the distinct sorted ids of both; an empty observed
-    roster matches nothing."""
-    seen = sorted(set(_spectate_roster_list(observed_roster)))
-    return bool(seen) and observed_mode == game["mode"] \
-        and seen == sorted(set(_spectate_roster_list(game["roster"])))
+# Session report round 6 MEDIUM 1: the ONE definition of what a watch grant
+# records from the room. Each entry is (the validation request's field, the
+# spectate_games column it is compared with, the spectate_watch_grants column
+# it is written to). _spectate_observed_grant_tuple compares every entry and
+# returns the request's own values keyed by grant column; the grant insert
+# binds exactly that mapping and reads no tuple column from the room row, so
+# a value can reach a grant only through this definition, i.e. only after it
+# was compared. The request's values come from the master: mode and roster
+# from its own room at the snapshot, game id and source from the server's
+# answer to its last participant attest of that same mode and roster.
+_SPECTATE_GRANT_OBSERVED_TUPLE = (
+    ("observed_game_id", "id", "game_id"),
+    ("observed_mode", "mode", "mode"),
+    ("observed_source_ref", "source_ref", "source_ref"),
+    ("observed_roster", "roster", "roster"),
+)
+# Every other column the grant insert names, and where its value comes from.
+# None of them is a value of the room row that could change under the
+# request: test_the_grant_copies_no_room_value_it_did_not_compare pins this
+# list, the insert's column list and the table's columns (364) to each other.
+_SPECTATE_GRANT_OTHER_COLUMNS = {
+    "spectator_steam_id": "the validated entry's steam id; the grant is written only after the binding "
+                          "UPDATE found that seat's live lease on the compared game id",
+    "game_started_at": "spectate_games.started_at of the compared game id: set when the row is inserted "
+                       "and written by no other statement, so it is a property of that id",
+    "observed_seq": "nextval of the observation sequence (364), drawn under the room lock (round 5 LOW 1)",
+}
+
+
+def _spectate_observed_canon(column: str, value) -> str:
+    """The comparable form of one observed-tuple value: a roster as its
+    distinct fighter ids sorted and comma-joined (the form the attest stores:
+    it refuses any other), a game id lower-cased, anything else as text."""
+    if column == "roster":
+        return ",".join(sorted(set(_spectate_roster_list(value))))
+    text_value = "" if value is None else str(value)
+    return text_value.lower() if column == "id" else text_value
+
+
+def _spectate_observed_grant_tuple(game, req):
+    """Session report round 6 MEDIUM 1 (round 5 compared mode and roster
+    only): the tuple a grant may record, or None. Every entry of
+    _SPECTATE_GRANT_OBSERVED_TUPLE is compared, the request's observed value
+    against the live room row this request read under the room lock; when
+    any one differs (or the observed roster is empty) the answer is None and
+    the caller writes nothing. Otherwise the answer is the REQUEST's values
+    (in comparable form) keyed by grant column: what the grant insert
+    binds."""
+    got = {}
+    for field, row_column, grant_column in _SPECTATE_GRANT_OBSERVED_TUPLE:
+        seen = _spectate_observed_canon(row_column, getattr(req, field))
+        if seen != _spectate_observed_canon(row_column, game[row_column]):
+            return None
+        got[grant_column] = seen
+    return got if got["roster"] else None
 
 
 async def _spectate_mandatory_class(db: AsyncSession, game) -> str:
@@ -59135,7 +59179,14 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
            "cap": req.room_capacity, "proto": req.spectator_protocol,
            "roster": req.roster, "phase": req.phase[:16]})
     await db.commit()
-    return {"status": "ok"}
+    # Session report round 6 MEDIUM 1: the answer names the room row this
+    # attest wrote - its game id and the server-derived source it now holds
+    # for this caller's mode and roster (the client cannot derive the source
+    # itself). A master sends both back with its next spectator validation,
+    # beside the mode and roster it observes then, and the validation grants
+    # a watch only when all four are still the live row's. Released clients
+    # read only a transport failure from this answer.
+    return {"status": "ok", "game_id": str(game["id"]), "source_ref": derived_ref[:64]}
 
 
 @app.post("/api/v1/spectate/close", tags=["Spectate"])
@@ -60271,22 +60322,25 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
         raise HTTPException(status_code=403, detail="not_a_participant")
     await _assert_no_service_subject(
         db, affected_steam_ids=_spectate_roster_list(game["roster"]))
-    # Session report round 5 MEDIUM 1: the spectator inventory below and the
-    # tuple a grant records must belong to ONE observation. The master sends
-    # the participant tuple it read with the inventory (observed_mode,
-    # observed_roster); a participant attest may have rewritten the live row
-    # in place since then (a delayed request, a fighter replaced), so the
-    # tuple is compared here, under the room lock the attest also takes,
-    # with the row this request just read. A mismatch writes nothing - no
-    # drain, no sweep, no binding, no grant - and answers the typed retry
-    # result; the master re-snapshots and sends again (bounded, client side).
-    # Absent (every released client) keeps the old answer and writes no
-    # grant: that request carries no observation to record.
-    if (req.observed_mode is None) != (req.observed_roster is None):
+    # Session report round 5 MEDIUM 1 / round 6 MEDIUM 1: the spectator
+    # inventory below and the tuple a grant records must belong to ONE
+    # observation. The master sends the tuple it holds with the inventory
+    # (_SPECTATE_GRANT_OBSERVED_TUPLE: game id, mode, source, roster); a
+    # participant attest may have rewritten the live row in place since then
+    # (a delayed request, a fighter replaced, a new series in the same room),
+    # so every value of it is compared here, under the room lock the attest
+    # also takes, with the row this request just read. A mismatch in any one
+    # writes nothing - no drain, no sweep, no binding, no grant - and answers
+    # the typed retry result; the master re-snapshots and sends again
+    # (bounded, client side). All absent (every released client) keeps the
+    # old answer and writes no grant: that request carries no observation to
+    # record. Some present and some absent is refused.
+    sent = [getattr(req, field) is not None for field, _c, _g in _SPECTATE_GRANT_OBSERVED_TUPLE]
+    if any(sent) and not all(sent):
         raise HTTPException(status_code=422, detail="observed_tuple_incomplete")
-    records_watch = req.observed_mode is not None
-    if records_watch and not _spectate_observed_tuple_is_live(
-            game, req.observed_mode, req.observed_roster):
+    records_watch = all(sent)
+    grant_tuple = _spectate_observed_grant_tuple(game, req) if records_watch else None
+    if records_watch and grant_tuple is None:
         await db.rollback()
         return {"status": "retry", "reason": "participants_changed", "results": []}
     observed_sids = {entry.steam_id for entry in req.spectators[:8] if entry.steam_id}
@@ -60341,12 +60395,13 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
             # OBSERVED also records the watch where the sweep above cannot
             # reach it: spectate_watch_grants (migration 364), one row per
             # game, spectator and (mode, source, roster) tuple, the tuple never
-            # changed (a repeat refreshes observed_seq alone, round 5 LOW 1) - the
-            # tuple of the room row this request read under the room's lock -
+            # changed (a repeat refreshes observed_seq alone, round 5 LOW 1) -
             # the entitlement the broadcast seat's report reads rest on.
-            # Round 5 MEDIUM 1: the grant is written only by a request that
-            # carried the tuple it observed (records_watch), already proven
-            # above to be the row's; the old request shape binds and answers
+            # Round 5 / round 6 MEDIUM 1: the grant is written only by a
+            # request that carried the tuple it observed, and it records the
+            # REQUEST's values as compared above (grant_tuple, bound whole),
+            # never the room row's: the row supplies only game_started_at, by
+            # the compared game id. The old request shape binds and answers
             # as it always did and records no watch, so its ok=True carries
             # no grant (that seat's report is refused: fail closed). For a
             # request that carried its tuple, the binding and the grant share
@@ -60376,18 +60431,20 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                     # else), so the greatest value of a (game, seat) is its
                     # most recent successful validation - also when the room
                     # returns to a tuple it had before.
-                    if lease is not None and records_watch:
+                    if lease is not None and grant_tuple is not None:
                         await db.execute(text("""
                             INSERT INTO spectate_watch_grants
-                                (game_id, spectator_steam_id, mode, source_ref, roster,
-                                 game_started_at, observed_seq)
-                            SELECT g.id, CAST(:sid AS text), g.mode, g.source_ref, g.roster,
+                                (game_id, mode, source_ref, roster,
+                                 spectator_steam_id, game_started_at, observed_seq)
+                            SELECT CAST(:game_id AS uuid), CAST(:mode AS text),
+                                   CAST(:source_ref AS text), CAST(:roster AS text),
+                                   CAST(:sid AS text),
                                    g.started_at, nextval('spectate_watch_grants_observed_seq')
                               FROM spectate_games g
-                             WHERE g.id = CAST(:gid AS uuid)
+                             WHERE g.id = CAST(:game_id AS uuid)
                             ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple
                             DO UPDATE SET observed_seq = EXCLUDED.observed_seq
-                        """), {"gid": str(game["id"]), "sid": entry.steam_id})
+                        """), {**grant_tuple, "sid": entry.steam_id})
             except Exception as ex:
                 if lease is not None:
                     print(f"[SPECTATE] watched grant not recorded, validation refused: {type(ex).__name__}")

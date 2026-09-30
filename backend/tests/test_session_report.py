@@ -2074,7 +2074,7 @@ def test_the_watched_grant_is_written_once_per_tuple_and_never_changed():
         assert verb not in src, verb
     val = " ".join(inspect.getsource(main.spectate_validate).split())
     assert ("g.started_at, nextval('spectate_watch_grants_observed_seq') FROM spectate_games g "
-            "WHERE g.id = CAST(:gid AS uuid) ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple "
+            "WHERE g.id = CAST(:game_id AS uuid) ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple "
             "DO UPDATE SET observed_seq = EXCLUDED.observed_seq \"\"\"") in val
     assert val.count("DO UPDATE") == 1 and src.count("spectate_watch_grants_observed_seq") == 1
     assert val.index("SELECT pg_advisory_xact_lock(hashtext(:k))") < val.index("nextval(")
@@ -2141,36 +2141,62 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     val = " ".join(inspect.getsource(main.spectate_validate).split())
     lock = val.index("SELECT pg_advisory_xact_lock(hashtext(:k))")
     read = val.index("FROM spectate_games WHERE room_name = :room AND ended_at IS NULL")
-    check = val.index("if records_watch and not _spectate_observed_tuple_is_live( game, req.observed_mode, "
-                      "req.observed_roster): await db.rollback() return {\"status\": \"retry\", "
+    check = val.index("grant_tuple = _spectate_observed_grant_tuple(game, req) if records_watch else None "
+                      "if records_watch and grant_tuple is None: await db.rollback() return {\"status\": \"retry\", "
                       "\"reason\": \"participants_changed\", \"results\": []}")
     assert lock < read < check
     for write in ("await _spectate_record_drains(db, game)", "DELETE FROM spectate_drain_tombstones",
                   "DELETE FROM spectate_leases", "UPDATE spectate_leases", "INSERT INTO spectate_watch_grants"):
         assert val.index(write) > check, write
-    assert val.count("records_watch = req.observed_mode is not None") == 1
-    assert val.count("if lease is not None and records_watch: await db.execute(text(\"\"\" "
+    # round 6: all four observed values or none (some without the others: 422)
+    assert val.count("sent = [getattr(req, field) is not None for field, _c, _g in "
+                     "_SPECTATE_GRANT_OBSERVED_TUPLE] if any(sent) and not all(sent): raise HTTPException("
+                     "status_code=422, detail=\"observed_tuple_incomplete\") records_watch = all(sent)") == 1
+    assert val.count("if lease is not None and grant_tuple is not None: await db.execute(text(\"\"\" "
                      "INSERT INTO spectate_watch_grants") == 1
-    # the comparison: the mode and the fighter set of the live row, nothing looser
-    cmp_src = " ".join(inspect.getsource(main._spectate_observed_tuple_is_live).split())
-    assert "observed_mode == game[\"mode\"]" in cmp_src
-    assert "seen == sorted(set(_spectate_roster_list(game[\"roster\"])))" in cmp_src
     fields = main.SpectateValidateBody.model_fields
-    assert fields["observed_mode"].default is None and fields["observed_roster"].default is None
+    for field, _row, _grant in main._SPECTATE_GRANT_OBSERVED_TUPLE:
+        assert fields[field].default is None, field
+    assert sorted(f for f in fields if f.startswith("observed_")) == \
+        sorted(f for f, _r, _g in main._SPECTATE_GRANT_OBSERVED_TUPLE)
 
     api = strip_comments_only((PLUGIN / "ApiClient.cs").read_text(encoding="utf-8"))
     body = _cs_body(PLUGIN / "ApiClient.cs", "private static void SpectateValidateActors(int attempt)")
     assert "GameStateWatcher.SpectateModeOfRoomPrefix(roomAtSend)" in body
     assert "GameStateWatcher.SpectateFighterIds(RoomActors.ActiveFighters())" in body
-    assert '\\"observed_mode\\":' in body and '\\"observed_roster\\":' in body
-    # the tuple goes out whenever the snapshot has a fighter id: exactly that
-    # condition guards the two fields (a mutant that never sends them, or
-    # sends them under any other condition, fails here; round-5 control R5M1-e)
+    # the tuple goes out when the snapshot has a fighter id AND this seat
+    # holds the server's answer to its last attest of the same room, mode
+    # and roster; exactly that condition guards the four fields, each sent
+    # once (a mutant that never sends them, sends them under any other
+    # condition, or drops the attest answer's check fails here; controls
+    # R5M1-e, R6M1-h)
     flat = " ".join(body.split())
     assert flat.count('if (seenMode.Length == 0) seenMode = "1v1";') == 1
-    assert flat.count(r'if (seenRoster.Length > 0) sb.Append($"\"observed_mode\":\"{Escape(seenMode)}\",") '
+    assert flat.count("bool sendTuple = seenRoster.Length > 0 && SpectateAttestAnswerFor( "
+                      "roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource);") == 1
+    assert flat.count(r'if (sendTuple) sb.Append($"\"observed_game_id\":\"{Escape(seenGameId)}\",") '
+                      r'.Append($"\"observed_mode\":\"{Escape(seenMode)}\",") '
+                      r'.Append($"\"observed_source_ref\":\"{Escape(seenSource)}\",") '
                       r'.Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");') == 1
-    assert flat.count("if (seenRoster.Length") == 1 and flat.count("observed_mode") == 1
+    for f, _r, _g in main._SPECTATE_GRANT_OBSERVED_TUPLE:
+        assert flat.count('\\"%s\\":' % f) == 1, f
+    assert flat.count("if (sendTuple)") == 1 and flat.count("sendTuple") == 3
+    assert flat.count("if (!sendTuple && seenRoster.Length > 0) GameStateWatcher.RequestSpectateAttestSoon();") == 1
+    # the attest answer is kept only for the room, mode and roster it answered
+    note = " ".join(_cs_body(PLUGIN / "ApiClient.cs", "internal static void NoteSpectateAttestAnswer("
+                             "bool ok, string resp, string room, string mode, string roster)").split())
+    assert 'ExtractJsonString(resp, "status") != "ok"' in note
+    assert 'spectateAttestAnswerGameId = ExtractJsonString(resp, "game_id");' in note
+    assert 'spectateAttestAnswerSourceRef = ExtractJsonString(resp, "source_ref");' in note
+    answer_for = " ".join(_cs_body(PLUGIN / "ApiClient.cs", "internal static bool SpectateAttestAnswerFor("
+                                   "string room, string mode, string roster,").split())
+    for kept in ("spectateAttestAnswerRoom", "spectateAttestAnswerMode", "spectateAttestAnswerRoster"):
+        assert answer_for.count("if (!string.Equals(%s," % kept) == 1, kept
+    attest = " ".join(_cs_body(PLUGIN / "ApiClient.cs", "public static void SpectateAttest(").split())
+    assert attest.count("NoteSpectateAttestAnswer(ok, resp, attestedRoom, attestedMode, attestedRoster);") == 1
+    assert 'string attestedMode = mode ?? "", attestedRoster = rosterCsv ?? "", attestedRoom = roomName ?? "";' \
+        in attest
+    assert '+ $"\\"roster\\":\\"{Escape(rosterCsv ?? "")}\\""' in attest, "the roster kept is the one sent"
     retry = body.index('if (ExtractJsonString(resp, "status") == "retry")')
     assert retry < body.index('int arr = resp.IndexOf("\\"results\\"", StringComparison.Ordinal);')
     assert body.count("if (attempt < SPECTATE_VALIDATE_RETRY_MAX)") == 1
@@ -2181,6 +2207,96 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     assert tick.count("string mode = SpectateModeOfRoomPrefix(room);") == 1
     assert tick.count("var sids = SpectateFighterIds(fighters);") == 1
     assert "sids.Sort(" not in tick and "StartsWith(\"team_\"" not in tick, "one derivation, shared"
+    assert _cs_body(PLUGIN / "GameStateWatcher.cs", "internal static void RequestSpectateAttestSoon()").split() \
+        == ["{", "spectateAttestEdgePending", "=", "true;", "}"]
+
+
+def _sql_list(s):
+    """Top-level comma split of a SQL expression list."""
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    return out + [cur.strip()]
+
+
+def test_the_grant_copies_no_room_value_it_did_not_compare():
+    """Round 6 MEDIUM 1 (b), the structural guarantee: a watch grant takes
+    its tuple from ONE place, main._SPECTATE_GRANT_OBSERVED_TUPLE, which is
+    also the compared set. The comparator iterates that definition and
+    returns the request's own values keyed by grant column; the grant insert
+    binds exactly that mapping, names every tuple column as its own bind
+    parameter (never a room-row column), and reads from the room row only
+    started_at, by the compared game id. Every other column the insert names
+    is declared in _SPECTATE_GRANT_OTHER_COLUMNS, and every column of the
+    table (364) is either named by the insert or filled by a default that
+    reads no row. started_at is a property of the game id: no statement of
+    the api writes it after the row's insert. A column copied into the grant
+    without being in the compared set fails one of these."""
+    tup = main._SPECTATE_GRANT_OBSERVED_TUPLE
+    other = main._SPECTATE_GRANT_OTHER_COLUMNS
+    grant_cols = [g for _f, _r, g in tup]
+    assert len(set(grant_cols)) == len(grant_cols) and not set(grant_cols) & set(other)
+    # the comparator: every entry compared, the request's value kept
+    cmp_src = " ".join(inspect.getsource(main._spectate_observed_grant_tuple).split())
+    assert cmp_src.count("for field, row_column, grant_column in _SPECTATE_GRANT_OBSERVED_TUPLE:") == 1
+    assert cmp_src.count("seen = _spectate_observed_canon(row_column, getattr(req, field)) "
+                         "if seen != _spectate_observed_canon(row_column, game[row_column]): return None "
+                         "got[grant_column] = seen") == 1
+    assert cmp_src.count("return") == 2 and "game[" not in cmp_src.replace("game[row_column]", "")
+    # every compared row column is read by the route's own row read
+    val_raw = inspect.getsource(main.spectate_validate)
+    val = " ".join(val_raw.split())
+    marker = "game = (await db.execute(text(\"\"\" SELECT "
+    row_read = val[val.index(marker) + len(marker):]
+    row_read = row_read[:row_read.index(" FROM spectate_games WHERE room_name = :room AND ended_at IS NULL")]
+    for _f, row_col, _g in tup:
+        assert row_col in _sql_list(row_read), row_col
+    # the insert: its column list is the definition's columns, then the declared others
+    ins = val[val.index("INSERT INTO spectate_watch_grants"):]
+    ins = ins[:ins.index('"""')]
+    assert val.count("INSERT INTO spectate_watch_grants") == 1
+    cols = _sql_list(ins[ins.index("(") + 1:ins.index(")")])
+    assert cols == grant_cols + list(other), cols
+    select = ins[ins.index(" SELECT ") + 8:ins.index(" FROM spectate_games g ")]
+    exprs = dict(zip(cols, _sql_list(select)))
+    assert len(_sql_list(select)) == len(cols)
+    for g in grant_cols:
+        assert re.fullmatch(r"CAST\(:%s AS (text|uuid)\)" % g, exprs[g]), (g, exprs[g])
+    assert exprs["spectator_steam_id"] == "CAST(:sid AS text)"
+    assert exprs["game_started_at"] == "g.started_at"
+    assert exprs["observed_seq"] == "nextval('spectate_watch_grants_observed_seq')"
+    assert re.findall(r"\bg\.(\w+)", select) == ["started_at"], "the only room-row value the grant reads"
+    assert ins[ins.index(" FROM spectate_games g "):].split(" ON CONFLICT ")[0].strip() == \
+        "FROM spectate_games g WHERE g.id = CAST(:game_id AS uuid)"
+    assert val.count('"""), {**grant_tuple, "sid": entry.steam_id})') == 1
+    assert val.count("grant_tuple = _spectate_observed_grant_tuple(game, req) if records_watch else None") == 1
+    assert val.count("grant_tuple =") == 1
+    # the table: every column named by the insert, or a default reading no row
+    mig = (PLUGIN.parent / "backend" / "sql" / "364_spectate_watch_grants.sql").read_text(encoding="utf-8")
+    head = "CREATE TABLE IF NOT EXISTS spectate_watch_grants ("
+    body = mig[mig.index(head) + len(head):]
+    body = body[:body.index(");")]
+    table = {}
+    for line in body.splitlines():
+        line = line.strip().rstrip(",")
+        if line and not line.startswith(("CONSTRAINT", "UNIQUE", "--")):
+            table[line.split()[0]] = line
+    assert set(table) - set(cols) == {"id", "granted_at"}, sorted(table)
+    assert "DEFAULT gen_random_uuid()" in table["id"] and "DEFAULT NOW()" in table["granted_at"]
+    assert set(cols) <= set(table)
+    # started_at is never written after the row's insert (nor the id)
+    src = " ".join((PLUGIN.parent / "backend" / "api" / "main.py").read_text(encoding="utf-8").split())
+    updates = [m.start() for m in re.finditer(r"UPDATE spectate_games\b", src)]
+    assert len(updates) >= 4
+    for at in updates:
+        stmt = src[at:src.index(" WHERE ", at)]
+        assert not re.search(r"\b(started_at|id)\s*=", stmt.split(" SET ", 1)[1]), stmt[:160]
 
 
 # -- board row 30g: the broadcaster pages through the session report ------------

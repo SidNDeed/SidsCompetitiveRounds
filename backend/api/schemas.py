@@ -1947,11 +1947,17 @@ class SpectateValidateBody(BaseModel):
     # Session report round 5 MEDIUM 1: the participant tuple the master read
     # from its own room when it took this spectator inventory - the room's
     # mode and its fighters' steam ids, sorted and comma-joined exactly as
-    # its attest sends them. The route grants a watch only when this tuple is
-    # the live room row's under the room lock. Both absent is the request
-    # shape of every released client (1.40.3 and earlier): it is answered as
-    # before, and writes no grant. One without the other is refused (422).
+    # its attest sends them. Round 6 MEDIUM 1: beside them, the room row's
+    # game id and server-derived source, as the server answered the master's
+    # last participant attest of that same mode and roster. The route grants
+    # a watch only when all four are the live room row's under the room
+    # lock, and records these values (main._SPECTATE_GRANT_OBSERVED_TUPLE).
+    # All four absent is the request shape of every released client (1.40.3
+    # and earlier): it is answered as before, and writes no grant. Some
+    # without the others is refused (422).
+    observed_game_id: str | None = Field(default=None, max_length=64)
     observed_mode: str | None = Field(default=None, min_length=3, max_length=8)
+    observed_source_ref: str | None = Field(default=None, max_length=64)
     observed_roster: str | None = Field(default=None, max_length=400)
 
 

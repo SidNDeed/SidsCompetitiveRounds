@@ -21,7 +21,10 @@
 -- changes while the seat watches (a code room where one fighter is replaced,
 -- an FFA lobby losing a member) leaves one row per tuple the seat was
 -- observed under, and a repeated validation adds no row. It carries what the
--- watched binding compares, copied from the spectate game at that moment:
+-- watched binding compares: the game id, mode, source and roster the request
+-- observed, each compared equal to the live room row before the write and
+-- written from the request (round 6 MEDIUM 1), and the game's start by that
+-- game id:
 --   mode             the game's server-recorded mode (1v1, 2v2, 1v2, ffa)
 --   source_ref       the server-derived source identity ('' = none: 1v1 queue
 --                    and code rooms), compared with the requested game's

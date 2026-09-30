@@ -24311,13 +24311,58 @@ namespace CompetitiveRounds
                 + $"\"phase\":\"{Escape(phase)}\","
                 + $"\"roster\":\"{Escape(rosterCsv ?? "")}\""
                 + "}";
+            string attestedMode = mode ?? "", attestedRoster = rosterCsv ?? "", attestedRoom = roomName ?? "";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/spectate/participant-attest", json,
                 (ok, resp) =>
                 {
                     if (!ok && !resp.Contains("HTTP 4"))
                         Plugin.Log.LogInfo($"[SPECTATE] attest failed (transport): {resp}");
+                    try { NoteSpectateAttestAnswer(ok, resp, attestedRoom, attestedMode, attestedRoster); } catch { }
                 }));
+        }
+
+        // Session report round 6 MEDIUM 1: the server's answer to this seat's
+        // last participant attest - the room row's game id and the source the
+        // server derived for it - kept with the room, mode and roster that
+        // attest sent. A master's spectator validation carries the game id
+        // and source only while its snapshot shows that same room, mode and
+        // roster (SpectateAttestAnswerFor); the server grants a watch only
+        // when all four are still the live row's.
+        private static string spectateAttestAnswerRoom = "", spectateAttestAnswerMode = "",
+            spectateAttestAnswerRoster = "", spectateAttestAnswerGameId = "", spectateAttestAnswerSourceRef = "";
+
+        internal static void NoteSpectateAttestAnswer(bool ok, string resp, string room, string mode, string roster)
+        {
+            resp = resp ?? "";
+            // Any other answer (a refusal, a transport failure, a server
+            // from before this answer named the row) leaves no answer to
+            // send: the next validation goes out without a tuple.
+            if (!ok || ExtractJsonString(resp, "status") != "ok"
+                || !resp.Contains("\"game_id\":\"") || !resp.Contains("\"source_ref\":\""))
+            {
+                if (string.Equals(spectateAttestAnswerRoom, room, StringComparison.Ordinal))
+                    spectateAttestAnswerRoom = spectateAttestAnswerGameId = spectateAttestAnswerSourceRef = "";
+                return;
+            }
+            spectateAttestAnswerRoom = room ?? "";
+            spectateAttestAnswerMode = mode ?? "";
+            spectateAttestAnswerRoster = roster ?? "";
+            spectateAttestAnswerGameId = ExtractJsonString(resp, "game_id");
+            spectateAttestAnswerSourceRef = ExtractJsonString(resp, "source_ref");
+        }
+
+        internal static bool SpectateAttestAnswerFor(string room, string mode, string roster,
+                                                     out string gameId, out string sourceRef)
+        {
+            gameId = sourceRef = "";
+            if (spectateAttestAnswerGameId.Length == 0) return false;
+            if (!string.Equals(spectateAttestAnswerRoom, room ?? "", StringComparison.Ordinal)) return false;
+            if (!string.Equals(spectateAttestAnswerMode, mode ?? "", StringComparison.Ordinal)) return false;
+            if (!string.Equals(spectateAttestAnswerRoster, roster ?? "", StringComparison.Ordinal)) return false;
+            gameId = spectateAttestAnswerGameId;
+            sourceRef = spectateAttestAnswerSourceRef;
+            return true;
         }
 
         /// <summary>Tell the server this fighter has left the room, so the
@@ -25049,7 +25094,10 @@ namespace CompetitiveRounds
         /// them); the server records a watch only when that tuple is still
         /// the live room row's, and otherwise answers status "retry", on
         /// which the master takes a fresh snapshot and sends again, at most
-        /// SPECTATE_VALIDATE_RETRY_MAX times.</summary>
+        /// SPECTATE_VALIDATE_RETRY_MAX times. Round 6 MEDIUM 1: the tuple
+        /// also carries the room row's game id and source, from the server's
+        /// answer to this seat's last attest of the same room, mode and
+        /// roster; without one the request carries no tuple.</summary>
         public static void SpectateValidateActors() { SpectateValidateActors(0); }
 
         internal const int SPECTATE_VALIDATE_RETRY_MAX = 3;
@@ -25089,12 +25137,24 @@ namespace CompetitiveRounds
                 if (seenMode.Length == 0) seenMode = "1v1";
                 string seenRoster = string.Join(",",
                     GameStateWatcher.SpectateFighterIds(RoomActors.ActiveFighters()).ToArray());
+                // Round 6 MEDIUM 1: the room row's game id and source are the
+                // server's answer to this seat's last attest of this same
+                // room, mode and roster. Without such an answer (none yet,
+                // or the snapshot's roster is not the one last attested) the
+                // old request shape goes out and an attest is asked for now,
+                // so the next validation carries the whole tuple.
+                string seenGameId = "", seenSource = "";
+                bool sendTuple = seenRoster.Length > 0 && SpectateAttestAnswerFor(
+                    roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource);
+                if (!sendTuple && seenRoster.Length > 0) GameStateWatcher.RequestSpectateAttestSoon();
                 var sb = new StringBuilder();
                 sb.Append('{')
                   .Append($"\"steam_id\":\"{Escape(sid)}\",")
                   .Append($"\"room_name\":\"{Escape(roomAtSend)}\",");
-                if (seenRoster.Length > 0)
-                    sb.Append($"\"observed_mode\":\"{Escape(seenMode)}\",")
+                if (sendTuple)
+                    sb.Append($"\"observed_game_id\":\"{Escape(seenGameId)}\",")
+                      .Append($"\"observed_mode\":\"{Escape(seenMode)}\",")
+                      .Append($"\"observed_source_ref\":\"{Escape(seenSource)}\",")
                       .Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");
                 sb.Append("\"spectators\":[");
                 bool first = true;
@@ -25136,6 +25196,9 @@ namespace CompetitiveRounds
                         {
                             if (ExtractJsonString(resp, "status") == "retry")
                             {
+                                // the row moved on (round 6: its source or game
+                                // too): a fresh attest answer for the retry
+                                GameStateWatcher.RequestSpectateAttestSoon();
                                 if (attempt < SPECTATE_VALIDATE_RETRY_MAX)
                                     Plugin.Instance.StartCoroutine(SpectateValidateRetryAfter(attempt + 1, roomAtSend));
                                 return;

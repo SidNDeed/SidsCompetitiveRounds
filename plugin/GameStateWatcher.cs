@@ -1489,6 +1489,13 @@ namespace CompetitiveRounds
             return sids;
         }
 
+        /// <summary>Session report round 6 MEDIUM 1: the master's validation
+        /// had no attest answer for the tuple it observes (or the server
+        /// answered retry), so the next attest tick sends at once instead of
+        /// waiting out the 60 s throttle; it still sends only a complete
+        /// roster, and the answer is what the next validation carries.</summary>
+        internal static void RequestSpectateAttestSoon() { spectateAttestEdgePending = true; }
+
         private static void TickSpectateAttest()
         {
             try
