@@ -14,6 +14,8 @@ CompetitiveUI.cs	CompetitiveUI	RefreshMatchStatusCache	ActiveFighters	N	HUD stat
 DanceEmotes.cs	DanceEmotes	OnEvent	GetPlayer	N	emote cosmetic; the sender must be a live non-spectator actor (DanceEmotes.cs:241-246)	
 DanceEmotes.cs	DanceEmotes	OnEvent	Sender	N	emote cosmetic; the sender must own the claimed actor (DanceEmotes.cs:234)	
 DanceEmotes.cs	DanceEmotes	ResolveActorPlayer	players	N	emote cosmetic; owner-actor lookup (DanceEmotes.cs:378-389)	
+DanceStep0Probe.cs	DanceStep0Probe	BodyProbe	players	N	dev diagnostics; offline sandbox only, refuses unless PhotonNetwork.OfflineMode (DanceStep0Probe.cs:95); PlayerAssigner's join list	
+DanceStep0Probe.cs	DanceStep0Probe	LocalBody	players	N	dev diagnostics; the offline sandbox's own body, called only from BodyProbe after its offline check (DanceStep0Probe.cs:96, 112)	
 FfaAssembly.cs	FfaAssembly	CensusBody	IsKeptActor	V	the census reports each present actor's kept flag from the view (K28, K48)	
 FfaAssembly.cs	FfaAssembly	CensusBody	PresentNonSpectators	R	the census: the room's actors minus spectators, never a fighter view (K28, K48); the server judges them	
 FfaAssembly.cs	FfaAssembly	CensusBody	players	R	the census's body flag: every registered body's owner, raw by design (the body rule counts bodies, sec3.2)	
