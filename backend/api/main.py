@@ -1938,8 +1938,11 @@ async def _supervised(name: str, coro_factory):
 # sweep and team_queue_cleanup_loop threw UndefinedTableError every 60s for
 # FIVE DAYS before anyone looked (restored in c199d57). The per-arm try/except
 # blocks — correct for isolation — are exactly what made that silent. So at
-# every boot we EXPLAIN every SQL statement the janitor loops can reach and
-# scream if one no longer plans.
+# every boot we check every SQL statement the janitor loops can reach and
+# scream if one no longer plans or runs: a DML statement is EXPLAINed, a
+# session statement (SET, RESET, SHOW, a transaction word) is executed in a
+# transaction that is rolled back, and a statement of any other kind is a
+# failure (_janitor_statement_class).
 
 _JANITOR_SELFTEST_ROOTS = (
     ("main", "queue_cleanup_loop"),
@@ -1961,6 +1964,76 @@ _JANITOR_SELFTEST_ROOTS = (
 )
 
 _janitor_selftest_report: dict = {"status": "pending"}
+
+
+# What each harvested statement is checked BY, decided by its first keyword.
+# EXPLAIN accepts only the optimizable statements, and prefixing it to
+# anything else is a syntax error on a janitor that runs correctly: the
+# trading janitor's SET LOCAL lock_timeout read as a dead sweep on every boot
+# until this split (board row 26, 2026-09-28). The class chooses the CHECK;
+# the server still gives every verdict but one:
+#   explain       EXPLAINed verbatim with NULL binds -- the check as it was.
+#   session       EXECUTED verbatim inside the check's own transaction, which
+#                 is then rolled back. An unknown parameter or a bad value
+#                 still fails (SET LOCAL lock_timeout = 'banana' is 22023),
+#                 and PostgreSQL reverts even a session-level SET or RESET
+#                 made inside a transaction that rolls back, so nothing the
+#                 check runs follows the connection back into the pool.
+#                 Transaction words run the same way. BEGIN, START and
+#                 SAVEPOINT stay inside the check's transaction; COMMIT, END,
+#                 ROLLBACK and ABORT end it early, while it holds nothing but
+#                 the check's own SET LOCAL statement_timeout; RELEASE and
+#                 ROLLBACK TO name a savepoint an earlier statement made, which
+#                 a check of one statement at a time does not reproduce, so
+#                 they report failed -- loud, never a pass.
+#   unclassified  any other first keyword, or none (a parenthesis, an empty
+#                 or comment-only literal). Reported as a failure and never
+#                 sent to the server: the self-test cannot vouch for a class
+#                 it does not know, and refusing is the direction #605 and
+#                 #613 settle on. Teach these sets the new form instead.
+_JANITOR_EXPLAIN_WORDS = frozenset(
+    ("SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "VALUES", "MERGE"))
+_JANITOR_SESSION_WORDS = frozenset(
+    ("SET", "RESET", "SHOW", "BEGIN", "START", "COMMIT", "END", "ROLLBACK",
+     "ABORT", "SAVEPOINT", "RELEASE"))
+# ASCII whitespace only: PostgreSQL's lexer counts no Unicode space as one.
+_JANITOR_SQL_SPACE = " \t\n\r\f\v"
+_JANITOR_SQL_WORD = _re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+def _janitor_statement_class(sql: str) -> tuple:
+    """(class, keyword) of one harvested statement: 'explain', 'session' or
+    'unclassified' (the table above), and its first keyword upper-cased, or
+    '' when it has none. The keyword is read after leading whitespace, `--`
+    line comments and `/* */` block comments, which nest as they do in
+    PostgreSQL; an unterminated block comment leaves no keyword."""
+    i, n = 0, len(sql)
+    while i < n:
+        if sql[i] in _JANITOR_SQL_SPACE:
+            i += 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif sql.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if sql.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif sql.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            if depth:
+                return "unclassified", ""
+        else:
+            break
+    m = _JANITOR_SQL_WORD.match(sql, i)
+    word = m.group(0).upper() if m else ""
+    if word in _JANITOR_EXPLAIN_WORDS:
+        return "explain", word
+    if word in _JANITOR_SESSION_WORDS:
+        return "session", word
+    return "unclassified", word
 
 
 def _janitor_sql_from_sources(sources: dict, roots) -> dict:
@@ -2069,9 +2142,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
     Everything outside this subset degrades to `dynamic`, i.e. a loud
     failure — never a guess.
 
-    Returns {"statements": [{module, func, line, sql, roots}],
+    Returns {"statements": [{module, func, line, sql, roots, class, keyword}],
              "dynamic":    [{module, func, line}],
              "root_counts": {root_fn: n statements reachable}}.
+    `class` and `keyword` are _janitor_statement_class(sql): the check the
+    self-test applies to that statement.
     """
     import ast as _ast
 
@@ -2942,9 +3017,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             for line, sql in found:
                 key = (mod, line, sql)
                 touched.add(key)
+                cls, word = _janitor_statement_class(sql)
                 e = statements.setdefault(key, {
                     "module": mod, "func": fn, "line": line,
-                    "sql": sql, "roots": []})
+                    "sql": sql, "roots": [], "class": cls, "keyword": word})
                 if root_fn not in e["roots"]:
                     e["roots"].append(root_fn)
             for line in dyn:
@@ -3041,7 +3117,8 @@ def _janitor_sql_inventory() -> dict:
 
 
 def _janitor_explain_error_kind(e) -> tuple:
-    """Classify an EXPLAIN failure into ('infra'|'timeout'|'failed', detail).
+    """Classify a failed check -- an EXPLAIN, or a session statement's
+    execution -- into ('infra'|'timeout'|'failed', detail).
     'infra' is connection-level (DB down/dropped — aborts the run as
     db_unreachable); 'timeout' is our own SET LOCAL statement_timeout firing
     (the statement is UNVERIFIED, not proven broken — likely blocked behind
@@ -3079,8 +3156,77 @@ def _janitor_explain_error_kind(e) -> tuple:
     return "failed", detail
 
 
+async def _janitor_check_statement(db, s) -> tuple:
+    """Check ONE harvested statement on `db` and return (verdict, detail).
+
+    Verdicts: 'explained' or 'executed_rolled_back' by the statement's class
+    (detail None); 'unclassified', never sent to the server; and the three
+    kinds _janitor_explain_error_kind gives a check that raised: 'timed_out',
+    'failed', and 'infra' (connection-level -- the caller stops the run).
+
+    Every check gets a transaction of its own and that transaction is always
+    rolled back, EXPLAIN or not. 'executed_rolled_back' is returned only once
+    the rollback has returned, because the name claims both halves: an
+    executed session statement whose rollback raised is 'failed', with the
+    rollback's error. An EXPLAIN leaves nothing for a rollback to undo, so its
+    verdict does not wait on one (as before the split)."""
+    cls = s.get("class")
+    if cls not in ("explain", "session"):
+        word = s.get("keyword") or ""
+        return "unclassified", (
+            f"unclassified statement (first keyword {word!r}): the self-test "
+            "neither EXPLAINs nor executes a class it does not recognise -- "
+            "teach _JANITOR_EXPLAIN_WORDS or _JANITOR_SESSION_WORDS the new "
+            "form, or restructure the SQL")
+    verdict, detail, rollback_error = None, None, None
+    try:
+        # Txn-local timeout: planning takes AccessShareLock and can wait
+        # forever behind a migration's AccessExclusiveLock, wedging the
+        # report at 'running' and pinning a pool connection (Codex r1 find
+        # 5). statement_timeout covers lock waits, and SET LOCAL dies with
+        # our rollback, so nothing leaks to the pooled connection (a
+        # session-level SET would follow it back into the pool -- unless, as
+        # for a harvested session statement below, the transaction it ran in
+        # is rolled back).
+        await db.execute(text("SET LOCAL statement_timeout = '5s'"))
+        # VERBATIM: prefixing EXPLAIN to a DML statement is the only edit
+        # ever made to the SQL, and a session statement runs with none.
+        # Collapsing whitespace would let a `--` comment swallow the rest of
+        # the line and check a truncated statement (that silently ate a
+        # GROUP BY in tournaments.py during the Aug 20 validation of this
+        # feature).
+        stmt = text("EXPLAIN " + s["sql"] if cls == "explain" else s["sql"])
+        # _bindparams: SQLAlchemy's own parse of the binds -- a private attr,
+        # but the one source that can never disagree with how execute() will
+        # read the SQL. If it ever vanishes in an upgrade, bind-carrying
+        # statements fail loudly here; nothing passes silently.
+        params = {k: None for k in getattr(stmt, "_bindparams", {})}
+        await db.execute(stmt, params)
+        verdict = "explained" if cls == "explain" else "executed_rolled_back"
+    except Exception as e:
+        kind, detail = _janitor_explain_error_kind(e)
+        verdict = {"infra": "infra", "timeout": "timed_out"}.get(kind, "failed")
+    finally:
+        # Reset even after an aborted txn; guarded because a dead connection
+        # makes rollback itself raise. (An in-flight CancelledError still
+        # propagates -- it is not an Exception.)
+        try:
+            await db.rollback()
+        except Exception as e:
+            rollback_error = f"{type(e).__name__}: {e}"
+    if verdict == "executed_rolled_back" and rollback_error is not None:
+        return "failed", ("executed, but the rollback that must undo it "
+                          f"raised: {rollback_error}")
+    return verdict, detail
+
+
 async def _run_janitor_query_selftest():
-    """Boot-time EXPLAIN sweep of every janitor SQL statement.
+    """Boot-time check of every janitor SQL statement, each by its class
+    (_janitor_check_statement): DML EXPLAINed, session statements executed
+    and rolled back, anything else a failure. A finished run's report names
+    each statement's result in `outcomes` (explained, executed_rolled_back,
+    failed, unclassified, timed_out, unchecked) with its first 80 characters
+    and the janitor function that issues it; `counts` keeps every older key.
 
     Runs as a DETACHED lifespan task (off the boot path — Sid's call): not
     awaited at startup and NOT under _supervised, whose while-True wrapper
@@ -3097,13 +3243,22 @@ async def _run_janitor_query_selftest():
     try:
         inv = _janitor_sql_inventory()
         stmts = inv["statements"]
-        failures, timed_out = [], []
-        n_ok = unchecked = 0
+        failures, timed_out, outcomes = [], [], []
+        n_ok = n_exec = n_unclassified = unchecked = 0
         db_error = None
 
         def _loc(s):
             return {"module": s["module"], "func": s["func"],
                     "line": s["line"], "roots": s["roots"]}
+
+        def _outcome(s, outcome):
+            # One row per harvested statement, in harvest order: its class
+            # and what its check said. sql80 is the statement with each
+            # whitespace run folded to one space, none at either end, cut to
+            # 80 characters (a literal usually opens with a newline + indent).
+            outcomes.append({**_loc(s), "class": s.get("class"),
+                             "keyword": s.get("keyword"), "outcome": outcome,
+                             "sql80": " ".join(s["sql"].split())[:80]})
 
         # A root that reaches zero statements means the call-graph walk broke
         # — a self-test that tests nothing must scream, not pass.
@@ -3133,51 +3288,22 @@ async def _run_janitor_query_selftest():
             from database import async_session
             async with async_session() as db:
                 for i, s in enumerate(stmts):
-                    try:
-                        # Txn-local timeout: planning takes AccessShareLock
-                        # and can wait forever behind a migration's
-                        # AccessExclusiveLock, wedging the report at
-                        # 'running' and pinning a pool connection (Codex r1
-                        # find 5). statement_timeout covers lock waits, and
-                        # SET LOCAL dies with our rollback, so nothing leaks
-                        # to the pooled connection (a session-level SET
-                        # would follow it back into the pool).
-                        await db.execute(text("SET LOCAL statement_timeout = '5s'"))
-                        # VERBATIM: prefixing EXPLAIN is the only edit ever
-                        # made to the SQL. Collapsing whitespace would let a
-                        # `--` comment swallow the rest of the line and
-                        # EXPLAIN a truncated statement (that silently ate a
-                        # GROUP BY in tournaments.py during the Aug 20
-                        # validation of this feature).
-                        stmt = text("EXPLAIN " + s["sql"])
-                        # _bindparams: SQLAlchemy's own parse of the binds —
-                        # a private attr, but the one source that can never
-                        # disagree with how execute() will read the SQL. If
-                        # it ever vanishes in an upgrade, bind-carrying
-                        # statements fail loudly here; nothing passes silently.
-                        params = {k: None for k in getattr(stmt, "_bindparams", {})}
-                        await db.execute(stmt, params)
+                    verdict, detail = await _janitor_check_statement(db, s)
+                    if verdict == "infra":
+                        db_error = detail
+                        unchecked = len(stmts) - i
+                        break
+                    _outcome(s, verdict)
+                    if verdict == "explained":
                         n_ok += 1
-                    except Exception as e:
-                        kind, detail = _janitor_explain_error_kind(e)
-                        if kind == "infra":
-                            db_error = detail
-                            unchecked = len(stmts) - i
-                            break
-                        if kind == "timeout":
-                            timed_out.append({**_loc(s), "error": detail})
-                        else:
-                            failures.append({**_loc(s), "error": detail,
-                                             "sql": s["sql"]})
-                    finally:
-                        # Reset even after an aborted txn; guarded because a
-                        # dead connection makes rollback itself raise. (An
-                        # in-flight CancelledError still propagates — it is
-                        # not an Exception.)
-                        try:
-                            await db.rollback()
-                        except Exception:
-                            pass
+                    elif verdict == "executed_rolled_back":
+                        n_exec += 1
+                    elif verdict == "timed_out":
+                        timed_out.append({**_loc(s), "error": detail})
+                    else:   # 'failed' and 'unclassified': the loud case
+                        n_unclassified += verdict == "unclassified"
+                        failures.append({**_loc(s), "error": detail,
+                                         "sql": s["sql"]})
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -3195,7 +3321,13 @@ async def _run_janitor_query_selftest():
             # pre-loop synthetic failures (root-zero, dynamic sites) are
             # not statements and must not offset this (Codex r2 find 7).
             n_stmt_failures = len(failures) - n_prior_failures
-            unchecked = max(0, len(stmts) - n_ok - n_stmt_failures - len(timed_out))
+            unchecked = max(0, len(stmts) - n_ok - n_exec - n_stmt_failures
+                            - len(timed_out))
+
+        # A statement the run did not check (the DB went away at it or before
+        # it, or the session died around the loop) still gets its row.
+        for s in stmts[len(outcomes):]:
+            _outcome(s, "unchecked")
 
         if failures:
             status = "failed"
@@ -3212,25 +3344,41 @@ async def _run_janitor_query_selftest():
             "duration_ms": int((time.monotonic() - t0) * 1000),
             "counts": {"statements": len(stmts), "explained_ok": n_ok,
                        "failed": len(failures), "timed_out": len(timed_out),
-                       "dynamic": len(inv["dynamic"]), "unchecked": unchecked},
+                       "dynamic": len(inv["dynamic"]), "unchecked": unchecked,
+                       "executed_rolled_back": n_exec,
+                       "unclassified": n_unclassified},
             "root_counts": inv["root_counts"],
             "failures": failures,
             "timed_out": timed_out,
             "dynamic": inv["dynamic"],
             "db_error": db_error,
+            "outcomes": outcomes,
         }
 
         bar = "=" * 72
+        by_class = {}
+        for s in stmts:
+            by_class[s.get("class")] = by_class.get(s.get("class"), 0) + 1
         lines = [bar,
-                 f"[JANITOR-SELFTEST] EXPLAINed {n_ok}/{len(stmts)} janitor "
-                 f"statements in {time.monotonic() - t0:.1f}s "
+                 f"[JANITOR-SELFTEST] EXPLAINed {n_ok}/"
+                 f"{by_class.get('explain', 0)}, executed and rolled back "
+                 f"{n_exec}/{by_class.get('session', 0)}, unclassified "
+                 f"{n_unclassified}: {len(stmts)} janitor statements in "
+                 f"{time.monotonic() - t0:.1f}s "
                  f"({len(failures)} failed, {len(timed_out)} timed out)",
                  "[JANITOR-SELFTEST] roots: " + "  ".join(
                      f"{k}={v}" for k, v in inv["root_counts"].items())]
+        # An executed statement was run and rolled back, never planned: name
+        # each one, so "plan clean" below is not read as covering it.
+        for o in outcomes:
+            if o["outcome"] == "executed_rolled_back":
+                lines.append(f"[JANITOR-SELFTEST]   executed and rolled back, "
+                             f"not EXPLAINed: {o['module']}.py:{o['line']} "
+                             f"({o['func']}): {o['sql80']}")
         if status == "failed":
             lines.append(f"[JANITOR-SELFTEST] !!! {len(failures)} JANITOR "
-                         "QUERIES FAIL TO PLAN — those sweeps are dead EVERY "
-                         "cycle until fixed !!!")
+                         "QUERIES FAIL THEIR CHECK -- one that fails to plan "
+                         "or run is dead EVERY cycle until fixed !!!")
             for f in failures:
                 lines.append(f"[JANITOR-SELFTEST]   {f['module']}.py:{f['line']}"
                              f" ({f['func']}): {f['error'].splitlines()[0]}")
@@ -3554,6 +3702,18 @@ async def lifespan(app: FastAPI):
                 "status": "skipped",
                 "reason": "read replica: the janitor writers this validates do not run here",
             })
+            # POST-DEPLOY ACCEPTANCE is role-specific -- the row this proves
+            # cannot exist on both boxes (Codex r1 MEDIUM, board row 26).
+            # PRIMARY: the endpoint (get_janitor_selftest) reports
+            # status="ok", counts.failed == 0 and the trading janitor's row
+            # executed_rolled_back; /health reads janitor_selftest=1 and
+            # janitor_selftest_build=1. STANDBY: this block replaces the
+            # report before the box serves a request, so its own positive
+            # signal is exactly this dict -- {"status": "skipped", "reason":
+            # ...}, nothing else -- with /health reading janitor_selftest=2
+            # and janitor_selftest_build=1. Which box answered is already on
+            # /health as `replica` (HealthResponse.replica, both arms of
+            # health_check below): no new health key is added for this.
             # The janitor self-test is skipped rather than trusted: it EXPLAINs
             # janitor SQL containing FOR UPDATE SKIP LOCKED, and whether
             # recovery accepts EXPLAIN of a locking statement is UNVERIFIED
@@ -4296,7 +4456,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:47444 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:47642 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4362,7 +4522,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47256 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:47454 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4432,7 +4592,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47159 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:47357 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6854,6 +7014,38 @@ _RJ_TRIAGE_MARKER = 2
 _TICKET_REDACTION_MARKER = 1
 # Release-train verification plumbing, not a design mechanism: the Discord collection lane's one addition.
 _DISCORD_COLLECTION_MARKER = 1
+# JANITOR-SELFTEST, reported on /health as `janitor_selftest`: the verdict of
+# this api process's boot janitor SQL self-test (_run_janitor_query_selftest),
+# DERIVED from the report that run recorded (_janitor_selftest_report), never
+# written down (#342). 1 = it ran and every harvested statement passed its
+# check. 0 = it ran and did not pass (a statement failed its check or went
+# unverified, the database went away, or the self-test itself crashed), and
+# any status the map below does not name. 2 = skipped: the read replica,
+# whose lifespan branch records the skip before the box serves a request
+# because the janitor writers the self-test validates do not run there.
+# 3 = not finished: pending or running, from boot until the self-test ends.
+# The release train fails at once on a falsy word and waits on a truthy one
+# that is not the role's value, so "not finished" must not read 0. Read by
+# nothing but the train (#306). Both arms of the route carry it; a box on
+# the build before answers without the key.
+_JANITOR_SELFTEST_WORDS = {"ok": 1, "skipped": 2, "pending": 3, "running": 3}
+
+
+def _janitor_selftest_marker() -> int:
+    """/health `janitor_selftest`: the word for the verdict this process's
+    boot self-test recorded (see _JANITOR_SELFTEST_WORDS)."""
+    return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)
+
+
+# Release-train verification plumbing, not a design mechanism: the
+# JANITOR-SELFTEST lane's build marker, reported on /health as
+# `janitor_selftest_build`. A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else
+# (#306). janitor_selftest above differs by role (the primary reads 1, the
+# standby 2), and the train reads a batch that adds no route through the
+# edge only by a marker both roles answer alike, because no probe says
+# which box answered. Absent on any build before it.
+_JANITOR_SELFTEST_BUILD = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -6879,6 +7071,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=await _pc_trading_word(db),
                               discord_fix=await _discord_fix_probe(db),
                               pc_motion=_pc_motion_health_word(),
+                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
+                              janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
                               team_dc_fallback=team_dc_fallback)
     except Exception:
@@ -6890,6 +7084,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # database, so this arm answers each one's last probe on this worker (0 before the
         # first, which the release train reads as not proven); pc_trading
         # answers its own cache-only form.
+        # janitor_selftest is the verdict this process's boot self-test
+        # recorded in memory, so it answers here unchanged.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
@@ -6903,6 +7099,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=_pc_trading_word_cached(),
                               discord_fix=_DISCORD_FIX_LAST,
                               pc_motion=_pc_motion_health_word(),
+                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
+                              janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
 
@@ -47551,7 +47749,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4401 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4561 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
