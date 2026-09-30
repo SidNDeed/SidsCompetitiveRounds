@@ -46,6 +46,38 @@ namespace CompetitiveRounds
         public static string LatchedSrc { get; private set; }
         /// <summary>True when the latched room plays anything but the defaults.</summary>
         public static bool NonDefault => Latched && (!FriendlyFire || SameCards);
+        /// <summary>True when the latched room plays friendly fire OFF (the 2v2 /
+        /// 1v2 host toggle). False outside a latched room, which plays the
+        /// default (on); an FFA lobby never latches it off, its settings ride its
+        /// own property. The standing strip names the rule from this.</summary>
+        public static bool FriendlyFireOff => Latched && !FriendlyFire;
+
+        /// <summary>The latch source the broadcast seat's [Broadcast]
+        /// TestRoomRules lever writes, so a release can never clear a latch that
+        /// a real room wrote.</summary>
+        internal const string TestLeverSrc = "test-lever";
+
+        /// <summary>Broadcast seat, OFFLINE only ([Broadcast] TestRoomRules):
+        /// latch a rules pair in the strict grammar so the standing strip can be
+        /// verified with nobody at the seat. Refused inside a room, where the
+        /// room's own latch is the only authority, and for an unparseable
+        /// value.</summary>
+        internal static bool DevLatchForTest(string prop)
+        {
+            try { if (PhotonNetwork.InRoom) return false; } catch { return false; }
+            if (!TryParse(prop, out bool ff, out bool sc)) return false;
+            SetLatched(ff, sc, prop, TestLeverSrc);
+            return true;
+        }
+
+        /// <summary>Undo <see cref="DevLatchForTest"/>: resets only a latch the
+        /// lever wrote.</summary>
+        internal static bool DevReleaseTest()
+        {
+            if (LatchedSrc != TestLeverSrc) return false;
+            ResetLatched();
+            return true;
+        }
 
         private static bool announced;
         private static int suppressedThisGame;

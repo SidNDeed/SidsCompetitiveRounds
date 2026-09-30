@@ -179,8 +179,12 @@ def test_history_record_distinguishes_unknown_from_default():
 
 
 def test_ffa_settings_block_reports_unknown_rather_than_a_plausible_default():
+    # settings_frozen None: a game recorded before migration 360, so the block
+    # comes from the lobby columns (test_ffa_settings_frozen.py covers the
+    # frozen block and the fall back between the two).
     full = {"score_target": 7, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
-            "same_card_rule": True, "sudden_death": False, "settings_known": True}
+            "same_card_rule": True, "sudden_death": False, "settings_known": True,
+            "settings_frozen": None}
     assert main._ffa_settings_block(full) == {
         "score_target": 7, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
         "same_card_rule": True, "sudden_death": False}

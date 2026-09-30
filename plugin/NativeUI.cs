@@ -13011,6 +13011,37 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return "";
         }
 
+        // v1.41.0 item 23c: the album note. AUTHORED text like the by-line
+        // itself (MusicCatalog.cs header, #368): rendered raw and never
+        // translated, so its words read the same in every locale.
+        // Shown beside the album by-line and in the now-playing readout only.
+        // Round 2 (L2): ONE style for both places, an ABSOLUTE size, and
+        // that size is 14 pt. Captured on the broadcast seat's 1080p window
+        // (bold-wrapped by SetTextRaw, heavy material): at 12 pt the hyphen
+        // in "machine-generated" drew no pixel in the readout or the by-line;
+        // at 14 pt it draws one partly covered pixel row in both. The stroke
+        // is under a pixel tall at these sizes, so whether it lands on a row
+        // depends on the line's position as well as the size (round 1 saw the
+        // by-line draw it at 10.2 pt): the ink is an observation at this
+        // seat's scale, not a property of the font, and needs a new capture
+        // if the size, the font, the material or the layout changes. Both
+        // lines use Overflow with no wrap (FitOneLine), so the text element
+        // itself does not truncate the larger run.
+        private const string MUSIC_NOTE_STYLE = "<size=14><color=#888>";
+        private const string MUSIC_ALBUM_NOTE = "  " + MUSIC_NOTE_STYLE + "(machine-generated)</color></size>";
+
+        private static string MusicAlbumNote(MusicAlbumDef alb)
+        {
+            return alb != null && alb.MachineGenerated ? MUSIC_ALBUM_NOTE : "";
+        }
+
+        private static string NowPlayingAlbumNote()
+        {
+            string sku = null;
+            try { sku = MusicEngine.NowPlayingAlbumSku(); } catch { }
+            return sku == null ? "" : MusicAlbumNote(MusicCatalog.Get(sku));
+        }
+
         private static void RefreshMusicTab()
         {
             // Transport dock paints — the engine is the single source of truth (§4).
@@ -13021,7 +13052,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (txtMusicNow != null)
                 UIFactory.SetTextRaw(txtMusicNow, string.IsNullOrEmpty(np)
                     ? $"<color=#888><i>{I18n.Tr("Nothing playing")}</i></color>"
-                    : np);
+                    : np + NowPlayingAlbumNote());
             // Play/pause is ONE toggling icon driven by IsPlayingNow (audibly
             // playing) — paused-in-Custom shows the play glyph again.
             bool playing = false; try { playing = MusicEngine.IsPlayingNow; } catch { }
@@ -13044,7 +13075,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // Volume: the persisted config value IS the state (the contract's
             // SetVolumePercent writes it); silent so the repaint can't re-seek
             // the engine's volume path.
-            int vol = 100; try { vol = Plugin.MusicVolume != null ? Mathf.Clamp(Plugin.MusicVolume.Value, 0, 100) : 100; } catch { }
+            int vol = MusicLevels.DEFAULT_PERCENT; try { vol = Plugin.MusicVolume != null ? Mathf.Clamp(Plugin.MusicVolume.Value, 0, 100) : MusicLevels.DEFAULT_PERCENT; } catch { }
             if (musicVolSlider != null) musicVolSlider.SetSilent(vol / 100f);
             // Re-anchor the dedup to the PERSISTED value: without this, a
             // config change from elsewhere followed by the user dragging back
@@ -13142,7 +13173,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
                 catch { }
                 UIFactory.SetTextRaw(h.txtMeta,
-                    I18n.TrF("by {0}", HomeSan(alb.ArtistName ?? "")) + $"  -  {HomeSan(alb.Genre ?? "")}  -  "
+                    I18n.TrF("by {0}", HomeSan(alb.ArtistName ?? "")) + MusicAlbumNote(alb) + $"  -  {HomeSan(alb.Genre ?? "")}  -  "
                     + I18n.TrF("{0} tracks", n) + $"  -  {FmtTrackLen(MusicAlbumTotalSeconds(alb))}" + albAgg);
                 h.root.SetActive(true);
                 h.root.transform.SetSiblingIndex(sibling++);

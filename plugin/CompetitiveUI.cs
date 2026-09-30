@@ -1553,7 +1553,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // ── Room rules: the persistent "same cards" strip (Sept 15) ────────
+        // -- Room rules: the standing strip (Sept 15; friendly fire: item 22) --------
         // The game-start toast (RoomRules.OnGameStart) is an ARRIVAL cue: one
         // 6 s bottom-centre notification per latched room, behind its own
         // `announced` latch. It cannot serve a seat that joins after it fired,
@@ -1598,9 +1598,27 @@ namespace CompetitiveRounds
         // chooses by mode: whichever side answers, the strip says the one
         // sentence and says it once.
         //
-        // NOT stated here: friendly fire. The game-start toast already names it
-        // (RoomRules.OnGameStart's three variants), and the standing statement
-        // is deliberately the one rule that changes what you are handed.
+        // FRIENDLY FIRE, since v1.41.0 item 22 (Sid: while any game-changing
+        // room rule is active, a standing indicator names it for the whole
+        // game; a toast is not enough). The strip used to name only the rule
+        // that changes what you are handed and left friendly fire OFF to the
+        // six-second toast. It now reads RoomRules.FriendlyFireOff (the LATCHED
+        // rule, Latched && !FriendlyFire, so the defaults and every FFA lobby
+        // read false) beside StripState(), and RoomRulesStrip.Choose turns the
+        // pair into one sentence: friendly fire alone, same cards alone (or
+        // its fell-back line), or both in one line. The game-start toast is
+        // unchanged and still fires once per latched room.
+        //
+        // [UI] ShowRoomRulesIndicator (default true) hides the strip and
+        // nothing else: the toast and the rules themselves are untouched, and
+        // a hidden strip logs one "suppressed" line per change, so that it was
+        // hidden is still a readable fact.
+        //
+        // Why this strip and not a standing copy of the toast: the toast's slot
+        // (DrawNotification, bottom-centre) is where the 6 s and 9 s toasts
+        // paint, so a standing line there would collide with every toast for a
+        // whole game. This strip is the standing statement at the opposite
+        // edge, and one pill for every rule rather than two indicators.
         //
         // RECT: a centred pill, 22px tall, docked under whatever else painted in
         // the top-centre strip in THIS Repaint — the in-match banner/series/H2H
@@ -1648,11 +1666,13 @@ namespace CompetitiveRounds
         // room's worth of Repaints emits ONE line and the next room emits
         // another. Not a "once ever" flag — a seat that leaves and rejoins
         // should log again, because that is a second arrival.
-        // Holds the STATE it logged, not a bool: the strip's claim changes when
+        // Holds the LINE it logged, not a bool: the strip's claim changes when
         // the dealer falls back mid-room, and one line per room would have hid
         // exactly the transition worth reading.
-        private static FfaCardSequence.RuleDisplayState roomRuleLogged
-            = FfaCardSequence.RuleDisplayState.Off;
+        private static RoomRulesStrip.Line roomRuleLogged = RoomRulesStrip.Line.None;
+        // The same edge latch for the [UI] ShowRoomRulesIndicator=false branch:
+        // one "suppressed" line per line the key hid, not one per frame.
+        private static RoomRulesStrip.Line roomRuleSuppressed = RoomRulesStrip.Line.None;
 
         private static void DrawRoomRulesBanner()
         {
@@ -1669,20 +1689,54 @@ namespace CompetitiveRounds
                 FfaCardSequence.RuleDisplayState state;
                 try { state = FfaCardSequence.StripState(); }
                 catch { state = FfaCardSequence.RuleDisplayState.Off; }
-                if (state == FfaCardSequence.RuleDisplayState.Off)
-                { roomRuleLogged = FfaCardSequence.RuleDisplayState.Off; return; }
+                bool fellBack = state == FfaCardSequence.RuleDisplayState.FellBack;
+                // Pending renders the configured rule (a room lobby should show
+                // its own rule) -- only a LATCHED fallback changes the claim.
+                RoomRulesStrip.SameCards sameCards = fellBack
+                    ? RoomRulesStrip.SameCards.FellBack
+                    : state == FfaCardSequence.RuleDisplayState.Off
+                        ? RoomRulesStrip.SameCards.Off
+                        : RoomRulesStrip.SameCards.On;
+                // Item 22: the latched friendly-fire rule, named beside it.
+                bool ffOff;
+                try { ffOff = RoomRules.FriendlyFireOff; }
+                catch { ffOff = false; }
+                RoomRulesStrip.Line line = RoomRulesStrip.Choose(ffOff, sameCards);
+                if (line == RoomRulesStrip.Line.None)
+                {
+                    roomRuleLogged = RoomRulesStrip.Line.None;
+                    roomRuleSuppressed = RoomRulesStrip.Line.None;
+                    return;
+                }
+                // The player's key (default true). A missing entry (a config
+                // that failed to bind) shows the strip: hiding is the opt-out.
+                bool enabled;
+                try { enabled = Plugin.ShowRoomRulesIndicator == null || Plugin.ShowRoomRulesIndicator.Value; }
+                catch { enabled = true; }
+                if (!RoomRulesStrip.Paints(enabled, line))
+                {
+                    if (roomRuleSuppressed != line)
+                    {
+                        roomRuleSuppressed = line;
+                        // Shown again later is a new arrival and logs again.
+                        roomRuleLogged = RoomRulesStrip.Line.None;
+                        Plugin.Log.LogInfo("[ROOM-RULES] indicator suppressed by [UI] ShowRoomRulesIndicator=false: "
+                            + line + " (same cards " + state + ")");
+                    }
+                    return;
+                }
+                roomRuleSuppressed = RoomRulesStrip.Line.None;
                 // Item 4: yields to anything the player opened. See RoomStripHidden.
                 if (RoomStripHidden) return;
-                bool fellBack = state == FfaCardSequence.RuleDisplayState.FellBack;
-                if (roomRuleLogged != state)
+                if (roomRuleLogged != line)
                 {
-                    roomRuleLogged = state;
-                    // Written on the first PAINTING Repaint of each state, never
+                    roomRuleLogged = line;
+                    // Written on the first PAINTING Repaint of each line, never
                     // per frame (#162): it claims the strip was shown, so it is
                     // emitted past the hidden gate rather than at the rule edge.
                     // The only place this tag is written (#306).
-                    Plugin.Log.LogInfo("[ROOM-RULES] indicator shown: same cards ("
-                        + state + ")");
+                    Plugin.Log.LogInfo("[ROOM-RULES] indicator shown: " + line
+                        + " (same cards " + state + ")");
                 }
                 if (roomRuleStyle == null)
                 {
@@ -1696,14 +1750,27 @@ namespace CompetitiveRounds
                 // creation: the style is cached across states, so a colour
                 // written only inside the "if (style == null)" block would stay
                 // whatever the FIRST state of the session painted.
-                roomRuleStyle.normal.textColor = fellBack
+                bool amber = RoomRulesStrip.IsFallback(line);
+                roomRuleStyle.normal.textColor = amber
                     ? new Color(1f, 0.86f, 0.55f, 1f)          // amber: a downgrade
                     : new Color(0.78f, 0.92f, 1f, 1f);          // cyan, as the toast
-                // Pending renders the configured rule (a room lobby should show
-                // its own rule) — only a LATCHED fallback changes the claim.
-                string text = fellBack
-                    ? I18n.Tr("Room rule: same cards is off this game")
-                    : I18n.Tr("Room rule: same cards for everyone");
+                // One catalogue string per line; the three friendly-fire lines
+                // reuse the toast's own keys where the toast says the same
+                // thing, and the fell-back combination is the one new key.
+                string text;
+                switch (line)
+                {
+                    case RoomRulesStrip.Line.SameCards:
+                        text = I18n.Tr("Room rule: same cards for everyone"); break;
+                    case RoomRulesStrip.Line.SameCardsOff:
+                        text = I18n.Tr("Room rule: same cards is off this game"); break;
+                    case RoomRulesStrip.Line.FriendlyFireOff:
+                        text = I18n.Tr("Room rules: friendly fire OFF"); break;
+                    case RoomRulesStrip.Line.FriendlyFireOffSameCards:
+                        text = I18n.Tr("Room rules: friendly fire OFF, same cards for everyone"); break;
+                    default:
+                        text = I18n.Tr("Room rules: friendly fire OFF, same cards is off this game"); break;
+                }
                 // CalcSize on CHANGE only — never per Repaint (#162). The text
                 // moves when the locale or the state does, and the reference
                 // compare below costs one ordinal string compare per frame.
@@ -1726,7 +1793,7 @@ namespace CompetitiveRounds
                 // in the same IMGUI pass.
                 try
                 {
-                    GUI.color = fellBack
+                    GUI.color = amber
                         ? new Color(0.30f, 0.22f, 0.06f, 0.78f)
                         : new Color(0.10f, 0.22f, 0.40f, 0.72f);
                     GUI.DrawTexture(new Rect(x, y, w, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);

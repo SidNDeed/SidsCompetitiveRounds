@@ -2,7 +2,7 @@
 
 Three things a source test can decide, none of which a screenshot can:
 
-1. The five room-rule strings the strip and its game-start toast render have a
+1. The six room-rule strings the strip and its game-start toast render have a
    real entry in every shipped locale.  A key with no catalogue entry renders
    English with every other gate green (#578), and the artifact that RENDERS is
    the DLL-bundled catalogue, never a SQL seed (#583).
@@ -35,17 +35,30 @@ from test_pc_sept12 import _bundled_catalogues  # noqa: E402  (shared parser, on
 
 LOCALES = ("es", "ru", "uk", "sv")
 
-# The strip's two lines plus the three game-start toast variants it stands
-# beside.  All five are rendered from `plugin/I18nCatalogues.cs` at runtime.
-# The fell-back line is the one the strip shows when the dealer latched a
+# The strip's lines plus the three game-start toast variants it stands beside.
+# All six are rendered from `plugin/I18nCatalogues.cs` at runtime.  The
+# fell-back lines are the ones the strip shows when the dealer latched a
 # fallback: an untranslated one would tell four fifths of the player base
-# nothing in the one state where the strip has something to say.
+# nothing in the one state where the strip has something to say.  Since item
+# 22 the strip names friendly fire too, reusing the toast's two friendly-fire
+# keys and adding the one combination the toast never says.
 ROOM_RULE_KEYS = (
     "Room rule: same cards for everyone",
     "Room rule: same cards is off this game",
     "Room rules: friendly fire OFF",
     "Room rules: friendly fire OFF, same cards for everyone",
+    "Room rules: friendly fire OFF, same cards is off this game",
     "Room rules: same cards for everyone",
+)
+
+# The five sentences the strip itself renders, one per non-default line
+# RoomRulesStrip.Choose can return.
+STRIP_KEYS = (
+    "Room rule: same cards for everyone",
+    "Room rule: same cards is off this game",
+    "Room rules: friendly fire OFF",
+    "Room rules: friendly fire OFF, same cards for everyone",
+    "Room rules: friendly fire OFF, same cards is off this game",
 )
 
 
@@ -174,6 +187,73 @@ def test_indicator_is_called_from_the_draw_pass():
     src = _plugin("CompetitiveUI.cs")
     assert src.count("DrawRoomRulesBanner();") == 1, \
         "the indicator must be invoked exactly once from DrawUI"
+
+
+# -- 2b. item 22: the strip names friendly fire, and one key can hide it ----
+# Which line each (friendly fire, same cards) pair gets is EXECUTED by the
+# client-rules harness (RoomRulesStrip.SelfTest, the "roomrules" suite in
+# test_client_rules_harness.py); what a source test decides is that the painter
+# feeds the chooser the LATCHED rule and renders every line it can return.
+
+def test_the_strip_names_friendly_fire_from_the_latched_rule():
+    body = code_of(_plugin("CompetitiveUI.cs"),
+                   "private static void DrawRoomRulesBanner()")
+    assert body.count("RoomRules.FriendlyFireOff") == 1, \
+        "the strip must read the latched friendly-fire rule exactly once"
+    assert body.count("RoomRulesStrip.Choose(") == 1
+    # The raw flag is not a second source: it reads TRUE outside a latched
+    # room only because ResetLatched sets it, and FriendlyFireOff carries the
+    # Latched term itself.
+    for stray in ("RoomRules.FriendlyFire;", "!RoomRules.FriendlyFire", "RoomRules.NonDefault"):
+        assert stray not in body, stray
+    for key in STRIP_KEYS:
+        assert body.count('I18n.Tr("%s")' % key) == 1, \
+            "the strip does not render {!r} exactly once".format(key)
+    for member in ("SameCards", "SameCardsOff", "FriendlyFireOff", "FriendlyFireOffSameCards"):
+        assert body.count("case RoomRulesStrip.Line.%s:" % member) == 1, member
+
+
+def test_friendly_fire_off_is_the_latched_rule():
+    lines = [ln for ln in code_of(_plugin("RoomRules.cs")).splitlines()
+             if "public static bool FriendlyFireOff" in ln]
+    assert len(lines) == 1, lines
+    assert "Latched && !FriendlyFire" in lines[0], lines[0]
+
+
+def test_one_cfg_key_hides_the_strip_and_it_defaults_to_shown():
+    code = code_of(_plugin("Plugin.cs"))
+    m = re.search(r'ShowRoomRulesIndicator\s*=\s*Config\.Bind\(\s*"UI",\s*'
+                  r'"ShowRoomRulesIndicator",\s*(\w+),', code)
+    assert m, "no [UI] ShowRoomRulesIndicator binding"
+    assert m.group(1) == "true", "the strip must default to shown"
+    body = code_of(_plugin("CompetitiveUI.cs"),
+                   "private static void DrawRoomRulesBanner()")
+    assert "Plugin.ShowRoomRulesIndicator" in body
+    assert body.count("RoomRulesStrip.Paints(") == 1
+    # The key's VALUE is what the gate is handed, and the gate returns before
+    # the strip claims its band: a Paints call fed a constant, or one whose
+    # refusal falls through to the paint, reads the key and ignores it (the
+    # mutation Paints(true, line) passed every assertion above).
+    m = re.search(r"(\w+)\s*=\s*Plugin\.ShowRoomRulesIndicator\s*==\s*null\s*"
+                  r"\|\|\s*Plugin\.ShowRoomRulesIndicator\.Value\s*;", body)
+    assert m, "the cfg value is not read into a local the gate can be handed"
+    gate = "if (!RoomRulesStrip.Paints(%s, line))" % m.group(1)
+    assert body.count(gate) == 1, "the gate is not handed the key's value: " + gate
+    refusal = body.split(gate, 1)[1]
+    refusal = refusal[:refusal.index("roomRuleSuppressed = RoomRulesStrip.Line.None;")]
+    assert "return;" in refusal, "a refused strip falls through to the paint"
+    assert body.index(gate) < body.index("ClaimTopStrip("), \
+        "the strip claims its band before the key is consulted"
+    # The key hides the strip only: the game-start toast is not behind it.
+    toast = code_of(_plugin("RoomRules.cs"), "public static void OnGameStart()")
+    assert "ShowRoomRulesIndicator" not in toast
+    assert "CompetitiveUI.ShowNotification(" in toast
+
+
+def test_the_chooser_file_holds_no_catalogue_string():
+    """RoomRulesStrip.cs is not in tools/i18n_extract.py's FILES list (#464):
+    a string moved into it would be silently unharvestable."""
+    assert "I18n.Tr(" not in code_of(_plugin("RoomRulesStrip.cs"))
 
 
 def test_spectator_bar_claims_its_own_band_and_paints_inside_it():

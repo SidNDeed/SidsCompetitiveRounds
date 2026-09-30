@@ -2103,6 +2103,7 @@ namespace CompetitiveRounds
             "Room rule: same cards is off this game",
             "Room rules: friendly fire OFF",
             "Room rules: friendly fire OFF, same cards for everyone",
+            "Room rules: friendly fire OFF, same cards is off this game",
             "Room rules: same cards for everyone",
             "Room settings did not match — left the room",
             "Rose",

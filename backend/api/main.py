@@ -11431,7 +11431,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
         SELECT m.id, m.ended_at, m.invalidated_at, m.invalidation_reason, m.is_ranked,
                m.duration_seconds, m.player_count, m.timeline, m.photon_room_id,
                m.winner_id, pw.steam_id AS winner_sid,
-               {_FFA_SETTINGS_COLS}
+               m.settings_frozen, {_FFA_SETTINGS_COLS}
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
           LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
@@ -20159,7 +20159,7 @@ async def get_recent_multimode_series(
                pw.display_name AS winner_name,
                (SELECT fmp.rating_change FROM ffa_match_players fmp
                  WHERE fmp.match_id = m.id AND fmp.player_id = m.winner_id) AS winner_change,
-               {_FFA_SETTINGS_COLS}
+               m.settings_frozen, {_FFA_SETTINGS_COLS}
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
           LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
@@ -46092,15 +46092,19 @@ def _rules_history(raw, extra_pick=None):
     return out
 
 
-def _ffa_settings_block(row):
+_FFA_SETTINGS_INT_KEYS = ("score_target", "card_cap", "initial_picks", "card_candidates")
+_FFA_SETTINGS_BOOL_KEYS = ("same_card_rule", "sudden_death")
+
+
+def _ffa_settings_live(row):
     """The FFA `settings` object (score_target, card_cap, initial_picks,
-    card_candidates, same_card_rule, sudden_death) from a row that LEFT JOINs
-    ffa_lobbies l with those columns plus settings_known. None when the match
-    has no lobby row or the lobby predates configurable settings —
-    settings_known is FALSE for lobbies migration 176 gave DEFAULT values they
-    were never played under (early games were first-to-3), so report unknown
-    rather than a plausible lie. ONE definition for every FFA history surface
-    (#330)."""
+    card_candidates, same_card_rule, sudden_death) off the LOBBY columns: a
+    row that LEFT JOINs ffa_lobbies l with those columns plus settings_known,
+    or the lobby row itself. None when the match has no lobby row or the
+    lobby predates configurable settings - settings_known is FALSE for
+    lobbies migration 176 gave DEFAULT values they were never played under
+    (early games were first-to-3), so report unknown rather than a plausible
+    lie."""
     if row["score_target"] is None or not row["settings_known"]:
         return None
     return {
@@ -46111,6 +46115,64 @@ def _ffa_settings_block(row):
         "same_card_rule": bool(row["same_card_rule"]),
         "sudden_death": bool(row["sudden_death"]),
     }
+
+
+def _ffa_settings_frozen(raw):
+    """The settings block a game's own row froze when it was recorded
+    (ffa_matches.settings_frozen, migration 360), or None. NULL (a game
+    recorded before 360, or one whose lobby settings were unknown) reads as
+    None, and so does anything that is not exactly the six keys at their
+    types (bool is not accepted as a number). The caller decides what None
+    means: only a NULL column falls back to the lobby row; a non-NULL value
+    this rejects reads as unknown (_ffa_settings_block)."""
+    if raw is None:
+        return None
+    try:
+        v = raw if isinstance(raw, dict) else _json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(v, dict) or set(v) != set(_FFA_SETTINGS_INT_KEYS + _FFA_SETTINGS_BOOL_KEYS):
+        return None
+    if any(type(v[k]) is not int for k in _FFA_SETTINGS_INT_KEYS):
+        return None
+    if any(type(v[k]) is not bool for k in _FFA_SETTINGS_BOOL_KEYS):
+        return None
+    return {k: v[k] for k in _FFA_SETTINGS_INT_KEYS + _FFA_SETTINGS_BOOL_KEYS}
+
+
+def _ffa_settings_block(row):
+    """The FFA `settings` object every FFA history surface returns, from a row
+    carrying the game's settings_frozen plus the lobby columns
+    _FFA_SETTINGS_COLS names: the block the game's own row froze when it was
+    recorded (migration 360); for a game whose column is NULL (recorded
+    before 360, or with its lobby settings unknown) the lobby row's
+    (_ffa_settings_live), which is what every game read before 360. The
+    lobby's settings are written only while it is open and once when it
+    starts, but a history that reads another table's CURRENT state describes
+    a game by whatever that row says now; the frozen block is the game's own
+    record. A NON-NULL value that is not the six keys at their types is
+    unknown (None) and never the lobby row: that game froze something, and
+    the lobby's later values are not it. The row MUST carry settings_frozen
+    (a KeyError, not a silent fall back to the lobby, when a surface forgets
+    to select it). ONE definition for every FFA history surface (#330)."""
+    raw = row["settings_frozen"]
+    if raw is None:
+        return _ffa_settings_live(row)
+    return _ffa_settings_frozen(raw)
+
+
+def _ffa_settings_to_freeze(lobby):
+    """What the INSERT that records a game writes to settings_frozen: the
+    locked lobby row's settings as _ffa_settings_live reads them, as JSON text
+    for CAST(... AS jsonb), or None (SQL NULL) when they are unknown. A lobby
+    row without the settings columns freezes None too, so the freeze can never
+    be the reason a report is refused (#430): the history then reads the lobby
+    row, exactly as for a game recorded before migration 360."""
+    try:
+        block = _ffa_settings_live(lobby)
+    except KeyError:
+        return None
+    return None if block is None else _json.dumps(block, sort_keys=True)
 
 
 _FFA_SETTINGS_COLS = ("l.score_target, l.card_cap, l.initial_picks,"
@@ -52287,10 +52349,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 duration_seconds, game_version, region, hmac_signature, reported_by,
                 is_ranked, started_at, ended_at, timeline,
                 battles_total, paid_battles, elapsed_seconds, game_number,
-                score_target_frozen, score_target_played)
+                score_target_frozen, score_target_played, settings_frozen)
             VALUES (:id, :lid, :room, :n, :win, :dur, :gv, :reg, :hmac, :rep, :ranked, :started, :endts, :tl,
                 :bt, :pb, :es, CAST(:gn AS SMALLINT),
-                CAST(:stf AS SMALLINT), CAST(:stp AS SMALLINT))
+                CAST(:stf AS SMALLINT), CAST(:stp AS SMALLINT), CAST(:sfz AS jsonb))
         """), {"id": match_id, "lid": lobby_uuid, "room": (report.photon_room_id or "")[:64],
                "gn": _game_number,
                # BOTH targets, because they can differ and the difference
@@ -52298,6 +52360,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                # configuration, `played` is the race this game actually ran.
                # Equal on every normally configured lobby.
                "stf": int(_score_target), "stp": _played_target,
+               # The settings block this game was played under, frozen into
+               # its own row (migration 360) off the lobby row locked above;
+               # the FFA history reads it from here, not from the lobby.
+               "sfz": _ffa_settings_to_freeze(lobby),
                "n": n, "win": id_by_steam[report.winner_steam_id],
                "dur": report.match_duration, "gv": (report.game_version or "")[:32] or None,
                "reg": (report.region or "")[:8] or None,
@@ -53137,11 +53203,14 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
         SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
                m.ended_at, m.started_at, m.is_ranked, m.timeline,
                pw.steam_id AS winner_steam,
-               -- Sid, Aug 3: show the lobby's settings beside each game. The
-               -- config is immutable once a lobby leaves 'open' (settings are
-               -- host-only AND status-gated), so this row still describes
-               -- exactly what these games were played under. LEFT JOIN so a
-               -- pre-config-era match simply reports nulls.
+               -- Sid, Aug 3: show the settings beside each game. The block
+               -- is the one the game's own row froze when it was recorded
+               -- (settings_frozen, migration 360); a game recorded before
+               -- that reads the lobby's columns, which are host-only and
+               -- written only while the lobby is open and once when it
+               -- starts. LEFT JOIN so a pre-config-era match simply reports
+               -- nulls.
+               m.settings_frozen,
                l.score_target, l.card_cap, l.initial_picks,
                l.card_candidates, l.same_card_rule, l.sudden_death, l.settings_known
           FROM ffa_matches m
@@ -53257,9 +53326,10 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
              "is_ranked": bool(m["is_ranked"]),
              "winner_steam_id": m["winner_steam"],
              "timeline": m["timeline"] or "",
-             # Lobby settings this game was played under (null for
+             # The settings this game was played under, as its own row froze
+             # them (migration 360; the lobby's for an older game), null for
              # pre-config-era matches, which the client renders as blank
-             # rather than as defaults it cannot vouch for).
+             # rather than as defaults it cannot vouch for.
              # settings_known is FALSE for lobbies that predate the
              # configurable-lobby feature: migration 176 gave them DEFAULT
              # values they were never played under (early games were
@@ -54907,7 +54977,7 @@ async def player_ffa_history(steam_id: str, limit: int = Query(15, ge=1, le=50),
     rows = (await db.execute(text(f"""
         SELECT m.id AS match_id, m.player_count, m.ended_at, fmp.placement,
                fmp.rating_change, fmp.kills, fmp.rounds_won, fmp.points_total,
-               {_FFA_SETTINGS_COLS}
+               m.settings_frozen, {_FFA_SETTINGS_COLS}
           FROM ffa_match_players fmp
           JOIN ffa_matches m ON m.id = fmp.match_id
           JOIN players p ON p.id = fmp.player_id
@@ -54935,7 +55005,8 @@ async def player_ffa_history(steam_id: str, limit: int = Query(15, ge=1, le=50),
          "kills": int(r["kills"] or 0), "rounds_won": int(r["rounds_won"] or 0),
          "points_total": int(r["points_total"] or 0),
          "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
-         # The lobby's settings block, same shape as /ffa/recent (§4.7).
+         # The game's settings block (frozen with the game, migration 360;
+         # the lobby's for an older game), same shape as /ffa/recent (section 4.7).
          "settings": _ffa_settings_block(r),
          "participants": parts.get(r["match_id"], [])}
         for r in rows
@@ -60373,7 +60444,7 @@ _REPORT_OVT_WHERE = {
 _REPORT_FFA_SQL = f"""
     SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
            COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s,
-           {_FFA_SETTINGS_COLS}
+           fm.settings_frozen, {_FFA_SETTINGS_COLS}
       FROM ffa_matches fm
       LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id
      WHERE fm.id = CAST(:key AS uuid) AND fm.invalidated_at IS NULL

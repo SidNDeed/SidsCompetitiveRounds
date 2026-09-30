@@ -791,7 +791,8 @@ def test_the_harness_compiles_only_the_rule_files():
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
                       "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
-                      "plugin/PcTradeRules.cs"):
+                      "plugin/PcTradeRules.cs",
+                      "plugin/RoomRulesStrip.cs", "plugin/MusicLevels.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -807,3 +808,109 @@ def test_the_harness_compiles_only_the_rule_files():
         assert harness_only in included
         assert harness_only.split(".")[0] not in plugin_proj
         assert not (REPO / "plugin" / harness_only).exists()
+
+
+# -- v1.41.0 item 22: the standing room-rules strip's line ----------------------
+
+def test_the_room_rules_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "roomrules" in suites, "the RoomRulesStrip suite did not report"
+    run, fail, verdict = suites["roomrules"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[roomrules\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 12 cases on the commit that added it (#342: a floor far
+    # below the real count is a gate that cannot fail).
+    assert run >= 12, "the RoomRulesStrip suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    "default rules paint nothing",
+    "same cards alone names same cards",
+    "a fell-back dealer alone says same cards is off",
+    "friendly fire off alone names friendly fire",
+    "friendly fire off with same cards names both",
+    "friendly fire off with a fell-back dealer names both",
+    "every non-default pair has its own line",
+    "friendly fire is named exactly when it is off",
+    "the cfg key off hides every line",
+    "the cfg key on paints every line but None",
+    "only the fell-back lines are amber",
+    "the same-cards-only chooser says nothing for a friendly-fire-off room (control)",
+])
+def test_the_room_rules_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "roomrules")
+    assert line.startswith("[roomrules] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+# -- v1.41.0 item 23: the custom-music ceiling and fade envelopes ----------------
+
+def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "musiclevels" in suites, "the MusicLevels suite did not report"
+    run, fail, verdict = suites["musiclevels"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[musiclevels\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 18 cases on the commit that added it, 26 once the
+    # measured levels and the volume migration joined, and 43 once round 2's
+    # per-clip gains and first-track fade decision joined (#342).
+    assert run >= 43, "the MusicLevels suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    "the slider's 100 maps to at most half of the old output",
+    "every stored percent is scaled by the same factor",
+    "the slider never gets quieter as it rises",
+    "the slider clamps outside 0..100",
+    "the pre-1.41 slider is louder than half at 100 (control)",
+    "the default plays at the soundtrack's level, within 1 dB",
+    "the slider's 100 is at most 6.5 dB over the soundtrack",
+    "the default sits below the ceiling",
+    "the pre-1.41 default sat over 30 dB above the soundtrack (control)",
+    "a stored 100 becomes the default once",
+    "a stored 100 stays once the migration has run",
+    "the migration never changes any other value",
+    "a migration that resets every value fails the leave-alone check (control)",
+    "the short fade starts at zero gain (60fps)",
+    "the short fade reaches full gain at 0.6 s, not before (60fps)",
+    "the long fade starts at zero gain (60fps)",
+    "the long fade reaches full gain at 2.5 s, not before (60fps)",
+    "the short fade starts at zero gain (10fps)",
+    "the short fade reaches full gain at 0.6 s, not before (10fps)",
+    "the long fade starts at zero gain (10fps)",
+    "the long fade reaches full gain at 2.5 s, not before (10fps)",
+    "the long fade is perceptual: a quarter gain at half time",
+    "at 0.6 s the long fade is still under a tenth of full gain",
+    "a one-second hitch counts as a tenth of a second",
+    "a zero or negative frame does not advance the fade",
+    "the short envelope reaches full gain well before 2.5 s (control)",
+    # round 2, M1: the per-clip gains
+    "every catalog clip's gain brings it to the one target",
+    "the full tracks' post-gain RMS spread is at most 3.0 dB",
+    "the previews' post-gain RMS spread is at most 3.0 dB",
+    "one global gain leaves the full tracks over 3 dB apart (control)",
+    "the default percent plays a custom clip within 1 dB of the calibration point",
+    "no clip peaks at or above 0 dBFS at the slider's 100 after its gain",
+    "a target 4 dB higher would peak over full scale at 100 (control)",
+    "every table clip is found and an unknown clip reads false at gain 1",
+    # round 2, M2: the first-track fade decision
+    "an audible vanilla menu arms the short fade and names the game's music",
+    "later starts after an audible menu stay short",
+    "a silent menu arms the long fade exactly once",
+    "the mod's own audible menu music arms the short fade",
+    "a muted game music volume makes the vanilla menu silent",
+    "a start while still in the menu never consumes the decision",
+    "the latest menu sample decides",
+    "returning to the menu clears a stale decision",
+    "the round-1 rule arms long after the default vanilla menu (control)",
+])
+def test_the_music_levels_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "musiclevels")
+    assert line.startswith("[musiclevels] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)

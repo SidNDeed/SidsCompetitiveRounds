@@ -511,7 +511,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "d1cec796f07e8a9a2f17ffb9c7566b4b0ad4f2c9"
+          "5039e4c2e6e5fa8afe6c11aae167821705b5a02c"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -952,7 +952,7 @@
           ],
           "main",
           "player_ffa_history",
-          "7a5cc71d8b0b97dc51058dda4809f24a4efd401e"
+          "c264eab09b3de557cb19b7043543dd4486943c3a"
         ],
         [
           "/api/v1/players/{steam_id}/gold-sources",
@@ -1141,7 +1141,7 @@
           ],
           "main",
           "get_recent_multimode_series",
-          "b55fc9783dcbca2ff129e06fdb4e513d2653c10f"
+          "0ef792906bccc820cd49feb036d366d6abf237f3"
         ],
         [
           "/api/v1/series/{series_id}/live-points",
@@ -1795,7 +1795,7 @@
           ],
           "main",
           "ffa_recent",
-          "88f308efad41555b0a95c64b3f8ed0295ba3dfb5"
+          "8108375b347c59309a43ea99a6a59b15173a480b"
         ],
         [
           "/api/v1/health",
@@ -3089,7 +3089,7 @@
           ],
           "main",
           "get_set_report",
-          "db72bfc54ec48fcb7779cbd975bff0db33295a54"
+          "112fe8b1fce8dbba610091869ee632a65a98e8b0"
         ],
         [
           "/api/v1/admin/pc/portrait/clear",
