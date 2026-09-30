@@ -390,6 +390,81 @@ def gate_g9_every_new_string_is_in_every_catalogue(s):
                 lang, key[:60])
 
 
+def _callback_order(fn, call, epoch, drop, first_write, what):
+    cb = fn[_at(fn, call, "the %s request moved" % what):]
+    e = _at(cb, epoch, "the %s answer's identity check moved" % what)
+    d = _at(cb, drop, "an answer to a %s given up still commits" % what)
+    w = _at(cb, first_write, "the %s answer no longer writes its state" % what)
+    assert e < d < w, "an answer to a %s given up still commits" % what
+
+
+def gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is(s):
+    """Carried item (ii): the history page, the intent recovery and the discard
+    run are bounded as the settings card latch is (gate g11) - a 25 s give-up on
+    the tick, a serial stamped at the send, and an answer checked against it
+    before its first state write."""
+    ui = s["ui"]
+    for decl in ("private static float historySentAt; private static int historySerial;",
+                 "private static float recoverSentAt; private static int recoverSerial;",
+                 "private static float discardSentAt; private static int discardSerial;"):
+        assert decl in ui, "a latch lost its time or serial field: " + decl
+    tick = _member(ui, "internal static void MaybeTick(bool onTab, bool onSettings)")
+    call = _at(tick, "RetireStuckLatches(id);", "the give-ups do not run on every tick")
+    assert call < _at(tick, "if (id == null) return;", "the tick's identity return moved"), (
+        "the give-ups do not run on every tick")
+    assert call < _at(tick, "if (!onTab && !onSettings) return;", "the tick's tab return moved"), (
+        "the give-ups do not run on every tick")
+    ret = _member(ui, "private static void RetireStuckLatches(string id)")
+    for flag, at, serial, what in (("historyInFlight", "historySentAt", "historySerial", "history page"),
+                                    ("recoverInFlight", "recoverSentAt", "recoverSerial", "recovery"),
+                                    ("discardInFlight", "discardSentAt", "discardSerial", "discard run")):
+        head = "if (%s && Now - %s > 25f)" % (flag, at)
+        i = _at(ret, head, "a %s that never answers holds the latch" % what)
+        j = ret.find("\n            if (", i + len(head))
+        block = ret[i:j if j >= 0 else len(ret)]
+        assert (serial + "++;") in block, "a %s that never answers holds the latch" % what
+        if flag == "discardInFlight":
+            assert 'FinishDiscard(id, "transport");' in block, "a discard run that never answers holds the latch"
+            assert "ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true);" in block, (
+                "a discard run given up does not re-read the binder")
+        else:
+            assert (flag + " = false;") in block, "a %s that never answers holds the latch" % what
+
+    page = _member(ui, "private static void LoadHistoryPage(string id)")
+    stamp = page[_at(page, "historyInFlight = true;", "history page"):_at(page, "ApiClient.FetchPcPacks(", "history page")]
+    assert "historySentAt = Now;" in stamp and "serial = ++historySerial" in stamp, (
+        "a sent history page is not stamped with its time and serial")
+    _callback_order(page, "ApiClient.FetchPcPacks(", "if (ep != uiEpoch || gen != historyGen) return;",
+                    "if (serial != historySerial)", "historyInFlight = false;", "history page")
+
+    rec = _member(ui, "private static void MaybeRecover(bool force)")
+    stamp = rec[_at(rec, "recoverInFlight = true;", "recovery"):_at(rec, "ApiClient.PcPackResult(", "recovery")]
+    assert "recoverSentAt = Now;" in stamp and "serial = ++recoverSerial" in stamp, (
+        "a sent recovery is not stamped with its time and serial")
+    _callback_order(rec, "ApiClient.PcPackResult(", "if (ep != uiEpoch) return;",
+                    "if (serial != recoverSerial)", "recoverInFlight = false;", "recovery")
+
+    click = _member(ui, "private static void OnDiscardClick(Tile t, bool dupes)")
+    run = click[_at(click, "discardInFlight = true;", "discard run"):]
+    assert "int serial = ++discardSerial;" in run and "DiscardNext(id, serial);" in run, (
+        "a discard run is not given its serial")
+    nxt = _member(ui, "private static void DiscardNext(string id, int serial)")
+    assert "discardSentAt = Now;" in nxt[:_at(nxt, "ApiClient.PcDiscard(", "discard run")], (
+        "a sent discard is not stamped with its time")
+    _callback_order(nxt, "ApiClient.PcDiscard(", "if (ep != uiEpoch) return;",
+                    "if (serial != discardSerial)", "discardDone++;", "discard run")
+    assert nxt.count("DiscardNext(id, serial);") == 1, "a discard answer does not carry its run's serial"
+    pause = _at(nxt, "Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep, serial));",
+                "a pause of a discard run given up resumes a newer run")
+    assert "discardSentAt = Now + wait;" in nxt[_at(nxt, 'if (code == "rate_limited"', "pause"):pause], (
+        "a server-asked pause counts against the discard give-up")
+    after = _member(ui, "private static IEnumerator DiscardAfter(string id, float seconds, int ep, int serial)")
+    stop = _at(after, "if (ep != uiEpoch || !discardInFlight || serial != discardSerial) yield break;",
+               "a pause of a discard run given up resumes a newer run")
+    assert stop < _at(after, "DiscardNext(id, serial);", "a pause of a discard run given up resumes a newer run"), (
+        "a pause of a discard run given up resumes a newer run")
+
+
 GATES = [gate_g1_the_preview_requests_the_card_variant,
          gate_g2_pending_shows_the_live_picture_and_the_key_refetches,
          gate_g3_the_batch_is_signed_and_capped_as_the_server_verifies,
@@ -401,7 +476,8 @@ GATES = [gate_g1_the_preview_requests_the_card_variant,
          gate_g9_every_new_string_is_in_every_catalogue,
          gate_g10_a_failed_refresh_retries_in_thirty_seconds_and_says_so,
          gate_g11_a_fetch_that_never_answers_does_not_hold_the_latch,
-         gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value]
+         gate_g12_a_print_received_by_trade_is_counted_at_the_trade_value,
+         gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -570,6 +646,68 @@ MUTATIONS = [
      "                return ShardValue(p.rarity);\n",
      "                return full != null && full.bounds != null ? Math.Max(0, full.bounds.traded_discard_shards) : 0;   // the bound\n",
      "a print received by trade is not counted at the trade bound"),
+    # Merge pass 2, carried item (ii). MI2a, MI2d and MI2g remove each latch's
+    # give-up (the untimed latches as they were): the negative controls.
+    ("MI2a", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "            if (historyInFlight && Now - historySentAt > 25f)\n",
+     "            if (false)\n",
+     "            if (historyInFlight && Now - historySentAt > 25f)   // given up\n",
+     "a history page that never answers holds the latch"),
+    ("MI2b", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "                if (serial != historySerial)\n",
+     "                if (false)\n",
+     "                if (serial != historySerial)   // given up meanwhile\n",
+     "an answer to a history page given up still commits"),
+    ("MI2c", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "            historySentAt = Now;\n",
+     "",
+     "            historySentAt = Now;   // when it was sent\n",
+     "a sent history page is not stamped with its time and serial"),
+    ("MI2d", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "            if (recoverInFlight && Now - recoverSentAt > 25f)\n",
+     "            if (false)\n",
+     "            if (recoverInFlight && Now - recoverSentAt > 25f)   // given up\n",
+     "a recovery that never answers holds the latch"),
+    ("MI2e", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "                    if (serial != recoverSerial)\n",
+     "                    if (false)\n",
+     "                    if (serial != recoverSerial)   // given up meanwhile\n",
+     "an answer to a recovery given up still commits"),
+    ("MI2f", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "            recoverSentAt = Now;\n",
+     "",
+     "            recoverSentAt = Now;   // when it was sent\n",
+     "a sent recovery is not stamped with its time and serial"),
+    ("MI2g", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "            if (discardInFlight && Now - discardSentAt > 25f)\n",
+     "            if (false)\n",
+     "            if (discardInFlight && Now - discardSentAt > 25f)   // given up\n",
+     "a discard run that never answers holds the latch"),
+    ("MI2h", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "                if (serial != discardSerial)\n",
+     "                if (false)\n",
+     "                if (serial != discardSerial)   // given up meanwhile\n",
+     "an answer to a discard run given up still commits"),
+    ("MI2i", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "            discardSentAt = Now;\n",
+     "",
+     "            discardSentAt = Now;   // when the step began\n",
+     "a sent discard is not stamped with its time"),
+    ("MI2j", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "if (ep != uiEpoch || !discardInFlight || serial != discardSerial) yield break;",
+     "if (ep != uiEpoch || !discardInFlight) yield break;",
+     "if (ep != uiEpoch || !discardInFlight || serial != discardSerial) yield break;   // this run only",
+     "a pause of a discard run given up resumes a newer run"),
+    ("MI2k", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "                        discardSentAt = Now + wait;\n",
+     "",
+     "                        discardSentAt = Now + wait;   // from the pause's end\n",
+     "a server-asked pause counts against the discard give-up"),
+    ("MI2l", gate_g13_the_sibling_latches_are_given_up_as_the_settings_card_is, "ui",
+     "            RetireStuckLatches(id);\n            if (id == null) return;\n",
+     "            if (id == null) return;\n",
+     "            RetireStuckLatches(id);   // every tick\n            if (id == null) return;\n",
+     "the give-ups do not run on every tick"),
 ]
 
 

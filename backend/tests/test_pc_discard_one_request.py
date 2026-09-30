@@ -54,7 +54,7 @@ PLAYER_CARDS = PLUGIN / "PlayerCardsUI.cs"
 API_CLIENT = PLUGIN / "ApiClient.cs"
 
 PC_CLASS = "internal static class PlayerCardsUI"
-DISCARD_NEXT = "DiscardNext(string id)"
+DISCARD_NEXT = "DiscardNext(string id, int serial)"   # the run's serial (merge pass 2, carried item ii)
 FINISH_DISCARD = "FinishDiscard(string id, string errorCode)"
 IDENTITY_CHANGED = "OnIdentityChanged()"
 
@@ -352,8 +352,8 @@ def test_the_retry_latch_is_keyed_by_the_copy():
 def test_the_resumption_does_not_return_the_copys_retry():
     """Resuming IS the retry. Clearing the latch there gives it straight back,
     which is what turned per-copy into per-in-flight."""
-    code = mask_code(cs_block(PLAYER_CARDS, "DiscardAfter(string id, float seconds, int ep)"))
-    assert "DiscardNext(id)" in code, "the resumption no longer resumes"
+    code = mask_code(cs_block(PLAYER_CARDS, "DiscardAfter(string id, float seconds, int ep, int serial)"))
+    assert "DiscardNext(id, serial)" in code, "the resumption no longer resumes"
     assert "discardRetried" not in code, (
         f"the resumption still touches the retry latch: {code!r}")
 

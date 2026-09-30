@@ -127,6 +127,14 @@ namespace CompetitiveRounds
         private static int binderPage;
         private static string armedPrintId; private static bool armedDupes; private static float armedAt;
         private static bool discardInFlight; private static readonly List<string> discardQueue = new List<string>();
+        // The run latch's give-up (the settings card latch's rule, carried
+        // item ii): discardSentAt is when the run's CURRENT step began - a
+        // request sent, or the end of a server-asked pause - and a run whose
+        // step has had no answer 25 s later is ended by RetireStuckLatches.
+        // discardSerial names the run; every answer and every resumed pause
+        // checks it before touching run state, so a late answer to a run that
+        // was given up (or a pause of one) cannot drive a newer run.
+        private static float discardSentAt; private static int discardSerial;
         private static int discardDone, discardShards;
         // The copies that have already had their ONE wait-and-retry, keyed
         // by print id.
@@ -154,6 +162,9 @@ namespace CompetitiveRounds
         // state
         private static bool openInFlight, claimInFlight, recoverInFlight;
         private static float openAt, claimAt, recoverAt, tickAt, meRefreshAt;
+        // recoverAt is the RETRY throttle; recoverSentAt is when the request in
+        // flight was sent (its 25 s give-up), recoverSerial the request.
+        private static float recoverSentAt; private static int recoverSerial;
         private static int unparseableStrikes;   // consecutive 2xx answers the client could not read (c6)
         private static ApiClient.PcPackAnswer lastPack;
         private static string lastMsg; private static Color lastMsgColor; private static float lastMsgAt;
@@ -495,8 +506,9 @@ namespace CompetitiveRounds
             // print ids are not even its own; and discardInFlight left true
             // WEDGES the surface outright - the binder goes on saying
             // "discarding..." and the button stays dead for an account that
-            // never started a run. Nothing clears it afterwards, because the
-            // epoch check drops the answer that would have.
+            // never started a run. The epoch check drops the answer that would
+            // have cleared it; only RetireStuckLatches' 25 s give-up would,
+            // and that is 25 s of a dead surface.
             discardInFlight = false;
             discardQueue.Clear(); discardRetriedIds.Clear(); discardWaited = 0f;
             armedPrintId = null; priceChangedAt = -1f;
@@ -562,6 +574,9 @@ namespace CompetitiveRounds
             if (Time.unscaledTime < tickAt) return;
             tickAt = Time.unscaledTime + 2f;
             var id = LocalId();
+            // Above every early return: a latch stuck while the tab is shut
+            // (or on Settings) is retired all the same.
+            RetireStuckLatches(id);
             if (id == null) return;
             if (HasIntent()) MaybeRecover(false);
             // Card trading (V8 6.4): ABOVE the early return below, so the
@@ -1547,6 +1562,10 @@ namespace CompetitiveRounds
         private static readonly List<ApiClient.PcPackAnswer> packHistory = new List<ApiClient.PcPackAnswer>();
         private static string historyNextBefore;
         private static bool historyLoaded, historyInFlight, historyExhausted;
+        // historyGen names a HISTORY (bumped by HistoryReset); historySerial
+        // names a page REQUEST (bumped by its 25 s give-up as well), so a
+        // late page cannot land after the request was given up.
+        private static float historySentAt; private static int historySerial;
         private static int historyIndex, historyTotal;
         // The chain's count is its FIRST page's total, kept for the chain's
         // life: a later page's total can count a pack opened on another
@@ -1801,11 +1820,17 @@ namespace CompetitiveRounds
             string before = historyLoaded ? historyNextBefore : null;
             if (historyLoaded && string.IsNullOrEmpty(before)) { historyExhausted = true; return; }
             historyInFlight = true;
-            int ep = uiEpoch, gen = historyGen;
+            historySentAt = Now;
+            int ep = uiEpoch, gen = historyGen, serial = ++historySerial;
             NativeUI.MarkDirty();
             ApiClient.FetchPcPacks(id, before, (ok, resp, h) =>
             {
                 if (ep != uiEpoch || gen != historyGen) return;   // reset since: its flags went with it
+                if (serial != historySerial)
+                {
+                    Plugin.Log.LogInfo($"[PC] pack history: answer to serial {serial} dropped (given up)");
+                    return;
+                }
                 historyInFlight = false;
                 if (!ok || h == null)
                 {
@@ -2342,10 +2367,61 @@ namespace CompetitiveRounds
             if (!force && Time.unscaledTime < recoverAt) return;
             recoverAt = Time.unscaledTime + 15f;
             recoverInFlight = true;
-            Plugin.Log.LogInfo($"[PC] recovering {kind} intent (age {age:F0}s)");
-            int ep = uiEpoch;
+            recoverSentAt = Now;
+            int ep = uiEpoch, serial = ++recoverSerial;
+            Plugin.Log.LogInfo($"[PC] recovering {kind} intent (age {age:F0}s, serial {serial})");
             ApiClient.PcPackResult(id, kind == "buy" ? reference : null, kind == "pack" ? reference : null,
-                (ok, resp) => { if (ep != uiEpoch) return; recoverInFlight = false; HandleAnswer(ok, resp, true); });
+                (ok, resp) =>
+                {
+                    if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                    if (serial != recoverSerial)
+                    {
+                        // The intent is still on disk, so nothing is lost: the
+                        // next recovery asks the same idempotent question again.
+                        Plugin.Log.LogInfo($"[PC] recovery: answer to serial {serial} dropped (given up)");
+                        return;
+                    }
+                    recoverInFlight = false;
+                    HandleAnswer(ok, resp, true);
+                });
+        }
+
+        /// <summary>The 25 s give-up for the three latches that had none
+        /// (carried item ii, the settings card latch's rule from asks-b round
+        /// 2): past ApiClient's 20 s transport timeout an answer that has not
+        /// come is not coming - a request whose coroutine was stopped (the
+        /// persistent host respawned, Plugin.cs OnDestroy) never runs its
+        /// callback, and the latch would otherwise hold for the session. Each
+        /// give-up bumps that latch's serial, so an answer that does arrive
+        /// later commits nothing. Runs on every 2 s tick, above the tick's
+        /// early returns.</summary>
+        private static void RetireStuckLatches(string id)
+        {
+            if (historyInFlight && Now - historySentAt > 25f)
+            {
+                historyInFlight = false;
+                historySerial++;
+                historyFailedAt = Now;   // EnsureHistory's own 30 s retry, as after a failed page
+                Plugin.Log.LogWarning("[PC] pack history: no answer 25 s after the request; given up");
+                NativeUI.MarkDirty();
+            }
+            if (recoverInFlight && Now - recoverSentAt > 25f)
+            {
+                recoverInFlight = false;
+                recoverSerial++;
+                Plugin.Log.LogWarning("[PC] recovery: no answer 25 s after the request; given up, the intent is kept");
+                NativeUI.MarkDirty();
+            }
+            if (discardInFlight && Now - discardSentAt > 25f)
+            {
+                discardSerial++;
+                Plugin.Log.LogWarning($"[PC] discard: no answer 25 s into the run's step ({discardDone} done); run given up");
+                // Whether the unanswered discard applied is unknown, so the
+                // binder and the balance are re-read ("transport" alone skips
+                // that refetch - it is the code for an answer that FAILED).
+                FinishDiscard(id, "transport");
+                if (id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+            }
         }
 
         private static void OnDiscardClick(Tile t, bool dupes)
@@ -2377,18 +2453,25 @@ namespace CompetitiveRounds
             }
             if (discardQueue.Count == 0) return;
             discardDone = 0; discardShards = 0; discardWaited = 0f; discardRetriedIds.Clear(); discardInFlight = true;
+            int serial = ++discardSerial;
             NativeUI.MarkDirty();
-            DiscardNext(id);
+            DiscardNext(id, serial);
         }
 
-        private static void DiscardNext(string id)
+        private static void DiscardNext(string id, int serial)
         {
             if (discardQueue.Count == 0) { FinishDiscard(id, null); return; }
             string pid = discardQueue[0]; discardQueue.RemoveAt(0);
             int ep = uiEpoch;
+            discardSentAt = Now;
             ApiClient.PcDiscard(id, pid, (ok, resp) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                if (serial != discardSerial)
+                {
+                    Plugin.Log.LogInfo($"[PC] discard: answer for run {serial} dropped (given up)");
+                    return;
+                }
                 if (ok)
                 {
                     discardDone++;
@@ -2397,7 +2480,7 @@ namespace CompetitiveRounds
                     var col = ApiClient.CachedPcCollection;
                     if (col != null) col.prints.RemoveAll(x => x.print_id == pid);
                     HistoryMarkDiscarded(pid, gained);
-                    DiscardNext(id);
+                    DiscardNext(id, serial);
                     return;
                 }
                 string code = ApiClient.PcErrorCode(resp);
@@ -2417,7 +2500,12 @@ namespace CompetitiveRounds
                         discardWaited += wait;
                         discardQueue.Insert(0, pid);
                         Say(I18n.TrF("Slowing down - the server asked for a {0} s pause", (int)wait), C_WARN);
-                        Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep));
+                        // The step's give-up counts from the END of the pause:
+                        // the pause is ours, not an unanswered request. A
+                        // pause whose coroutine never resumes (the host
+                        // respawned) is still given up 25 s after it ends.
+                        discardSentAt = Now + wait;
+                        Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep, serial));
                         return;
                     }
                     // This copy still had its retry; the RUN has no waiting
@@ -2431,10 +2519,12 @@ namespace CompetitiveRounds
             });
         }
 
-        private static IEnumerator DiscardAfter(string id, float seconds, int ep)
+        private static IEnumerator DiscardAfter(string id, float seconds, int ep, int serial)
         {
             yield return new WaitForSecondsRealtime(seconds);
-            if (ep != uiEpoch || !discardInFlight) yield break;
+            // serial: a pause of a run that was given up must not resume a
+            // NEWER run (discardInFlight alone is true again for that one).
+            if (ep != uiEpoch || !discardInFlight || serial != discardSerial) yield break;
             // DELIBERATELY does not clear the per-copy latch. Resuming IS the
             // retry; clearing it here was what turned "one retry per copy"
             // into "one retry in flight" and let a single copy loop until the
@@ -2450,7 +2540,7 @@ namespace CompetitiveRounds
             // account's run must not inherit this one's retries). What no site
             // does is clear it MID-RUN — that is the property this comment is
             // actually here for.
-            DiscardNext(id);
+            DiscardNext(id, serial);
         }
 
         private static void FinishDiscard(string id, string errorCode)
