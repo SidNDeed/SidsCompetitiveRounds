@@ -44,6 +44,7 @@ import json as _json
 import os
 import re
 import secrets
+import threading
 import time as _time
 import uuid
 from pathlib import Path
@@ -1064,7 +1065,7 @@ class BotRig:
         from datetime import datetime, timezone
         ns = {"__builtins__": __builtins__, "__name__": "dc_reveal_bot",
               "asyncio": fake_asyncio, "time": fake_time, "io": io, "re": re, "json": _json,
-              "datetime": datetime, "timezone": timezone, "discord": discord,
+              "datetime": datetime, "timezone": timezone, "discord": discord, "threading": threading,
               "aiohttp": SimpleNamespace(ClientTimeout=lambda total=None, **k: SimpleNamespace(total=total)),
               "http_session": _Session(self), "API_BASE_URL": BASE_URL, "API_SECRET_KEY": INTERNAL_KEY,
               "print": self._print}

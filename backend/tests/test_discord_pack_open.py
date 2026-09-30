@@ -32,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import uuid
 from types import SimpleNamespace
 from typing import Literal
@@ -52,12 +53,13 @@ UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it
 OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_refusal", "_pc_open_and_show",
                                "_pc_reveal_opened", "cmd_pc_buypack", "_pc_open_verdict", "_pc_buy_pending",
                                "_pc_buy_pending_write", "_pc_buy_and_show", "_pc_buy_player",
-                               "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver", "_faq_discord_link"}
+                               "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver", "_faq_discord_link",
+                               "_pc_buy_journal_update", "_pc_buy_entry", "_pc_buy_record", "_pc_buy_settle"}
 # _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
 # the test's own folder instead of the container's /opt/bot-state
 OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
                                    "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED",
-                                   "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER"}
+                                   "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER", "_pc_buy_journal_lock", "_PC_BUY_KEEP"}
 
 
 def e2e(monkeypatch, tmp_path, fn, **kw):
@@ -1549,3 +1551,195 @@ def test_item2_the_settled_entry_leaves_the_journal_only_after_the_reveal_is_sen
                                        "settled": {"pack_id": pack_id, "pay": "gold", "price": price}}}], seen
         assert journal(rig) == {} and len(rig.sent) == 1 and rig.sent[0].file is not None
     e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 4, M1: every journal change is one locked read-modify-write -----------------------------
+# Codex round 3 MEDIUM 1: /buypack read the whole journal, awaited the buyer's link lookup, and wrote
+# back {**what it read, me: ...}; the in-flight guard is per Discord id, so a second buyer's write could
+# put back a copy of the journal that no longer held the first buyer's nonce, and that buyer's next
+# /buypack would draw a fresh nonce and buy again. Now the write-ahead entry, the settled mark and the
+# removal each read the journal inside one process-wide lock and write before releasing it.
+
+def chain(*stubs):
+    """The first stub answer that is not None, in order."""
+    async def stub(call):
+        for s in stubs:
+            reply = await s(call)
+            if reply is not None:
+                return reply
+        return None
+    return stub
+
+
+def link_barrier(first, second, holder):
+    """Both buyers' link lookups wait until both are in flight - each buyer has
+    read the journal and neither has written its entry - and `second`'s lookup
+    answers only once `first` has sent its purchase, so `first`'s write-ahead
+    entry is on disk before `second` writes its own. Every request records
+    whether the journal lock was held while it was made."""
+    arrived = {first: asyncio.Event(), second: asyncio.Event()}
+    posted = asyncio.Event()
+    locked = []
+
+    async def stub(call):
+        locked.append(holder["rig"].ns["_pc_buy_journal_lock"].locked())
+        if call.method == "GET" and call.path.startswith("/players/by-discord/"):
+            who = call.path.rsplit("/", 1)[-1]
+            if who in arrived:
+                arrived[who].set()
+                await asyncio.wait_for(asyncio.gather(*(e.wait() for e in arrived.values())), 5)
+                if who == second:
+                    await asyncio.wait_for(posted.wait(), 5)
+        if call.method == "POST" and call.path == OPEN and call.params.get("discord_id") == first:
+            posted.set()
+        return None
+    return stub, locked
+
+
+def lose_answers_of(holder, discord_id, answers):
+    """`discord_id`'s first purchase nonce commits on every send, and its first
+    len(answers) answers are replaced on the way back (None: no answer, the
+    bot's timeout). Every other request gets the api's own answer."""
+    first = {}
+
+    async def stub(call):
+        if (call.method == "POST" and call.path == OPEN and call.params.get("nonce")
+                and call.params.get("discord_id") == discord_id):
+            nonce = first.setdefault("nonce", call.params["nonce"])
+            if call.params["nonce"] == nonce:
+                first["n"] = first.get("n", 0) + 1
+                if first["n"] <= len(answers):
+                    reply = await holder["rig"].base(call)
+                    lost = answers[first["n"] - 1]
+                    if lost is None:
+                        reply.delay = 25.0
+                        return reply
+                    return lost
+        return None
+    return stub
+
+
+def watched_ctx(rig, uid, locked):
+    """rig.ctx(uid) whose send records whether the journal lock was held."""
+    ctx = rig.ctx(uid)
+    real = ctx.send
+
+    async def send(*a, **k):
+        locked.append(rig.ns["_pc_buy_journal_lock"].locked())
+        return await real(*a, **k)
+    ctx.send = send
+    return ctx
+
+
+def test_m1r4_two_buyers_racing_the_journal_keep_each_others_nonces(monkeypatch, tmp_path):
+    """The reviewer's falsifier. Two linked buyers both reach the journal step
+    before either link lookup returns; A's purchase N commits and every
+    answer of it is lost; B completes; A's next /buypack runs in a NEW bot
+    process. N is still journaled after the race and is what the restart
+    replays: A holds exactly one debit, one pack and one ledger row, B holds
+    its own one of each, and the lock was free at every request and every
+    send. The decisive line is the first assertion: with the journal written
+    from the command's own earlier read, B's entry write puts back a journal
+    without N and A's restart buys a second pack."""
+    async def body(env):
+        own, subs = await world(env)
+        second = await env.player("second", rating=None)
+        env.plan([(s, False, False) for s in subs])   # B's deal
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        await set_gold(env, second, 10 * price)
+        a, b = str(own.discord), str(second.discord)
+        holder = {}
+        barrier, locked = link_barrier(a, b, holder)
+        lost = [H.Reply(500, json={"detail": "Internal Server Error"}), H.Reply(200, b""), None]
+        rig = rig_over(env, chain(barrier, lose_answers_of(holder, a, lost)))
+        holder["rig"] = rig
+        sends = []
+        ctx_a, ctx_b = watched_ctx(rig, a, sends), watched_ctx(rig, b, sends)
+        await asyncio.gather(buypack(rig, a, "gold", ctx=ctx_a), buypack(rig, b, "gold", ctx=ctx_b))
+        nonce = next(c.params["nonce"] for c in calls_to(rig, OPEN) if c.params["discord_id"] == a)
+        after_race = journal(rig)
+        assert after_race.get(a) == {"nonce": nonce, "pay": "gold", "player": own.steam}, \
+            f"A's committed nonce is not in the journal after the race: {after_race}"
+        assert set(after_race) == {a}, after_race
+        assert await holdings(env, second) == (price, 1, 1)
+        deal(env, subs)   # a deal for a second purchase by A, should the restart make one
+        after = rig_over(env)
+        await buypack(after, a, "gold")
+        spent, packs, rows = await holdings(env, own)
+        assert (spent, packs, rows) == (price, 1, 1), f"A charged {spent // price} times, {packs} packs, {rows} rows"
+        assert [(c.params["nonce"], c.params["player_steam_id"], c.status) for c in calls_to(after, OPEN)] == \
+            [(nonce, own.steam, 200)]
+        assert after.sent[-1].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert await holdings(env, second) == (price, 1, 1)
+        assert journal(after) == {}
+        assert locked and not any(locked), "the journal lock was held across a request"
+        assert sends and not any(sends), "the journal lock was held across a Discord send"
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1r4_the_journal_lock_serializes_two_writers_on_two_threads(tmp_path):
+    """The lock itself. Two write-ahead entries are recorded from two threads;
+    the first writer's read of the journal is held open for up to a second
+    waiting for the other writer to read. Under the lock the other cannot
+    read until the first has written, so both entries are in the journal.
+    The decisive line is the assertion: without the lock both read the same
+    empty journal and one entry is lost (or a write fails)."""
+    rig = rig_over(SimpleNamespace(tmp=tmp_path))
+    ns = rig.ns
+    real = ns["_pc_buy_pending"]
+    readers, gate, first_reading, count = set(), threading.Lock(), threading.Event(), threading.Event()
+
+    def slow():
+        me = threading.get_ident()
+        with gate:
+            fresh = me not in readers
+            readers.add(me)
+            n = len(readers)
+        out = real()
+        if fresh and n == 1:
+            first_reading.set()
+            count.wait(1.0)
+        elif fresh:
+            count.set()
+        return out
+    ns["_pc_buy_pending"] = slow
+    entries = {d: {"nonce": secrets.token_hex(16), "pay": "gold", "player": f"7656119{d}"}
+               for d in ("100000000001", "100000000002")}
+    results = {}
+
+    def write(d):
+        results[d] = ns["_pc_buy_record"](d, entries[d])
+    ids = list(entries)
+    t1 = threading.Thread(target=write, args=(ids[0],))
+    t2 = threading.Thread(target=write, args=(ids[1],))
+    t1.start()
+    assert first_reading.wait(5)
+    t2.start()
+    t1.join(10)
+    t2.join(10)
+    ns["_pc_buy_pending"] = real
+    assert (journal(rig), results) == (entries, {d: True for d in ids}), (journal(rig), results)
+
+
+def test_m1r4_every_journal_writer_keeps_the_other_buyers_entries(tmp_path):
+    """Each writer - the write-ahead entry, the settled mark, the removal -
+    changes only its own buyer's entry of the journal it reads inside the
+    lock: an entry another buyer wrote after this buyer's own read survives
+    each of them."""
+    rig = rig_over(SimpleNamespace(tmp=tmp_path))
+    ns = rig.ns
+    mine = {"nonce": "a" * 32, "pay": "gold", "player": "76561190000000001"}
+    theirs = {"nonce": "b" * 32, "pay": "shards", "player": "76561190000000002"}
+    assert ns["_pc_buy_record"]("1", mine)
+    assert ns["_pc_buy_record"]("1", {**mine, "nonce": "c" * 32}) is False   # one entry per buyer
+    assert ns["_pc_buy_record"]("2", theirs)
+    settled = {**mine, "settled": {"pack_id": str(uuid.uuid4()), "pay": "gold", "price": 100}}
+    assert ns["_pc_buy_settle"]("1", settled)
+    assert journal(rig) == {"1": settled, "2": theirs}
+    assert ns["_pc_buy_settle"]("1", {**settled, "nonce": "d" * 32}) is False   # not this buyer's nonce
+    ns["_pc_buy_forget"]("1", "d" * 32)
+    assert journal(rig) == {"1": settled, "2": theirs}
+    ns["_pc_buy_forget"]("1", mine["nonce"])
+    assert journal(rig) == {"2": theirs}
+    assert ns["_pc_buy_entry"]("2") == (True, theirs) and ns["_pc_buy_entry"]("1") == (True, None)

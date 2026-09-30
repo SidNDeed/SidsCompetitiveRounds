@@ -9015,8 +9015,8 @@ def _pc_buy_pending_write(pending):
     - and read it back: True only when the file now holds `pending` on the
     mounted volume. A folder that is not a mount point is the container's
     own layer, which a rebuild deletes, so a journal there would only look
-    durable: it is refused. Synchronous, so no other command runs between a
-    caller's read of the journal and this write."""
+    durable: it is refused. Called only by _pc_buy_journal_update, under the
+    journal lock, with the journal it read inside that lock (round 4, M1)."""
     folder = os.path.dirname(_PC_BUY_PENDING_FILE)
     if not os.path.ismount(folder):
         print(f"[PC-BUY] {folder} is not a mounted volume: the purchase journal would not survive a rebuild")
@@ -9035,6 +9035,62 @@ def _pc_buy_pending_write(pending):
         print("[PC-BUY] the purchase journal read back different from what was written")
         return False
     return True
+
+
+# Discord fix round 4, M1 (Codex round 3 MEDIUM 1): the journal holds every
+# buyer's entry in one file, so a writer that read it, awaited something, and
+# wrote back what it read would put back a stale copy of the OTHER buyers'
+# entries - a nonce another buyer committed could vanish, and that buyer's
+# next /buypack would draw a fresh one and buy again. Every change of the
+# journal is therefore one read-modify-write under this ONE process-wide lock:
+# the read is taken inside the lock, the change is computed from that read and
+# written before the lock is released, and nothing in between awaits. The lock
+# is never held across the link lookup, the purchase request or a Discord
+# send: the writers below are synchronous and take it only for their own
+# read-modify-write.
+_pc_buy_journal_lock = threading.Lock()
+_PC_BUY_KEEP = object()   # a change that writes nothing
+
+
+def _pc_buy_journal_update(me, change):
+    """One read-modify-write of the purchase journal (round 4, M1): under
+    _pc_buy_journal_lock, read the journal, give `change` the entry `me` holds
+    in THAT read (None when it holds none), and write the journal back with
+    `me`'s entry replaced by what `change` returns - None takes it out,
+    _PC_BUY_KEEP writes nothing. Every other buyer's entry is written back as
+    this read found it. True only when the new journal was written and read
+    back; False when the journal cannot be read, `change` kept it, or the
+    write failed."""
+    with _pc_buy_journal_lock:
+        pending = _pc_buy_pending()
+        if pending is None:
+            return False
+        after = change(pending.get(me))
+        if after is _PC_BUY_KEEP:
+            return False
+        now = {k: v for k, v in pending.items() if k != me}
+        if after is not None:
+            now[me] = after
+        return _pc_buy_pending_write(now)
+
+
+def _pc_buy_entry(me):
+    """(readable, `me`'s journal entry or None), read under the journal lock."""
+    with _pc_buy_journal_lock:
+        pending = _pc_buy_pending()
+    return (pending is not None), (None if pending is None else pending.get(me))
+
+
+def _pc_buy_record(me, entry):
+    """Write-ahead: `me`'s new purchase entry, only while `me` holds none."""
+    return _pc_buy_journal_update(me, lambda cur: entry if cur is None else _PC_BUY_KEEP)
+
+
+def _pc_buy_settle(me, entry):
+    """`me`'s entry replaced by `entry` (its settled form), only while `me`
+    still holds that entry's nonce."""
+    return _pc_buy_journal_update(
+        me, lambda cur: entry if (cur or {}).get("nonce") == entry["nonce"] else _PC_BUY_KEEP)
 
 
 def _pc_fix_ready_line():
@@ -9086,13 +9142,16 @@ async def _pc_buy_player(ctx, me):
 def _pc_buy_forget(me, nonce):
     """Take `me`'s purchase `nonce` out of the journal (a later entry of
     `me` is left alone). A write that fails leaves it there, and the next
-    /buypack reads its outcome again."""
-    now = _pc_buy_pending()
-    if now is not None and (now.get(me) or {}).get("nonce") == nonce:
-        del now[me]
-        if not _pc_buy_pending_write(now):
-            print(f"[PC-BUY] purchase {nonce[:8]} is finished but still in the journal:"
-                  " the next /buypack reads its outcome again")
+    /buypack reads its outcome again. One locked read-modify-write (round 4,
+    M1): every other buyer's entry is kept as the read inside the lock found it."""
+    held = {}
+
+    def change(cur):
+        held["mine"] = (cur or {}).get("nonce") == nonce
+        return None if held["mine"] else _PC_BUY_KEEP
+    if not _pc_buy_journal_update(me, change) and held.get("mine"):
+        print(f"[PC-BUY] purchase {nonce[:8]} is finished but still in the journal:"
+              " the next /buypack reads its outcome again")
 
 
 async def _pc_buy_deliver(ctx, me, entry, earlier):
@@ -9125,12 +9184,16 @@ async def _pc_buy_and_show(ctx, me, pay):
     it (412 player_changed, "moved") when the Discord id is now linked to
     another player. A moved purchase is settled as the earlier player's: its
     entry leaves the journal, one line says so, and no nonce is drawn for
-    the player linked now on its account."""
-    pending = _pc_buy_pending()
-    if pending is None:
+    the player linked now on its account.
+    Round 4, M1: the journal is never written from this function's own read.
+    The write-ahead entry, the settled mark and the removal each go through
+    one locked read-modify-write (_pc_buy_record, _pc_buy_settle,
+    _pc_buy_forget), so another buyer's entry written while this purchase
+    awaited its link lookup, its request or its reveal is kept."""
+    readable, held = _pc_buy_entry(me)
+    if not readable:
         await ctx.send(_PC_BUY_PAUSED)
         return
-    held = pending.get(me)
     if held is not None and "settled" in held:
         # round 3, item 2: bought, and its reveal never delivered (a crash or a
         # failed send between the answer and the reveal) - shown from the
@@ -9144,7 +9207,7 @@ async def _pc_buy_and_show(ctx, me, pay):
         if player is None:
             return
         key = {"nonce": secrets.token_hex(16), "pay": pay}
-        if not _pc_buy_pending_write({**pending, me: {**key, "player": player}}):
+        if not _pc_buy_record(me, {**key, "player": player}):
             await ctx.send(_PC_BUY_PAUSED)
             return
     verdict, status, body = await _pc_open_pack_api(
@@ -9164,11 +9227,9 @@ async def _pc_buy_and_show(ctx, me, pay):
         entry = {**key, "player": player, "settled": {
             "pack_id": str(body["pack_id"]), "pay": body.get("pay") if body.get("pay") in ("gold", "shards")
             else key["pay"], "price": price if isinstance(price, int) and not isinstance(price, bool) else None}}
-        now = _pc_buy_pending()
-        if now is not None and (now.get(me) or {}).get("nonce") == key["nonce"]:
-            if not _pc_buy_pending_write({**now, me: entry}):
-                print(f"[PC-BUY] purchase {key['nonce'][:8]} is settled but its answer is not in the journal:"
-                      " the next /buypack reads its outcome again")
+        if not _pc_buy_settle(me, entry):
+            print(f"[PC-BUY] purchase {key['nonce'][:8]} is settled but its answer is not in the journal:"
+                  " the next /buypack reads its outcome again")
         await _pc_buy_deliver(ctx, me, entry, held is not None)
         return
     _pc_buy_forget(me, key["nonce"])
