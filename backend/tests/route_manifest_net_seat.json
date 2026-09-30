@@ -2614,7 +2614,7 @@
           ],
           "main",
           "spectate_participant_attest",
-          "23b1b6d30094490b983217f3e9c70d510ce52c0a"
+          "e82b48deb31a944a555b72af9a6aa7c698969048"
         ],
         [
           "/api/v1/spectate/validate",
@@ -2623,7 +2623,7 @@
           ],
           "main",
           "spectate_validate",
-          "5efb963fa1cb1ec84a8c69f665f1f235e1a79fa6"
+          "59fd2fabb04e1e97caa4bf2ad918463a0aad2333"
         ],
         [
           "/api/v1/team-bets",
