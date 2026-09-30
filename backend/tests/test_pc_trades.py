@@ -2593,8 +2593,8 @@ def test_f63_no_code_reads_or_writes_them_through_the_orm():
     models.py uses either name as an attribute, a keyword argument or a
     getattr/setattr/hasattr literal -- such a use would load a deferred
     column (failing on a database 353 has not reached) or write through
-    the ORM. The detector sees each form (the planted source), and a use
-    planted in main.py turns this red (the mutation leg in
+    the ORM. The detector sees each form (the planted source), and one
+    such access planted in the api source turns this red (the mutation leg in
     trading-server-land-f63.log)."""
     planted = ("p.pc_trades_open\nPlayer(steam_id='x', pc_trades_generation=1)\n"
                "getattr(p, 'pc_trades_open')\nq = 'SELECT pc_trades_open, pc_trades_generation FROM players'\n")

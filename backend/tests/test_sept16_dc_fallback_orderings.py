@@ -39,8 +39,8 @@ record and with team 1's post alone, and asserts the hotfix's outcome
 there, so the orderings below end rated because of the record and not in
 spite of it.
 
-THE GAME TOKEN (the v1.41.0 beta merge). On the merged tree a crossing is
-read only from the posts that carried the physical game's token the DC
+THE GAME TOKEN (the v1.41.0 beta). Under the beta's rule a crossing counts
+only from the posts that carried the physical game's token the DC
 report names, counted from the series' physical game 1 on record
 (main._team_game_token_seats, _team_game_first_game_refusal; migrations 354
 and 359). Nothing in the API writes that origin, so in production every
