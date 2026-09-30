@@ -297,3 +297,92 @@ def test_item4_a_check_that_outlived_its_signup_is_never_sent(monkeypatch, tmp_p
         got, want, contents, line = dm_view(rig, people, slot)
         assert (got, contents) == (want, {line}), f"DMs to {got}"
     e2e(monkeypatch, tmp_path, body)
+
+
+# -- round 4, fix 3: one eligibility domain, the lock's ---------------------------------------------
+# Codex round 3 LOW 3: the shared tally counted every current unbanned signup's vote, speculative
+# entrants included, while the lock's gate required min_players unbanned CONFIRMED entrants. Now one
+# predicate (tournaments._ELIGIBLE_ENTRANT_SQL: confirmed, no active ban) answers who counts, and the
+# tally, the agreement, the lock's gate and decision, the push-back sentence and the notice queue and
+# feed all read it. The domain is the integrator's default (2026-09-30); Sid may change it.
+
+async def field_with_a_speculative_entrant(env):
+    """The reviewer's composition: a sync tournament of max 16 with 16
+    confirmed entrants and one speculative one; nine confirmed entrants are
+    banned (active player_bans rows); the other seven confirmed and the
+    speculative entrant vote for the one slot. Returns (tid, slot, people):
+    people[:9] banned, people[9:16] the confirmed voters, people[16] the
+    speculative voter."""
+    import models
+    people = await entrants_of(env, 17)
+    tid, slot = await sync_tournament(env, people[:16], 0)
+    async with AsyncSession(env.seed) as s:
+        s.add(models.TournamentSignup(tournament_id=tid, player_id=people[16].id, is_speculative=True))
+        await s.commit()
+    for who in people[9:17]:
+        await vote(env, tid, who, slot, sign_up=False)
+    # Five bans through the production route (its admin rate limit allows five
+    # in five minutes), the other four as the same active player_bans rows.
+    for who in people[:5]:
+        await env.ban(who)
+    adm = await env.admin()
+    async with AsyncSession(env.seed) as s:
+        for who in people[5:9]:
+            s.add(models.PlayerBan(steam_id=who.steam, reason="violation", banned_by_steam_id=adm.steam))
+        await s.commit()
+    return tid, slot, people
+
+
+def test_low3r4_seven_confirmed_and_one_speculative_vote_is_no_quorum_on_any_surface(monkeypatch, tmp_path):
+    """Every surface agrees the quorum is not met: /tournaments/current's
+    tally reads 7, the agreement is not reached and nothing is announced, the
+    FAQ answer and the bot's DM-decision tally read 7 of 8, no availability
+    DM is sent, the lock pushes back without picking a slot or removing
+    anyone, and its push-back names no consensus and reads 7 of 8 at the new
+    time. The decisive line is the first assertion: with the speculative
+    entrant counted the tally read 8 while the lock saw seven."""
+    async def body(env):
+        tid, slot, people = await field_with_a_speculative_entrant(env)
+        unix = int(slot.timestamp())
+        seen = tallies_of(await current(env, people[9]))
+        assert seen == [(unix, 7)], f"tally {seen}: a quorum the lock refuses"
+        assert await agreement(env, tid) is False
+        import models
+
+        async def announce(db, T):
+            await T._maybe_announce_sync_agreement(db, await db.get(models.Tournament, tid))
+        await in_app(env, announce)
+        posts = [r["content"] for r in await env.rows(f"SELECT content FROM {SCHEMA}.pending_channel_posts"
+                                                       " ORDER BY created_at, id")]
+        assert not [p for p in posts if "agreed on a start time" in p], posts
+        rig = bot_over(env)
+        entry = R.faq_entry(rig)
+        rig.ns["_watch_cache"] = {"tournaments": [{**R.sync_watch(tid=tid), "signups": [
+            {"signup_id": "s1", "steam_id": people[9].steam, "display_name": "e9", "is_speculative": False}]}]}
+        answer = await rig.ns["_faq_resolve_answer"](entry, {"content": "how do tournaments work"})
+        assert f"7 of 8 agree on <t:{unix}:F> so far" in answer, answer
+        tally = await rig.ns["_tsync_tally"](people[9].steam)
+        assert (tally["votes"], tally["min_players"], tally["slots"]) == (7, 8, [unix]), tally
+        await queue_notices(env)
+        await tick(rig)
+        assert rig.client.dms == [], [d.uid for d in rig.client.dms]
+        status, start = await lock(env, tid)
+        assert (status, start) == ("voting", None), (status, start)
+        left = await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.tournament_signups WHERE tournament_id = CAST(:t AS uuid)",
+                             {"t": tid})
+        assert left == 17, f"the lock removed signups: {left} of 17 remain"
+        pushed = (await env.rows(f"SELECT content FROM {SCHEMA}.pending_channel_posts"
+                                 " ORDER BY created_at, id"))[-1]["content"]
+        assert "pushed back: no start time had 8 players agreeing on it." in pushed, pushed
+        assert f"7 of 8 agree on <t:{unix + 7 * 86400}:F> so far" in pushed, pushed
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_low3r4_the_eligible_entrants_are_the_confirmed_unbanned_ones(monkeypatch, tmp_path):
+    """The one function that answers who counts: of the composition's 17
+    signups, the seven confirmed entrants with no ban."""
+    async def body(env):
+        tid, slot, people = await field_with_a_speculative_entrant(env)
+        got = await in_app(env, lambda db, T: T._eligible_entrant_ids(db, tid))
+        assert {str(p) for p in got} == {str(p.id) for p in people[9:16]}, got
+    e2e(monkeypatch, tmp_path, body)

@@ -477,27 +477,48 @@ async def _player_id_banned(db: AsyncSession, player_id) -> bool:
     return row is not None
 
 
-# ONE eligibility predicate for a sync tournament's start-time votes (Discord
-# fix round 3, item 3; Codex round 2 LOW 1). A vote counts when its slot is far
-# enough out for the lock to pick it (MIN_SLOT_NOTICE_HOURS after the decision,
-# less the hour of slack lock_tournament allows), its voter holds a CURRENT
-# signup (confirmed or speculative), and that player carries no active ban.
-# /tournaments/current's time_slot_tallies - the in-game tab and every Discord
-# line built from it, the bot's availability-DM trigger among them - the
-# agreement announcement and lock_tournament's decision all read it here, so
-# no surface can show a count the lock will not honour.
-_ELIGIBLE_SLOT_TALLY_SQL = """
+# ONE eligibility domain for a tournament's quorum (Discord fix round 4, fix
+# 3; Codex round 3 LOW 3), and it is the lock's, because the lock is the code
+# that acts: an entrant counts when it holds a CONFIRMED signup (is_speculative
+# FALSE) and carries no active ban - the roster lock_tournament brackets.
+# _ELIGIBLE_ENTRANT_SQL is that predicate over a tournament_signups row aliased
+# `ts`, and _eligible_entrant_ids answers "who counts" with it. Every quorum
+# surface reads one or the other: the slot tally below (/tournaments/current's
+# time_slot_tallies - the in-game tab and every Discord line built from it,
+# the FAQ and the bot's availability-DM decision among them), the agreement
+# announcement, lock_tournament's signup gate, slot decision and post-kick
+# recheck, the push-back sentence, the availability-notice queue and the
+# notice feed's recheck (main.py). Round 3's tally also counted speculative
+# entrants' votes while the lock's gate required confirmed ones, so a surface
+# could report a quorum the lock then refused. Recorded as the integrator's
+# default (2026-09-30): tournament rules are Sid's, and he may change it.
+_ELIGIBLE_ENTRANT_SQL = """ts.is_speculative = FALSE
+       AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                        JOIN players bp ON bp.steam_id = pb.steam_id
+                       WHERE bp.id = ts.player_id AND pb.unbanned_at IS NULL)"""
+
+# A start-time vote counts when its voter is an eligible entrant and its slot
+# is far enough out for the lock to pick it (MIN_SLOT_NOTICE_HOURS after the
+# decision, less the hour of slack lock_tournament allows).
+_ELIGIBLE_SLOT_TALLY_SQL = f"""
     SELECT v.slot_ts, COUNT(*) AS votes
       FROM tournament_time_votes v
       JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
                                 AND ts.player_id = v.player_id
      WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
-       AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                        JOIN players p ON p.steam_id = pb.steam_id
-                       WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
+       AND {_ELIGIBLE_ENTRANT_SQL}
      GROUP BY v.slot_ts
      ORDER BY v.slot_ts
 """
+
+
+async def _eligible_entrant_ids(db: AsyncSession, tournament_id) -> set:
+    """The players who count toward the tournament's quorum
+    (_ELIGIBLE_ENTRANT_SQL): the confirmed, unbanned entrants."""
+    rows = (await db.execute(text(
+        "SELECT ts.player_id FROM tournament_signups ts"
+        f" WHERE ts.tournament_id = :tid AND {_ELIGIBLE_ENTRANT_SQL}"), {"tid": tournament_id})).all()
+    return {r[0] for r in rows}
 
 
 async def _eligible_slot_tallies(db: AsyncSession, tournament_id, now: datetime) -> list:
@@ -996,9 +1017,9 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         # "only after the caller has voted" anti-snoop gate predates
         # mandatory voting and starved exactly the audience that needs the
         # data most.)
-        # The lock's own tally (Discord fix round 3, item 3): the one
-        # eligibility predicate, _eligible_slot_tallies - a slot the lock
-        # could pick, a current signup's vote, no active ban - so "best time:
+        # The lock's own tally (Discord fix round 3, item 3; round 4, fix 3):
+        # _eligible_slot_tallies - a slot the lock could pick, the vote of a
+        # confirmed entrant with no active ban - so "best time:
         # N/8" here, in the in-game tab (client topTally scans ALL tallies)
         # and in every Discord line built from this answer, is the count the
         # lock will honour.
@@ -1107,13 +1128,13 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
     # and each attempt created a new reachable deadlock class in the
     # tick/voting planes (review r20 findings 5-8) — the milliseconds-wide
     # residual on this low-stakes surface is the better trade (#242).
-    _unbanned = []
+    # Round 4, fix 3: the one eligibility domain (_eligible_entrant_ids) is
+    # this gate's, so no surface counts a quorum this gate would refuse.
+    _eligible = await _eligible_entrant_ids(db, t.id)
     for _s in signups:
-        if await _player_id_banned(db, _s.player_id):
+        if _s.player_id not in _eligible:
             print(f"[TOURNAMENT] lock: excluding banned signup {_s.id}")
-        else:
-            _unbanned.append(_s)
-    signups = _unbanned
+    signups = [_s for _s in signups if _s.player_id in _eligible]
 
     pushback_reason = None
     if len(signups) < t.min_players:
@@ -1121,8 +1142,9 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                            f"{t.min_players} required signed up)")
 
     # Item 3 (sync): at least min_players must agree on ONE slot. Votes are
-    # tallied across every signup — speculatives included, since they promote
-    # into slots freed by the kick pass below.
+    # tallied over the eligible entrants only (round 4, fix 3): a speculative
+    # entrant's vote no longer counts toward the quorum - it still keeps the
+    # entrant through the kick pass below, which may promote it.
     winning_slot = None
     if t.kind == "sync" and not force and pushback_reason is None:
         # Only slots giving real notice can win (Sid item 9): players must be
@@ -1137,7 +1159,8 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         # (round-19 find 1: a banned entrant's vote must not push a slot over
         # the threshold the ELIGIBLE roster cannot reach) are the one
         # eligibility predicate every row-32 surface reads (Discord fix
-        # round 3, item 3): _eligible_slot_tallies.
+        # round 3, item 3; round 4, fix 3: confirmed entrants only):
+        # _eligible_slot_tallies.
         tallies = await _eligible_slot_tallies(db, t.id, now)
         agree_count = 0
         if tallies:
@@ -1309,9 +1332,9 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         # Reload the confirmed set — kicks + promotions changed it.
         # Re-apply the BAN filter (round-19 find 1: this reload restored a
         # banned entrant the initial filter had excluded).
-        signups = (await db.execute(q)).scalars().all()
-        signups = [s for s in signups
-                   if not await _player_id_banned(db, s.player_id)]
+        _eligible = await _eligible_entrant_ids(db, t.id)
+        signups = [s for s in (await db.execute(q)).scalars().all()
+                   if s.player_id in _eligible]
         # Round-20 find 1: kicks + speculative promotions + the ban filter
         # can drop the eligible roster below the minimum AFTER the initial
         # gate passed — a below-minimum bracket must push back, not lock.
@@ -4400,8 +4423,8 @@ async def _sync_agreement_reached(db: AsyncSession, t: Tournament) -> bool:
 
     The eligibility rules are the lock's tally itself, because a claim of
     agreement that the lock would not honour is still a lie: the one
-    predicate, _eligible_slot_tallies (lockable slots, CURRENT signups, no
-    active ban).
+    predicate, _eligible_slot_tallies (lockable slots, confirmed entrants
+    with no active ban - round 4, fix 3).
     """
     tallies = await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))
     return any(votes >= int(t.min_players) for _slot, votes in tallies)
