@@ -121,11 +121,15 @@ namespace CompetitiveRounds
         /// this client does not know, the route is the conservative one: never a
         /// motion capture, never a base still over a still that is current
         /// (ownedHere true, canDance false: Current or Fallback). The server
-        /// names a selection only while the player holds it (S2.9).</summary>
+        /// names a selection only while the player holds it (S2.9).
+        /// `transient`: the job cannot run now for a reason that ends by
+        /// itself -- the ownership read is still unanswered, or a HoldOff hold
+        /// is the only term that stops this seat -- so a Fallback or a None is
+        /// retried rather than settled (StillOnlyRoute's Wait).</summary>
         private static DanceMotionCore.Need DanceDecision(ApiClient.PcMe me, string baseDescriptor, out string sku, out int idx,
-                                                          out string danceDesc, out bool defer)
+                                                          out string danceDesc, out bool defer, out bool transient)
         {
-            sku = ""; idx = -1; danceDesc = null; defer = false;
+            sku = ""; idx = -1; danceDesc = null; defer = false; transient = false;
             bool supported = me != null && me.dance_supported;
             if (supported) sku = me.pc_dance_sku ?? "";
             if (!supported || sku.Length == 0)
@@ -143,22 +147,68 @@ namespace CompetitiveRounds
                 {
                     if (DanceMayDefer()) { defer = true; return DanceMotionCore.Need.None; }
                     owned = true; can = false;
+                    transient = !remembered;
                 }
-                else { owned = list.Contains(idx); can = DanceSeatCan(); }
+                else
+                {
+                    owned = list.Contains(idx); can = DanceSeatCan();
+                    transient = owned && !can && !remembered && DanceSeatWaits();
+                }
             }
             return DanceMotionCore.Decide(true, sku, owned, me.pc_motion, me.portrait_hash, me.portrait_descriptor, danceDesc,
                                           DanceEmotes.MOTION_RECIPE, can, remembered);
         }
 
+        /// <summary>DanceSeatCan's terms with the hold as the only one that
+        /// fails: the seat can capture once the hold ends.</summary>
+        private static bool DanceSeatWaits()
+        {
+            try
+            {
+                return SystemInfo.supportsAsyncGPUReadback && GradeBaked && _danceOrientation >= 0
+                    && !_danceSessionStop && Time.realtimeSinceStartup < _danceHoldUntil;
+            }
+            catch { return false; }
+        }
+
+        private static string _danceStillOnlyNoted;
+
+        /// <summary>Report 1 (2026-09-30): the still-only path while a dance is
+        /// selected and the dance job did not start. Nothing is uploaded -- a
+        /// base still would unbind the stored motion (DanceMotionCore.
+        /// DanceSelected). The Settings preview is still rendered, without an
+        /// upload, when it does not show the current inputs. False only when no
+        /// dance is selected: the product path decides as before. `settled`
+        /// comes back false for Wait (the caller keeps its check armed) and
+        /// true for Nothing.</summary>
+        private static bool DanceStillOnly(ApiClient.PcMe me, string want, string sku, string why, bool transient, out bool settled)
+        {
+            settled = true;
+            var route = DanceMotionCore.StillOnlyRoute(me != null && me.dance_supported, me == null ? null : me.pc_dance_sku, transient);
+            if (route == DanceMotionCore.StillOnly.Base) return false;
+            settled = route == DanceMotionCore.StillOnly.Nothing;
+            LastResult = settled ? "not sent: the dance cannot be captured on this seat now" : "waiting to capture the dance";
+            string note = why + "|" + route + "|" + sku + "|" + want;
+            if (note != _danceStillOnlyNoted)
+            {
+                _danceStillOnlyNoted = note;
+                Plugin.Log.LogInfo("[DANCE] " + why + ": no base still sent, dance " + sku + " selected (" + route
+                                   + ", last dance result: " + (DanceLastResult.Length > 0 ? DanceLastResult : "-") + ")");
+            }
+            if (want != null && (PreviewTex == null || PreviewDescriptor != want)) Start("preview", false);
+            return true;
+        }
+
         /// <summary>The visit check's dance half (Tick). True when the visit is
         /// settled here -- a dance job started or was re-armed, the dance picture
-        /// is current, a Fallback's still is current, or the check is deferred;
-        /// false when the product path decides as before (no dance selected, an
-        /// older server, or a Fallback whose still is behind).</summary>
+        /// is current, a Fallback's still is current, the check is deferred, or
+        /// a dance is selected and the still-only path sends nothing
+        /// (DanceStillOnly); false when the product path decides as before (no
+        /// dance selected, or an older server).</summary>
         private static bool DanceVisit(ApiClient.PcMe me, string want)
         {
-            string sku, danceDesc; int idx; bool defer;
-            var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer);
+            string sku, danceDesc; int idx; bool defer, transient, settled;
+            var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer, out transient);
             if (defer) { _pendingCheck = true; _checkedVisit = -1; return true; }
             switch (need)
             {
@@ -170,33 +220,46 @@ namespace CompetitiveRounds
                     if (PreviewTex == null) Start("preview", false);
                     return true;
                 case DanceMotionCore.Need.Fallback:
-                    if (!DanceMotionCore.StillCurrent(me.portrait_hash, me.portrait_descriptor, want, danceDesc)) return false;
-                    LastResult = "picture current";
-                    if (PreviewTex == null) Start("preview", false);
-                    return true;
-                default:
-                    return false;
+                    if (DanceMotionCore.StillCurrent(me.portrait_hash, me.portrait_descriptor, want, danceDesc))
+                    {
+                        LastResult = "picture current";
+                        if (PreviewTex == null) Start("preview", false);
+                        return true;
+                    }
+                    break;
             }
+            // None or a Fallback whose still is behind: with a dance selected the
+            // still-only path sends nothing (report 1); a Wait re-arms the check.
+            if (!DanceStillOnly(me, want, sku, "visit", transient, out settled)) return false;
+            if (!settled) { _refreshAt = Time.realtimeSinceStartup + 5f; _refreshWhy = "visit"; }
+            return true;
         }
 
         /// <summary>A matured refresh (Tick): the dance job when a motion is
-        /// needed, nothing when the dance picture is current, else the product
-        /// path as before (a Fallback re-renders the base still, as a refresh
-        /// always did). False keeps the refresh armed (busy, refused, deferred).</summary>
+        /// needed, nothing when the dance picture is current; with a dance
+        /// selected and the job unable to run, nothing is sent (DanceStillOnly:
+        /// a Wait keeps the refresh armed); with no dance selected, the product
+        /// path as before. An unread /pc/me keeps the refresh armed: whether a
+        /// dance is selected is not known yet, and a base still over a bound
+        /// motion unbinds it. False keeps the refresh armed (busy, refused,
+        /// deferred, waiting).</summary>
         private static bool RefreshStart(string why)
         {
             var me = ApiClient.CachedPcMe;
-            if (me != null && me.dance_supported && !string.IsNullOrEmpty(me.pc_dance_sku))
+            if (me == null) return false;
+            if (DanceMotionCore.DanceSelected(me.dance_supported, me.pc_dance_sku))
             {
                 string want = BuildDescriptor(CurrentPreset());
-                if (want != null)
-                {
-                    string sku, danceDesc; int idx; bool defer;
-                    var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer);
-                    if (defer) return false;
-                    if (need == DanceMotionCore.Need.Needed) return StartDance(why, sku, idx, null);
-                    if (need == DanceMotionCore.Need.Current) { LastResult = "picture current (dancing)"; return true; }
-                }
+                if (want == null) { LastResult = "no picture: the character is not readable yet"; return true; }
+                string sku, danceDesc; int idx; bool defer, transient, settled;
+                var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer, out transient);
+                if (defer) return false;
+                if (need == DanceMotionCore.Need.Needed) return StartDance(why, sku, idx, null);
+                if (need == DanceMotionCore.Need.Current) { LastResult = "picture current (dancing)"; return true; }
+                if (need == DanceMotionCore.Need.Fallback
+                    && DanceMotionCore.StillCurrent(me.portrait_hash, me.portrait_descriptor, want, danceDesc))
+                { LastResult = "picture current"; return true; }
+                if (DanceStillOnly(me, want, sku, why, transient, out settled)) return settled;
             }
             return Start(why, true);
         }

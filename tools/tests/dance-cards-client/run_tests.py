@@ -396,6 +396,18 @@ MUTANTS = [
     {"name": "remember_key_by_visit", "file": "DanceMotionCore.cs",
      "edits": [("internal static string RememberKey(", "return (steamId ?? \"\") + \"|\" + (danceDescriptor ?? \"\");", "return (steamId ?? \"\") + \"|\" + System.Guid.NewGuid().ToString(\"N\");")],
      "targets": ["remember_key_stable"], "controls": ["t48_decide_truth_table"]},
+    # report 1 (2026-09-30): no base still while a dance is selected. (a) the
+    # pre-fix still-only path: a settled Fallback/None sends the base still
+    {"name": "t58_fallback_sends_base", "file": "DanceMotionCore.cs",
+     "edits": [("internal static StillOnly StillOnlyRoute(", "return transient ? StillOnly.Wait : StillOnly.Nothing;",
+                "return transient ? StillOnly.Wait : StillOnly.Base;")],
+     "targets": ["t58_no_base_still_while_dance_selected", "t58_wait_only_when_transient"],
+     "controls": ["t58_base_still_without_selection", "still_current_rows"]},
+    # (b) the selection never consulted: every route is the base still
+    {"name": "t58_selection_ignored", "file": "DanceMotionCore.cs",
+     "edits": [("internal static bool DanceSelected(", "return supported && !string.IsNullOrEmpty(selectedSku);", "return false;")],
+     "targets": ["t58_no_base_still_while_dance_selected", "t58_wait_only_when_transient"],
+     "controls": ["t58_base_still_without_selection", "t48_decide_truth_table"]},
     # round three, RR-R2-2: the per-entry catch boundary of the rig undo (round
     # two's single boundary: an attempt's failure and the entry's both rethrow)
     {"name": "rig_undo_single_catch", "file": "DanceMotionCore.cs",

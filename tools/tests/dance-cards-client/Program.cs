@@ -121,6 +121,9 @@ namespace DanceCardsClientTests
             Add("t48_decide_truth_table", DecideTruthTable);
             Add("motion_current_terms", MotionCurrentTerms);
             Add("still_current_rows", StillCurrentRows);
+            Add("t58_no_base_still_while_dance_selected", T58NoBaseStill);
+            Add("t58_base_still_without_selection", T58BaseStillWithoutSelection);
+            Add("t58_wait_only_when_transient", T58WaitOnlyWhenTransient);
             Add("remember_key_stable", RememberKeyStable);
             Add("frame_emit_for_server", FrameEmitForServer);
             Add("rig_undo_retry_restores_same_pass", () => RigUndo(RigFault.FirstAttempt));
@@ -1029,6 +1032,68 @@ namespace DanceCardsClientTests
             Check(!DanceMotionCore.StillCurrent(H2, DANCE, BASE, null), "suffixed still, selection cleared: replaced");
             Check(!DanceMotionCore.StillCurrent(H2, BASE + "x", BASE, DANCE), "other inputs: replaced");
             Check(!DanceMotionCore.StillCurrent("", BASE, BASE, null), "no stored still: replaced");
+        }
+
+        /// <summary>Report 1 (2026-09-30), the still-only path's pure half. The
+        /// replay is the production state the triage read: a motion bound to
+        /// the dance still, then the character's inputs moved while this seat
+        /// could not capture (a hold, or the ownership read timed out). Decide
+        /// says Fallback with the stored still behind -- exactly where the
+        /// still-only path used to send a base still over the bound motion.
+        /// With a dance selected no row of the decision may route to a base
+        /// still, transient or not.</summary>
+        private static void T58NoBaseStill()
+        {
+            string bound = H1 + ":" + H2 + ":1";
+            string base2 = BASE.Replace("face=a", "face=b");       // the inputs moved (the triage: face 32:..:33 -> 28:..:9)
+            string dance2 = base2 + "|dance=dance_floss|ar=1";
+            var need = DanceMotionCore.Decide(true, "dance_floss", true, bound, H2, DANCE, dance2, 1, false, false);
+            Check(need == DanceMotionCore.Need.Fallback, "replay: Fallback expected, got " + need);
+            Check(!DanceMotionCore.StillCurrent(H2, DANCE, base2, dance2), "replay: the stored dance still should be behind");
+            Check(DanceMotionCore.DanceSelected(true, "dance_floss"), "replay: a selection named by the server is selected");
+            foreach (bool transient in new[] { false, true })
+            {
+                var r = DanceMotionCore.StillOnlyRoute(true, "dance_floss", transient);
+                Check(r != DanceMotionCore.StillOnly.Base, "replay transient=" + transient + ": routed to a base still");
+            }
+            // Every None and Fallback row of the truth table that carries a selection.
+            var rows = new[]
+            {
+                DanceMotionCore.Decide(true, "dance_floss", false, bound, H2, DANCE, DANCE, 1, true, false),   // not owned here: None
+                DanceMotionCore.Decide(true, "dance_floss", true, bound, H2, DANCE, null, 1, true, false),     // no dance descriptor: Fallback
+                DanceMotionCore.Decide(true, "dance_floss", true, "", H2, BASE, DANCE, 1, false, false),       // cannot dance here: Fallback
+                DanceMotionCore.Decide(true, "dance_floss", true, "", H2, BASE, DANCE, 1, true, true),         // remembered: Fallback
+            };
+            foreach (var n in rows)
+            {
+                Check(n == DanceMotionCore.Need.None || n == DanceMotionCore.Need.Fallback, "row decided " + n);
+                foreach (bool transient in new[] { false, true })
+                    Check(DanceMotionCore.StillOnlyRoute(true, "dance_floss", transient) != DanceMotionCore.StillOnly.Base,
+                          "row " + n + " transient=" + transient + ": routed to a base still");
+            }
+        }
+
+        /// <summary>T58's negative control: with no selection (an older server,
+        /// an empty or absent sku) the still-only path sends the base still as
+        /// it always did, transient or not.</summary>
+        private static void T58BaseStillWithoutSelection()
+        {
+            foreach (bool transient in new[] { false, true })
+            {
+                Check(DanceMotionCore.StillOnlyRoute(false, "dance_floss", transient) == DanceMotionCore.StillOnly.Base, "older server");
+                Check(DanceMotionCore.StillOnlyRoute(true, "", transient) == DanceMotionCore.StillOnly.Base, "empty selection");
+                Check(DanceMotionCore.StillOnlyRoute(true, null, transient) == DanceMotionCore.StillOnly.Base, "absent selection");
+            }
+            Check(!DanceMotionCore.DanceSelected(false, "dance_floss") && !DanceMotionCore.DanceSelected(true, "")
+                  && !DanceMotionCore.DanceSelected(true, null), "no selection is not selected");
+        }
+
+        /// <summary>T58's Wait/Nothing split: only a reason that ends by itself
+        /// keeps the check armed.</summary>
+        private static void T58WaitOnlyWhenTransient()
+        {
+            Check(DanceMotionCore.StillOnlyRoute(true, "dance_floss", true) == DanceMotionCore.StillOnly.Wait, "transient: Wait");
+            Check(DanceMotionCore.StillOnlyRoute(true, "dance_floss", false) == DanceMotionCore.StillOnly.Nothing, "settled: Nothing");
         }
 
         private static void RememberKeyStable()

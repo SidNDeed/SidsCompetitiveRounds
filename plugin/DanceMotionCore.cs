@@ -508,9 +508,41 @@ namespace CompetitiveRounds
         /// would build now -- nothing to do. Needed: the dance job (the still
         /// and the motion from one camera). Fallback: a motion is needed but
         /// the job cannot run on this seat now (no AsyncGPUReadback, no baked
-        /// grade table, a hold) or its key is remembered -- the still-only path
-        /// keeps the still current, with no suffix.</summary>
+        /// grade table, a hold) or its key is remembered. None and Fallback do
+        /// NOT license a base still while a dance is selected: StillOnlyRoute
+        /// decides what the still-only path may send (report 1, 2026-09-30).</summary>
         internal enum Need { None, Current, Needed, Fallback }
+
+        /// <summary>The server names a dance selection (S2.9 names one only
+        /// while the player holds it). While this is true the only still that
+        /// may go up is the dance job's own, under the dance descriptor: a base
+        /// still is stored over the dance still, the motion's binding to the
+        /// still no longer holds (pc_motion.servable) and every print reads "no
+        /// motion" until a new capture (report 1, 2026-09-30: a base still sent
+        /// 56 s after a bound motion). The server accepts an absent suffix
+        /// whatever the selection (S2.8), so the refusal is the client's.</summary>
+        internal static bool DanceSelected(bool supported, string selectedSku)
+        {
+            return supported && !string.IsNullOrEmpty(selectedSku);
+        }
+
+        /// <summary>What the still-only path may send when the picture check
+        /// or a refresh did not start the dance job and the picture is not
+        /// current (Need None, or a Fallback whose still is behind). Base: the
+        /// base still, as before this release -- no dance is selected. Wait:
+        /// nothing now, the check stays armed -- a dance is selected and the
+        /// reason the job cannot run ends by itself (a HoldOff hold, the
+        /// ownership read not answered yet). Nothing: nothing, the check is
+        /// settled until the next visit -- a dance is selected and the job
+        /// cannot run in this process (a remembered key, a session stop, a
+        /// seat that cannot capture, a dance this client does not list).</summary>
+        internal enum StillOnly { Base, Wait, Nothing }
+
+        internal static StillOnly StillOnlyRoute(bool supported, string selectedSku, bool transient)
+        {
+            if (!DanceSelected(supported, selectedSku)) return StillOnly.Base;
+            return transient ? StillOnly.Wait : StillOnly.Nothing;
+        }
 
         internal static Need Decide(bool supported, string selectedSku, bool ownedHere, string pcMotion,
                                     string portraitHash, string portraitDescriptor, string danceDescriptor,
@@ -541,10 +573,10 @@ namespace CompetitiveRounds
         /// still under the base descriptor, or -- on the fallback, where a
         /// dance is selected -- under the same inputs with that dance's suffix:
         /// a dancer still whose motion is missing or was refused is the same
-        /// pixels, and replacing it would only spend a pacing slot. With no
-        /// selection `danceDescriptor` is null, so a suffixed still is replaced
-        /// by a base one (the server accepts an absent suffix whatever the
-        /// selection, S2.8).</summary>
+        /// pixels. With no selection `danceDescriptor` is null, so a suffixed
+        /// still is replaced by a base one (the server accepts an absent suffix
+        /// whatever the selection, S2.8). A still that is not current while a
+        /// dance IS selected is never replaced by a base one (StillOnlyRoute).</summary>
         internal static bool StillCurrent(string portraitHash, string portraitDescriptor, string baseDescriptor, string danceDescriptor)
         {
             if (string.IsNullOrEmpty(portraitHash) || baseDescriptor == null) return false;

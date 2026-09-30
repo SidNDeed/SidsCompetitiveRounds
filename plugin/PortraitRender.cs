@@ -838,9 +838,11 @@ namespace CompetitiveRounds
             // spin; the next visit (or a preset change) tries again, which is
             // what makes "art not loaded yet" self-correcting.
             if (want == null) return;
-            // Dance cards (design S1.2): a selected, owned dance decides here --
-            // the dance job, a current dance picture, or a Fallback whose still
-            // is current; otherwise the product path below, as before.
+            // Dance cards (design S1.2): a selected dance decides here -- the
+            // dance job, a current dance picture, a Fallback whose still is
+            // current, or no upload at all (report 1: a base still over a bound
+            // motion unbinds it); with no dance selected, the product path
+            // below, as before.
             if (DanceVisit(me, want)) return;
             if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want)
             {
@@ -1344,7 +1346,25 @@ namespace CompetitiveRounds
 
         private static void Upload(string key, string descriptor, byte[] png, string why)
         {
-            // Every upload, the retry included, passes here. A build whose grade
+            // Every base-still upload, the retry and the dev lever included,
+            // passes here, and it is the one base-still sender (the dance job's
+            // still goes through DanceApiPort.UploadStill under the dance
+            // descriptor). While a dance is selected -- or while /pc/me is unread,
+            // so a selection cannot be ruled out -- a base still is never sent:
+            // the server would store it over the dance still and the motion
+            // bound to that still would read "no motion" everywhere (report 1,
+            // 2026-09-30; DanceMotionCore.DanceSelected). The decision layer
+            // (DanceVisit, RefreshStart) already routes around this; this is
+            // the backstop for every caller.
+            var pcMe = ApiClient.CachedPcMe;
+            if (pcMe == null || DanceMotionCore.DanceSelected(pcMe.dance_supported, pcMe.pc_dance_sku))
+            {
+                LastResult = pcMe == null ? "not sent: the card state is not read yet" : "not sent: a dance is selected";
+                Plugin.Log.LogInfo("[PORTRAIT] " + why + ": base still not sent ("
+                                   + (pcMe == null ? "no /pc/me yet" : "dance " + pcMe.pc_dance_sku + " selected") + ")");
+                return;
+            }
+            // A build whose grade
             // table is still the identity placeholder, or whose compiled table
             // LoadGrade rejected (length, digest, marker, or not the table
             // RECIPE_GRADE_FNV names), renders ungraded pixels, and the server
