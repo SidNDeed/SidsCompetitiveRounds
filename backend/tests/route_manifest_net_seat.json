@@ -1516,7 +1516,7 @@
           ],
           "main",
           "broadcast_target",
-          "ea6b9d0494385f76ffd60033925399e1020a636b"
+          "34bcf664831a36e56b1522831f84381ec50f8cf4"
         ],
         [
           "/api/v1/chat/moderate/bridge-unmute",
@@ -1813,7 +1813,7 @@
           ],
           "main",
           "health_check",
-          "81293dc0adc83de238e5a975871ac85b4b99ceba"
+          "1f3a1c1eb86a532bcf49f024aa4f10becf18fed4"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2146,7 +2146,7 @@
           ],
           "main",
           "internal_tournament_notices",
-          "cee7e2301173b2681c4cb47e5c8743484a2e4817"
+          "c04722074f1e2be2b1f2103229514a8f23718601"
         ],
         [
           "/api/v1/internal/tournament-notices/ack",
@@ -2587,7 +2587,7 @@
           ],
           "main",
           "spectate_games",
-          "34227e984fa93dc5a42c14c7d4432cac43c51028"
+          "110872f49321147f77c21f8b30c52b1743cfc186"
         ],
         [
           "/api/v1/spectate/grant",
@@ -2596,7 +2596,7 @@
           ],
           "main",
           "spectate_grant",
-          "499b185ce00c4b3d691e9be5cf5deb6ed9303b30"
+          "eb70d2fa2774dcd4dd89062c0de8a2626996ccc8"
         ],
         [
           "/api/v1/spectate/heartbeat",
@@ -2749,7 +2749,7 @@
           ],
           "main",
           "team_queue_join",
-          "afb85f0bd63d19a227d33d1e3eb197eb8ddbd88f"
+          "43553e77a236801e546d93c8e26bd64618fee7a9"
         ],
         [
           "/api/v1/team/queue/leave",
@@ -2785,7 +2785,7 @@
           ],
           "main",
           "team_queue_poll",
-          "25b8610874918d045452885a935c46f111d365e0"
+          "710f7cbdd38562d22107b094d6de17a9af7cac17"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3206,7 +3206,7 @@
           ],
           "main",
           "internal_pc_packs",
-          "d5fbe3a83521448d0f98009cd43b4663087684c6"
+          "c5c946bfdac4f23ea0564bf0a9350aa4e24a76eb"
         ],
         [
           "/api/v1/internal/pc/packs/open",
@@ -3347,7 +3347,7 @@
           ],
           "tournaments",
           "get_current",
-          "130c56f892cba70ece436bba652a490fa17bd3fa"
+          "fbe91966948c70cee014d8303dfbf08ab9fb8719"
         ],
         [
           "/api/v1/tournaments/history",
@@ -3419,7 +3419,7 @@
           ],
           "tournaments",
           "force_vote",
-          "c9232dbdc3faf45ccb09856edd09e3901df4e895"
+          "33e15b8768cc0a20baa1ae813f43aa4d19750894"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit",
@@ -3437,7 +3437,7 @@
           ],
           "tournaments",
           "play_now",
-          "cc306ceeb9de251732a89637a17a641256ceb452"
+          "13dda8ed410ef5cfe407f9c63ded8b24c9971234"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/ready",
@@ -3446,7 +3446,7 @@
           ],
           "tournaments",
           "ready",
-          "052ac87852ade28a407980bf0afd8a2c4df5d50d"
+          "8ad4cddf6a0d68d01feeba43dcb83412b065bfdb"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/signup",
@@ -3455,7 +3455,7 @@
           ],
           "tournaments",
           "signup",
-          "6913c225ad56ca7b769c9eda9d3c86a20b668342"
+          "e280a50a161657a4d92e5a4fa83e63ea8d2e234d"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -3464,7 +3464,7 @@
           ],
           "tournaments",
           "time_vote",
-          "3ebc5ef8af455234d0033254f30d2bff5cde6491"
+          "bda6847d5b438da59e659d027fdeddc72f647a7c"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/unsignup",
@@ -3473,7 +3473,7 @@
           ],
           "tournaments",
           "unsignup",
-          "7d850368f4ed68ac15ab0f5325599bc26f40457e"
+          "56c6de049cad6a8e45cd1aa63effbad49ae16634"
         ]
       ]
     },
@@ -3527,7 +3527,7 @@
       [
         "main",
         "lifespan",
-        "f1a0a1e892ba45301cd45caa52dc07e9d1c492d8"
+        "8befde0887933fd35a533494d4ffff4324d62509"
       ]
     ]
   },
