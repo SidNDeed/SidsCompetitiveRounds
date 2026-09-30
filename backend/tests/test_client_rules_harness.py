@@ -900,7 +900,8 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
                       "plugin/PcTradeRules.cs",
                       "plugin/RoomRulesStrip.cs", "plugin/MusicLevels.cs",
-                      "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs"):
+                      "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs",
+                      "plugin/NameGlyphs.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -1029,5 +1030,44 @@ def test_the_music_levels_suite_ran_every_case_and_none_failed(harness_run):
 def test_the_music_levels_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "musiclevels")
     assert line.startswith("[musiclevels] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+# -- report 3 (2026-09-30): the one name sanitiser of the list panels ----------
+
+def test_the_name_glyphs_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "nameglyphs" in suites, "the NameGlyphs suite did not report"
+    run, fail, verdict = suites["nameglyphs"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[nameglyphs\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 16 cases on the commit that added it (#342).
+    assert run >= 16, "the NameGlyphs suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    "U+13171 (Egyptian hieroglyph, supplementary plane) becomes the fallback",
+    "a supplementary-plane emoji (U+1F600) becomes the fallback",
+    "a supplementary-plane letter the chain carries is kept whole",
+    "a basic-plane glyph the chain lacks (U+25EF) becomes the fallback",
+    "accented Latin and Cyrillic the chain carries are kept",
+    "a pair cut by a truncation (lone high surrogate) becomes the fallback",
+    "a lone low surrogate becomes the fallback",
+    "controls and the line separators flatten to a space",
+    "a rich-text opener cannot open a tag",
+    "the glyph pass alone leaves tag characters to its caller",
+    "an ASCII name is returned unchanged",
+    "null and empty become empty",
+    "a throwing font answer counts as not renderable",
+    "the fallback is visible ASCII and not a thin letter",
+    "never longer, and every code point left renders",
+    "the raw name keeps the unrenderable code points (control)",
+])
+def test_the_name_glyphs_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "nameglyphs")
+    assert line.startswith("[nameglyphs] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)

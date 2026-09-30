@@ -3768,7 +3768,10 @@ namespace CompetitiveRounds
             foreach(char ch in value)
                 sb.Append(ch<' '||(ch>=(char)0x7F&&ch<=(char)0x9F)
                           ||ch==(char)0x2028||ch==(char)0x2029?' ':ch);
-            return sb.ToString().Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;");
+            // Report 3 (2026-09-30): the glyph pass every list-panel name shares
+            // (NameGlyphs): a code point no font carries, or a surrogate pair
+            // cut by a Trunc, becomes '?' instead of reaching TMP.
+            return UnicodeFallback.SafeGlyphs(sb.ToString()).Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;");
         }
 
         private static string FfaTitleHex(string value)
@@ -4735,7 +4738,7 @@ namespace CompetitiveRounds
                     e.rank==1?new Color(1f,0.84f,0f):
                     e.rank==2?new Color(0.75f,0.75f,0.75f):
                     e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);
-                string nameDisplay=(e.is_online?OnlineDot+" ":"")+InactiveName(Trunc(e.display_name,14),e.inactive);   // bug 342 + item d
+                string nameDisplay=(e.is_online?OnlineDot+" ":"")+InactiveName(Nm(e.display_name,14),e.inactive);   // bug 342 + item d; report 3's name sanitiser
                 if(!string.IsNullOrEmpty(e.title))
                 {
                     string col=string.IsNullOrEmpty(e.title_color)?"#FFD94D":e.title_color;
@@ -5955,9 +5958,9 @@ namespace CompetitiveRounds
                 else if(st=="ready_join")
                 {
                     // Locked lineup: who ended up solo vs duo.
-                    string solo=Trunc(ApiClient.OvtLockedSoloName??"?",14);
+                    string solo=Nm(ApiClient.OvtLockedSoloName??"?",14);
                     var duo=ApiClient.OvtLockedDuo;
-                    string duoNames=(duo!=null&&duo.Count>=2)?$"{Trunc(duo[0].display_name,14)} + {Trunc(duo[1].display_name,14)}":I18n.Tr("duo");
+                    string duoNames=(duo!=null&&duo.Count>=2)?$"{Nm(duo[0].display_name,14)} + {Nm(duo[1].display_name,14)}":I18n.Tr("duo");
                     msg=I18n.TrF("<color=#66DD66>Match found! Joining…</color>  <color=#FFB347>{0}</color> <color=#888>vs</color> <color=#88AAFF>{1}</color>",solo,duoNames)
                         +(ApiClient.OvtSoloExtraPick?"  "+I18n.Tr("<color=#888>(solo extra pick)</color>"):"");
                 }
@@ -6066,7 +6069,7 @@ namespace CompetitiveRounds
                 string nameCol=!string.IsNullOrEmpty(e.title_color)?e.title_color:(me?"#88FF88":"#FFFFFF");
                 string rankCol=e.rank==1?"#FFD700":e.rank==2?"#C0C0C0":e.rank==3?"#CD7F32":"#FFD94D";
                 UIFactory.SetTextRaw(pool[i],
-                    $"<color={rankCol}>#{e.rank}</color>  {(e.is_online?OnlineDot+" ":"")}{(e.inactive?InactiveName(Trunc(e.display_name,14),true):$"<color={nameCol}>{Trunc(e.display_name,14)}</color>")}  {e.wins}-{e.losses} <color=#66DD66>({e.win_rate:F0}%)</color>  <color=#888>Lv{e.level}</color>");ProfileCard.RegisterNameHover(pool[i],e.steam_id);/* Sept 6 item a: one player per label */
+                    $"<color={rankCol}>#{e.rank}</color>  {(e.is_online?OnlineDot+" ":"")}{(e.inactive?InactiveName(Nm(e.display_name,14),true):$"<color={nameCol}>{Nm(e.display_name,14)}</color>")}  {e.wins}-{e.losses} <color=#66DD66>({e.win_rate:F0}%)</color>  <color=#888>Lv{e.level}</color>");ProfileCard.RegisterNameHover(pool[i],e.steam_id);/* Sept 6 item a: one player per label */
             }
         }
 
@@ -6169,7 +6172,7 @@ namespace CompetitiveRounds
             string statusTag=s.status=="completed"?"":"  "+I18n.Tr("<color=#888>(in progress)</color>");
             string extraTag=(s.solo_extra_pick?"  "+I18n.Tr("<color=#888>+pick</color>"):"")+RulesTag(s.has_rules,s.rules_ff,s.rules_sc);   // room rules (Sept 10)
             string header=I18n.TrF("<color=#FFB347><b>{0}</b></color> <color=#888>vs</color> <color=#88AAFF>{1} + {2}</color>  <b>{3}-{4}</b>  <color=#999>{5}</color>",
-                Trunc(s.solo_name??"?",14),Trunc(s.duo_a_name??"?",14),Trunc(s.duo_b_name??"?",14),s.solo_wins,s.duo_wins,dt);
+                Nm(s.solo_name??"?",14),Nm(s.duo_a_name??"?",14),Nm(s.duo_b_name??"?",14),s.solo_wins,s.duo_wins,dt);
             int gameNo=0;
             foreach(var m in s.matches)
             {
@@ -8974,7 +8977,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                                     if(!string.IsNullOrEmpty(en.unlocked_at)&&en.unlocked_at!="null"){try{d=DateFmt.Full(DateTime.Parse(en.unlocked_at));}catch{}}
                                     string ttl="";
                                     if(!string.IsNullOrEmpty(en.title)){string tc=string.IsNullOrEmpty(en.title_color)?"#CCCCCC":en.title_color;ttl=$" <b><color={tc}>[{en.title}]</color></b>";}
-                                    sb.Append($"<color=#889>{e+1}.</color> {Trunc(en.display_name,24)}{ttl}  <color=#66CCFF>{rt}</color>  <color=#667>{d}</color>\n");
+                                    sb.Append($"<color=#889>{e+1}.</color> {Nm(en.display_name,24)}{ttl}  <color=#66CCFF>{rt}</color>  <color=#667>{d}</color>\n");
                                 }
                                 UIFactory.SetText(achEarnersBody,sb.ToString());
                             }
@@ -10098,7 +10101,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (b.settled) continue;
                 if (ledgerLines >= LEDGER_MAX_LINES) { ledgerOverflow++; continue; }
                 ledgerLines++;
-                sb.Append($"<color=#FFD94D>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name}</color> <color=#AAA>- in play, score {b.series_score}</color>\n");
+                sb.Append($"<color=#FFD94D>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)}</color> <color=#AAA>- in play, score {b.series_score}</color>\n");
             }
             foreach (var b in bets)
             {
@@ -10116,11 +10119,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (string.IsNullOrEmpty(st))
                     st = b.payout == b.amount ? "refunded" : b.payout > 0 ? "won" : "lost";
                 if (st == "refunded")
-                    sb.Append($"<color=#BBB>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - refunded, series never finished</color>\n");
+                    sb.Append($"<color=#BBB>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - refunded, series never finished</color>\n");
                 else if (st == "won")
-                    sb.Append($"<color=#66DD66>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - WON {Math.Max(0, b.payout - b.amount):N0} gold</color>\n");
+                    sb.Append($"<color=#66DD66>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - WON {Math.Max(0, b.payout - b.amount):N0} gold</color>\n");
                 else
-                    sb.Append($"<color=#DD7777>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - LOST</color>\n");
+                    sb.Append($"<color=#DD7777>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - LOST</color>\n");
             }
             if (ledgerOverflow > 0)
                 sb.Append($"<color=#888>{I18n.TrF("+{0} more bets", ledgerOverflow)}</color>\n");
@@ -10281,9 +10284,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 tag = "<color=#888><b>[PRIVATE]</b></color>  ";
             }
             string line = tag +
-                          $"<color=#AAF>{Trunc(s.p1_name, 12)}</color> ({s.p1_rating})  " +
+                          $"<color=#AAF>{Nm(s.p1_name, 12)}</color> ({s.p1_rating})  " +
                           $"<b>{s.p1_wins}-{s.p2_wins}</b>  " +
-                          $"<color=#FAA>{Trunc(s.p2_name, 12)}</color> ({s.p2_rating})";
+                          $"<color=#FAA>{Nm(s.p2_name, 12)}</color> ({s.p2_rating})";
             var t = UIFactory.CreateText("h", row.transform, line, 15f, C_WHITE,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(384, 24));
             UIFactory.SetBold(t, true);
@@ -10396,7 +10399,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         private static void ApplyBetRow(GameObject row, ApiClient.ActiveSeriesEntry s, bool betOnP1)
         {
-            string name = betOnP1 ? s.p1_name : s.p2_name;
+            string name = Nm(betOnP1 ? s.p1_name : s.p2_name);   // report 3: display only
             string steamId = betOnP1 ? s.p1_steam_id : s.p2_steam_id;
             float odds = betOnP1 ? s.p1_odds : s.p2_odds;
 
@@ -10474,9 +10477,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             string h1 = SafeStampTextHex(s.t1_color_hex) ?? "#AAF";
             string h2 = SafeStampTextHex(s.t2_color_hex) ?? "#FAA";
             string line = $"<color=#FFB347>2v2</color>  " +
-                          $"<color={h1}>{Trunc(s.t1a_name, 7)}({s.t1a_rating})+{Trunc(s.t1b_name, 7)}({s.t1b_rating})</color>  " +
+                          $"<color={h1}>{Nm(s.t1a_name, 7)}({s.t1a_rating})+{Nm(s.t1b_name, 7)}({s.t1b_rating})</color>  " +
                           $"<b>{s.t1_wins}-{s.t2_wins}</b>  " +
-                          $"<color={h2}>{Trunc(s.t2a_name, 7)}({s.t2a_rating})+{Trunc(s.t2b_name, 7)}({s.t2b_rating})</color>";
+                          $"<color={h2}>{Nm(s.t2a_name, 7)}({s.t2a_rating})+{Nm(s.t2b_name, 7)}({s.t2b_rating})</color>";
             var t = UIFactory.CreateText("hdr", row.transform, line,
                 14f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 24));
             UIFactory.SetWordWrap(t, false);
@@ -10498,8 +10501,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (ch != null && !string.IsNullOrEmpty(cn))
                 sideName = $"<color={ch}>{sideName}</color>";
             string teamLabel = team == 1
-                ? $"{sideName} ({Trunc(s.t1a_name, 6)}+{Trunc(s.t1b_name, 6)})"
-                : $"{sideName} ({Trunc(s.t2a_name, 6)}+{Trunc(s.t2b_name, 6)})";
+                ? $"{sideName} ({Nm(s.t1a_name, 6)}+{Nm(s.t1b_name, 6)})"
+                : $"{sideName} ({Nm(s.t2a_name, 6)}+{Nm(s.t2b_name, 6)})";
 
             string myId = MatchTracker.LocalSteamId;
             bool localIsParticipant = !string.IsNullOrEmpty(myId)
@@ -15415,8 +15418,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             int budget=(wElo.Length==0&&lElo.Length==0)?44:36;
             string leftFit,rightFit;
             FitLabelPair(m.left_label??"?",m.right_label??"?",budget,out leftFit,out rightFit);
-            string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{leftFit}</color>{wElo}"
-                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{rightFit}</color>{lElo}"
+            string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{Nm(leftFit)}</color>{wElo}"
+                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{Nm(rightFit)}</color>{lElo}"
                       +(m.mode=="ffa"?FfaSettingsSummary(m.ffa_settings):RulesTag(m.has_rules,m.rules_ff,m.rules_sc,m.mode=="1v2"?(bool?)m.rules_xp:null))+"\n";
             if(m.bets!=null)
             {
@@ -15518,7 +15521,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // KNIGHT") orphaned the elo tail on its own line and looked
                 // awful. Cap each NAME so the whole line fits the column; the
                 // element no longer word-wraps (overflow clips at the mask).
-                string wNameT=Trunc(wName,16), lNameT=Trunc(lName,16);
+                // Report 3: the whole page is ONE element, so a name glyph no font
+                // carries blanked all 50 rows -- every name goes through Nm.
+                string wNameT=Nm(wName,16), lNameT=Nm(lName,16);
                 txt+=$"<color={wCol}>{wNameT}</color>{wRatingTag}{wElo}  <b>{wScore}-{lScore}</b>  <color={lCol}>{lNameT}</color>{lRatingTag}{lElo}{RulesTag(s.has_rules,s.rules_ff,s.rules_sc)}\n";
                 // Bet sub-rows under each series. Indent + smaller font + green for winners,
                 // dim grey for losers. Show "AsteRiA bet 500g on Sid -> +505g" style.
@@ -15526,11 +15531,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 {
                     foreach (var b in s.bets)
                     {
-                        string bettorTag = b.bettor_name == myName ? "<b>You</b>" : Trunc(b.bettor_name ?? "?", 14);
+                        string bettorTag = b.bettor_name == myName ? "<b>You</b>" : Nm(b.bettor_name ?? "?", 14);
                         if (b.won)
-                            txt += $"    <color=#88CC88>-> {bettorTag} bet {b.amount}g on {Trunc(b.bet_on_name ?? "?", 12)} -> <b>+{b.payout}g</b></color>\n";
+                            txt += $"    <color=#88CC88>-> {bettorTag} bet {b.amount}g on {Nm(b.bet_on_name ?? "?", 12)} -> <b>+{b.payout}g</b></color>\n";
                         else
-                            txt += $"    <color=#664444>-> {bettorTag} bet {b.amount}g on {Trunc(b.bet_on_name ?? "?", 12)} - lost</color>\n";
+                            txt += $"    <color=#664444>-> {bettorTag} bet {b.amount}g on {Nm(b.bet_on_name ?? "?", 12)} - lost</color>\n";
                     }
                 }
             }
@@ -16689,12 +16694,12 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
         }
 
-        private static void RefreshLeaderboard(){_podiumLbRows.Clear();lbSelRenderAbsIdx=-1;/* Aug 31 showcase scroll-to-row: reset, re-recorded below when the selected row renders. *//* Item 1 (the "Oro v" bug): translate the base label FIRST, then append the arrow, and write Raw so the composed string is never re-looked-up. */string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetTextRaw(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":/* Aug 6 item 6: hide_gold players carry gold==-1 — treat as +infinity so they sit at the TOP of the default descending sort (they were sorting below 0-gold players). */entries.Sort((a,b)=>{int ga=a.gold<0?int.MaxValue:a.gold;int gb=b.gold<0?int.MaxValue:b.gold;return lbSortDesc?gb.CompareTo(ga):ga.CompareTo(gb);});break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=(e.is_online?OnlineDot+" ":"")+InactiveName(Trunc(e.display_name,20),e.inactive);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){/* Aug 31: the server now ships "1v1 1st Place"; on the 1v1 board itself the prefix says nothing — strip it exactly as the 2v2/FFA boards strip theirs (both the stored tick entry and the immediate span, or the first sparkle tick repaints the prefix back). */string _pt=PodiumTitleOnOwnBoard(e.title,"1v1");_podiumLbRows.Add(new object[]{row.txtName,_lbName,_pt,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(_pt,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}/* SetTextRaw (find 15): a bare display name must never hit the translation catalogue — a player literally named "Done." would render as "Hecho.". */UIFactory.SetTextRaw(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);ProfileCard.RegisterNameHover(row.txtName,e.steam_id);/* Sept 6 item a *//* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;if(sel)lbSelRenderAbsIdx=i;/* Aug 31: absolute index in the SORTED+FILTERED list, recorded AS RENDERED so the showcase scroll-to-row lever never has to re-derive the sort (#330 — one mechanism, not two copies). */ /* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetTextRaw(txtLBCount,lbQ.Length>0?I18n.TrF("{0} of {1} players",entries.Count,board.total_players):((Plugin.ShowInactiveOnBoards!=null&&Plugin.ShowInactiveOnBoards.Value)?I18n.TrF("{0} players ranked",board.total_players):I18n.TrF("{0} active players (90d)",board.total_players)));lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetTextRaw(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>{I18n.TrF("Level {0}",ps.level)}</color>");ProfileCard.RegisterNameHover(txtLBPlayerName,selectedSteamId);/* Sept 6 item a */string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?I18n.TrF("Rank: <b><color={0}>{1}</color></b>",string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color,ps.rank_name):"";string _modeBlock=ModeRatingBlock(ps);/* Every emitted mode row ends in a newline; one more creates exactly one empty line before the match summary. */string detail="\n"+(_rkLine.Length>0?_rkLine+"\n":"")+_modeBlock+(_modeBlock.Length>0?"\n":"")+I18n.TrF("{0} matches ({1}W / {2}L)  WR: {3}%",ps.total_matches,ps.wins,ps.losses,(ps.total_matches>0?ps.wins*100f/ps.total_matches:0f).ToString("F0",_INV))+"\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=I18n.TrF("<color=#FFD94D>Ranked (series): {0}W / {1}L</color>",ps.ranked_series_wins,ps.ranked_series_losses)+"\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=I18n.TrF("<color={0}>Leave: {1}/{2} ({3}%)</color>",dcCol,dc,totalRanked,pct.ToString("F0",_INV))+"\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.bullets_hit*100f/ps.bullets_fired).ToString("F1",_INV),ps.bullets_hit,ps.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=ps.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.blocks_successful*100f/ps.blocks_activated).ToString("F1",_INV),ps.blocks_successful,ps.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+        private static void RefreshLeaderboard(){_podiumLbRows.Clear();lbSelRenderAbsIdx=-1;/* Aug 31 showcase scroll-to-row: reset, re-recorded below when the selected row renders. *//* Item 1 (the "Oro v" bug): translate the base label FIRST, then append the arrow, and write Raw so the composed string is never re-looked-up. */string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetTextRaw(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":/* Aug 6 item 6: hide_gold players carry gold==-1 — treat as +infinity so they sit at the TOP of the default descending sort (they were sorting below 0-gold players). */entries.Sort((a,b)=>{int ga=a.gold<0?int.MaxValue:a.gold;int gb=b.gold<0?int.MaxValue:b.gold;return lbSortDesc?gb.CompareTo(ga):ga.CompareTo(gb);});break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=(e.is_online?OnlineDot+" ":"")+InactiveName(Nm(e.display_name,20),e.inactive);/* report 3: the one name sanitiser */if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){/* Aug 31: the server now ships "1v1 1st Place"; on the 1v1 board itself the prefix says nothing — strip it exactly as the 2v2/FFA boards strip theirs (both the stored tick entry and the immediate span, or the first sparkle tick repaints the prefix back). */string _pt=PodiumTitleOnOwnBoard(e.title,"1v1");_podiumLbRows.Add(new object[]{row.txtName,_lbName,_pt,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(_pt,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}/* SetTextRaw (find 15): a bare display name must never hit the translation catalogue — a player literally named "Done." would render as "Hecho.". */UIFactory.SetTextRaw(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);ProfileCard.RegisterNameHover(row.txtName,e.steam_id);/* Sept 6 item a *//* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;if(sel)lbSelRenderAbsIdx=i;/* Aug 31: absolute index in the SORTED+FILTERED list, recorded AS RENDERED so the showcase scroll-to-row lever never has to re-derive the sort (#330 — one mechanism, not two copies). */ /* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetTextRaw(txtLBCount,lbQ.Length>0?I18n.TrF("{0} of {1} players",entries.Count,board.total_players):((Plugin.ShowInactiveOnBoards!=null&&Plugin.ShowInactiveOnBoards.Value)?I18n.TrF("{0} players ranked",board.total_players):I18n.TrF("{0} active players (90d)",board.total_players)));lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetTextRaw(txtLBPlayerName,$"{Nm(ps.display_name)}   <color=#66CCFF>{I18n.TrF("Level {0}",ps.level)}</color>");ProfileCard.RegisterNameHover(txtLBPlayerName,selectedSteamId);/* Sept 6 item a */string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?I18n.TrF("Rank: <b><color={0}>{1}</color></b>",string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color,ps.rank_name):"";string _modeBlock=ModeRatingBlock(ps);/* Every emitted mode row ends in a newline; one more creates exactly one empty line before the match summary. */string detail="\n"+(_rkLine.Length>0?_rkLine+"\n":"")+_modeBlock+(_modeBlock.Length>0?"\n":"")+I18n.TrF("{0} matches ({1}W / {2}L)  WR: {3}%",ps.total_matches,ps.wins,ps.losses,(ps.total_matches>0?ps.wins*100f/ps.total_matches:0f).ToString("F0",_INV))+"\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=I18n.TrF("<color=#FFD94D>Ranked (series): {0}W / {1}L</color>",ps.ranked_series_wins,ps.ranked_series_losses)+"\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=I18n.TrF("<color={0}>Leave: {1}/{2} ({3}%)</color>",dcCol,dc,totalRanked,pct.ToString("F0",_INV))+"\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.bullets_hit*100f/ps.bullets_fired).ToString("F1",_INV),ps.bullets_hit,ps.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=ps.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.blocks_successful*100f/ps.blocks_activated).ToString("F1",_INV),ps.blocks_successful,ps.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
  * limited to the viewer's most-recent 500 matches and silently dropped
  * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+="\n"+I18n.TrF("<b>vs You:</b> <color={0}>{1}W - {2}L ({3} games)</color>",h2hColor,h2hAll,h2hAllL,h2hAll+h2hAllL)+"\n";if(h2hSW+h2hSL>0)detail+="  "+I18n.TrF("Ranked Series: {0}W / {1}L",h2hSW,h2hSL)+"\n";if(h2hCW+h2hCL>0)detail+="  "+I18n.TrF("Casual: {0}W / {1}L",h2hCW,h2hCL)+"\n";}}/* Mod version this player was last seen running (X-Mod-Version
  * header on their last mod-only API call). Helps testers tell at a
- * glance who's on a build that has a given fix. *//* July 22 item 8: opt-in Discord display name, right above the Mod line. Server already nulls discord_display_name for non-opted-in third-party views; the show_discord check is the client-side second layer. */if(ps.show_discord&&!string.IsNullOrEmpty(ps.discord_display_name)){detail+="\n"+I18n.Tr("<color=#888>Discord:</color>")+$" <color=#8899FF>@{Trunc(ps.discord_display_name,24)}</color>";}if(!string.IsNullOrEmpty(ps.mod_version)){string mvCol=ps.mod_version==Plugin.ModVersion?"#88FF88":"#FFD94D";detail+="\n"+I18n.Tr("<color=#888>Mod:</color>")+$" <color={mvCol}>v{ps.mod_version}</color>\n";}else{detail+="\n"+I18n.Tr("<color=#888>Mod: <i>not detected</i></color>")+"\n";}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n"+I18n.Tr("<color=#99AAEE>Top Cards:</color>")+"\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {CardTextLocalizer.PrettyName(ps.top_card_names[ci],ps.top_card_names[ci])}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n"+I18n.Tr("<color=#FFD94D>Tournaments:</color>")+" ";detail+=I18n.TrF("<color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <color=#888>(played {3})</color>",_tHist.winner_count,_tHist.runner_up_count,_tHist.third_place_count,_tHist.participant_count)+"\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=DateFmt.FullShortYear(TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()));}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}/* Composition (item 10 + July 12 item 5): main text = stats + Series-vs-You
+ * glance who's on a build that has a given fix. *//* July 22 item 8: opt-in Discord display name, right above the Mod line. Server already nulls discord_display_name for non-opted-in third-party views; the show_discord check is the client-side second layer. */if(ps.show_discord&&!string.IsNullOrEmpty(ps.discord_display_name)){detail+="\n"+I18n.Tr("<color=#888>Discord:</color>")+$" <color=#8899FF>@{Nm(ps.discord_display_name,24)}</color>";}if(!string.IsNullOrEmpty(ps.mod_version)){string mvCol=ps.mod_version==Plugin.ModVersion?"#88FF88":"#FFD94D";detail+="\n"+I18n.Tr("<color=#888>Mod:</color>")+$" <color={mvCol}>v{ps.mod_version}</color>\n";}else{detail+="\n"+I18n.Tr("<color=#888>Mod: <i>not detected</i></color>")+"\n";}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n"+I18n.Tr("<color=#99AAEE>Top Cards:</color>")+"\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {CardTextLocalizer.PrettyName(ps.top_card_names[ci],ps.top_card_names[ci])}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n"+I18n.Tr("<color=#FFD94D>Tournaments:</color>")+" ";detail+=I18n.TrF("<color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <color=#888>(played {3})</color>",_tHist.winner_count,_tHist.runner_up_count,_tHist.third_place_count,_tHist.participant_count)+"\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=DateFmt.FullShortYear(TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()));}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}/* Composition (item 10 + July 12 item 5): main text = stats + Series-vs-You
  * (so the pager GameObject right after it lands directly under the series
  * list); achievements render in their own element BELOW the pager. */string _histPart;string _seriesPart=BuildViewHistoryText(out _histPart);UIFactory.SetTextRaw(txtLBDetail,detail+_seriesPart);UIFactory.SetTextRaw(txtLBDetailB,_histPart);UIFactory.SetTextRaw(txtLBAch,GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.rating_history_times,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Stop Avoiding in Ranked":"Avoid in Ranked Matchmaking");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}
 /* Admin-only Steam ID (Sid item 10) - IsAdmin resolves async, so gate here
@@ -17968,7 +17973,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 int selOrder = compareSelected.IndexOf(e.steam_id);
                 Color swatch = sel && selOrder >= 0 ? COMPARE_COLORS[selOrder % COMPARE_COLORS.Length] : C_LABEL;
                 string dot = sel ? $"<color=#{ColorToHex(swatch)}>[X]</color> " : "<color=#555>[ ]</color> ";
-                UIFactory.SetText(comparePickerTexts[i], $"{dot}{Trunc(e.display_name, 16)}  <color=#888>{e.rating}</color>");
+                UIFactory.SetText(comparePickerTexts[i], $"{dot}{Nm(e.display_name, 16)}  <color=#888>{e.rating}</color>");
                 UIFactory.SetImageColor(row, sel ? new Color(0.2f, 0.3f, 0.25f, 0.9f) : C_TAB);
             }
             for (int i = n; i < comparePickerRows.Count; i++) comparePickerRows[i].SetActive(false);
@@ -18154,7 +18159,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 // with no usable timestamps skips the player the same way.
                 float[] xs, ys;
                 if (!RatingGraphAxis.Build(hist, histTimes, axisMode, maxPoints, out xs, out ys)) continue;
-                names.Add(Trunc(ps.display_name ?? "?", 14));
+                names.Add(Nm(ps.display_name ?? "?", 14));
                 cols.Add(COMPARE_COLORS[i % COMPARE_COLORS.Length]);
                 xsList.Add(xs);
                 ysList.Add(ys);
@@ -18836,7 +18841,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                         new Vector2(0, 0), new Vector2(bx - 6f, padB + clamped / maxV * plotH + 1f), new Vector2(bw + 12f, 12), UIFactory.AlignMidCenter);
                 }
 
-                MakeGraphLabel($"CmpBarName{gi2}", $"<b><color=#{ColorToHex(pc)}>{Trunc(ps.display_name, nameLen)}</color></b>",
+                MakeGraphLabel($"CmpBarName{gi2}", $"<b><color=#{ColorToHex(pc)}>{Nm(ps.display_name, nameLen)}</color></b>",
                     new Vector2(0, 0), new Vector2(gx - 4f, padB - 18f), new Vector2(groupW + 8f, 16), UIFactory.AlignMidCenter, 13f);
             }
         }
@@ -18918,7 +18923,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                         var ps = compareStatsCache[compareSelected[i]];
                         Color pc = COMPARE_COLORS[i % COMPARE_COLORS.Length];
                         MakeGraphLabel($"CmpAchHdr{blk}_{c}",
-                            $"<b><color=#{ColorToHex(pc)}>{Trunc(ps.display_name, Mathf.Clamp((int)(colW / 9f), 4, 16))}</color></b>",
+                            $"<b><color=#{ColorToHex(pc)}>{Nm(ps.display_name, Mathf.Clamp((int)(colW / 9f), 4, 16))}</color></b>",
                             new Vector2(0, 1), new Vector2(bx + nameW + c * colW, headerY), new Vector2(colW, 16), UIFactory.AlignMidCenter, 13f);
                     }
                     for (int r = from; r < to; r++)
@@ -20436,7 +20441,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 }
                 else
                 {
-                    sb.Append($"<color=#{ColorToHex(pc)}><b>{ps.display_name}</b></color>\n");
+                    sb.Append($"<color=#{ColorToHex(pc)}><b>{Nm(ps.display_name)}</b></color>\n");
                     if (metricName == "Worst Cards")
                         AppendCardList(sb, ps.worst_card_names, ps.worst_card_picks, ps.worst_card_win_rates, I18n.Tr("not enough data (4+ picks)"));
                     else
@@ -20476,7 +20481,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     sb.Append($"<color=#{ColorToHex(col)}><b>{I18n.Tr("(loading...)")}</b></color>\n\n");
                     continue;
                 }
-                sb.Append($"<color=#{ColorToHex(col)}><b>{ps.display_name}</b></color>  ");
+                sb.Append($"<color=#{ColorToHex(col)}><b>{Nm(ps.display_name)}</b></color>  ");
                 switch (metricName)
                 {
                     case "Top Cards":
@@ -22340,7 +22345,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static string OnlineSuffix(){int on=ApiClient.CachedOnlineCount;return on>0?I18n.TrF("  <color=#7FDBFF>|</color>  <color=#AAAAAA>{0} online</color>",on):"";}
 
         private static int CalcStreak(List<ApiClient.MatchHistoryEntry> m){if(m==null||m.Count==0)return 0;bool t=m[0].won;int c=0;for(int i=0;i<m.Count;i++){if(m[i].won==t)c++;else break;}return t?c:-c;}
-        private static string Trunc(string s,int max){if(string.IsNullOrEmpty(s))return "";if(max<=2)return s.Length<=max?s:"..";return s.Length<=max?s:s.Substring(0,max-2)+"..";}
+        private static string Trunc(string s,int max){if(string.IsNullOrEmpty(s))return "";if(max<=2)return s.Length<=max?s:"..";if(s.Length<=max)return s;int cut=max-2;if(char.IsHighSurrogate(s[cut-1]))cut--;/* report 3: never cut a surrogate pair in half */return s.Substring(0,cut)+"..";}
+        /// <summary>Report 3 (2026-09-30): a player-authored name for a list
+        /// panel's TMP text, cut to `max` and passed through the one name
+        /// sanitiser (UnicodeFallback.SafeName over NameGlyphs.Safe): a glyph no
+        /// font carries becomes '?', tag characters become '[' ']', controls a
+        /// space. Display only -- comparisons keep the raw name.</summary>
+        private static string Nm(string s,int max){return UnicodeFallback.SafeName(Trunc(s??"",max));}
+        private static string Nm(string s){return UnicodeFallback.SafeName(s??"");}
 
         /* Aug-3 review find F5 — one shared visible-character budget for a cell
          * composed of two variable-length parts (name + title, name + artist).

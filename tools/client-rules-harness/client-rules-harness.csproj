@@ -94,6 +94,13 @@
                         Unity; so the sentences checked are the shipped ones,
                         looked up in the shipped catalogues.
 
+      NameGlyphs.cs         the one name sanitiser of the list panels (report 3,
+                        2026-09-30): a code point the font chain cannot
+                        render and a cut surrogate pair become '?', controls
+                        a space, tag characters '[' ']'. Driven with a fixed
+                        font-chain answer; U+13171 and a supplementary-plane
+                        emoji are cases, the raw name is the negative control.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -133,6 +140,7 @@
     <Compile Include="../../plugin/I18nCatalogues.cs" />
     <Compile Include="SecureRouteRulesSelfTest.cs" />
     <Compile Include="I18nHarnessStub.cs" />
+    <Compile Include="../../plugin/NameGlyphs.cs" />
   </ItemGroup>
 
 </Project>
