@@ -14,7 +14,10 @@ namespace CompetitiveRounds
 {
     public static class ApiClient
     {
-        private static string baseUrl = "";
+        // volatile: written on the main thread (Initialize, the boot verdict and
+        // the secure-route flip, board row 27) and also read from the chat
+        // socket's thread (FetchRecentChat on a reconnect).
+        private static volatile string baseUrl = "";
         private static float lastFetchTime = 0f;
         private static float fetchCooldown = 5f; // Min seconds between refreshes
 
@@ -669,8 +672,17 @@ namespace CompetitiveRounds
             // `if (Success)` with no else, so LatestModVersion stays null, the
             // F5 Update button stays hidden, and the auto-updater never fires.
             // Probe first and fall back for the session if TLS can't connect.
-            if (string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
-                Plugin.Instance.StartCoroutine(ProbeEndpointThenStart());
+            // Board row 27: the fall-back is no longer for the WHOLE session --
+            // the portal button and a timer re-check the secure route and the
+            // first usable answer returns the session to it (StartBootProbe).
+            // Only the compiled default gets a route: an explicit override is a
+            // deliberate choice and nothing re-checks or replaces it.
+            UsingLegacyFallback = false;
+            _route = null;
+            _routeHarnessBackup = RouteHarnessBackup();
+            if (_routeHarnessBackup != null
+                || string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                StartBootProbe();
             else
                 CheckModVersion();
             // Start the tournament heartbeat loop. This runs forever and fires
@@ -725,7 +737,21 @@ namespace CompetitiveRounds
         // matches has UNIQUE (photon_room_id, player1_id, player2_id), team_matches
         // has the 5-column equivalent, and room ids are per-game suffixed — a
         // replay of a report that actually landed just errors out and is dropped.
-        private class PendingReport { public string url; public string json; public int attempts; public float nextAt; }
+        private class PendingReport
+        {
+            public string url; public string json; public int attempts; public float nextAt;
+            /// <summary>In memory only (never persisted): the entry is held
+            /// back because no session is held for a transport that carries one
+            /// (SecureRouteRules.OutboxSendGate). Only so the wait is logged
+            /// once when it begins and once when it ends, not on every lap.</summary>
+            public bool waitingForSession;
+            /// <summary>In memory only: the time the last restore promised this
+            /// entry a look by (OutboxRouteRestored), negative when none stands.
+            /// A give-back never moves the entry later than it
+            /// (SecureRouteRules.OutboxGiveBackDue); a send that begins after
+            /// the promise has kept it.</summary>
+            public float restoreDueAt = -1f;
+        }
         private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
         /// <summary>WHICH host is driving the supervisor, not merely that one
         /// was started. The flag this replaces was cleared only by the
@@ -776,16 +802,84 @@ namespace CompetitiveRounds
         private static bool _outboxLoaded;
 
         /// <summary>Whether this exact report is already queued. Identity is
-        /// the url and the body, which is what RemovePendingReport already
-        /// matches on, so the two agree about what "the same report" means.</summary>
+        /// the body and the address it resolves to (SameQueuedReport), which is
+        /// what RemovePendingReport also matches on, so the two agree about
+        /// what "the same report" means.</summary>
         private static bool OutboxAlreadyQueued(string url, string json)
         {
             for (int i = 0; i < _pendingReports.Count; i++)
             {
                 var p = _pendingReports[i];
-                if (p.url == url && p.json == json) return true;
+                if (SameQueuedReport(p.url, p.json, url, json)) return true;
             }
             return false;
+        }
+
+        /// <summary>Where a queued report is sent NOW (Codex round 1 HIGH 1).
+        /// A report keeps the address it was queued with, and that address
+        /// named the base of the moment; when the base is one of this session's
+        /// route (the secure address, the backup, a witness lever's), the report
+        /// follows the route to the base in use at the send. So a report queued
+        /// on the backup goes to the secure base, with the session token, from
+        /// the first retry after a restore, and a report queued on the secure
+        /// base in an earlier launch goes where this launch's route goes. No
+        /// route (an explicit BaseUrl override) changes nothing. Resolved once
+        /// per send: a request already in flight keeps its URL.</summary>
+        private static string OutboxSendUrl(string storedUrl)
+        {
+            var route = _route;
+            if (route == null || string.IsNullOrEmpty(storedUrl)) return storedUrl;
+            string[] bases = route.Bases(SecureProbeBase());
+            if (_routeHarnessBackup == null)
+            {
+                // The compiled pair too, for a report queued in an earlier
+                // launch whose route answered differently. Never in the witness
+                // harness: a real report on disk must not be sent to it.
+                var all = new string[bases.Length + 2];
+                bases.CopyTo(all, 0);
+                all[bases.Length] = Plugin.DefaultApiUrl;
+                all[bases.Length + 1] = Plugin.LegacyApiUrl;
+                bases = all;
+            }
+            return SecureRouteRules.OutboxTarget(storedUrl, baseUrl, bases);
+        }
+
+        /// <summary>The route has just returned to the secure base: every
+        /// queued report falls due within OUTBOX_RESTORE_DELAY, so a report that
+        /// waited on the backup (at the capped interval) is looked at promptly.
+        /// Falling due is not being sent: the pass sends a report to the secure
+        /// base only with a fresh session (SecureRouteRules.OutboxSendGate), and
+        /// until SteamAuth lands one the entry waits without spending an attempt
+        /// (Codex round 2 HIGH 1: a restore followed by minutes without a
+        /// session used to send it tokenless and spend its budget). Nothing is
+        /// sent from here: the supervisor's next pass decides, resolving each
+        /// address as always.</summary>
+        private static void OutboxRouteRestored()
+        {
+            if (_pendingReports.Count == 0) return;
+            float soon = Time.realtimeSinceStartup + OUTBOX_RESTORE_DELAY;
+            int pulled = 0;
+            foreach (var p in _pendingReports)
+            {
+                p.restoreDueAt = soon;
+                if (p.nextAt > soon) { p.nextAt = soon; pulled++; }
+            }
+            Plugin.Log.LogInfo($"[OUTBOX] secure route restored: {_pendingReports.Count} queued report(s) due within "
+                               + $"{OUTBOX_RESTORE_DELAY:0} s ({pulled} brought forward)");
+            EnsureOutboxLoop();
+        }
+
+        private const float OUTBOX_RESTORE_DELAY = 20f;
+
+        /// <summary>One report, whichever of the route's bases it was queued
+        /// under: the same body bound for the same place once resolved. Without
+        /// the resolution a report queued on the backup and queued again on the
+        /// secure base after a restore would be two entries and two sends.</summary>
+        private static bool SameQueuedReport(string urlA, string jsonA, string urlB, string jsonB)
+        {
+            if (jsonA != jsonB) return false;
+            if (urlA == urlB) return true;
+            return string.Equals(OutboxSendUrl(urlA), OutboxSendUrl(urlB), StringComparison.Ordinal);
         }
         /// <summary>DERIVED from the window the server will still accept a
         /// report in, not chosen. At the capped backoff below this ladder has
@@ -979,7 +1073,7 @@ namespace CompetitiveRounds
                 // was the one call that could not restart the driver.
                 EnsureOutboxLoop();
                 foreach (var pending in _pendingReports)
-                    if (pending.url == url && pending.json == json)
+                    if (SameQueuedReport(pending.url, pending.json, url, json))
                         return;
                 float initialDelay = OutboxInitialDelay(url);
                 _pendingReports.Add(new PendingReport
@@ -1160,7 +1254,7 @@ namespace CompetitiveRounds
             for (int i = _pendingReports.Count - 1; i >= 0; i--)
             {
                 var pending = _pendingReports[i];
-                if (pending.url != url || pending.json != json) continue;
+                if (!SameQueuedReport(pending.url, pending.json, url, json)) continue;
                 _pendingReports.RemoveAt(i);
                 removed = true;
             }
@@ -1365,7 +1459,7 @@ namespace CompetitiveRounds
             {
                 bool seen = false;
                 foreach (var n in merged.entries)
-                    if (n.url == e.url && n.json == e.json) { seen = true; break; }
+                    if (SameQueuedReport(n.url, n.json, e.url, e.json)) { seen = true; break; }
                 if (!seen) merged.entries.Add(e);
             }
             return merged;
@@ -1651,17 +1745,85 @@ namespace CompetitiveRounds
             foreach (var p in due)
             {
                 if (!_pendingReports.Contains(p)) continue;
+                // Codex round 1 HIGH 1: the address is resolved for THIS send
+                // and kept in a local, so a flip during the request changes
+                // nothing about it; the entry is rewritten (and persisted) only
+                // when the route has moved since it was queued.
+                string target = OutboxSendUrl(p.url);
+                if (!string.Equals(target, p.url, StringComparison.Ordinal))
+                {
+                    Plugin.Log.LogInfo($"[OUTBOX] queued report follows the route: {SecureRouteRules.HostPort(p.url)} -> "
+                                       + $"{SecureRouteRules.HostPort(target)}");
+                    p.url = target;
+                    PersistOutbox();
+                }
+                // Codex round 2 HIGH 1: over a transport that carries the
+                // session token, a report goes out only WITH a fresh session.
+                // Without one it waits here: no send, no attempt spent, the
+                // entry kept, looked at again after the poll interval.
+                if (SecureRouteRules.OutboxSendGate(CredentialedTransportAllowed(target), SteamAuth.HasFreshToken)
+                    == SecureRouteRules.OutboxGate.WaitForSession)
+                {
+                    p.nextAt = Time.realtimeSinceStartup + (float)SecureRouteRules.OutboxSessionPollSeconds;
+                    if (!p.waitingForSession)
+                    {
+                        p.waitingForSession = true;
+                        Plugin.Log.LogInfo($"[OUTBOX] queued report waits for a session before it goes to {SecureRouteRules.HostPort(target)}: "
+                                           + $"sent only with the token, no attempt spent while it waits ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                    }
+                    continue;
+                }
+                if (p.waitingForSession)
+                {
+                    p.waitingForSession = false;
+                    Plugin.Log.LogInfo($"[OUTBOX] session held; sending the queued report to {SecureRouteRules.HostPort(target)} with it");
+                }
+                p.restoreDueAt = -1f;   // this send keeps any restore's promise
                 p.attempts++;
                 // Linear-ish backoff, capped at 4x the base interval. Measured
-                // from now rather than from the top of the pass — an earlier
+                // from now rather than from the top of the pass - an earlier
                 // entry's attempt can have taken most of a minute.
                 p.nextAt = Time.realtimeSinceStartup
                            + OUTBOX_RETRY_SECONDS
                              * Math.Min(OUTBOX_RETRY_MAX_MULTIPLIER, (float)p.attempts);
-                bool done = false, ok = false; string resp = null;
-                yield return PostRequest(p.url, p.json, (s, r) => { done = true; ok = s; resp = r; });
+                // Whether THIS request carried the token, read from the header
+                // PostRequestRaw actually stamped (not from the address: a
+                // session dropped between the gate and the stamp leaves an
+                // https request without one).
+                bool done = false, ok = false, carried = false; string resp = null;
+                // redactErrorText: a failure's text can reach the log below,
+                // so its body is scrubbed whole before the 300 cut.
+                yield return PostRequest(target, p.json, (s, r) => { done = true; ok = s; resp = r; },
+                                         stamped => carried = stamped, redactErrorText: true);
                 while (!done) yield return null;
-                if (ok)
+                // Codex round 3 HIGH 1: what the request CARRIED decides
+                // removal as well as spend, and it is asked before the status.
+                // A request without the token (the plaintext backup, or a
+                // session dropped between the gate and the stamp) settles
+                // nothing, whatever it was answered: a 2xx there can come from
+                // a server that does not enforce or from anything answering in
+                // its place, and removing the entry on it lost the report. The
+                // attempt is given back and the entry stays queued until one
+                // send that carries the token settles it.
+                var answer = SecureRouteRules.OutboxAnswerFor(ok, carried);
+                if (answer == SecureRouteRules.OutboxAnswer.GiveBack)
+                {
+                    p.attempts--;
+                    // The earlier of the capped interval and a restore's
+                    // promise made while this request was in flight
+                    // (Codex round 2 LOW 1): never later than the promise.
+                    p.nextAt = (float)SecureRouteRules.OutboxGiveBackDue(
+                        Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER, p.restoreDueAt);
+                    if (ok)
+                        Plugin.Log.LogInfo("[OUTBOX] a retry without the session token was answered 2xx; not taken as delivered, "
+                                           + $"the report stays queued for a send with the token ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                    else
+                        // The failure text is a remote answer: flattened,
+                        // scrubbed whole, then bounded (Codex round 3 LOW 5).
+                        Plugin.Log.LogInfo(SecureRouteRules.OutboxTokenlessFailureLine(resp, p.attempts, OUTBOX_MAX_ATTEMPTS));
+                    continue;
+                }
+                if (answer == SecureRouteRules.OutboxAnswer.Settle)
                 {
                     Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
                     if (!IsSilentOutboxUrl(p.url))
@@ -1766,6 +1928,10 @@ namespace CompetitiveRounds
                     // retires one is the server, which turns the same refusal
                     // into a 403 once the sitting has been idle past its live
                     // window.
+                    //
+                    // Only a request that carried the session token reaches
+                    // this branch (SecureRouteRules.OutboxAnswerFor): a
+                    // tokenless one was given back above.
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
@@ -1907,48 +2073,358 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Probe the TLS endpoint before committing to it for the session.
-        /// Falls back to the legacy plaintext endpoint ONLY on a transport-level
-        /// failure — never on an HTTP status, because any 4xx/5xx proves the port
-        /// and the TLS handshake both worked and the problem is elsewhere.
-        /// Deliberately does NOT write to config: this must re-evaluate every launch.
-        /// DELETE THIS along with Plugin.LegacyApiUrl in the same release that drops
-        /// the plaintext port-forward, or a broken TLS path is forgiven forever.</summary>
-        private static IEnumerator ProbeEndpointThenStart()
+        // Secure route (board row 27). The boot check used to be the only one: a
+        // session whose two boot attempts failed stayed on the plaintext backup
+        // until the game restarted, and a LAN desktop fails them by construction
+        // (the router's hairpin hangs the second connection, #223). The same
+        // probe now also runs from the portal button and from a timer while on
+        // the backup. SecureRouteRules decides; this file does the I/O and owns
+        // the base-url field, which it copies from the route after a verdict.
+        // Deliberately never writes to config: the boot check re-evaluates every
+        // launch. DELETE the backup half along with Plugin.LegacyApiUrl in the
+        // same release that drops the plaintext port-forward, or a broken TLS
+        // path is forgiven forever.
+
+        /// <summary>This session's route; null when BaseUrl is an explicit
+        /// override, for which no check, backup or timer ever runs.</summary>
+        private static SecureRouteRules.Route _route;
+        private static float _secureRouteTickRt = -999f;
+        private static bool _loggedBadTestSecureUrl;
+        /// <summary>The local witness harness's backup address, or null (every
+        /// player, and this seat whenever the lever is empty). Set once per
+        /// Initialize from [Broadcast] TestBackupUrl.</summary>
+        private static string _routeHarnessBackup;
+
+        /// <summary>The local witness harness (Codex round 1 HIGH 1's control):
+        /// on the broadcast identity only, [Broadcast] TestBackupUrl names a
+        /// plaintext address that replaces the backup for this launch, the
+        /// configured BaseUrl is the route's own address even when it is not
+        /// the compiled default, and a check may probe a plaintext loopback
+        /// address (the harness has no certificate a client trusts). The
+        /// harness runs every request against a local api; a player's route is
+        /// untouched, since the lever is read only on the broadcast identity
+        /// and is empty by default.</summary>
+        private static string RouteHarnessBackup()
         {
-            const int attempts = 2;
-            bool reachable = false;
-            for (int i = 0; i < attempts && !reachable; i++)
+            try
             {
-                using (var probe = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version"))
+                if (Plugin.BroadcastTestBackupUrl == null) return null;
+                string lever = SecureRouteRules.TrimBase(Plugin.BroadcastTestBackupUrl.Value);
+                if (lever.Length == 0) return null;
+                if (!BroadcastMode.IsBroadcastIdentityAtBoot()) return null;
+                Uri parsed;
+                if (!lever.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || !Uri.TryCreate(lever, UriKind.Absolute, out parsed) || !string.IsNullOrEmpty(parsed.UserInfo))
                 {
-                    probe.timeout = 8;
-                    StampVersionHeader(probe);
-                    yield return probe.SendWebRequest();
-                    // "Reachable" must mean USABLE, not merely "something answered".
-                    // An earlier version accepted anything that wasn't a
-                    // ConnectionError, on the reasoning that an HTTP status proves
-                    // the port and TLS handshake worked. True — but useless to the
-                    // player: nginx up with the api container down returns 502, and
-                    // a captive portal or TLS-intercepting middlebox returns an
-                    // HTML 200. Both would pin the client to an endpoint it cannot
-                    // actually use, and because every recovery channel rides this
-                    // same baseUrl there would be no way back. Require a parseable
-                    // mod-version payload instead.
-                    string body = probe.result == UnityWebRequest.Result.Success
-                        ? (probe.downloadHandler?.text ?? "") : "";
-                    if (!string.IsNullOrEmpty(ExtractJsonString(body, "version")))
-                        reachable = true;
-                    else
-                        Plugin.Log.LogWarning(
-                            $"[API] TLS endpoint probe {i + 1}/{attempts} unusable: " +
-                            $"result={probe.result} code={probe.responseCode} err={probe.error}");
+                    Plugin.Log.LogWarning($"[SCR] TestBackupUrl ignored: not a plaintext http address ({lever})");
+                    return null;
+                }
+                Plugin.Log.LogWarning($"[SCR] witness harness: the backup is {lever} and the route's address is {baseUrl} for this launch");
+                return lever;
+            }
+            catch { return null; }
+        }
+
+        private static string _testQueueReportLast;
+
+        /// <summary>The harness's report (Codex round 1 HIGH 1's control): each
+        /// new value of [Broadcast] TestQueueReport posts the body in
+        /// BepInEx/config/scr-portal-report.json to the current base exactly as
+        /// ReportMatch posts a finished 1v1 game (PostMatchReportWithRetry, then
+        /// EnqueueFailedReport on failure or on a 2xx that did not carry the
+        /// session token), so the outbox that carries it is
+        /// the real one. ReportMatch itself is fenced off the broadcast
+        /// identity, which is why the body comes from a file. Called from the
+        /// broadcast lever tick; does nothing unless the harness is armed.</summary>
+        internal static void TickTestQueueReport()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestQueueReport == null) return;
+                string want = (Plugin.BroadcastTestQueueReport.Value ?? "").Trim();
+                if (_testQueueReportLast == null) { _testQueueReportLast = want; return; }
+                if (string.Equals(want, _testQueueReportLast, StringComparison.Ordinal)) return;
+                _testQueueReportLast = want;
+                if (want.Length == 0) return;
+                if (_routeHarnessBackup == null || Plugin.Instance == null)
+                {
+                    Plugin.Log.LogWarning("[SCR] TestQueueReport ignored: the witness harness is not armed (TestBackupUrl)");
+                    return;
+                }
+                string path = Path.Combine(BepInEx.Paths.ConfigPath, "scr-portal-report.json");
+                string json = File.ReadAllText(path).Trim();
+                string url = $"{baseUrl}/api/v1/matches";
+                Plugin.Log.LogInfo($"[SCR] TestQueueReport ({want}): posting the harness report to {url} ({json.Length} bytes)");
+                Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(url, json, (success, response) =>
+                {
+                    if (success)
+                    {
+                        Plugin.Log.LogInfo($"[SCR] TestQueueReport: reported at once: {Trunc(response, 160)}");
+                        return;
+                    }
+                    Plugin.Log.LogWarning($"[SCR] TestQueueReport: the send failed ({Trunc(response ?? "", 160)}); queued as a game's report is");
+                    EnqueueFailedReport($"{baseUrl}/api/v1/matches", json);   // as ReportMatch's failure branch
+                    SeedWitnessAttempts(want, json);
+                }));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestQueueReport failed: {ex.Message}"); }
+        }
+
+        /// <summary>Witness only (Codex round 2 HIGH 1's control S8/S9): a
+        /// TestQueueReport value ending "@N" sets the attempts the queued entry
+        /// has already spent to N, so the one attempt that would delete it is
+        /// the next counted one. Reached only from TickTestQueueReport, which
+        /// does nothing unless the broadcast-only witness harness is armed.</summary>
+        private static void SeedWitnessAttempts(string want, string json)
+        {
+            int at = want.LastIndexOf('@');
+            int seed;
+            if (at < 0 || !int.TryParse(want.Substring(at + 1), out seed) || seed < 0 || seed >= OUTBOX_MAX_ATTEMPTS) return;
+            foreach (var p in _pendingReports)
+            {
+                if (p.json != json) continue;
+                p.attempts = seed;
+                Plugin.Log.LogWarning($"[SCR] TestQueueReport: the queued entry's spent attempts set to {seed} of {OUTBOX_MAX_ATTEMPTS} (witness only)");
+                return;
+            }
+        }
+
+        private static string _testStaleTokenLast;
+
+        /// <summary>Witness lever (Codex round 1 LOW 1's control): each new
+        /// value of [Broadcast] TestStaleToken replaces the held session token
+        /// with a random one the server never issued. Called from the broadcast
+        /// lever tick.</summary>
+        internal static void TickTestStaleToken()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestStaleToken == null) return;
+                string want = (Plugin.BroadcastTestStaleToken.Value ?? "").Trim();
+                if (_testStaleTokenLast == null) { _testStaleTokenLast = want; return; }
+                if (string.Equals(want, _testStaleTokenLast, StringComparison.Ordinal)) return;
+                _testStaleTokenLast = want;
+                if (want.Length == 0) return;
+                var bytes = new byte[32];
+                using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+                string fake = Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+                bool done = SteamAuth.ReplaceTokenForWitness(fake);
+                Plugin.Log.LogWarning(done
+                    ? $"[SCR] TestStaleToken ({want}): the held session token was replaced by one the server never issued"
+                    : $"[SCR] TestStaleToken ({want}): no session held; nothing replaced");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestStaleToken failed: {ex.Message}"); }
+        }
+
+        /// <summary>The address a check probes: the compiled secure default, or,
+        /// on the broadcast identity only, [Broadcast] TestSecureUrl when it
+        /// names an https address (the witness lever for the backup path). The
+        /// session only ever moves to an address a check has just shown usable.
+        /// The boot check asks too: it starts in Initialize, which DoInitialize
+        /// calls before GameStateWatcher.Initialize resolves the local id, so the
+        /// identity is asked in its boot-safe form, and only when the lever is set.</summary>
+        private static string SecureProbeBase()
+        {
+            // The harness's own address stands in for the compiled default,
+            // so an emptied lever never sends a harness check to the real one.
+            bool harness = _routeHarnessBackup != null && _route != null;
+            string def = harness ? _route.Bases(null)[0] : SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
+            try
+            {
+                if (Plugin.BroadcastTestSecureUrl == null) return def;
+                string lever = SecureRouteRules.TrimBase(Plugin.BroadcastTestSecureUrl.Value);
+                if (lever.Length == 0) return def;
+                if (!BroadcastMode.IsBroadcastIdentityAtBoot()) return def;
+                if (SecureRouteRules.IsSecure(lever)) return lever;
+                if (harness && SecureRouteRules.IsLoopbackPlaintext(lever)) return lever;
+                if (!_loggedBadTestSecureUrl)
+                {
+                    _loggedBadTestSecureUrl = true;
+                    Plugin.Log.LogWarning($"[SCR] TestSecureUrl ignored: not an https address ({lever})");
                 }
             }
+            catch { }
+            return def;
+        }
+
+        private static double SecureRetrySeconds()
+        {
+            double minutes = SecureRouteRules.DefaultRetryMinutes;
+            try { if (Plugin.SecureRetryMinutes != null) minutes = Plugin.SecureRetryMinutes.Value; } catch { }
+            return SecureRouteRules.RetrySecondsFromMinutes(minutes);
+        }
+
+        private static int SecureProbeOwner()
+        {
+            var host = Plugin.Instance;
+            return host != null ? host.GetInstanceID() : 0;
+        }
+
+        private static double RealtimeNow() => Time.realtimeSinceStartup;
+
+        /// <summary>The ONE probe behind the boot check, the portal button and
+        /// the timer: GET mod-version with an 8 s timeout, stamped like every
+        /// request. "Reachable" must mean USABLE, not merely "something
+        /// answered". An earlier version accepted anything that wasn't a
+        /// ConnectionError, on the reasoning that an HTTP status proves the
+        /// port and TLS handshake worked. True, but useless to the player:
+        /// nginx up with the api container down returns 502, and a captive
+        /// portal or TLS-intercepting middlebox returns an HTML 200. Both would
+        /// pin the client to an endpoint it cannot actually use, and because
+        /// every recovery channel rides this same baseUrl there would be no way
+        /// back. So the reading records whether a parseable mod-version payload
+        /// came back, and SecureRouteRules.Classify calls anything else
+        /// unusable.</summary>
+        private static IEnumerator ProbeSecureRoute(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)
+        {
+            var reading = new SecureRouteRules.Reading
+            {
+                Result = SecureRouteRules.Transport.NotStarted, ResultName = "NotStarted",
+            };
+            float started = Time.realtimeSinceStartup;
+            using (var probe = UnityWebRequest.Get(url))
+            {
+                probe.timeout = timeoutSeconds;
+                StampVersionHeader(probe);
+                yield return probe.SendWebRequest();
+                try
+                {
+                    reading.ResultName = probe.result.ToString();
+                    reading.HttpCode = probe.responseCode;
+                    reading.Error = probe.error;
+                    switch (probe.result)
+                    {
+                        case UnityWebRequest.Result.Success: reading.Result = SecureRouteRules.Transport.Success; break;
+                        case UnityWebRequest.Result.ProtocolError: reading.Result = SecureRouteRules.Transport.HttpError; break;
+                        case UnityWebRequest.Result.ConnectionError: reading.Result = SecureRouteRules.Transport.ConnectionError; break;
+                        default: reading.Result = SecureRouteRules.Transport.DataError; break;
+                    }
+                    string body = probe.result == UnityWebRequest.Result.Success
+                        ? (probe.downloadHandler?.text ?? "") : "";
+                    // A strict parse of the whole body (Codex round 1 MEDIUM 1):
+                    // the substring reader accepted a body cut off inside the
+                    // version string and refused one with a space after the
+                    // colon, and a usable verdict ends the backup for good.
+                    reading.VersionParsed = SecureRouteRules.IsModVersionBody(body);
+                }
+                catch (Exception ex) { reading.Error = "probe read failed: " + ex.Message; }
+            }
+            reading.ElapsedSeconds = Time.realtimeSinceStartup - started;
+            try { done(reading); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] secure route verdict failed: {ex.Message}"); }
+        }
+
+        /// <summary>The route's transport: one ProbeSecureRoute coroutine per
+        /// attempt, on the current host.</summary>
+        private sealed class SecureProbeTransport : SecureRouteRules.ITransport
+        {
+            internal static readonly SecureProbeTransport Shared = new SecureProbeTransport();
+
+            public void Get(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)
+            {
+                Coroutine running = null;
+                try
+                {
+                    var host = Plugin.Instance;
+                    if (host != null) running = host.StartCoroutine(ProbeSecureRoute(url, timeoutSeconds, done));
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] secure route probe could not start: {ex.Message}"); }
+                // An inactive host returns null instead of throwing (see
+                // EnsureOutboxLoop), so the verdict is "not started", now.
+                if (running == null)
+                    done(new SecureRouteRules.Reading
+                    {
+                        Result = SecureRouteRules.Transport.NotStarted, ResultName = "NotStarted",
+                        Error = "the probe could not start (no active host)",
+                    });
+            }
+        }
+
+        /// <summary>The boot check: two attempts against the secure address,
+        /// then OnBootProbeConcluded, then the version check (as before).</summary>
+        private static void StartBootProbe()
+        {
+            var route = _routeHarnessBackup != null
+                ? new SecureRouteRules.Route(baseUrl, _routeHarnessBackup, acceptLoopbackPlaintext: true)
+                : new SecureRouteRules.Route(Plugin.DefaultApiUrl, Plugin.LegacyApiUrl);
+            _route = route;
+            int gen = route.Begin(SecureRouteRules.Trigger.Boot, SecureProbeBase(), RealtimeNow(),
+                                  SecureProbeOwner(), SecureRetrySeconds());
+            if (gen == 0) { CheckModVersion(); return; }
+            RunSecureCheck(route, gen);
+        }
+
+        private static void RunSecureCheck(SecureRouteRules.Route route, int generation)
+        {
+            route.Run(generation, SecureProbeTransport.Shared, RealtimeNow, SecureRetrySeconds,
+                      LogSecureAttempt, c => OnSecureRunConcluded(route, c));
+        }
+
+        /// <summary>From the persistent behaviour's Update, beside OutboxTick:
+        /// the timer's check while on the backup. Asked on a tick rather than
+        /// armed once, so a destroyed host cannot silence it (#508); the route
+        /// itself refuses to run beside a live check or off the backup.</summary>
+        internal static void SecureRouteTick()
+        {
+            var route = _route;
+            if (route == null || !route.OnFallback) return;
+            float now = Time.realtimeSinceStartup;
+            if (now - _secureRouteTickRt < 1f) return;
+            _secureRouteTickRt = now;
+            int owner = SecureProbeOwner();
+            if (owner == 0 || !route.AutoDue(now, owner)) return;
+            int gen = route.Begin(SecureRouteRules.Trigger.Timer, SecureProbeBase(), now, owner, SecureRetrySeconds());
+            if (gen != 0) RunSecureCheck(route, gen);
+        }
+
+        /// <summary>One log line per attempt. The boot run keeps the survey's
+        /// own line, unchanged, so a player's log still shows which route it
+        /// took and why (item d, #224); button and timer checks name their
+        /// outcome whatever it was.</summary>
+        private static void LogSecureAttempt(SecureRouteRules.Attempt a)
+        {
+            try
+            {
+                if (a.Trigger == SecureRouteRules.Trigger.Boot)
+                {
+                    if (a.Outcome != SecureRouteRules.Outcome.Usable)
+                        Plugin.Log.LogWarning(
+                            $"[API] TLS endpoint probe {a.Number}/{a.Of} unusable: " +
+                            $"result={a.Reading.ResultName} code={a.Reading.HttpCode} err={a.Reading.Error}");
+                    return;
+                }
+                string trigger = a.Trigger == SecureRouteRules.Trigger.Button ? "portal button" : "timer";
+                string outcome = SecureRouteRules.Describe(a.Outcome, a.Reading.HttpCode, SecureRouteRules.ProbeTimeoutSeconds);
+                string took = a.Reading.ElapsedSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+                string detail = a.Outcome == SecureRouteRules.Outcome.Usable ? ""
+                    : $" (result={a.Reading.ResultName} code={a.Reading.HttpCode} err={a.Reading.Error})";
+                Plugin.Log.LogInfo($"[SCR] secure route check {a.AttemptsSinceFallback} ({trigger}): {outcome} at "
+                                   + $"{SecureRouteRules.HostPort(a.Base)} in {took} s{detail}"
+                                   + (a.Current ? "" : " [superseded, ignored]"));
+            }
+            catch { }
+        }
+
+        private static void OnSecureRunConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            // A verdict from a superseded run, or from a route a later
+            // Initialize replaced (a respawn re-runs it), changes nothing.
+            if (c == null || c.Stale || !ReferenceEquals(route, _route)) return;
+            if (c.Trigger == SecureRouteRules.Trigger.Boot) { OnBootProbeConcluded(route, c); return; }
+            if (c.Flipped) OnSecureRouteRestored(route, c);
+            FinishPortalPress(c);
+        }
+
+        /// <summary>The boot run's verdict. On failure the session moves to the
+        /// plaintext backup (the survey's lines below are unchanged) and the
+        /// timer starts counting; either way the version check runs next.</summary>
+        private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            bool reachable = c.Usable;
 
             if (!reachable)
             {
-                baseUrl = Plugin.LegacyApiUrl.TrimEnd('/');
+                baseUrl = route.CurrentBase;
                 UsingLegacyFallback = true;
                 Plugin.Log.LogWarning(
                     $"[API] {Plugin.DefaultApiUrl} unreachable — falling back to {baseUrl} for this session. " +
@@ -1957,8 +2433,102 @@ namespace CompetitiveRounds
                 // already looping on the dead TLS host has to be pointed at the
                 // fallback explicitly — otherwise chat stays dark all session.
                 try { ChatClient.Retarget(baseUrl); } catch (Exception ex) { Plugin.Log.LogWarning($"[API] chat retarget failed: {ex.Message}"); }
+                string every = (SecureRetrySeconds() / 60.0).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                Plugin.Log.LogInfo($"[SCR] secure route {c.HostPort} failed at boot "
+                                   + $"({SecureRouteRules.Describe(c.Outcome, c.HttpCode, c.TimeoutSeconds)}); the backup "
+                                   + $"carries this session until a check answers: every {every} min, and on the portal button");
             }
+            else
+            {
+                baseUrl = route.CurrentBase;
+                // A respawn re-runs Initialize, and chat's session override is
+                // static: it can still name the backup from an earlier boot in
+                // this process. Released only if it is still the API's (no-op
+                // otherwise).
+                try { ChatClient.ReleaseApiFallback(Plugin.LegacyApiUrl); } catch { }
+            }
+            FinishPortalPress(c);
             CheckModVersion();
+        }
+
+        /// <summary>A check begun on the backup answered: the session returns to
+        /// the address that answered, for good (the route stops its timer).
+        ///
+        /// One field write, on the main thread. A request object built before
+        /// it keeps the backup URL it was built with and completes there: the
+        /// same api answers both ports, and it already carries the backup's
+        /// rules (StampVersionHeader withheld the bearer and
+        /// SensitiveTransportBlocked vetted the route, both against its own
+        /// URL). Every request built after it uses the secure base, bearer
+        /// included. The report outbox resolves each queued report's address
+        /// when it sends it (OutboxSendUrl), so a report queued on the backup
+        /// goes to the restored base, with the token, from its next retry on;
+        /// a retry already in flight keeps the URL it was sent with.</summary>
+        private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            baseUrl = route.CurrentBase;
+            UsingLegacyFallback = false;
+            int n = c.AttemptsSinceFallback;
+            Plugin.Log.LogInfo($"[SCR] secure route restored after {n} attempt{(n == 1 ? "" : "s")} ({baseUrl})");
+            // Chat was pointed at the backup by the boot verdict. The REST check
+            // says nothing about chat's own TLS stack (#194), so chat is not
+            // forced onto wss: its override is released and its own three-strike
+            // wss fall-back decides from here.
+            try { ChatClient.ReleaseApiFallback(Plugin.LegacyApiUrl); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] chat release failed: {ex.Message}"); }
+            try { OutboxRouteRestored(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] route-restore pass failed: {ex.Message}"); }
+        }
+
+        /// <summary>The answer to a portal press that was waiting on a check.</summary>
+        private static void FinishPortalPress(SecureRouteRules.Conclusion c)
+        {
+            if (c.OpenPortal)
+            {
+                if (c.Flipped)
+                    CompetitiveUI.ShowNotification(SecureRouteText.RestoredOpeningPortal(), new Color(0.4f, 1f, 0.5f), 5f);
+                var host = Plugin.Instance;
+                if (host != null) host.StartCoroutine(OpenPortalWhenSessionReady());
+            }
+            else if (c.ReportFailure)
+            {
+                Plugin.Log.LogInfo($"[SCR] portal not opened: the secure route {c.HostPort} "
+                                   + $"{SecureRouteRules.Describe(c.Outcome, c.HttpCode, c.TimeoutSeconds)}; the session stays on the backup");
+                CompetitiveUI.ShowNotification(SecureRouteText.Failure(c.Outcome, c.HostPort, c.TimeoutSeconds, c.HttpCode),
+                                               Color.yellow, 9f);
+            }
+        }
+
+        /// <summary>After a restore there may be no session yet: no ticket is
+        /// requested while the session is on the backup (SteamAuth.MaybeRefresh),
+        /// and the portal mint accepts a verified session only. SteamAuth
+        /// requests one on its own loop once the route returns; this waits for
+        /// it, bounded, then mints either way (a refusal then shows the
+        /// existing sign-in message). Used by the press that restores the
+        /// route and by every press after a restore.</summary>
+        private static IEnumerator OpenPortalWhenSessionReady()
+        {
+            // A USABLE session, not a nonempty token (Codex round 1 LOW 1): a
+            // token that expired while the session sat on the backup is still
+            // nonempty, and minting with it only earns a refusal. The mint
+            // itself then covers a token the server has dropped (a fresh-looking
+            // one it no longer knows): MintPortalSessionAndOpen re-mints once.
+            float started = Time.realtimeSinceStartup;
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))
+            {
+                try { SteamAuth.MaybeRefresh(); } catch { }
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+            MintPortalSessionAndOpen(true);
+        }
+
+        /// <summary>A known local identity and a fresh session: what the portal
+        /// mint needs before it is worth sending.</summary>
+        private static bool PortalSessionReady()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return false;
+            return SteamAuth.HasFreshToken;
         }
 
         /// <summary>Bug 392 item A step 2: whether the server has said it
@@ -5807,30 +6377,125 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Portal handoff (§2.5): mint a short-TTL portal session and
-        /// open the browser with the token in the URL FRAGMENT. Refused on a
-        /// plaintext base URL — the token is a real credential.</summary>
+        /// open the browser with the token in the URL FRAGMENT. Never over a
+        /// plaintext base URL: the token is a real credential. On the backup
+        /// connection the press first checks the secure route (board row 27)
+        /// and opens the portal in the same press when it answers; while a
+        /// check is already running the press waits for that one. After a
+        /// restore the press waits for the first secure session.</summary>
         public static void OpenTranslatePortal()
         {
+            // The identity is asked only before a mint (Codex round 1 LOW 2):
+            // the secure check and the plaintext refusal need none, and asking
+            // first made a press during the startup identity race do nothing
+            // at all, with no toast. SecureRouteRules.PortalPressAction orders it.
+            if (Plugin.Instance == null) return;
+            var route = _route;
+            SecureRouteRules.Press? press = null;
+            int gen = 0;
+            if (route != null)
+                press = route.PressPortal(SecureProbeBase(), RealtimeNow(), SecureProbeOwner(), SecureRetrySeconds(), out gen);
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
-            if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            var action = SecureRouteRules.PortalPressAction(
+                press, baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase),
+                route != null && route.Restored, !string.IsNullOrEmpty(sid) && sid != "unknown");
+            switch (action)
             {
-                CompetitiveUI.ShowNotification("Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.", Color.yellow, 6f);
+                case SecureRouteRules.PressAction.ShowChecking:
+                    CompetitiveUI.ShowNotification(SecureRouteText.Checking(), Color.white, 9f);
+                    Plugin.Log.LogInfo(press == SecureRouteRules.Press.Checking
+                        ? "[SCR] portal button: on the backup connection, checking the secure route before opening"
+                        : "[SCR] portal button: a secure route check is already running; the press waits for it");
+                    if (press == SecureRouteRules.Press.Checking) RunSecureCheck(route, gen);
+                    return;
+                case SecureRouteRules.PressAction.RefusePlaintext:
+                    // No check can help: an explicit plaintext BaseUrl (no
+                    // route), so the gate names the address instead of
+                    // promising one. One log line says why nothing opened
+                    // (Codex round 2 LOW 3), with the base reduced to
+                    // scheme://host:port so no credential reaches the log.
+                    CompetitiveUI.ShowNotification(SecureRouteText.PlaintextOverride(baseUrl), Color.yellow, 8f);
+                    Plugin.Log.LogInfo(SecureRouteRules.PlaintextRefusalLine(baseUrl));
+                    return;
+                case SecureRouteRules.PressAction.WaitThenMint:
+                    // Back from the backup (the first secure session may not
+                    // have landed yet: SteamAuth requests one on its own loop
+                    // once the route returns), or the startup identity race:
+                    // wait for both, bounded, then mint.
+                    Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());
+                    return;
+                default:
+                    MintPortalSessionAndOpen(true);
+                    return;
+            }
+        }
+
+        /// <summary>The mint and the browser hand-off, behind the same gate. The
+        /// base is read once, so the token is minted and opened on one host.
+        /// `remintOnRefusal`: when the server refuses the session the request
+        /// carried (PostRequest has already dropped that token), sign in again
+        /// and mint once more, so one press opens exactly one portal tab
+        /// (Codex round 1 LOW 1). The second mint passes false: a second
+        /// refusal is reported, never looped.</summary>
+        private static void MintPortalSessionAndOpen(bool remintOnRefusal)
+        {
+            if (Plugin.Instance == null) return;
+            string sid = MatchTracker.LocalSteamId;
+            // Every press that ends without a portal says why in the log (board
+            // row 27 round 2: witness S5's press r5 showed only a 5 s toast and
+            // left no line, so its cause could not be read afterwards).
+            if (string.IsNullOrEmpty(sid) || sid == "unknown")
+            {
+                Plugin.Log.LogWarning("[I18N] portal not opened: the local Steam identity is not known yet");
+                CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
+                return;
+            }
+            string portalBase = baseUrl;
+            if (!portalBase.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                Plugin.Log.LogWarning($"[I18N] portal not opened: the base moved off https before the mint ({portalBase})");
                 return;
             }
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/i18n/portal-session",
+                $"{portalBase}/api/v1/i18n/portal-session",
                 $"{{\"steam_id\":\"{Escape(sid)}\"}}",
                 (success, response) =>
                 {
                     string token = success ? ExtractJsonString(response, "token") : null;
-                    if (string.IsNullOrEmpty(token))
+                    var act = SecureRouteRules.PortalMintAction(success, token, response, remintOnRefusal);
+                    if (act == SecureRouteRules.MintAction.RemintOnce && Plugin.Instance != null)
                     {
+                        Plugin.Log.LogInfo("[I18N] portal mint refused the session; signing in again and minting once more");
+                        Plugin.Instance.StartCoroutine(RemintThenOpenPortal());
+                        return;
+                    }
+                    if (act != SecureRouteRules.MintAction.Open)
+                    {
+                        // The failure's own answer, never a token: one line,
+                        // scrubbed of credentials, then bounded (Codex round 2
+                        // LOW 4; SecureRouteRules.PortalMintFailureLine).
+                        Plugin.Log.LogWarning(SecureRouteRules.PortalMintFailureLine(portalBase, success, response, !remintOnRefusal));
                         CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
                         return;
                     }
-                    Application.OpenURL($"{baseUrl}/translate#token={token}");
-                }));
+                    Plugin.Log.LogInfo($"[I18N] portal opened over {portalBase}");
+                    Application.OpenURL($"{portalBase}/translate#token={token}");
+                },
+                redactErrorText: true));   // the failure text is logged: scrubbed whole before it is cut
+        }
+
+        /// <summary>After the portal mint refused the session: wait (bounded)
+        /// for the session SteamAuth mints to replace the dropped one, then mint
+        /// once more without a further retry.</summary>
+        private static IEnumerator RemintThenOpenPortal()
+        {
+            float started = Time.realtimeSinceStartup;
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))
+            {
+                try { SteamAuth.MaybeRefresh(); } catch { }
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+            MintPortalSessionAndOpen(false);
         }
 
         // R2-5: chat scrollback request generation. A refetch (reconnect,
@@ -8286,13 +8951,20 @@ namespace CompetitiveRounds
             // Persist before the first network yield so a quit, crash, or long
             // outage cannot erase the immutable evidence body.
             EnqueueFailedReport(url, body);
+            // The queued copy is taken out only for a 2xx to a request that
+            // carried the session token (SecureRouteRules.OutboxAnswerFor,
+            // Codex round 3 HIGH 1); a tokenless 2xx leaves it for the outbox.
+            bool carried = false;
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 url, body,
                 (ok, resp) =>
                 {
                     if (ok)
                     {
-                        RemovePendingReport(url, body);
+                        if (SecureRouteRules.OutboxAnswerFor(true, carried) == SecureRouteRules.OutboxAnswer.Settle)
+                            RemovePendingReport(url, body);
+                        else
+                            Plugin.Log.LogInfo("[INPUT] macro evidence answered without the session token; kept queued for a send with it");
                     }
                     else
                     {
@@ -8300,7 +8972,8 @@ namespace CompetitiveRounds
                             $"[INPUT] exact macro evidence was not attached: {Trunc120(resp)}");
                     }
                 },
-                maxRetries: 6, retryDelay: 2f));
+                maxRetries: 6, retryDelay: 2f,
+                onTokenStamped: stamped => carried = stamped));
         }
 
         public static void ReportMatch(
@@ -8554,7 +9227,7 @@ namespace CompetitiveRounds
                 preflightRetiredThrough = preflightGeneration;
             ClearActiveSeries();
 
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(
                 $"{baseUrl}/api/v1/matches",
                 json,
                 (success, response) =>
@@ -15673,7 +16346,23 @@ namespace CompetitiveRounds
         /// behind it is waiting on. There is no wait here any more: the delayed
         /// send this method used to open with was an elapsed-time guess about
         /// another seat's transaction, and the seat that used to schedule it now
-        /// watches for a terminal outcome instead.</summary>
+        /// watches for a terminal outcome instead.
+        ///
+        /// <para>NOT UNDER THE CARRIED RULE, by decision (merge pass 3 of the
+        /// v1.41.0 beta lane, board row 27's merge semantic 5). The match
+        /// reporters settle a 2xx only when the answering request carried
+        /// X-Session-Token (PostMatchReportWithRetry) because their four routes
+        /// read the Steam session (_check_steam_session) and each report has a
+        /// queued copy to fall back on.
+        /// Neither holds here: the report-dc route is authenticated by its
+        /// HMAC and never reads the session (team_series_report_dc in
+        /// backend/api/main.py takes no request), so a 2xx records the same
+        /// whether or not the token went out; and this report has no queued
+        /// copy, so a 2xx refused as "not carried" would have nowhere to go
+        /// and would publish OutcomeFailed, which tells the seat behind to
+        /// post its fallback beside a report that landed. A 2xx here is
+        /// therefore answered as it is, onTokenStamped is not passed, and
+        /// test_portal_reprobe_client.py pins both halves of that premise.</para></summary>
         private static IEnumerator SendTeamSeriesDcReport(string url, string seriesId, bool fallback)
         {
             yield return Plugin.Instance.StartCoroutine(PostRequestWithRetryAnswered(url, "", (ok, resp, answered) =>
@@ -16679,7 +17368,7 @@ namespace CompetitiveRounds
 
             string json = sb.ToString();
             Plugin.Log.LogInfo($"Reporting 2v2 match (series={seriesId}, winner=T{winnerTeam}, {t1Rounds}-{t2Rounds})...");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(
                 $"{baseUrl}/api/v1/team/matches", json,
                 (success, response) =>
                 {
@@ -17925,7 +18614,7 @@ namespace CompetitiveRounds
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[1v2-REPORT] submitting series={seriesId} winner=side{winnerSide} {soloRounds}-{duoRounds}");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
             {
                 if (ok)
                 {
@@ -22527,7 +23216,7 @@ namespace CompetitiveRounds
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[FFA-REPORT] submitting lobby={lobbyId} n={players.Count} winner={winnerSteam}");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ffa/matches", json, (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ffa/matches", json, (ok, resp) =>
             {
                 if (ok)
                 {
@@ -22833,6 +23522,11 @@ namespace CompetitiveRounds
             // OutboxPass, so a report that can never land is dropped rather
             // than retried twenty times.
             if (durable) EnqueueFailedReport(url, DC_REPORT_BODY);
+            // Whether this request carried the session token, read from the
+            // header actually stamped on it: the queued copy is taken out only
+            // for a 2xx to a request that did (SecureRouteRules.OutboxAnswerFor,
+            // Codex round 3 HIGH 1); a tokenless 2xx leaves it for the outbox.
+            bool carried = false;
             Plugin.Instance.StartCoroutine(PostRequest(
                 url,
                 DC_REPORT_BODY,
@@ -22840,14 +23534,18 @@ namespace CompetitiveRounds
                 {
                     if (success)
                     {
-                        if (durable) RemovePendingReport(url, DC_REPORT_BODY);
+                        if (durable && SecureRouteRules.OutboxAnswerFor(true, carried) == SecureRouteRules.OutboxAnswer.Settle)
+                            RemovePendingReport(url, DC_REPORT_BODY);
+                        else if (durable)
+                            Plugin.Log.LogInfo("[DC] disconnect report answered without the session token; kept queued for a send with it");
                         Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
                     }
                     else if (durable)
                         Plugin.Log.LogWarning($"[DC] Disconnect report failed, queued for retry: {response}");
                     else
                         Plugin.Log.LogWarning($"[DC] Failed to report disconnect (no series id — not queued): {response}");
-                }
+                },
+                stamped => carried = stamped
             ));
         }
 
@@ -23044,9 +23742,21 @@ namespace CompetitiveRounds
             try
             {
                 if (req.responseCode != 401) return;
+                // A 401 speaks only for a token the request carried, and
+                // StampVersionHeader withholds the token on plaintext-to-public
+                // transport by this same rule on this same URL. A request to
+                // the backup never showed the server a session, so its 401 says
+                // nothing about ours: clearing on it dropped a good session, and
+                // after a secure-route restore (board row 27) a request still
+                // bound for the backup would drop the new one.
+                if (!CredentialedTransportAllowed(req.url)) return;
                 string body = null;
                 try { body = req.downloadHandler?.text; } catch { }
-                if (body == null || !body.Contains("session_required")) return;
+                // Both refusal wordings (Codex round 1 LOW 1): the enforced
+                // writes say session_required, the portal mint says
+                // "steam session required", and missing the second left a
+                // dropped token in place for the next press to fail on too.
+                if (!SecureRouteRules.IsSessionRefusal(body)) return;
                 SteamAuth.InvalidateSessionIf(sentToken);
                 Plugin.Log.LogWarning("[STEAM-AUTH] server rejected session (401) — re-minting on next heartbeat");
             }
@@ -23124,47 +23834,89 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>July 21 item 4: exchange a Steam web-API auth ticket for a
-        /// server session token. Called from SteamAuth's ticket callback.</summary>
-        public static void PostSteamAuth(string ticketHex)
+        /// <summary>Whether the api would exchange a Steam ticket now: the
+        /// transport rule the bearer rides on (F1), asked of the current base.
+        /// SteamAuth asks it before requesting a ticket and PostSteamAuth before
+        /// exchanging one: one rule, asked at both ends.</summary>
+        internal static bool TicketExchangeAllowed() => CredentialedTransportAllowed(baseUrl);
+
+        /// <summary>The refusal notice, once per session: a log line and a
+        /// toast. "Until it is back", not "this session": on the backup
+        /// connection a secure-route check can restore signed-in features
+        /// mid-session (board row 27).</summary>
+        internal static void NoteTicketExchangeRefused()
         {
+            if (_insecureAuthNotified) return;
+            _insecureAuthNotified = true;
+            Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} - signed-in features are off until the secure route is back");
+            try
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are off until it is back."), new Color(1f, 0.6f, 0.2f), 8f);
+            }
+            catch { }
+        }
+
+        /// <summary>July 21 item 4: exchange a Steam web-API auth ticket for a
+        /// server session token. Called from SteamAuth's ticket callback.
+        /// `onEnded` is called exactly once, on every path, with how the
+        /// exchange ended (board row 27 round 2): SteamAuth cancels the ticket
+        /// there and only then may request the next one.</summary>
+        public static void PostSteamAuth(string ticketHex, Action<string> onEnded)
+        {
+            bool ended = false;
+            Action<string> end = outcome =>
+            {
+                if (ended) return;
+                ended = true;
+                try { onEnded?.Invoke(outcome); } catch (Exception ex) { Plugin.Log.LogWarning($"[STEAM-AUTH] ticket end hook threw: {ex.Message}"); }
+            };
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { end("not sent: no identity"); return; }
             // F1 (Codex r3): never exchange a Steam ticket over plaintext to a
             // PUBLIC host — the returned 24h bearer would be capturable in
-            // transit. SteamAuth keeps minting tickets on a 4s backoff while
-            // no session lands, so the log + toast are once-per-session.
-            if (!CredentialedTransportAllowed(baseUrl))
+            // transit. SteamAuth asks TicketExchangeAllowed before it requests
+            // a ticket, so this refusal is reached only by a ticket requested
+            // on a secure base whose callback lands after the session moved to
+            // the backup.
+            if (!TicketExchangeAllowed())
             {
-                if (!_insecureAuthNotified)
-                {
-                    _insecureAuthNotified = true;
-                    Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} — signed-in features disabled this session");
-                    try
-                    {
-                        CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are disabled this session."), new Color(1f, 0.6f, 0.2f), 8f);
-                    }
-                    catch { }
-                }
+                NoteTicketExchangeRefused();
+                end("not sent: plaintext base");
                 return;
             }
             string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"ticket_hex\":\"{Escape(ticketHex)}\",\"mod_version\":\"{Escape(Plugin.ModVersion ?? "0.0.0")}\"}}";
-            Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/auth/steam",
-                json,
-                (success, response) =>
-                {
-                    if (!success)
+            try
+            {
+                Plugin.Instance.StartCoroutine(PostRequest(
+                    $"{baseUrl}/api/v1/auth/steam",
+                    json,
+                    (success, response) =>
                     {
-                        Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange failed: {response}");
-                        return;
-                    }
-                    string token = ExtractJsonString(response, "session_token");
-                    int expiresIn = ExtractJsonInt(response, "expires_in");
-                    if (!string.IsNullOrEmpty(token)) SteamAuth.SetSession(token, expiresIn > 0 ? expiresIn : 86400);
-                    else Plugin.Log.LogWarning("[STEAM-AUTH] session response had no token");
-                }
-            ));
+                        try
+                        {
+                            if (!success)
+                            {
+                                Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange failed: {response}");
+                                return;
+                            }
+                            string token = ExtractJsonString(response, "session_token");
+                            int expiresIn = ExtractJsonInt(response, "expires_in");
+                            if (!string.IsNullOrEmpty(token)) SteamAuth.SetSession(token, expiresIn > 0 ? expiresIn : 86400);
+                            else Plugin.Log.LogWarning("[STEAM-AUTH] session response had no token");
+                        }
+                        finally
+                        {
+                            end(success ? "answered" : "failed");
+                        }
+                    },
+                    timeoutSeconds: SecureRouteRules.SteamAuthExchangeTimeoutSeconds
+                ));
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange not started: {ex.Message}");
+                end("not started");
+            }
         }
 
         // Paths that MUST work before consent is granted (version probe so we can auto-update
@@ -23625,11 +24377,23 @@ namespace CompetitiveRounds
         /// consent gate, the sensitive-transport gate, the version header, the
         /// session handling and the error formatting cannot differ between a
         /// caller that hands over text and one that hands over bytes.</summary>
-        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback)
+        /// <param name="onTokenStamped">Told once, before the request goes
+        /// out, whether StampVersionHeader attached X-Session-Token to it (the
+        /// header itself is read back): the outbox's spend rule asks what the
+        /// request carried, not what its address could have carried.</param>
+        /// <param name="timeoutSeconds">The request's timeout. The session
+        /// exchange passes SecureRouteRules.SteamAuthExchangeTimeoutSeconds,
+        /// which the portal's readiness wait is derived from.</param>
+        /// <param name="redactErrorText">The caller logs the failure text: its
+        /// whole body is scrubbed of credentials before it is cut
+        /// (FormatRequestError; Codex round 3 LOW 3).</param>
+        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,
+                                               Action<bool> onTokenStamped = null, int timeoutSeconds = 20,
+                                               bool redactErrorText = false)
         {
             return PostRequestRaw(url,
                                   string.IsNullOrEmpty(json) ? null : Encoding.UTF8.GetBytes(json),
-                                  callback, json);
+                                  callback, json, null, onTokenStamped, timeoutSeconds, redactErrorText);
         }
 
         /// <summary>The response text a request aborted by
@@ -23656,7 +24420,10 @@ namespace CompetitiveRounds
         private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,
                                                   Action<bool, string> callback,
                                                   string sensitiveProbe = null,
-                                                  Func<bool> abortIf = null)
+                                                  Func<bool> abortIf = null,
+                                                  Action<bool> onTokenStamped = null,
+                                                  int timeoutSeconds = 20,
+                                                  bool redactErrorText = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
@@ -23671,7 +24438,13 @@ namespace CompetitiveRounds
                 request.SetRequestHeader("Content-Type", "application/json");
                 StampVersionHeader(request);
                 string _sentTok = SteamAuth.SessionToken;
-                request.timeout = 20;
+                request.timeout = timeoutSeconds;
+                if (onTokenStamped != null)
+                {
+                    bool stamped = false;
+                    try { stamped = !string.IsNullOrEmpty(request.GetRequestHeader("X-Session-Token")); } catch { }
+                    try { onTokenStamped(stamped); } catch { }
+                }
 
                 if (abortIf == null)
                 {
@@ -23715,11 +24488,14 @@ namespace CompetitiveRounds
                     success,
                     success
                         ? request.downloadHandler.text
-                        : FormatRequestError(request));
+                        : FormatRequestError(request, redactErrorText));
             }
         }
 
-        private static string FormatRequestError(UnityWebRequest request)
+        /// <param name="redact">The caller logs this text: the whole response
+        /// body is scrubbed of credentials BEFORE it is cut (Codex round 3
+        /// LOW 3; SecureRouteRules.RequestErrorText).</param>
+        private static string FormatRequestError(UnityWebRequest request, bool redact = false)
         {
             if (request == null) return "request failed";
             // Carry the RESPONSE BODY, not just Unity's status text (lobby
@@ -23730,10 +24506,6 @@ namespace CompetitiveRounds
             // pattern-matches it for permanence.
             string body = "";
             try { body = request.downloadHandler?.text ?? ""; } catch { }
-            if (body.Length > 300) body = body.Substring(0, 300);
-            string line = request.responseCode > 0
-                ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}"
-                : request.error;
             // Sept 6 item b (review r1 M14): a 429 says WHEN to retry in its
             // Retry-After header, and for the daily window that header is the
             // only honest figure — carry it as a trailing line so a caller can
@@ -23743,8 +24515,9 @@ namespace CompetitiveRounds
             // extractors) sees exactly what it saw before.
             string retryAfter = null;
             try { retryAfter = request.GetResponseHeader("Retry-After"); } catch { }
-            if (!string.IsNullOrEmpty(retryAfter) && !string.IsNullOrEmpty(line)) line += "\nRetry-After: " + retryAfter.Trim();
-            return line;
+            // The text itself (the body cut to 300, after the scrub when
+            // `redact`) is built by one rule the harness executes.
+            return SecureRouteRules.RequestErrorText(request.responseCode, body, request.error, retryAfter, redact);
         }
 
         // ── Sept 6 (Sid, in-game mail): request + slicer aliases for MailClient.cs ──
@@ -23826,13 +24599,20 @@ namespace CompetitiveRounds
         /// method is its two-argument face. The refusal rule is built here, from
         /// the shared FfaReportRules predicate, only for a caller that opted in,
         /// and the loop asks it of every failed attempt.</para></summary>
-        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false)
+        /// <param name="onTokenStamped">Told before each attempt goes out
+        /// whether StampVersionHeader attached X-Session-Token to it (the
+        /// header itself is read back), so the last call before `callback`
+        /// describes the request that answered. Passed through unchanged to
+        /// the one loop, which tells it (merge pass 3: the parameter is the
+        /// loop's, so a caller of either face gets the same report).</param>
+        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false,
+                                                        Action<bool> onTokenStamped = null)
         {
             Func<UnityWebRequest, bool> stopOn = null;
             if (stopOnTerminalRefusal)
                 stopOn = request => FfaReportRules.IsTerminalRefusal(request.responseCode);
             return PostRequestWithRetryAnswered(
-                url, json, (ok, resp, answered) => callback(ok, resp), maxRetries, retryDelay, stopOn);
+                url, json, (ok, resp, answered) => callback(ok, resp), maxRetries, retryDelay, stopOn, onTokenStamped);
         }
 
         /// <summary>The retried POST, with ONE extra fact for the callers that need
@@ -23860,8 +24640,17 @@ namespace CompetitiveRounds
         /// attempt, and a true answer ends the loop at once instead of re-sending:
         /// PostRequestWithRetry builds it from FfaReportRules.IsTerminalRefusal for
         /// a caller that opts in (see its summary for why a decided refusal breaks
-        /// the loop's premise). Null, the default, retries every failure.</para></summary>
-        private static IEnumerator PostRequestWithRetryAnswered(string url, string json, Action<bool, string, bool> callback, int maxRetries = 3, float retryDelay = 2f, Func<UnityWebRequest, bool> stopOn = null)
+        /// the loop's premise). Null, the default, retries every failure.</para>
+        ///
+        /// <para><paramref name="onTokenStamped"/>, when given, is told before
+        /// each attempt goes out whether StampVersionHeader attached
+        /// X-Session-Token to it (the header read back from the request), so
+        /// the last call before <paramref name="callback"/> describes the
+        /// request that answered. PostMatchReportWithRetry feeds it to
+        /// SecureRouteRules.ReportSendCarried; null, the default, is told
+        /// nothing.</para></summary>
+        private static IEnumerator PostRequestWithRetryAnswered(string url, string json, Action<bool, string, bool> callback, int maxRetries = 3, float retryDelay = 2f, Func<UnityWebRequest, bool> stopOn = null,
+                                                                Action<bool> onTokenStamped = null)
         {
             bool allAnswered = true;
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent", true); yield break; }
@@ -23881,6 +24670,12 @@ namespace CompetitiveRounds
                     StampVersionHeader(request);
                     string _sentTok = SteamAuth.SessionToken;
                     request.timeout = 10;
+                    if (onTokenStamped != null)
+                    {
+                        bool stamped = false;
+                        try { stamped = !string.IsNullOrEmpty(request.GetRequestHeader("X-Session-Token")); } catch { }
+                        try { onTokenStamped(stamped); } catch { }
+                    }
 
                     yield return request.SendWebRequest();
 
@@ -23918,6 +24713,35 @@ namespace CompetitiveRounds
                         callback(false, FormatRequestError(request), allAnswered);
                 }
             }
+        }
+
+        /// <summary>PostRequestWithRetry for a match report (Codex round 4
+        /// HIGH 1): the settlement rule the outbox applies to a queued report,
+        /// applied to the first send. `callback(true, ...)` is given only for a
+        /// 2xx to a request that carried the session token
+        /// (SecureRouteRules.ReportSendCarried, fed by onTokenStamped before
+        /// every attempt). A 2xx from any attempt that did not carry it reaches
+        /// the caller as a failure with SecureRouteRules.TokenlessReportAnswer,
+        /// so the caller's failure arm queues the same body under the same key,
+        /// exactly as it queues every failure, and the player sees the queued
+        /// outcome. The loop stops at that answer: another attempt would go out
+        /// the same way. Every caller that settles a match report uses this,
+        /// never PostRequestWithRetry directly.</summary>
+        private static IEnumerator PostMatchReportWithRetry(string url, string json, Action<bool, string> callback,
+                                                            int maxRetries = 3, float retryDelay = 2f,
+                                                            bool stopOnTerminalRefusal = false)
+        {
+            var carried = new SecureRouteRules.ReportSendCarried();
+            return PostRequestWithRetry(url, json, (ok, resp) =>
+            {
+                if (ok && !carried.Settles(ok))
+                {
+                    Plugin.Log.LogWarning("[OUTBOX] a match report was answered 2xx without the session token; not taken as recorded, it is queued for a send with the token");
+                    callback(false, SecureRouteRules.TokenlessReportAnswer);
+                    return;
+                }
+                callback(ok, resp);
+            }, maxRetries, retryDelay, stopOnTerminalRefusal, carried.Stamped);
         }
 
         // ── Discord Linking ──────────────────────────────────────

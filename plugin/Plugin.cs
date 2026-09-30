@@ -47,6 +47,7 @@ namespace CompetitiveRounds
         // anyone who unzipped the mod forge admin requests.
         internal static ConfigEntry<string> AdminHmacSecret;
         internal static ConfigEntry<bool> HttpsMigrationDone;
+        internal static ConfigEntry<float> SecureRetryMinutes;   // [API] board row 27: minutes between secure-route checks while the session runs on the backup
         internal static ConfigEntry<bool> RankedEnabled;
         internal static ConfigEntry<bool> RankedDisabledByConsent;
         internal static ConfigEntry<bool> ShowNotifications;
@@ -170,6 +171,11 @@ namespace CompetitiveRounds
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
+        internal static ConfigEntry<string> BroadcastTestPress;          // broadcast seat only -- "ObjectName[:nonce]" presses a named F5 overlay button once per new value (board row 27 witnesses)
+        internal static ConfigEntry<string> BroadcastTestSecureUrl;      // broadcast seat only -- an https address the secure-route check probes instead of the default one (board row 27 witnesses)
+        internal static ConfigEntry<string> BroadcastTestBackupUrl;      // broadcast seat only -- a plaintext address that replaces the backup for one launch: the local witness harness of board row 27 round 2
+        internal static ConfigEntry<string> BroadcastTestQueueReport;    // broadcast seat only -- each new value posts BepInEx/config/scr-portal-report.json as a match report through the real send and outbox path (board row 27 round 2 harness)
+        internal static ConfigEntry<string> BroadcastTestStaleToken;     // broadcast seat only -- each new value replaces the held session token with one the server never issued (board row 27 round 2 witness)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<string> BroadcastTestReporterElectionSentinel; // broadcast seat only — any new value runs the 2v2 DC reporter-election self-test once
         internal static ConfigEntry<string> BroadcastTestAutoLogConsentSentinel; // broadcast seat only — any new value runs the automatic-log consent-abort self-test once
@@ -513,6 +519,16 @@ namespace CompetitiveRounds
                 "admins receive the value out-of-band and it must match the " +
                 "server's ADMIN_HMAC_SECRET. Admin menu actions are rejected " +
                 "without it."
+            );
+
+            // Board row 27: while the session runs on the plaintext backup (the
+            // secure check at boot failed), the secure route is checked again
+            // every this-many minutes, and on the Translate portal button. A
+            // NEW key, so no existing default changes (#190); clamped to
+            // 0.25..60 where it is read (ApiClient.SecureRetrySeconds).
+            SecureRetryMinutes = Config.Bind(
+                "API", "SecureRetryMinutes", 5f,
+                "Minutes between automatic checks of the secure connection while the game is running on the backup connection (0.25 to 60). The Translate portal button also checks it on demand."
             );
 
             // One-time HTTPS migration. Config.Bind writes its default to
@@ -1172,6 +1188,26 @@ namespace CompetitiveRounds
             BroadcastTestQuit = Config.Bind(
                 "Broadcast", "TestQuit", "",
                 "Broadcast seat only: set to any value that differs from the value at launch (e.g. quit-<timestamp>) to quit the game — Application.Quit, then a hard exit if the process is still alive 8 s later. Clear it afterwards; the value present at launch is the baseline and never fires."
+            );
+            BroadcastTestPress = Config.Bind(
+                "Broadcast", "TestPress", "",
+                "Broadcast seat only: 'ObjectName[:nonce]' presses the named button on the open F5 overlay through the button's own click path (e.g. SPortal:1 for the Translate portal button, ScrMod:1 for the scrmod.com link). The value at launch is the baseline and never fires; each later different non-empty value presses once. Clear it when done."
+            );
+            BroadcastTestSecureUrl = Config.Bind(
+                "Broadcast", "TestSecureUrl", "",
+                "Broadcast seat only: an https address the secure-connection check probes instead of the default one, so a witness can make the secure route unreachable (a closed port or an unroutable host) without touching BaseUrl. Empty = the default address. Read at every check; clear it when done."
+            );
+            BroadcastTestBackupUrl = Config.Bind(
+                "Broadcast", "TestBackupUrl", "",
+                "Broadcast seat only, local witness harness: a plaintext http address that replaces the backup connection for this launch. While set, BaseUrl is the route's own address even when it is not the default, TestSecureUrl may also name a plaintext loopback address (http://127.0.0.1:port), and empty TestSecureUrl means BaseUrl. Point BaseUrl at a local api when using it. Read once at launch; clear it when done."
+            );
+            BroadcastTestQueueReport = Config.Bind(
+                "Broadcast", "TestQueueReport", "",
+                "Broadcast seat only, local witness harness: each new non-empty value (the value at launch never fires) posts the match report in BepInEx/config/scr-portal-report.json to the current api through the same send, failure and outbox path a finished 1v1 game uses. Only while TestBackupUrl is set. Clear it when done."
+            );
+            BroadcastTestStaleToken = Config.Bind(
+                "Broadcast", "TestStaleToken", "",
+                "Broadcast seat only: each new non-empty value (the value at launch never fires) replaces the held session token with a random one the server never issued, keeping its local expiry, so a witness can press the portal button with a token the server refuses. Clear it when done."
             );
             BroadcastTestPlayerCards = Config.Bind(
                 "Broadcast", "TestPlayerCards", "",
@@ -2587,6 +2623,34 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestQuit lever failed: {ex.Message}"); }
         }
 
+        // TestPress lever state (board row 27 witnesses): the value at its
+        // first read is the baseline and never fires; each later different
+        // non-empty value presses once.
+        private static string _testPressLast;
+
+        /// <summary>Board row 27 and 33a witnesses: press a named button on the
+        /// open F5 overlay through the ClickHandler a real click runs (#420:
+        /// synthetic mouse input never reaches the overlay on this VM). The
+        /// TestQuit grammar, except that every new value fires once rather than
+        /// once per process. Broadcast identity only (the caller has already
+        /// checked), after the same 2 s cfg reload.</summary>
+        private void TickTestPress()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestPress == null) return;
+                string want = (Plugin.BroadcastTestPress.Value ?? "").Trim();
+                if (_testPressLast == null) { _testPressLast = want; return; }
+                if (string.Equals(want, _testPressLast, StringComparison.Ordinal)) return;
+                _testPressLast = want;
+                if (want.Length == 0) return;
+                int colon = want.IndexOf(':');
+                string name = colon >= 0 ? want.Substring(0, colon).Trim() : want;
+                Plugin.Log.LogInfo($"[UI] TestPress -> {name}: {NativeUI.DevPressButton(name)}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestPress lever failed: {ex.Message}"); }
+        }
+
         private static void QuitThenKill()
         {
             // r5 review M5: the hard-kill watchdog must not live on Unity's
@@ -2619,6 +2683,9 @@ namespace CompetitiveRounds
                 try { Plugin.ConfigFileForLevers?.Reload(); } catch { }
             }
             TickTestQuit();
+            TickTestPress();
+            ApiClient.TickTestQueueReport();
+            ApiClient.TickTestStaleToken();
             string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
             if (raw == _lastTestOpenTab) return;
             if (Time.realtimeSinceStartup < 6f) return;   // let the menu and the overlay's page build settle
@@ -3146,6 +3213,11 @@ namespace CompetitiveRounds
             // enqueue because a session that has stopped enqueueing is the one
             // whose queue would otherwise stay put.
             try { ApiClient.OutboxTick(); } catch { }
+
+            // Board row 27: the secure-route re-check while the session runs on
+            // the plaintext backup. Self-throttled (once a second) and a no-op
+            // unless the boot check fell back to the backup.
+            try { ApiClient.SecureRouteTick(); } catch { }
 
             // F5 input (no log spam — just toggle)
             if (Input.GetKeyDown(KeyCode.F5))

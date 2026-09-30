@@ -73,6 +73,29 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>IsBroadcastIdentity for a caller that can run before
+        /// GameStateWatcher.Initialize has resolved LocalSteamId (board row 27:
+        /// the boot secure check starts in ApiClient.Initialize, which
+        /// DoInitialize calls first, so the property still reads false there).
+        /// When the property says no, the id is read from Steamworks directly:
+        /// a plain read with no side effects; a Steamworks that is not up yet
+        /// throws or reads 0, and that answers false. Does not latch - the
+        /// property latches as before once the id resolves.</summary>
+        internal static bool IsBroadcastIdentityAtBoot()
+        {
+            if (IsBroadcastIdentity) return true;
+            try
+            {
+                ulong id = Steamworks.SteamUser.GetSteamID().m_SteamID;
+                if (id == 0) return false;
+                string sid = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                for (int i = 0; i < BroadcastAccounts.Length; i++)
+                    if (string.Equals(BroadcastAccounts[i], sid, StringComparison.Ordinal)) return true;
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>r3 finding 10 (idle-throttle gate): any non-Idle director
         /// state — granting, joining, watching, leaving, recovering — means
         /// this seat is NOT out of play. Regular players' director never

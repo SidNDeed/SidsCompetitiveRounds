@@ -319,6 +319,113 @@ def test_the_settings_model_guarantees_each_have_a_case(harness_run, name):
         "the case printed no measurement: " + line)
 
 
+def test_the_secure_route_suite_ran_every_case_and_none_failed(harness_run):
+    """Board row 27: the secure-route checks behind the Translate portal
+    button and the timer that retries while the session runs on the plaintext
+    backup. SecureRouteRules decides; its cases live in the harness-only
+    SecureRouteRulesSelfTest.cs with a fake transport and a fake clock, and
+    the sentences come from the shipped SecureRouteText.cs, looked up in the
+    shipped catalogues."""
+    suites = _suites(harness_run)
+    assert "secureroute" in suites, "the SecureRouteRules suite did not report"
+    run, fail, verdict = suites["secureroute"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[secureroute\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 46 cases on the commit that added the suite, 72 since round 2 added
+    # the J, O, R, K and H cases; the floor is that count, not one far
+    # below it (#342). Raise it when cases are added (116 since round 5 added
+    # O11-O11g).
+    assert run >= 116, "the SecureRouteRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # the portal button: on-demand check with a fake transport
+    "P1 on the backup a press begins ONE check of the secure address with the 8 s timeout",
+    "P2 the check answers: the session flips to the secure base and the portal opens in the same press",
+    "P3 control: the check times out: the session stays on the backup and the press reports it",
+    "P4 the failure toast names the host:port and the 8 s timeout, word for word",
+    "P6 no sentence tells the player to restart, and every hole is filled",
+    "P9 a second press while the check runs joins it and starts nothing",
+    # the timer with a fake clock
+    "T1 on the backup the timer checks at the 5-minute marks and at no other second",
+    "T2 control: a session that never left the secure base never checks",
+    "T3 a live check holds the timer past its mark: never a second check beside it",
+    "T3c control: once the check has answered, the mark alone decides",
+    "T5 the timer stops at the first answer and the session is back on the secure base",
+    "T6 off the backup no check of any trigger begins, and a press opens at once",
+    # the flip mid-flight
+    "F1 a request queued on the backup before the flip completes against the backup",
+    "F2 control: a request built after the flip goes to the secure base",
+    # round 2: the probe body (MEDIUM 1)
+    "J1 a compact mod-version body is usable and restores the secure route",
+    "J2 a mod-version body with whitespace between its tokens is usable and restores the secure route",
+    "J3 control: a JSON body without the version member is not the SCR server and keeps the backup",
+    "J4 control: a body cut off inside the version string is not the SCR server and keeps the backup",
+    # round 2: the outbox follows the route (HIGH 1)
+    "O1 a report queued on the backup is sent to the secure base from the first send after the flip",
+    "O1c control: before the flip the same report is sent to the backup",
+    "O4 a failed retry that did not carry the session token spends no attempt",
+    "O5 with enforcement armed a report queued on the backup is delivered once, with the token, after the restore",
+    "O5c control: the queued URL kept, as in round 1, never reaches the secure base and is never delivered",
+    # round 3: a restored retry goes out only with the session (Codex round 2 HIGH 1)
+    "O4b over a transport that carries the token, a report without a fresh session waits and is not sent",
+    "O7 restored without a session for 2 min: no send to the secure base, no attempt spent, the entry kept",
+    "O7b then the session lands: exactly one send, with the token, one settlement, an empty outbox",
+    "O8 a request sent without the token after the gate passed spends nothing and removes nothing",
+    "O9 a backup 401 that lands after a restore keeps the entry due by the restore's promise (20 s)",
+    # round 2: the portal press (LOW 1, LOW 2)
+    "R1 both refusal wordings (the portal mint's and the enforced writes') read as a session refusal",
+    "R2 a mint refused for its session re-mints once, and the second refusal is reported, never looped",
+    "K1 a press on the backup while the local identity is unknown still starts the check and shows it",
+    "K2 a press on an explicit plaintext address while the identity is unknown still names the address",
+    "H1 a player's route never checks a plaintext address, loopback included",
+    # round 3: the readiness wait outlasts its own auth exchange (Codex round 2 LOW 2)
+    "W1 a session the exchange lands 16-19.9 s after the press is waited for: the one mint carries it",
+    # round 3: the plaintext refusal says why in the log (Codex round 2 LOW 3)
+    "N1 the plaintext refusal's log line names the base as scheme://host:port and the reason, with no credential",
+    # round 3: the mint failure line is bounded and token-safe (Codex round 2 LOW 4)
+    "M1 a 161+ character failure body with a token: the whole line is bounded, one line, and scrubbed",
+    "M2 a bare token-shaped value, a session header, a token pair and a Steam ticket are all redacted",
+    # round 3: the ticket latch is released only after the cancel (Codex round 2 LOW 5)
+    "MT6 a cancel that throws once keeps the handle; the next tick cancels it, and no successor is requested before that",
+    "MT6b both cancels throw: the handle stays held, no successor is requested (requested=1), one line",
+    "MT7 a repeated end of a failed handle, and a late end of an old serial, change nothing",
+    "MT8 a held ticket whose end never arrives is abandoned (cancelled) past the exchange's timeout, then superseded",
+    # round 4 (Codex round 3 HIGH 1 and LOWs 1-5)
+    "O4d a 2xx to a retry that did not carry the session token removes nothing and spends nothing",
+    "O10 a tokenless 2xx without a row leaves the entry queued: nothing removed, no attempt spent, 0 rows",
+    "O10b then the restore and the session: exactly one token-bearing settlement, one row, an empty outbox",
+    "W1d a ticket callback later than 5 s and an exchange inside its 20 s: one press mints once, with the session",
+    "N1d a valid 253-character host: the whole line stays within its declared maximum, the host cut with a marker",
+    "M3 FormatRequestError's text into the mint line: an authorization= value and a credential straddling character 300 are both gone, 240 held",
+    "MT9 a cancel that succeeds on the third attempt frees the latch, then exactly one successor",
+    "MT9b a cancel that never succeeds: retried on its 30 s bound for an hour, never a successor, the log bounded",
+    "M4 a tokenless 401 with CR/LF and JSON, header, key=value, bare-token and Steam-ticket sentinels: one bounded line, none of them",
+    "M4b each sentinel first after a CR/LF, raw text: the line scrubs and flattens by itself",
+    "M4c a credential straddling the line's own cut is scrubbed before the cut",
+    # round 5 (Codex round 4 HIGH 1): a first send's 2xx settles only when it carried the token
+    "O11 a first send answered 2xx without the token and without a row is not settled: one durable entry, 0 rows",
+    "O11b then the restore and the session: exactly one token-bearing POST, one row, an empty outbox",
+    "O11c attempt one fails and attempt two is a tokenless 2xx without a row: queued, then delivered once with the token",
+    "O11d attempts one and two fail and attempt three is a tokenless 2xx: queued, then delivered once with the token",
+    "O11e attempt one carried a stale token (401) and attempt two went out without it: its 2xx is not settled",
+    "O11f control: a first send that carried the token and was answered 2xx settles at once, one row, nothing queued",
+    "O11g control: against the enforcing sink the three tokenless attempts fail, the report is queued and delivered once",
+    # every catalogue
+    "L-es every secure-route sentence is translated in the es catalogue, holes filled",
+    "L-ru every secure-route sentence is translated in the ru catalogue, holes filled",
+    "L-uk every secure-route sentence is translated in the uk catalogue, holes filled",
+    "L-sv every secure-route sentence is translated in the sv catalogue, holes filled",
+])
+def test_the_secure_route_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "secureroute")
+    assert line.startswith("[secureroute] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
 def test_the_split_keeps_a_colon_that_belongs_to_the_value(harness_run):
     """T2a's control, asserted on the printed MEASUREMENT: the value half
     of "Label: <color=#88FF88>10:30</color>" keeps its own colon. A split at
@@ -792,7 +899,8 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
                       "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs",
                       "plugin/PcTradeRules.cs",
-                      "plugin/RoomRulesStrip.cs", "plugin/MusicLevels.cs"):
+                      "plugin/RoomRulesStrip.cs", "plugin/MusicLevels.cs",
+                      "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -801,12 +909,21 @@ def test_the_harness_compiles_only_the_rule_files():
     plugin_proj = (REPO / "plugin" / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
     assert "TitleLadderRulesSelfTest" not in plugin_proj
     assert not (REPO / "plugin" / "TitleLadderRulesSelfTest.cs").exists()
-    # Item 13: the settings model's cases and the I18n stand-in are the
-    # harness's own files; the plugin compiles the model and never these.
+    # Item 13: the settings model's cases are the harness's own file; the plugin
+    # compiles the model and never it. Its I18n stand-in is the board-row-27
+    # I18nHarnessStub.cs, asserted below (merge pass 3: one stand-in, not two).
     assert any(p.endswith("plugin/SettingsModel.cs") for p in included)
-    for harness_only in ("SettingsModelSelfTest.cs", "I18nStub.cs"):
+    for harness_only in ("SettingsModelSelfTest.cs",):
         assert harness_only in included
         assert harness_only.split(".")[0] not in plugin_proj
+        assert not (REPO / "plugin" / harness_only).exists()
+    # Board row 27: the secure-route cases and the I18n stand-in are the
+    # harness's own; the shipped catalogues compile here so the L cases read
+    # them, and neither harness file may exist under plugin/.
+    assert any(p.endswith("plugin/I18nCatalogues.cs") for p in included)
+    for harness_only in ("SecureRouteRulesSelfTest.cs", "I18nHarnessStub.cs"):
+        assert harness_only in included, "%s is not compiled into the harness" % harness_only
+        assert harness_only.replace(".cs", "") not in plugin_proj
         assert not (REPO / "plugin" / harness_only).exists()
 
 

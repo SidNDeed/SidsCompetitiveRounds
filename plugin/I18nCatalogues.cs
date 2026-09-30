@@ -1290,7 +1290,6 @@ namespace CompetitiveRounds
             ["CRASH"] = "CRASH",
             ["Calm forest-green tint with low saturation."] = "Tinte verde bosque tranquilo, de baja saturación.",
             ["Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. Off = a perfectly steady camera. Local only."] = "Temblor de cámara al disparar, golpear y morir. Full = normal. Reduced = suave, mantiene el feedback de golpe. Off = cámara totalmente estable. Solo local.",
-            ["Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one."] = "No se puede abrir el portal - esta instalación usa una conexión de respaldo insegura. Reinicia ROUNDS y reintenta la segura.",
             ["Cancel"] = "Cancelar",
             ["Cannot spectate: {0}"] = "No se puede observar: {0}",
             ["Cap bullet-hit particles at 2/frame — biggest user-visible win on heavy firefights."] = "Limita las partículas de impacto a 2/frame — la mejora más visible en tiroteos intensos.",
@@ -2132,7 +2131,6 @@ namespace CompetitiveRounds
             ["Searching... {0}s  +/-{1}"] = "Buscando... {0}s  +/-{1}",
             ["Searing electric-green body color."] = "Color de cuerpo verde eléctrico abrasador.",
             ["Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow."] = "Nombre neón lima abrasador con un halo de brillo suave. Visible para todos; los jugadores con mod también ven el brillo.",
-            ["Secure connection unavailable - signed-in features are disabled this session."] = "Sin conexión segura - las funciones de cuenta están desactivadas esta sesión.",
             ["Select 2-12 players (left) to see who beats each of them most."] = "Elige 2-12 jugadores (izquierda) para ver quién le gana más a cada uno.",
             ["Select 2-12 players to find their common nemesis."] = "Elige 2-12 jugadores para hallar su némesis común.",
             ["Select players (left) to chart {0}."] = "Elige jugadores (izquierda) para graficar {0}.",
@@ -3162,6 +3160,25 @@ namespace CompetitiveRounds
             ["Performance"] = "Rendimiento",
             ["Language & menus"] = "Idioma y men\u00fas",
             ["Privacy & account"] = "Privacidad y cuenta",
+
+            // Added 2026-09-28: board rows 27 and 33a -- the secure-route checks
+            // behind the Translate portal button (SecureRouteText.cs and the
+            // PostSteamAuth toast) and the scrmod.com footer link, a proper noun
+            // that reads the same in every locale. Letters outside ASCII are
+            // written as four-digit unicode escapes. Sorted among themselves;
+            // entries above are untouched.
+            ["Can't open the portal - it only opens over a secure connection, and this install's server address is {0}."] = "No se puede abrir el portal - solo se abre con una conexi\u00f3n segura, y la direcci\u00f3n del servidor de esta instalaci\u00f3n es {0}.",
+            ["Checking the secure connection..."] = "Comprobando la conexi\u00f3n segura...",
+            ["Secure connection restored - opening the portal."] = "Conexi\u00f3n segura restablecida - abriendo el portal.",
+            ["Secure connection unavailable - signed-in features are off until it is back."] = "Sin conexi\u00f3n segura - las funciones de cuenta est\u00e1n desactivadas hasta que vuelva.",
+            ["The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection."] = "La conexi\u00f3n segura con {0} respondi\u00f3 con un error (HTTP {1}). El portal la necesita; el juego sigue funcionando con la conexi\u00f3n de respaldo.",
+            ["The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keeps working on the backup connection."] = "La conexi\u00f3n segura con {0} respondi\u00f3, pero no como el servidor de SCR. El portal la necesita; el juego sigue funcionando con la conexi\u00f3n de respaldo.",
+            ["The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the backup connection."] = "No se pudo abrir la conexi\u00f3n segura con {0}. El portal la necesita; el juego sigue funcionando con la conexi\u00f3n de respaldo.",
+            ["The secure connection to {0} failed its security check. The portal needs it; the game keeps working on the backup connection."] = "La conexi\u00f3n segura con {0} no super\u00f3 la comprobaci\u00f3n de seguridad. El portal la necesita; el juego sigue funcionando con la conexi\u00f3n de respaldo.",
+            ["The secure connection to {0} failed: the address could not be looked up. The portal needs it; the game keeps working on the backup connection."] = "La conexi\u00f3n segura con {0} fall\u00f3: no se pudo resolver la direcci\u00f3n. El portal la necesita; el juego sigue funcionando con la conexi\u00f3n de respaldo.",
+            ["The secure connection to {0} timed out after {1} s. The portal needs it; the game keeps working on the backup connection."] = "La conexi\u00f3n segura con {0} agot\u00f3 el tiempo de espera tras {1} s. El portal la necesita; el juego sigue funcionando con la conexi\u00f3n de respaldo.",
+            ["The secure connection to {0} was refused. The portal needs it; the game keeps working on the backup connection."] = "La conexi\u00f3n segura con {0} fue rechazada. El portal la necesita; el juego sigue funcionando con la conexi\u00f3n de respaldo.",
+            ["scrmod.com"] = "scrmod.com",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -4418,7 +4435,6 @@ namespace CompetitiveRounds
             ["CRASH"] = "КРАШ",
             ["Calm forest-green tint with low saturation."] = "Спокойный лесной зелёный с низкой насыщенностью.",
             ["Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. Off = a perfectly steady camera. Local only."] = "Тряска камеры при выстрелах/попаданиях/смертях. Полная = как в оригинале. Слабее = мягче, отдача видна. Выкл = камера неподвижна. Только локально.",
-            ["Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one."] = "Портал не открыть - эта установка на резервном незащищённом соединении. Перезапусти ROUNDS, чтобы вернуться к защищённому.",
             ["Cancel"] = "Отмена",
             ["Cannot spectate: {0}"] = "Нельзя наблюдать: {0}",
             ["Cap bullet-hit particles at 2/frame — biggest user-visible win on heavy firefights."] = "Ограничить частицы попаданий до 2/кадр — самый заметный выигрыш в жарких перестрелках.",
@@ -5260,7 +5276,6 @@ namespace CompetitiveRounds
             ["Searching... {0}s  +/-{1}"] = "Поиск... {0}с  +/-{1}",
             ["Searing electric-green body color."] = "Цвет тела: жгучий электрический зелёный.",
             ["Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow."] = "Жгуче-лаймовое неоновое имя с мягким ореолом свечения. Имя видят все; игроки с модом видят и свечение.",
-            ["Secure connection unavailable - signed-in features are disabled this session."] = "Защищённое соединение недоступно - функции входа отключены в этой сессии.",
             ["Select 2-12 players (left) to see who beats each of them most."] = "Выбери 2-12 игроков (слева), чтобы увидеть, кто чаще всех их побеждает.",
             ["Select 2-12 players to find their common nemesis."] = "Выберите 2-12 игроков, чтобы найти их общего врага.",
             ["Select players (left) to chart {0}."] = "Выбери игроков слева, чтобы построить {0}.",
@@ -6290,6 +6305,25 @@ namespace CompetitiveRounds
             ["Performance"] = "\u041f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c",
             ["Language & menus"] = "\u042f\u0437\u044b\u043a \u0438 \u043c\u0435\u043d\u044e",
             ["Privacy & account"] = "\u041f\u0440\u0438\u0432\u0430\u0442\u043d\u043e\u0441\u0442\u044c \u0438 \u0430\u043a\u043a\u0430\u0443\u043d\u0442",
+
+            // Added 2026-09-28: board rows 27 and 33a -- the secure-route checks
+            // behind the Translate portal button (SecureRouteText.cs and the
+            // PostSteamAuth toast) and the scrmod.com footer link, a proper noun
+            // that reads the same in every locale. Letters outside ASCII are
+            // written as four-digit unicode escapes. Sorted among themselves;
+            // entries above are untouched.
+            ["Can't open the portal - it only opens over a secure connection, and this install's server address is {0}."] = "\u041f\u043e\u0440\u0442\u0430\u043b \u043d\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u044c - \u043e\u043d \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435, \u0430 \u0430\u0434\u0440\u0435\u0441 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0432 \u044d\u0442\u043e\u0439 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0435 - {0}.",
+            ["Checking the secure connection..."] = "\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u043c \u0437\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435...",
+            ["Secure connection restored - opening the portal."] = "\u0417\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e - \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u043c \u043f\u043e\u0440\u0442\u0430\u043b.",
+            ["Secure connection unavailable - signed-in features are off until it is back."] = "\u0417\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e - \u0444\u0443\u043d\u043a\u0446\u0438\u0438 \u0432\u0445\u043e\u0434\u0430 \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b, \u043f\u043e\u043a\u0430 \u043e\u043d\u043e \u043d\u0435 \u0432\u0435\u0440\u043d\u0451\u0442\u0441\u044f.",
+            ["The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0441 {0} \u043e\u0442\u0432\u0435\u0442\u0438\u043b\u043e \u043e\u0448\u0438\u0431\u043a\u043e\u0439 (HTTP {1}). \u041e\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0438\u0433\u0440\u0430 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435.",
+            ["The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0441 {0} \u043e\u0442\u0432\u0435\u0442\u0438\u043b\u043e, \u043d\u043e \u043d\u0435 \u043a\u0430\u043a \u0441\u0435\u0440\u0432\u0435\u0440 SCR. \u041e\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0438\u0433\u0440\u0430 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435.",
+            ["The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the backup connection."] = "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0437\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0441 {0}. \u041e\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0438\u0433\u0440\u0430 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435.",
+            ["The secure connection to {0} failed its security check. The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0441 {0} \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u043e \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u0438. \u041e\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0438\u0433\u0440\u0430 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435.",
+            ["The secure connection to {0} failed: the address could not be looked up. The portal needs it; the game keeps working on the backup connection."] = "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c \u0437\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0441 {0}: \u0430\u0434\u0440\u0435\u0441 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d. \u041e\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0438\u0433\u0440\u0430 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435.",
+            ["The secure connection to {0} timed out after {1} s. The portal needs it; the game keeps working on the backup connection."] = "\u0412\u0440\u0435\u043c\u044f \u043e\u0436\u0438\u0434\u0430\u043d\u0438\u044f \u0437\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0433\u043e \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f \u0441 {0} \u0438\u0441\u0442\u0435\u043a\u043b\u043e \u0447\u0435\u0440\u0435\u0437 {1} \u0441. \u041e\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0438\u0433\u0440\u0430 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435.",
+            ["The secure connection to {0} was refused. The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0449\u0438\u0449\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0441 {0} \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e. \u041e\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0438\u0433\u0440\u0430 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u043e\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435.",
+            ["scrmod.com"] = "scrmod.com",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -7504,7 +7538,6 @@ namespace CompetitiveRounds
             ["CRASH"] = "КРАШ",
             ["Calm forest-green tint with low saturation."] = "Спокійний лісово-зелений відтінок із низькою насиченістю.",
             ["Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. Off = a perfectly steady camera. Local only."] = "Тремтіння камери при пострілах/влучаннях/смертях. Повне = як в оригіналі. Знижене = м’якше, відгук ударів є. Вимк = цілком нерухома камера. Лише локально.",
-            ["Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one."] = "Портал не відкривається - ця інсталяція використовує незахищене резервне з’єднання. Перезапустіть ROUNDS, щоб знову спробувати захищене з’єднання.",
             ["Cancel"] = "Скасувати",
             ["Cannot spectate: {0}"] = "Не можна спостерігати: {0}",
             ["Cap bullet-hit particles at 2/frame — biggest user-visible win on heavy firefights."] = "Обмежити частинки влучань до 2/кадр — найпомітніший виграш у жарких перестрілках.",
@@ -8322,7 +8355,6 @@ namespace CompetitiveRounds
             ["Searching... {0}s  +/-{1}"] = "Пошук... {0}с  +/-{1}",
             ["Searing electric-green body color."] = "Колір тіла: пекучий електрично-зелений.",
             ["Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow."] = "Пекуче-лаймове неонове ім’я з м’яким ореолом світіння. Ім’я бачать усі; гравці з модом бачать і світіння.",
-            ["Secure connection unavailable - signed-in features are disabled this session."] = "Захищене з’єднання недоступне - функції входу вимкнено на цю сесію.",
             ["Select 2-12 players (left) to see who beats each of them most."] = "Оберіть 2-12 гравців (ліворуч), щоб побачити, хто найчастіше перемагає кожного з них.",
             ["Select 2-12 players to find their common nemesis."] = "Оберіть 2-12 гравців, щоб знайти їхню спільну немезиду.",
             ["Select players (left) to chart {0}."] = "Оберіть гравців ліворуч, щоб побудувати графік: {0}.",
@@ -9344,6 +9376,25 @@ namespace CompetitiveRounds
             ["Performance"] = "\u041f\u0440\u043e\u0434\u0443\u043a\u0442\u0438\u0432\u043d\u0456\u0441\u0442\u044c",
             ["Language & menus"] = "\u041c\u043e\u0432\u0430 \u0439 \u043c\u0435\u043d\u044e",
             ["Privacy & account"] = "\u041f\u0440\u0438\u0432\u0430\u0442\u043d\u0456\u0441\u0442\u044c \u0456 \u0430\u043a\u0430\u0443\u043d\u0442",
+
+            // Added 2026-09-28: board rows 27 and 33a -- the secure-route checks
+            // behind the Translate portal button (SecureRouteText.cs and the
+            // PostSteamAuth toast) and the scrmod.com footer link, a proper noun
+            // that reads the same in every locale. Letters outside ASCII are
+            // written as four-digit unicode escapes. Sorted among themselves;
+            // entries above are untouched.
+            ["Can't open the portal - it only opens over a secure connection, and this install's server address is {0}."] = "\u041f\u043e\u0440\u0442\u0430\u043b \u043d\u0435 \u0432\u0456\u0434\u043a\u0440\u0438\u0432\u0430\u0454\u0442\u044c\u0441\u044f - \u0432\u0456\u043d \u0432\u0456\u0434\u043a\u0440\u0438\u0432\u0430\u0454\u0442\u044c\u0441\u044f \u043b\u0438\u0448\u0435 \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f, \u0430 \u0430\u0434\u0440\u0435\u0441\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0432 \u0446\u0456\u0439 \u0456\u043d\u0441\u0442\u0430\u043b\u044f\u0446\u0456\u0457 - {0}.",
+            ["Checking the secure connection..."] = "\u041f\u0435\u0440\u0435\u0432\u0456\u0440\u044f\u0454\u043c\u043e \u0437\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f...",
+            ["Secure connection restored - opening the portal."] = "\u0417\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0432\u0456\u0434\u043d\u043e\u0432\u043b\u0435\u043d\u043e - \u0432\u0456\u0434\u043a\u0440\u0438\u0432\u0430\u0454\u043c\u043e \u043f\u043e\u0440\u0442\u0430\u043b.",
+            ["Secure connection unavailable - signed-in features are off until it is back."] = "\u0417\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0435 - \u0444\u0443\u043d\u043a\u0446\u0456\u0457 \u0432\u0445\u043e\u0434\u0443 \u0432\u0438\u043c\u043a\u043d\u0435\u043d\u043e, \u0434\u043e\u043a\u0438 \u0432\u043e\u043d\u043e \u043d\u0435 \u043f\u043e\u0432\u0435\u0440\u043d\u0435\u0442\u044c\u0441\u044f.",
+            ["The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0437 {0} \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u043b\u043e \u043f\u043e\u043c\u0438\u043b\u043a\u043e\u044e (HTTP {1}). \u0412\u043e\u043d\u043e \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0435 \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0433\u0440\u0430 \u0439 \u0434\u0430\u043b\u0456 \u043f\u0440\u0430\u0446\u044e\u0454 \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+            ["The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0437 {0} \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u043b\u043e, \u0430\u043b\u0435 \u043d\u0435 \u044f\u043a \u0441\u0435\u0440\u0432\u0435\u0440 SCR. \u0412\u043e\u043d\u043e \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0435 \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0433\u0440\u0430 \u0439 \u0434\u0430\u043b\u0456 \u043f\u0440\u0430\u0446\u044e\u0454 \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+            ["The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the backup connection."] = "\u041d\u0435 \u0432\u0434\u0430\u043b\u043e\u0441\u044f \u0432\u0456\u0434\u043a\u0440\u0438\u0442\u0438 \u0437\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0437 {0}. \u0412\u043e\u043d\u043e \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0435 \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0433\u0440\u0430 \u0439 \u0434\u0430\u043b\u0456 \u043f\u0440\u0430\u0446\u044e\u0454 \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+            ["The secure connection to {0} failed its security check. The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0437 {0} \u043d\u0435 \u043f\u0440\u043e\u0439\u0448\u043b\u043e \u043f\u0435\u0440\u0435\u0432\u0456\u0440\u043a\u0443 \u0431\u0435\u0437\u043f\u0435\u043a\u0438. \u0412\u043e\u043d\u043e \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0435 \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0433\u0440\u0430 \u0439 \u0434\u0430\u043b\u0456 \u043f\u0440\u0430\u0446\u044e\u0454 \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+            ["The secure connection to {0} failed: the address could not be looked up. The portal needs it; the game keeps working on the backup connection."] = "\u041d\u0435 \u0432\u0434\u0430\u043b\u043e\u0441\u044f \u0432\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0438 \u0437\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0437 {0}: \u0430\u0434\u0440\u0435\u0441\u0443 \u043d\u0435 \u0437\u043d\u0430\u0439\u0434\u0435\u043d\u043e. \u0412\u043e\u043d\u043e \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0435 \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0433\u0440\u0430 \u0439 \u0434\u0430\u043b\u0456 \u043f\u0440\u0430\u0446\u044e\u0454 \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+            ["The secure connection to {0} timed out after {1} s. The portal needs it; the game keeps working on the backup connection."] = "\u0427\u0430\u0441 \u043e\u0447\u0456\u043a\u0443\u0432\u0430\u043d\u043d\u044f \u0437\u0430\u0445\u0438\u0449\u0435\u043d\u043e\u0433\u043e \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0437 {0} \u0432\u0438\u0447\u0435\u0440\u043f\u0430\u043d\u043e \u0447\u0435\u0440\u0435\u0437 {1} \u0441. \u0412\u043e\u043d\u043e \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0435 \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0433\u0440\u0430 \u0439 \u0434\u0430\u043b\u0456 \u043f\u0440\u0430\u0446\u044e\u0454 \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+            ["The secure connection to {0} was refused. The portal needs it; the game keeps working on the backup connection."] = "\u0417\u0430\u0445\u0438\u0449\u0435\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f \u0437 {0} \u0432\u0456\u0434\u0445\u0438\u043b\u0435\u043d\u043e. \u0412\u043e\u043d\u043e \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0435 \u043f\u043e\u0440\u0442\u0430\u043b\u0443; \u0433\u0440\u0430 \u0439 \u0434\u0430\u043b\u0456 \u043f\u0440\u0430\u0446\u044e\u0454 \u0447\u0435\u0440\u0435\u0437 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0435 \u0437\u2019\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+            ["scrmod.com"] = "scrmod.com",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -10558,7 +10609,6 @@ namespace CompetitiveRounds
             ["CRASH"] = "KRASCH",
             ["Calm forest-green tint with low saturation."] = "Lugn skogsgrön ton med låg mättnad.",
             ["Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. Off = a perfectly steady camera. Local only."] = "Kameraskakning vid skott/träffar/dödsfall. Full = som i originalet. Minskad = mjukare och behåller träffkänslan. Av = helt stilla kamera. Endast lokalt.",
-            ["Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one."] = "Kan inte öppna portalen - den här installationen använder en osäker reservanslutning. Starta om ROUNDS för att prova den säkra igen.",
             ["Cancel"] = "Avbryt",
             ["Cannot spectate: {0}"] = "Kan inte åskåda: {0}",
             ["Cap bullet-hit particles at 2/frame — biggest user-visible win on heavy firefights."] = "Begränsa kulträffpartiklar till 2/bildruta — största märkbara vinsten i intensiva eldstrider.",
@@ -11376,7 +11426,6 @@ namespace CompetitiveRounds
             ["Searching... {0}s  +/-{1}"] = "Söker... {0}s  +/-{1}",
             ["Searing electric-green body color."] = "Kroppsfärg: brännande elgrön.",
             ["Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow."] = "Brännande limegrönt neonnamn med mjuk glödhalo. Syns för alla; spelare med modden ser även glöden.",
-            ["Secure connection unavailable - signed-in features are disabled this session."] = "Säker anslutning saknas - funktioner som kräver inloggning är avstängda denna session.",
             ["Select 2-12 players (left) to see who beats each of them most."] = "Välj 2-12 spelare (till vänster) för att se vem som oftast slår var och en av dem.",
             ["Select 2-12 players to find their common nemesis."] = "Välj 2-12 spelare för att hitta deras gemensamma nemesis.",
             ["Select players (left) to chart {0}."] = "Välj spelare (vänster) för att visa {0}.",
@@ -12398,6 +12447,25 @@ namespace CompetitiveRounds
             ["Performance"] = "Prestanda",
             ["Language & menus"] = "Spr\u00e5k & menyer",
             ["Privacy & account"] = "Integritet & konto",
+
+            // Added 2026-09-28: board rows 27 and 33a -- the secure-route checks
+            // behind the Translate portal button (SecureRouteText.cs and the
+            // PostSteamAuth toast) and the scrmod.com footer link, a proper noun
+            // that reads the same in every locale. Letters outside ASCII are
+            // written as four-digit unicode escapes. Sorted among themselves;
+            // entries above are untouched.
+            ["Can't open the portal - it only opens over a secure connection, and this install's server address is {0}."] = "Kan inte \u00f6ppna portalen - den \u00f6ppnas bara \u00f6ver en s\u00e4ker anslutning, och den h\u00e4r installationens serveradress \u00e4r {0}.",
+            ["Checking the secure connection..."] = "Kontrollerar den s\u00e4kra anslutningen...",
+            ["Secure connection restored - opening the portal."] = "S\u00e4ker anslutning \u00e5terst\u00e4lld - \u00f6ppnar portalen.",
+            ["Secure connection unavailable - signed-in features are off until it is back."] = "S\u00e4ker anslutning saknas - funktioner som kr\u00e4ver inloggning \u00e4r avst\u00e4ngda tills den \u00e4r tillbaka.",
+            ["The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection."] = "Den s\u00e4kra anslutningen till {0} svarade med ett fel (HTTP {1}). Portalen beh\u00f6ver den; spelet forts\u00e4tter att fungera \u00f6ver reservanslutningen.",
+            ["The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keeps working on the backup connection."] = "Den s\u00e4kra anslutningen till {0} svarade, men inte som SCR-servern. Portalen beh\u00f6ver den; spelet forts\u00e4tter att fungera \u00f6ver reservanslutningen.",
+            ["The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the backup connection."] = "Den s\u00e4kra anslutningen till {0} kunde inte \u00f6ppnas. Portalen beh\u00f6ver den; spelet forts\u00e4tter att fungera \u00f6ver reservanslutningen.",
+            ["The secure connection to {0} failed its security check. The portal needs it; the game keeps working on the backup connection."] = "Den s\u00e4kra anslutningen till {0} klarade inte s\u00e4kerhetskontrollen. Portalen beh\u00f6ver den; spelet forts\u00e4tter att fungera \u00f6ver reservanslutningen.",
+            ["The secure connection to {0} failed: the address could not be looked up. The portal needs it; the game keeps working on the backup connection."] = "Den s\u00e4kra anslutningen till {0} misslyckades: adressen kunde inte sl\u00e5s upp. Portalen beh\u00f6ver den; spelet forts\u00e4tter att fungera \u00f6ver reservanslutningen.",
+            ["The secure connection to {0} timed out after {1} s. The portal needs it; the game keeps working on the backup connection."] = "Den s\u00e4kra anslutningen till {0} \u00f6verskred tidsgr\u00e4nsen efter {1} s. Portalen beh\u00f6ver den; spelet forts\u00e4tter att fungera \u00f6ver reservanslutningen.",
+            ["The secure connection to {0} was refused. The portal needs it; the game keeps working on the backup connection."] = "Den s\u00e4kra anslutningen till {0} nekades. Portalen beh\u00f6ver den; spelet forts\u00e4tter att fungera \u00f6ver reservanslutningen.",
+            ["scrmod.com"] = "scrmod.com",
         };
     }
 }

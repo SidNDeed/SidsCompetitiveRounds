@@ -137,6 +137,11 @@ FILES = [
     # templates, so it adds no string the registry lacks; named because the
     # list is FIXED and every file with a call site belongs on it (#357).
     "NativeUI.SettingsDrive.cs",
+    # Secure route (board row 27): every sentence the portal button and the
+    # secure-route checks show a player, at I18n.Tr/TrF sites. Its sibling
+    # SecureRouteRules.cs is deliberately absent: pure decision code with no
+    # display text. Listed because the list is FIXED (#357, #464).
+    "SecureRouteText.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

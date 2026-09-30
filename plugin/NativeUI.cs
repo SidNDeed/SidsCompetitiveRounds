@@ -2537,6 +2537,14 @@ namespace CompetitiveRounds
             AddFooterBtnIcon(UIFactory.CreateButton("YouTube",bottom.transform,"YouTube",14f,Color.white,new Color(0.80f,0.06f,0.06f,0.92f),()=>{Application.OpenURL("https://www.youtube.com/@SidsCompetitiveRounds");},sizeDelta:new Vector2(102,26)),"icon_youtube.png");
             AddFooterBtnIcon(UIFactory.CreateButton("Twitch",bottom.transform,"Twitch",14f,Color.white,new Color(0.569f,0.275f,1f,0.92f),()=>{Application.OpenURL("https://www.twitch.tv/sidscompetitiverounds");},sizeDelta:new Vector2(92,26)),"icon_twitch.png");
             AddFooterBtnIcon(UIFactory.CreateButton("Thunderstore",bottom.transform,"Thunderstore",14f,Color.white,new Color(0.10f,0.16f,0.24f,0.95f),()=>{Application.OpenURL("https://thunderstore.io/c/rounds/p/Team_Sid/SidsCompetitiveRounds/");},sizeDelta:new Vector2(128,26)),"icon_thunderstore.png");
+            /* Board row 33a: the mod's own site, directly after Thunderstore.
+             * Built by the same factory call as the five links above, so it
+             * opens the way they do (Application.OpenURL behind CreateButton's
+             * per-control ClickGuard debounce). These footer links are the
+             * mod's own buttons, not clones of a ROUNDS menu button, so there
+             * is no QuitButton on them to strip. The label is a proper noun
+             * and reads the same in every catalogue. */
+            UIFactory.CreateButton("ScrMod",bottom.transform,"scrmod.com",14f,Color.white,new Color(0.16f,0.42f,0.36f,0.92f),()=>{Application.OpenURL("https://scrmod.com/");},sizeDelta:new Vector2(110,26));
             var bSp=new GameObject("S");bSp.transform.SetParent(bottom.transform,false);bSp.AddComponent<RectTransform>();UIFactory.AddLE(bSp,flexW:1);
             UIFactory.CreateButton("RefreshBtn",bottom.transform,"Refresh",15f,C_WHITE,C_BTN,()=>{if(Time.unscaledTime>=_nextManualRefreshAt){_nextManualRefreshAt=Time.unscaledTime+2f;RefreshData();dirty=true;}else{CompetitiveUI.ShowNotification("Refreshing too fast - give it a sec",Color.yellow,1.5f);}},sizeDelta:new Vector2(85,26));
             SwitchTab(TAB_HOME);pageBuilt=true;Plugin.Log.LogInfo("[NATIVE] Competitive page built");
@@ -6260,6 +6268,48 @@ namespace CompetitiveRounds
                 if (sr != null && p != null) p.SetValue(sr, 1f - s);   // 0 = top of the article
             }
             catch { }
+        }
+
+        /// <summary>Board row 27 and 33a witnesses (Plugin.TickTestPress):
+        /// press the named button on the open overlay through the ClickHandler
+        /// a real click runs, ClickGuard included. Only a button a player could
+        /// press counts: active in the hierarchy, and exactly one carrying the
+        /// name. Returns the outcome for the lever's log line, naming the label
+        /// of the button just before it in its row (read from the TMP text).
+        /// Gated by the caller on the broadcast identity.</summary>
+        internal static string DevPressButton(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "no button name given";
+            if (!isOpen || pageGO == null) return "the overlay is closed";
+            ClickHandler found = null;
+            int count = 0;
+            foreach (var t in pageGO.GetComponentsInChildren<Transform>(false))
+            {
+                if (t == null || t.name != name) continue;
+                var ch = t.GetComponent<ClickHandler>();
+                if (ch == null || ch.onClick == null) continue;
+                count++;
+                found = ch;
+            }
+            if (count == 0) return "no such button on the open overlay";
+            if (count > 1) return count + " buttons carry that name; pressed none";
+            var tr = found.transform;
+            string before = "(first in its row)";
+            int i = tr.GetSiblingIndex();
+            if (i > 0 && tr.parent != null)
+            {
+                var prev = tr.parent.GetChild(i - 1).gameObject;
+                string label = null;
+                try
+                {
+                    var tmp = UIFactory.GetButtonText(prev);
+                    label = tmp?.GetType().GetProperty("text", BindingFlags.Public | BindingFlags.Instance)?.GetValue(tmp, null) as string;
+                }
+                catch { }
+                before = string.IsNullOrEmpty(label) ? prev.name : System.Text.RegularExpressions.Regex.Replace(label, "<[^>]+>", "");
+            }
+            found.onClick();
+            return "pressed (after " + before + ")";
         }
 
         /// <summary>Broadcast-seat verification lever (Aug 23): open the overlay

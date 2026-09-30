@@ -271,6 +271,63 @@ namespace CompetitiveRounds
             return true;
         }
 
+        // -- Credentials in a one-line diagnostic (board row 27 round 3) -------
+        //
+        // NOT a pass of Scrub: the bundle's bound above ("any token or credential
+        // other than that ticket" is not removed) is unchanged. A caller that
+        // logs a server's answer (the portal mint's failure line, Codex round 2
+        // LOW 4) runs it through RedactCredentials first. The JSON-member and
+        // key=value patterns name the same keys (Codex round 3 LOW 3: the pair
+        // pattern had lost "authorization"), and a scheme word (Bearer, Basic)
+        // before a value is taken with it. A caller that also shortens the
+        // text scrubs the WHOLE text first (SecureRouteRules.RequestErrorText),
+        // so a cut can never split a credential out of these patterns' sight.
+
+        private const string CredentialRedacted = "[redacted]";
+
+        private static readonly Regex CredentialJsonPattern = new Regex(
+            "(\"[A-Za-z0-9_-]*(?:token|secret|password|passwd|ticket|api_?key|authorization|credential)[A-Za-z0-9_-]*\"\\s*:\\s*)\"(?:[^\"\\\\]|\\\\.)*\"",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static readonly Regex CredentialHeaderPattern = new Regex(
+            "\\b((?:X-[A-Za-z0-9-]*(?:Token|Secret|Key)|Authorization|Cookie)\\s*:\\s*)(?:(?:Bearer|Basic)\\s+)?[^\\s,;\"'<>]+",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static readonly Regex CredentialPairPattern = new Regex(
+            "\\b([A-Za-z0-9_-]*(?:token|secret|password|passwd|ticket|api_?key|authorization|credential)[A-Za-z0-9_-]*=)(?:(?:Bearer|Basic)\\s+)?[^&\\s\"'<>#;,]+",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static readonly Regex TokenShapedPattern = new Regex("[A-Za-z0-9_-]{32,}", RegexOptions.CultureInvariant);
+
+        /// <summary>A diagnostic line with its credentials replaced: the Steam
+        /// login ticket (as in Scrub); the value of any JSON member, header or
+        /// key=value pair whose name says token, secret, password, ticket,
+        /// api key, authorization or credential; and any bare run of 32 or
+        /// more base64url/hex characters holding both a digit and a letter
+        /// (the shape of a session or portal token). Over-redaction is the
+        /// accepted direction: the line is a diagnostic, not a record.</summary>
+        internal static string RedactCredentials(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            string s = TicketPattern.Replace(text, m => TicketMarker + RedactedTicket(m.Groups[1].Value));
+            s = CredentialJsonPattern.Replace(s, m => m.Groups[1].Value + "\"" + CredentialRedacted + "\"");
+            s = CredentialHeaderPattern.Replace(s, m => m.Groups[1].Value + CredentialRedacted);
+            s = CredentialPairPattern.Replace(s, m => m.Groups[1].Value + CredentialRedacted);
+            s = TokenShapedPattern.Replace(s, m => HasDigitAndLetter(m.Value) ? CredentialRedacted : m.Value);
+            return s;
+        }
+
+        private static bool HasDigitAndLetter(string v)
+        {
+            bool digit = false, letter = false;
+            foreach (char c in v)
+            {
+                if (c >= '0' && c <= '9') digit = true;
+                else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) letter = true;
+            }
+            return digit && letter;
+        }
+
         /// <summary>Scrub with this process's own account name and profile
         /// directory. Reading them can throw on a locked-down host, which is
         /// why both reads are separately guarded and a failure to read leaves

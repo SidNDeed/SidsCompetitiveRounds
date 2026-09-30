@@ -52,8 +52,10 @@
                         label and its value, and exactly which rows each
                         sub-tab's reset writes. The generated descriptor table
                         it reads (SettingsDescriptors.g.cs) comes with it, and
-                        I18nStub.cs stands in for the plugin's I18n, which
-                        needs Unity. The cases live in the harness-only
+                        I18nHarnessStub.cs, the one stand-in both this suite
+                        and the secure-route suite compile against, stands
+                        in for the plugin's I18n, which needs Unity. The
+                        cases live in the harness-only
                         SettingsModelSelfTest.cs.
       PcTradeRules.cs   card trading's client half: the canonical item list
                         and its SHA-256 digest (checked against fixed vectors
@@ -78,6 +80,19 @@
                         and the two fade-in envelopes, driven frame by
                         frame at 60 and at 10 fps. The negative controls
                         are the pre-1.41 slider law and the short envelope.
+
+      SecureRouteRules.cs   board row 27: the secure-route checks behind the
+                        Translate portal button and the timer that retries
+                        while the session runs on the plaintext backup - the
+                        probe verdicts, the flip, the marks, the claim. Its
+                        cases live in the harness-only SecureRouteRulesSelfTest.cs
+                        with a fake transport and a fake clock.
+                        SecureRouteText.cs (every sentence a player reads on
+                        those paths) and I18nCatalogues.cs (the four shipped
+                        catalogues) compile against I18nHarnessStub.cs, a
+                        harness-only stand-in for plugin/I18n.cs, which reads
+                        Unity; so the sentences checked are the shipped ones,
+                        looked up in the shipped catalogues.
 
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
@@ -109,11 +124,15 @@
     <Compile Include="TitleLadderRulesSelfTest.cs" />
     <Compile Include="../../plugin/SettingsModel.cs" />
     <Compile Include="../../plugin/SettingsDescriptors.g.cs" />
-    <Compile Include="I18nStub.cs" />
     <Compile Include="SettingsModelSelfTest.cs" />
     <Compile Include="../../plugin/PcTradeRules.cs" />
     <Compile Include="../../plugin/RoomRulesStrip.cs" />
     <Compile Include="../../plugin/MusicLevels.cs" />
+    <Compile Include="../../plugin/SecureRouteRules.cs" />
+    <Compile Include="../../plugin/SecureRouteText.cs" />
+    <Compile Include="../../plugin/I18nCatalogues.cs" />
+    <Compile Include="SecureRouteRulesSelfTest.cs" />
+    <Compile Include="I18nHarnessStub.cs" />
   </ItemGroup>
 
 </Project>

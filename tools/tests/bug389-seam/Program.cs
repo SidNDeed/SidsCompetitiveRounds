@@ -3822,10 +3822,12 @@ internal static class Program
         // thing initialisation sets, so this reads the field the same way the
         // guard terms are read: declared in ApiClient.cs with the EMPTY
         // initialiser, written by no other shipped file, and written only from a
-        // closed set of members one of which is ApiClient.Initialize. The TLS
-        // probe re-targets it for the session and is named here rather than
-        // waved past, because a writer this case cannot name is a writer nobody
-        // reading the run can account for.
+        // closed set of members one of which is ApiClient.Initialize. The boot
+        // probe's verdict (OnBootProbeConcluded) re-targets it to the backup,
+        // and the secure-route flip (OnSecureRouteRestored, board row 27)
+        // returns it to the address a check has just shown usable; both are
+        // named here rather than waved past, because a writer this case cannot
+        // name is a writer nobody reading the run can account for.
         SurfaceScan urlScan = ScanField(shippedCs, surface,
             "baseUrl", apiRel, "\"\"");
         scanNotes.Add(ScanNote("request prefix", urlScan));
@@ -3841,7 +3843,8 @@ internal static class Program
             string[] urlWriters = new[]
             {
                 "public static void Initialize(string url)",
-                "private static IEnumerator ProbeEndpointThenStart()"
+                "private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)",
+                "private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)"
             };
             var urlWhere = new List<string>();
             bool initWrites = false;
@@ -3852,7 +3855,7 @@ internal static class Program
                 if (owner != null && owner == urlWriters[0]) initWrites = true;
                 if (owner == null || Array.IndexOf(urlWriters, owner) < 0)
                     reachProblems.Add("the request prefix may be written only from " + urlWriters[0]
-                        + " or the TLS fallback that runs from it; found a write at " + apiRel + " line "
+                        + ", the boot probe's verdict or the secure-route flip; found a write at " + apiRel + " line "
                         + w.Line + " inside '" + (owner ?? "no member") + "'");
                 // AND EVERY ONE OF THOSE WRITES MUST ACTUALLY RETARGET IT. The
                 // prefix is declared with the EMPTY string, which is not null,
@@ -3905,15 +3908,18 @@ internal static class Program
         var callerBound = new Dictionary<string, string[]>(StringComparer.Ordinal);
         callerBound["ApiClient.Initialize"] =
             new[] { pluginRel + " :: private void DoInitialize()" };
-        callerBound["ApiClient.ProbeEndpointThenStart"] =
-            new[] { apiRel + " :: public static void Initialize(string url)" };
+        callerBound["ApiClient.OnBootProbeConcluded"] =
+            new[] { apiRel + " :: private static void OnSecureRunConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)" };
+        callerBound["ApiClient.OnSecureRouteRestored"] =
+            new[] { apiRel + " :: private static void OnSecureRunConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)" };
         callerBound["ApiClient.FfaProbeServerState"] =
             new[] { uiRel + " :: private static void MaybeRefreshFfaTab()" };
         // { qualified spelling, bare spelling, the file that DECLARES it }
         string[][] callerTargets = new[]
         {
             new[] { "ApiClient.Initialize",             "Initialize",             apiRel },
-            new[] { "ApiClient.ProbeEndpointThenStart", "ProbeEndpointThenStart", apiRel },
+            new[] { "ApiClient.OnBootProbeConcluded",   "OnBootProbeConcluded",   apiRel },
+            new[] { "ApiClient.OnSecureRouteRestored",  "OnSecureRouteRestored",  apiRel },
             new[] { "ApiClient.FfaProbeServerState",    "FfaProbeServerState",    apiRel }
         };
         var callerMap = new List<string>();
