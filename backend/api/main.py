@@ -37695,9 +37695,9 @@ ACHIEVEMENT_DEFS = {
     # shutout and the text says so rather than letting players read a zero
     # into it and file a bug when the scoreboard shows halves.
     # ASCII only — ROUNDS' Gravity SDF font has no em-dash (#47).
-    "ffa_shutout_3":        {"name": "Clean House",        "desc": "Win a ranked FFA 5-0 with 3 or more players (nobody else takes a point)"},
-    "ffa_shutout_4":        {"name": "Party Crasher",      "desc": "Win a ranked FFA 5-0 with 4 or more players (nobody else takes a point)"},
-    "ffa_shutout_5":        {"name": "Hostile Takeover",   "desc": "Win a ranked FFA 5-0 with 5 or more players (nobody else takes a point)"},
+    "ffa_shutout_3":        {"name": "Clean House",        "desc": "Win a ranked FFA 5-0 with 3 or more players who finished the game (nobody else takes a point)"},
+    "ffa_shutout_4":        {"name": "Party Crasher",      "desc": "Win a ranked FFA 5-0 with 4 or more players who finished the game (nobody else takes a point)"},
+    "ffa_shutout_5":        {"name": "Hostile Takeover",   "desc": "Win a ranked FFA 5-0 with 5 or more players who finished the game (nobody else takes a point)"},
     "ffa_kills_50":         {"name": "Rampage",            "desc": "Get over 50 kills in a single ranked FFA"},
     "ffa_kills_100":        {"name": "Bodycount",          "desc": "Get over 100 kills in a single ranked FFA"},
     "ffa_half_point_heartbreak": {"name": "Heartbreak",    "desc": "Lose a ranked FFA holding 10 or more half points that never became a point"},

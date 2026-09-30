@@ -609,9 +609,9 @@ namespace CompetitiveRounds
             // main.py VERBATIM — the F5 Achievements tab iterates THIS dict, so a
             // key missing here is invisible in-game even though the server grants
             // it (unlock toasts already fall back to the server-sent name).
-            {"ffa_shutout_3",            new[]{"Clean House",          "Win a ranked FFA 5-0 with 3 or more players (nobody else takes a point)"}},
-            {"ffa_shutout_4",            new[]{"Party Crasher",        "Win a ranked FFA 5-0 with 4 or more players (nobody else takes a point)"}},
-            {"ffa_shutout_5",            new[]{"Hostile Takeover",     "Win a ranked FFA 5-0 with 5 or more players (nobody else takes a point)"}},
+            {"ffa_shutout_3",            new[]{"Clean House",          "Win a ranked FFA 5-0 with 3 or more players who finished the game (nobody else takes a point)"}},
+            {"ffa_shutout_4",            new[]{"Party Crasher",        "Win a ranked FFA 5-0 with 4 or more players who finished the game (nobody else takes a point)"}},
+            {"ffa_shutout_5",            new[]{"Hostile Takeover",     "Win a ranked FFA 5-0 with 5 or more players who finished the game (nobody else takes a point)"}},
             {"ffa_kills_50",             new[]{"Rampage",              "Get over 50 kills in a single ranked FFA"}},
             {"ffa_kills_100",            new[]{"Bodycount",            "Get over 100 kills in a single ranked FFA"}},
             {"ffa_half_point_heartbreak",  new[]{"Heartbreak",           "Lose a ranked FFA holding 10 or more half points that never became a point"}},

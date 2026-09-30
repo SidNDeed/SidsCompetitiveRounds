@@ -2751,9 +2751,9 @@
   "Win a game without moving or jumping",
   "Win a game without taking any damage",
   "Win a live (sync) tournament",
-  "Win a ranked FFA 5-0 with 3 or more players (nobody else takes a point)",
-  "Win a ranked FFA 5-0 with 4 or more players (nobody else takes a point)",
-  "Win a ranked FFA 5-0 with 5 or more players (nobody else takes a point)",
+  "Win a ranked FFA 5-0 with 3 or more players who finished the game (nobody else takes a point)",
+  "Win a ranked FFA 5-0 with 4 or more players who finished the game (nobody else takes a point)",
+  "Win a ranked FFA 5-0 with 5 or more players who finished the game (nobody else takes a point)",
   "Win after being down 0-4",
   "Win against Sid in a ranked series",
   "Win against Stan in a ranked series",
@@ -6906,7 +6906,7 @@
   },
   "Cards received in a trade may give fewer shards when discarded.": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshInfo",
+   "location": "RefreshInfo, TradedNote",
    "kind": "Tr"
   },
   "Cards:": {
@@ -16949,17 +16949,17 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
-  "Win a ranked FFA 5-0 with 3 or more players (nobody else takes a point)": {
+  "Win a ranked FFA 5-0 with 3 or more players who finished the game (nobody else takes a point)": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
   },
-  "Win a ranked FFA 5-0 with 4 or more players (nobody else takes a point)": {
+  "Win a ranked FFA 5-0 with 4 or more players who finished the game (nobody else takes a point)": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
   },
-  "Win a ranked FFA 5-0 with 5 or more players (nobody else takes a point)": {
+  "Win a ranked FFA 5-0 with 5 or more players who finished the game (nobody else takes a point)": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
