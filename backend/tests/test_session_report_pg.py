@@ -1399,7 +1399,7 @@ def _grant_rows(w, **where):
                     + cond, w.wid, w.seat, *where.values())
 
 
-def test_a_delayed_validation_grants_no_source_the_master_never_observed(lab, seat):
+def test_a_delayed_validation_grants_no_source_the_master_never_observed(lab, seat, monkeypatch):
     """Round 6 MEDIUM 1, the reviewer's falsifier. Master A's snapshot is
     taken while the room row holds source X; before the request reaches the
     server the row's source becomes Y - and ONLY the source: mode, roster and
@@ -1408,11 +1408,17 @@ def test_a_delayed_validation_grants_no_source_the_master_never_observed(lab, se
     validation carrying X is answered the typed retry and writes nothing: no
     Y grant, no grant of any tuple, the lease not bound, status empty.
     Controls: only the source changed between the two snapshots; the
-    master's fresh snapshot (Y) is then granted, and records exactly Y."""
+    master's fresh snapshot (Y) is then granted, and records exactly Y.
+    Round 8: the room's authoritative source follows the row here (the
+    validation resolves it again; _source_resolver answers what the row was
+    set to), so this case isolates the request-versus-row comparison."""
     w = _LiveWatch(seat, "K1")
+    truth = {"ref": SOURCE_X}
+    _source_resolver(monkeypatch, w.room, truth)
     _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, SOURCE_X)
     snap = w.snapshot()
     assert snap["source_ref"] == SOURCE_X
+    truth["ref"] = SOURCE_Y
     _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, SOURCE_Y)
     now = w.snapshot()
     assert now == {**snap, "source_ref": SOURCE_Y, "generation": now["generation"]}, \
@@ -1555,10 +1561,14 @@ def test_a_stale_attest_cannot_rewrite_the_room_or_authorize_its_source(lab, sea
     only then is A's attest released. X does not rewrite the row: the row
     ends on Y, and B's attest waited for the room lock A's attest held while
     it resolved (the resolution is inside the serialization, so B resolved Y
-    after A committed). The master holding A's (X) answer then validates the
-    seat: retry, no X grant, no grant, nothing bound. Controls: A's attest
-    did write X first (its answer names X and an earlier generation than
-    B's); the master holding B's answer is granted exactly Y."""
+    after A committed). A master holding an observation of X then validates
+    the seat: retry, no X grant, no grant, nothing bound. Controls: the
+    master holding B's answer is granted exactly Y.
+    Round 8 MEDIUM 1: A's attest resolves the source a second time, under
+    the lock, before it reads back its answer; that resolution sees Y, so A
+    rewrites the row to Y and answers Y - an attest never answers the X it
+    resolved before the change (the resolver calls are X, Y for A, then Y, Y
+    for B, which changes nothing and answers A's generation)."""
     w = _LiveWatch(seat, "K1")
     ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
     truth = {"ref": SOURCE_X}
@@ -1586,12 +1596,13 @@ def test_a_stale_attest_cannot_rewrite_the_room_or_authorize_its_source(lab, sea
     tx.join(120)
     ty.join(120)
     assert not tx.is_alive() and not ty.is_alive() and not errors, errors
-    assert calls == [SOURCE_X, SOURCE_Y], calls
+    assert calls == [SOURCE_X, SOURCE_Y, SOURCE_Y, SOURCE_Y], calls
     assert y_waited, "B's attest committed while A's attest held a source it resolved before B's change"
     assert w.snapshot()["source_ref"] == SOURCE_Y, "the stale X rewrote the room row"
-    assert answers["x"]["source_ref"] == SOURCE_X and answers["y"]["source_ref"] == SOURCE_Y, answers
-    assert answers["y"]["generation"] > answers["x"]["generation"], answers
-    got = w.validate([seat], seen=_answer_seen(answers["x"]))
+    assert answers["x"]["source_ref"] == SOURCE_Y and answers["y"]["source_ref"] == SOURCE_Y, \
+        ("round 8: the delayed attest answered the source it resolved before the change", answers)
+    assert answers["y"] == answers["x"] and answers["x"]["generation"] == w.snapshot()["generation"], answers
+    got = w.validate([seat], seen={**_answer_seen(answers["x"]), "source_ref": SOURCE_X})
     assert got == {"status": "retry", "reason": "participants_changed", "results": []}, got
     assert _grant_rows(w, source_ref=SOURCE_X) == 0, "an X grant exists"
     assert w.grants() == 0 and w.bound() is None and w.status() == []
@@ -1610,11 +1621,17 @@ def test_a_room_back_on_an_observed_tuple_grants_nothing_to_the_old_observation(
     the attest answers for X, Y and X again carry three different
     generations, and a validation under the first answer is answered retry.
     Controls: the values are the snapshot's and the generation is later;
-    the fresh snapshot is granted, with the row's current generation."""
+    the fresh snapshot is granted, with the row's current generation.
+    Round 8: the room's authoritative source follows the row throughout
+    (_source_resolver answers the value the row was set to), so the retry
+    here is the generation comparison's, not the resolution's."""
     w = _LiveWatch(seat, "K1")
+    truth = {"ref": SOURCE_X}
+    _source_resolver(monkeypatch, w.room, truth)
     _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, SOURCE_X)
     snap = w.snapshot()
     for ref in (SOURCE_Y, SOURCE_X):
+        truth["ref"] = ref
         _lab_sql("UPDATE spectate_games SET source_ref = $2 WHERE id = $1 RETURNING 1", w.wid, ref)
     now = w.snapshot()
     assert now == {**snap, "generation": now["generation"]} and now["generation"] > snap["generation"], (snap, now)
@@ -1624,8 +1641,6 @@ def test_a_room_back_on_an_observed_tuple_grants_nothing_to_the_old_observation(
     assert w.status() == []
     # through the attest route: X, Y, X
     ab = ",".join(sorted((STEAM["A"], STEAM["B"])))
-    truth = {"ref": SOURCE_X}
-    _source_resolver(monkeypatch, w.room, truth)
     seen = []
     for ref in (SOURCE_X, SOURCE_Y, SOURCE_X):
         truth["ref"] = ref
@@ -1688,7 +1703,201 @@ def test_the_room_generation_advances_on_every_change_of_a_grant_carried_value(l
     asyncio.run(_go())
 
 
-# -- round 5 LOW 1: status answers the most recent observation -------------------
+# -- round 8 MEDIUM 1: the validation resolves the room's authoritative source ----
+
+RETRY_SOURCE = {"status": "retry", "reason": "source_changed", "results": []}
+
+
+class _TeamSitting:
+    """A 2v2 sitting in a team_ room, of four players of this test's own
+    (fresh steam ids, never printed; the lab's seeded players keep their own
+    series). Its live series X names the room; attest(i) is fighter i's
+    participant attest (the route), which writes the live spectate row; join()
+    gives `seat` a live, unbound lease on that row (a spectator that joins
+    now); cont() is the same-room continuation through its own route
+    (team_series_continuation: identity and quartet locks, INSERT of series
+    Y, commit - no room lock, no room row); validate(answer) is fighter 0,
+    the master, validating the seat with the tuple of an attest answer (its
+    game id, source and generation; the room's mode and the four ids)."""
+
+    OLD_SHAPE = object()
+
+    def __init__(self, seat, monkeypatch):
+        taken = set(STEAM.values()) | {seat}
+        sids = set()
+        while len(sids) < 4:
+            s = "7656119%010d" % random.randrange(10 ** 10)
+            if s not in taken:
+                sids.add(s)
+        self.seat, self.sids = seat, sorted(sids)
+        self.room, self.roster = "team_" + uuid.uuid4().hex[:12], ",".join(self.sids)
+        self.pids, self.x = [uuid.uuid4() for _ in self.sids], uuid.uuid4()
+        known = taken | sids
+
+        async def _ok(request, steam_id, db):
+            return steam_id in known
+        monkeypatch.setattr(main, "_strict_steam_session_ok", _ok)
+        # the continuation's signature is the mod's shared secret; the route's
+        # own checks after it (players, partition, room, prior, leases) run
+        monkeypatch.setattr(main, "_verify_action_sig", lambda canonical, signature: True)
+
+        async def _setup():
+            conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+            try:
+                for i, (sid, pid) in enumerate(zip(self.sids, self.pids)):
+                    await _ins(conn, "players", id=pid, steam_id=sid, display_name="R8 fighter %d" % i)
+                started = await conn.fetchval("SELECT clock_timestamp() - interval '10 minutes'")
+                await _ins(conn, "team_series", id=self.x, t1a_id=self.pids[0], t1b_id=self.pids[1],
+                           t2a_id=self.pids[2], t2b_id=self.pids[3], status="active",
+                           photon_room_id=self.room, created_at=started)
+            finally:
+                await conn.close()
+        asyncio.run(_setup())
+
+    def attest(self, i):
+        body = main.SpectateAttestBody(steam_id=self.sids[i], mode="2v2", room_name=self.room, actor_number=i + 1,
+                                       fighter_target=4, phase="battle", roster=self.roster)
+        return _lab_call(lambda db: main.spectate_participant_attest(body, request=None, db=db))
+
+    def row(self):
+        return json.loads(_lab_sql(
+            "SELECT json_build_object('game_id', CAST(id AS text), 'generation', generation, 'mode', mode,"
+            " 'source_ref', source_ref, 'roster', roster)::text"
+            " FROM spectate_games WHERE room_name = $1 AND ended_at IS NULL", self.room))
+
+    def complete_x(self):
+        _lab_sql("UPDATE team_series SET status = 'completed', completed_at = clock_timestamp()"
+                 " WHERE id = $1 RETURNING 1", self.x)
+
+    def cont(self):
+        body = main._TeamContinuationReq(reporter_steam_id=self.sids[0], room_id=self.room,
+                                         t1a_steam=self.sids[0], t1b_steam=self.sids[1],
+                                         t2a_steam=self.sids[2], t2b_steam=self.sids[3], hmac_signature="r8")
+        return _lab_call(lambda db: main.team_series_continuation(body, db=db))
+
+    def join(self):
+        gid = uuid.UUID(self.row()["game_id"])
+
+        async def _go():
+            conn = await asyncpg.connect(PLAIN_DSN, server_settings={"search_path": _LAB["schema"]})
+            try:
+                now = await conn.fetchval("SELECT clock_timestamp()")
+                await _ins(conn, "spectate_leases", game_id=gid, spectator_steam_id=self.seat,
+                           token_hash=uuid.uuid4().hex, protocol=main.SPECTATE_PROTOCOL,
+                           join_expires_at=now + timedelta(hours=1), heartbeat_expires_at=now + timedelta(hours=1))
+            finally:
+                await conn.close()
+        asyncio.run(_go())
+
+    def validate(self, answer, roster=None):
+        tup = {}
+        if answer is not self.OLD_SHAPE:
+            tup = {"observed_game_id": answer["game_id"], "observed_generation": answer["generation"],
+                   "observed_mode": "2v2", "observed_source_ref": answer["source_ref"],
+                   "observed_roster": roster or self.roster}
+        body = main.SpectateValidateBody(steam_id=self.sids[0], room_name=self.room,
+                                         spectators=[{"actor_number": 7, "steam_id": self.seat}], **tup)
+        return _lab_call(lambda db: main.spectate_validate(body, request=None, db=db))
+
+    def grants(self, **where):
+        cond = "".join(" AND %s = $%d" % (k, i + 2) for i, k in enumerate(where))
+        return _lab_sql("SELECT count(*) FROM spectate_watch_grants WHERE spectator_steam_id = $1" + cond,
+                        self.seat, *where.values())
+
+    def bound(self):
+        return _lab_sql("SELECT bound_actor FROM spectate_leases WHERE spectator_steam_id = $1", self.seat)
+
+    def end(self):
+        _lab_sql("UPDATE spectate_games SET ended_at = clock_timestamp() WHERE room_name = $1"
+                 " AND ended_at IS NULL RETURNING 1", self.room)
+
+
+def test_a_continuation_the_room_row_never_saw_grants_nothing(lab, seat, monkeypatch):
+    """Round 8 MEDIUM 1, the reviewer's falsifier through the routes. The
+    master holds the answer to its attest while series X is the room's live
+    series (X at generation g). X completes; the continuation route then
+    creates series Y in the same room and commits, taking neither the room
+    lock nor the room row, and no fighter attests Y. A spectator joins now,
+    and the master validates it at once with its cached X/g. Required: the
+    typed retry, zero grants of X (of anything) for the seat, the lease not
+    bound, and the room row now on Y at a later generation (the validation
+    resolved the source again under the room lock and wrote it back).
+    Also, between the two series (X completed, Y not yet created) nothing is
+    authoritative: a validation is answered the retry and writes nothing. The
+    released request shape, in the stale window, keeps its answer (ok) and
+    records no watch. Controls: the attest did answer X at g; the
+    continuation left the row untouched; the next attest answers Y at the
+    row's generation, and the master's validation with it is granted, the
+    grant recording exactly the compared (resolved) source and roster."""
+    s = _TeamSitting(seat, monkeypatch)
+    x_answer = s.attest(0)
+    before = s.row()
+    assert x_answer == {"status": "ok", "game_id": before["game_id"], "source_ref": str(s.x),
+                        "generation": before["generation"]}, "control: the attest answered X at g"
+    assert (before["mode"], before["roster"], before["source_ref"]) == ("2v2", s.roster, str(s.x))
+    s.complete_x()
+    assert s.validate(x_answer) == RETRY_SOURCE, "X completed and nothing is live: no grant"
+    assert s.row() == before, "nothing authoritative: nothing written back"
+    y = s.cont()
+    assert y["status"] == "created" and y["series_id"] != str(s.x), y
+    assert s.row() == before, "control: the continuation took neither the room lock nor the row"
+    s.join()
+    got = s.validate(x_answer)
+    assert got == RETRY_SOURCE, got
+    assert s.grants() == 0 and s.grants(source_ref=str(s.x)) == 0, "a grant of X for a seat that joined Y"
+    assert s.bound() is None, "the refused validation bound nothing"
+    after = s.row()
+    assert after == {**before, "source_ref": y["series_id"], "generation": after["generation"]}, after
+    assert after["generation"] > before["generation"], "the write-back drew a later generation"
+    old = s.validate(_TeamSitting.OLD_SHAPE)
+    assert list(old) == ["results"] and [(r["actor_number"], r["ok"]) for r in old["results"]] == [(7, True)], old
+    assert s.grants() == 0 and s.row() == after, "the released shape records no watch and is not resolved"
+    y_answer = s.attest(1)
+    assert y_answer == {"status": "ok", "game_id": after["game_id"], "source_ref": y["series_id"],
+                        "generation": after["generation"]}, "control: the next attest observes Y"
+    assert [r["ok"] for r in s.validate(y_answer)["results"]] == [True], "control: the Y observation"
+    assert s.grants() == 1 and s.grants(source_ref=y["series_id"], roster=s.roster, mode="2v2",
+                                        generation=after["generation"]) == 1
+    assert s.grants(source_ref=str(s.x)) == 0
+    s.end()
+
+
+def test_a_room_row_behind_the_resolution_is_refused_even_to_its_own_values(lab, seat, monkeypatch):
+    """Round 8 MEDIUM 1, the agreement check: a validation grants only when
+    the resolution, the room row and the request agree. The request here
+    carries the row's own current values (a master whose snapshot is
+    current), and the row is behind the resolution in one value: (a) its
+    roster names a fighter the live series does not - refused, and nothing
+    is written back (the roster is the fighters' attest to make; the row and
+    its generation stay); (b) its source names a series that is not the live
+    one - refused, and the row is written back to the live series. Negative
+    controls: with the row equal to the resolution the same request shape is
+    granted, and the resolution's own values are what the grant records."""
+    s = _TeamSitting(seat, monkeypatch)
+    s.attest(0)
+    s.join()
+    set_row = ("UPDATE spectate_games SET %s = $2 WHERE room_name = $1 AND ended_at IS NULL RETURNING 1")
+    # (a) the roster: fighter 3 replaced by a player of no live series here
+    other = ",".join(sorted(s.sids[:3] + [STEAM["E"]]))
+    assert other != s.roster
+    _lab_sql(set_row % "roster", s.room, other)
+    behind = s.row()
+    assert s.validate(behind, roster=other) == RETRY_SOURCE
+    assert s.row() == behind, "the roster is not written back and the generation stays"
+    assert s.grants() == 0 and s.bound() is None
+    _lab_sql(set_row % "roster", s.room, s.roster)
+    # (b) the source: a series that is not the live one
+    _lab_sql(set_row % "source_ref", s.room, "r8-not-the-live-series")
+    behind = s.row()
+    assert s.validate(behind) == RETRY_SOURCE
+    now = s.row()
+    assert now == {**behind, "source_ref": str(s.x), "generation": now["generation"]}, now
+    assert now["generation"] > behind["generation"]
+    assert s.grants() == 0 and s.bound() is None
+    # negative control: the row equal to the resolution, the same request shape
+    assert [r["ok"] for r in s.validate(now)["results"]] == [True]
+    assert s.grants() == 1 and s.grants(source_ref=str(s.x), roster=s.roster, generation=now["generation"]) == 1
+    s.end()
 
 def test_status_answers_the_room_back_on_a_tuple_it_had_before(lab, seat):
     """Round 5 LOW 1, the reviewer's A-B -> A-C -> A-B, through the routes.

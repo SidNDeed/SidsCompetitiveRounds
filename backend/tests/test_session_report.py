@@ -2155,6 +2155,29 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     for write in ("await _spectate_record_drains(db, game)", "DELETE FROM spectate_drain_tombstones",
                   "DELETE FROM spectate_leases", "UPDATE spectate_leases", "INSERT INTO spectate_watch_grants"):
         assert val.index(write) > check, write
+    # round 8 MEDIUM 1: a request that records a watch has the room's
+    # authoritative source resolved again, once, under the room lock and
+    # after the row read, and compared with the row BEFORE the request is
+    # compared with the row and before any write of the request; a row
+    # behind the resolution is refused with the typed retry, and the one
+    # statement that writes it back is an UPDATE of the room row by its id
+    # binding the refresh values (the columns of _SPECTATE_ROW_REFRESHED_COLUMNS)
+    resolve = val.index('if records_watch: now_roster, now_ref = await _spectate_authoritative_roster('
+                        'db, game["mode"], req.room_name)')
+    assert val.count("_spectate_authoritative_roster(") == 1
+    agree = val.index("agrees, refresh = _spectate_row_agrees_with_resolution( "
+                      "game, _spectate_resolved_room_values(now_roster, now_ref))")
+    refuse = val.index("if not agrees:", agree)
+    answer = val.index('return {"status": "retry", "reason": "source_changed", "results": []}', refuse)
+    assert read < resolve < agree < refuse < answer < check and val.count('"source_changed"') == 1
+    back = re.findall(r'UPDATE spectate_games SET (.*?) WHERE id = :gid\W', val)
+    assert len(back) == 1 and val.count("UPDATE spectate_games") == 1, back
+    assert [c.split("=")[0].strip() for c in back[0].split(",")] == list(main._SPECTATE_ROW_REFRESHED_COLUMNS)
+    assert all(c.split("=")[1].strip() == ":" + c.split("=")[0].strip() for c in back[0].split(","))
+    wb = val.index("UPDATE spectate_games")
+    assert refuse < val.index("if refresh:", refuse) < wb < val.index("await db.commit()", wb) < answer
+    assert val.index('{**refresh, "gid": str(game["id"])}', wb) < answer
+    assert refuse < val.index("else: await db.rollback()", refuse) < answer
     # round 6: all four observed values or none (some without the others: 422)
     assert val.count("sent = [getattr(req, field) is not None for field, _c, _g in "
                      "_SPECTATE_GRANT_OBSERVED_TUPLE] if any(sent) and not all(sent): raise HTTPException("
@@ -2219,9 +2242,22 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     att = " ".join(inspect.getsource(main.spectate_participant_attest).split())
     lock_at = att.index("SELECT pg_advisory_xact_lock(hashtext(:k))")
     assert att.count("SELECT pg_advisory_xact_lock(") == 1
-    assert lock_at < att.index("await _spectate_authoritative_roster(db, req.mode, req.room_name)")
-    assert att.count("_spectate_authoritative_roster(") == 1
+    first = att.index("await _spectate_authoritative_roster(db, req.mode, req.room_name)")
+    assert lock_at < first
+    # round 8 MEDIUM 1: and resolves it a second time, under the same lock,
+    # after its last write of the room and the attestation and before the
+    # read-back; a source that moved is written to the row, which the answer
+    # then names; a roster that moved refuses the attest (as the first check)
+    assert att.count("_spectate_authoritative_roster(") == 2
+    final = att.index("final_roster, final_ref = await _spectate_authoritative_roster(db, req.mode, req.room_name)")
     wrote = att.index("SELECT id, source_ref, generation FROM spectate_games WHERE id = :gid")
+    assert first < att.index("INSERT INTO spectate_attestations") < final < wrote
+    assert att.count("if final_roster is not None: if not final_roster: raise HTTPException(status_code=409, "
+                     "detail=\"room_unknown\") if set(roster) != final_roster or req.steam_id not in final_roster: "
+                     "raise HTTPException(status_code=409, detail=\"roster_mismatch\")") == 1
+    rewrite = att.index('if final_ref[:64] != derived_ref[:64]: await db.execute(text("UPDATE spectate_games SET '
+                        'source_ref = :ref WHERE id = :gid"), {"ref": final_ref[:64], "gid": str(game["id"])})')
+    assert final < rewrite < wrote
     assert lock_at < wrote < att.index("await db.commit()") and att.count("await db.commit()") == 1
     assert att.count('return {"status": "ok", "game_id": str(wrote["id"]), "source_ref": wrote["source_ref"], '
                      '"generation": int(wrote["generation"])}') == 1
@@ -2356,6 +2392,48 @@ def test_the_grant_copies_no_room_value_it_did_not_compare():
     for at in updates:
         stmt = src[at:src.index(" WHERE ", at)]
         assert not re.search(r"\b(started_at|id)\s*=", stmt.split(" SET ", 1)[1]), stmt[:160]
+    # Round 8 MEDIUM 1: the compared set grew by the resolution. The room
+    # values the authoritative resolution decides are row columns of the one
+    # definition (so a grant records them only as compared values, and they
+    # equal the resolution when it is written); the resolution helper answers
+    # exactly those keys; the agreement iterates that tuple; what a
+    # validation writes back is a subset of it
+    resolved = main._SPECTATE_GRANT_RESOLVED_COLUMNS
+    assert set(resolved) <= set(row_cols) - {"id", "generation", "mode"} and len(set(resolved)) == len(resolved)
+    assert set(main._SPECTATE_ROW_REFRESHED_COLUMNS) <= set(resolved)
+    assert tuple(main._spectate_resolved_room_values({"b", "a"}, "s")) == resolved
+    agree_src = " ".join(inspect.getsource(main._spectate_row_agrees_with_resolution).split())
+    assert agree_src.count("for col in _SPECTATE_GRANT_RESOLVED_COLUMNS if col in resolved") == 1
+    assert agree_src.count("_spectate_observed_canon(col, resolved[col]) != _spectate_observed_canon(col, game[col])") == 1
+    assert agree_src.count("if col in _SPECTATE_ROW_REFRESHED_COLUMNS") == 1
+
+
+def test_the_validation_grants_only_what_the_resolution_agrees_with():
+    """Round 8 MEDIUM 1, the agreement check by behaviour (the PG tests run
+    it through the routes): the resolution decides the source always and the
+    roster when the server has one; a row agreeing in every decided value
+    (rosters as sets) agrees; a row behind in the source disagrees and is
+    written back to the resolved source; a row behind in the roster
+    disagrees and nothing is written back; no mapping where one must exist
+    (an empty roster) disagrees with nothing to write back. Negative
+    controls: a 1v1 fallback resolution (no roster) never refuses on the
+    roster; the source is cut to 64 characters as the attest cuts it."""
+    ab, ba = "p1,p2", "p2,p1"
+    ids = {"p1", "p2"}
+    row = {"source_ref": "x", "roster": ab}
+    values = main._spectate_resolved_room_values
+    agree = main._spectate_row_agrees_with_resolution
+    assert values(ids, "x") == {"source_ref": "x", "roster": ab}
+    assert values(None, "x") == {"source_ref": "x"} and values(set(), "") is None
+    assert values(None, "y" * 80) == {"source_ref": "y" * 64}
+    assert agree(row, values(ids, "x")) == (True, {})
+    assert agree({**row, "roster": ba}, values(ids, "x")) == (True, {})
+    assert agree(row, values(ids, "y")) == (False, {"source_ref": "y"})
+    assert agree(row, values(ids | {"p3"}, "x")) == (False, {})
+    assert agree(row, values(ids | {"p3"}, "y")) == (False, {"source_ref": "y"})
+    assert agree(row, values(set(), "")) == (False, {})
+    assert agree({**row, "roster": "p9"}, values(None, "x")) == (True, {})
+    assert agree(row, values(None, "")) == (False, {"source_ref": ""})
 
 
 # -- board row 30g: the broadcaster pages through the session report ------------

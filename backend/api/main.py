@@ -58561,6 +58561,55 @@ _SPECTATE_GRANT_OTHER_COLUMNS = {
                        "and written by no other statement, so it is a property of that id",
     "observed_seq": "nextval of the observation sequence (364), drawn under the room lock (round 5 LOW 1)",
 }
+# Session report round 8 MEDIUM 1: the room-row columns of the definition that
+# the room's AUTHORITATIVE source also decides. _spectate_authoritative_roster
+# resolves them from the server's own records (the newest live series, lobby
+# or bracket match that names the room, and its members). A writer of those
+# records does not take the room lock and does not touch the room row (a
+# same-room continuation inserts series Y and commits), so the row can still
+# hold X after Y is authoritative, and a request that echoes X and the row's
+# generation agrees with the row. A validation that records a watch therefore
+# resolves these values again, under the room lock, and grants only when the
+# resolution, the row and the request all agree
+# (_spectate_row_agrees_with_resolution).
+_SPECTATE_GRANT_RESOLVED_COLUMNS = ("source_ref", "roster")
+# Of those, the column a validation writes back when the row is behind the
+# resolution: the source is server-derived and never a caller's, so the
+# resolved value is the one the attest would write. The roster is not written
+# back: the attest records it only when the fighters' own claim EQUALS the
+# resolution, and the listing's completeness check reads the attestations
+# against it, so a row behind on its roster is refused until the fighters
+# attest again.
+_SPECTATE_ROW_REFRESHED_COLUMNS = ("source_ref",)
+
+
+def _spectate_resolved_room_values(true_roster, derived_ref):
+    """The room-row values the authoritative resolution decides, keyed by
+    spectate_games column (_SPECTATE_GRANT_RESOLVED_COLUMNS), or None when a
+    mapping should exist and none does (an empty roster: the series or lobby
+    ended, or its successor is not created yet - nothing is authoritative, so
+    nothing can be granted). A resolution with no server roster (the 1v1
+    fallback) decides the source alone. The source is cut as the attest cuts
+    it when it writes the row."""
+    if true_roster is not None and not true_roster:
+        return None
+    resolved = {"source_ref": (derived_ref or "")[:64]}
+    if true_roster is not None:
+        resolved["roster"] = ",".join(sorted(true_roster))
+    return resolved
+
+
+def _spectate_row_agrees_with_resolution(game, resolved):
+    """(agrees, refresh). agrees: the resolution exists and every value it
+    decides equals the room row's (in the comparable form of the observed
+    tuple). refresh: the resolved values of _SPECTATE_ROW_REFRESHED_COLUMNS
+    the row does not hold, which the caller writes back (the trigger of 364
+    then draws the row a new generation)."""
+    if resolved is None:
+        return False, {}
+    behind = [col for col in _SPECTATE_GRANT_RESOLVED_COLUMNS if col in resolved
+              and _spectate_observed_canon(col, resolved[col]) != _spectate_observed_canon(col, game[col])]
+    return not behind, {col: resolved[col] for col in behind if col in _SPECTATE_ROW_REFRESHED_COLUMNS}
 
 
 def _spectate_observed_canon(column: str, value) -> str:
@@ -59197,6 +59246,25 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
            "region": req.region, "target": req.fighter_target,
            "cap": req.room_capacity, "proto": req.spectator_protocol,
            "roster": req.roster, "phase": req.phase[:16]})
+    # Session report round 8 MEDIUM 1: the source is resolved AGAIN, still
+    # under the room lock, as the last step before the answer is read back. A
+    # writer of the authoritative source takes neither this lock nor the row,
+    # so a continuation can commit Y after the resolution above; this
+    # resolution sees it (READ COMMITTED), the row is rewritten to it, and the
+    # answer names it. The same checks as above apply to it: a roster that is
+    # no longer the room's refuses the attest (its writes roll back). A change
+    # that commits after this statement is not excluded here; the validation
+    # resolves again under the lock and refuses a request that echoes a
+    # source that is no longer authoritative.
+    final_roster, final_ref = await _spectate_authoritative_roster(db, req.mode, req.room_name)
+    if final_roster is not None:
+        if not final_roster:
+            raise HTTPException(status_code=409, detail="room_unknown")
+        if set(roster) != final_roster or req.steam_id not in final_roster:
+            raise HTTPException(status_code=409, detail="roster_mismatch")
+    if final_ref[:64] != derived_ref[:64]:
+        await db.execute(text("UPDATE spectate_games SET source_ref = :ref WHERE id = :gid"),
+                         {"ref": final_ref[:64], "gid": str(game["id"])})
     # Session report round 6 MEDIUM 1: the answer names the room row this
     # attest wrote - its game id and the server-derived source it now holds
     # for this caller's mode and roster (the client cannot derive the source
@@ -60370,6 +60438,34 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
     if any(sent) and not all(sent):
         raise HTTPException(status_code=422, detail="observed_tuple_incomplete")
     records_watch = all(sent)
+    # Session report round 8 MEDIUM 1: the row is not the authority on its
+    # source. A writer of the room's authoritative source (a same-room
+    # continuation, a void, a completion) takes neither this lock nor the
+    # row, so the row and a request echoing it can both still say X, at the
+    # row's own generation, after Y is authoritative. A validation that
+    # records a watch resolves the source again here, under the room lock,
+    # after the row read (READ COMMITTED: this statement sees every commit
+    # made before it), and goes on only when the resolution agrees with the
+    # row; the comparison below then makes the request agree with both. When
+    # the row is behind, nothing is granted, drained, swept or bound: the
+    # resolved source is written to the row (its generation advances, so the
+    # next attest answer and the next validation carry the new one) and the
+    # typed retry is answered. When nothing is authoritative (no live series
+    # or lobby where one must exist) nothing is written and the retry is
+    # answered. The released request shape records no watch and keeps its
+    # answer: it is not resolved here.
+    if records_watch:
+        now_roster, now_ref = await _spectate_authoritative_roster(db, game["mode"], req.room_name)
+        agrees, refresh = _spectate_row_agrees_with_resolution(
+            game, _spectate_resolved_room_values(now_roster, now_ref))
+        if not agrees:
+            if refresh:
+                await db.execute(text("UPDATE spectate_games SET source_ref = :source_ref WHERE id = :gid"),
+                                 {**refresh, "gid": str(game["id"])})
+                await db.commit()
+            else:
+                await db.rollback()
+            return {"status": "retry", "reason": "source_changed", "results": []}
     grant_tuple = _spectate_observed_grant_tuple(game, req) if records_watch else None
     if records_watch and grant_tuple is None:
         await db.rollback()
