@@ -689,6 +689,63 @@ namespace CompetitiveRounds
         // Last time (server clock) we heard ANY verdict from this actor.
         private static readonly Dictionary<int, int> _lastHeardServerTs = new Dictionary<int, int>();
 
+        // ── Late-verdict evidence (bugs 406/407, C1) ──────────────────────
+        // EVIDENCE ONLY: nothing here applies, withholds or reorders damage.
+        // When this seat's ShadowDot has reported [POISON-SILENT] for an
+        // actor, the first verdict that actor's stream then delivers here is
+        // logged once as [POISON-LATE] with the stream, the tick and how late
+        // it came (server clock, from the shadow's arming and from the silence
+        // report). A silence no verdict ever answered is logged once at the
+        // point end. One record per actor, the earliest silence kept, so the
+        // lines are bounded by the [POISON-SILENT] lines themselves.
+        private struct SilenceRec { internal int ViewId, ArmedTs, ReportedTs; }
+        private static readonly Dictionary<int, SilenceRec> _silence = new Dictionary<int, SilenceRec>();
+
+        private static void NoteSilence(int actor, int viewId, int armedTs)
+        {
+            try
+            {
+                if (_silence.ContainsKey(actor)) return;
+                _silence[actor] = new SilenceRec { ViewId = viewId, ArmedTs = armedTs, ReportedTs = PhotonNetwork.ServerTimestamp };
+            }
+            catch { }
+        }
+
+        private static void NoteVerdictAfterSilence(int actor, int viewId, int streamId, int tick)
+        {
+            try
+            {
+                SilenceRec s;
+                if (_silence.Count == 0 || !_silence.TryGetValue(actor, out s)) return;
+                _silence.Remove(actor);
+                int now = PhotonNetwork.ServerTimestamp;
+                int fromArm, fromReport;
+                unchecked { fromArm = now - s.ArmedTs; fromReport = now - s.ReportedTs; }
+                Plugin.Log.LogInfo("[POISON-LATE] verdict after silence: view=" + viewId + " stream=" + streamId + " tick=" + tick
+                    + " silent_view=" + s.ViewId + " delay_from_arm_ms=" + fromArm + " delay_from_silence_ms=" + fromReport);
+            }
+            catch { }
+        }
+
+        /// <summary>Point end: every silence still unanswered, once, then
+        /// forgotten (the revive that follows restarts every stream).</summary>
+        internal static void ReportUnansweredSilences()
+        {
+            try
+            {
+                if (_silence.Count == 0) return;
+                int now = PhotonNetwork.ServerTimestamp;
+                foreach (var kv in _silence)
+                {
+                    int fromArm; unchecked { fromArm = now - kv.Value.ArmedTs; }
+                    Plugin.Log.LogInfo("[POISON-LATE] no verdict after silence by the point end: view=" + kv.Value.ViewId
+                        + " delay_from_arm_ms=" + fromArm);
+                }
+                _silence.Clear();
+            }
+            catch { }
+        }
+
         // Revive fence: verdicts whose stream began before the victim's most
         // recent revive are dropped. Defaults to "unset" so a late joiner drops
         // nothing — that absence is exactly the gap that made the old per-life
@@ -785,6 +842,8 @@ namespace CompetitiveRounds
                 _lastSeq.Clear();
                 _streams.Clear();
                 _lastHeardServerTs.Clear();
+                _silence.Clear();
+                PointEvidence.ResetForRoomExit();
                 _reviveServerTs.Clear();
                 _sawIncapablePeer = false;
                 _rosterRoom = "";
@@ -953,6 +1012,7 @@ namespace CompetitiveRounds
                 int last;
                 if (_lastSeq.TryGetValue(e.Sender, out last) && !SeqAfter(seq, last)) return;
                 _lastSeq[e.Sender] = seq;
+                NoteVerdictAfterSilence(e.Sender, viewId, streamId, kind == TypeHeader ? 0 : (int)a[4]);
 
                 long key = StreamKey(viewId, streamId);
                 StreamRec rec;
@@ -1466,6 +1526,8 @@ namespace CompetitiveRounds
                                 + "ms of a damage-over-time stream — sender/path/receiver undetermined; "
                                 + "damage state on other seats unknown. Correlate across seats before "
                                 + "blaming the victim's client.");
+                            NoteSilence(actor, viewId, anchor);
+
                         }
                     }
                 }
@@ -1596,5 +1658,128 @@ namespace CompetitiveRounds
             }
             return exception;
         }
+    }
+
+    /// <summary>Bugs 406/407, EVIDENCE ONLY (C2, C3): per point, what THIS seat
+    /// holds. Nothing here changes damage, health or timing -- it reads.
+    ///
+    /// C2: at every point end, one [HP-POINT-END] line with every player's
+    /// health and max health as this seat holds them (player id and team, no
+    /// account identity). Two seats' lines for the same point differing is the
+    /// divergence the reports describe; equal lines rule it out for that point.
+    ///
+    /// C3: the Saw card deals its damage on each seat from that seat's own
+    /// locally spawned saw (VanillaFixes.SawDeadTargetPatch's notes). Every
+    /// Saw.Update is bracketed and the health each player LOST inside it is
+    /// summed per point; at the point end one [SAW-POINT] line carries the
+    /// sums (only when a saw dealt anything). A heal inside the bracket
+    /// (lifesteal) is not netted against it: only drops are counted.</summary>
+    internal static class PointEvidence
+    {
+        private static readonly Dictionary<int, float> _sawLost = new Dictionary<int, float>();
+        private static readonly Dictionary<int, float> _before = new Dictionary<int, float>();
+        private static int _sawFrames;
+        private static int _point;
+
+        internal static void ResetForRoomExit()
+        {
+            _sawLost.Clear(); _before.Clear(); _sawFrames = 0; _point = 0;
+        }
+
+        internal static void SawBefore()
+        {
+            try
+            {
+                _before.Clear();
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+                foreach (var p in pm.players)
+                    if (p != null && p.data != null) _before[p.PlayerID] = p.data.health;
+            }
+            catch { }
+        }
+
+        internal static void SawAfter()
+        {
+            try
+            {
+                if (_before.Count == 0) return;
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+                bool any = false;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.data == null) continue;
+                    float was;
+                    if (!_before.TryGetValue(p.PlayerID, out was)) continue;
+                    float lost = was - p.data.health;
+                    if (lost <= 0f) continue;
+                    float sum;
+                    _sawLost.TryGetValue(p.PlayerID, out sum);
+                    _sawLost[p.PlayerID] = sum + lost;
+                    any = true;
+                }
+                if (any) _sawFrames++;
+                _before.Clear();
+            }
+            catch { }
+        }
+
+        internal static void PointEnd()
+        {
+            try
+            {
+                _point++;
+                var sb = new System.Text.StringBuilder();
+                var pm = PlayerManager.instance;
+                if (pm != null && pm.players != null)
+                    foreach (var p in pm.players)
+                    {
+                        if (p == null || p.data == null) continue;
+                        sb.Append(" p").Append(p.PlayerID).Append("(team ").Append(p.TeamID).Append(")=")
+                          .Append(p.data.health.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)).Append('/')
+                          .Append(p.data.MaxHealth.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture))
+                          .Append(p.data.dead ? " dead" : "");
+                    }
+                Plugin.Log.LogInfo("[HP-POINT-END] point=" + _point + " spectator=" + (RoomActors.LocalIsSpectator ? 1 : 0) + sb);
+                if (_sawLost.Count > 0)
+                {
+                    var s = new System.Text.StringBuilder();
+                    foreach (var kv in _sawLost)
+                        s.Append(" p").Append(kv.Key).Append('=').Append(kv.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
+                    Plugin.Log.LogInfo("[SAW-POINT] point=" + _point + " frames=" + _sawFrames + " lost" + s);
+                }
+                _sawLost.Clear(); _sawFrames = 0;
+                PoisonSync.ReportUnansweredSilences();
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>C3's bracket: the health each player loses inside one
+    /// Saw.Update on this seat. A prefix and a finalizer (which runs whether or
+    /// not the update threw, and rethrows what it was given), neither of which
+    /// changes anything.</summary>
+    [HarmonyPatch(typeof(Saw), "Update")]
+    internal static class SawPointEvidencePatch
+    {
+        [HarmonyPrefix]
+        private static void Before() { PointEvidence.SawBefore(); }
+
+        [HarmonyFinalizer]
+        private static Exception After(Exception __exception)
+        {
+            PointEvidence.SawAfter();
+            return __exception;
+        }
+    }
+
+    /// <summary>C2's trigger: the point-decided broadcast, which runs in every
+    /// mode (FFA's prefix replaces the body, postfixes still run).</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound", new Type[] { typeof(int), typeof(int), typeof(int), typeof(int), typeof(int), typeof(int) })]
+    internal static class PointEndEvidencePatch
+    {
+        [HarmonyPostfix]
+        private static void After() { PointEvidence.PointEnd(); }
     }
 }
