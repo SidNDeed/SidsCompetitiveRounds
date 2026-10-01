@@ -176,6 +176,34 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 
 @pytest.fixture(autouse=True)
+def _read_gate_stage_known():
+    """Verified reads: production reads the read gate's stage through its own
+    short session on `database.async_session`, and a node that has never read
+    it answers 503 read_gate_unavailable on gated GETs (requirement 14). A
+    test harness that points only `get_db` at its own database leaves that
+    session aimed at nothing, so every gated GET it sends would 503 -- or not,
+    depending on whether an earlier test in the process happened to load the
+    stage. Each test therefore starts with the stage known as `off`, the
+    production default; a failed refresh keeps a known stage, so it stays
+    `off`. The read gate's own tests set the stage they exercise themselves
+    (read_gate_testkit.gate_env, mode_cache_set) after this runs. The cache is
+    restored whole afterwards.
+
+    Only when `read_gate` is already imported, like the fixture below."""
+    rg = sys.modules.get("read_gate")
+    if rg is None or not hasattr(rg, "_mode_cache"):
+        yield
+        return
+    before = dict(rg._mode_cache)
+    rg._mode_cache.update({"value": "off", "loaded": True, "at": rg._mono()})
+    try:
+        yield
+    finally:
+        rg._mode_cache.clear()
+        rg._mode_cache.update(before)
+
+
+@pytest.fixture(autouse=True)
 def _pc_card_themes_loaded():
     """Production loads the card -> ink map once at startup and every face
     route refuses while it is empty, because that colour is part of

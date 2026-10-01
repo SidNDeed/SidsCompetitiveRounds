@@ -2991,6 +2991,15 @@ def test_mod_version_advertises_no_series_status_capability():
     the returned mapping is exactly the two version numbers plus that one
     field, so any other key -- the series-status flag above all -- turns it
     red.
+
+    Verified reads adds two keys, `read_gate` (the stage this box acts on) and
+    `read_gate_open` (the GET templates its read gate never refuses for want of
+    a read credential). They are the client's one signal for OPEN versus gated
+    (requirement 32). Both boxes read the stage from the same replicated
+    runtime_settings row and serve the same route table, and the client
+    treats the advert as a hint: a gate refusal from whichever box answers
+    latches enforce on its own (ReadGateRules.OnRefusal), so a later request
+    never depends on this answer's box. Pinned here by name and by value.
     """
     node = node_named("get_mod_version")
     joined = "\n".join(code_lines_of(node))
@@ -3001,8 +3010,11 @@ def test_mod_version_advertises_no_series_status_capability():
     assert isinstance(answer, ast.Dict), ast.unparse(returns[0])
     keys = sorted(ast.unparse(k) for k in answer.keys)
     assert keys == sorted(["'version'", "'min_version'",
-                           "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD"]), keys
+                           "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD",
+                           "'read_gate'", "'read_gate_open'"]), keys
     values = {ast.unparse(k): ast.unparse(v) for k, v in zip(answer.keys, answer.values)}
+    assert values["'read_gate'"] == "await read_gate.current_mode()", values
+    assert values["'read_gate_open'"] == "read_gate.ungated_templates(app.routes)", values
     # The two version numbers are the two constants, not a literal.
     assert values["'version'"] == "LATEST_MOD_VERSION", values
     assert values["'min_version'"] == "MIN_MOD_VERSION_EFFECTIVE", values
