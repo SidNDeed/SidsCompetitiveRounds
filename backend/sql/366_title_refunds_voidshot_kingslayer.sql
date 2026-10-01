@@ -36,7 +36,12 @@
 --     holder included) equals the census's holders, the paying holders and
 --     the gold they paid equal the census's, and no refund row exists;
 --   APPLIED: no holder remains and the refund rows equal the census's paying
---     holders and gold.
+--     holders and gold;
+--   NEVER SOLD: no holder, no refund row and no 'purchase' row naming the
+--     sku -- a database these titles were never sold on (a fresh or replayed
+--     schema), where there is nothing to refund and only the catalogue rows
+--     are retired. Production is not in this state for title_regicide: its
+--     buyer's 'purchase' row exists, so a holder lost there still refuses.
 -- Anything else -- a holder gained or lost since the census, at any price --
 -- refuses with nothing changed (re-census, then edit the census numbers
 -- below). A second run is the APPLIED state and writes nothing.
@@ -59,8 +64,10 @@ DECLARE
     moved      INTEGER;
     n_unworn   INTEGER;
     n_retired  INTEGER;
+    n_purch    INTEGER;
     v_fresh    BOOLEAN;
     v_applied  BOOLEAN;
+    v_never    BOOLEAN;
 BEGIN
     -- The census, per sku: every holder at any price, the holders who paid,
     -- and the gold they paid.
@@ -97,12 +104,16 @@ BEGIN
         SELECT count(*), COALESCE(SUM(g.amount), 0) INTO n_done, paid_done
           FROM gold_transactions g
          WHERE g.reason = 'title_refunded' AND g.reference_id = c.sku;
-        RAISE NOTICE '366 preflight %: holders now % (census %), paying holders now % (census %), gold now % (census %), refunds written % for % gold',
-            c.sku, n_all, c.holders, n_now, c.paid_holders, paid_now, c.paid, n_done, paid_done;
+        SELECT count(*) INTO n_purch
+          FROM gold_transactions g
+         WHERE g.reason = 'purchase' AND g.reference_id = c.sku;
+        RAISE NOTICE '366 preflight %: holders now % (census %), paying holders now % (census %), gold now % (census %), refunds written % for % gold, purchase rows %',
+            c.sku, n_all, c.holders, n_now, c.paid_holders, paid_now, c.paid, n_done, paid_done, n_purch;
         v_fresh := n_all = c.holders AND n_now = c.paid_holders AND paid_now = c.paid
                    AND n_done = 0 AND paid_done = 0;
         v_applied := n_all = 0 AND n_done = c.paid_holders AND paid_done = c.paid;
-        IF NOT (v_fresh OR v_applied) THEN
+        v_never := n_all = 0 AND n_done = 0 AND n_purch = 0;
+        IF NOT (v_fresh OR v_applied OR v_never) THEN
             RAISE EXCEPTION '366 refused: % has % holders now (% paying, % gold) and % refunds written (% gold); the census says % holders (% paying, % gold). Re-census before refunding',
                 c.sku, n_all, n_now, paid_now, n_done, paid_done, c.holders, c.paid_holders, c.paid;
         END IF;
@@ -147,7 +158,8 @@ END $m366$;
 -- Post-checks, on every application.
 DO $m366post$
 DECLARE
-    bad INTEGER;
+    bad  INTEGER;
+    want INTEGER;
 BEGIN
     SELECT count(*) INTO bad FROM player_items pi JOIN shop_items si ON si.id = pi.item_id
      WHERE si.sku IN ('title_voidshot', 'title_regicide');
@@ -164,12 +176,18 @@ BEGIN
     IF bad <> 0 THEN
         RAISE EXCEPTION '366: % retired titles are still on sale', bad;
     END IF;
+    -- One refund row per census paying holder of a sku that was ever sold
+    -- here (the census: title_regicide 1, title_voidshot 0); none where it
+    -- never was.
     SELECT count(*) INTO bad FROM gold_transactions
      WHERE reason = 'title_refunded' AND reference_id IN ('title_voidshot', 'title_regicide');
-    IF bad <> 1 THEN
-        RAISE EXCEPTION '366: expected the census''s 1 refund row (its 1 paying holder), found %', bad;
+    SELECT CASE WHEN EXISTS (SELECT 1 FROM gold_transactions
+                              WHERE reason = 'purchase' AND reference_id = 'title_regicide')
+                THEN 1 ELSE 0 END INTO want;
+    IF bad <> want THEN
+        RAISE EXCEPTION '366: expected % refund row(s) (the census''s paying holders of a title sold here), found %', want, bad;
     END IF;
-    RAISE NOTICE '366: final state holds -- no holder, no wearer, both retired, 1 refund row';
+    RAISE NOTICE '366: final state holds -- no holder, no wearer, both retired, % refund row(s)', bad;
 END $m366post$;
 
 COMMIT;
