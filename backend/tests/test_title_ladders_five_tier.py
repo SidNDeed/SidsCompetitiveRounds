@@ -275,6 +275,27 @@ def test_berserker_5_0_passes_and_5_1_fails(winner):
 
 
 @BOTH
+@pytest.mark.parametrize("own", [4, 1])
+def test_berserker_an_accepted_short_shutout_does_not_count(winner, own):
+    """Finding 2: an accepted 4-0 or 1-0 won game is not the 5-0 the ladder
+    names. NEGATIVE CONTROL: under the previous rule (won, the opponent on 0,
+    any positive own score) the same rows count, which this test catches."""
+    m, w, _ = _game(winner, SWEEP)
+    me, opp = ("p1", "p2") if winner == "P1" else ("p2", "p1")
+    setattr(m, me + "_rounds_won", own)
+    setattr(m, opp + "_rounds_won", 0)
+    row = tl.game_row_1v1(m, w)
+    assert tl.counted_delta("berserker", row) == 0, (own, row)
+
+    def previous_rule(r):
+        return (bool(r.get("won")) and r.get("opp_rounds") == 0
+                and (r.get("own_rounds") or 0) > 0)
+    assert previous_rule(row) is True, row
+    setattr(m, me + "_rounds_won", 5)
+    assert tl.counted_delta("berserker", tl.game_row_1v1(m, w)) == 1
+
+
+@BOTH
 def test_the_conditions_read_points_scored_not_timeline_values(winner, monkeypatch):
     """NEGATIVE CONTROL for the evaluator. The timeline value of the side that
     loses a round drops back to its rounds * 2, so read as points it UNDER-

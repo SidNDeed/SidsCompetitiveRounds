@@ -558,8 +558,10 @@ def meets_sniper(row) -> bool:
 
 
 def meets_berserker(row) -> bool:
-    return (bool(row.get("won")) and row.get("opp_rounds") == 0
-            and (row.get("own_rounds") or 0) > 0)
+    """Exactly 5-0: a won game of five rounds to none. An accepted 4-0 or 1-0
+    (a shorter game the report still carries) is not a sweep."""
+    return (bool(row.get("won")) and row.get("own_rounds") == 5
+            and row.get("opp_rounds") == 0)
 
 
 def meets_blitz(row) -> bool:
