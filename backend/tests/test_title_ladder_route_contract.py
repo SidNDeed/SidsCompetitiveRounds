@@ -405,3 +405,52 @@ def test_the_exempt_account_reads_its_entry_rungs_owned_without_a_row():
     # A synthetic id below the first individual-account id: no real account.
     b = _answer_for("76561190000000206", active_sku="title_ladder_rat_1")
     assert not any(r["owned"] for ln in b["ladders"] for r in ln["rungs"])
+
+
+# -- Round 2, finding 6: what a client older than 1.41.0 is shown -------------
+#
+# No released client calls this route. Every release tag before v1.41.0 is
+# read here, and none of its plugin sources names the route's path segment or
+# its parser, so no X-Mod-Version shaping can change what such a client is
+# shown: a 1.40.3 player sees the ladders only through /api/v1/shop/items --
+# the 32 tier-1 rungs as ordinary titles for sale, an earned rung only to
+# its owner (the 'achievement' pool rule), and the two retired titles gone.
+# The negative control is the same search finding a string the tag DOES
+# carry, so an empty answer is the tag's content and not a broken search
+# (it caught the first draft's pathspec, relative to backend/tests).
+
+ROUTE_MARKERS = ("title-ladders", "ParseTitleLadders", "TitleLaddersUI")
+
+
+def _git(*args):
+    import subprocess
+    return subprocess.run(["git", "-C", HERE] + list(args), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace")
+
+
+def _released_before_1_41_0():
+    tags = []
+    for t in _git("tag", "-l", "v1.*").stdout.split():
+        try:
+            parts = tuple(int(x) for x in t[1:].split("."))
+        except ValueError:
+            continue
+        if parts < (1, 41, 0):
+            tags.append(t)
+    return tags
+
+
+def _grep_tag(tag, needle):
+    got = _git("grep", "-n", "-F", "-e", needle, tag, "--", ":(top)plugin")
+    assert got.returncode in (0, 1), (tag, needle, got.stderr)
+    return got.stdout
+
+
+def test_no_release_older_than_1_41_0_calls_the_ladder_route():
+    tags = _released_before_1_41_0()
+    if "v1.40.3" not in tags:
+        pytest.skip("the release tags are not in this clone")
+    hits = {(t, m): _grep_tag(t, m) for t in tags for m in ROUTE_MARKERS}
+    assert not any(hits.values()), [k for k, v in hits.items() if v]
+    # Negative control: the search does find what v1.40.3 does carry.
+    assert "/api/v1/shop/items" in _grep_tag("v1.40.3", "/api/v1/shop/items")
