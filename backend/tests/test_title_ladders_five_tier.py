@@ -359,15 +359,16 @@ def test_every_member_of_a_family_credits_and_nothing_else_does(line):
     assert tl.counted_delta(line, tl.game_row_1v1(m, lo, [FAMILIES[line][0]])) == 1
 
 
-def test_a_team_or_ffa_game_claims_nothing_for_a_one_v_one_kind(monkeypatch):
+def test_a_team_or_ffa_game_counts_nothing_for_a_one_v_one_kind(monkeypatch):
     """Through the hook, on a fake session: a 2v2 or FFA game worn with a
-    card ladder does not even claim the credit row. Control: the same game as
-    a 1v1 claims and moves the count."""
+    card ladder is CLAIMED (round 3: every participant of every ranked game,
+    so a replay changes nothing) but writes no progress. Control: the same
+    game as a 1v1 claims and moves the count."""
     row = {"P": _card_row(["Poison"])}
     for mode in ("2v2", "ffa"):
         db = _LadderDB(sku="title_poisoner", games=1, tier=1)
         _run(tl.record_completed_games(db, ["P"], mode=mode, reference_id="g1", rows=row))
-        assert db.credit_attempts == 0, mode
+        assert db.credit_attempts == 1, mode
         assert not any("INSERT INTO title_ladder_progress" in s for s, _ in db.log), mode
     db = _LadderDB(sku="title_poisoner", games=1, tier=1)
     _run(tl.record_completed_games(db, ["P"], mode="1v1", reference_id="g1", rows=row))
@@ -462,7 +463,12 @@ def hook_scenario(wear, calls, *, held=(), gold=(), history=0):
                 try:
                     for call in calls:
                         mode, ref, row = call[:3]
-                        if len(call) > 3:      # wear another title for this game
+                        if len(call) > 3 and call[3] is None:    # wear nothing
+                            await db.execute(text(
+                                "UPDATE players SET active_title_id = NULL WHERE id = :pid"),
+                                {"pid": pid})
+                            await db.commit()
+                        elif len(call) > 3:    # wear another title for this game
                             await db.execute(text(
                                 "INSERT INTO player_items (player_id, item_id, purchase_price) "
                                 "SELECT :pid, id, 0 FROM shop_items WHERE sku = :s "
@@ -508,14 +514,13 @@ T0 = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _at(i):
-    """The order key of the i-th game: one game every ten minutes."""
+    """A report clock for the i-th game: one game every ten minutes."""
     return T0 + timedelta(minutes=10 * i)
 
 
 def _apex(results):
     return hook_scenario("title_ladder_apex_1",
-                         [("1v1", "g%d" % i, dict(r, order_at=_at(i)))
-                          for i, r in enumerate(results)])
+                         [("1v1", "g%d" % i, dict(r)) for i, r in enumerate(results)])
 
 
 def test_pg_the_apex_run_resets_on_a_loss():
@@ -537,12 +542,11 @@ def test_pg_five_straight_wins_reach_predator_and_a_broken_five_does_not():
 
 
 def test_pg_a_re_reported_game_credits_once():
-    w1, w2, w3 = (dict(W, order_at=_at(i)) for i in (1, 2, 3))
     got = hook_scenario("title_ladder_apex_1",
-                        [("1v1", "g1", w1), ("1v1", "g2", w2), ("1v1", "g2", w2)])
+                        [("1v1", "g1", W), ("1v1", "g2", W), ("1v1", "g2", W)])
     assert got.credits == 2 and got.progress["apex"][2] == 2, got.progress
     control = hook_scenario("title_ladder_apex_1",
-                            [("1v1", "g1", w1), ("1v1", "g2", w2), ("1v1", "g3", w3)])
+                            [("1v1", "g1", W), ("1v1", "g2", W), ("1v1", "g3", W)])
     assert control.credits == 3 and control.progress["apex"][2] == 3
 
 
@@ -551,59 +555,125 @@ OTHER = "title_decent"
 
 
 def test_pg_r2_apex_an_unworn_loss_ends_the_run():
-    """Finding 4, the reviewer's case: four Apex-worn wins, a loss while
-    another title is worn, then one Apex-worn win. The loss ends the run, so
-    the later win starts a new run of 1 and no five-win rung is granted.
-    NEGATIVE CONTROL: the same games with the loss replaced by an unworn WIN
-    (also not a worn win, so it ends the run too) and, separately, with no
-    unworn game at all (five worn wins in a row) -- the latter grants
+    """Finding 4 of round 2, the reviewer's case: four Apex-worn wins, a loss
+    while another title is worn, then one Apex-worn win. The loss ends the
+    run, so the later win starts a new run of 1 and no five-win rung is
+    granted. NEGATIVE CONTROL: the same games with the loss replaced by an
+    unworn WIN (also not a worn win, so it ends the run too) and, separately,
+    with no unworn game at all (five worn wins in a row) -- the latter grants
     Predator."""
-    seq = [("1v1", "g%d" % i, dict(W, order_at=_at(i))) for i in range(4)]
-    seq.append(("1v1", "g4", dict(L, order_at=_at(4)), OTHER))
-    seq.append(("1v1", "g5", dict(W, order_at=_at(5)), APEX))
+    seq = [("1v1", "g%d" % i, dict(W)) for i in range(4)]
+    seq.append(("1v1", "g4", dict(L), OTHER))
+    seq.append(("1v1", "g5", dict(W), APEX))
     got = hook_scenario(APEX, seq)
     assert got.progress["apex"][0] == 4 and got.progress["apex"][2] == 1, got.progress
     assert "title_ladder_apex_2" not in got.owned and got.active == APEX
     unworn_win = list(seq)
-    unworn_win[4] = ("1v1", "g4", dict(W, order_at=_at(4)), OTHER)
+    unworn_win[4] = ("1v1", "g4", dict(W), OTHER)
     uw = hook_scenario(APEX, unworn_win)
     assert uw.progress["apex"][2] == 1 and "title_ladder_apex_2" not in uw.owned, uw.progress
-    straight = hook_scenario(APEX, [("1v1", "g%d" % i, dict(W, order_at=_at(i)))
-                                    for i in range(5)])
+    straight = hook_scenario(APEX, [("1v1", "g%d" % i, dict(W)) for i in range(5)])
     assert straight.progress["apex"] == (5, 2, 5), straight.progress
     assert "title_ladder_apex_2" in straight.owned
-
-
-def test_pg_r2_apex_a_delayed_report_cannot_append_behind_a_later_game():
-    """Finding 4: games 0-3 are worn wins reported in order; then game 4 (a
-    worn win played BEFORE game 3, reported late) arrives. It cannot extend
-    the run behind game 3: the run stays 4 and its last key stays game 3's.
-    A delayed LOSS still ends the run. Controls: the same win in order
-    extends to 5 and grants Predator; a missing order key never extends."""
-    base = [("1v1", "g%d" % i, dict(W, order_at=_at(i * 2))) for i in range(4)]
-    late_win = base + [("1v1", "late", dict(W, order_at=_at(5)))]       # 10*5 < 10*6
-    got = hook_scenario(APEX, late_win)
-    assert got.progress["apex"] == (4, 1, 4), got.progress
-    assert got.credits == 5 and "title_ladder_apex_2" not in got.owned
-    late_loss = base + [("1v1", "late", dict(L, order_at=_at(1)))]
-    lost = hook_scenario(APEX, late_loss)
-    assert lost.progress["apex"] == (4, 1, 0), lost.progress
-    in_order = base + [("1v1", "next", dict(W, order_at=_at(7)))]
-    ok = hook_scenario(APEX, in_order)
-    assert ok.progress["apex"] == (5, 2, 5) and "title_ladder_apex_2" in ok.owned, ok.progress
-    no_key = base + [("1v1", "nokey", dict(W))]
-    nk = hook_scenario(APEX, no_key)
-    assert nk.progress["apex"] == (4, 1, 4), nk.progress
 
 
 def test_pg_r2_apex_a_two_v_two_or_ffa_game_does_not_touch_the_run():
     """Apex counts ranked 1v1 games: a 2v2 or FFA game, worn or not, neither
     extends nor ends the run."""
-    seq = [("1v1", "g%d" % i, dict(W, order_at=_at(i))) for i in range(3)]
+    seq = [("1v1", "g%d" % i, dict(W)) for i in range(3)]
     seq += [("2v2", "t1", dict(L)), ("ffa", "f1", dict(L), OTHER)]
-    seq += [("1v1", "g9", dict(W, order_at=_at(9)), APEX)]
+    seq += [("1v1", "g9", dict(W), APEX)]
     got = hook_scenario(APEX, seq)
     assert got.progress["apex"][2] == 4, got.progress
+
+
+# -- Round 3 finding 2: the Apex run in the order the SERVER recorded the games.
+#
+# Every row below is PRODUCTION-SHAPED: game_row_1v1 over a `matches`-shaped
+# row carrying the report's own clock (started_at: optional, unsigned) and the
+# server's (ended_at), exactly what submit_match hands the hook. The module
+# under test builds the row, so a module that reads a client clock reads it
+# here too.
+
+def _row(i, won, started="honest"):
+    """The 1v1 row of game i for player P1. `started` is the report clock:
+    "honest" (ten minutes a game), None (absent), "future" (a day ahead),
+    "behind" (a day behind) or a datetime."""
+    winner = "P1" if won else "P2"
+    m, _, _ = _game(winner, SWEEP)
+    clock = {"honest": _at(i), "future": _at(i) + timedelta(days=1),
+             "behind": _at(i) - timedelta(days=1)}
+    m.started_at = clock.get(started, started) if started is not None else None
+    m.ended_at = _at(i) + timedelta(minutes=5)
+    return tl.game_row_1v1(m, "P1")
+
+
+def test_r3_the_one_v_one_row_carries_no_clock():
+    """No client time reaches the hook: the row game_row_1v1 builds holds no
+    time value, whatever the report's started_at says. Control: the same
+    check over a row that does carry the report's start fails."""
+    rows = [_row(1, True, s) for s in ("honest", None, "future", "behind")]
+    for r in rows:
+        assert not [k for k, v in r.items() if isinstance(v, datetime)], r
+    assert rows[0] == rows[1] == rows[2] == rows[3]
+    leaky = dict(rows[0], order_at=_at(1))
+    assert [k for k, v in leaky.items() if isinstance(v, datetime)] == ["order_at"]
+
+
+def test_pg_r3_apex_absent_future_or_behind_report_clocks_give_the_honest_run():
+    """Five worn wins: honest report clocks, then the same games with one
+    report's started_at absent, one a day in the future and two a day behind.
+    The run is the same five-win run each time (Predator granted), because the
+    order is the order the server recorded them. MUTATION: a module that
+    orders by the report clock (round 2's, 29f91f81) refuses the
+    behind-clock wins and fails this test."""
+    honest = hook_scenario(APEX, [("1v1", "g%d" % i, _row(i, True)) for i in range(5)])
+    assert honest.progress["apex"] == (5, 2, 5), honest.progress
+    clocks = ["honest", None, "future", "behind", "behind"]
+    mixed = hook_scenario(APEX, [("1v1", "g%d" % i, _row(i, True, c))
+                                 for i, c in enumerate(clocks)])
+    assert mixed.progress == honest.progress, (mixed.progress, honest.progress)
+    assert mixed.owned == honest.owned and mixed.active == honest.active
+
+
+def test_pg_r3_apex_a_duplicate_after_a_title_switch_changes_nothing():
+    """Three worn wins (run 3); the player switches to another title and game
+    2's report arrives again: claimed already, so nothing changes -- the run
+    stays 3 and no credit is added. Control: a NEW game played wearing the
+    other title ends the run."""
+    seq = [("1v1", "g%d" % i, _row(i, True)) for i in range(3)]
+    dup = hook_scenario(APEX, seq + [("1v1", "g2", _row(2, True), OTHER)])
+    assert dup.progress["apex"] == (3, 1, 3) and dup.credits == 3, (dup.progress, dup.credits)
+    new = hook_scenario(APEX, seq + [("1v1", "g3", _row(3, True), OTHER)])
+    assert new.progress["apex"] == (3, 1, 0) and new.credits == 4, (new.progress, new.credits)
+
+
+def test_pg_r3_apex_a_no_title_first_report_then_a_worn_replay_gets_no_credit():
+    """A game first reported while the player wears no title is claimed then
+    (line NULL); its replay after equipping Apex changes nothing: no Apex
+    progress. Control: a new game won wearing Apex starts a run of 1."""
+    first = ("1v1", "g1", _row(1, True), None)
+    replay = ("1v1", "g1", _row(1, True), APEX)
+    got = hook_scenario(APEX, [first, replay])
+    assert "apex" not in got.progress and got.credits == 1, (got.progress, got.credits)
+    control = hook_scenario(APEX, [first, ("1v1", "g2", _row(2, True), APEX)])
+    assert control.progress["apex"] == (1, 1, 1) and control.credits == 2, control.progress
+
+
+def test_pg_r3_apex_an_unworn_game_recorded_before_an_older_worn_win_arrives():
+    """Four worn wins (run 4); then an unworn game (g5) is recorded; then a
+    worn win played BEFORE it (g4, its report clock earlier than g5's) arrives.
+    In recorded order the unworn game ended the run, so the late win starts a
+    new run at 1 and no Predator is granted. Control: without the unworn game
+    the same late win is the fifth in a row and grants Predator."""
+    base = [("1v1", "g%d" % i, _row(i, True)) for i in range(4)]
+    unworn = ("1v1", "g5", _row(5, False), OTHER)
+    late = ("1v1", "g4", _row(4, True), APEX)
+    got = hook_scenario(APEX, base + [unworn, late])
+    assert got.progress["apex"] == (4, 1, 1), got.progress
+    assert "title_ladder_apex_2" not in got.owned
+    control = hook_scenario(APEX, base + [late])
+    assert control.progress["apex"] == (5, 2, 5) and "title_ladder_apex_2" in control.owned
 
 
 def _rerun_365_after(mutate, sql365=None):
@@ -676,18 +746,6 @@ def test_pg_r3_365_declares_streak_at_timestamptz_default_null():
                    "column_default": None}, col
 
 
-def test_game_order_key_is_the_start_never_after_the_server_clock():
-    s, e = _at(1), _at(2)
-    assert tl.game_order_key(s, e) == s
-    assert tl.game_order_key(_at(9), e) == e            # a future stamp is clamped
-    assert tl.game_order_key(None, e) == e
-    assert tl.game_order_key(s.replace(tzinfo=None), e) == s   # naive is UTC
-    assert tl.game_order_key(None, None) is None
-    m, w, _ = _game("P1", SWEEP)
-    m.started_at, m.ended_at = s, e
-    assert tl.game_row_1v1(m, w)["order_at"] == s
-
-
 def test_pg_two_games_of_one_series_credit_two():
     got = hook_scenario("title_decent", [("1v1", "m-1", W), ("1v1", "m-2", W)])
     assert got.progress["decent"][0] == 2 and got.credits == 2, got.progress
@@ -756,7 +814,7 @@ def test_pg_a_card_ladder_credits_a_family_pick_and_not_another():
     got = hook_scenario("title_poisoner", [("1v1", "a", fam), ("1v1", "b", other),
                                            ("2v2", "c", fam)])
     assert got.progress["poisoner"][0] == 1, got.progress
-    assert got.credits == 2                       # the 2v2 game claims nothing
+    assert got.credits == 3                       # the 2v2 game is claimed, counts nothing
 
 
 def test_pg_an_owner_of_a_higher_rung_starts_there():

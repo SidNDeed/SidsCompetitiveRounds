@@ -1456,7 +1456,9 @@ def test_pg_ffa_credit_is_keyed_by_the_game(opened, hook_calls):
     THAT game's match id -- and now the ladder too: after game 1, W and R
     each hold one credit keyed by game 1's id and read +1 through the GET;
     after game 2, W holds a second keyed by game 2's id and reads +2, R --
-    a ghost in game 2 -- still one, G none. Game 2 sent again is the replay
+    a ghost in game 2 -- still one, G none. V and X wear nothing and are still
+    CLAIMED for every game they are rated in (round 3: every participant of
+    every ranked game), so a replay worn with a ladder would change nothing. Game 2 sent again is the replay
     echo and moves nothing. A new lobby gives W the next +1.
 
     The hook is reached by both games of L -- three players, then two. The
@@ -1491,7 +1493,7 @@ def test_pg_ffa_credit_is_keyed_by_the_game(opened, hook_calls):
             got1 = await _get_ladders(schema, [W, R, G])
             once = {W: start[W] + 1, R: start[R] + 1, G: start[G]}
             problems += _sitting_problems("after game 1", after1, got1, once,
-                                          {W: [m1], V: [], R: [m1], G: []})
+                                          {W: [m1], V: [m1], R: [m1], G: []})
 
             # Game 2.
             game_2 = _sitting_game_2(lobby)
@@ -1509,7 +1511,7 @@ def test_pg_ffa_credit_is_keyed_by_the_game(opened, hook_calls):
             got2 = await _get_ladders(schema, [W, R, G])
             twice = {W: start[W] + 2, R: start[R] + 1, G: start[G]}
             problems += _sitting_problems("after game 2", after2, got2, twice,
-                                          {W: [m1, m2], V: [], R: [m1], G: []})
+                                          {W: [m1, m2], V: [m1, m2], R: [m1], G: []})
             by_lobby = sorted(NAME[c[0]] for c in after2["credits"] if c[1] == L)
             if by_lobby:
                 problems.append("after game 2: %d credit(s) keyed by the lobby, not a "
@@ -1548,7 +1550,7 @@ def test_pg_ffa_credit_is_keyed_by_the_game(opened, hook_calls):
             got4 = await _get_ladders(schema, [W, R, G])
             thrice = {W: start[W] + 3, R: start[R] + 1, G: start[G]}
             late = _sitting_problems("after the second lobby", after4, got4, thrice,
-                                     {W: [m1, m2, m3], V: [], R: [m1], G: [], X: []})
+                                     {W: [m1, m2, m3], V: [m1, m2, m3], R: [m1], G: [], X: [m3]})
             assert not late, late
     _run(_go())
 

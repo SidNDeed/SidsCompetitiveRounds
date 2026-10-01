@@ -116,8 +116,9 @@ KIND_UNIT = {
     "phoenix": "wins", "specter": "wins", "streak": "streak",
 }
 
-# Kinds measured on a ranked 1v1 game's own row. A 2v2 or FFA game claims
-# nothing for them: the stats they read exist only on the 1v1 `matches` row.
+# Kinds measured on a ranked 1v1 game's own row. A 2v2 or FFA game is claimed
+# but counts nothing for them: the stats they read exist only on the 1v1
+# `matches` row.
 ONE_V_ONE_KINDS = frozenset({"card", "sniper", "berserker", "blitz", "phoenix",
                              "specter", "streak"})
 
@@ -536,8 +537,6 @@ def game_row_1v1(match, player_id, cards=()) -> dict:
     duration = getattr(match, "duration_seconds", None)
     if duration is None:
         duration = getattr(match, "match_duration", None)
-    order_at = game_order_key(getattr(match, "started_at", None),
-                              getattr(match, "ended_at", None))
     worst_deficit = None
     loser_points = None
     pts = parse_timeline(getattr(match, "point_timeline", None))
@@ -559,38 +558,7 @@ def game_row_1v1(match, player_id, cards=()) -> dict:
         "worst_deficit": worst_deficit,
         "loser_points": loser_points,
         "cards": frozenset(_norm_card(c) for c in (cards or ()) if c),
-        "order_at": order_at,
     }
-
-
-def _aware(ts):
-    # The UTC import is local on purpose: a module-level `timezone` binding here
-    # becomes the identity the route-manifest gate resolves main.py's own
-    # `timezone` to, which moved 310 unrelated route fingerprints.
-    from datetime import timezone as _tz
-    if ts is None:
-        return None
-    if getattr(ts, "tzinfo", None) is None:
-        return ts.replace(tzinfo=_tz.utc)
-    return ts
-
-
-def game_order_key(started_at, ended_at):
-    """The order key of a 1v1 game for the Apex run: when it STARTED, as the
-    report says, but never later than the server recorded it (`ended_at` is
-    the server's clock at insert). A delayed report keeps its real place in
-    the order -- behind every game the player has played since -- and a
-    future or missing stamp falls back to the server's clock. The stamp is
-    client-attested, so it is only ever used to REFUSE extending a run (a
-    game ordered at or before the run's last game cannot extend it, and a
-    loss there still ends it): no stamp can lengthen a run (record_completed
-    _games, the streak kind). None when neither is known."""
-    s, e = _aware(started_at), _aware(ended_at)
-    if s is None:
-        return e
-    if e is None:
-        return s
-    return min(s, e)
 
 
 def meets_sniper(row) -> bool:
@@ -654,21 +622,17 @@ def counted_delta(line: str, row) -> int:
 
 # -- The per-game hook -------------------------------------------------
 
-# The Apex run (round 2 finding 4). `streak` is the current run of
+# The Apex run (round 3 finding 2). `streak` is the current run of
 # consecutive ranked 1v1 games each WON while an Apex rung is worn; `games`
-# is the best run reached; `streak_at` is the order key (game_order_key) of
-# the last game the run consumed. A game is IN ORDER when it has a key and
-# that key is after `streak_at`. In order, a worn win extends the run and
-# anything else ends it; out of order (a delayed report, or no key), a worn
-# win cannot append behind a later game and changes nothing, while anything
-# else still ends the run -- the conservative reading, since where it falls
-# inside the run is not known.
+# is the best run reached. The ORDER is the server's: the order in which this
+# hook claims each (player, game) under the player's row lock, i.e. the order
+# the server recorded the games. No client clock is read (a report's
+# started_at is optional and unsigned). In that order a worn win extends the
+# run and every other recorded ranked 1v1 outcome -- a loss, a game played
+# wearing anything else or nothing -- ends it. There is no out-of-order case:
+# the recorded order is the order. `streak_at` is the server's clock when the
+# run was last written; nothing reads it for a decision.
 APEX_LINE = "apex"
-_APEX_IN_ORDER = ("(CAST(:k AS timestamptz) IS NOT NULL AND "
-                  "(title_ladder_progress.streak_at IS NULL OR "
-                  "CAST(:k AS timestamptz) > title_ladder_progress.streak_at))")
-_APEX_FIRST = ("CASE WHEN CAST(:won AS boolean) AND CAST(:k AS timestamptz) IS NOT NULL "
-               "THEN 1 ELSE 0 END")
 
 
 async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
@@ -678,15 +642,18 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
 
     WHAT ONE CREDIT IS. One row of `title_ladder_credits`, keyed
     (player_id, reference_id), and every caller passes the GAME's id: a 1v1
-    series of two games credits two. The insert is the gate: the counter only
-    moves for the caller that wins it, so a re-reported game, or the same game
-    arriving twice, counts once -- a streak reset included. `mode` is stored
-    but is not part of the key.
+    series of two games credits two. The CLAIM COMES FIRST: it is taken for
+    every listed player, whatever they wear (line NULL when no ladder rung),
+    before any ladder read or write, Apex included. Only the call that wins
+    the insert does anything more, so a re-reported game, or the same game
+    arriving twice, changes nothing -- whatever title is worn at the replay.
+    `mode` is stored but is not part of the key.
 
     `rows` maps str(player_id) -> that player's game row: `won`, `lost`,
     `play_gold` (the play gold the caller credited this player for this game,
     see PLAY_GOLD_KEY) and, for 1v1, everything `game_row_1v1` reads. A 2v2 or FFA game
-    claims nothing for a 1v1-only kind (card, playstyle, Apex).
+    is claimed but counts nothing for a 1v1-only kind (card, playstyle, Apex),
+    and neither extends nor ends an Apex run.
 
     WHERE IT IS CALLED. Inside the reporting transaction, after the game row
     and its gold are written, before the commit, in a savepoint of its own.
@@ -709,7 +676,10 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
     `active_title_id` (#202). The progress row is an upsert (it may not exist
     yet, and a gate on a row that does not exist locks nothing, #203/#207).
     Counts move by a delta (#326); the Apex best run moves by GREATEST over
-    the stored run inside the same statement.
+    the stored run inside the same statement. The row lock is also what
+    ORDERS a player's games for the Apex run: two games of one player are
+    claimed and consumed one after the other, in the order the server
+    recorded them.
     """
     # Late import: `main` imports THIS module at its own module level, so a
     # module-level `from main import ...` here would be an import cycle.
@@ -717,33 +687,29 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
 
     # The two Apex statements are defined HERE, not at module level: every
     # statement that writes a ladder table lives in this function
-    # (test_the_ladder_tables_have_no_writer_but_the_hook).
+    # (test_the_ladder_tables_have_no_writer_but_the_hook). Neither takes a
+    # time from the caller: the order is the order of the claims.
     _APEX_WORN_SQL = (
         "INSERT INTO title_ladder_progress (player_id, line, games, tier, streak, streak_at) "
-        "VALUES (:pid, :line, GREATEST(CAST(:base AS integer), " + _APEX_FIRST + "), "
-        "        CAST(:wt AS integer), " + _APEX_FIRST + ", CAST(:k AS timestamptz)) "
+        "VALUES (:pid, :line, "
+        "        GREATEST(CAST(:base AS integer), CASE WHEN CAST(:won AS boolean) THEN 1 ELSE 0 END), "
+        "        CAST(:wt AS integer), CASE WHEN CAST(:won AS boolean) THEN 1 ELSE 0 END, NOW()) "
         "ON CONFLICT (player_id, line) DO UPDATE "
-        "   SET streak = CASE WHEN NOT CAST(:won AS boolean) THEN 0 "
-        "                     WHEN " + _APEX_IN_ORDER + " THEN title_ladder_progress.streak + 1 "
-        "                     ELSE title_ladder_progress.streak END, "
+        "   SET streak = CASE WHEN CAST(:won AS boolean) THEN title_ladder_progress.streak + 1 "
+        "                     ELSE 0 END, "
         "       games = GREATEST(title_ladder_progress.games, "
-        "                        CASE WHEN CAST(:won AS boolean) AND " + _APEX_IN_ORDER + " "
+        "                        CASE WHEN CAST(:won AS boolean) "
         "                             THEN title_ladder_progress.streak + 1 ELSE 0 END), "
-        "       streak_at = CASE WHEN " + _APEX_IN_ORDER + " THEN CAST(:k AS timestamptz) "
-        "                        ELSE title_ladder_progress.streak_at END, "
+        "       streak_at = NOW(), "
         "       tier = GREATEST(title_ladder_progress.tier, CAST(:wt AS integer)), "
         "       updated_at = NOW() "
         "RETURNING games, tier")
-    # A ranked 1v1 game that is not a worn Apex win: the run ends (one statement,
-    # a no-op for a player with no Apex row or no run and nothing newer to note).
+    # A claimed ranked 1v1 game that is not played wearing an Apex rung: the
+    # run ends (a no-op for a player with no Apex row or no run).
     _APEX_BREAK_SQL = (
         "UPDATE title_ladder_progress "
-        "   SET streak = 0, "
-        "       streak_at = CASE WHEN " + _APEX_IN_ORDER + " THEN CAST(:k AS timestamptz) "
-        "                        ELSE title_ladder_progress.streak_at END, "
-        "       updated_at = NOW() "
-        " WHERE player_id = :pid AND line = :line "
-        "   AND (streak <> 0 OR " + _APEX_IN_ORDER + ")")
+        "   SET streak = 0, streak_at = NOW(), updated_at = NOW() "
+        " WHERE player_id = :pid AND line = :line AND streak <> 0")
 
     rows = {str(k): v for k, v in (rows or {}).items()}
     events = []
@@ -759,20 +725,10 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
             continue
         line = line_of_sku(row[1])
         game = rows.get(str(pid)) or {}
-        if mode == "1v1" and (line is None or LINES[line]["kind"] != "streak"):
-            # Every ranked 1v1 game ends an Apex run unless it is a win with
-            # an Apex rung worn (round 2 finding 4): a loss, or any game
-            # played wearing something else, resets the stored run whether
-            # or not the title is worn now. Ordered like the worn case.
-            await db.execute(text(_APEX_BREAK_SQL),
-                             {"pid": pid, "line": APEX_LINE, "k": game.get("order_at")})
-        if line is None:
-            continue   # not wearing a ladder rung: nothing to credit
-        ld = LINES[line]
-        kind = ld["kind"]
-        if kind in ONE_V_ONE_KINDS and mode != "1v1":
-            continue   # measured on the 1v1 row only: this game claims nothing
 
+        # THE CLAIM, FIRST (round 3 finding 2): every participant of every
+        # ranked game, worn or not, any title or none, before any Apex read
+        # or write. A replay of a claimed game stops here, whatever is worn.
         claimed = (await db.execute(text(
             "INSERT INTO title_ladder_credits (player_id, reference_id, line, mode) "
             "VALUES (:pid, :ref, :line, :mode) "
@@ -780,7 +736,18 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
             "RETURNING 1"
         ), {"pid": pid, "ref": str(reference_id), "line": line, "mode": mode})).first()
         if claimed is None:
-            continue   # this game already counted for this player
+            continue   # this game was already claimed for this player
+
+        if mode == "1v1" and (line is None or LINES[line]["kind"] != "streak"):
+            # A claimed ranked 1v1 game played wearing anything but an Apex
+            # rung ends the run, in the order the server recorded it.
+            await db.execute(text(_APEX_BREAK_SQL), {"pid": pid, "line": APEX_LINE})
+        if line is None:
+            continue   # claimed; not wearing a ladder rung: nothing to credit
+        ld = LINES[line]
+        kind = ld["kind"]
+        if kind in ONE_V_ONE_KINDS and mode != "1v1":
+            continue   # claimed; measured on the 1v1 row only: counts nothing
 
         # The tier a first progress row starts at: the highest rung of this
         # ladder the player HOLDS (the read route reports the same number),
@@ -795,15 +762,13 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
         base = threshold(line, worn_tier)
 
         if kind == "streak":
-            # One statement consumes this game in ORDER (game_order_key): a
-            # win after the run's last game extends the run; a win ordered at
-            # or before it (a delayed report) cannot append behind a later
-            # game and leaves the run as it is; anything but a win ends the
-            # run wherever it falls. The best run (`games`) only rises.
+            # One statement consumes this game in the order it was claimed: a
+            # worn win extends the run, anything else ends it. The best run
+            # (`games`) only rises.
             won = bool(game.get("won"))
             res = (await db.execute(text(_APEX_WORN_SQL), {
                 "pid": pid, "line": line, "base": base, "wt": worn_tier,
-                "won": won, "k": game.get("order_at")})).one()
+                "won": won})).one()
             if not won:
                 continue   # a game that is not a win never raises the best run
         else:
