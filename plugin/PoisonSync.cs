@@ -1681,9 +1681,23 @@ namespace CompetitiveRounds
         private static int _sawFrames;
         private static int _point;
 
+        internal static int Point { get { return _point; } }
+
         internal static void ResetForRoomExit()
         {
+            HitEvidence.ResetForRoomExit(_point);   // item D: a game cut short still reports what arrived
             _sawLost.Clear(); _before.Clear(); _sawFrames = 0; _point = 0;
+        }
+
+        /// <summary>Item D's per-game flush when this point decided the game.</summary>
+        internal static void GameOverCheck(GM_ArmsRace gm)
+        {
+            try
+            {
+                if (gm != null && (gm.p1Rounds >= gm.roundsToWinGame || gm.p2Rounds >= gm.roundsToWinGame))
+                    HitEvidence.GameEnd(_point);
+            }
+            catch { }
         }
 
         internal static void SawBefore()
@@ -1750,6 +1764,7 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo("[SAW-POINT] point=" + _point + " frames=" + _sawFrames + " lost" + s);
                 }
                 _sawLost.Clear(); _sawFrames = 0;
+                HitEvidence.PointEnd(_point);
                 PoisonSync.ReportUnansweredSilences();
             }
             catch { }
@@ -1780,6 +1795,6 @@ namespace CompetitiveRounds
     internal static class PointEndEvidencePatch
     {
         [HarmonyPostfix]
-        private static void After() { PointEvidence.PointEnd(); }
+        private static void After(GM_ArmsRace __instance) { PointEvidence.PointEnd(); PointEvidence.GameOverCheck(__instance); }
     }
 }

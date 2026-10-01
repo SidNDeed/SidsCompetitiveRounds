@@ -103,7 +103,11 @@ def test_motion_view_names_come_from_the_enum():
 
 # -- item C: bugs 406/407, evidence only --------------------------------------
 
-TAGS = {"[POISON-LATE]": POISON, "[HP-POINT-END]": POISON, "[SAW-POINT]": POISON, "[DANCE-FIT]": DANCE}
+HIT = PLUGIN / "HitEvidence.cs"
+HIT_CORE = PLUGIN / "HitEvidenceCore.cs"
+
+TAGS = {"[POISON-LATE]": POISON, "[HP-POINT-END]": POISON, "[SAW-POINT]": POISON, "[DANCE-FIT]": DANCE,
+        "[HIT-RECV]": HIT_CORE, "[SHOT-OBS]": HIT_CORE, "[BLOCK-MISS]": HIT_CORE}
 
 
 def test_evidence_tags_exist_for_nothing_else():
@@ -152,3 +156,82 @@ def test_evidence_is_bounded_identity_free_and_writes_nothing():
         assert not re.search(r"\.health\s*[-+]?=[^=]", body), "evidence writes health"
         for call in ("DoDamage(", "TakeDamage(", "Heal(", "RaiseEvent(", ".RPC("):
             assert call not in body, call
+
+
+# -- item D: hits, knockback and blocks as the RECEIVING seat saw them ---------
+# The pure half (pairing, buckets, first-hit dedup, the three lines) is
+# EXECUTED by tools/tests/hit-evidence-client with its own mutants. Checked
+# here: the hooks sit on the received messages, only count, attribute by the
+# message's sender, and are flushed per point and per game.
+
+HOOKS = (
+    '[HarmonyPatch(typeof(HealthHandler), "RPCA_SendTakeDamage")]',
+    '[HarmonyPatch(typeof(HealthHandler), "RPCA_SendTakeForce")]',
+    '[HarmonyPatch(typeof(HealthHandler), "DoDamage")]',
+    '[HarmonyPatch(typeof(Block), "RPCA_DoBlock")]',
+    '[HarmonyPatch(typeof(ProjectileInit), "RPCA_Init")]',
+    '[HarmonyPatch(typeof(ProjectileInit), "RPCA_Init_noAmmoUse")]',
+    '[HarmonyPatch(typeof(ProjectileInit), "RPCA_Init_SeparateGun")]',
+    '[HarmonyPatch(typeof(ProjectileHit), "RPCA_DoHit")]',
+)
+
+
+def test_hit_evidence_hooks_sit_on_the_received_messages():
+    src = _read(HIT)
+    for hook in HOOKS:
+        assert src.count(hook) == 1, hook
+    sender = _member(src, "internal static class HitEvidence_ExecuteRpcPatch")
+    assert 'AccessTools.Method(typeof(PhotonNetwork), "ExecuteRpc"' in sender
+    assert "typeof(ExitGames.Client.Photon.Hashtable), typeof(Photon.Realtime.Player)" in sender
+    assert "throw new Exception(" in sender            # a missing target is a visible patch failure, never silent
+
+
+def test_hit_evidence_hooks_only_count():
+    src = _read(HIT)
+    assert not re.search(r"static\s+bool\s+Prefix", src), "a prefix that can skip the original"
+    assert "__result" not in src and not re.search(r"\bref\s+\w", src), "a hook that rewrites a result or an argument"
+    finals = len(re.findall(r"\[HarmonyFinalizer\]", src))
+    assert finals == src.count("return __exception;") >= 9, "every finalizer returns the exception it was given"
+    for body in (src, _read(HIT_CORE)):
+        assert not re.search(r"steam", body, re.I), "an account identity in an evidence line"
+        assert not re.search(r"\.health\s*[-+]?=[^=]", body), "evidence writes health"
+        for call in ("DoDamage(", "TakeDamage(", "TakeForce(", "Heal(", "RaiseEvent(", ".RPC(", "sinceBlock ="):
+            assert call not in body, call
+        # a knockback write is <body>.AddForce( (playerVel, a rigidbody); the
+        # tally's own AddForce is called on P(actor), a call result
+        assert not re.search(r"[A-Za-z_\]]\.AddForce\(", body), "evidence applies a force"
+
+
+def test_hit_evidence_attributes_by_sender_and_counts_the_local_player_only():
+    src = _read(HIT)
+    sender = _member(src, "internal static class HitEvidence_ExecuteRpcPatch")
+    assert "__state = HitEvidence.RpcSender;" in sender and "HitEvidence.RpcSender = __state;" in sender
+    for name in ("internal static void NoteDamage(", "internal static void NoteForce("):
+        body = _member(src, name)
+        assert "RemoteSender(out actor)" in body and "LocalVictim(hh, out data)" in body, name
+    for name in ("internal static void NoteSpawn(", "internal static void NoteImpact("):
+        assert "RemoteSender(out actor)" in _member(src, name), name
+    impact = _member(src, "internal static void NoteImpact(")
+    assert "target.IsMine" in impact
+    dot = _member(src, "internal static void NoteDot(")
+    assert "!healthRemoval" in dot and "LocalVictim(hh, out data)" in dot
+    damage = _member(src, "internal static void NoteDamage(")
+    assert "HitEvidenceCore.Bucket(_blockedThisPoint, since)" in damage and "data.block.sinceBlock" in damage
+
+
+def test_hit_evidence_flushes_per_point_and_per_game():
+    poison = _read(POISON)
+    ev = _member(poison, "internal static class PointEvidence")
+    assert _member(ev, "internal static void PointEnd()").count("HitEvidence.PointEnd(_point);") == 1
+    assert "HitEvidence.ResetForRoomExit(_point);" in _member(ev, "internal static void ResetForRoomExit()")
+    over = _member(ev, "internal static void GameOverCheck(GM_ArmsRace gm)")
+    assert "gm.p1Rounds >= gm.roundsToWinGame || gm.p2Rounds >= gm.roundsToWinGame" in over
+    assert "HitEvidence.GameEnd(_point);" in over
+    assert "PointEvidence.GameOverCheck(__instance);" in _member(poison, "internal static class PointEndEvidencePatch")
+    src = _read(HIT)
+    start = _member(src, "internal static class HitEvidence_StartGamePatch")
+    assert "HitEvidence.GameEnd(PointEvidence.Point);" in start
+    point = _member(src, "internal static void PointEnd(int point)")
+    assert "_point.Clear();" in point and "_blockedThisPoint = false;" in point
+    game = _member(src, "internal static void GameEnd(int point)")
+    assert "_game.Clear();" in game and "HitEvidenceCore.ShotObsLine(" in game and "HitEvidenceCore.BlockMissLine(" in game
