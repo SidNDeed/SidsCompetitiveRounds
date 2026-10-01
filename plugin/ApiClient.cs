@@ -1850,6 +1850,11 @@ namespace CompetitiveRounds
         /// written down in the batch notes rather than asserted here.</summary>
         public static bool ServerAcceptsInvoluntaryFfaCause { get; private set; }
 
+        /// <summary>V11 D3: the joiner's region check ends an attempt only
+        /// while /mod-version carries join_region_guard: 1 (and only under
+        /// JoinGate); absent reads as off, so the check only logs.</summary>
+        public static bool ServerJoinRegionGuard { get; private set; }
+
         public static void CheckModVersion()
         {
             Plugin.Instance.StartCoroutine(DoCheckModVersion());
@@ -1889,6 +1894,8 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo(
                     $"[VERSION] involuntary-cause capability: probed '{TransportExit.CapabilityField}' -> {involuntaryCause}");
                 ServerAcceptsInvoluntaryFfaCause = involuntaryCause;
+                ServerJoinRegionGuard = ExtractJsonInt(req.downloadHandler.text, "join_region_guard") == 1;
+                Plugin.Log.LogInfo("[VERSION] join_region_guard -> " + (ServerJoinRegionGuard ? "1" : "0"));
                 if (!string.IsNullOrEmpty(ver))
                 {
                     LatestModVersion = ver;
@@ -1982,6 +1989,8 @@ namespace CompetitiveRounds
         internal const string BuildVariantMarker =
 #if THUNDERSTORE
             "SCR_BUILD_VARIANT=THUNDERSTORE";
+#elif SCR_G3
+            "SCR_BUILD_VARIANT=G3";
 #else
             "SCR_BUILD_VARIANT=STANDALONE";
 #endif
@@ -16379,7 +16388,12 @@ namespace CompetitiveRounds
             // v1.37 private lobbies: password rides create AND join; the server
             // ignores it on public lobbies, so a stale value is harmless.
             string pw = string.IsNullOrEmpty(password) ? "" : $",\"password\":\"{Escape(password)}\"";
-            return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}}}";
+            // V11 sec5.1: the capability list (ffa_asm1, and ffa_adm1 only when
+            // every admission condition holds); empty on a client without them.
+            string capsList = "";
+            try { capsList = FfaAssembly.Caps(); } catch { }
+            string caps = string.IsNullOrEmpty(capsList) ? "" : $",\"caps\":\"{Escape(capsList)}\"";
+            return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}{caps}}}";
         }
 
         // Remembered for recovery rejoins (the ghost-prune same-lobby rejoin
@@ -16432,7 +16446,7 @@ namespace CompetitiveRounds
                 if (inCompRoom)
                 {
                     Plugin.Log.LogWarning("[FFA-LOBBY] enrolled while inside a competitive room — leaving the lobby");
-                    FfaLeaveQueue();
+                    FfaLeaveQueue(label: "enroll_in_comp");
                     return;
                 }
             }
@@ -16741,7 +16755,41 @@ namespace CompetitiveRounds
         /// room-exit hook (the leaver was demonstrably IN the ffa_ room, so
         /// the server must never classify it as failed assembly); anything
         /// else / empty = pre-room (menu leave, decline, watchdog).</summary>
-        public static void FfaLeaveQueue(string cause = "")
+        /// <summary>The client clears a leave performs (V11 N10: FfaAssembly.
+        /// Release performs them too, so no queue state outlives an exit on
+        /// the client). The leave intent is FfaLeaveQueue's own, not these.</summary>
+        public static void FfaClientClears()
+        {
+            // Bug #132 fencing: a leave abandons any pending start countdown.
+            _ffaJoinCountdownKey = null;
+            _ffaJoinCountdownActiveToken = 0;
+            CompetitiveUI.CancelFfaStartCountdown();
+            IsFfaQueuePolling = false; FfaQueueCount = 0; FfaGatherSecondsLeft = -1;
+            FfaLockedRoster = null;
+            ActiveFfaLobbyId = null;
+            FfaMySlot = -1; FfaLobbyPlayerCount = 0;
+            FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+            FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+            Plugin.ClearPendingFfaSlot();
+            // A pending ffa_ room join must die with the membership (impl
+            // review find 5: QueueRoomJoiner could still fire its captured
+            // JoinOrCreateRoom after a successful leave).
+            try { if ((Plugin.PendingRankedRoom ?? "").StartsWith("ffa_")) Plugin.ClearPendingRoom(); } catch { }
+            // V11: a leave or a release also ends a gated lock's own timers
+            // (the outer join deadline, the start hold, the held scene).
+            try { FfaAssembly.OnQueueCleared(); } catch { }
+            _ffaReformHeld = false;
+        }
+
+        /// <summary>V11 (FfaAssembly.Move): a leave is in flight or intended,
+        /// so a re-form's lock routine must not re-arm a join.</summary>
+        public static bool FfaLeaveIntentPending => _ffaLeaveIntent || FfaQueueStatus == "leaving";
+
+        /// <summary>V11: the FFA queue generation the lock routine is armed
+        /// with (ArmFfaLock's gen argument for a re-form).</summary>
+        public static int FfaGenNow => ffaGen;
+
+        public static void FfaLeaveQueue(string cause = "", string label = "")
         {
             string sid = MatchTracker.LocalSteamId;
             // Durable-cause bookkeeping (round-10 finds 1+3): a tagged call
@@ -16784,21 +16832,7 @@ namespace CompetitiveRounds
             string expectedLobby = !string.IsNullOrEmpty(OpenFfaLobbyId) ? OpenFfaLobbyId : ActiveFfaLobbyId;
             _ffaLeaveIntent = true;
             if (!string.IsNullOrEmpty(expectedLobby)) _ffaLeaveTargetLobby = expectedLobby;
-            // Bug #132 fencing: a leave abandons any pending start countdown.
-            _ffaJoinCountdownKey = null;
-            _ffaJoinCountdownActiveToken = 0;
-            CompetitiveUI.CancelFfaStartCountdown();
-            IsFfaQueuePolling = false; FfaQueueCount = 0; FfaGatherSecondsLeft = -1;
-            FfaLockedRoster = null;
-            ActiveFfaLobbyId = null;
-            FfaMySlot = -1; FfaLobbyPlayerCount = 0;
-            FfaLobbyIsHost = false; FfaLobbyCanStart = false;
-            FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
-            Plugin.ClearPendingFfaSlot();
-            // A pending ffa_ room join must die with the membership (impl
-            // review find 5: QueueRoomJoiner could still fire its captured
-            // JoinOrCreateRoom after a successful leave).
-            try { if ((Plugin.PendingRankedRoom ?? "").StartsWith("ffa_")) Plugin.ClearPendingRoom(); } catch { }
+            FfaClientClears();
             if (string.IsNullOrEmpty(sid) || sid == "unknown") { FfaQueueStatus = ""; OpenFfaLobbyId = null; _ffaLeaveIntent = false; return; }
             int gen = ++ffaGen;
             FfaQueueStatus = "leaving";
@@ -16809,6 +16843,9 @@ namespace CompetitiveRounds
                 url += $"&expected_lobby_id={UnityWebRequest.EscapeURL(expectedLobby)}";
             if (!string.IsNullOrEmpty(cause))
                 url += $"&cause={UnityWebRequest.EscapeURL(cause)}";
+            // V11 I3: the leave label, its own parameter; read nowhere else on
+            // the client (it never reaches _ffaLeaveCause or &cause=).
+            url += "&label=" + UnityWebRequest.EscapeURL(label);
             // Bug 392: the cause that actually goes on the wire, named in the
             // log. Without it the attestation is unobservable on this seat —
             // the URL is not logged, and the difference between the two
@@ -16884,9 +16921,19 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/queue/poll/{sid}", (ok, resp) =>
             {
                 if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
-                if (!ok || string.IsNullOrEmpty(resp)) return;
-                if (!IsFfaQueuePolling) return;
-                if (gen != ffaGen) return;
+                if (!ok || string.IsNullOrEmpty(resp))
+                {
+                    // V11 I1: poll_fail, armed or not, while the poll is on
+                    // (at most once per 10 s).
+                    if (!ok && IsFfaQueuePolling && JoinTimeline.Throttle("poll_fail", 10f))
+                        JoinTimeline.Step("poll_fail", "code=" + FfaAssembly.ErrorCode(resp).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    return;
+                }
+                // V11 item 10: the notice is read after the !ok return and
+                // before the two discards; the callback then runs as today.
+                try { FfaAssembly.OnPollNotice(resp); } catch { }
+                if (!IsFfaQueuePolling) { FfaPollDrop("polling", resp); return; }
+                if (gen != ffaGen) { FfaPollDrop("gen", resp); return; }
                 string status = ExtractJsonString(resp, "status") ?? "";
                 FfaQueueStatus = status;
                 FfaQueueCount = ExtractJsonInt(resp, "queue_count");
@@ -16912,7 +16959,8 @@ namespace CompetitiveRounds
                     if (hadBelief)
                         CompetitiveUI.ShowNotification("Your FFA lobby closed.", new Color(1f, 0.75f, 0.4f), 6f);
                     Plugin.Log.LogInfo($"[FFA-LOBBY] legacy searching row detected (belief={hadBelief}) — leaving it");
-                    FfaLeaveQueue();
+                    JoinTimeline.Disarm("lobby_closed");   // V11 I1: the poll found the lobby closed
+                    FfaLeaveQueue(label: "stale_lobby");
                     NativeUI.MarkDirty();
                     return;
                 }
@@ -16925,6 +16973,8 @@ namespace CompetitiveRounds
                     // stale open seat as foreign and dissolves our own live
                     // lobby the moment we enter its ffa_ room.
                     if (!string.IsNullOrEmpty(ActiveFfaLobbyId)) return;
+                    // V11 N10: a pending release is re-sent from here too.
+                    if (FfaAssembly.ResendRelease()) return;
                     // Leave intent outranks membership (impl review find 2):
                     // the seat still existing means the leave never landed —
                     // retry it instead of re-adopting.
@@ -16934,7 +16984,7 @@ namespace CompetitiveRounds
                         {
                             _ffaLeaveRetryAt = Time.unscaledTime;
                             Plugin.Log.LogWarning("[FFA-LOBBY] leave intent pending but seat still exists — retrying leave");
-                            FfaLeaveQueue();
+                            FfaLeaveQueue(label: "intent_retry");
                         }
                         return;
                     }
@@ -16956,7 +17006,7 @@ namespace CompetitiveRounds
                     if (inCompetitiveRoomNow)
                     {
                         Plugin.Log.LogWarning("[FFA-LOBBY] in a competitive room while holding a lobby seat — leaving the lobby");
-                        FfaLeaveQueue();
+                        FfaLeaveQueue(label: "held_in_comp");
                         return;
                     }
                     // Open host-lobby membership (July 29 redesign).
@@ -17008,6 +17058,10 @@ namespace CompetitiveRounds
                     // Authoritative terminal: the lobby we sat in is gone
                     // (disband, janitor, or we were pruned at start).
                     Plugin.Log.LogInfo($"[FFA-LOBBY] lobby closed server-side (was {OpenFfaLobbyId})");
+                    // V11 I1: the poll finding the lobby closed disarms the
+                    // timeline; no live row, so no gated lock's timers either.
+                    JoinTimeline.Disarm("lobby_closed");
+                    try { FfaAssembly.OnQueueCleared(); } catch { }
                     _ffaJoinCountdownKey = null;
                     _ffaJoinCountdownActiveToken = 0;
                     CompetitiveUI.CancelFfaStartCountdown();
@@ -17019,13 +17073,30 @@ namespace CompetitiveRounds
                 }
                 if (status == "ready_join")
                 {
+                    // V11 I1/I2: lock_seen, once per lobby id, before every
+                    // early return of this branch; its receipt for a gated lock.
+                    JoinTimeline.Seen(ExtractJsonString(resp, "lobby_id"),
+                        "src=poll adm=" + (ExtractJsonInt(resp, "admission") == 1 ? "1" : "0"));
+                    FfaAssembly.ReceiptLockSeen(resp);
+                    // V11 N10: a pending release outranks every rejoin or leave.
+                    if (FfaAssembly.ResendRelease()) return;
+                    // V11 item 6, the poll as a second channel: a re-form of
+                    // the lobby we hold moves us (only the fence when a leave
+                    // is in flight, and the leave below is then re-sent as
+                    // today), before the competitive-room decline.
+                    string reformedFrom = ExtractJsonString(resp, "reformed_from");
+                    if (!string.IsNullOrEmpty(reformedFrom) && reformedFrom == ActiveFfaLobbyId)
+                    {
+                        FfaAssembly.Move(resp, Time.realtimeSinceStartup);
+                        if (!_ffaLeaveIntent) return;
+                    }
                     // Leave intent outranks a racing Start (impl review find
                     // 2): the player asked OUT before the lock landed —
                     // leaving now uses the legacy ready_join dissolution.
                     if (_ffaLeaveIntent)
                     {
                         Plugin.Log.LogWarning("[FFA-LOBBY] ready_join landed after a leave request — leaving instead of joining");
-                        FfaLeaveQueue();
+                        FfaLeaveQueue(label: "leave_intent");
                         NativeUI.MarkDirty();
                         return;
                     }
@@ -17064,10 +17135,15 @@ namespace CompetitiveRounds
                                 && PhotonNetwork.CurrentRoom?.Name == cdRoom;
                         }
                         catch { }
-                        if (!inThatRoom && resp.Contains("\"game_in_progress\":true"))
+                        // V11 item 10 (K35, #686): an admissible seat may still
+                        // enter the short-started sitting, so neither the
+                        // refusal nor the unknown wait applies to it; the
+                        // competitive-room decline below still does.
+                        bool admissibleSeat = ExtractJsonInt(resp, "admissible") == 1;
+                        if (!inThatRoom && !admissibleSeat && resp.Contains("\"game_in_progress\":true"))
                         {
                             Plugin.Log.LogWarning("[FFA] ready_join for a lobby whose game is LIVE — refusing rejoin (relaunched seat)");
-                            FfaLeaveQueue();
+                            FfaLeaveQueue(label: "rejoin_refused");
                             CompetitiveUI.ShowNotification("Your FFA match continued without you - you've been removed from it.", new Color(1f, 0.7f, 0.3f), 8f);
                             NativeUI.MarkDirty();
                             return;
@@ -17078,7 +17154,7 @@ namespace CompetitiveRounds
                         // re-asks, and the server's window resolves within
                         // ~210s worst case. Acting on unknown was what made
                         // an API restart dissolve every fresh FFA.
-                        if (!inThatRoom && resp.Contains("\"game_in_progress\":null"))
+                        if (!inThatRoom && !admissibleSeat && resp.Contains("\"game_in_progress\":null"))
                         {
                             Plugin.Log.LogInfo("[FFA] ready_join with game_in_progress UNKNOWN (server just restarted) — waiting for the next poll");
                             return;
@@ -17100,7 +17176,7 @@ namespace CompetitiveRounds
                     if (busyInRoom && !busyCasual)
                     {
                         Plugin.Log.LogWarning("[FFA] ready_join landed while in a competitive room — declining (leaving FFA queue)");
-                        FfaLeaveQueue();
+                        FfaLeaveQueue(label: "lock_declined");
                         CompetitiveUI.ShowNotification("FFA match found, but you're in a game — removed from the FFA queue.", new Color(1f, 0.7f, 0.3f), 7f);
                         NativeUI.MarkDirty();
                         return;
@@ -17120,114 +17196,7 @@ namespace CompetitiveRounds
                     // find 6) — it is the only channel that can tell us the
                     // lobby was cancelled by ANOTHER member's leave during the
                     // countdown. DelayedFfaRoomJoin turns it off at fire time.
-                    ActiveFfaLobbyId = ExtractJsonString(resp, "lobby_id");
-                    // The open-lobby membership just became a LOCKED lobby —
-                    // clear the open belief or the room-join teardown would
-                    // "leave" our own game the moment we enter the ffa_ room.
-                    OpenFfaLobbyId = null;
-                    FfaLobbyIsHost = false; FfaLobbyCanStart = false;
-                    FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
-                    FfaMySlot = ExtractJsonInt(resp, "slot");
-                    FfaLobbyPlayerCount = ExtractJsonInt(resp, "player_count");
-                    string room = ExtractJsonString(resp, "room_name");
-                    string region = ExtractJsonString(resp, "room_region");
-                    var roster = ExtractTeamMemberList(resp, "players");
-                    FfaLockedRoster = roster;
-                    // v1.36 frozen lobby config — flat scalars (#73), from the
-                    // server's row (the authority). Absent fields (old server)
-                    // extract as 0/false and the setter's clamps keep defaults.
-                    try
-                    {
-                        int cfgTarget = ExtractJsonInt(resp, "score_target");
-                        int cfgCand = ExtractJsonInt(resp, "card_candidates");
-                        int cfgPicks = ExtractJsonInt(resp, "initial_picks");
-                        int cfgCap = ExtractJsonInt(resp, "card_cap");
-                        bool cfgSame = ExtractJsonBool(resp, "same_card_rule");
-                        bool cfgRanked = !resp.Contains("\"lobby_ranked\":false");
-                        // Aug 6 item 10: sudden death. Absent/false from an
-                        // older server (or a roster the server collapsed for
-                        // capability) reads as FALSE, which is the only safe
-                        // direction — a client that armed the rule while its
-                        // peers had not would suppress damage they applied.
-                        bool cfgSudden = ExtractJsonBool(resp, "sudden_death");
-                        if (cfgTarget > 0)
-                            FfaMode.SetPendingConfig(cfgTarget, cfgCand > 0 ? cfgCand : 5,
-                                cfgPicks > 0 ? cfgPicks : 1, cfgCap > 0 ? cfgCap : 5,
-                                cfgSame, cfgRanked, cfgSudden);
-                    }
-                    catch (Exception cfgEx) { Plugin.Log.LogWarning($"[FFA] config parse: {cfgEx.Message}"); }
-
-                    if (!string.IsNullOrEmpty(room))
-                    {
-                        // Loop-breaker (July 28 trapped-lobby incident): if
-                        // this exact lobby+room keeps re-firing (dead room,
-                        // wedged server row, failed joins re-arming the
-                        // poll), stop after 3 attempts and LEAVE — the leave
-                        // endpoint dissolves/closes the lobby server-side,
-                        // freeing the whole group. The menu also stops being
-                        // slammed shut by the auto-close below.
-                        string fireKey = (ActiveFfaLobbyId ?? "") + "|" + room;
-                        if (fireKey == _ffaLastReadyFireKey) _ffaReadyFireCount++;
-                        else { _ffaLastReadyFireKey = fireKey; _ffaReadyFireCount = 1; }
-                        if (_ffaReadyFireCount > 3)
-                        {
-                            Plugin.Log.LogWarning($"[FFA] ready_join re-fired {_ffaReadyFireCount}x for '{room}' — giving up and leaving the FFA queue");
-                            CompetitiveUI.ShowNotification("Couldn't join the FFA match — left the queue. Please requeue.", Color.yellow, 8f);
-                            FfaLeaveQueue();
-                            NativeUI.MarkDirty();
-                            return;
-                        }
-                        Plugin.SetPendingFfaSlot(FfaMySlot, FfaLobbyPlayerCount);
-                        try
-                        {
-                            var prejoin = new ExitGames.Client.Photon.Hashtable();
-                            prejoin["p_id"] = FfaMySlot;
-                            prejoin["t_id"] = FfaMySlot;   // FFA: every player own team
-                            prejoin["u_id"] = sid;
-                            // Capability advert (rope-scale fix): the map-object
-                            // rescale keys off the MASTER's copy of this prop —
-                            // pre-join so it rides the Player record and can
-                            // never race a peer's map load (#79 pattern).
-                            prejoin[FfaMapScale.ScaleCapabilityProp] = 1;
-                            // Bug 389: this build re-resolves the victim of a proximity
-                            // effect on every call instead of keeping the first one. It
-                            // changes who takes damage in a shared simulation, so it runs
-                            // only when EVERY fighter advertises it - never on a room-name
-                            // prefix (#286) and never on mod_version (#301).
-                            // StageInto writes the key ONLY if our own patches attached
-                            // (#83): the advert is what peers act on, so a seat that
-                            // cannot perform the repair must not claim it.
-                            ProximityVictimGate.StageInto(prejoin);
-                            // Config/same-card feature level (v1.36): the
-                            // same-card engine runs only when EVERY room member
-                            // advertises this (#273 all-players rule).
-                            prejoin[FfaCardSequence.CapabilityProp] = FfaCardSequence.FeatureLevel;
-                            if (PhotonNetwork.LocalPlayer != null)
-                                PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
-                        }
-                        catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join SetCustomProperties: {ex.Message}"); }
-                        try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join nametag publish: {ex.Message}"); }
-                        try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join pcolor publish: {ex.Message}"); }
-                        try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join trail publish: {ex.Message}"); }
-
-                        // Bug #132 (Sid's design): a 5-second on-screen countdown
-                        // between the host's Start and the actual room join, so
-                        // nobody — especially a member just yanked out of a
-                        // casual game — is teleported with zero warning. The
-                        // deferred join re-checks generation, leave intent AND
-                        // lobby identity so a Leave clicked during the countdown
-                        // or a remote dissolution observed by the (still-live)
-                        // poll wins over the join (#252e / Codex find 6).
-                        _ffaJoinCountdownKey = (ActiveFfaLobbyId ?? "") + "|" + room;
-                        int cdToken = ++_ffaJoinCountdownToken;
-                        _ffaJoinCountdownActiveToken = cdToken;
-                        _ffaJoinCountdownArmedAt = Time.realtimeSinceStartup;
-                        CompetitiveUI.ShowFfaStartCountdown(5f);
-                        Plugin.Log.LogInfo($"[FFA] Lobby locked! Room: {room} (region: {region ?? "auto"}) lobby={ActiveFfaLobbyId} slot={FfaMySlot} players={FfaLobbyPlayerCount} — joining in 5s");
-                        CompetitiveUI.ShowNotification(I18n.TrF("{0}-player FFA starting in 5 seconds!", FfaLobbyPlayerCount), Color.green, 5f);
-                        try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
-                        Plugin.Instance.StartCoroutine(DelayedFfaRoomJoin(room, region, gen, ActiveFfaLobbyId, cdToken, 5f));
-                    }
+                    ArmFfaLock(resp, gen, false);
                 }
                 else if (status == "not_in_queue" || status == "expired")
                 {
@@ -17246,12 +17215,17 @@ namespace CompetitiveRounds
                     FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
                     Plugin.ClearPendingFfaSlot();
                     try { if ((Plugin.PendingRankedRoom ?? "").StartsWith("ffa_")) Plugin.ClearPendingRoom(); } catch { }
+                    // V11 item 11: no live row, so no gated lock's timers either.
+                    try { FfaAssembly.OnQueueCleared(); } catch { }
                     // 30-min server cap (July 28) — explicit reason, and no
                     // auto-rejoin for this status (that would defeat the cap).
                     if (status == "expired")
                         CompetitiveUI.ShowNotification(
                             "Removed from FFA queue after 30 minutes of searching - rejoin if you're still here!",
                             Color.yellow, 7f);
+                    // V11 N10: a pending release is re-sent from here too (a
+                    // 404 drops it; the lease then expires by its TTL).
+                    if (FfaAssembly.ResendRelease()) return;
                     // A pending explicit leave reaching not_in_queue means the
                     // leave LANDED (its ack was just lost) — clear the belief
                     // silently; re-enrolling an explicit leaver is the one
@@ -17309,8 +17283,27 @@ namespace CompetitiveRounds
                     }
                 }
                 NativeUI.MarkDirty();
-            }, extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+            }, detailedErrors: true,
+               extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
                extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
+        }
+
+        private static readonly HashSet<string> _ffaPollDropped = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>V11 I1 poll_drop: a discarded ready_join for a lobby that
+        /// is not ActiveFfaLobbyId, at most once per lobby id.</summary>
+        private static void FfaPollDrop(string why, string resp)
+        {
+            try
+            {
+                string st = ExtractJsonString(resp, "status") ?? "";
+                if (st != "ready_join") return;
+                string lid = ExtractJsonString(resp, "lobby_id") ?? "";
+                if (lid == (ActiveFfaLobbyId ?? "")) return;
+                if (!_ffaPollDropped.Add(lid)) return;
+                JoinTimeline.Step("poll_drop", "why=" + why + " status=" + st);
+            }
+            catch { }
         }
 
         // Suppression key for countdown-window ready_join re-fires (the poll
@@ -17330,6 +17323,181 @@ namespace CompetitiveRounds
         // countdown is never deduplicated away; a dead one lapses and the next
         // poll re-arms a fresh countdown (counting toward the loop-breaker).
         private static float _ffaJoinCountdownArmedAt = -999f;
+
+        /// <summary>The FFA lock routine (V11 item 6: extracted from the poll's
+        /// ready_join branch, whose call is unchanged): lobby state, the frozen
+        /// config, the pre-join properties and the 5 s countdown. With
+        /// reform: true (FfaAssembly.Move) it holds the slot state for the fire,
+        /// stages the pre-join properties for IssueJoinOrCreate (outside any
+        /// room, #287), shows the re-form toast and lets the countdown ignore
+        /// the competitive room it moves out of.</summary>
+        public static void ArmFfaLock(string resp, int gen, bool reform)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            // V11: every lock records the statement for its room; a gated one
+            // also its lock, windows, config (LockConfig) and outer deadline.
+            bool gated = FfaAssembly.OnLockPayload(resp, reform);
+            var rosterBefore = FfaLockedRoster;
+            int countBefore = FfaLobbyPlayerCount;
+            ActiveFfaLobbyId = ExtractJsonString(resp, "lobby_id");
+            // The open-lobby membership just became a LOCKED lobby —
+            // clear the open belief or the room-join teardown would
+            // "leave" our own game the moment we enter the ffa_ room.
+            OpenFfaLobbyId = null;
+            FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+            FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+            FfaMySlot = ExtractJsonInt(resp, "slot");
+            FfaLobbyPlayerCount = ExtractJsonInt(resp, "player_count");
+            string room = ExtractJsonString(resp, "room_name");
+            string region = ExtractJsonString(resp, "room_region");
+            var roster = ExtractTeamMemberList(resp, "players");
+            FfaLockedRoster = roster;
+            // v1.36 frozen lobby config — flat scalars (#73), from the
+            // server's row (the authority). Absent fields (old server)
+            // extract as 0/false and the setter's clamps keep defaults.
+            try
+            {
+                int cfgTarget = ExtractJsonInt(resp, "score_target");
+                int cfgCand = ExtractJsonInt(resp, "card_candidates");
+                int cfgPicks = ExtractJsonInt(resp, "initial_picks");
+                int cfgCap = ExtractJsonInt(resp, "card_cap");
+                bool cfgSame = ExtractJsonBool(resp, "same_card_rule");
+                bool cfgRanked = !resp.Contains("\"lobby_ranked\":false");
+                // Aug 6 item 10: sudden death. Absent/false from an
+                // older server (or a roster the server collapsed for
+                // capability) reads as FALSE, which is the only safe
+                // direction — a client that armed the rule while its
+                // peers had not would suppress damage they applied.
+                bool cfgSudden = ExtractJsonBool(resp, "sudden_death");
+                if (cfgTarget > 0)
+                    FfaMode.SetPendingConfig(cfgTarget, cfgCand > 0 ? cfgCand : 5,
+                        cfgPicks > 0 ? cfgPicks : 1, cfgCap > 0 ? cfgCap : 5,
+                        cfgSame, cfgRanked, cfgSudden);
+            }
+            catch (Exception cfgEx) { Plugin.Log.LogWarning($"[FFA] config parse: {cfgEx.Message}"); }
+
+            if (!string.IsNullOrEmpty(room))
+            {
+                // Loop-breaker (July 28 trapped-lobby incident): if
+                // this exact lobby+room keeps re-firing (dead room,
+                // wedged server row, failed joins re-arming the
+                // poll), stop after 3 attempts and LEAVE — the leave
+                // endpoint dissolves/closes the lobby server-side,
+                // freeing the whole group. The menu also stops being
+                // slammed shut by the auto-close below.
+                string fireKey = (ActiveFfaLobbyId ?? "") + "|" + room;
+                if (fireKey == _ffaLastReadyFireKey) _ffaReadyFireCount++;
+                else { _ffaLastReadyFireKey = fireKey; _ffaReadyFireCount = 1; }
+                if (_ffaReadyFireCount > 3)
+                {
+                    Plugin.Log.LogWarning($"[FFA] ready_join re-fired {_ffaReadyFireCount}x for '{room}' — giving up and leaving the FFA queue");
+                    CompetitiveUI.ShowNotification("Couldn't join the FFA match — left the queue. Please requeue.", Color.yellow, 8f);
+                    FfaLeaveQueue(label: "loop_breaker");
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                // V11 item 6: a re-form holds the slot state for its fire (the
+                // room it moves out of is still ours until then); every other
+                // lock applies it now, as today.
+                _ffaReformHeld = reform;
+                _ffaReformSlot = FfaMySlot;
+                _ffaReformCount = FfaLobbyPlayerCount;
+                if (!reform) Plugin.SetPendingFfaSlot(FfaMySlot, FfaLobbyPlayerCount);
+                FfaAssembly.StagedPrejoin = null; FfaAssembly.PrejoinAtJoin = false;
+                try
+                {
+                    var prejoin = new ExitGames.Client.Photon.Hashtable();
+                    prejoin["p_id"] = FfaMySlot;
+                    prejoin["t_id"] = FfaMySlot;   // FFA: every player own team
+                    prejoin["u_id"] = sid;
+                    // Capability advert (rope-scale fix): the map-object
+                    // rescale keys off the MASTER's copy of this prop —
+                    // pre-join so it rides the Player record and can
+                    // never race a peer's map load (#79 pattern).
+                    prejoin[FfaMapScale.ScaleCapabilityProp] = 1;
+                    // Bug 389: this build re-resolves the victim of a proximity
+                    // effect on every call instead of keeping the first one. It
+                    // changes who takes damage in a shared simulation, so it runs
+                    // only when EVERY fighter advertises it - never on a room-name
+                    // prefix (#286) and never on mod_version (#301).
+                    // StageInto writes the key ONLY if our own patches attached
+                    // (#83): the advert is what peers act on, so a seat that
+                    // cannot perform the repair must not claim it.
+                    ProximityVictimGate.StageInto(prejoin);
+                    // Config/same-card feature level (v1.36): the
+                    // same-card engine runs only when EVERY room member
+                    // advertises this (#273 all-players rule).
+                    prejoin[FfaCardSequence.CapabilityProp] = FfaCardSequence.FeatureLevel;
+                    // V11: kept for the arrival's identity republish (item 1).
+                    // A re-form sets them in IssueJoinOrCreate, immediately
+                    // before JoinOrCreateRoom and outside any room (#287); a
+                    // slot written now would land in the room it moves out of.
+                    FfaAssembly.StagedPrejoin = prejoin;
+                    if (reform)
+                        FfaAssembly.PrejoinAtJoin = true;
+                    else if (PhotonNetwork.LocalPlayer != null)
+                        PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join SetCustomProperties: {ex.Message}"); }
+                try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join nametag publish: {ex.Message}"); }
+                try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join pcolor publish: {ex.Message}"); }
+                try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join trail publish: {ex.Message}"); }
+
+                // Bug #132 (Sid's design): a 5-second on-screen countdown
+                // between the host's Start and the actual room join, so
+                // nobody — especially a member just yanked out of a
+                // casual game — is teleported with zero warning. The
+                // deferred join re-checks generation, leave intent AND
+                // lobby identity so a Leave clicked during the countdown
+                // or a remote dissolution observed by the (still-live)
+                // poll wins over the join (#252e / Codex find 6).
+                _ffaJoinCountdownKey = (ActiveFfaLobbyId ?? "") + "|" + room;
+                int cdToken = ++_ffaJoinCountdownToken;
+                _ffaJoinCountdownActiveToken = cdToken;
+                _ffaJoinCountdownArmedAt = Time.realtimeSinceStartup;
+                CompetitiveUI.ShowFfaStartCountdown(5f);
+                Plugin.Log.LogInfo($"[FFA] Lobby locked! Room: {room} (region: {region ?? "auto"}) lobby={ActiveFfaLobbyId} slot={FfaMySlot} players={FfaLobbyPlayerCount} — joining in 5s");
+                JoinTimeline.Arm(ActiveFfaLobbyId, room, region,
+                    "n=" + FfaLobbyPlayerCount.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + " slot=" + FfaMySlot.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + " src=" + (reform ? "reform" : "poll"),
+                    gated && FfaAssembly.Lock != null ? FfaAssembly.Lock.Admission : 0);
+                if (!reform)
+                    CompetitiveUI.ShowNotification(I18n.TrF("{0}-player FFA starting in 5 seconds!", FfaLobbyPlayerCount), Color.green, 5f);
+                else if (ReformExcluded(rosterBefore, roster, countBefore, FfaLobbyPlayerCount) > 1)
+                    CompetitiveUI.ShowNotification(I18n.TrF("{0} players could not connect. Re-forming the lobby with everyone still here.",
+                        ReformExcluded(rosterBefore, roster, countBefore, FfaLobbyPlayerCount)), new Color(1f, 0.75f, 0.4f), 5f);
+                else
+                    CompetitiveUI.ShowNotification("One player could not connect. Re-forming the lobby with everyone still here.",
+                        new Color(1f, 0.75f, 0.4f), 5f);
+                try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
+                Plugin.Instance.StartCoroutine(DelayedFfaRoomJoin(room, region, gen, ActiveFfaLobbyId, cdToken, 5f,
+                    reform ? FfaAssembly.MovedOutOf : null, reform, gated));
+            }
+        }
+
+        // V11 item 6: the slot state a re-form holds for its fire.
+        private static bool _ffaReformHeld;
+        private static int _ffaReformSlot = -1;
+        private static int _ffaReformCount;
+
+        /// <summary>The re-form toast's k (D-Q6): the old lock's roster members
+        /// the new roster no longer names; the player-count difference when
+        /// either roster is missing; at least 1 (a re-form excludes a seat).</summary>
+        private static int ReformExcluded(List<TeamQueueMember> before, List<TeamQueueMember> after, int nBefore, int nAfter)
+        {
+            int k = nBefore - nAfter;
+            if (before != null && after != null)
+            {
+                var still = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var m in after)
+                    if (m != null && !string.IsNullOrEmpty(m.steam_id)) still.Add(m.steam_id);
+                k = 0;
+                foreach (var m in before)
+                    if (m != null && !string.IsNullOrEmpty(m.steam_id) && !still.Contains(m.steam_id)) k++;
+            }
+            return Math.Max(1, k);
+        }
 
         /// <summary>Bug #132: the FFA room join runs after the 5s start
         /// countdown. Hosted on Plugin.Instance — NOTE the coroutine itself
@@ -17351,7 +17519,9 @@ namespace CompetitiveRounds
         /// re-checks), so the countdown strictly narrowed it; the lonely-room
         /// watchdog recovers the tail.</summary>
         private static IEnumerator DelayedFfaRoomJoin(string room, string region, int gen,
-                                                      string lobbyId, int myToken, float delay)
+                                                      string lobbyId, int myToken, float delay,
+                                                      string allowedRoom = null, bool reform = false,
+                                                      bool gated = false)
         {
             yield return new WaitForSecondsRealtime(delay);
             if (_ffaJoinCountdownActiveToken != myToken)
@@ -17364,24 +17534,57 @@ namespace CompetitiveRounds
             bool inCompetitiveRoomNow = false;
             try
             {
+                // V11 item 6: a re-form's countdown ignores the competitive
+                // room only when it is exactly the room it moves out of; the
+                // ungated call passes null and keeps today's clause.
                 inCompetitiveRoomNow = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
-                    && CompetitiveRoomDetect.IsCompetitiveRoom();
+                    && CompetitiveRoomDetect.IsCompetitiveRoom()
+                    && (allowedRoom == null || PhotonNetwork.CurrentRoom?.Name != allowedRoom);
             }
             catch { }
             if (gen != ffaGen || _ffaLeaveIntent
                 || string.IsNullOrEmpty(ActiveFfaLobbyId) || ActiveFfaLobbyId != lobbyId
                 || foreignPending || inCompetitiveRoomNow)
             {
+                // V11 I1: one token per clause, the first true one.
+                string why = gen != ffaGen ? "gen"
+                    : _ffaLeaveIntent ? "leave"
+                    : (string.IsNullOrEmpty(ActiveFfaLobbyId) || ActiveFfaLobbyId != lobbyId) ? "lobby"
+                    : foreignPending ? "foreign" : "room";
                 CompetitiveUI.CancelFfaStartCountdown();
                 Plugin.Log.LogInfo("[FFA] start countdown aborted ("
                     + (foreignPending ? $"another join owns the room slot: {pendingNow}"
                         : inCompetitiveRoomNow ? "already in a competitive room"
                         : "leave requested, lobby gone, or queue lifecycle moved on")
                     + ")");
+                if (reform) JoinTimeline.Step("reform_aborted", "why=" + why);
+                else JoinTimeline.Step("countdown_aborted", "why=" + why);
+                FfaAssembly.ReceiptCountdown(lobbyId, false, why);
+                if (reform)
+                {
+                    // MovedOutOf stays set. The expected lobby is now the new
+                    // one, so its own leave rule applies (V11 item 6).
+                    _ffaReformHeld = false;
+                    if (!FfaLeaveIntentPending) FfaLeaveQueue(label: "reform_abort");
+                }
                 yield break;
             }
             IsFfaQueuePolling = false;
-            Plugin.SetPendingRoom(room, region);
+            if (reform)
+            {
+                // V11 item 6, at fire: the old room's one-shot handoff, then
+                // the held slot state, then SetPendingRoom.
+                FfaAssembly.OnReformFire();
+                if (_ffaReformHeld)
+                {
+                    _ffaReformHeld = false;
+                    Plugin.SetPendingFfaSlot(_ffaReformSlot, _ffaReformCount);
+                }
+                JoinTimeline.Step("reform_fired", "from=" + JoinTimeline.Nonce(allowedRoom) + " to=" + JoinTimeline.Nonce(room));
+            }
+            else JoinTimeline.Step("countdown_fired");
+            FfaAssembly.ReceiptCountdown(lobbyId, true, null);
+            Plugin.SetPendingRoom(room, region, gated);
         }
 
         // ── 2v2 / 1v2 host lobbies (v1.37 private-lobby client half) ───────
@@ -21130,7 +21333,7 @@ namespace CompetitiveRounds
             }
         }
 
-        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback)
+        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback, int timeout = 20)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, json, callback)) yield break;
@@ -21146,7 +21349,9 @@ namespace CompetitiveRounds
                 request.SetRequestHeader("Content-Type", "application/json");
                 StampVersionHeader(request);
                 string _sentTok = SteamAuth.SessionToken;
-                request.timeout = 20;
+                // V11: the assembly's POSTs are single-try with a 4 s timeout
+                // (AsmPost); every other caller keeps the 20 s default.
+                request.timeout = timeout;
 
                 yield return request.SendWebRequest();
 
@@ -21198,6 +21403,16 @@ namespace CompetitiveRounds
         // twin of PostRequest — same consent, transport, version-gate and session
         // handling, same "HTTP <code>: <body>" error format.
         public static string BaseUrl => baseUrl;
+
+        /// <summary>V11 (FfaAssembly): one assembly, connect or release POST
+        /// with its own timeout (seconds), the same consent, transport,
+        /// version-gate and session handling as every POST, and the same
+        /// "HTTP code: body" error format.</summary>
+        public static void AsmPost(string url, string json, Action<bool, string> callback, int timeout = 20)
+        {
+            if (Plugin.Instance == null) { try { callback?.Invoke(false, "no plugin"); } catch { } return; }
+            Plugin.Instance.StartCoroutine(PostRequest(url, json, callback ?? ((ok, r) => { }), timeout));
+        }
         public static int FindMatchingBracketStringAwarePublic(string s, int openPos) => FindMatchingBracketStringAware(s, openPos);
         public static int FindMatchingBraceStringAwarePublic(string s, int openPos) => FindMatchingBraceStringAware(s, openPos);
         public static bool TryTopLevelMembersPublic(string obj, out Dictionary<string, string> members) => TryTopLevelMembers(obj, out members);
@@ -23780,7 +23995,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!Photon.Pun.PhotonNetwork.InRoom || !Photon.Pun.PhotonNetwork.IsMasterClient) return;
+                if (!Photon.Pun.PhotonNetwork.InRoom || !FfaLateEntry.MasterMaySend()) return;
                 if (RoomActors.LocalIsSpectator) return;
                 var specs = RoomActors.Spectators();
                 if (specs.Length == 0) return;

@@ -75,6 +75,10 @@ namespace CompetitiveRounds
         private static string ticketRoomName;
         private static int ticketActor = -1;
 
+        /// <summary>The master's own ticket is armed for the next load (the
+        /// load gate's count hold never waits on the master's own count).</summary>
+        internal static bool TicketArmedNow => ticketArmed;
+
         private static void ClearTicket()
         {
             ticketArmed = false;
@@ -120,20 +124,27 @@ namespace CompetitiveRounds
         /// Master only: publish the live player count before triggering a map
         /// load so every client derives the same scale factor.
         /// </summary>
-        public static void MasterPublishCount()
+        public static void MasterPublishCount(int k)
         {
             try
             {
-                if (!PhotonNetwork.IsMasterClient || !PhotonNetwork.InRoom ||
+                // V11 item 13 (sender fence): only a master that MasterMaySend()
+                // allows publishes; an unkept or lagged master sends nothing.
+                if (!FfaLateEntry.MasterMaySend() || !PhotonNetwork.InRoom ||
                     PhotonNetwork.CurrentRoom == null) return;
 
+                // V11 item 13 surface 6: the kept view, so a quarantined body
+                // cannot size the map (every body outside a gated sitting).
                 int n = 0;
-                var players = PlayerManager.instance?.players;
+                var players = RoomActors.KeptPlayers();
                 if (players != null)
                 {
                     foreach (var p in players)
                         if (p != null && p.gameObject != null) n++;
                 }
+                // In a gated room the count travels as EVT_SCALE {lobby8, game,
+                // k, count}, never as the room property (V11 item 13, N3).
+                bool gatedRoom = FfaAssembly.SittingGated();
 
                 if (n == 0)
                     n = RoomActors.ActiveFighterCount();   // census: scale by fighters, not actors
@@ -156,9 +167,24 @@ namespace CompetitiveRounds
                     return;
                 }
 
-                var h = new ExitGames.Client.Photon.Hashtable();
-                h[PropKey] = n;
-                bool sent = room.SetCustomProperties(h);
+                bool sent;
+                if (gatedRoom)
+                {
+                    sent = FfaLateEntry.RaiseScale(k, n);
+                    // Spectators keep today's property path (they record no
+                    // EVT_SCALE: no grant set to judge a sender by), so the
+                    // property is still written for them; no gated fighter
+                    // reads it (ReadPublishedCount returns before it).
+                    var hs = new ExitGames.Client.Photon.Hashtable();
+                    hs[PropKey] = n;
+                    room.SetCustomProperties(hs);
+                }
+                else
+                {
+                    var h = new ExitGames.Client.Photon.Hashtable();
+                    h[PropKey] = n;
+                    sent = room.SetCustomProperties(h);
+                }
 
                 // Arm ONLY on a confirmed enqueue (Codex r1 find 7). The old
                 // code ignored the return entirely. If the send is refused we
@@ -225,12 +251,16 @@ namespace CompetitiveRounds
                 // still-being-master (a former master must defer to the new
                 // master's published value). Spent either way, so a later
                 // unpublished load falls through to the property.
+                // V11 item 13: still-being-master is the sender fence,
+                // MasterMaySend() (an unkept or lagged master's own ticket does
+                // not serve its load).
+                bool gatedRoom = FfaAssembly.SittingGated();
                 if (ticketArmed)
                 {
                     bool valid = room != null
                         && ReferenceEquals(ticketRoomRef, room)
                         && ticketRoomName == room.Name
-                        && PhotonNetwork.IsMasterClient
+                        && FfaLateEntry.MasterMaySend()
                         && PhotonNetwork.LocalPlayer != null
                         && PhotonNetwork.LocalPlayer.ActorNumber == ticketActor;
                     // Either way the ticket is spent: a valid one is consumed,
@@ -238,8 +268,17 @@ namespace CompetitiveRounds
                     // survive to be re-tested against a later map.
                     int t = ticketCount;
                     ClearTicket();
-                    if (valid) return t;
+                    if (valid)
+                    {
+                        if (gatedRoom) FfaLateEntry.NoteAppliedScale(t);
+                        return t;
+                    }
                 }
+
+                // V11 item 13 (N3): in a gated room the load never reads the
+                // room property; it consumes the EVT_SCALE record for its own
+                // (game, k), -1 (unscaled) and LAG_OUT when it holds none.
+                if (gatedRoom) return FfaLateEntry.ConsumeLoadCount();
 
                 var props = room?.CustomProperties;
                 if (props == null || !props.ContainsKey(PropKey)) return -1;
@@ -402,6 +441,19 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>V11 item 13 surface 4: FfaLateRules.PairIndices over the
+        /// list's kept flags (an entry is kept when the kept view holds it), or
+        /// null, today's positional loop, when no kept view applies.</summary>
+        private static int[] PairIndicesFor(System.Collections.Generic.List<global::Player> list,
+                                            System.Collections.Generic.List<global::Player> kept)
+        {
+            if (list == null || kept == null) return null;
+            var flags = new bool[list.Count];
+            for (int j = 0; j < list.Count; j++)
+                flags[j] = list[j] != null && kept.Contains(list[j]);
+            return FfaLateRules.PairIndices(flags);
+        }
+
         [HarmonyPatch(typeof(PlayerManager), "MovePlayers")]
         class PlayerManager_MovePlayers_FfaScale_Patch
         {
@@ -428,7 +480,18 @@ namespace CompetitiveRounds
                     // So: in FFA this patch now always takes over the loop for its
                     // null-skip, and the SCALE is applied only when there is one.
                     if (!FfaMode.EngineActive()) return true;   // vanilla
-                    if (__instance?.players == null || spawnPoints == null) return true;
+                    // V11 item 13 surface 4 (row 42): the list and each entry's
+                    // kept flag are read in ONE statement, so the pairing below
+                    // always consumes the kept view of the very list it walks.
+                    // In a gated running room the spawn points pair with the
+                    // kept bodies only, in list order (FfaLateRules.PairIndices):
+                    // a quarantined entry takes no index, no point, no Move
+                    // coroutine and no spawn sound. An ungated room runs today's
+                    // loop (pairIdx stays null, index i pairs with point i).
+                    System.Collections.Generic.List<global::Player> roster;
+                    int[] pairIdx = PairIndicesFor(roster = __instance?.players,
+                                                   FfaLateEntry.GatedRunning ? FfaLateEntry.KeptPlayers() : null);
+                    if (roster == null || spawnPoints == null) return true;
                     if (f < 1f) f = 1f;
 
                     // Bug #116 second half: the padded array repeats vanilla
@@ -448,11 +511,18 @@ namespace CompetitiveRounds
                     // cannot clash anyway.
                     var extras = f > 1.001f ? FfaSpawnPoints.Extras : null;
                     int nextExtra = 0;
-                    for (int i = 0; i < __instance.players.Count && i < spawnPoints.Length; i++)
+                    for (int i = 0; i < roster.Count; i++)
                     {
-                        var pl = __instance.players[i];
-                        if (pl == null || spawnPoints[i] == null) continue;
-                        Vector3 target = spawnPoints[i].localStartPos * f;
+                        int sp = pairIdx != null ? pairIdx[i] : i;
+                        var pl = roster[i];
+                        if (sp < 0)
+                        {
+                            if (pl != null) FfaLateEntry.Refused("pair", pl);
+                            continue;
+                        }
+                        if (sp >= spawnPoints.Length) break;   // indices only grow
+                        if (pl == null || spawnPoints[sp] == null) continue;
+                        Vector3 target = spawnPoints[sp].localStartPos * f;
                         bool clash = false;
                         for (int u = 0; u < used.Count; u++)
                             if ((used[u] - target).sqrMagnitude < 0.01f) { clash = true; break; }
@@ -460,7 +530,7 @@ namespace CompetitiveRounds
                             target = extras[nextExtra++];
                         used.Add(target);
                         __instance.StartCoroutine(__instance.Move(pl.data.playerVel, target));
-                        PlaySpawnSound(__instance, i, pl.transform);
+                        PlaySpawnSound(__instance, sp, pl.transform);
                     }
                     return false;
                 }

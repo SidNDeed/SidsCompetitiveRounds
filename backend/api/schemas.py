@@ -998,6 +998,18 @@ class HealthResponse(BaseModel):
     # without a default, so building the answer without it raises instead
     # of silently leaving the key out. Absent on any build before it.
     janitor_selftest_build: int
+    # connect_failure: how many of the connect-failure design's eight I2
+    # writers (the lock, the poll, connect, assembly, the leave, the verdict,
+    # the report and the release) are wired to their seat-row write in this
+    # build (main._CONNECT_FAILURE; 8 = every one). DERIVED from those
+    # functions' compiled code when main is imported, never written down, so
+    # a build that lost a writer's wiring reads less than 8 (#342). The
+    # release train's build discriminator for the connect-failure batch; read
+    # by nothing else (#306). Declared without a default, so building the
+    # answer without it raises instead of silently leaving the key out.
+    # Absent on any build before that batch, which is how the train reads the
+    # old build.
+    connect_failure: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

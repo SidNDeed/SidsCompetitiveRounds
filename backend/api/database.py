@@ -65,6 +65,52 @@ release_engine = create_async_engine(
 
 release_session = async_sessionmaker(release_engine, class_=AsyncSession, expire_on_commit=False)
 
+# The FFA assembly routes' own pool (connect-failure design V11, the
+# pre-COMMIT-work deadline): POST /api/v1/ffa/lobby/{id}/connect, .../assembly
+# and .../release run under ASM_TXN_DEADLINE_S (3 s, main.py), so a checkout
+# must fail fast instead of waiting the main pool's 30 s. pool_timeout=3 turns
+# a checkout that cannot complete in time into the pool's TimeoutError, which
+# those routes answer as 503 asm_deadline with no write; connect_args timeout=2
+# is asyncpg's connect timeout for a NEW connection (the dialect passes it to
+# asyncpg.connect; the lane's test confirms it against a listener that never
+# answers). What it does not bound: a checked-out connection's own validation
+# (the pre-ping, a recycle, a reconnection after an invalidation) can still
+# delay a request; the routes' elapsed-time check after checkout turns such a
+# delay into a 503, but not its wall time. At most ASM_POOL_SIZE +
+# ASM_POOL_OVERFLOW (8) connections per api process, beside engine's 30 and
+# release_engine's 5.
+#
+# Not added to the post-COMMIT seal listener below: only the quarantine triage
+# read primitive arms the seal, and it never calls these routes; the
+# listener's engine tuple is also pinned by the triage controls.
+ASM_POOL_SIZE = 4
+ASM_POOL_OVERFLOW = 4
+ASM_POOL_TIMEOUT_S = 3
+ASM_CONNECT_TIMEOUT_S = 2
+
+
+def make_asm_engine(url=DATABASE_URL, **connect_args):
+    """An engine with the assembly pool's arguments. The api builds exactly
+    one (asm_engine); a test builds its own with the same arguments against
+    its database (extra connect_args, such as server_settings, merge in)."""
+    args = {"timeout": ASM_CONNECT_TIMEOUT_S}
+    args.update(connect_args)
+    return create_async_engine(
+        url,
+        echo=False,
+        pool_size=ASM_POOL_SIZE,
+        max_overflow=ASM_POOL_OVERFLOW,
+        pool_timeout=ASM_POOL_TIMEOUT_S,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        connect_args=args,
+    )
+
+
+asm_engine = make_asm_engine()
+
+asm_session = async_sessionmaker(asm_engine, class_=AsyncSession, expire_on_commit=False)
+
 
 # ── The post-COMMIT seal (quarantine triage, RJ-TRIAGE C9) ─────────────────
 # The quarantine triage routes (main.py, _triage_read_txn) read in ONE
@@ -118,6 +164,18 @@ for _sealed_engine in (engine, release_engine):
 async def get_release_db():
     """FastAPI dependency: a session on the reserved pool (the lease release, the ack)."""
     async with release_session() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+async def get_asm_db():
+    """FastAPI dependency: a session on the assembly pool. A session checks a
+    connection out lazily, at its first statement; the assembly routes force
+    the checkout themselves (main.py, _asm_begin) so that a pool timeout is
+    attributed to stage=pool."""
+    async with asm_session() as session:
         try:
             yield session
         finally:
