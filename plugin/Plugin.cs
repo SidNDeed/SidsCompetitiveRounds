@@ -1085,7 +1085,7 @@ namespace CompetitiveRounds
             );
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
-                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). '4:cat<N>' selects a Shop category; after it, 'fixture[:line]', 'ladder:<line>', 'close' or 'live' drives the Titles section's ladder popup (fixture = BepInEx/config/scr-ladder-fixture.json). Re-applied whenever the value changes; clear when done."
+                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). '4:cat<N>' selects a Shop category; after it, 'fixture[:line]', 'ladder:<line>', 'close' or 'live' drives the Titles section's ladder dropdown (fixture = BepInEx/config/scr-ladder-fixture.json). Re-applied whenever the value changes; clear when done."
             );
             BroadcastTestQuit = Config.Bind(
                 "Broadcast", "TestQuit", "",
@@ -2566,7 +2566,7 @@ namespace CompetitiveRounds
                 {
                     int.TryParse(parts[1].Trim().Substring(3), out shopCat);
                     // Sept 23 (item 12 follow-up): anything after "4:catN:" drives the
-                    // Titles section's ladder entries and their tier popup, e.g.
+                    // Titles section's ladder entries and their tier dropdown, e.g.
                     // "4:cat4:fixture:cat" (TitleLaddersUI.DevDirective owns the grammar).
                     if (parts.Length > 2) ladderDirective = string.Join(":", parts, 2, parts.Length - 2);
                 }
