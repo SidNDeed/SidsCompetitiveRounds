@@ -9152,6 +9152,9 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # Set before the try so the post-rating blocks below can never NameError
         # on it if the rating pass throws before the authoritative re-read.
         _series_still_valid = True
+        # Achievement gold this pass pays reaches this game's Gold Rush count
+        # through _ladder_commit_with_late_gold at each of its commits.
+        _ladder_late_mark = _ladder_achievement_mark(db)
         # Inline recalculation for the two series players
         try:
             # This is a NEW transaction (the match write committed above), so
@@ -9274,7 +9277,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 await _grant_rating_achievements(db, p1.id, new_r1)
                 await _grant_rating_achievements(db, p2.id, new_r2)
 
-            await db.commit()
+            await _ladder_commit_with_late_gold(db, match.id, _ladder_late_mark, "rating")
         except Exception as ex:
             print(f"Series Glicko update error: {ex}")
 
@@ -9296,12 +9299,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 )).scalar_one_or_none()
                 slayer_key = SLAYER_TARGETS.get(loser_steam or "")
                 if slayer_key and winner_steam and winner_steam != loser_steam:
+                    _ladder_late_mark = _ladder_achievement_mark(db)
                     if await _grant_achievement_inline(db, series.winner_id, slayer_key):
-                        await db.commit()
+                        await _ladder_commit_with_late_gold(
+                            db, match.id, _ladder_late_mark, "slayer")
                         print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
                 # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
                 if winner_steam:
                     streak = await get_ranked_streak(db, winner_steam)
+                    _ladder_late_mark = _ladder_achievement_mark(db)
                     granted_streak = False
                     if streak >= 25:
                         granted_streak |= await _grant_achievement_inline(db, series.winner_id, "on_fire")
@@ -9310,7 +9316,8 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                     if streak >= 100:
                         granted_streak |= await _grant_achievement_inline(db, series.winner_id, "immortal")
                     if granted_streak:
-                        await db.commit()
+                        await _ladder_commit_with_late_gold(
+                            db, match.id, _ladder_late_mark, "streak")
                         print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
         except Exception as ex:
             print(f"Slayer auto-grant error: {ex}")
@@ -40404,6 +40411,34 @@ def _ladder_achievement_restore(db, mark: dict) -> None:
     info = _ladder_note_bag(db)
     if info is not None:
         info[_LADDER_ACH_GOLD] = dict(mark)
+
+
+async def _ladder_commit_with_late_gold(db, game_ref, mark: dict, source: str) -> None:
+    """Commit one block of submit_match's post-commit rating pass (source
+    rating, slayer or streak), first adding the achievement gold that block
+    paid since `mark` to the Gold Rush count of the game that completed the
+    series (title_ladders.record_late_play_gold, round 3 finding 1). The game
+    was claimed before this pass ran, so this gold would otherwise never
+    reach it. The supplement rides the same commit as the payout: both land
+    or neither does. A fault in the supplement alone is dropped with its own
+    savepoint and the payout still commits. A failed commit restores the
+    note to `mark` and re-raises to the block's own handler."""
+    now = _ladder_achievement_mark(db)
+    for pid_s in sorted(now):
+        amount = int(now.get(pid_s, 0)) - int(mark.get(pid_s, 0))
+        if amount <= 0:
+            continue
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_late_play_gold(
+                    db, uuid.UUID(pid_s), game_ref=str(game_ref), source=source, amount=amount)
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] 1v1 late {source} gold dropped (game={game_ref}): {_lex}")
+    try:
+        await db.commit()
+    except Exception:
+        _ladder_achievement_restore(db, mark)
+        raise
 
 
 async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:

@@ -2025,3 +2025,82 @@ def test_pg_r2_a_rolled_back_achievement_is_not_play_gold(opened):
     assert "_ladder_achievement_restore(db, _ffa_ach_mark)" in src[i - 200:i], (
         "the FFA achievement savepoint's handler does not restore the note")
     assert src.count("_ffa_ach_mark = _ladder_achievement_mark(db)") == 1
+
+
+# -- Round 3 finding 1: late 1v1 play gold ------------------------------------
+#
+# submit_match's post-commit rating pass pays achievement gold (rating tier,
+# Slayer, streak) after the game that completed the series was claimed. Each
+# of the three must reach that game's Gold Rush count, once. The oracle is the
+# ledger after the fact, as above. The case: P1 wins a two-game 1v1 series
+# with Gold Rush worn from 0; the late source is forced to pay P1.
+
+def _force_late(monkeypatch, source):
+    if source == "rating":
+        monkeypatch.setattr(main, "MASTER_RANK_THRESHOLD", 0.0)           # master_rank, 500
+    elif source == "slayer":
+        monkeypatch.setattr(main, "SLAYER_TARGETS", {P2: "regicide"})     # regicide, 1000
+    elif source == "streak":
+        async def _streak(db, steam_id):
+            return 100                                                    # on_fire .. immortal
+        monkeypatch.setattr(main, "get_ranked_streak", _streak)
+
+
+async def _late_series(sm, opened, tag):
+    ids = await _seed(sm, wear=GOLD_WEAR)
+    refs, _people, answers, lines = await _complete("1v1", sm, ids, opened, tag)
+    assert len(refs) == 2 and not _dropped(lines, "1v1"), (refs, answers)
+    assert not [ln for ln in lines if "late" in ln and "dropped" in ln], lines
+    return ids, refs, lines
+
+
+@pytest.mark.parametrize("source", ["rating", "slayer", "streak"])
+def test_pg_rd3_late_one_v_one_gold_reaches_gold_rush(opened, monkeypatch, source):
+    """Each late source: P1's Gold Rush count equals every play gold row the
+    ledger holds for P1, the late achievement gold included; the gold crosses
+    the tier-2 threshold, so its rung is granted and auto-equipped; a credit
+    keyed <game>#late-<source> on gold_rush records the supplement; replaying
+    the supplement changes nothing. NEGATIVE CONTROL: the same series with no
+    late payout stays under the threshold and grants nothing."""
+    _require_live_pg()
+    line = "gold_rush"
+    tier2 = tl.rungs_at_tier(line, 2)[0]["sku"]
+
+    async def _control():
+        async with _case() as (schema, sm):
+            await _late_series(sm, opened, "C" + source[0])
+            after, _ = await _look(schema)
+            play, ach = await _play_ledger(schema)
+            return after, play, ach
+    c_after, c_play, c_ach = _run(_control())
+    assert c_ach.get(P1, 0) == 0, ("the control paid an achievement", c_ach)
+    assert c_after["progress"][(P1, line)][0] == c_play[P1] < tl.threshold(line, 2), (
+        "the control series alone reaches tier 2: the case cannot show the late gold",
+        c_after["progress"][(P1, line)], c_play)
+    assert (P1, tier2) not in c_after["rungs"]
+
+    _force_late(monkeypatch, source)
+
+    async def _go():
+        async with _case() as (schema, sm):
+            ids, refs, _lines = await _late_series(sm, opened, "L" + source[0])
+            after, _ = await _look(schema)
+            play, ach = await _play_ledger(schema)
+            late = ach.get(P1, 0)
+            assert late > 0, ("the forced late source paid P1 nothing", source, ach)
+            games, tier = after["progress"][(P1, line)]
+            assert games == play[P1], ("late gold missing from Gold Rush", source, games, play)
+            assert games >= tl.threshold(line, 2) and tier == tl.tier_for_games(line, games)
+            assert (P1, tier2) in after["rungs"], after["rungs"]
+            assert after["worn"][P1] == tl.rungs_at_tier(line, tier)[0]["sku"], after["worn"]
+            key = tl.late_reference(refs[1], source)
+            assert (P1, key, line, "1v1") in after["credits"], after["credits"]
+            # Replay of the supplement: claimed, so nothing moves.
+            async with sm() as db:
+                again = await tl.record_late_play_gold(
+                    db, ids[P1], game_ref=refs[1], source=source, amount=late)
+                await db.commit()
+            replay, _ = await _look(schema)
+            assert again == [] and replay["progress"] == after["progress"], (again, replay)
+            assert replay["credits"] == after["credits"]
+    _run(_go())

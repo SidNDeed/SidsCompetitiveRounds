@@ -479,8 +479,13 @@ def hook_scenario(wear, calls, *, held=(), gold=(), history=0):
                                 {"pid": pid, "s": call[3]})
                             await db.commit()
                         del seen[:]
-                        events.append(await tl.record_completed_games(
-                            db, [pid], mode=mode, reference_id=ref, rows={str(pid): row}))
+                        if mode == "late":    # ref "<game>|<source>", row the amount
+                            game_ref, source = ref.split("|")
+                            events.append(await tl.record_late_play_gold(
+                                db, pid, game_ref=game_ref, source=source, amount=row))
+                        else:
+                            events.append(await tl.record_completed_games(
+                                db, [pid], mode=mode, reference_id=ref, rows={str(pid): row}))
                         statements.append(list(seen))
                         await db.commit()
                 finally:
@@ -806,6 +811,62 @@ def test_pg_the_gold_ladder_work_does_not_grow_with_ledger_history(mode):
     assert a == b, (a, b)
     assert len(a) <= HOOK_STATEMENT_CEILING[mode], (len(a), a)
     assert not any("gold_transactions" in s for s in a), a
+
+
+# The late 1v1 supplement (round 3 finding 1), one player, one source, no rung
+# crossed: lock, read the game's claim, claim the supplement, read held rungs,
+# upsert the count.
+LATE_STATEMENT_CEILING = 5
+
+
+def test_pg_r3_late_gold_work_does_not_grow_with_ledger_history():
+    calls = [("1v1", "g-1", {"won": True, "play_gold": 25}), ("late", "g-1|rating", 100)]
+    fresh = hook_scenario("title_ladder_gold_rush_1", calls)
+    long_ = hook_scenario("title_ladder_gold_rush_1", calls, history=3000)
+    assert fresh.progress["gold_rush"][0] == long_.progress["gold_rush"][0] == 125
+    a, b = fresh.statements[1], long_.statements[1]
+    assert a == b, (a, b)
+    assert len(a) <= LATE_STATEMENT_CEILING, (len(a), a)
+    assert not any("gold_transactions" in s for s in a), a
+
+
+def test_pg_r3_late_gold_adds_once_on_the_game_claim_gold_line():
+    """A late payout adds to the Gold Rush count of the game it belongs to,
+    once per source: a replay of the same source changes nothing, a second
+    source adds again. It counts on the line of the game's claim even when
+    another title is worn by then, granting the crossed rung without
+    changing the worn title."""
+    once = hook_scenario("title_ladder_gold_rush_1", [
+        ("1v1", "m-1", {"won": True, "play_gold": 40}),
+        ("late", "m-1|rating", 500), ("late", "m-1|rating", 500),
+        ("late", "m-1|streak", 100)])
+    assert once.progress["gold_rush"][0] == 640 and once.credits == 3, once.progress
+    assert once.events[2] == [] and once.active == "title_gold_rush", once.active
+    switched = hook_scenario("title_ladder_gold_rush_1", [
+        ("1v1", "m-1", {"won": True, "play_gold": 40}),
+        ("late", "m-1|slayer", 500, "title_beginner")])
+    assert switched.progress["gold_rush"][0] == 540, switched.progress
+    assert "title_gold_rush" in switched.owned and switched.active == "title_beginner"
+
+
+def test_pg_r3_late_gold_needs_the_game_claimed_on_a_gold_line():
+    """CONTROLS: no claim of the game, or a claim on another line, or no
+    title at the game: the supplement adds nothing and claims nothing."""
+    unclaimed = hook_scenario("title_ladder_gold_rush_1", [("late", "m-9|rating", 500)])
+    assert "gold_rush" not in unclaimed.progress and unclaimed.credits == 0
+    other = hook_scenario("title_beginner", [
+        ("1v1", "m-1", W), ("late", "m-1|rating", 500, "title_ladder_gold_rush_1")])
+    assert "gold_rush" not in other.progress and other.credits == 1, other.progress
+    bare = hook_scenario("title_ladder_gold_rush_1", [
+        ("1v1", "m-1", {"won": True, "play_gold": 40}, None),
+        ("late", "m-1|rating", 500, "title_ladder_gold_rush_1")])
+    assert "gold_rush" not in bare.progress and bare.credits == 1, bare.progress
+
+
+def test_r3_late_reference_names_one_source():
+    assert tl.late_reference("m-1", "slayer") == "m-1#late-slayer"
+    with pytest.raises(ValueError):
+        tl.late_reference("m-1", "bet")
 
 
 def test_pg_a_card_ladder_credits_a_family_pick_and_not_another():

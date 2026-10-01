@@ -146,9 +146,11 @@ KIND_CONDITION = {
 # credited to each player for the game it is recording and passes their sum
 # as the row's `play_gold` -- the xp gold, the level reward, the series result
 # (1v1, 2v2) or the placement (FFA), and the achievement gold newly paid
-# while recording that game (main._ladder_achievement_gold). So the hook's
-# work per player is fixed by the catalogue, not by the player's ledger
-# history (round 2, findings 3 and 9).
+# while recording that game (main._ladder_achievement_gold). A 1v1 game's
+# achievement gold paid after the claim, by the post-commit rating pass, is
+# added once per source by record_late_play_gold (round 3 finding 1). So the
+# hook's work per player is fixed by the catalogue, not by the player's
+# ledger history (round 2, findings 3 and 9).
 PLAY_GOLD_KEY = "play_gold"
 
 
@@ -636,7 +638,7 @@ APEX_LINE = "apex"
 
 
 async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
-                                 reference_id: str, rows=None) -> list:
+                                 reference_id: str, rows=None, late_of=None) -> list:
     """Credit one completed RANKED GAME to every listed player's worn ladder.
     Returns one event dict per rung-up (usually none).
 
@@ -660,6 +662,19 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
     Its WRITE FOOTPRINT is four tables: `title_ladder_credits`,
     `title_ladder_progress`, `players.active_title_id` (the auto-equip) and
     `player_items` (every granted rung goes through `main._grant_title_item`).
+
+    LATE PLAY GOLD (round 3 finding 1, `late_of`). A 1v1 game's post-commit
+    rating pass can pay achievement gold (rating tier, Slayer, streak) after
+    this hook claimed the game. record_late_play_gold passes that amount
+    here with `late_of` = the game's id and `reference_id` = a supplement key
+    of its own. The supplement counts only on the line of the game's OWN
+    claim, and only when that line is a `gold` ladder; with no claim of the
+    game it counts nothing. It is claimed like a game, so a replay of it
+    changes nothing. It is not a game: it neither extends nor ends an Apex
+    run. Its tier base is the highest rung of that line the player holds
+    (with the worn rung when it is of that line); a player who holds none
+    any more is credited nothing. A rung it crosses is granted, and
+    auto-equipped only when the worn title is of that line.
 
     WHAT IT DOES NOT CHECK. It does not know whether the game was ranked. The
     caller does, and calls only from a ranked game.
@@ -723,8 +738,19 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
         ), {"pid": pid})).first()
         if row is None:
             continue
-        line = line_of_sku(row[1])
+        worn_line = line_of_sku(row[1])
+        line = worn_line
         game = rows.get(str(pid)) or {}
+        if late_of is not None:
+            # A late supplement counts on the line of the game's own claim,
+            # and only on a gold ladder (round 3 finding 1).
+            orig = (await db.execute(text(
+                "SELECT line FROM title_ladder_credits "
+                " WHERE player_id = :pid AND reference_id = :ref"
+            ), {"pid": pid, "ref": str(late_of)})).first()
+            if orig is None or orig[0] not in LINES or LINES[orig[0]]["kind"] != "gold":
+                continue   # the game was not claimed on a gold ladder: nothing to add
+            line = orig[0]
 
         # THE CLAIM, FIRST (round 3 finding 2): every participant of every
         # ranked game, worn or not, any title or none, before any Apex read
@@ -738,7 +764,7 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
         if claimed is None:
             continue   # this game was already claimed for this player
 
-        if mode == "1v1" and (line is None or LINES[line]["kind"] != "streak"):
+        if late_of is None and mode == "1v1" and (line is None or LINES[line]["kind"] != "streak"):
             # A claimed ranked 1v1 game played wearing anything but an Apex
             # rung ends the run, in the order the server recorded it.
             await db.execute(text(_APEX_BREAK_SQL), {"pid": pid, "line": APEX_LINE})
@@ -751,14 +777,19 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
 
         # The tier a first progress row starts at: the highest rung of this
         # ladder the player HOLDS (the read route reports the same number),
-        # never below the one being worn.
+        # never below the one being worn when it is of this ladder (it always
+        # is, but for a late supplement).
         held = [s for (s,) in (await db.execute(text(
             "SELECT si.sku FROM player_items pi "
             "  JOIN shop_items si ON si.id = pi.item_id "
             " WHERE pi.player_id = :pid AND si.sku = ANY(CAST(:skus AS text[]))"
         ), {"pid": pid, "skus": [r["sku"] for r in ld["rungs"]]})).all()]
-        worn_tier = max([SKU_TO_RUNG[row[1]]["tier"]]
-                        + [SKU_TO_RUNG[s]["tier"] for s in held if s in SKU_TO_RUNG])
+        tiers = [SKU_TO_RUNG[s]["tier"] for s in held if s in SKU_TO_RUNG]
+        if worn_line == line:
+            tiers.append(SKU_TO_RUNG[row[1]]["tier"])
+        if not tiers:
+            continue   # a late supplement for a player holding no rung of the line now
+        worn_tier = max(tiers)
         base = threshold(line, worn_tier)
 
         if kind == "streak":
@@ -824,10 +855,12 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
         ), {"t": earned, "pid": pid, "line": line})
 
         # Auto-equip the new top rung. `row[1]` was read under the FOR NO KEY
-        # UPDATE this transaction still holds, and it was a rung of `line`.
+        # UPDATE this transaction still holds, and it was a rung of `line`
+        # (a late supplement for a player now wearing another line grants
+        # the rung and leaves the worn title alone).
         top = rungs_at_tier(line, earned)
         equipped_sku = None
-        if top:
+        if top and worn_line == line:
             equipped_sku = top[0]["sku"]
             await db.execute(text(
                 "UPDATE players SET active_title_id = si.id "
@@ -848,6 +881,36 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
             "equipped_sku": equipped_sku,
         })
     return events
+
+
+# -- Late 1v1 play gold (round 3 finding 1) ----------------------------
+
+# The hook's own implementation, bound once: the late supplement is not one
+# of the three per-mode game sites, so a test that replaces the module's
+# `record_completed_games` to observe those sites does not see it.
+_RECORD_GAME = record_completed_games
+LATE_SOURCES = ("rating", "slayer", "streak")
+
+
+def late_reference(game_ref, source) -> str:
+    """The supplement key of one late payout source for one game."""
+    if source not in LATE_SOURCES:
+        raise ValueError(f"late play gold source {source!r}")
+    return f"{game_ref}#late-{source}"
+
+
+async def record_late_play_gold(db: AsyncSession, player_id, *, game_ref,
+                                source: str, amount: int) -> list:
+    """Add achievement gold that a ranked 1v1 game's post-commit rating pass
+    paid AFTER the game was claimed (`source`: rating tier, Slayer or streak)
+    to that game's Gold Rush count, once per (player, game, source). Runs
+    inside the caller's transaction; the caller commits it with the payout.
+    See record_completed_games, LATE PLAY GOLD."""
+    if int(amount or 0) <= 0:
+        return []
+    return await _RECORD_GAME(
+        db, [player_id], mode="1v1", reference_id=late_reference(game_ref, source),
+        rows={str(player_id): {PLAY_GOLD_KEY: int(amount)}}, late_of=str(game_ref))
 
 
 # -- The build word main.py derives from the hook ---------------------
