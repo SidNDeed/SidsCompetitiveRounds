@@ -742,16 +742,17 @@ def test_pg_an_owner_of_a_higher_rung_starts_there():
 
 # -- 5. The refund migration 366, on the seeded census ----------------------
 
-def refund_scenario(before="", runs=1, sql366=None):
-    """prereq + 365 + the census seed + `before`, then 366 (or `sql366`, a
-    control's text) `runs` times. Returns (state, [None or the refusal text
-    per run])."""
+def refund_scenario(before="", runs=1, sql366=None, seed=None):
+    """prereq + 365 + `seed` (default the census seed) + `before`, then 366
+    (or `sql366`, a control's text) `runs` times. Returns (state, [None or
+    the refusal text per run])."""
     _require_live_pg()
     schema = _schema_name()
     sql366 = sql366 or lane.migration_text(M366)
+    seed = lane.CENSUS_SEED if seed is None else seed
 
     async def go():
-        await _make_schema(schema, lane.CENSUS_SEED + before)
+        await _make_schema(schema, seed + before)
         conn = await _asyncpg.connect(LADDER_DSN)
         try:
             await conn.execute('SET search_path TO "%s"' % schema)
@@ -885,6 +886,32 @@ def test_pg_r2_366_refuses_a_lost_holder_with_no_refund_row():
     state, outcomes = refund_scenario(before=lost)
     assert outcomes[0] and "366 refused" in outcomes[0], outcomes
     assert state == untouched
+
+
+# A database these titles were never sold on -- a fresh or replayed schema,
+# which every migration-replay harness builds -- has no holder, no refund and
+# no purchase row. 366 retires both catalogue rows there and writes nothing
+# else; a second run is a no-op. Production is never in this state for
+# title_regicide (its buyer's purchase row exists), which the lost-holder
+# refusal above pins.
+def test_pg_r2_366_on_a_database_never_sold_on_retires_and_refunds_nothing():
+    state, outcomes = refund_scenario(seed="", runs=2)
+    assert outcomes == [None, None], outcomes
+    assert state["items"] == [] and state["ledger"] == [], state
+    assert state["ready"] == {"title_voidshot": False, "title_regicide": False}
+    # Negative control: the a39bb4e2 text (holders and applied states only)
+    # refuses the same never-sold database.
+    old, old_out = refund_scenario(seed="", sql366=_sql366_at("a39bb4e2"))
+    assert old_out[0] and "366 refused" in old_out[0], old_out
+    assert old["ready"] == {"title_voidshot": True, "title_regicide": True}
+
+
+def _sql366_at(rev):
+    import subprocess
+    return subprocess.run(
+        ["git", "-C", os.path.dirname(os.path.abspath(__file__)), "show",
+         rev + ":backend/sql/" + M366],
+        check=True, capture_output=True, text=True, encoding="utf-8").stdout
 
 
 # -- 6. The old client's parser over the extended answer ---------------------

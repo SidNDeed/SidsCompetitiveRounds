@@ -53,7 +53,12 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 SQL_DIR = os.path.normpath(os.path.join(HERE, "..", "sql"))
 M331 = lh.MIGRATION
 M355 = os.path.join(SQL_DIR, "355_ffa_assembly.sql")
-HELD_OUT = frozenset({os.path.basename(M331), os.path.basename(M355)})
+# 365 (the five-tier ladder catalogue) rewrites 331's tables, so it is held
+# out with 331 and run whole right after it, as the ladder suite does: a
+# statement-by-statement replay cannot run it before 331 exists.
+M365 = lh.MIGRATION_365
+HELD_OUT = frozenset({os.path.basename(M331), os.path.basename(M355),
+                      os.path.basename(M365)})
 
 
 def require_live_pg():
@@ -147,6 +152,7 @@ async def build(case, *, with_355=True, dsn=None, faithful=False):
             "the second DDL pass failed on statements outside REPLAY_KNOWN: %r"
             % unexpected[:5])
     await conn.execute(io.open(M331, encoding="utf-8").read())
+    await conn.execute(io.open(M365, encoding="utf-8").read())
     if with_355:
         await apply_355(conn)
 
