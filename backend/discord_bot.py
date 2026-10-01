@@ -478,6 +478,10 @@ async def on_ready():
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
+    # Discord card render parity: the art evidence's boot witness, before the
+    # Discord fix's witness so the lines that test pins around [BOT-READY]
+    # stay as they are.
+    print(_pc_card_art_signal(), flush=True)
     # The Discord fix's witness (round 2), read by the release train: the
     # purchase journal's volume and the fixed behaviour, stamped with gen.
     print(_pc_fix_ready_line())
@@ -8785,7 +8789,7 @@ def _pc_upload_cap(ctx):
 
 
 async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
-                        require_lease=False, receipt=None, no_face=None):
+                        require_lease=False, receipt=None, no_face=None, art=None):
     """ONE send under the lease: the lease is re-validated immediately before
     the send and the bytes are dropped when it is gone; the send runs under
     the lease's deadline; the lease is released afterwards, sent or not.
@@ -8795,8 +8799,10 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
     before the send, and returns False otherwise (r6 H1/M2: a line that names
     people is authorised as a whole, both names re-read, or not posted).
     With `receipt` (a log label) the send's own answer is logged: what
-    Discord stored (_pc_receipt), or `no_face`, why no picture went (D3).
-    Returns True when the send ran."""
+    Discord stored (_pc_receipt), or `no_face`, why no picture went (D3);
+    `art` (_pc_art_note of the face answer) is appended when the picture
+    went, so the line also says whether that picture carries the top card's
+    art. Returns True when the send ran."""
     # `lease` is `_pc_lease`'s answer: (lease_id, deadline) and, since the
     # drain needed to know WHY a lease was refused, a third field this does
     # not use. Sliced rather than unpacked, so one caller's shape is not the
@@ -8830,10 +8836,22 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
                 line = _pc_receipt(msg, attach, no_face)
             except Exception as ex:   # a log line must never fail a post that went out
                 line = f"posted; the receipt could not be read ({type(ex).__name__})"
-            print(f"{receipt} {line}")
+            print(f"{receipt} {line}" + (f" {art}" if art and attach else ""))
     finally:
         await _pc_lease_release(lease_id)
     return True
+
+
+def _pc_art_note(meta, kind) -> str:
+    """The top card's art evidence of one picture answer, from the headers the
+    api computed from the SAME row the pixels were drawn from (Discord card
+    render parity): `art=drawn|none still=<still>` for a face, `art=<drawn>/
+    <face tiles>` for a pack strip or binder page; `-` where the api sent no
+    such header (an older api). Diagnostics only: nothing is decided on it."""
+    meta = meta or {}
+    if kind == "face":
+        return f"art={meta.get('x-face-art') or '-'} still={meta.get('x-face-still') or '-'}"
+    return f"art={meta.get('x-strip-art' if kind == 'pack' else 'x-grid-art') or '-'}"
 
 
 @bot.hybrid_command(name="daily", description="Claim and open today's free Player Cards pack")
@@ -9529,6 +9547,39 @@ def _pc_card_gif_signal() -> str:
     return "[BOT-FEATURE] card_motion_gif=" + word + " -- gen=" + _BOT_GEN
 
 
+# The two senders whose log lines carry the top card's art evidence (Discord
+# card render parity): the reveal run and the pull-event drain.
+_PC_CARD_ART_READERS = ("_pc_reveal_run", "poll_pc_events")
+
+
+def _pc_card_art_word() -> int:
+    """1 when every function of _PC_CARD_ART_READERS (a tasks.Loop's coroutine
+    included) loads _pc_art_note, nested code included; else 0. DERIVED from
+    the compiled code, never a constant (#342)."""
+    for name in _PC_CARD_ART_READERS:
+        obj = globals()[name]
+        fn = getattr(obj, "coro", None) or getattr(obj, "callback", None) or obj
+        names, todo = set(), [fn.__code__]
+        while todo:
+            code = todo.pop()
+            names.update(code.co_names)
+            todo.extend(c for c in code.co_consts if isinstance(c, type(code)))
+        if "_pc_art_note" not in names:
+            return 0
+    return 1
+
+
+def _pc_card_art_signal() -> str:
+    """The boot witness of this build's art evidence, one whole line printed
+    by on_ready before the Discord fix's witness; read by eye after
+    deploy-bot (the release train has no bot-marker key)."""
+    try:
+        word = str(_pc_card_art_word())
+    except Exception as exc:   # the probe must never stop the ready line
+        word = "error:" + type(exc).__name__
+    return "[BOT-FEATURE] card_art=" + word + " -- gen=" + _BOT_GEN
+
+
 def _pc_reveal_hex32(ref):
     """A uuid as the reveal manifests write it: 32 lower-case hex digits."""
     return str(ref or "").replace("-", "").lower()
@@ -9871,6 +9922,7 @@ async def _pc_reveal_run(ctx, kind, ref, first, reread, image_path, image_params
             try:
                 await asyncio.wait_for(ctx.send(render(again, None), file=discord.File(io.BytesIO(image),
                                                 filename=f"{kind}.png"), **kwargs), timeout=budget)
+                print(f"[PC-REVEAL] {kind} ref={ref} posted {_pc_art_note(meta, kind)}")
                 return "posted"
             except discord.HTTPException as e:
                 if getattr(e, "status", None) != 413:
@@ -10187,7 +10239,7 @@ async def poll_pc_events():
                 # handout; a busy subject is leased again).
                 first = by_id.get(ids[0], {})
                 p = first.get("print") or {}
-                face, lease, again, why, gone = None, (None, None), False, None, False
+                face, lease, again, why, gone, fmeta = None, (None, None), False, None, False, {}
                 if first.get("subject_ref"):
                     lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)
                     again = bool(lease[2])
@@ -10200,8 +10252,8 @@ async def poll_pc_events():
                 elif not first.get("face_ready", True):
                     why = "the subject's picture was unresolved when the hold ran out (face_ready false)"
                 if lease[0] and p.get("print_id") and first.get("face_ready", True):
-                    st, face, _ = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
-                                                   params={"size": "card"})
+                    st, face, fmeta = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
+                                                       params={"size": "card"})
                     if st != 200:
                         face = None
                         again = st == 0 or st == 409 or st >= 500
@@ -10241,6 +10293,7 @@ async def poll_pc_events():
                 if face is not None:
                     embed = discord.Embed(color=_PC_RARITY_COLOR.get(str(p.get("rarity") or ""), 0x95A5A6))
                 if not await _pc_send_face(ch.send, content=text_line[:2000], embed=embed, face=face, lease=lease,
+                                           art=_pc_art_note(fmeta, "face"),
                                            require_lease=True, receipt=f"[PC-EVENTS] line for {ids}", no_face=why):
                     # No live lease at the send: not posted, not acked, not
                     # remembered as sent -- the api's next handout resolves a
