@@ -5338,7 +5338,13 @@ def test_m2_the_attest_runs_the_expiry_after_a(monkeypatch):
         a = await attest(lob.sids[0], live)
         listed = await env.conn.fetchval(
             "SELECT count(*) FROM spectate_games WHERE room_name = $1 AND ended_at IS NULL", room)
-        assert a.status == 200 and a.body == {"status": "ok"} and listed == 1, \
+        # v1.41.0 merge pass 4 (c): the beta lane's session report makes the
+        # attest answer the room row it wrote (game_id, source_ref, generation).
+        gid = await env.conn.fetchval(
+            "SELECT id FROM spectate_games WHERE room_name = $1 AND ended_at IS NULL", room)
+        assert a.status == 200 and a.body.get("status") == "ok" and listed == 1 \
+            and a.body.get("game_id") == str(gid) \
+            and set(a.body) == {"status", "game_id", "source_ref", "generation"}, \
             ("M2 at A", a, listed)
         seat, row = await env.seat(lob, 4), await env.lobby_row(lob)
         line = "lobby %s admission expired slot=4 t=+140000" % str(lob.lid)[:8]
