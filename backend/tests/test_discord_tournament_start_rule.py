@@ -541,10 +541,14 @@ def test_row32_f_the_unsignup_line_and_the_push_back_state_the_rule_and_name_the
     Q.e2e(monkeypatch, tmp_path, body)
 
 
-def test_row32_f_a_force_start_push_back_keeps_the_eligible_count(monkeypatch, tmp_path):
-    """A force start skips the time vote, so when the ban filter leaves it
-    short its push-back says so (7 of 8 eligible), not that no time had 8
-    agreeing; the rule and how to vote follow as on every sync push-back."""
+def test_row32_f_a_force_start_left_short_changes_nothing_and_the_tick_pushes_back(monkeypatch, tmp_path):
+    """A force start arrives from force_vote, a request, so a forced lock the
+    ban filter leaves short (7 of 8 eligible) is declined: its status, its
+    lock_at and the channel feed are all untouched (lock_tournament's
+    force-lock declined branch). The due-time tick then pushes it back as
+    every sync push-back reads: the consensus, the rule at the carried tally,
+    and how to vote. (Merge pass 4 follow-up 4: the v1.41.0 lane's declined
+    branch and main's row 32 meet here.)"""
     import test_discord_tournament_quorum as Q
     import models
 
@@ -552,15 +556,28 @@ def test_row32_f_a_force_start_push_back_keeps_the_eligible_count(monkeypatch, t
         people = await Q.entrants_of(env, 8)
         tid, slot = await Q.sync_tournament(env, people, 0)
         await env.ban(people[5])
+        feed = f"SELECT content FROM {Q.SCHEMA}.pending_channel_posts ORDER BY created_at, id"
 
-        async def go(db, T):
+        async def read(db, T):
             t = await db.get(models.Tournament, tid)
-            await T.lock_tournament(db, t, force=True)
-            return t.status
-        assert await Q.in_app(env, go) == "voting"
-        pushed = (await env.rows(f"SELECT content FROM {Q.SCHEMA}.pending_channel_posts"
-                                 " ORDER BY created_at, id"))[-1]["content"]
+            return t.status, t.lock_at
+
+        def lock(force):
+            async def go(db, T):
+                t = await db.get(models.Tournament, tid)
+                await T.lock_tournament(db, t, force=force)
+                return t.status, t.lock_at
+            return go
+
+        status0, lock_at0 = await Q.in_app(env, read)
+        feed0 = [r["content"] for r in await env.rows(feed)]
+        assert await Q.in_app(env, lock(True)) == (status0, lock_at0) == ("voting", lock_at0)
+        assert [r["content"] for r in await env.rows(feed)] == feed0, "a declined force lock posted"
+
+        status1, lock_at1 = await Q.in_app(env, lock(False))
+        assert status1 == "voting" and lock_at1 > lock_at0, (status1, lock_at0, lock_at1)
+        pushed = (await env.rows(feed))[-1]["content"]
         later = int(slot.timestamp()) + 7 * 86400
-        assert ("pushed back: not enough players (7 of 8 required signed up). New start time is"
+        assert ("pushed back: no start time had 8 players agreeing on it. New start time is"
                 f" <t:{later}:F>. {RULE}: 0 of 8 agree on a time so far. {HOW_TO_VOTE}") in pushed, pushed
     Q.e2e(monkeypatch, tmp_path, body)
