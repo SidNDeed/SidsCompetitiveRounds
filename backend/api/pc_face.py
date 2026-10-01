@@ -1500,11 +1500,333 @@ def _draw_badge_name(image: Image.Image, name: str, rgb: tuple[int, int, int],
     image.alpha_composite(layer)
 
 
+# ── the top card's art (board row 33): one optional, private bundle ──────────
+# The game draws the top card's own picture beside its name: the client
+# overlays CardSnapshot's thumbnail (the live-rendered ROUNDS card cropped to
+# its corner band) height-fitted into [94,646,172,750] over an opaque backing
+# at [92,646,172,750] (plugin/PlayerCardsUI.cs, PlaceTopCard). The server
+# cannot run Unity, so the bundle carries that overlay pre-composed: one
+# 80x104 opaque patch per vanilla card, harvested once from the shipped
+# client on the seat and fitted offline, so a render only pastes.
+#
+# The bundle is NOT in the repository (it is game-derived art). The api
+# container gets it as a READ-ONLY bind mount at assets/pc/cards, staged per
+# box outside the build context; a clone, a test process and a box without
+# the mount simply have no bundle. A bundle is a directory holding exactly
+# index.json (canonical card name -> file, sha256, width, height, in the one
+# canonical serialization), BUNDLE-DIGEST (the sha256 of those index bytes)
+# and one PNG per name. It is ONE optional renderer input: accepted only when
+# EVERY expected name, hash, chunk set, header, mode, opacity and decode
+# checks out, and otherwise not used at all -- never partly. An absent or
+# invalid bundle keeps the fingerprint valid and every face rendering, with
+# the name-only badge for every card; it is never a reason to refuse a face or
+# a pack (the pack writer asks _pc_require_renderer BEFORE it takes payment).
+_CARD_ART_DIRNAME = "cards"        # the mount point under assets/pc, fixed by the compose file
+_CARD_ART_PATH = _ASSETS_PATH / _CARD_ART_DIRNAME
+CARD_ART_W, CARD_ART_H = 80, 104
+CARD_ART_INDEX = "index.json"
+CARD_ART_DIGEST_FILE = "BUNDLE-DIGEST"
+CARD_ART_FORMAT = 1
+_CARD_ART_MAX_FILE = 64 << 10
+_CARD_ART_MAX_INDEX = 256 << 10
+_CARD_ART_FILE_RE = regex.compile(r"\A[a-z0-9]{1,64}\.png\Z")
+_CARD_ART_SHA_RE = regex.compile(r"\A[0-9a-f]{64}\Z")
+# The one fingerprint record an absent or invalid bundle contributes. Both
+# draw the same pixels (no art anywhere), so they share it: a bundle going
+# from absent to invalid re-keys no face.
+CARD_ART_NONE_IDENTITY = b"card-art:none"
+
+
+def card_art_slug(name: str) -> str:
+    """The bundle file stem of a canonical card name: lower-cased, every
+    character outside a-z and 0-9 removed (the client's own art-key rule,
+    CardImageLoader.NormalizeKey)."""
+    return "".join(ch for ch in str(name).lower() if ("a" <= ch <= "z") or ("0" <= ch <= "9"))
+
+
+def card_art_index_bytes(index: dict) -> bytes:
+    """The one canonical serialization of a bundle index: sorted keys, no
+    whitespace, UTF-8, one trailing newline. A bundle's index.json must be
+    exactly these bytes, and BUNDLE-DIGEST is their sha256."""
+    return (json.dumps(index, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n").encode("utf-8")
+
+
+def card_art_write_bundle(dest_dir, patches: dict) -> str:
+    """Write a bundle directory from {canonical name: 80x104 RGBA image}: one
+    canonically encoded PNG per name (IHDR/IDAT/IEND only, so no text chunk,
+    path or time can ride in), index.json in its canonical serialization, and
+    BUNDLE-DIGEST last. The directory must not exist yet. Returns the digest.
+    The bundle-building tool and the tests' synthetic bundles both write
+    through this, so the format has one writer as it has one reader."""
+    root = Path(dest_dir)
+    root.mkdir(parents=True, exist_ok=False)
+    cards = {}
+    for name in sorted(patches):
+        image = patches[name]
+        if image.size != (CARD_ART_W, CARD_ART_H):
+            raise ValueError("card_art_size")
+        data = _encode_rgba(image)
+        stem = card_art_slug(name)
+        if not stem or (root / f"{stem}.png").exists():
+            raise ValueError("card_art_slug")
+        (root / f"{stem}.png").write_bytes(data)
+        cards[name] = {"file": f"{stem}.png", "sha256": hashlib.sha256(data).hexdigest(),
+                       "width": CARD_ART_W, "height": CARD_ART_H}
+    index_bytes = card_art_index_bytes({"format": CARD_ART_FORMAT, "cards": cards})
+    (root / CARD_ART_INDEX).write_bytes(index_bytes)
+    digest = hashlib.sha256(index_bytes).hexdigest()
+    (root / CARD_ART_DIGEST_FILE).write_bytes((digest + "\n").encode("ascii"))
+    return digest
+
+
+@functools.lru_cache(maxsize=4)
+def _card_art_names_at(assets_dir: str) -> tuple[str, ...]:
+    with (Path(assets_dir) / "card_art_names.json").open("r", encoding="utf-8") as fh:
+        names = json.load(fh)["names"]
+    if (not isinstance(names, list) or not names or len(set(names)) != len(names)
+            or not all(isinstance(name, str) and name for name in names)):
+        raise ValueError("card_art_names")
+    return tuple(sorted(names))
+
+
+def card_art_names() -> tuple[str, ...]:
+    """The canonical card names a bundle must carry, exactly: the tracked
+    assets/pc/card_art_names.json (migration 333's names; a test holds the
+    two equal)."""
+    return _card_art_names_at(_assets_dir())
+
+
+def _card_art_stamps(assets_dir: Path) -> tuple:
+    """(name, size, mtime_ns) of every entry in the bundle directory, sorted;
+    ("<absent>",) when it is not a readable directory. A cache key and a
+    fingerprint stamp, so it never raises.
+
+    The directory parameters of the bundle readers are named `assets_dir` on
+    purpose: the renderer's read rule (test_discord_collection_server's
+    _face_source_findings) admits a read through such a parameter only when
+    every call in this module hands it a path under the assets tree, and the
+    renderer's bundle is assets/pc/cards (_CARD_ART_PATH). The bundle tool
+    calls the same readers on a candidate directory; that is its own job."""
+    try:
+        if not assets_dir.is_dir():
+            return ("<absent>",)
+        out = []
+        for entry in sorted(assets_dir.iterdir(), key=lambda item: item.name):
+            st = entry.stat()
+            out.append((entry.name, int(st.st_size), int(st.st_mtime_ns), entry.is_file()))
+        return tuple(out)
+    except OSError:
+        return ("<unreadable>",)
+
+
+@dataclass(frozen=True)
+class CardArtBundle:
+    """One reading of the bundle directory. `status` is accepted, absent or
+    invalid; `patches` maps a canonical name to its (card, tile) images and is
+    empty unless accepted; `identity` is the renderer-fingerprint payload."""
+    status: str
+    reason: str
+    digest: str
+    identity: bytes
+    patches: dict = field(default_factory=dict, compare=False, repr=False)
+
+
+def _card_art_refuse(reason: str) -> CardArtBundle:
+    return CardArtBundle("invalid", reason, "", CARD_ART_NONE_IDENTITY, {})
+
+
+def _card_art_decode(data: bytes) -> Image.Image:
+    """One patch's pixels: the container walked (every CRC), the chunk set
+    exactly IHDR/IDAT/IEND, the header 80x104 8-bit RGBA non-interlaced, a
+    PNG that decodes in full to RGBA at that size, and every pixel opaque."""
+    chunks = png_chunks(data)
+    if any(kind not in _PNG_OUTPUT_CHUNKS for kind, _ in chunks):
+        raise ValueError("card_art_chunks")
+    if png_ihdr(data) != (CARD_ART_W, CARD_ART_H, 8, 6, 0):
+        raise ValueError("card_art_header")
+    with Image.open(io.BytesIO(data)) as source:
+        if (source.format or "").upper() != "PNG":
+            raise ValueError("card_art_format")
+        source.load()
+        if source.mode != "RGBA" or source.size != (CARD_ART_W, CARD_ART_H):
+            raise ValueError("card_art_mode")
+        image = Image.frombytes("RGBA", source.size, source.tobytes())
+    if image.getchannel("A").getextrema() != (255, 255):
+        raise ValueError("card_art_opacity")
+    return image
+
+
+def card_art_check_entry(assets_dir: Path, entry: dict) -> tuple[bytes, Image.Image]:
+    """(bytes, decoded patch) of one index entry, or ValueError naming why
+    not: the file present and within the cap, its sha256 the index's, and
+    _card_art_decode's checks. The bundle loader and the validation tool both
+    call this, so a tool PASS is exactly what the renderer accepts."""
+    path = Path(assets_dir) / entry["file"]
+    if not path.is_file():
+        raise ValueError("file missing")
+    if path.stat().st_size > _CARD_ART_MAX_FILE:
+        raise ValueError("file too large")
+    data = path.read_bytes()
+    if len(data) > _CARD_ART_MAX_FILE:
+        raise ValueError("file too large")
+    if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+        raise ValueError("hash mismatch")
+    try:
+        return data, _card_art_decode(data)
+    except ValueError as exc:
+        raise ValueError(f"patch refused ({exc})") from exc
+    except Exception as exc:                         # noqa: BLE001 -- a decode failure of any kind
+        raise ValueError(f"patch refused (decode: {type(exc).__name__})") from exc
+
+
+@functools.lru_cache(maxsize=4)
+def _card_art_bundle_at(assets_dir: str, names: tuple[str, ...], _stamps: tuple) -> CardArtBundle:
+    """Read and validate the whole bundle, or refuse the whole bundle. Keyed
+    on the directory, the expected names and the directory's stamps, never on
+    a module global read inside (#744)."""
+    root = Path(assets_dir)
+    try:
+        if not root.is_dir():
+            return CardArtBundle("absent", "no bundle directory", "", CARD_ART_NONE_IDENTITY, {})
+        listed = sorted(entry.name for entry in root.iterdir())
+        if not listed:
+            return CardArtBundle("absent", "empty bundle directory", "", CARD_ART_NONE_IDENTITY, {})
+        if CARD_ART_INDEX not in listed:
+            return _card_art_refuse("no index.json")
+        index_bytes = (root / CARD_ART_INDEX).read_bytes()
+        if len(index_bytes) > _CARD_ART_MAX_INDEX:
+            return _card_art_refuse("index.json too large")
+        try:
+            index = json.loads(index_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return _card_art_refuse("index.json is not JSON")
+        if (not isinstance(index, dict) or set(index) != {"format", "cards"}
+                or index.get("format") != CARD_ART_FORMAT or not isinstance(index.get("cards"), dict)):
+            return _card_art_refuse("index.json shape")
+        if card_art_index_bytes(index) != index_bytes:
+            return _card_art_refuse("index.json is not in its canonical serialization")
+        cards = index["cards"]
+        if tuple(sorted(cards)) != names:
+            missing = sorted(set(names) - set(cards))
+            extra = sorted(set(cards) - set(names))
+            return _card_art_refuse(f"name set differs: {len(missing)} missing, {len(extra)} extra")
+        digest = hashlib.sha256(index_bytes).hexdigest()
+        if CARD_ART_DIGEST_FILE not in listed:
+            return _card_art_refuse("no BUNDLE-DIGEST")
+        if (root / CARD_ART_DIGEST_FILE).read_bytes() != (digest + "\n").encode("ascii"):
+            return _card_art_refuse("BUNDLE-DIGEST does not match index.json")
+        files = []
+        for name in names:
+            entry = cards[name]
+            if (not isinstance(entry, dict) or set(entry) != {"file", "sha256", "width", "height"}
+                    or not isinstance(entry["file"], str) or not _CARD_ART_FILE_RE.match(entry["file"])
+                    or not isinstance(entry["sha256"], str) or not _CARD_ART_SHA_RE.match(entry["sha256"])
+                    or entry["width"] != CARD_ART_W or entry["height"] != CARD_ART_H):
+                return _card_art_refuse(f"entry shape: {name!r}")
+            files.append(entry["file"])
+        if len(set(files)) != len(files):
+            return _card_art_refuse("two names share one file")
+        if listed != sorted(files + [CARD_ART_INDEX, CARD_ART_DIGEST_FILE]):
+            return _card_art_refuse("the directory holds files the index does not name, or lacks some")
+        patches: dict[str, tuple[Image.Image, Image.Image]] = {}
+        identity = hashlib.sha256()
+        _frame_hash_record(identity, CARD_ART_INDEX, index_bytes)
+        for name in names:
+            try:
+                data, card = card_art_check_entry(root, cards[name])
+            except ValueError as exc:
+                return _card_art_refuse(f"{exc}: {name!r}")
+            patches[name] = (card, card.reduce(2))
+            _frame_hash_record(identity, cards[name]["file"], data)
+        return CardArtBundle("accepted", "", digest,
+                             b"card-art:accepted:" + identity.hexdigest().encode("ascii"), patches)
+    except OSError as exc:
+        return _card_art_refuse(f"unreadable: {type(exc).__name__}")
+
+
+_CARD_ART_LOGGED: set = set()
+
+
+def card_art_bundle() -> CardArtBundle:
+    """The bundle as the renderer uses it right now (one validated reading per
+    distinct directory state). The first reading of each state logs one line."""
+    bundle = _card_art_bundle_at(str(_CARD_ART_PATH), card_art_names(), _card_art_stamps(_CARD_ART_PATH))
+    note = (bundle.status, bundle.digest, bundle.reason)
+    if note not in _CARD_ART_LOGGED:
+        _CARD_ART_LOGGED.add(note)
+        if bundle.status == "accepted":
+            print(f"[PC-ART] card art bundle accepted: {len(bundle.patches)} cards, digest {bundle.digest[:16]}")
+        else:
+            print(f"[PC-ART] card art bundle {bundle.status} ({bundle.reason}): every top card draws the "
+                  f"name-only badge")
+    return bundle
+
+
+def card_art_patch(top_name: str, size: str) -> Image.Image | None:
+    """The accepted patch for a canonical top-card name at one size, or None.
+    THE resolver: drawing and every art header ask this and nothing else."""
+    entry = card_art_bundle().patches.get(top_name)
+    if entry is None:
+        return None
+    return entry[0] if size == "card" else entry[1]
+
+
+def top_card_name(spec: dict) -> str:
+    """The spec's top card as render_face reads it. Normalised, not merely
+    truthy: the spec builders project the name through `coverage_strip`, which
+    collapses to "" -- so a value that is only whitespace means the same "no
+    top card" that "" does, and must not draw the badge chrome around an
+    empty column."""
+    return " ".join(str(spec.get("top_card") or "").split())
+
+
+def card_art_drawn(spec: dict) -> bool:
+    """Whether render_face(spec, ...) pastes a top-card art patch: the same
+    resolver, the same name. The X-Face-Art and composite art headers."""
+    name = top_card_name(spec)
+    patch = card_art_patch(name, "card") if name else None
+    back = LAYOUT["rects"]["badge_art_back"]
+    return patch is not None and patch.size == (back[2] - back[0], back[3] - back[1])
+
+
+_CARD_ART_MISSING_LOGGED: set = set()
+
+
+def _draw_badge_art(image: Image.Image, top_name: str, scale: float, size: str) -> bool:
+    """Layers 13-14 of the in-game card: the art backing and the top card's
+    art, one opaque patch over rects.badge_art_back. Drawn after the badge
+    name, as the client's overlay sits above the whole face: the patch is
+    opaque, so it covers whatever the earlier layers drew inside its rect,
+    the name rect's overlap included, exactly as the in-game overlay does.
+    Nothing is drawn when the accepted bundle has no patch for the name: the
+    badge then stands as before (fill, frame, name). A patch whose size is
+    not the scaled rect's (a layout edited without its bundle) is not drawn
+    either -- never an exception out of a render; the self-test then reads 0.
+    Returns whether a patch was pasted."""
+    patch = card_art_patch(top_name, size)
+    if patch is None:
+        if (top_name != CARD_ART_SENTINEL and top_name not in _CARD_ART_MISSING_LOGGED
+                and card_art_bundle().status == "accepted"):
+            _CARD_ART_MISSING_LOGGED.add(top_name)
+            print(f"[PC-ART] no art for top card {top_name!r} - badge drawn without art")
+        return False
+    box = _scale_rect(LAYOUT["rects"]["badge_art_back"], scale)
+    if patch.size != (box[2] - box[0], box[3] - box[1]):
+        if ("<size>", size) not in _CARD_ART_MISSING_LOGGED:
+            _CARD_ART_MISSING_LOGGED.add(("<size>", size))
+            print(f"[PC-ART] art patch {patch.size} does not fit the {size} rect {box} - not drawn")
+        return False
+    image.alpha_composite(patch, (box[0], box[1]))
+    return True
+
+
 def _draw_badge(image: Image.Image, band_colour: tuple[int, int, int], name: str,
                 theme_rgb: tuple[int, int, int] | None, scale: float, size: str) -> None:
     """The top-card badge: the band frame over the card fill, the ROUNDS card's
-    own name reading upward in that card's theme colour, and an art area the
-    CLIENT overlays with the real card art.
+    own name reading upward in that card's theme colour, and the card's own
+    art beside it when the accepted bundle carries it (_draw_badge_art). The
+    client still lays its live thumbnail over the same rect in game.
 
     The card fill stays. The portrait rect overlaps this box and is pasted
     before it, so without the fill a Discord or bot face would show the
@@ -1523,6 +1845,7 @@ def _draw_badge(image: Image.Image, band_colour: tuple[int, int, int], name: str
     tinted.putalpha(neutral.getchannel("A"))
     image.alpha_composite(tinted)
     _draw_badge_name(image, name, theme_rgb or band_colour, scale)
+    _draw_badge_art(image, name, scale, size)
 
 
 # ── the autograph of a signed print, in the subject's shop name styling ──────
@@ -1879,11 +2202,7 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
         body = _foil(body, size)
 
     _draw_stats(body, spec, effective, scale)
-    # Normalised, not merely truthy: the spec builders project the name
-    # through `coverage_strip`, which collapses to "" -- so a value that
-    # is only whitespace means the same "no top card" that "" does, and
-    # must not draw the badge chrome around an empty column.
-    top_name = " ".join(str(spec.get("top_card") or "").split())
+    top_name = top_card_name(spec)
     if top_name:
         _draw_badge(body, colour, top_name, spec.get("top_card_rgb"), scale, size)
     if bool(spec.get("signed")):
@@ -1944,6 +2263,68 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
     if len(output) > ceiling:
         raise ValueError("face_too_large")
     return output
+
+
+# The card-art self-test (the /health word `pc_card_art`, read by the release
+# train and by nothing else). Its proof is a RENDERED BYTE, not a loaded file
+# (#637 d): every accepted patch is pasted through _draw_badge_art and read
+# back out of its rect at both sizes, then one whole face per size is drawn
+# through render_face and its art rect compared with the patch, and the same
+# face with a name the bundle lacks must NOT carry it (so a paste that does
+# nothing, or a patch that happens to equal the badge fill, cannot prove 3).
+CARD_ART_SENTINEL = "~no-art~"
+
+
+def _card_art_selftest_spec(top_name: str) -> dict:
+    return {"band": "common", "name": "Self Test", "title": None, "title_rgb": None,
+            "subtitle": None, "rating": None, "pool_rank": 1, "board_rank": None,
+            "wins": 0, "losses": 0, "foil": False, "signed": False, "sign": None,
+            "edition_label": "Edition 1", "minted_on": "", "print_short": "#000000",
+            "top_card": top_name, "top_card_rgb": None}
+
+
+@functools.lru_cache(maxsize=4)
+def _card_art_selftest_at(_identity: bytes) -> dict:
+    bundle = card_art_bundle()
+    if bundle.status != "accepted":
+        return {"word": 1, "status": bundle.status, "reason": bundle.reason, "checked": 0}
+    sizes = (("card", 1.0, (CARD_W, CARD_H)), ("tile", 0.5, (TILE_W, TILE_H)))
+    for name in sorted(bundle.patches):
+        for size, scale, edge in sizes:
+            box = _scale_rect(LAYOUT["rects"]["badge_art_back"], scale)
+            canvas = Image.new("RGBA", edge, (0, 0, 0, 0))
+            want = card_art_patch(name, size)
+            if want is None or not _draw_badge_art(canvas, name, scale, size):
+                return {"word": 0, "status": "proof_failed", "reason": f"not drawn: {name!r} {size}",
+                        "checked": 0}
+            if canvas.crop(box).tobytes() != want.tobytes():
+                return {"word": 0, "status": "proof_failed", "reason": f"rect differs: {name!r} {size}",
+                        "checked": 0}
+    first = sorted(bundle.patches)[0]
+    for size, scale, _edge in sizes:
+        box = _scale_rect(LAYOUT["rects"]["badge_art_back"], scale)
+        want = card_art_patch(first, size).tobytes()
+        with Image.open(io.BytesIO(render_face(_card_art_selftest_spec(first), {}, None, size))) as drawn:
+            got = drawn.convert("RGBA").crop(box).tobytes()
+        with Image.open(io.BytesIO(render_face(_card_art_selftest_spec(CARD_ART_SENTINEL), {}, None,
+                                               size))) as bare:
+            negative = bare.convert("RGBA").crop(box).tobytes()
+        if got != want:
+            return {"word": 0, "status": "proof_failed", "reason": f"face rect differs: {size}",
+                    "checked": 0}
+        if negative == want:
+            return {"word": 0, "status": "proof_failed", "reason": f"negative carries the art: {size}",
+                    "checked": 0}
+    return {"word": 3, "status": "accepted", "reason": "", "checked": len(bundle.patches),
+            "digest": bundle.digest}
+
+
+def card_art_selftest() -> dict:
+    """{"word": 3|1|0, ...} for the bundle as it stands: 3 = accepted and every
+    entry proved drawn, 1 = no usable bundle (absent or invalid; the base face
+    serves), 0 = an accepted bundle the renderer did not draw as it accepted
+    it. Cached per bundle identity; the api warms it at boot."""
+    return _card_art_selftest_at(card_art_bundle().identity)
 
 
 def render_back() -> bytes:
@@ -2059,25 +2440,37 @@ def _require_every_font() -> None:
         raise FileNotFoundError("fonts missing: " + ", ".join(missing))
 
 
-def _fingerprint_inputs() -> tuple[str, tuple[tuple[str, int, int], ...]]:
+def _kit_pngs() -> list[Path]:
+    """Every tracked face-kit PNG under assets/pc, sorted by relative path --
+    and never the card-art bundle's directory, whatever it holds. The bundle
+    is an OPTIONAL input framed as one record of its own (card_art_bundle);
+    walking it here would make its files required stamps and its absence a
+    refusal, which is the opposite of what an absent bundle must do."""
+    return sorted((path for path in _ASSETS_PATH.rglob("*")
+                   if path.is_file() and path.suffix.lower() == ".png"
+                   and path.relative_to(_ASSETS_PATH).parts[0] != _CARD_ART_DIRNAME),
+                  key=lambda path: path.relative_to(_ASSETS_PATH).as_posix())
+
+
+def _fingerprint_inputs() -> tuple[str, tuple]:
     _require_every_font()
     semantic_layout = json.dumps(LAYOUT, ensure_ascii=False, sort_keys=True,
                                  separators=(",", ":"))
     paths = [Path(__file__), _ASSETS_PATH / "face_layout_v1.json", _ASSETS_PATH / "catalogue.json",
-             _ASSETS_PATH / "name_coverage.json"]
-    paths.extend(sorted((path for path in _ASSETS_PATH.rglob("*")
-                         if path.is_file() and path.suffix.lower() == ".png"),
-                        key=lambda path: path.relative_to(_ASSETS_PATH).as_posix()))
+             _ASSETS_PATH / "name_coverage.json", _ASSETS_PATH / "card_art_names.json"]
+    paths.extend(_kit_pngs())
     paths.extend(sorted((path for path in _FONTS_PATH.iterdir()
                          if path.is_file() and path.suffix.lower() in (".ttf", ".otf")),
                         key=lambda path: path.name))
     stamps = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths)
-    return semantic_layout, stamps
+    # The card-art bundle's stamps ride beside the required ones but are read
+    # by _card_art_stamps, which never raises: a missing bundle is a stamp,
+    # not an exception.
+    return semantic_layout, stamps + (("card-art", str(_CARD_ART_PATH), _card_art_stamps(_CARD_ART_PATH)),)
 
 
 @functools.lru_cache(maxsize=8)
-def _renderer_fingerprint_cached(semantic_layout: str,
-                                 _stamps: tuple[tuple[str, int, int], ...]) -> str:
+def _renderer_fingerprint_cached(semantic_layout: str, _stamps: tuple) -> str:
     provenance = runtime_provenance()
     records: list[tuple[str, bytes]] = [
         ("source/pc_face.py", Path(__file__).read_bytes()),
@@ -2086,13 +2479,17 @@ def _renderer_fingerprint_cached(semantic_layout: str,
         # The coverage manifest decides which code points survive into a name,
         # so a change to it draws different pixels and must re-key every face.
         ("manifest/name_coverage.json", (_ASSETS_PATH / "name_coverage.json").read_bytes()),
+        ("manifest/card_art_names.json", (_ASSETS_PATH / "card_art_names.json").read_bytes()),
         ("manifest/layout_runtime.json", semantic_layout.encode("utf-8")),
     ]
-    asset_pngs = (path for path in _ASSETS_PATH.rglob("*")
-                  if path.is_file() and path.suffix.lower() == ".png")
-    for path in sorted(asset_pngs, key=lambda item: item.relative_to(_ASSETS_PATH).as_posix()):
+    for path in _kit_pngs():
         relative = path.relative_to(_ASSETS_PATH).as_posix()
         records.append((f"assets/{relative}", path.read_bytes()))
+    # ONE optional record for the whole card-art bundle: the accepted bundle's
+    # identity (its index and every patch's bytes, framed) when it validated in
+    # full, the shared none-sentinel otherwise. It moves every face_rev when the
+    # art a face draws moves, and only then.
+    records.append(("assets/cards/bundle", card_art_bundle().identity))
     for path in sorted((item for item in _FONTS_PATH.iterdir()
                         if item.is_file() and item.suffix.lower() in (".ttf", ".otf")),
                        key=lambda item: item.name):

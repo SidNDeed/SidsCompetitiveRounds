@@ -29863,8 +29863,13 @@ _PC_FACE_SUBJECT_ID_SQL = _sid64.individual_id_sql("s.steam_id")
 
 async def _pc_bot_face_row(db: AsyncSession, print_id: str):
     """_pc_face_row's statement with the subject's id rule added: no row for a
-    print of a subject whose id is not a SteamID64."""
-    return (await db.execute(text(_PC_PRINT_FACE_SELECT + " WHERE pr.id = CAST(:id AS uuid) AND "
+    print of a subject whose id is not a SteamID64. It is the MOTION select
+    (_PC_PRINT_MOTION_SELECT: every face column plus the servable columns of
+    the subject), so the bot's face route computes its pixels AND its
+    X-Face-Still header from this ONE row mapping -- a second read for the
+    still could race the face row and name a still the picture does not show
+    (Discord cards, LOW 1)."""
+    return (await db.execute(text(_PC_PRINT_MOTION_SELECT + " WHERE pr.id = CAST(:id AS uuid) AND "
                                   + _PC_FACE_SUBJECT_ID_SQL),
                              {"id": print_id})).mappings().first()
 
@@ -31965,7 +31970,35 @@ async def internal_pc_face_print(
     rev, data = await _pc_render_face(db, row, ctx, size)
     resp = _pc_png_response(data, "private, max-age=60")
     resp.headers["X-Face-Rev"] = rev
+    # Diagnostics only, never in the key and never drawn: whether the face
+    # carries the top card's art, and which still it shows -- both from the
+    # SAME row mapping and context the pixels came from (_pc_face_inputs is
+    # pure over them), so a header cannot describe a different picture.
+    spec = _pc_face_inputs(row, ctx)[0]
+    resp.headers["X-Face-Art"] = "drawn" if _pcf.card_art_drawn(spec) else "none"
+    resp.headers["X-Face-Still"] = _pc_face_still(row)
     return resp
+
+
+def _pc_face_still(row) -> str:
+    """X-Face-Still of one bot face row: `dance` when the subject's dance
+    motion is servable (pc_motion.servable: bound to the still the face draws,
+    the selection its item, the dance held), else the kind of still the face
+    draws -- `base` (an uploaded game still), `steam` (the Steam picture) or
+    `none` (the emblem plate). Read from the row the face was drawn from."""
+    kind, _hash = _pcp.portrait_for(row)
+    if kind == "game" and _pcm is not None and _pcm.servable(row, row.get("subject_sid"), _auto_owned):
+        return "dance"
+    return {"game": "base", "steam": "steam"}.get(kind, "none")
+
+
+def _pc_composite_art(cells, ctx) -> str:
+    """X-Strip-Art / X-Grid-Art of one composite: `<face tiles whose face
+    draws the top card's art>/<face tiles>`, from the cells' own rows and the
+    context the tiles are keyed under -- the resolver render_face uses."""
+    faces = [row for tile, row, _discarded in cells if tile == "face" and row is not None]
+    drawn = sum(1 for row in faces if _pcf.card_art_drawn(_pc_face_inputs(row, ctx)[0]))
+    return f"{drawn}/{len(faces)}"
 
 
 async def _pc_preview_read(db: AsyncSession, player_ref: str, loc: str, snapshot_id, *, motion: bool = False):
@@ -32496,6 +32529,7 @@ async def internal_pc_pack_strip(
     resp.headers["X-Strip-Rev"] = digest
     resp.headers["X-Strip-Slots"] = ",".join(manifest)
     resp.headers["X-Strip-Actor"] = str(actor.id)
+    resp.headers["X-Strip-Art"] = _pc_composite_art(cells, ctx)
     return resp
 
 
@@ -32656,6 +32690,7 @@ async def internal_pc_binder_page(
     resp.headers["X-Grid-Slots"] = ",".join(manifest)
     resp.headers["X-Grid-Owner"] = pid
     resp.headers["X-Grid-Consent-Rev"] = str(int(getattr(owner, "pc_settings_revision", 0) or 0))
+    resp.headers["X-Grid-Art"] = _pc_composite_art(cells, ctx)
     return resp
 
 

@@ -136,6 +136,16 @@ services:
       # The motion cache too, on its own volume: an api rebuild must not
       # send every viewed print back through the motion worker.
       - pc-motion:/var/cache/pc-motion
+      # The top card's art bundle (Discord card render parity, board row 33):
+      # private game-derived art, NEVER in the repository or the build context.
+      # Staged per box under /opt/competitive-rounds/private/ (ignored by the
+      # clone), one immutable directory per revision; `current` names the one
+      # in use, and PC_CARD_ART_DIR overrides that path. READ-ONLY. The renderer
+      # treats a missing or invalid bundle as "no art" (/health pc_card_art=1,
+      # the name-only badge) and never refuses a face or a pack over it. A bind
+      # source is resolved when the container is CREATED: switching revisions
+      # means re-pointing `current` and recreating the api container.
+      - ${PC_CARD_ART_DIR:-/opt/competitive-rounds/private/pc-cards/current}:/app/assets/pc/cards:ro
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:
