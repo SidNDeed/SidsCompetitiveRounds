@@ -3491,6 +3491,66 @@
           "32f4c63bfbc5da44f88ed29b738f69ae80a775df"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "verified-reads control routes (backend/api/main.py): GET /api/v1/read-gate/probe answers a fixed body once the read gate admits it; the other five require an admin signature: the operator-key routes (list, issue, revoke) and the read-gate mode route respond from api_operator_keys and runtime_settings, the read-census route from the in-process census. No route here reads matches, so no W1 private Match column can reach its output.",
+      "routes": [
+        [
+          "/api/v1/admin/operators",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_operator_list",
+          "unpinned-vr-1"
+        ],
+        [
+          "/api/v1/admin/operators/keys",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_operator_key_issue",
+          "unpinned-vr-2"
+        ],
+        [
+          "/api/v1/admin/operators/keys/revoke",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_operator_key_revoke",
+          "unpinned-vr-3"
+        ],
+        [
+          "/api/v1/admin/read-census",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_read_census",
+          "unpinned-vr-4"
+        ],
+        [
+          "/api/v1/admin/read-gate/mode",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_read_gate_mode",
+          "unpinned-vr-5"
+        ],
+        [
+          "/api/v1/read-gate/probe",
+          [
+            "GET"
+          ],
+          "main",
+          "read_gate_probe",
+          "unpinned-vr-6"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -3504,6 +3564,11 @@
         "main",
         "rate_limit_gate",
         "f065649e5f96c29aed9efc3c51174e4d4fa4c0be"
+      ],
+      [
+        "main",
+        "read_gate_cache_control",
+        "unpinned-vr-mw-read_gate_cache_control"
       ],
       [
         "main",
@@ -3915,6 +3980,12 @@
     "POST /api/v1/internal/moderation-cases/{case_id}/notified -> main.internal_moderation_case_notified",
     "POST /api/v1/admin/mail/broadcast -> main.admin_mail_broadcast",
     "POST /api/v1/admin/mail/bulk-grants -> main.admin_mail_bulk_grant",
-    "DELETE /api/v1/admin/mail/bulk-grants/{steam_id} -> main.admin_mail_bulk_grant_revoke"
+    "DELETE /api/v1/admin/mail/bulk-grants/{steam_id} -> main.admin_mail_bulk_grant_revoke",
+    "POST /api/v1/admin/operators/keys -> main.admin_operator_key_issue",
+    "POST /api/v1/admin/operators/keys/revoke -> main.admin_operator_key_revoke",
+    "GET /api/v1/admin/operators -> main.admin_operator_list",
+    "POST /api/v1/admin/read-gate/mode -> main.admin_read_gate_mode",
+    "GET /api/v1/admin/read-census -> main.admin_read_census",
+    "GET /api/v1/read-gate/probe -> main.read_gate_probe"
   ]
 }

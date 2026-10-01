@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 384   # LAND of main cd8d846: dance cards' +5 (the motion upload, the selection, the motion read, the atlas, the motion preview GIF; 379 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route (378 before); Discord fix round 1: +1 (the bot's pack open, internal/pc/packs/open; 377 before); card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 390   # verified reads: +6 (the read-gate probe, the operator list, key issue and revoke, the read census, the read-gate mode; 384 before); LAND of main cd8d846: dance cards' +5 (the motion upload, the selection, the motion read, the atlas, the motion preview GIF; 379 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route (378 before); Discord fix round 1: +1 (the bot's pack open, internal/pc/packs/open; 377 before); card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 383   # LAND of main cd8d846: dance cards' +5 (378 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (377 before); Discord fix round 1: +1 (376 before); card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 389   # verified reads: +6, the probe answers a fixed body and the five admin-signed control routes read no Match column (383 before); LAND of main cd8d846: dance cards' +5 (378 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (377 before); Discord fix round 1: +1 (376 before); card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -880,7 +880,39 @@ def test_the_helper_closure_stays_affordable():
     # The CODE tier is the one that drifts, and the r15 repairs left its bounds
     # alone: measured 20 / 55 / 198 with data-into-data expansion, against
     # 16 / 48 / 191 before it.
-    assert code_median <= 24, f"median code closure {code_median} of {total}"
+    #
+    # Verified reads (2026-10-01): ALL SIX bounds in this test move, for one
+    # reason. Every GET now carries the read gate as a FastAPI dependency
+    # (read_gate.ReadGateRoute prepends Depends(read_gate.read_gate)), and
+    # _route_seeds seeds dependencies, so each of the 184 GET routes reaches
+    # the gate's own closure: 68 code bindings (111 whole), all in read_gate
+    # plus database.async_session / engine / DATABASE_URL and main.IS_REPLICA
+    # -- the mode read, the credential checks and caches, the census. Every
+    # one runs on every GET. The same walk with the same route seeds:
+    #
+    #   tree                                routes  code m / p90 / worst   whole m / p90 / worst
+    #   base 0e75199                           383  22 / 88 / 328         76 / 171 / 461
+    #   lane tip, read_gate seed removed       389  24 / 90 / 330         86 / 185 / 475
+    #   lane tip, as built                     389  73 / 124 / 370        130 / 220 / 511
+    #
+    # GET routes measure a code median of 80 and the 205 other routes 29; the
+    # median of the population sits on the GET side because the gate is on
+    # half the routes. The worst route is now GET /api/v1/pc/packs/result
+    # (the pack outcome read plus the gate), ahead of POST pc/packs/open.
+    # Without the gate seed the code tier stays under the old bounds; every
+    # route reaching main.app gains two data bindings, title_ladders.router
+    # and tournaments.router, which main.app reaches through the bare name in
+    # `app.router.route_class = ...` and which now name ReadGateRoute; the whole
+    # tier's +10 there is read_gate's import lines (datetime, Request,
+    # HTTPException, os, ...), folded in by name the way main.case was at the
+    # Sept 14 merge. Two shared names that folded read_gate's census into 43
+    # unrelated routes and its replica flag into 126 were renamed before this
+    # measurement (count -> census_add, IS_REPLICA -> REPLICA_NODE).
+    #
+    # Each bound moves to ~5% over its measurement, the headroom the moves
+    # below gave: code 77 / 130 / 389, whole 137 / 231 / 537. The hub case
+    # in the docstring (code median 179) still fails the median first.
+    assert code_median <= 77, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
     #
@@ -974,7 +1006,8 @@ def test_the_helper_closure_stays_affordable():
     # The bound moves to 92 -- ~5% over the measurement, the headroom the
     # moves above gave -- for that reason and no other; the median (22) and
     # worst bounds stay.
-    assert code_p90 <= 92, f"p90 code closure {code_p90} of {total}"
+    # Verified reads (2026-10-01): 124 measured; moves to 130 (see the median).
+    assert code_p90 <= 130, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1006,7 +1039,11 @@ def test_the_helper_closure_stays_affordable():
     # data-into-data hub case measured worst 279 at MEDIAN 179, i.e. a runaway
     # shows up in the median long before it shows up here) rather than on a
     # feature module a route genuinely runs. The median and p90 bounds stay.
-    assert code_worst <= 335, f"worst code closure {code_worst} of {total}"
+    # Verified reads (2026-10-01): 370 measured on GET /api/v1/pc/packs/result
+    # (305 without the gate seed, 303 at base plus the two router data
+    # bindings; the gate adds 65, three of its 68 already reached); moves to
+    # 389 (see the median).
+    assert code_worst <= 389, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -1014,7 +1051,9 @@ def test_the_helper_closure_stays_affordable():
     # they do not triple is the DRIFT: an import line changes far more rarely
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
-    assert all_median <= 90, f"median closure {all_median} of {total}"
+    # Verified reads (2026-10-01): 130 measured; moves to 137 (see the code
+    # median above for the table and the reason).
+    assert all_median <= 137, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1072,7 +1111,9 @@ def test_the_helper_closure_stays_affordable():
     # model reaches). The bound moves to 174, ~6% over the measurement; the
     # median and worst bounds stay (the worst route, POST
     # /api/v1/pc/packs/open, measures 459 against 460).
-    assert all_p90 <= 174, f"p90 closure {all_p90} of {total}"
+    # Verified reads (2026-10-01): 220 measured; moves to 231 (see the code
+    # median above).
+    assert all_p90 <= 231, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -1105,7 +1146,9 @@ def test_the_helper_closure_stays_affordable():
     # 327 -> 328, under its bound; median 75 and p90 164 -> 166 under
     # theirs. The bound moves to 484, the same ~5% headroom 460 gave over
     # 439, for that reason and no other.
-    assert all_worst <= 484, f"worst closure {all_worst} of {total}"
+    # Verified reads (2026-10-01): 511 measured on GET /api/v1/pc/packs/result;
+    # moves to 537 (see the code median above).
+    assert all_worst <= 537, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
