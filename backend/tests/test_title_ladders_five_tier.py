@@ -648,6 +648,34 @@ def test_pg_r2_365_postcheck_rejects_an_earned_rung_with_no_pool():
     assert _rerun_365_after("SELECT 1;") is None          # the untouched state passes
 
 
+STREAK_AT_DDL = "ADD COLUMN IF NOT EXISTS streak_at TIMESTAMPTZ DEFAULT NULL;"
+
+
+def test_pg_r3_365_declares_streak_at_timestamptz_default_null():
+    """Round 3 finding 4: 365 declares streak_at TIMESTAMPTZ DEFAULT NULL, and
+    the column 365 leaves is exactly that: timestamptz, nullable, and no
+    default expression (PostgreSQL stores none for an explicit NULL default,
+    so column_default reads NULL; any other default would read back here)."""
+    assert lane.migration_text(M365).count(STREAK_AT_DDL) == 1
+    _require_live_pg()
+    schema = _schema_name()
+
+    async def go():
+        await _make_schema(schema)
+        conn = await _asyncpg.connect(LADDER_DSN)
+        try:
+            return dict(await conn.fetchrow(
+                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
+                " WHERE table_schema = $1 AND table_name = 'title_ladder_progress' "
+                "   AND column_name = 'streak_at'", schema))
+        finally:
+            await conn.close()
+            await _drop_schema(schema)
+    col = _run(go())
+    assert col == {"data_type": "timestamp with time zone", "is_nullable": "YES",
+                   "column_default": None}, col
+
+
 def test_game_order_key_is_the_start_never_after_the_server_clock():
     s, e = _at(1), _at(2)
     assert tl.game_order_key(s, e) == s
