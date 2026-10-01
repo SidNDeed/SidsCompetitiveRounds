@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -459,7 +460,18 @@ def hook_scenario(wear, calls, *, held=(), gold=(), history=0):
                 from sqlalchemy import event as _sa_event
                 _sa_event.listen(engine.sync_engine, "before_cursor_execute", _count)
                 try:
-                    for mode, ref, row in calls:
+                    for call in calls:
+                        mode, ref, row = call[:3]
+                        if len(call) > 3:      # wear another title for this game
+                            await db.execute(text(
+                                "INSERT INTO player_items (player_id, item_id, purchase_price) "
+                                "SELECT :pid, id, 0 FROM shop_items WHERE sku = :s "
+                                "ON CONFLICT DO NOTHING"), {"pid": pid, "s": call[3]})
+                            await db.execute(text(
+                                "UPDATE players SET active_title_id = "
+                                "(SELECT id FROM shop_items WHERE sku = :s) WHERE id = :pid"),
+                                {"pid": pid, "s": call[3]})
+                            await db.commit()
                         del seen[:]
                         events.append(await tl.record_completed_games(
                             db, [pid], mode=mode, reference_id=ref, rows={str(pid): row}))
@@ -492,9 +504,18 @@ W = {"won": True, "lost": False}
 L = {"won": False, "lost": True}
 
 
+T0 = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _at(i):
+    """The order key of the i-th game: one game every ten minutes."""
+    return T0 + timedelta(minutes=10 * i)
+
+
 def _apex(results):
     return hook_scenario("title_ladder_apex_1",
-                         [("1v1", "g%d" % i, r) for i, r in enumerate(results)])
+                         [("1v1", "g%d" % i, dict(r, order_at=_at(i)))
+                          for i, r in enumerate(results)])
 
 
 def test_pg_the_apex_run_resets_on_a_loss():
@@ -516,12 +537,127 @@ def test_pg_five_straight_wins_reach_predator_and_a_broken_five_does_not():
 
 
 def test_pg_a_re_reported_game_credits_once():
+    w1, w2, w3 = (dict(W, order_at=_at(i)) for i in (1, 2, 3))
     got = hook_scenario("title_ladder_apex_1",
-                        [("1v1", "g1", W), ("1v1", "g2", W), ("1v1", "g2", W)])
+                        [("1v1", "g1", w1), ("1v1", "g2", w2), ("1v1", "g2", w2)])
     assert got.credits == 2 and got.progress["apex"][2] == 2, got.progress
     control = hook_scenario("title_ladder_apex_1",
-                            [("1v1", "g1", W), ("1v1", "g2", W), ("1v1", "g3", W)])
+                            [("1v1", "g1", w1), ("1v1", "g2", w2), ("1v1", "g3", w3)])
     assert control.credits == 3 and control.progress["apex"][2] == 3
+
+
+APEX = "title_ladder_apex_1"
+OTHER = "title_decent"
+
+
+def test_pg_r2_apex_an_unworn_loss_ends_the_run():
+    """Finding 4, the reviewer's case: four Apex-worn wins, a loss while
+    another title is worn, then one Apex-worn win. The loss ends the run, so
+    the later win starts a new run of 1 and no five-win rung is granted.
+    NEGATIVE CONTROL: the same games with the loss replaced by an unworn WIN
+    (also not a worn win, so it ends the run too) and, separately, with no
+    unworn game at all (five worn wins in a row) -- the latter grants
+    Predator."""
+    seq = [("1v1", "g%d" % i, dict(W, order_at=_at(i))) for i in range(4)]
+    seq.append(("1v1", "g4", dict(L, order_at=_at(4)), OTHER))
+    seq.append(("1v1", "g5", dict(W, order_at=_at(5)), APEX))
+    got = hook_scenario(APEX, seq)
+    assert got.progress["apex"][0] == 4 and got.progress["apex"][2] == 1, got.progress
+    assert "title_ladder_apex_2" not in got.owned and got.active == APEX
+    unworn_win = list(seq)
+    unworn_win[4] = ("1v1", "g4", dict(W, order_at=_at(4)), OTHER)
+    uw = hook_scenario(APEX, unworn_win)
+    assert uw.progress["apex"][2] == 1 and "title_ladder_apex_2" not in uw.owned, uw.progress
+    straight = hook_scenario(APEX, [("1v1", "g%d" % i, dict(W, order_at=_at(i)))
+                                    for i in range(5)])
+    assert straight.progress["apex"] == (5, 2, 5), straight.progress
+    assert "title_ladder_apex_2" in straight.owned
+
+
+def test_pg_r2_apex_a_delayed_report_cannot_append_behind_a_later_game():
+    """Finding 4: games 0-3 are worn wins reported in order; then game 4 (a
+    worn win played BEFORE game 3, reported late) arrives. It cannot extend
+    the run behind game 3: the run stays 4 and its last key stays game 3's.
+    A delayed LOSS still ends the run. Controls: the same win in order
+    extends to 5 and grants Predator; a missing order key never extends."""
+    base = [("1v1", "g%d" % i, dict(W, order_at=_at(i * 2))) for i in range(4)]
+    late_win = base + [("1v1", "late", dict(W, order_at=_at(5)))]       # 10*5 < 10*6
+    got = hook_scenario(APEX, late_win)
+    assert got.progress["apex"] == (4, 1, 4), got.progress
+    assert got.credits == 5 and "title_ladder_apex_2" not in got.owned
+    late_loss = base + [("1v1", "late", dict(L, order_at=_at(1)))]
+    lost = hook_scenario(APEX, late_loss)
+    assert lost.progress["apex"] == (4, 1, 0), lost.progress
+    in_order = base + [("1v1", "next", dict(W, order_at=_at(7)))]
+    ok = hook_scenario(APEX, in_order)
+    assert ok.progress["apex"] == (5, 2, 5) and "title_ladder_apex_2" in ok.owned, ok.progress
+    no_key = base + [("1v1", "nokey", dict(W))]
+    nk = hook_scenario(APEX, no_key)
+    assert nk.progress["apex"] == (4, 1, 4), nk.progress
+
+
+def test_pg_r2_apex_a_two_v_two_or_ffa_game_does_not_touch_the_run():
+    """Apex counts ranked 1v1 games: a 2v2 or FFA game, worn or not, neither
+    extends nor ends the run."""
+    seq = [("1v1", "g%d" % i, dict(W, order_at=_at(i))) for i in range(3)]
+    seq += [("2v2", "t1", dict(L)), ("ffa", "f1", dict(L), OTHER)]
+    seq += [("1v1", "g9", dict(W, order_at=_at(9)), APEX)]
+    got = hook_scenario(APEX, seq)
+    assert got.progress["apex"][2] == 4, got.progress
+
+
+def _rerun_365_after(mutate, sql365=None):
+    """prereq + 365, then `mutate`, then 365 again (its post-checks run on
+    every application). Returns the second run's error text, or None."""
+    _require_live_pg()
+    schema = _schema_name()
+
+    async def go():
+        await _make_schema(schema)
+        conn = await _asyncpg.connect(LADDER_DSN)
+        try:
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(mutate)
+            try:
+                await conn.execute(sql365 or lane.migration_text(M365))
+                return None
+            except Exception as exc:      # the refusal is the outcome under test
+                return str(exc)
+        finally:
+            await conn.close()
+            await _drop_schema(schema)
+    return _run(go())
+
+
+NULL_POOL = ("UPDATE shop_items SET rotation_pool = NULL "
+             " WHERE sku = 'title_ladder_rat_2';")
+
+
+def test_pg_r2_365_postcheck_rejects_an_earned_rung_with_no_pool():
+    """Residual 3 of the round-1 report, fixed: an earned rung whose
+    rotation_pool is NULL would be on sale in the ordinary pool; 365's
+    post-check now refuses it. NEGATIVE CONTROL: the previous predicate
+    (rotation_pool = 'achievement', NULL-blind) accepts the same state."""
+    err = _rerun_365_after(NULL_POOL)
+    assert err and "earned rungs are not granted-only" in err, err
+    old = lane.migration_text(M365).replace(
+        "NOT (COALESCE(si.rotation_pool, '') = 'achievement' AND si.price = 0)",
+        "NOT (si.rotation_pool = 'achievement' AND si.price = 0)")
+    assert old != lane.migration_text(M365)
+    assert _rerun_365_after(NULL_POOL, old) is None
+    assert _rerun_365_after("SELECT 1;") is None          # the untouched state passes
+
+
+def test_game_order_key_is_the_start_never_after_the_server_clock():
+    s, e = _at(1), _at(2)
+    assert tl.game_order_key(s, e) == s
+    assert tl.game_order_key(_at(9), e) == e            # a future stamp is clamped
+    assert tl.game_order_key(None, e) == e
+    assert tl.game_order_key(s.replace(tzinfo=None), e) == s   # naive is UTC
+    assert tl.game_order_key(None, None) is None
+    m, w, _ = _game("P1", SWEEP)
+    m.started_at, m.ended_at = s, e
+    assert tl.game_row_1v1(m, w)["order_at"] == s
 
 
 def test_pg_two_games_of_one_series_credit_two():
@@ -568,7 +704,7 @@ def test_pg_the_gold_ladder_counts_the_play_gold_the_caller_passes():
 
 # The statements the hook may run for one player and one game when no rung is
 # crossed, per mode (finding 9): a fixed number, whatever the ledger holds.
-HOOK_STATEMENT_CEILING = {"1v1": 4, "2v2": 4, "ffa": 4}
+HOOK_STATEMENT_CEILING = {"1v1": 5, "2v2": 4, "ffa": 4}
 
 
 @pytest.mark.parametrize("mode", ["1v1", "2v2", "ffa"])
