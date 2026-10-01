@@ -1281,7 +1281,11 @@ row("K45", N("k45"), [
 
 row("K47", N("k47"), [
     M("match_start_reads_fighters", "K47 ungated only", D(GSW, ("private static void OnMatchStarted(",), "if (lockIds == null)")),
-    M("ffa_start_reads_fighters", "K47 ungated only", D(GSW, ("public static void OnFfaMatchStarted(",), "if (lockIds == null)")),
+    # v1.41.0 merge pass 4 (c): OnFfaMatchStarted's ungated branch is the beta
+    # lane's RJ-2 raw refreeze, which reads no fighter view, so the mutant
+    # sends a gated room down that branch instead of deleting a view guard.
+    M("ffa_start_gated_takes_refreeze", "K47 gated lock roster, else the raw refreeze",
+      R(GSW, ("public static void OnFfaMatchStarted(",), "if (lockIds != null)", "if (lockIds != null && false)")),
     M("first_freeze_fighters", "K47 three freezes",
       R(GSW, (), "RoomActors.FreezeFighterRoster(lockIds ?? sids);", "RoomActors.FreezeFighterRoster(sids);")),
 ], T("gated_local",
