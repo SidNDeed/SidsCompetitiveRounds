@@ -1008,7 +1008,32 @@ def test_the_helper_closure_stays_affordable():
     # merged tree measures 22 / 94 / 328 (code) and 93 / 197 / 484 (all) over
     # 391 routes and 3123 indexed bindings, the same walk with the same route
     # seeds; the beta's 95 holds it, so the bound stays at 95.
-    assert code_p90 <= 95, f"p90 code closure {code_p90} of {total}"
+    #
+    # v1.41.0 merge pass 4, second merge (2026-10-01), claude/session-report
+    # b070e71d into the beta at 06565058: measured, the same walk with the
+    # same route seeds over each tree's own backend/api,
+    #
+    #   tree                         routes   code median / p90 / worst   all median / p90 / worst
+    #   beta 06565058                   391   22 / 94 / 328               93 / 197 / 484
+    #   session-report b070e71d         372   21 / 75 / 326               89 / 163 / 480
+    #   the merge                       391   22 / 97 / 328               93 / 199 / 484
+    #
+    # The population did not move (391 routes on both beta trees). Three
+    # routes' code counts did, each the union of what the two sides reach:
+    # GET /api/v1/health 89 -> 188 (the lane's session_report probe, 135 on
+    # the lane, beside the beta's and main's health words; 4 bindings neither
+    # side reaches alone, the beta's frozen FFA settings helpers the probe's
+    # report path now runs), GET /api/v1/report 83 -> 97 (93 on the lane: its
+    # set report plus the beta's 4 FFA settings bindings), POST
+    # /api/v1/spectate/validate 23 -> 32 (32 on the lane). Health and report
+    # rise past the p90 rank (sorted position 351 of 391, the 40th from the
+    # top), and the route at the rank becomes GET /api/v1/report at 97. The
+    # median (22) and worst (328) did not move, which is where a walk gone
+    # wrong shows first.
+    #
+    # The bound moves to 102, ~5% over the measurement, the headroom the
+    # moves above gave, for that reason and no other.
+    assert code_p90 <= 102, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
