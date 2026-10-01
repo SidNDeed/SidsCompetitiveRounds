@@ -742,12 +742,13 @@ def test_pg_an_owner_of_a_higher_rung_starts_there():
 
 # -- 5. The refund migration 366, on the seeded census ----------------------
 
-def refund_scenario(before="", runs=1):
-    """prereq + 365 + the census seed + `before`, then 366 `runs` times.
-    Returns (state, [None or the refusal text per run])."""
+def refund_scenario(before="", runs=1, sql366=None):
+    """prereq + 365 + the census seed + `before`, then 366 (or `sql366`, a
+    control's text) `runs` times. Returns (state, [None or the refusal text
+    per run])."""
     _require_live_pg()
     schema = _schema_name()
-    sql366 = lane.migration_text(M366)
+    sql366 = sql366 or lane.migration_text(M366)
 
     async def go():
         await _make_schema(schema, lane.CENSUS_SEED + before)
@@ -836,6 +837,54 @@ def test_pg_366_refuses_a_price_its_ledger_does_not_show():
     assert ("census-holder-1", 8000, 6000, None) in state["players"]
     assert state["items"] == SEEDED_ITEMS
     assert state["ready"] == {"title_voidshot": True, "title_regicide": True}
+
+
+# Round 2, finding 5: the census counts EVERY holder, at any price. A holder
+# 366 did not census -- here one granted Voidshot at price 0, with no purchase
+# row -- must refuse the whole file before any write, so players, inventory,
+# ledger and catalogue rows are all exactly what they were.
+ZERO_PRICE_HOLDER = (
+    "INSERT INTO players (steam_id, display_name, gold_earned, gold_spent) "
+    "VALUES ('census-granted', 'granted holder', 400, 0);"
+    "INSERT INTO player_items (player_id, item_id, purchase_price) "
+    "SELECT p.id, si.id, 0 FROM players p, shop_items si "
+    " WHERE p.steam_id = 'census-granted' AND si.sku = 'title_voidshot';")
+
+
+def _sql366_round1():
+    """366 as round 1 committed it (paid holders only), for the negative
+    control: it is the text before this round's census change."""
+    import subprocess
+    return subprocess.run(
+        ["git", "-C", os.path.dirname(os.path.abspath(__file__)), "show",
+         "bb6b7848:backend/sql/" + M366],
+        check=True, capture_output=True, text=True, encoding="utf-8").stdout
+
+
+def test_pg_r2_366_refuses_a_zero_price_holder_and_changes_nothing():
+    untouched, none_run = refund_scenario(before=ZERO_PRICE_HOLDER, runs=0)
+    assert none_run == []
+    state, outcomes = refund_scenario(before=ZERO_PRICE_HOLDER)
+    assert outcomes[0] and "366 refused" in outcomes[0] and "Re-census" in outcomes[0], outcomes
+    assert state == untouched, (state, untouched)
+    assert ("census-granted", "title_voidshot", 0) in state["items"]
+    assert state["ready"] == {"title_voidshot": True, "title_regicide": True}
+    # Negative control: round 1's paid-only census does not see the holder,
+    # applies, and deletes the granted title without a word.
+    old, old_out = refund_scenario(before=ZERO_PRICE_HOLDER, sql366=_sql366_round1())
+    assert old_out == [None], old_out
+    assert ("census-granted", "title_voidshot", 0) not in old["items"]
+
+
+def test_pg_r2_366_refuses_a_lost_holder_with_no_refund_row():
+    # The census holder's title vanished without 366's refund: neither the
+    # not-yet-applied nor the applied state, so it refuses.
+    lost = ("DELETE FROM player_items WHERE item_id = "
+            "(SELECT id FROM shop_items WHERE sku = 'title_regicide');")
+    untouched, _ = refund_scenario(before=lost, runs=0)
+    state, outcomes = refund_scenario(before=lost)
+    assert outcomes[0] and "366 refused" in outcomes[0], outcomes
+    assert state == untouched
 
 
 # -- 6. The old client's parser over the extended answer ---------------------
