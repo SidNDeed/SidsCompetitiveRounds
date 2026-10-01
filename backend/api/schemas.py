@@ -880,6 +880,18 @@ class HealthResponse(BaseModel):
     # without a default, so an answer built without it raises instead of
     # leaving the key out. Absent on any build before it.
     pc_card_art: int
+    # pc_art_rect: release-train verification plumbing for bug 408 (the top
+    # card's art geometry): the art rect of the layout this box's renderer
+    # LOADED, "x0,y0,x1,y1" (main._pc_art_rect_word -> pc_face.card_art_rect,
+    # rects.badge_art_back), DERIVED at every request, never a constant
+    # (#342); null when the renderer module did not import. It tells a box on
+    # this geometry from a box on another one even when both draw their own
+    # bundle healthily, which pc_card_art (unchanged in meaning) cannot. Equal
+    # on both roles and both arms; it needs no database. Read by nothing but
+    # the train (#306). Declared without a default, so an answer built
+    # without it raises instead of leaving the key out. Absent on any build
+    # before it.
+    pc_art_rect: str | None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup

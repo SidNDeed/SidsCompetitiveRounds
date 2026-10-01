@@ -7096,6 +7096,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=await _pc_trading_word(db),
                               discord_fix=await _discord_fix_probe(db),
                               pc_card_art=await _pc_card_art_word(),
+                              pc_art_rect=_pc_art_rect_word(),
                               pc_motion=_pc_motion_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
@@ -7126,6 +7127,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=_pc_trading_word_cached(),
                               discord_fix=_DISCORD_FIX_LAST,
                               pc_card_art=await _pc_card_art_word(),
+                              pc_art_rect=_pc_art_rect_word(),
                               pc_motion=_pc_motion_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
@@ -29815,6 +29817,20 @@ async def _pc_card_art_word() -> int:
         return int(result["word"])
     except Exception:
         return 0
+
+
+def _pc_art_rect_word() -> str | None:
+    """The /health word pc_art_rect (bug 408): the top-card art rect of the
+    layout this process's renderer LOADED, "x0,y0,x1,y1" -- see
+    HealthResponse.pc_art_rect. Read from pc_face at every call, never a
+    constant here (#342). None when the renderer module did not import.
+    Needs no database, so both arms answer it the same way."""
+    if _pcf is None:
+        return None
+    try:
+        return _pcf.card_art_rect_word()
+    except Exception:
+        return None
 
 
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
