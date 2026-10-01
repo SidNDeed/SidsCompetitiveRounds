@@ -3761,6 +3761,17 @@ async def lifespan(app: FastAPI):
             from database import async_session
             async with async_session() as _theme_db:
                 await _pc_load_card_themes(_theme_db)
+            # The top card's art (Discord card render parity): read and PROVE
+            # the private bundle once now, off the loop and bounded, so the
+            # first /health answers the drawn verdict rather than paying for
+            # it, and the log says which state the box came up in. Swallowed:
+            # an absent or invalid bundle is word 1 and no reason to refuse.
+            try:
+                _art = await asyncio.wait_for(asyncio.to_thread(_pcf.card_art_selftest), timeout=60)
+                print(f"[PC-ART] boot self-test: word={_art.get('word')} status={_art.get('status')} "
+                      f"checked={_art.get('checked', 0)}", flush=True)
+            except Exception as _art_exc:
+                print(f"[PC-ART] boot self-test did not finish: {type(_art_exc).__name__}", flush=True)
         # The Steam-render probe (v3 §9) runs on BOTH roles: each box
         # composites a stored Steam picture through its own face path and
         # reports the word on /health; the standby serves faces too.
@@ -7070,6 +7081,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
                               discord_fix=await _discord_fix_probe(db),
+                              pc_card_art=await _pc_card_art_word(),
                               pc_motion=_pc_motion_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
@@ -7098,6 +7110,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
                               discord_fix=_DISCORD_FIX_LAST,
+                              pc_card_art=await _pc_card_art_word(),
                               pc_motion=_pc_motion_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
@@ -29674,6 +29687,24 @@ def _pc_card_themes_word() -> str:
     than of the build; the question this answers is whether the map the face
     routes refuse without is populated at all."""
     return "ready" if _PC_CARD_THEMES else "empty"
+
+
+async def _pc_card_art_word() -> int:
+    """The /health word for the top card's art (Discord card render parity):
+    3, 1 or 0 -- see HealthResponse.pc_card_art. 0 whenever this box cannot
+    serve faces at all (_pc_renderer_unavailable: so 3 also certifies every
+    condition that reads), else the renderer's own self-test of the bundle it
+    reads (pc_face.card_art_selftest: it DRAWS every accepted patch and a full
+    face, cached per bundle identity, warmed at startup). Off the event loop,
+    because the first proof of a new identity renders. Needs no database, so
+    the degraded arm answers it the same way."""
+    if _pc_renderer_unavailable() is not None:
+        return 0
+    try:
+        result = await asyncio.to_thread(_pcf.card_art_selftest)
+        return int(result["word"])
+    except Exception:
+        return 0
 
 
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
