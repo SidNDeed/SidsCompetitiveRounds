@@ -888,34 +888,31 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) return _emptyActors;
                 if (_fighterCacheFrame == Time.frameCount && _fighterCache != null)
                     return _fighterCache;
-                var list = PhotonNetwork.PlayerList;
-                if (list == null) return _emptyActors;
-                // R3 (LOW): the fast path must ALSO require an unfrozen
-                // roster — otherwise freezing {A,B} and then admitting a late
-                // actor C with no spectator in the room returned C as a
-                // fighter, defeating the freeze in exactly the case it exists
-                // for. CORRECTED (Codex client r2 LOW, this line; and on
-                // 2026-09-17): the "nothing calls FreezeFighterRoster, so
-                // RosterFrozen is false everywhere" that stood here has not
-                // been true for releases — GameStateWatcher freezes at match
-                // assembly (OnMatchStarted), at late identity resolution
-                // (TickSpectateAttest's code-room catch-up), and once per FFA
-                // game (OnFfaMatchStarted). In a frozen room this path is NOT
-                // taken and the loop below does exclude actors that are off the
-                // roster, which is the freeze working: the RosterFrozen
-                // conjunct is load-bearing, not decorative.
+                // R3 (LOW): the filter must ALSO apply with a frozen roster -
+                // otherwise freezing {A,B} and then admitting a late actor C
+                // with no spectator in the room returned C as a fighter,
+                // defeating the freeze in exactly the case it exists for
+                // (GameStateWatcher freezes at match assembly, OnMatchStarted;
+                // at late identity resolution, TickSpectateAttest's code-room
+                // catch-up; and once per FFA game, OnFfaMatchStarted; #302).
+                // Item 13 (connect-failure V11): while a gated room's game
+                // runs, an actor the kept-actor view rejects is no fighter
+                // either. The same-instance fast path is gone: with no filter
+                // the result is PlayerList's own actors, cached per frame like
+                // the filtered one.
                 //
                 // NOTE FOR ANYONE REACHING FOR THIS AS A CENSUS: the result
                 // has IsUnauthorized applied, so it already excludes every
                 // latched actor. It is the right answer to "who is playing"
                 // and the wrong input to any decision ABOUT a latch or about
-                // roster membership — see RoomActors.RawActorCensus and the
+                // roster membership - see RoomActors.RawActorCensus and the
                 // r2 HIGH it closes.
-                if (!AnySpectatorPresent() && !RosterFrozen) return list;   // inert: same instance
-                var keep = new List<PhotonPlayer>(list.Length);
-                for (int i = 0; i < list.Length; i++)
+                bool filter = AnySpectatorPresent() || RosterFrozen || FfaLateEntry.GatedRunning;
+                var keep = new List<PhotonPlayer>(10);
+                foreach (var actor in PhotonNetwork.PlayerList)
                 {
-                    if (IsSpectator(list[i])) continue;
+                    if (filter && !FfaLateEntry.IsKeptActor(actor.ActorNumber)) continue;
+                    if (filter && IsSpectator(actor)) continue;
                     // Codex round 2 (MEDIUM): once the roster is FROZEN, a
                     // non-spectator actor is only a fighter if it is ON that
                     // roster. Without this, an actor that joins late carrying
@@ -926,15 +923,11 @@ namespace CompetitiveRounds
                     // whose identity we cannot read is not a fighter either,
                     // because admitting an unidentifiable actor to a rating-
                     // bearing roster is strictly worse than excluding it.
-                    if (RosterFrozen)
-                    {
-                        // IsUnauthorized carries the whole rule set: roster
-                        // membership, fail-closed identity, AND the
-                        // duplicate-u_id impostor exclusion (r3 CRITICAL) —
-                        // an impostor must not appear in fighter views either.
-                        if (IsUnauthorized(list[i])) continue;
-                    }
-                    keep.Add(list[i]);
+                    // IsUnauthorized carries the whole rule set: roster
+                    // membership, fail-closed identity, AND the duplicate-u_id
+                    // impostor exclusion (r3 CRITICAL).
+                    if (filter && RosterFrozen && IsUnauthorized(actor)) continue;
+                    keep.Add(actor);
                 }
                 keep.Sort((a, b) => a.ActorNumber.CompareTo(b.ActorNumber));
                 var result = keep.ToArray();
@@ -943,6 +936,33 @@ namespace CompetitiveRounds
                 return result;
             }
             catch { return _emptyActors; }
+        }
+
+        /// <summary>Every present actor that is not a spectator,
+        /// ActorNumber-ascending: the room's players with neither the
+        /// frozen-roster filter nor the quarantine (connect-failure V11, item
+        /// 2's census feed, and the counts a seat that sits out reads).</summary>
+        internal static List<PhotonPlayer> PresentNonSpectators()
+        {
+            var keep = new List<PhotonPlayer>();
+            try
+            {
+                if (!PhotonNetwork.InRoom) return keep;
+                var room = PhotonNetwork.CurrentRoom;
+                if (room == null || room.Players == null) return keep;
+                foreach (var kv in room.Players)
+                    if (kv.Value != null && !IsSpectator(kv.Value)) keep.Add(kv.Value);
+                keep.Sort((a, b) => a.ActorNumber.CompareTo(b.ActorNumber));
+            }
+            catch { }
+            return keep;
+        }
+
+        /// <summary>The kept bodies (item 13): PlayerManager's players whose
+        /// current owner actor the kept-actor view accepts, in list order.</summary>
+        internal static List<global::Player> KeptPlayers()
+        {
+            return FfaLateEntry.KeptPlayers();
         }
 
         /// <summary>Fighter count. THE replacement for
@@ -958,6 +978,8 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) return 0;
                 var room = PhotonNetwork.CurrentRoom;
                 if (room == null) return 0;
+                // No fast path while a gated room's game runs (item 13).
+                if (FfaLateEntry.GatedRunning) return ActiveFighters().Length;
                 if (!AnySpectatorPresent() && !RosterFrozen) return room.PlayerCount;   // fast path
                 // Same frozen-roster rule as ActiveFighters — this count feeds
                 // quorum and start decisions, so the two MUST agree.
@@ -995,6 +1017,11 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) return 0;
                 var room = PhotonNetwork.CurrentRoom;
                 if (room == null) return 0;
+                // Item 13: while a gated room's game runs, no fast path, and the
+                // local seat is subtracted only when it is kept.
+                if (FfaLateEntry.GatedRunning)
+                    return Math.Max(0, ActiveFighterCount()
+                                       - (!LocalIsSpectator && FfaLateEntry.IsKeptActor(PhotonNetwork.LocalPlayer.ActorNumber) ? 1 : 0));
                 if (!AnySpectatorPresent() && !RosterFrozen)
                     return Math.Max(0, room.PlayerCount - 1);  // fast path
                 return Math.Max(0, ActiveFighterCount() - (LocalIsSpectator ? 0 : 1));
@@ -1069,6 +1096,9 @@ namespace CompetitiveRounds
             try
             {
                 if (!PhotonNetwork.InRoom) return false;
+                // Item 13 (connect-failure V11): a master this client does not
+                // keep needs the transfer too (the authority fence).
+                if (!FfaLateEntry.MasterKept()) return true;
                 // Spectator absence alone: with no spectator in the room the
                 // master cannot be one. The freeze is not part of this
                 // question.

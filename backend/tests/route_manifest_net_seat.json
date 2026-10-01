@@ -145,6 +145,15 @@
           "40dc676b528392b6650afa758a230820ba27ee51"
         ],
         [
+          "/api/v1/admin/ffa-g3-seats",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_ffa_g3_seat",
+          "ee1865fd07ea9b5ea1428a19f33843b827769fd3"
+        ],
+        [
           "/api/v1/admin/flagged-matches",
           [
             "GET"
@@ -1753,6 +1762,33 @@
           "bd996f42a11f7bdb87eadf0397a25e289c775a8e"
         ],
         [
+          "/api/v1/ffa/lobby/{lobby_id}/assembly",
+          [
+            "POST"
+          ],
+          "main",
+          "ffa_lobby_assembly",
+          "7960d99e1e909429616f9f0c0ed919e82d6421f9"
+        ],
+        [
+          "/api/v1/ffa/lobby/{lobby_id}/connect",
+          [
+            "POST"
+          ],
+          "main",
+          "ffa_lobby_connect",
+          "e3b29a222848c9504c3f7d30eddfd964e5fdd932"
+        ],
+        [
+          "/api/v1/ffa/lobby/{lobby_id}/release",
+          [
+            "POST"
+          ],
+          "main",
+          "ffa_lobby_release",
+          "9f7c32d3d518eb1d008f57ef5354e779e8991814"
+        ],
+        [
           "/api/v1/ffa/queue/join",
           [
             "POST"
@@ -2200,7 +2236,7 @@
           ],
           "main",
           "get_mod_version",
-          "fe54d85e5cca09ba1b43252dfcf66a4cf360ce80"
+          "0854bbd60342add914e640d328bbe085377c4dd4"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
@@ -3953,6 +3989,10 @@
     "GET /api/v1/ffa/lobbies -> main.ffa_lobby_browser",
     "POST /api/v1/ffa/lobby/kick -> main.ffa_lobby_kick",
     "POST /api/v1/ffa/queue/leave -> main.ffa_queue_leave",
+    "POST /api/v1/ffa/lobby/{lobby_id}/connect -> main.ffa_lobby_connect",
+    "POST /api/v1/ffa/lobby/{lobby_id}/assembly -> main.ffa_lobby_assembly",
+    "POST /api/v1/ffa/lobby/{lobby_id}/release -> main.ffa_lobby_release",
+    "POST /api/v1/admin/ffa-g3-seats -> main.admin_ffa_g3_seat",
     "GET /api/v1/ffa/queue/recent-joins -> main.ffa_queue_recent_joins",
     "GET /api/v1/ffa/queue/list -> main.ffa_queue_list",
     "GET /api/v1/ffa/queue/poll/{steam_id} -> main.ffa_queue_poll",

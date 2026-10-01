@@ -3239,6 +3239,20 @@ namespace CompetitiveRounds
             ["race target not recorded for {0} of {1} games"] = "objetivo de la carrera no registrado en {0} de {1} juegos",
             ["not recorded for this set"] = "no registrado en este set",
             ["not supported for this mode"] = "no disponible en este modo",
+            // Connect-failure (V11, D-Q6): the FFA assembly, re-form and late-entry toasts.
+            ["A player joined the match"] = "Un jugador se uni\u00F3 a la partida",
+            ["Joining the match at the next point"] = "Entrando en la partida en el pr\u00F3ximo punto",
+            ["One player could not connect. Re-forming the lobby with everyone still here."] = "Un jugador no pudo conectarse. Rehaciendo la sala con todos los que siguen aqu\u00ED.",
+            ["One player could not connect. The match continues; they may join later."] = "Un jugador no pudo conectarse. La partida sigue; podr\u00E1 unirse m\u00E1s tarde.",
+            ["The match could not be confirmed with the server. Please queue again."] = "No se pudo confirmar la partida con el servidor. Reencola.",
+            ["The match could not continue on your connection. Please queue again."] = "La partida no pudo continuar con tu conexi\u00F3n. Reencola.",
+            ["The match could not start. Please queue again."] = "La partida no pudo empezar. Reencola.",
+            ["This lobby closed before the match started. Nothing was counted."] = "Esta sala se cerr\u00F3 antes de que empezara la partida. No se cont\u00F3 nada.",
+            ["Waiting for {0} player(s) to connect: {1} s"] = "Esperando a que se conecten {0} jugador(es): {1} s",
+            ["You could not connect in time. No penalty. Queue again when ready."] = "No pudiste conectarte a tiempo. Sin penalizaci\u00F3n. Reencola cuando quieras.",
+            ["You joined the match in progress. This game is unrated for you."] = "Te uniste a la partida en curso. Esta partida es sin Elo para ti.",
+            ["{0} players could not connect. Re-forming the lobby with everyone still here."] = "{0} jugadores no pudieron conectarse. Rehaciendo la sala con todos los que siguen aqu\u00ED.",
+            ["{0} players could not connect. The match continues; they may join later."] = "{0} jugadores no pudieron conectarse. La partida sigue; podr\u00E1n unirse m\u00E1s tarde.",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -6444,6 +6458,20 @@ namespace CompetitiveRounds
             ["race target not recorded for {0} of {1} games"] = "цель гонки не записана для {0} из {1} игр",
             ["not recorded for this set"] = "не записано для этого сета",
             ["not supported for this mode"] = "не поддерживается в этом режиме",
+            // Connect-failure (V11, D-Q6): the FFA assembly, re-form and late-entry toasts.
+            ["A player joined the match"] = "\u0418\u0433\u0440\u043E\u043A \u043F\u0440\u0438\u0441\u043E\u0435\u0434\u0438\u043D\u0438\u043B\u0441\u044F \u043A \u043C\u0430\u0442\u0447\u0443",
+            ["Joining the match at the next point"] = "\u0412\u0445\u043E\u0434 \u0432 \u043C\u0430\u0442\u0447 \u0441\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u043E\u0447\u043A\u0430",
+            ["One player could not connect. Re-forming the lobby with everyone still here."] = "\u041E\u0434\u0438\u043D \u0438\u0433\u0440\u043E\u043A \u043D\u0435 \u0441\u043C\u043E\u0433 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F. \u041B\u043E\u0431\u0431\u0438 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0437\u0430\u043D\u043E\u0432\u043E \u0441\u043E \u0432\u0441\u0435\u043C\u0438, \u043A\u0442\u043E \u043E\u0441\u0442\u0430\u043B\u0441\u044F.",
+            ["One player could not connect. The match continues; they may join later."] = "\u041E\u0434\u0438\u043D \u0438\u0433\u0440\u043E\u043A \u043D\u0435 \u0441\u043C\u043E\u0433 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F. \u041C\u0430\u0442\u0447 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0430\u0435\u0442\u0441\u044F; \u0438\u0433\u0440\u043E\u043A \u043C\u043E\u0436\u0435\u0442 \u043F\u0440\u0438\u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u044C\u0441\u044F \u043F\u043E\u0437\u0436\u0435.",
+            ["The match could not be confirmed with the server. Please queue again."] = "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044C \u043C\u0430\u0442\u0447 \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435. \u0412\u0441\u0442\u0430\u043D\u044C \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0441\u043D\u043E\u0432\u0430.",
+            ["The match could not continue on your connection. Please queue again."] = "\u041C\u0430\u0442\u0447 \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C \u0441 \u0442\u0432\u043E\u0438\u043C \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435\u043C. \u0412\u0441\u0442\u0430\u043D\u044C \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0441\u043D\u043E\u0432\u0430.",
+            ["The match could not start. Please queue again."] = "\u041C\u0430\u0442\u0447 \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043D\u0430\u0447\u0430\u0442\u044C. \u0412\u0441\u0442\u0430\u043D\u044C \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0441\u043D\u043E\u0432\u0430.",
+            ["This lobby closed before the match started. Nothing was counted."] = "\u042D\u0442\u043E \u043B\u043E\u0431\u0431\u0438 \u0437\u0430\u043A\u0440\u044B\u043B\u043E\u0441\u044C \u0434\u043E \u043D\u0430\u0447\u0430\u043B\u0430 \u043C\u0430\u0442\u0447\u0430. \u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u0437\u0430\u0441\u0447\u0438\u0442\u0430\u043D\u043E.",
+            ["Waiting for {0} player(s) to connect: {1} s"] = "\u0416\u0434\u0451\u043C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u044F \u0438\u0433\u0440\u043E\u043A\u043E\u0432 ({0}): {1} \u0441",
+            ["You could not connect in time. No penalty. Queue again when ready."] = "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F \u0432\u043E\u0432\u0440\u0435\u043C\u044F. \u0411\u0435\u0437 \u0448\u0442\u0440\u0430\u0444\u0430. \u0412\u0441\u0442\u0430\u043D\u044C \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0441\u043D\u043E\u0432\u0430, \u043A\u043E\u0433\u0434\u0430 \u0437\u0430\u0445\u043E\u0447\u0435\u0448\u044C.",
+            ["You joined the match in progress. This game is unrated for you."] = "\u0422\u044B \u0432\u043E\u0448\u0451\u043B \u0432 \u0443\u0436\u0435 \u0438\u0434\u0443\u0449\u0438\u0439 \u043C\u0430\u0442\u0447. \u042D\u0442\u0430 \u0438\u0433\u0440\u0430 \u0434\u043B\u044F \u0442\u0435\u0431\u044F \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430.",
+            ["{0} players could not connect. Re-forming the lobby with everyone still here."] = "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F \u0438\u0433\u0440\u043E\u043A\u0430\u043C: {0}. \u041B\u043E\u0431\u0431\u0438 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0437\u0430\u043D\u043E\u0432\u043E \u0441\u043E \u0432\u0441\u0435\u043C\u0438, \u043A\u0442\u043E \u043E\u0441\u0442\u0430\u043B\u0441\u044F.",
+            ["{0} players could not connect. The match continues; they may join later."] = "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F \u0438\u0433\u0440\u043E\u043A\u0430\u043C: {0}. \u041C\u0430\u0442\u0447 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0430\u0435\u0442\u0441\u044F; \u043E\u043D\u0438 \u043C\u043E\u0433\u0443\u0442 \u043F\u0440\u0438\u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u044C\u0441\u044F \u043F\u043E\u0437\u0436\u0435.",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -9575,6 +9603,20 @@ namespace CompetitiveRounds
             ["race target not recorded for {0} of {1} games"] = "ціль перегонів не записана для {0} з {1} ігор",
             ["not recorded for this set"] = "не записано для цього сету",
             ["not supported for this mode"] = "не підтримується в цьому режимі",
+            // Connect-failure (V11, D-Q6): the FFA assembly, re-form and late-entry toasts.
+            ["A player joined the match"] = "\u0413\u0440\u0430\u0432\u0435\u0446\u044C \u043F\u0440\u0438\u0454\u0434\u043D\u0430\u0432\u0441\u044F \u0434\u043E \u043C\u0430\u0442\u0447\u0443",
+            ["Joining the match at the next point"] = "\u0412\u0445\u0456\u0434 \u0443 \u043C\u0430\u0442\u0447 \u0437 \u043D\u0430\u0441\u0442\u0443\u043F\u043D\u043E\u0433\u043E \u043E\u0447\u043A\u0430",
+            ["One player could not connect. Re-forming the lobby with everyone still here."] = "\u041E\u0434\u0438\u043D \u0433\u0440\u0430\u0432\u0435\u0446\u044C \u043D\u0435 \u0437\u043C\u0456\u0433 \u043F\u0456\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u0438\u0441\u044F. \u041B\u043E\u0431\u0456 \u0437\u0431\u0438\u0440\u0430\u0454\u0442\u044C\u0441\u044F \u0437\u0430\u043D\u043E\u0432\u043E \u0437 \u0443\u0441\u0456\u043C\u0430, \u0445\u0442\u043E \u0437\u0430\u043B\u0438\u0448\u0438\u0432\u0441\u044F.",
+            ["One player could not connect. The match continues; they may join later."] = "\u041E\u0434\u0438\u043D \u0433\u0440\u0430\u0432\u0435\u0446\u044C \u043D\u0435 \u0437\u043C\u0456\u0433 \u043F\u0456\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u0438\u0441\u044F. \u041C\u0430\u0442\u0447 \u0442\u0440\u0438\u0432\u0430\u0454; \u0433\u0440\u0430\u0432\u0435\u0446\u044C \u043C\u043E\u0436\u0435 \u043F\u0440\u0438\u0454\u0434\u043D\u0430\u0442\u0438\u0441\u044F \u043F\u0456\u0437\u043D\u0456\u0448\u0435.",
+            ["The match could not be confirmed with the server. Please queue again."] = "\u041D\u0435 \u0432\u0434\u0430\u043B\u043E\u0441\u044F \u043F\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u0438 \u043C\u0430\u0442\u0447 \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0456. \u0421\u0442\u0430\u043D\u044C\u0442\u0435 \u0432 \u0447\u0435\u0440\u0433\u0443 \u0437\u043D\u043E\u0432\u0443.",
+            ["The match could not continue on your connection. Please queue again."] = "\u041C\u0430\u0442\u0447 \u043D\u0435 \u0432\u0434\u0430\u043B\u043E\u0441\u044F \u043F\u0440\u043E\u0434\u043E\u0432\u0436\u0438\u0442\u0438 \u0437 \u0432\u0430\u0448\u0438\u043C \u0437'\u0454\u0434\u043D\u0430\u043D\u043D\u044F\u043C. \u0421\u0442\u0430\u043D\u044C\u0442\u0435 \u0432 \u0447\u0435\u0440\u0433\u0443 \u0437\u043D\u043E\u0432\u0443.",
+            ["The match could not start. Please queue again."] = "\u041C\u0430\u0442\u0447 \u043D\u0435 \u0432\u0434\u0430\u043B\u043E\u0441\u044F \u0440\u043E\u0437\u043F\u043E\u0447\u0430\u0442\u0438. \u0421\u0442\u0430\u043D\u044C\u0442\u0435 \u0432 \u0447\u0435\u0440\u0433\u0443 \u0437\u043D\u043E\u0432\u0443.",
+            ["This lobby closed before the match started. Nothing was counted."] = "\u0426\u0435 \u043B\u043E\u0431\u0456 \u0437\u0430\u043A\u0440\u0438\u043B\u043E\u0441\u044F \u0434\u043E \u043F\u043E\u0447\u0430\u0442\u043A\u0443 \u043C\u0430\u0442\u0447\u0443. \u041D\u0456\u0447\u043E\u0433\u043E \u043D\u0435 \u0437\u0430\u0440\u0430\u0445\u043E\u0432\u0430\u043D\u043E.",
+            ["Waiting for {0} player(s) to connect: {1} s"] = "\u0427\u0435\u043A\u0430\u0454\u043C\u043E \u043D\u0430 \u043F\u0456\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u043D\u044F \u0433\u0440\u0430\u0432\u0446\u0456\u0432 ({0}): {1} \u0441",
+            ["You could not connect in time. No penalty. Queue again when ready."] = "\u041D\u0435 \u0432\u0434\u0430\u043B\u043E\u0441\u044F \u0432\u0447\u0430\u0441\u043D\u043E \u043F\u0456\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u0438\u0441\u044F. \u0411\u0435\u0437 \u0448\u0442\u0440\u0430\u0444\u0443. \u0421\u0442\u0430\u043D\u044C\u0442\u0435 \u0432 \u0447\u0435\u0440\u0433\u0443 \u0437\u043D\u043E\u0432\u0443, \u043A\u043E\u043B\u0438 \u0431\u0443\u0434\u0435\u0442\u0435 \u0433\u043E\u0442\u043E\u0432\u0456.",
+            ["You joined the match in progress. This game is unrated for you."] = "\u0412\u0438 \u043F\u0440\u0438\u0454\u0434\u043D\u0430\u043B\u0438\u0441\u044F \u0434\u043E \u043C\u0430\u0442\u0447\u0443, \u0449\u043E \u0432\u0436\u0435 \u0442\u0440\u0438\u0432\u0430\u0454. \u0426\u044F \u0433\u0440\u0430 \u0434\u043B\u044F \u0432\u0430\u0441 \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0443.",
+            ["{0} players could not connect. Re-forming the lobby with everyone still here."] = "\u041D\u0435 \u0432\u0434\u0430\u043B\u043E\u0441\u044F \u043F\u0456\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u0438\u0441\u044F \u0433\u0440\u0430\u0432\u0446\u044F\u043C: {0}. \u041B\u043E\u0431\u0456 \u0437\u0431\u0438\u0440\u0430\u0454\u0442\u044C\u0441\u044F \u0437\u0430\u043D\u043E\u0432\u043E \u0437 \u0443\u0441\u0456\u043C\u0430, \u0445\u0442\u043E \u0437\u0430\u043B\u0438\u0448\u0438\u0432\u0441\u044F.",
+            ["{0} players could not connect. The match continues; they may join later."] = "\u041D\u0435 \u0432\u0434\u0430\u043B\u043E\u0441\u044F \u043F\u0456\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u0438\u0441\u044F \u0433\u0440\u0430\u0432\u0446\u044F\u043C: {0}. \u041C\u0430\u0442\u0447 \u0442\u0440\u0438\u0432\u0430\u0454; \u0432\u043E\u043D\u0438 \u043C\u043E\u0436\u0443\u0442\u044C \u043F\u0440\u0438\u0454\u0434\u043D\u0430\u0442\u0438\u0441\u044F \u043F\u0456\u0437\u043D\u0456\u0448\u0435.",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -12706,6 +12748,20 @@ namespace CompetitiveRounds
             ["race target not recorded for {0} of {1} games"] = "loppets mål är inte registrerat för {0} av {1} matcher",
             ["not recorded for this set"] = "inte registrerat för det här setet",
             ["not supported for this mode"] = "stöds inte i det här läget",
+            // Connect-failure (V11, D-Q6): the FFA assembly, re-form and late-entry toasts.
+            ["A player joined the match"] = "En spelare gick med i matchen",
+            ["Joining the match at the next point"] = "G\u00E5r med i matchen vid n\u00E4sta po\u00E4ng",
+            ["One player could not connect. Re-forming the lobby with everyone still here."] = "En spelare kunde inte ansluta. Lobbyn bildas om med alla som \u00E4r kvar.",
+            ["One player could not connect. The match continues; they may join later."] = "En spelare kunde inte ansluta. Matchen forts\u00E4tter; spelaren kan g\u00E5 med senare.",
+            ["The match could not be confirmed with the server. Please queue again."] = "Matchen kunde inte bekr\u00E4ftas med servern. K\u00F6a igen.",
+            ["The match could not continue on your connection. Please queue again."] = "Matchen kunde inte forts\u00E4tta p\u00E5 din anslutning. K\u00F6a igen.",
+            ["The match could not start. Please queue again."] = "Matchen kunde inte starta. K\u00F6a igen.",
+            ["This lobby closed before the match started. Nothing was counted."] = "Den h\u00E4r lobbyn st\u00E4ngdes innan matchen startade. Inget r\u00E4knades.",
+            ["Waiting for {0} player(s) to connect: {1} s"] = "V\u00E4ntar p\u00E5 att {0} spelare ansluter: {1} s",
+            ["You could not connect in time. No penalty. Queue again when ready."] = "Du kunde inte ansluta i tid. Ingen bestraffning. K\u00F6a igen n\u00E4r du \u00E4r redo.",
+            ["You joined the match in progress. This game is unrated for you."] = "Du gick med i en p\u00E5g\u00E5ende match. Den h\u00E4r matchen \u00E4r utan rating f\u00F6r dig.",
+            ["{0} players could not connect. Re-forming the lobby with everyone still here."] = "{0} spelare kunde inte ansluta. Lobbyn bildas om med alla som \u00E4r kvar.",
+            ["{0} players could not connect. The match continues; they may join later."] = "{0} spelare kunde inte ansluta. Matchen forts\u00E4tter; de kan g\u00E5 med senare.",
         };
     }
 }

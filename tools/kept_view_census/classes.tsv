@@ -1,0 +1,333 @@
+# kept-view census classification at edf9aee (V7 sec4.4; V8: 30 identifiers; V9: 31, per occurrence). Columns: file, class chain, member,
+# identifier, class (V view-filtered, F authority-fenced, R raw by design, N not a gated-room
+# gameplay consumer), reason, optional guard span (File.cs|Class|Member), optional required accessors (Name|Name).
+ApiClient.cs	ApiClient	FetchFfaBettable	players	N	JSON record field `.players` of a server answer, no body	
+ApiClient.cs	ApiClient	FetchPlayerNemesis	players	N	JSON record field, no body	
+ApiClient.cs	ApiClient	ParseFfaRecentList	players	N	JSON record field, no body	
+ApiClient.cs	ApiClient	SpectateValidateActors	GetPlayer	F	resolves the invalid spectator the master closes; the master-only validation send is fenced (row 48), and the close in its answer reads MasterMaySend() (V9, N5)	
+ApiClient.cs	ApiClient	SpectateValidateActors	MasterMaySend	F	master-only spectator validation send; reads MasterMaySend()	
+CompetitiveUI.cs	CompetitiveUI	DrawDanceWheel	players	N	UI	
+CompetitiveUI.cs	CompetitiveUI	FfaMatchPointName	players	N	HUD label	
+CompetitiveUI.cs	CompetitiveUI	MutedPlayersLine	PlayerList	N	chat UI	
+CompetitiveUI.cs	CompetitiveUI	RefreshFfaHudRows	players	N	HUD rows	
+CompetitiveUI.cs	CompetitiveUI	RefreshMatchStatusCache	ActiveFighters	N	HUD status	
+DanceEmotes.cs	DanceEmotes	OnEvent	GetPlayer	N	emote cosmetic; the sender must be a live non-spectator actor (DanceEmotes.cs:241-246)	
+DanceEmotes.cs	DanceEmotes	OnEvent	Sender	N	emote cosmetic; the sender must own the claimed actor (DanceEmotes.cs:234)	
+DanceEmotes.cs	DanceEmotes	ResolveActorPlayer	players	N	emote cosmetic; owner-actor lookup (DanceEmotes.cs:378-389)	
+DanceStep0Probe.cs	DanceStep0Probe	BodyProbe	players	N	dev diagnostics; offline sandbox only, refuses unless PhotonNetwork.OfflineMode (DanceStep0Probe.cs:95); PlayerAssigner's join list	
+DanceStep0Probe.cs	DanceStep0Probe	LocalBody	players	N	dev diagnostics; the offline sandbox's own body, called only from BodyProbe after its offline check (DanceStep0Probe.cs:96, 112)	
+FfaAssembly.cs	FfaAssembly	CensusBody	IsKeptActor	V	the census reports each present actor's kept flag from the view (K28, K48)	
+FfaAssembly.cs	FfaAssembly	CensusBody	PresentNonSpectators	R	the census: the room's actors minus spectators, never a fighter view (K28, K48); the server judges them	
+FfaAssembly.cs	FfaAssembly	CensusBody	players	R	the census's body flag: every registered body's owner, raw by design (the body rule counts bodies, sec3.2)	
+FfaAssembly.cs	FfaAssembly	Exit	IsMasterClient	N	toast choice only: a master in LAG_OUT gets the connection text (D-Q6); sends nothing	
+FfaAssembly.cs	FfaAssembly	LoadGate	MasterKept	F	item 13 receivers: a load dispatched under a master MasterKept() rejects is refused, never replayed (quarantine_refused site=authority)	
+FfaAssembly.cs	FfaAssembly	OnArrived	PlayerCount	R	the arrive report's raw room actor count (telemetry for the server, I2)	
+FfaAssembly.cs	FfaAssembly	OwedToastTick	PlayerCount	N	decides only when an owed guard toast shows (item 3); no gameplay decision	
+FfaAssembly.cs	FfaAssembly	TryForceStart	players	R	counts the registered bodies of the server's start roster (a start_ok answer's roster), never a local view	
+FfaAssembly.cs	FfaAssembly.Barrier	Run	MasterKept	F	the start barrier waits for a kind-s master MasterKept() accepts, else the seat exits at ASM_START_HOLD_S (item 8, R43)	
+FfaCardSequence.cs	FfaCardSequence	LatchForGame	ActiveFighterCount	V	card count reads ActiveFighterCount(), the kept view (row 45)	
+FfaCardSequence.cs	FfaCardSequence	MasterPublishSeed	MasterMaySend	F	NEW V7 site: master publishes the draw seed; MasterMaySend() (row 49)	
+FfaCardSequence.cs	FfaCardSequence	RoomCapabilityState	ActiveFighters	V	card consensus reads ActiveFighters(), the kept view (row 45)	
+FfaLateEntry.cs	FfaLateEntry	ActorByNumber	PresentNonSpectators	R	actor lookup by number among the present non-spectators; the caller judges kept-ness	
+FfaLateEntry.cs	FfaLateEntry	ApplyQuarantine	IsKeptActor	V	the quarantine hides exactly the bodies the view does not keep (item 13)	
+FfaLateEntry.cs	FfaLateEntry	ApplyQuarantine	players	R	the quarantine walks every registered body to hide the unkept and restore the kept; raw by design	
+FfaLateEntry.cs	FfaLateEntry	BodyActors	players	R	actors that own a registered body (the readiness barrier and the joined toast); raw by design	
+FfaLateEntry.cs	FfaLateEntry	BodyByPlayerId	players	R	body lookup by playerID; the caller judges kept-ness	
+FfaLateEntry.cs	FfaLateEntry	CheckPendingSnapshot	IsKeptActor	V	the late snapshot carries each present seat's kept flag from the view (item 5)	
+FfaLateEntry.cs	FfaLateEntry	CheckPendingSnapshot	PresentNonSpectators	R	the late snapshot lists the present seats raw, each with its kept flag (item 5)	
+FfaLateEntry.cs	FfaLateEntry	FenceMaster	IsMasterClient	R	the fence's own entry test: only the current master can hand the role on; MasterFenced() decides next	
+FfaLateEntry.cs	FfaLateEntry	FenceMaster	MasterFenced	F	the fence acts only on a master MasterFenced() holds for (item 13, row 48)	
+FfaLateEntry.cs	FfaLateEntry	FenceTick	IsKeptActor	V	the fence target is a kept actor MasterKept() would accept (FenceTarget)	
+FfaLateEntry.cs	FfaLateEntry	FenceTick	IsMasterClient	R	the fence's landing test: whether the role has left this client	
+FfaLateEntry.cs	FfaLateEntry	FenceTick	MasterFenced	F	the fence ends when this client is master and no longer fenced	
+FfaLateEntry.cs	FfaLateEntry	FenceTick	SetMasterClient	F	the fence's hand-off; FenceTick runs only from FenceMaster, after MasterFenced() holds	FfaLateEntry.cs|FfaLateEntry|FenceMaster
+FfaLateEntry.cs	FfaLateEntry	IsKeptActor	IsKeptActor	R	the view's own declaration: the pure rule FfaLateRules.KeptSender over the granted list and the applied epoch	
+FfaLateEntry.cs	FfaLateEntry	IsQuarantinedActor	IsKeptActor	V	quarantined = gated, running and not kept by the view	
+FfaLateEntry.cs	FfaLateEntry	KeptList	IsKeptActor	V	the kept line lists the view's kept actors (telemetry)	
+FfaLateEntry.cs	FfaLateEntry	KeptPlayers	IsKeptActor	V	the kept view filters every body through IsKeptActor	
+FfaLateEntry.cs	FfaLateEntry	KeptPlayers	KeptPlayers	V	the kept view's own declaration; its body reads IsKeptActor	
+FfaLateEntry.cs	FfaLateEntry	KeptPlayers	players	R	the kept view's own source: every registered body, filtered through IsKeptActor	
+FfaLateEntry.cs	FfaLateEntry	LocalSlots	KeptPlayers	V	the boundary digest (cr_bd) over the kept view	
+FfaLateEntry.cs	FfaLateEntry	MasterActor	MasterClient	R	the current master's actor number, raw by design: receivers compare a sender with it and judge it with MasterKept()	
+FfaLateEntry.cs	FfaLateEntry	MasterBoundary	MasterMaySend	F	the master's epoch proposal and call-in stamp run only under MasterMaySend() (items 5 and 13)	
+FfaLateEntry.cs	FfaLateEntry	MasterFenced	IsMasterClient	F	the fence predicate: the current master, unkept or in LAG_OUT	
+FfaLateEntry.cs	FfaLateEntry	MasterFenced	MasterFenced	F	the fence predicate's own declaration; its body reads MasterKept()	
+FfaLateEntry.cs	FfaLateEntry	MasterFenced	MasterKept	F	the fence predicate reads MasterKept()	
+FfaLateEntry.cs	FfaLateEntry	MasterKept	MasterKept	R	the fence's own declaration: the pure rule FfaLateRules.MasterKeptValue over the gate and the granted list	
+FfaLateEntry.cs	FfaLateEntry	MasterMaySend	IsMasterClient	F	every mod master sender's predicate: the current master, kept and not in LAG_OUT	
+FfaLateEntry.cs	FfaLateEntry	MasterMaySend	MasterKept	F	the sender predicate reads MasterKept()	
+FfaLateEntry.cs	FfaLateEntry	MasterMaySend	MasterMaySend	F	the sender predicate's own declaration; its body reads MasterKept()	
+FfaLateEntry.cs	FfaLateEntry	OnAck	IsMasterClient	R	the master records acknowledgements of its own proposal; it proposes and stamps only under MasterMaySend() (MasterBoundary)	
+FfaLateEntry.cs	FfaLateEntry	OnAck	Sender	R	the acknowledgement's sender is recorded as data and paired with the master's own proposal	
+FfaLateEntry.cs	FfaLateEntry	OnCallIn	MasterKept	F	item 13 receivers: a call-in under a master MasterKept() rejects is refused, never replayed (quarantine_refused site=authority)	
+FfaLateEntry.cs	FfaLateEntry	OnLateRequest	MasterMaySend	F	the master answers a late request only under MasterMaySend()	
+FfaLateEntry.cs	FfaLateEntry	OnLateSnapshot	MasterKept	F	the late snapshot is taken only from the current master MasterKept() accepts	
+FfaLateEntry.cs	FfaLateEntry	OnLateSnapshot	Sender	F	the late snapshot's sender must be the current master MasterKept() accepts	
+FfaLateEntry.cs	FfaLateEntry	OnMasterEvent	Sender	N	telemetry only (master_ack line)	
+FfaLateEntry.cs	FfaLateEntry	OnProposal	MasterKept	F	e1: the epoch proposal is validated with MasterKept() (V10, N7)	
+FfaLateEntry.cs	FfaLateEntry	OnProposal	Sender	R	the proposal's sender is data that ValidateEpoch judges against MasterActor() and MasterKept() (e1); the acknowledgement goes to it only after that	
+FfaLateEntry.cs	FfaLateEntry	OnReady	Sender	R	the master records each seat's readiness signal by its sender (the readiness barrier)	
+FfaLateEntry.cs	FfaLateEntry	OnScale	Sender	R	the EVT_SCALE receiver judges the sender at the dispatch with ScaleRecordDecision against MasterActor() and the point's LatchMaster (V9, N3; V10, N7); the record keeps the sender	
+FfaLateEntry.cs	FfaLateEntry	OnStamp	Sender	R	a stamp is held with its sender and validated at the pairing against the call-in's master (s1)	
+FfaLateEntry.cs	FfaLateEntry	OwnDeathAfterCallIn	players	N	finds the local body (IsMine) only	
+FfaLateEntry.cs	FfaLateEntry	OwnTicketServesLoad	IsMasterClient	R	whether this client's own count ticket serves its load; the ticket is armed only by MasterPublishCount, which reads MasterMaySend()	
+FfaLateEntry.cs	FfaLateEntry	PresentActors	PresentNonSpectators	R	the present non-spectator actors, raw by design (the readiness barrier and the fence target)	
+FfaMapScale.cs	FfaMapScale	MasterPublishCount	ActiveFighterCount	V	published count over KeptPlayers() (surface 6)	
+FfaMapScale.cs	FfaMapScale	MasterPublishCount	KeptPlayers	V	published count over KeptPlayers() (surface 6)	
+FfaMapScale.cs	FfaMapScale	MasterPublishCount	MasterMaySend	F	master publishes the count; MasterMaySend()	
+FfaMapScale.cs	FfaMapScale	OnMasterClientSwitched	OnMasterClientSwitched	R	a reset: a master switch spends this client's own count ticket (FfaMapScale.cs:113-117)	
+FfaMapScale.cs	FfaMapScale	ReadPublishedCount	MasterMaySend	F	master-ticket validity reads MasterMaySend(); in a gated room it returns only a count recorded from an EVT_SCALE whose sender this client keeps, never the room property (V8, V7-F4)	
+FfaMapScale.cs	FfaMapScale	RoomAdvertisesScaleCapability	ActiveFighters	V	scale capability over the kept view (row 45)	
+FfaMapScale.cs	FfaMapScale.MapTransition_SetStartPos_FfaScale_Patch	Postfix	IsMasterClient	N	log text only (FfaMapScale.cs:283-285)	
+FfaMapScale.cs	FfaMapScale.PlayerManager_MovePlayers_FfaScale_Patch	Prefix	KeptPlayers	V	compact kept-only pairing reads KeptPlayers() (surface 4, row 42)	
+FfaMapScale.cs	FfaMapScale.PlayerManager_MovePlayers_FfaScale_Patch	Prefix	players	V	compact kept-only pairing over KeptPlayers() (surface 4, row 42)	
+FfaMode.cs	CardBarHandler_AddCard_Ffa_Patch	Prefix	players	N	finds the local body (IsMine) only	
+FfaMode.cs	FfaMode	AlivePlayers	AlivePlayers	V	alive count over KeptPlayers() (surface 6)	
+FfaMode.cs	FfaMode	AlivePlayers	KeptPlayers	V	alive count over KeptPlayers() (surface 6)	
+FfaMode.cs	FfaMode	ApplyManifestPick	GetPlayerWithID	V	NEW V7 pick surface: skips a quarantined pid before ApplyCardTo (row 50)	
+FfaMode.cs	FfaMode	BoundedSyncUp	OtherActiveFighterCount	V	sync peers via OtherActiveFighterCount(), the kept view; LocalSitsOut returns first		LocalSitsOut
+FfaMode.cs	FfaMode	CheckRoundAfterLeave	ActiveFighterCount	V	leave quorum via ActiveFighterCount(), the kept view; while LocalSitsOut() it resolves nothing and its last-player exit counts PresentNonSpectators() (V8, V7-F1)		LocalSitsOut
+FfaMode.cs	FfaMode	CheckRoundAfterLeave	PresentNonSpectators	V	LocalSitsOut() selects: a client that sits out counts the present seats, every other the kept view (row 51)	
+FfaMode.cs	FfaMode	ClearLastDamageSources	players	R	clears kill-credit memory on every body; a reset gives no body an effect	
+FfaMode.cs	FfaMode	CollectMatchPointTeams	players	N	HUD match-point label (CompetitiveUI.cs:1095)	
+FfaMode.cs	FfaMode	CollectPicks	GetPlayerWithID	V	NEW V7 site: manifest entries of quarantined pids are skipped (row 50)	
+FfaMode.cs	FfaMode	CountStillPresent	GetPlayerWithID	V	NEW V7 site: counts kept manifest entries only (row 50)	
+FfaMode.cs	FfaMode	CurrentLeader	players	N	crown cosmetic (Plugin.cs:5926)	
+FfaMode.cs	FfaMode	DetectAheadPickIdentity	GetPlayerWithID	V	NEW V7 site: reads kept manifest entries only (row 50)	
+FfaMode.cs	FfaMode	Dictionary	Leavers	R	the leaver ledger's declaration (FfaMode.cs:238); its writer and every reader are census rows of their own	
+FfaMode.cs	FfaMode	FfaDoStartGame	MasterMaySend	F	master-driven game start; MasterMaySend() and the kind-s start barrier (row 48)	
+FfaMode.cs	FfaMode	FfaPickPhase	KeptPlayers	V	pickers over KeptPlayers() (surface 1)	
+FfaMode.cs	FfaMode	FfaPickPhase	MasterMaySend	F	every master branch of the pick phase reads MasterMaySend() (row 48)	
+FfaMode.cs	FfaMode	FfaTransition	MasterMaySend	F	the master's boundary (MasterBoundary) runs only under MasterMaySend()	
+FfaMode.cs	FfaMode	HandleNextRound	ActiveFighterCount	V	rematch minimum and the anchor-team fallback read the kept view (row 51); while LocalSitsOut() the minimum counts PresentNonSpectators() (V8, V7-F1)		LocalSitsOut
+FfaMode.cs	FfaMode	HandleNextRound	AlivePlayers	V	rematch minimum and the anchor-team fallback read the kept view (row 51)	
+FfaMode.cs	FfaMode	HandleNextRound	KeptPlayers	V	rematch minimum over the kept view (row 51); the anchor-team fallback is RawAnchorFallback (R)	
+FfaMode.cs	FfaMode	HandleNextRound	MasterMaySend	F	master-only server call; MasterMaySend()	
+FfaMode.cs	FfaMode	HandleNextRound	PresentNonSpectators	V	LocalSitsOut() selects: a client that sits out counts the present seats, every other the kept view (row 51)	
+FfaMode.cs	FfaMode	HandlePlayerDied	AlivePlayers	V	alive count via AlivePlayers() (surface 6); while LocalSitsOut() it returns before DoSlowDown (V8, V7-F1)		LocalSitsOut
+FfaMode.cs	FfaMode	HandlePlayerDied	MasterMaySend	F	master point latch and RPCA_NextRound (FfaMode.cs:1344-1408); MasterMaySend()	
+FfaMode.cs	FfaMode	LocalPlayer	players	N	finds the local body (IsMine) only	
+FfaMode.cs	FfaMode	MasterPublishConfig	MasterMaySend	F	NEW V7 site: master config publish (FfaMode.cs:89-93); MasterMaySend()	
+FfaMode.cs	FfaMode	OnGameStart	ActiveFighterCount	V	the game_start line's count is the kept view's (telemetry)	
+FfaMode.cs	FfaMode	OnGameStart	Leavers	R	a reset and the per-game carry: each recorded leave's tallies zeroed and gamePointsAtLeave set to -1 (FfaMode.cs:1084-1100); it adds no entry	
+FfaMode.cs	FfaMode	OnRoomLeft	Leavers	R	a reset on leaving the room (FfaMode.cs:1172)	
+FfaMode.cs	FfaMode	PurgeDepartedPlayers	players	R	removes destroyed entries from the raw list; must see every entry	
+FfaMode.cs	FfaMode	RawAnchorFallback	GetPlayersInTeam	R	vanilla indexes GetPlayersInTeam(anchor)[0] on the raw list, so an anchor it lacks falls back to a raw body; display only	
+FfaMode.cs	FfaMode	RawAnchorFallback	players	R	the anchor fallback's raw body (vanilla's victory flow); never a score, a point or a report	
+FfaMode.cs	FfaMode	RecordLeaver	Leavers	R	the ledger's only writer, keyed by Steam id (FfaMode.cs:1195-1213); each call site is a census row of its own, classified there (row 53)	
+FfaMode.cs	FfaMode	RecordLeaver	RecordLeaver	R	the ledger writer's own declaration; each call site is a census row of its own (row 53)	
+FfaMode.cs	FfaMode	ResolvePointNow	AlivePlayers	V	alive count via AlivePlayers() (surface 6)	
+FfaMode.cs	FfaMode	RoomCount	ActiveFighterCount	V	RoomCount via ActiveFighterCount(), the kept view; while LocalSitsOut() it counts PresentNonSpectators() (V8, V7-F1)		LocalSitsOut
+FfaMode.cs	FfaMode	RoomCount	PresentNonSpectators	V	LocalSitsOut() selects: a client that sits out counts the present seats, every other the kept view	
+FfaMode.cs	FfaMode	SampleTimelines	players	N	telemetry sampling	
+FfaMode.cs	FfaMode	ScoreLine	players	N	log line	
+FfaMode.cs	FfaMode	SpawnSpotlight	players	N	local spawn spotlight UI	
+FfaMode.cs	FfaMode	SpectatorBetweenGamesFlush	players	N	spectator-only path	
+FfaMode.cs	FfaMode	SpectatorCheckGameOver	players	N	spectator-only path	
+FfaMode.cs	FfaMode	SuddenDeathSuppresses	KeptPlayers	V	NEW V7 site: third-party match-point loop over KeptPlayers() (row 47)	
+FfaMode.cs	FfaMode	TickSpawnGrace	players	N	reads the local body (IsMine) only	
+FfaMode.cs	FfaTargeting	NearestOpponent	KeptPlayers	V	automatic targeting over KeptPlayers() (surface 7)	
+FfaMode.cs	GMArmsRace_NextRound_Ffa_Patch	Prefix	MasterKept	F	item 13 receivers: the next-round prefix ignores RPCA_NextRound under a master MasterKept() rejects	
+FfaMode.cs	LineRangeEffect_FfaOwnerExclusion_Patch	Prefix	KeptPlayers	V	NEW V7 site: line-range victims over KeptPlayers() (row 51)	
+FfaMode.cs	NCH_OnPlayerLeftRoom_Ffa_Patch	Prefix	ActiveFighterCount	V	cascade count via ActiveFighterCount(), the kept view	
+FfaMode.cs	PlayerManager_PlayerDied_Ffa_Patch	Prefix	KeptPlayers	V	NEW V7 site: the vanilla PlayerDied alive count over KeptPlayers() (row 51)	
+GameStateWatcher.cs	GameStateWatcher	BothPlayersSupportSharedGameToken	ActiveFighters	N	two-fighter shared-token consensus (1v1 rooms)	
+GameStateWatcher.cs	GameStateWatcher	BuildTeamReportPayload	ActiveFighters	N	2v2 report payload (team rooms)	
+GameStateWatcher.cs	GameStateWatcher	BuildTeamReportPayload	players	N	2v2 report payload (team rooms)	
+GameStateWatcher.cs	GameStateWatcher	CaptureEndStats	players	N	local end-of-match stats for UI	
+GameStateWatcher.cs	GameStateWatcher	DetermineLocalTeam	players	N	local team lookup	
+GameStateWatcher.cs	GameStateWatcher	EvaluateAchievements	players	N	local achievement claims; cross-player ones are server-side	
+GameStateWatcher.cs	GameStateWatcher	IsPlainOneVOneForHud	ActiveFighterCount	N	1v1 HUD predicate	
+GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	ActiveFighterCount	N	notification text: the banner's fighter count only; the ledger write in the same span is its own row (RecordLeaver, V, row 53)	
+GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	NotifyPlayerLeftRoom	R	the leave relay's own declaration: its banner text is N (ActiveFighterCount) and its ledger write is V (RecordLeaver, row 53)	
+GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	RecordLeaver	V	the actor-left callback's ledger write: in a gated running room it records a leave only for an actor this client keeps, read before the leave changes anything, so an unkept return's leave writes nothing and the entry of the game its seat left stands (V8, V7-F2)		IsKeptActor|IsQuarantinedActor
+GameStateWatcher.cs	GameStateWatcher	OnFfaGameOver	Leavers	N	local placement for this client's own end screen (GameStateWatcher.cs:6712-6737); the server ranks from the report	
+GameStateWatcher.cs	GameStateWatcher	OnFfaGameOver	players	N	local team lookup (IsMine) for the result screen	
+GameStateWatcher.cs	GameStateWatcher	OnFfaMatchStarted	ActiveFighters	R	roster freeze; a gated room passes the lock roster (K47)	
+GameStateWatcher.cs	GameStateWatcher	OnGameOver	ActiveFighterCount	N	1v1/2v2/OVT game over; FFA ends in OnFfaGameOver	
+GameStateWatcher.cs	GameStateWatcher	OnGameOver	ActiveFighters	N	1v1/2v2/OVT game over; FFA ends in OnFfaGameOver	
+GameStateWatcher.cs	GameStateWatcher	OnGameOver	PlayerList	N	1v1/2v2/OVT game over; FFA ends in OnFfaGameOver	
+GameStateWatcher.cs	GameStateWatcher	OnGameOver	players	N	1v1/2v2/OVT game over; FFA ends in OnFfaGameOver	
+GameStateWatcher.cs	GameStateWatcher	OnMatchStarted	ActiveFighterCount	R	roster freeze; a gated room passes the lock roster (K47)	
+GameStateWatcher.cs	GameStateWatcher	OnMatchStarted	ActiveFighters	R	roster freeze; a gated room passes the lock roster (K47)	
+GameStateWatcher.cs	GameStateWatcher	OpponentHasMod	ActiveFighters	N	1v1 opponent capability	
+GameStateWatcher.cs	GameStateWatcher	PollAchievementState	players	N	local achievement polling	
+GameStateWatcher.cs	GameStateWatcher	PollCardPicks	ActiveFighters	N	returns at once in FFA (GameStateWatcher.cs:7848)	
+GameStateWatcher.cs	GameStateWatcher	PollMatchState	players	N	cosmetic colour start (GameStateWatcher.cs:4652-4655)	
+GameStateWatcher.cs	GameStateWatcher	PollOpponentFps	ActiveFighters	N	telemetry	
+GameStateWatcher.cs	GameStateWatcher	PollRoomState	ActiveFighterCount	V	reads ActiveFighterCount(), the kept view; in a gated room the QUEUE-STALL latch reads only a started game (sec3.5 item 4, K34)	
+GameStateWatcher.cs	GameStateWatcher	PollRoomState	players	N	room-state telemetry and HUD flags	
+GameStateWatcher.cs	GameStateWatcher	PollRoomlessGameScene	ActiveFighterCount	N	roomless-scene watchdog	
+GameStateWatcher.cs	GameStateWatcher	RankedCodeRoom1v1InProgress	ActiveFighterCount	N	1v1 code rooms	
+GameStateWatcher.cs	GameStateWatcher	RecordFfaSession	ActiveFighters	N	local session history for the post-session screen	
+GameStateWatcher.cs	GameStateWatcher	RecordFfaSession	Leavers	N	the local session tally, display only (GameStateWatcher.cs:6615-6621)	
+GameStateWatcher.cs	GameStateWatcher	RecordFfaSession	players	N	local session history for the post-session screen	
+GameStateWatcher.cs	GameStateWatcher	RegisteredFighterBodies	players	N	used only when not an FFA room (GameStateWatcher.cs:3791)	
+GameStateWatcher.cs	GameStateWatcher	TickSpectateAttest	ActiveFighters	R	attestation roster (the third freeze); a gated room passes the lock roster (K47)	
+GameStateWatcher.cs	GameStateWatcher	TickSpectateAttest	IsMasterClient	N	code-room master attestation (codeRoom guard, GameStateWatcher.cs:1478)	
+GameStateWatcher.cs	GameStateWatcher	TickSpectateAttest	IsMasterClient#2	N	the master's spectate-validation cadence (GameStateWatcher.cs:1502-1518); its callees SpectateValidateActors and MasterSweepUnvalidated read the fence in their own spans (row 48; V9 per-occurrence override, N5)	
+GameStateWatcher.cs	GameStateWatcher	TryPublishSharedGameToken	IsMasterClient	N	1v1 shared game token	
+GameStateWatcher.cs	GameStateWatcher	TryReportFfaMatch	ActiveFighters	V	report roster over the kept view (surface 8)	
+GameStateWatcher.cs	GameStateWatcher	TryReportFfaMatch	Leavers	V	the report's leaver entries: a client that sits out files no report, so the builder returns before any entry while LocalSitsOut() (V8, V7-F1); the ledger holds only kept actors' leaves (row 53)		LocalSitsOut
+GameStateWatcher.cs	GameStateWatcher	TryReportFfaMatch	players	V	report roster over the kept view (surface 8)	
+GameStateWatcher.cs	GameStateWatcher	TryReportFfaMatch	players#1	R	the builder's null guard on the body list (returns before any read of the set); the roster's reads are over the kept view	
+GameStateWatcher.cs	GameStateWatcher	TryReportOvtMatch	ActiveFighters	N	OVT rooms	
+GameStateWatcher.cs	GameStateWatcher	TryReportOvtMatch	players	N	OVT rooms	
+GameStateWatcher.cs	GameStateWatcher	TryRequestContinuationSeries	ActiveFighters	N	1v1 continuation	
+GameStateWatcher.cs	GameStateWatcher	TryRequestOvtContinuationSeries	ActiveFighters	N	OVT continuation	
+GameStateWatcher.cs	GameStateWatcher	TryRequestOvtContinuationSeries	players	N	OVT continuation	
+GameStateWatcher.cs	GameStateWatcher	TryResolveOpponent	ActiveFighters	N	1v1 opponent resolution	
+GameStateWatcher.cs	RosterCensusEmitter	ReadFighterCount	ActiveFighterCount	R	census feed reads the unfiltered list (K48): PresentNonSpectators()	
+GameStateWatcher.cs	RosterCensusEmitter	ReadSeats	PlayerList	R	census feed reads every actor (K48)	
+GameStateWatcher.cs	RosterCensusEmitter	ResolveBodiesByActor	players	R	census feed resolves every body by actor (K48)	
+H2HSummary.cs	H2HSummary	IsPlainTwoFighterRoom	ActiveFighterCount	N	1v1 summary UI	
+H2HSummary.cs	H2HSummary	ResolveOpponent	OtherActiveFighters	N	1v1 summary UI	
+NametagFontRenderer.cs	NametagFontRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no nametag	
+NametagGlowRenderer.cs	NametagGlowRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no glow	
+NativeUI.cs	NativeUI	BuildComparePlayerNemesisPanel	players	N	JSON record field	
+NativeUI.cs	NativeUI	BuildFfaRecentRowText	players	N	JSON record field	
+NativeUI.cs	NativeUI	DrawFfaRecentHoverGraph	players	N	JSON record field	
+NativeUI.cs	NativeUI	EstimateFfaRecentHeight	players	N	JSON record field	
+NativeUI.cs	NativeUI	RenderFfaBettingSection	players	N	JSON record field	
+NetworkReplicaDiagnostics.cs	NetworkReplicaSpectatorSnapshotPatch	Postfix	MasterClient	N	diagnostics	
+NetworkReplicaDiagnostics.cs	NetworkReplicaSpectatorSnapshotPatch	Postfix	Sender	N	diagnostics	
+NetworkSeatTelemetry.cs	NetworkSeatTelemetry	SampleEligibleKey	ActiveFighters	N	telemetry	
+PerfPatches.cs	PlayerManagerSetInputActiveNullGuard	Prefix	players	R	vanilla input loop with a null guard; input drives only the local body	
+PlayerColorCosmetic.cs	PlayerColorCosmetic	DelayedApplyAll	ActiveFighters	N	cosmetic colour	
+PlayerColorCosmetic.cs	PlayerColorCosmetic	DelayedApplyAll	players	N	cosmetic colour	
+PlayerColorCosmetic.cs	PlayerColorCosmetic	OnShowPlayerColorsToggled	players	N	cosmetic colour	
+PlayerColorCosmetic.cs	PlayerColorCosmetic	ReapplyForActor	ActiveFighters	N	cosmetic colour	
+PlayerColorCosmetic.cs	PlayerColorCosmetic	ReapplyForActor	players	N	cosmetic colour	
+PlayerEffectCosmetic.cs	PlayerEffectCosmetic	DelayedApplyAll	ActiveFighters	N	cosmetic effect	
+PlayerEffectCosmetic.cs	PlayerEffectCosmetic	DelayedApplyAll	players	N	cosmetic effect	
+PlayerEffectCosmetic.cs	PlayerEffectCosmetic	ReapplyForActor	ActiveFighters	N	cosmetic effect	
+PlayerEffectCosmetic.cs	PlayerEffectCosmetic	ReapplyForActor	players	N	cosmetic effect	
+Plugin.cs	BlockTryBlockCounterPatch	Postfix	IsMasterClient	N	log field only (Plugin.cs:7933)	
+Plugin.cs	CardChoiceEndPickPatch	Prefix	GetPlayerWithID	N	local picker (IsMine) only	
+Plugin.cs	CardChoiceVisuals_Show_Competitive_Patch	Postfix	players	N	pick visuals UI	
+Plugin.cs	CardChoiceVisuals_Show_Competitive_Patch	Prefix	players	N	pick visuals UI	
+Plugin.cs	CardPickBodyTinter	RetintAfterChildrenSpawn	ActiveFighters	N	cosmetic tint	
+Plugin.cs	CharacterSelectionMenu_PlayerJoined_2v2_Patch	Prefix	players	N	2v2 lobby	
+Plugin.cs	CompetitiveRoundsBehaviour	MaybeRigDump	players	N	dev diagnostics	
+Plugin.cs	CompetitiveRoundsBehaviour	ProbeDancePose	players	N	dev diagnostics	
+Plugin.cs	CompetitiveRoundsBehaviour	TickTestSilence	players	N	dev diagnostics	
+Plugin.cs	Cr2v2DiagCallbacks	Force2v2StartGameWhenReady	players	N	2v2 start	
+Plugin.cs	Cr2v2DiagCallbacks	OnJoinedRoom	IsMasterClient	N	2v2 diag log (Diag2v2.IsActive guard, Plugin.cs:4521)	
+Plugin.cs	Cr2v2DiagCallbacks	OnJoinedRoom	PlayerCount	N	telemetry only (the joined_room line)	
+Plugin.cs	Cr2v2DiagCallbacks	OnMasterClientSwitched	ActiveFighters	F	FenceMaster: the spectator handoff generalised to every unkept master (row 48)	
+Plugin.cs	Cr2v2DiagCallbacks	OnMasterClientSwitched	OnMasterClientSwitched	F	the master-switch callback: FenceMaster() runs here (row 48); the count ticket is spent (FfaMapScale.OnMasterClientSwitched, R)	
+Plugin.cs	Cr2v2DiagCallbacks	OnMasterClientSwitched	OnMasterClientSwitched#2	R	the call that clears this client's own map-scale ticket and, since V9 (N3), its recorded EVT_SCALE count at every switch (Plugin.cs:4171); unconditional by design (V9 per-occurrence override)	
+Plugin.cs	Cr2v2DiagCallbacks	OnMasterClientSwitched	SetMasterClient	F	FenceMaster: the spectator handoff generalised to every unkept master (row 48)	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerEnteredRoom	IsMasterClient	N	master notes a spectator entry (Plugin.cs:3911-3913); spectator bookkeeping	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerEnteredRoom	MasterMaySend	F	the master's cooperative close of an entrant the registration firewall rejects; a master sender, fenced like the firewall's own close: MasterMaySend() (row 48)	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerEnteredRoom	OnPlayerEnteredRoom	R	the actor-entered callback: spectator and roster-firewall resolution over the entering actor, raw by design (K47); a return's new actor is admitted by the firewall and quarantined by the view (row 46)	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	ActiveFighters	V	reporter election over ActiveFighters(), the kept view (Plugin.cs:4106)	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	NotifyPlayerLeftRoom	R	relays every non-spectator leave to the banner and the ledger; the ledger write reads the view at its own row (row 53)	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	OnPlayerLeftRoom	R	the actor-left callback: spectator, impostor and firewall resolution over the leaving actor, raw by design (a leave is seen whatever the view says); its FFA ledger write is classified at NotifyPlayerLeftRoom (row 53)	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerPropertiesUpdate	OnPlayerPropertiesUpdate	R	identity bookkeeping: a change of u_id, a spectator mark or the proximity capability invalidates the roster identity cache (Plugin.cs:4138)	
+Plugin.cs	Cr2v2DiagCallbacks	RepeatedCompetitiveCosmeticReapply	ActiveFighters	N	cosmetic reapply	
+Plugin.cs	Diag2v2	DescribeRoom	PlayerCount	N	diag text	
+Plugin.cs	FacePublisher	TryReadAndApply	ActiveFighters	N	cosmetic face	
+Plugin.cs	FaceResync	TrySendLocalFace	players	N	cosmetic face	
+Plugin.cs	GMArmsRaceStartGameBlockResetPatch	RunSweep	players	R	game-start block reset over every body; a reset gives no body an effect	
+Plugin.cs	GMArmsRace_PlayerJoined_Diag_Patch	Prefix	players	N	diag log	
+Plugin.cs	GameCrownHandler2v2Patch	Prefix	players	N	crown cosmetic	
+Plugin.cs	MultiPickerShowVisualsPatch	Prefix	players	N	2v2 only; returns in FFA (Plugin.cs:6457)	
+Plugin.cs	OvtExtraPickPatch	Prefix	GetPlayerWithID	N	OVT rooms	
+Plugin.cs	OvtExtraPickPatch	Prefix	players	N	OVT rooms	
+Plugin.cs	PlayerAssigner_CreatePlayer_2v2_Patch	Prefix	players	N	2v2 body creation	
+Plugin.cs	QuickplayChurnAbandonGuardPatch	Prefix	ActiveFighterCount	N	quickplay rooms	
+Plugin.cs	QuickplayChurnFreezePatch	Postfix	ActiveFighterCount	N	quickplay rooms	
+PoisonSync.cs	PoisonSync	Apply	players	V	attacker lookup for credit; the damage reaches the DoDamage prefix (surface 3)	VanillaFixes.cs|DamageRulesGate|BeforeDoDamage
+PoisonSync.cs	PoisonSync	OnEvent	Sender	R	identity check: only the victim's owner speaks for the victim (PoisonSync.cs:854-860), so a quarantined sender speaks only for its own quarantined body, whose damage no count or credit reads (surfaces 3 and 6)	
+PoisonSync.cs	PoisonSync	RawNonSpectatorCount	PlayerList	R	whole-room predicate over every actor (counting a quarantined one is the stricter side)	
+PoisonSync.cs	PoisonSync	RawNonSpectators	PlayerList	R	whole-room predicate over every actor	
+PortraitRender.cs	PortraitRender	DevLeverBlocked	players	N	dev lever	
+PostSessionReport.cs	PostSessionReport	FfaRosterOverlapEnough	players	N	JSON record field	
+PostSessionReport.cs	PostSessionReport	FfaRosterPlayers	players	N	JSON record field	
+PostSessionReport.cs	PostSessionReport	FfaSessionMatches	players	N	JSON record field	
+ProximityVictimPatches.cs	ProximityVictimGate	Census	PlayerList	R	whole-room capability predicate over every actor	
+QuickChat.cs	QuickChat	Send	GetPlayerWithActorID	N	chat	
+RoomActors.cs	RoomActors	ActiveFighterCount	ActiveFighterCount	V	view definition: no fast path while GatedRunning; counts ActiveFighters()	
+RoomActors.cs	RoomActors	ActiveFighterCount	ActiveFighters	V	view definition: no fast path while GatedRunning; counts ActiveFighters()	
+RoomActors.cs	RoomActors	ActiveFighterCount	PlayerCount	V	view definition: no fast path while GatedRunning; counts ActiveFighters()	
+RoomActors.cs	RoomActors	ActiveFighters	ActiveFighters	V	view definition: skips every actor IsKeptActor() rejects	
+RoomActors.cs	RoomActors	ActiveFighters	IsKeptActor	V	the fighter view filters through IsKeptActor in a gated room	
+RoomActors.cs	RoomActors	ActiveFighters	PlayerList	V	view definition: skips every actor IsKeptActor() rejects	
+RoomActors.cs	RoomActors	AnySpectatorPresent	RoomPlayers	R	whole-room spectator predicate (RoomActors.cs:447-457); a quarantined fighter is not a spectator, so the view has nothing to filter	
+RoomActors.cs	RoomActors	IsImpostorReplicated	RoomPlayers	R	identity resolution: the duplicate-identity rule compares every earlier present actor, kept or not (RoomActors.cs:251-272)	
+RoomActors.cs	RoomActors	IsUnauthorized	RoomPlayers	R	the registration firewall's duplicate-identity rule reads every earlier present actor (RoomActors.cs:361-381); the firewall decides the roster, the kept set decides play	
+RoomActors.cs	RoomActors	KeptPlayers	KeptPlayers	R	a same-named delegate of FfaLateEntry.KeptPlayers(), whose own row is V; the own-name rule cannot read through it	
+RoomActors.cs	RoomActors	MasterIsSpectator	MasterClient	F	master-authority predicate; the receiver fence adds MasterKept()	
+RoomActors.cs	RoomActors	MasterIsSpectator	MasterKept	F	an unkept master counts as a spectator master (MasterKept())	
+RoomActors.cs	RoomActors	OtherActiveFighterCount	ActiveFighterCount	V	view definition: subtracts the local seat only when kept	
+RoomActors.cs	RoomActors	OtherActiveFighterCount	IsKeptActor	V	the own actor is subtracted only when the view keeps it	
+RoomActors.cs	RoomActors	OtherActiveFighterCount	OtherActiveFighterCount	V	view definition: subtracts the local seat only when kept	
+RoomActors.cs	RoomActors	OtherActiveFighterCount	PlayerCount	V	view definition: subtracts the local seat only when kept	
+RoomActors.cs	RoomActors	OtherActiveFighters	ActiveFighters	V	view definition over ActiveFighters()	
+RoomActors.cs	RoomActors	OtherActiveFighters	OtherActiveFighters	V	view definition over ActiveFighters()	
+RoomActors.cs	RoomActors	PresentNonSpectators	PresentNonSpectators	R	the present-actor accessor's own declaration: the room's actors minus spectators, raw by design (the census, the barrier)	
+RoomActors.cs	RoomActors	PresentNonSpectators	RoomPlayers	R	the present-actor accessor walks the room's actors raw by design	
+RoomActors.cs	RoomActors	Spectators	PlayerList	N	spectator list	
+SessionReportModel.cs	SessionReportModel	Build	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportModel.cs	SessionReportModel	BuildTotals	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportModel.cs	SessionReportModel	FfaScoreLabel	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportModel.cs	SessionReportModel	Parse	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportModel.cs	SessionReportModel	ScoreLine	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportModel.cs	SessionReportModel	TeamScoreLabel	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportView.cs	SessionReportView	DrawBuilds	RoomPlayers	N	the session report view reads the model's own player list (SessionReportModel.cs:461), not the room's	
+SessionReportView.cs	SessionReportView	MeasureBuildPages	RoomPlayers	N	the session report view reads the model's own player list (SessionReportModel.cs:461), not the room's	
+SpectatorPatches.cs	Spectator_NoMapAuthority_CallInBare_Patch	Prefix	MasterFenced	F	a fenced master sends no call-in (item 13, row 48)	
+SpectatorPatches.cs	Spectator_NoMapAuthority_CallIn_Patch	Prefix	MasterFenced	F	a fenced master sends no call-in (item 13, row 48)	
+SpectatorPatches.cs	Spectator_NoMapAuthority_Load_Patch	Prefix	MasterFenced	F	a fenced master sends no map load (item 13, row 48)	
+SpectatorPatches.cs	Spectator_RegistrationFirewall_Patch	Prefix	MasterMaySend	F	master-only close of an unauthorized actor (SpectatorPatches.cs:832-835); MasterMaySend()	
+SpectatorSync.cs	SpectatorSync	ActorDeparted	GetPlayer	N	spectator boundary replay: whether an actor is still in the room (SpectatorSync.cs:1811-1818); called only from ApplyDecks	
+SpectatorSync.cs	SpectatorSync	ApplyDecks	GetPlayer	N	spectator deck apply: skips an actor that left mid-manifest (SpectatorSync.cs:1961-1972); spectator-only path	
+SpectatorSync.cs	SpectatorSync	BetweenGamesFlush	players	N	spectator-only path	
+SpectatorSync.cs	SpectatorSync	BuildSnapshot	ActiveFighters	V	snapshot fighter list over ActiveFighters(), the kept view	
+SpectatorSync.cs	SpectatorSync	FindBodyByActor	players	R	identity resolution by actor; callers decide	
+SpectatorSync.cs	SpectatorSync	HandleRequest	GetPlayer	F	the requester's identity; the handler is master-only and fenced (row 48)	
+SpectatorSync.cs	SpectatorSync	HandleRequest	MasterMaySend	F	master-only request handler; MasterMaySend()	
+SpectatorSync.cs	SpectatorSync	HandleRequest	Sender	F	the requester's identity; the handler is master-only and fenced (row 48)	
+SpectatorSync.cs	SpectatorSync	HandleSnapshot	MasterClient	F	receiver fence: the sender must be the current master and kept	
+SpectatorSync.cs	SpectatorSync	HandleSnapshot	MasterKept	F	item 13 receivers: HandleSnapshot refuses a snapshot from a master MasterKept() rejects	
+SpectatorSync.cs	SpectatorSync	HandleSnapshot	Sender	F	receiver fence: the snapshot's sender must be the current master and kept on this client (row 48)	
+SpectatorSync.cs	SpectatorSync	HeartbeatLoop	ActiveFighterCount	N	spectator heartbeat	
+SpectatorSync.cs	SpectatorSync	MaintenanceLoop	ActiveFighters	N	spectator maintenance	
+SpectatorSync.cs	SpectatorSync	MasterNoteSpectatorEntered	IsMasterClient	N	spectator bookkeeping	
+SpectatorSync.cs	SpectatorSync	MasterSweepUnvalidated	MasterMaySend	F	master-only spectator sweep; MasterMaySend()	
+SpectatorSync.cs	SpectatorSync	MasterSweepUnvalidated	PlayerList	F	master-only spectator sweep; MasterMaySend()	
+SpectatorSync.cs	SpectatorSync	OnJoinedSpectatorRoom	PlayerCount	N	spectator join	
+SpectatorTeardownProbe.cs	SpectatorTeardownProbe	SnapshotRoster	players	N	diagnostic probe	
+SpectatorTeardownProbe.cs	SpectatorTeardownProbe	Tick	players	N	diagnostic probe	
+TabStatsOverlay.cs	TabStatsOverlay	BroadcastEnsureFresh	players	N	stats overlay UI	
+TabStatsOverlay.cs	TabStatsOverlay	CaptureAllBuildStats	players	N	stats overlay UI	
+TabStatsOverlay.cs	TabStatsOverlay	Draw	players	N	stats overlay UI	
+TabStatsOverlay.cs	TabStatsOverlay	RefreshSnapshot	players	N	stats overlay UI	
+TeamColorIdentity.cs	CardBarTeamColor	Tick	players	N	cosmetic colour	
+TeamColorIdentity.cs	RematchTextTeamColorPatch	AfterDisplayLoop	IsMasterClient	N	UI text	
+TeamColorIdentity.cs	TeamColorIdentity	Rebuild	players	N	cosmetic colour	
+TrailRenderer.cs	TrailCosmetic	DelayedAttachAll	ActiveFighters	N	cosmetic trail	
+TrailRenderer.cs	TrailCosmetic	DelayedAttachAll	players	N	cosmetic trail	
+TrailRenderer.cs	TrailCosmetic	ReattachForActor	ActiveFighters	N	cosmetic trail	
+TrailRenderer.cs	TrailCosmetic	ReattachForActor	players	N	cosmetic trail	
+TrailRenderer.cs	TrailPhotonCallbacks	OnMasterClientSwitched	OnMasterClientSwitched	N	empty interface callback (TrailRenderer.cs:526)	
+TrailRenderer.cs	TrailPhotonCallbacks	OnPlayerEnteredRoom	OnPlayerEnteredRoom	N	empty interface callback (TrailRenderer.cs:523)	
+TrailRenderer.cs	TrailPhotonCallbacks	OnPlayerLeftRoom	OnPlayerLeftRoom	N	empty interface callback (TrailRenderer.cs:524)	
+TrailRenderer.cs	TrailPhotonCallbacks	OnPlayerPropertiesUpdate	OnPlayerPropertiesUpdate	N	cosmetic refresh on a player's property change (TrailRenderer.cs:515-520)	
+VanillaCardSequence.cs	VanillaCardSequence	OnGameStart	IsMasterClient	N	log text only (VanillaCardSequence.cs:95-96)	
+VanillaCardSequence.cs	VanillaCardSequence	ResolvePicker	GetPlayerWithID	N	vanilla CardChoice picker, which FFA's own pick phase replaces (INFERRED)	
+VanillaCardSequence.cs	VanillaCardSequence	ResolvePicker	GetPlayersInTeam	N	vanilla CardChoice picker, which FFA's own pick phase replaces (INFERRED)	
+VanillaFixes.cs	GetColorFromTeamEmptyTeamPatch	Prefix	GetPlayersInTeam	R	null guard for a vanilla team lookup; one body per FFA team	
+VanillaFixes.cs	GetColorFromTeamEmptyTeamPatch	Prefix	players	R	null guard for a vanilla team lookup; one body per FFA team	
+VanillaFixes.cs	GetFirstPlayerInTeamEmptyTeamPatch	Prefix	GetPlayersInTeam	R	null guard for a vanilla team lookup; one body per FFA team	
+VanillaFixes.cs	GetFirstPlayerInTeamEmptyTeamPatch	Prefix	players	R	null guard for a vanilla team lookup; one body per FFA team	
+VanillaFixes.cs	GrowNormalize	Quorum	PlayerList	R	whole-room quorum over every actor	
+VanillaFixes.cs	LocalPlayerIdPublishPatch	Prefix	IsMasterClient	N	local identity publish; the master bit is the two-seat rule	
+VanillaFixes.cs	LocalPlayerIdPublishPatch	Prefix	players	N	local identity publish; the master bit is the two-seat rule	
+VanillaFixes.cs	NetDiag	Tick	PlayerCount	N	diagnostics	
+VanillaFixes.cs	PhoenixRespawnPatch	SafeRespawn	players	V	NEW V7 site: a revive target that is quarantined is refused (row 51)	
+VanillaFixes.cs	PlayerNicknameRepairDriver	OnPlayerPropertiesUpdate	OnPlayerPropertiesUpdate	N	nickname label refresh, display only (VanillaFixes.cs:3744)	
+VanillaFixes.cs	RemotePlayerIdOrderPatch	Prefix	IsMasterClient	N	remote identity order; the master bit is the two-seat rule	
+VanillaFixes.cs	RemotePlayerIdOrderPatch	StartWhenIdsLand	ActiveFighterCount	N	remote identity order; counts decide only the two-seat fallback	
+VanillaFixes.cs	RemotePlayerIdOrderPatch	StartWhenIdsLand	PlayerCount	N	remote identity order; counts decide only the two-seat fallback	

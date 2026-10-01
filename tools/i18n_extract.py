@@ -142,6 +142,10 @@ FILES = [
     # SecureRouteRules.cs is deliberately absent: pure decision code with no
     # display text. Listed because the list is FIXED (#357, #464).
     "SecureRouteText.cs",
+    # FFA assembly and late entry (connect-failure V11): the waiting, exit,
+    # re-form, dissolve and joined toasts, all literal notification or
+    # I18n.Tr/TrF arguments.
+    "FfaAssembly.cs", "FfaLateEntry.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

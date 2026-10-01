@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    EXECUTES plugin/FfaLateRules.cs under a plain compiler, with no Unity, no
+    Photon and no BepInEx (the connect-failure build, evidence sec8.2). The
+    file holds the late entry's and the kept epoch's rules as pure functions,
+    so the rules are RUN rather than asserted about by a source-shape test
+    (#391).
+
+    The harness does three things, and all three must hold for exit 0:
+
+      1. runs FfaLateRules.SelfTest() against the REAL functions, which must
+         pass every case and must run more than zero of them;
+
+      2. runs it against each mutant named in K33, K42, K44 and K45, which
+         must turn EXACTLY its declared fixtures red (its named fixture among
+         them): a mutant caught for the wrong reason is not a control;
+
+      3. runs it against each inert twin, which must stay green with printed
+         lines identical to the baseline's.
+
+    Modelled on tools/roster-census-harness. net10.0 because that is the
+    runtime installed on this build seat; RollForward keeps the next SDK
+    rotation from turning this into a green-looking nothing.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>late-rules-harness</AssemblyName>
+    <RootNamespace>CompetitiveRounds.Harness</RootNamespace>
+    <!-- Only the files named below. A default glob would drag in the whole
+         plugin tree, which does not compile without Unity. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Main.cs" />
+    <Compile Include="../../plugin/FfaLateRules.cs" />
+  </ItemGroup>
+
+</Project>

@@ -29,9 +29,15 @@ marker table is someone else's and is never dropped. The terminates, drops
 and truncates go through ONE sender, send_destructive, which refuses unless
 the census ran first on the same record.
 
-Synthetic identities only: SteamID64s from STEAM_BASE (inside the individual
-range, outside every prefix a real account carries), Discord ids from
-DISCORD_BASE, names composed here.
+Synthetic identities only: Steam ids from STEAM_BASE over STEAM_SPAN, whose
+high word is 0x010FFFFF, account type 0, so none of them is an individual
+SteamID64 (steamid64.py: an individual id is type 1), whatever Steam has
+allocated; test_cf_fixture_steam_ids.py proves the decode. The pc pool's
+range check admits only individual ids, so Env injects a pool-validity
+predicate for the harness alone (inject_pool_predicate) that admits exactly
+this block; production code is unchanged, and without the injection the
+pool refuses every harness player. Discord ids from DISCORD_BASE, names
+composed here.
 """
 
 import ast
@@ -95,13 +101,80 @@ def require_pg(dsn, opted_out):
 MOD_SECRET = "dc-reveal-mod-secret"
 ADMIN_SECRET = "dc-reveal-admin-secret"
 INTERNAL_KEY = "dc-reveal-internal-key"
-STEAM_BASE = 76561202100000000        # 7656120210000xxxx: SteamID64s by the pool's own range check
+STEAM_BASE = 76561193400000000        # high word 0x010FFFFF: account type 0, not an individual SteamID64
+STEAM_SPAN = 10 ** 6                  # steam_of's offsets; the block stays inside that one high word
 DISCORD_BASE = 900000000000000000     # 18 digits, synthetic
 BASE_URL = "http://dc-reveal.test"
 
 
 def steam_of(n: int) -> str:
-    return str(STEAM_BASE + int(n))
+    n = int(n)
+    if not 0 <= n < STEAM_SPAN:
+        raise ValueError("steam_of: offset outside the harness block")
+    return str(STEAM_BASE + n)
+
+
+# -- the pool-validity predicate, injected for this harness only ----------------
+
+def _api_modules():
+    """Every imported module whose file lies under backend/api."""
+    import sys
+    root = os.path.normcase(os.path.realpath(API_DIR)) + os.sep
+    return [m for _name, m in sorted(sys.modules.items())
+            if getattr(m, "__file__", None)
+            and os.path.normcase(os.path.realpath(m.__file__)).startswith(root)]
+
+
+def _holds(value, needle, depth=0, seen=None):
+    """True when a container (dict, list, tuple, set) holds a string that
+    contains needle, at any depth up to six."""
+    if isinstance(value, str):
+        return needle in value
+    if depth > 6 or not isinstance(value, (dict, list, tuple, set, frozenset)):
+        return False
+    seen = set() if seen is None else seen
+    if id(value) in seen:
+        return False
+    seen.add(id(value))
+    items = list(value.keys()) + list(value.values()) if isinstance(value, dict) else list(value)
+    return any(_holds(v, needle, depth + 1, seen) for v in items)
+
+
+def inject_pool_predicate(mp):
+    """Re-point the pool's Steam id rule at this harness's block, through mp
+    (a pytest MonkeyPatch), so every change is undone at the case's end.
+
+    The rule has two readers: steamid64.is_individual_id and
+    steamid64.individual_id_sql read INDIVIDUAL_MIN and INDIVIDUAL_MAX at call
+    time, and main.py's SQL constants (_PC_POOL_STEAM_ID_SQL and the constants
+    built from it or from individual_id_sql at import) carry the interval as
+    the text "BETWEEN <min> AND <max>". Both are re-pointed to
+    [STEAM_BASE, STEAM_BASE + STEAM_SPAN - 1]: the two module constants, and
+    every module-level string of every imported backend/api module that holds
+    the production interval's text. A container that holds that text cannot be
+    re-pointed here and fails the case by name; so does a sweep that finds no
+    string at all. Returns the names re-pointed."""
+    import main  # noqa: F401 -- the sweep must see main's composed constants
+    import steamid64
+    lo, hi = STEAM_BASE, STEAM_BASE + STEAM_SPAN - 1
+    if (steamid64.INDIVIDUAL_MIN, steamid64.INDIVIDUAL_MAX) == (lo, hi):
+        return []   # already injected in this case
+    prod = "BETWEEN %d AND %d" % (steamid64.INDIVIDUAL_MIN, steamid64.INDIVIDUAL_MAX)
+    test = "BETWEEN %d AND %d" % (lo, hi)
+    patched, stuck = [], []
+    for mod in _api_modules():
+        for name, value in list(vars(mod).items()):
+            if isinstance(value, str):
+                if prod in value:
+                    mp.setattr(mod, name, value.replace(prod, test))
+                    patched.append("%s.%s" % (mod.__name__, name))
+            elif _holds(value, prod):
+                stuck.append("%s.%s" % (mod.__name__, name))
+    assert not stuck, "the pool interval sits in a container the harness cannot re-point: %s" % stuck
+    assert patched, "no backend/api string carries the pool interval: the injection would be inert"
+    mp.setattr(steamid64, "INDIVIDUAL_MIN", lo)
+    mp.setattr(steamid64, "INDIVIDUAL_MAX", hi)
+    return patched
 
 
 def discord_of(n: int) -> str:
@@ -537,6 +610,7 @@ class Env:
                                         connect_args={"server_settings": {"search_path": SCHEMA}},
                                         execution_options={"schema_translate_map": {None: SCHEMA}})
         mp = self.mp
+        self.pool_predicate_sites = inject_pool_predicate(mp)
         mp.setenv("API_SECRET_KEY", INTERNAL_KEY)
         mp.delenv("STEAM_WEB_API_KEY", raising=False)
         mp.setattr(main, "MATCH_HMAC_SECRET", MOD_SECRET)
