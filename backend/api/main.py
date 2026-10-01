@@ -67077,11 +67077,13 @@ _REPORT_WATCHED_SQL = """
 # participant predicate is the same one _REPORT_FFA_SQL carries. A game with
 # no lobby row is its own one-game lobby (`g.id = an.id`). `total_rows` is the
 # participant-filtered size of the whole lobby sitting, as in the 1v1
-# statement, so `games_omitted` is exact whatever the LIMIT hides.
+# statement, so `games_omitted` is exact whatever the LIMIT hides. Each row
+# carries fm.settings_frozen beside the lobby columns, as _REPORT_FFA_SQL does:
+# both feed _report_ffa_games, whose _ffa_settings_block reads the column.
 _REPORT_FFA_LOBBY_SQL = """
     SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
            COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s,
-           """ + _FFA_SETTINGS_COLS + """,
+           fm.settings_frozen, """ + _FFA_SETTINGS_COLS + """,
            COUNT(*) OVER () AS total_rows
       FROM ffa_matches fm
       LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id

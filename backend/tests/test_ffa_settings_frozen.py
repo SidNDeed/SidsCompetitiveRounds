@@ -141,8 +141,13 @@ def test_every_ffa_history_surface_selects_the_frozen_block():
         s = _src(fn)
         assert s.count("m.settings_frozen") == 1, fn
         assert s.count("_ffa_settings_block(") == 1, fn
+    # The session report's two FFA statements (one game, the lobby sitting)
+    # both feed _report_ffa_games, the one place the report builds the block.
     assert main._REPORT_FFA_SQL.count("fm.settings_frozen") == 1
-    assert _src("_report_load_ffa").count("_ffa_settings_block(r)") == 1
+    assert main._REPORT_FFA_LOBBY_SQL.count("fm.settings_frozen") == 1
+    assert _src("_report_ffa_games").count("_ffa_settings_block(r)") == 1
+    assert _src("_report_load_ffa").count("_report_ffa_games(") == 1
+    assert _src("_report_load_ffa_lobby").count("_report_ffa_games(") == 1
     # one reader of the column: the block helper (definition + one call)
     assert inspect.getsource(main).count("_ffa_settings_frozen(") == 2
 
