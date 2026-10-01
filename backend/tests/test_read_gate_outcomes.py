@@ -189,7 +189,7 @@ def test_a_valid_credential_wins_over_a_failed_lookup(env):
 # -- H2: a session the standby has not received yet ---------------------------
 
 def test_standby_miss_503_pending(env, monkeypatch):
-    monkeypatch.setattr(read_gate, "IS_REPLICA", True)
+    monkeypatch.setattr(read_gate, "REPLICA_NODE", True)
     env.set_mode("enforce")
     r = _get(env, PUBLIC_PATH, session=UNKNOWN_TOKEN)
     assert r.status_code == 503 and r.json()["detail"] == "session_replication_pending"
@@ -202,14 +202,14 @@ def test_standby_miss_503_pending(env, monkeypatch):
 
 
 def test_primary_miss_401(env, monkeypatch):
-    monkeypatch.setattr(read_gate, "IS_REPLICA", False)
+    monkeypatch.setattr(read_gate, "REPLICA_NODE", False)
     env.set_mode("enforce")
     r = _get(env, PUBLIC_PATH, session=UNKNOWN_TOKEN)
     assert r.status_code == 401 and r.json()["detail"] == "session_required"
 
 
 def test_standby_expired_row_401(env, monkeypatch):
-    monkeypatch.setattr(read_gate, "IS_REPLICA", True)
+    monkeypatch.setattr(read_gate, "REPLICA_NODE", True)
     env.set_mode("enforce")
     r = _get(env, PUBLIC_PATH, session=EXPIRED)
     assert r.status_code == 401 and r.json()["detail"] == "session_required"

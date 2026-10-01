@@ -132,7 +132,7 @@ def gate_env(monkeypatch, *, mode="log", replica=False):
     monkeypatch.setattr(database, "async_session", stub)
     monkeypatch.setattr(read_gate, "_mono", lambda: clock.mono)
     monkeypatch.setattr(read_gate, "_wall", lambda: clock.wall)
-    monkeypatch.setattr(read_gate, "IS_REPLICA", replica)
+    monkeypatch.setattr(read_gate, "REPLICA_NODE", replica)
     monkeypatch.setenv("API_SECRET_KEY", INTERNAL_KEY)
     reset_gate()
     try:

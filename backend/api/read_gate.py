@@ -93,7 +93,7 @@ READ_GATE_CLIENT_MIN: str | None = None
 SOCKET_READ_GATE_BUILT = False
 
 # Same expression as main.IS_REPLICA (both read the one environment value).
-IS_REPLICA = os.getenv("SCR_REPLICA_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+REPLICA_NODE = os.getenv("SCR_REPLICA_MODE", "").strip().lower() in ("1", "true", "yes", "on")
 
 OPERATOR_KEY_PREFIX = "scrop1_"
 _OPERATOR_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
@@ -595,7 +595,7 @@ def census_reset() -> None:
     _agents.clear()
 
 
-def count(template, method, cred_class, key_id, version_present, refused,
+def census_add(template, method, cred_class, key_id, version_present, refused,
           client_host=None, agent=None) -> None:
     k = (template, method, cred_class, key_id or "", bool(version_present), bool(refused))
     _census[k] = _census.get(k, 0) + 1
@@ -617,7 +617,7 @@ def count(template, method, cred_class, key_id, version_present, refused,
 
 def census_snapshot(mode: str) -> dict:
     return {
-        "node": "standby" if IS_REPLICA else "primary",
+        "node": "standby" if REPLICA_NODE else "primary",
         "boot_id": BOOT_ID,
         "since": SINCE,
         "mode": mode,
@@ -690,7 +690,7 @@ async def evaluate(request, accept_operator: bool) -> _Evaluation:
     if verdict == "error":
         ev.error = True
     elif verdict == "miss":
-        if IS_REPLICA:
+        if REPLICA_NODE:
             ev.standby_miss = True
         else:
             ev.bad_session = True
@@ -770,11 +770,11 @@ async def read_gate(request: Request) -> None:
     mode = await current_mode()
     if cls in (C_ADMIN_SIGNED, C_PORTAL, C_INTERNAL):
         if mode in ("log", "enforce"):
-            count(template, method, _presence_class(request, cls), "", version_present,
+            census_add(template, method, _presence_class(request, cls), "", version_present,
                   False, host, agent)
         return
     if mode == UNKNOWN:
-        count(template, method, "mode_unknown", "", version_present, True, host, agent)
+        census_add(template, method, "mode_unknown", "", version_present, True, host, agent)
         raise _refuse(503, "read_gate_unavailable", retry_after=5)
     if cls == C_PROBE:
         request.state.read_gate_no_store = True
@@ -784,20 +784,20 @@ async def read_gate(request: Request) -> None:
         request.state.read_gate_no_store = True
     if cls == C_BOT_ONLY and mode == "enforce":
         if internal_key_valid(request.headers.get("X-Internal-Key")):
-            count(template, method, "internal", "", version_present, False, host, agent)
+            census_add(template, method, "internal", "", version_present, False, host, agent)
             return
         ev = await evaluate(request, accept_operator=True)
         cred = ev.valid_class or _unverified_class(ev, version_present)
-        count(template, method, cred, ev.key_id, version_present, True, host, agent)
+        census_add(template, method, cred, ev.key_id, version_present, True, host, agent)
         raise _refuse(403, "internal_key_required")
     ev = await evaluate(request, accept_operator=(cls != C_PLAYER))
     if ev.valid_class is not None:
-        count(template, method, ev.valid_class, ev.key_id, version_present, False, host, agent)
+        census_add(template, method, ev.valid_class, ev.key_id, version_present, False, host, agent)
         request.state.read_gate_credential = (ev.valid_class, ev.key_id)
         return
     cred = _unverified_class(ev, version_present)
     enforcing = (mode == "enforce" or cls == C_PROBE)
-    count(template, method, cred, ev.key_id, version_present, enforcing, host, agent)
+    census_add(template, method, cred, ev.key_id, version_present, enforcing, host, agent)
     if enforcing:
         raise _refusal_for(ev, cls)
 
@@ -875,7 +875,7 @@ async def count_socket(ws) -> None:
             else:
                 cred = "mod_no_session" if version_present else "other"
         client = getattr(ws, "client", None)
-        count(SOCKET_TEMPLATE, "WEBSOCKET", cred, key_id, version_present, False,
+        census_add(SOCKET_TEMPLATE, "WEBSOCKET", cred, key_id, version_present, False,
               client.host if client else None, headers.get("user-agent"))
     except Exception as ex:
         _log_once("socket-count", f"[READ-GATE] socket count failed: {ex}")
