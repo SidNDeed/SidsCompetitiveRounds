@@ -109,6 +109,8 @@ namespace DanceCardsClientTests
             Add("matte_arith", MatteArith);
             Add("grade_after_matte", GradeAfterMatte);
             Add("edge_band", EdgeBand);
+            Add("edge_first_pixel", EdgeFirstPixel);
+            Add("fit_drawn", FitDrawn);
             Add("luma_pillow", LumaPillow);
             Add("flash_pillow", FlashPillow);
             Add("flash_bounds", FlashBounds);
@@ -422,6 +424,89 @@ namespace DanceCardsClientTests
                 px[(c[1] * e + c[0]) * 4 + 3] = 1;
                 Check(DanceMotionCore.EdgeClear(px, e, e, DanceMotionCore.EDGE_MARGIN) == (c[2] == 1), "pixel (" + c[0] + "," + c[1] + ")");
             }
+        }
+
+        /// <summary>Bug 405: the band pixel a refused capture logs is the first
+        /// one the check met (buffer order), with its alpha, and the row it
+        /// names is the PNG's row from the top in both readback orders -- the
+        /// decoded PNG carries that alpha at that place.</summary>
+        private static void EdgeFirstPixel()
+        {
+            const int e = 590;
+            int x, y, a;
+            var px = new byte[e * e * 4];
+            Check(!DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == -1 && y == -1 && a == -1, "a clear band named a pixel");
+            px[(300 * e + 588) * 4 + 3] = 77;   // right strip, row 300
+            px[(400 * e + 1) * 4 + 3] = 9;      // left strip, row 400
+            Check(DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == 588 && y == 300 && a == 77, "strip: (" + x + "," + y + ") " + a);
+            px[(1 * e + 500) * 4 + 3] = 5;      // top band, row 1
+            Check(DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == 500 && y == 1 && a == 5, "top band: (" + x + "," + y + ") " + a);
+            px[(300 * e + 0) * 4 + 3] = 3;      // left strip, row 300, before the right one on that row
+            px[(1 * e + 500) * 4 + 3] = 0;
+            Check(DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == 0 && y == 300 && a == 3, "left before right: (" + x + "," + y + ") " + a);
+            Check(!DanceMotionCore.EdgeClear(px, e, e, 2), "the verdict disagrees with the pixel");
+            foreach (bool bu in new[] { true, false })
+            {
+                var black = new byte[e * e * 4]; var white = new byte[e * e * 4];
+                for (int p = 0; p < black.Length; p += 4) { black[p + 3] = 255; white[p] = white[p + 1] = white[p + 2] = white[p + 3] = 255; }
+                int q = (1 * e + 7) * 4;                                   // buffer row 1, column 7: opaque
+                black[q] = white[q] = 10; black[q + 1] = white[q + 1] = 20; black[q + 2] = white[q + 2] = 30;
+                var f = DanceMotionCore.ProcessPair(black, white, e, GradeMap, bu, new byte[black.Length], true);
+                int want = bu ? e - 2 : 1;
+                Check(!f.EdgeClear && f.EdgeX == 7 && f.EdgeY == want && f.EdgeA == 255,
+                      "bottomUp=" + bu + ": (" + f.EdgeX + "," + f.EdgeY + ") alpha " + f.EdgeA + ", want (7," + want + ") 255");
+                var back = ScrPng.DecodeRgba8(f.Png, e, e);                 // rows bottom-up
+                Check(back != null && back[((e - 1 - f.EdgeY) * e + f.EdgeX) * 4 + 3] == 255, "bottomUp=" + bu + ": the PNG has no pixel where the log says");
+                var s = new List<DanceMotionCore.FrameOut> { f };
+                f.Covered = 300; f.Pixels = 1000;                           // coverage inside the bounds, so the band is what refuses
+                string why = DanceMotionCore.SelfCheck(s, 1, 100) ?? "";
+                Check(why.Contains("(7," + want + ") alpha 255"), "the refusal does not name the pixel: " + why);
+            }
+        }
+
+        private static bool Holds(float cx, float cy, float s, float ocx, float ocy, float os)
+        {
+            const float eps = 1e-4f;
+            return ocx - os / 2 >= cx - s / 2 - eps && ocx + os / 2 <= cx + s / 2 + eps
+                && ocy - os / 2 >= cy - s / 2 - eps && ocy + os / 2 <= cy + s / 2 + eps;
+        }
+
+        /// <summary>Bug 405: the capture square holds the solid square and every
+        /// drawn box clear of the band, growing at most growMax; what it cannot
+        /// hold is reported not kept; the solid square is never cut.</summary>
+        private static void FitDrawn()
+        {
+            const int e = 590, clear = 4;
+            float frac = (float)clear / e;
+            var keep = new bool[4];
+            float cx, cy, s;
+            // everything inside: the solid square unchanged
+            var inside = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.5f, -0.5f, 0.5f, 0.5f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, inside, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Solid
+                  && cx == 0f && cy == 0f && s == 4f && keep[0], "inside: (" + cx + "," + cy + ") " + s);
+            // a box in the band of the solid square (y 1.99): it grows a little and keeps it
+            var band = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.3f, 1.5f, 0.3f, 1.999f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, band, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Grown
+                  && keep[0] && s > 4f && s <= 5f && Holds(cx, cy, s, 0f, 0f, 4f) && DanceMotionCore.BoxClear(band[0], cx, cy, s, frac),
+                  "band: (" + cx + "," + cy + ") " + s);
+            // a box over the top: it grows to hold it, within the cap
+            var over = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.3f, 1.5f, 0.3f, 2.3f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, over, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Grown
+                  && keep[0] && s <= 5f && Holds(cx, cy, s, 0f, 0f, 4f) && DanceMotionCore.BoxClear(over[0], cx, cy, s, frac),
+                  "over: (" + cx + "," + cy + ") " + s);
+            // one box over the left edge
+            var left = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-2.2f, -0.2f, -1.6f, 0.2f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, left, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Grown
+                  && keep[0] && Holds(cx, cy, s, 0f, 0f, 4f) && DanceMotionCore.BoxClear(left[0], cx, cy, s, frac), "left: (" + cx + "," + cy + ") " + s);
+            // a box far above: capped at growMax, that box not kept, a near one kept, the solid square whole
+            var far = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.3f, 6f, 0.3f, 6.6f), new DanceMotionCore.Box(-0.2f, -0.2f, 0.2f, 0.2f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, far, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Capped
+                  && Math.Abs(s - 5f) < 1e-5f && !keep[0] && keep[1] && Holds(cx, cy, s, 0f, 0f, 4f) && cy > 0f,
+                  "far: (" + cx + "," + cy + ") " + s + " keep " + keep[0] + "," + keep[1]);
+            // growMax 1: never grown, never moved; the box is not kept
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, over, clear, e, 1f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Capped
+                  && s == 4f && cx == 0f && cy == 0f && !keep[0], "cap 1: (" + cx + "," + cy + ") " + s);
+            Throws(() => DanceMotionCore.FitDrawn(0f, 0f, 0f, inside, clear, e, 1.25f, keep, out cx, out cy, out s), "a zero solid side");
         }
 
         private static void LumaPillow()
