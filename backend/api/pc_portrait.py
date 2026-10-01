@@ -465,6 +465,11 @@ class FaceCache:
         self._seen = {}           # key -> wall clock of the last publish or read (expire)
         self._inflight = {}       # key -> asyncio.Future
         self._scanned = False
+        # Called with the key when a render STARTS (a miss that is not joining
+        # an in-flight render): the measurement behind the "one render per key
+        # per box while the key is resident" claim (Discord cards, LOW 2).
+        # Never allowed to fail the render.
+        self.on_render_start = None
 
     def _scan(self):
         if self._scanned:
@@ -617,6 +622,11 @@ class FaceCache:
         fut = loop.create_future()
         self._inflight[key] = fut
         try:
+            if self.on_render_start is not None:
+                try:
+                    self.on_render_start(key)
+                except Exception:
+                    pass
             data = await in_pool(render_sync)
             await loop.run_in_executor(POOL, self._publish, key, data)
             fut.set_result(data)

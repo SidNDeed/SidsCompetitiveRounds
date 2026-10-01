@@ -171,8 +171,10 @@ def test_d3_the_drain_logs_what_discord_stored_for_the_post():
                                                           height=1050))])
     rig = rig_for(Drain([good_face(face)]), stored)
     tick(rig)
+    # The trailing art note (Discord card render parity): this fixture's face
+    # answer carries no X-Face-Art / X-Face-Still, as an older api's would not.
     want = (f"[PC-EVENTS] line for [7] stored by Discord: attachments [card.png image/png {len(face)} B 750x1050],"
-            " embed image 750x1050")
+            " embed image 750x1050 art=- still=-")
     assert want in rig.logs, rig.logs
 
 
@@ -181,7 +183,8 @@ def test_d3_a_post_whose_picture_discord_did_not_keep_says_so_in_the_log():
     face, and Discord's answer lists no attachment and no embed image."""
     rig = rig_for(Drain([good_face(png())]), lambda kw: SimpleNamespace(attachments=[], embeds=[]))
     tick(rig)
-    assert "[PC-EVENTS] line for [7] stored by Discord: attachments [none], embed image none" in rig.logs, rig.logs
+    assert ("[PC-EVENTS] line for [7] stored by Discord: attachments [none], embed image none art=- still=-"
+            in rig.logs), rig.logs
 
 
 def test_d3_a_post_sent_without_a_picture_logs_why():
@@ -201,7 +204,8 @@ def test_d3_an_unreadable_receipt_never_fails_a_post_that_went_out():
     rig = rig_for(drain, lambda kw: Broken())
     tick(rig)
     assert len(rig.sent) == 1 and drain.acked, "the post went out and is acked, not re-driven"
-    assert "[PC-EVENTS] line for [7] posted; the receipt could not be read (RuntimeError)" in rig.logs, rig.logs
+    assert ("[PC-EVENTS] line for [7] posted; the receipt could not be read (RuntimeError) art=- still=-"
+            in rig.logs), rig.logs
     tick(rig)
     assert len(rig.sent) == 1, "posted once"
 

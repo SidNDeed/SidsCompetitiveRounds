@@ -3762,6 +3762,17 @@ async def lifespan(app: FastAPI):
             from database import async_session
             async with async_session() as _theme_db:
                 await _pc_load_card_themes(_theme_db)
+            # The top card's art (Discord card render parity): read and PROVE
+            # the private bundle once now, off the loop and bounded, so the
+            # first /health answers the drawn verdict rather than paying for
+            # it, and the log says which state the box came up in. Swallowed:
+            # an absent or invalid bundle is word 1 and no reason to refuse.
+            try:
+                _art = await asyncio.wait_for(asyncio.to_thread(_pcf.card_art_selftest), timeout=60)
+                print(f"[PC-ART] boot self-test: word={_art.get('word')} status={_art.get('status')} "
+                      f"checked={_art.get('checked', 0)}", flush=True)
+            except Exception as _art_exc:
+                print(f"[PC-ART] boot self-test did not finish: {type(_art_exc).__name__}", flush=True)
         # The Steam-render probe (v3 §9) runs on BOTH roles: each box
         # composites a stored Steam picture through its own face path and
         # reports the word on /health; the standby serves faces too.
@@ -4457,7 +4468,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:47745 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:47822 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4523,7 +4534,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47557 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:47634 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4593,7 +4604,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47460 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:47537 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7084,6 +7095,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
                               discord_fix=await _discord_fix_probe(db),
+                              pc_card_art=await _pc_card_art_word(),
                               pc_motion=_pc_motion_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
@@ -7113,6 +7125,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
                               discord_fix=_DISCORD_FIX_LAST,
+                              pc_card_art=await _pc_card_art_word(),
                               pc_motion=_pc_motion_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
@@ -29652,6 +29665,17 @@ from fastapi.responses import Response as _PcResponse
 
 PC_FACE_CACHE_DIR = os.getenv("PC_FACE_CACHE_DIR", "/var/cache/pc-faces")
 _pc_face_cache = _pcp.FaceCache(PC_FACE_CACHE_DIR)
+
+
+def _pc_face_render_started(key) -> None:
+    """One line per face render START on this box (a cache miss that is not
+    joining an in-flight render), named by a short hash of the cache key so no
+    print id reaches the log. Residual 2's falsifier counts these per key per
+    box while the key is resident (Discord cards, LOW 2)."""
+    print(f"[PC-FACE] render start k={hashlib.sha256(str(key).encode('utf-8')).hexdigest()[:12]}", flush=True)
+
+
+_pc_face_cache.on_render_start = _pc_face_render_started
 _pc_back_cache = {"bytes": None}
 # Dance cards (design S4.6-S4.7): derived motion lives under its OWN root
 # beside the face cache's (the deploy adds its volume), in its own class; the
@@ -29773,6 +29797,24 @@ def _pc_card_themes_word() -> str:
     than of the build; the question this answers is whether the map the face
     routes refuse without is populated at all."""
     return "ready" if _PC_CARD_THEMES else "empty"
+
+
+async def _pc_card_art_word() -> int:
+    """The /health word for the top card's art (Discord card render parity):
+    3, 1 or 0 -- see HealthResponse.pc_card_art. 0 whenever this box cannot
+    serve faces at all (_pc_renderer_unavailable: so 3 also certifies every
+    condition that reads), else the renderer's own self-test of the bundle it
+    reads (pc_face.card_art_selftest: it DRAWS every accepted patch and a full
+    face, cached per bundle identity, warmed at startup). Off the event loop,
+    because the first proof of a new identity renders. Needs no database, so
+    the degraded arm answers it the same way."""
+    if _pc_renderer_unavailable() is not None:
+        return 0
+    try:
+        result = await asyncio.to_thread(_pcf.card_art_selftest)
+        return int(result["word"])
+    except Exception:
+        return 0
 
 
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
@@ -29962,8 +30004,13 @@ _PC_FACE_SUBJECT_ID_SQL = _sid64.individual_id_sql("s.steam_id")
 
 async def _pc_bot_face_row(db: AsyncSession, print_id: str):
     """_pc_face_row's statement with the subject's id rule added: no row for a
-    print of a subject whose id is not a SteamID64."""
-    return (await db.execute(text(_PC_PRINT_FACE_SELECT + " WHERE pr.id = CAST(:id AS uuid) AND "
+    print of a subject whose id is not a SteamID64. It is the MOTION select
+    (_PC_PRINT_MOTION_SELECT: every face column plus the servable columns of
+    the subject), so the bot's face route computes its pixels AND its
+    X-Face-Still header from this ONE row mapping -- a second read for the
+    still could race the face row and name a still the picture does not show
+    (Discord cards, LOW 1)."""
+    return (await db.execute(text(_PC_PRINT_MOTION_SELECT + " WHERE pr.id = CAST(:id AS uuid) AND "
                                   + _PC_FACE_SUBJECT_ID_SQL),
                              {"id": print_id})).mappings().first()
 
@@ -32064,7 +32111,35 @@ async def internal_pc_face_print(
     rev, data = await _pc_render_face(db, row, ctx, size)
     resp = _pc_png_response(data, "private, max-age=60")
     resp.headers["X-Face-Rev"] = rev
+    # Diagnostics only, never in the key and never drawn: whether the face
+    # carries the top card's art, and which still it shows -- both from the
+    # SAME row mapping and context the pixels came from (_pc_face_inputs is
+    # pure over them), so a header cannot describe a different picture.
+    spec = _pc_face_inputs(row, ctx)[0]
+    resp.headers["X-Face-Art"] = "drawn" if _pcf.card_art_drawn(spec) else "none"
+    resp.headers["X-Face-Still"] = _pc_face_still(row)
     return resp
+
+
+def _pc_face_still(row) -> str:
+    """X-Face-Still of one bot face row: `dance` when the subject's dance
+    motion is servable (pc_motion.servable: bound to the still the face draws,
+    the selection its item, the dance held), else the kind of still the face
+    draws -- `base` (an uploaded game still), `steam` (the Steam picture) or
+    `none` (the emblem plate). Read from the row the face was drawn from."""
+    kind, _hash = _pcp.portrait_for(row)
+    if kind == "game" and _pcm is not None and _pcm.servable(row, row.get("subject_sid"), _auto_owned):
+        return "dance"
+    return {"game": "base", "steam": "steam"}.get(kind, "none")
+
+
+def _pc_composite_art(cells, ctx) -> str:
+    """X-Strip-Art / X-Grid-Art of one composite: `<face tiles whose face
+    draws the top card's art>/<face tiles>`, from the cells' own rows and the
+    context the tiles are keyed under -- the resolver render_face uses."""
+    faces = [row for tile, row, _discarded in cells if tile == "face" and row is not None]
+    drawn = sum(1 for row in faces if _pcf.card_art_drawn(_pc_face_inputs(row, ctx)[0]))
+    return f"{drawn}/{len(faces)}"
 
 
 async def _pc_preview_read(db: AsyncSession, player_ref: str, loc: str, snapshot_id, *, motion: bool = False):
@@ -32595,6 +32670,7 @@ async def internal_pc_pack_strip(
     resp.headers["X-Strip-Rev"] = digest
     resp.headers["X-Strip-Slots"] = ",".join(manifest)
     resp.headers["X-Strip-Actor"] = str(actor.id)
+    resp.headers["X-Strip-Art"] = _pc_composite_art(cells, ctx)
     return resp
 
 
@@ -32755,6 +32831,7 @@ async def internal_pc_binder_page(
     resp.headers["X-Grid-Slots"] = ",".join(manifest)
     resp.headers["X-Grid-Owner"] = pid
     resp.headers["X-Grid-Consent-Rev"] = str(int(getattr(owner, "pc_settings_revision", 0) or 0))
+    resp.headers["X-Grid-Art"] = _pc_composite_art(cells, ctx)
     return resp
 
 
@@ -47852,7 +47929,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4562 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4573 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
