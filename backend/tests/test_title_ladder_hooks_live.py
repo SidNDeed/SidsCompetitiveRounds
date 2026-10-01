@@ -1,18 +1,20 @@
-"""The ladder hook, DRIVEN: the four rated completion paths through their real
-handlers, against a real PostgreSQL built from the migrations.
+"""The ladder hook, DRIVEN: the three ranked game-reporting paths through their
+real handlers, against a real PostgreSQL built from the migrations.
 
 test_title_ladders.py proves from the parse tree that main.py calls the hook
-once per rated completion path, awaited, with the right reference. This file
-proves what those calls DO, per site, on the design's frozen bar
-(LADDER-HOOK-DESIGN-LITE-V3 sections 3, 4 and 12.5):
+once per ranked game-reporting path, awaited, with the right reference. This
+file proves what those calls DO, per site. The unit is the GAME (board row
+29, the title ladders build): every ranked game credits each player once,
+keyed by that game's own row id, so a 1v1 or 2v2 series of two games credits
+two. The bar, from LADDER-HOOK-DESIGN-LITE-V3 sections 3, 4 and 12.5 with the
+unit moved from the series to the game:
 
-  H3  one completion delivered twice is credited once. 1v1's second delivery
-      of the deciding report dies at the match insert's flush on unique_match,
-      before any series logic, with nothing written; 2v2's is the duplicate
-      echo; the settlement helper's is its completed-status return (and the
-      admin route's noop above it); FFA's is refused by the room gate -- the
-      replay echo -- with no second ffa_matches row. The two 2v2 paths, run one
-      after the other on one series in either order, add nothing to the first.
+  H3  one game delivered twice is credited once. 1v1's second delivery of a
+      report dies at the match insert's flush on unique_match with nothing
+      written; 2v2's is the duplicate echo; FFA's is refused by the room gate
+      -- the replay echo -- with no second ffa_matches row. The after-the-fact
+      2v2 settlement (admin completion, lead forfeit) plays no game and
+      credits nothing, whichever path completed the series.
   H5  a DATABASE fault inside the hook's call -- the real hook runs, then a
       failing statement -- costs the completion nothing. The same completion
       runs twice, clean and faulted, each in a fresh schema: the result,
@@ -22,31 +24,30 @@ proves what those calls DO, per site, on the design's frozen bar
       savepoint around the call -- the handler's own source, compiled without
       that one `async with` -- and the same fault then loses the whole
       completion (#235/#536).
-  H6  what a completion wrote reads back through main.app's own GET, on a
-      session of its own: +1 on the worn line.
-  H8  every must-not-count line of design section 3 leaves no credit and no
-      progress change: 1v1 casual after the downgrade, a mid-series report,
-      an anti-cheat-invalidated match, a closed bracket room and the
-      abandoned idle series; 2v2 a mid-series report, a roster, room or
-      partition mismatch and a series that is not active (the helper's
-      completed one included); the helper's missing-row, completed and
-      unfilled-slot returns (that slot's NOT NULL relaxed in the throwaway
-      schema alone -- 053_2v2_schema.sql makes all four NOT NULL), an admin
-      void and a disconnect that is not a clear forfeit; FFA a casual lobby,
-      the refusals before the insert (lobby not active, score shape, game
-      number), a failed insert and a failed strict skew refund. FFA's ghost
-      and grace controls are read per sitting in the lobby-keyed test below
-      (design 12.3 steps 2 and 4).
+  H6  what a game wrote reads back through main.app's own GET, on a session
+      of its own: +1 on the worn line per game.
+  H8  every must-not-count line leaves no credit and no progress change:
+      1v1 casual after the downgrade, an anti-cheat-invalidated match, a
+      closed bracket room and the abandoned idle series; 2v2 a roster, room
+      or partition mismatch and a series that is not active; every 2v2
+      settlement (admin completion, lead forfeit, the helper's missing-row,
+      completed and unfilled-slot returns -- that slot's NOT NULL relaxed in
+      the throwaway schema alone, 053_2v2_schema.sql makes all four NOT NULL
+      -- an admin void and a disconnect that is not a clear forfeit); FFA a
+      casual lobby, the refusals before the insert (lobby not active, score
+      shape, game number), a failed insert and a failed strict skew refund.
+      FFA's ghost and grace controls are read per game in the game-keyed test
+      below.
 
-Beside the four sites: the FFA lobby-keyed test (design 12.3 steps 1-8 --
-two games of one sitting credit once, a new lobby credits again), and three
-of Codex round 2's LOW residual sentences (design 12.6) made tests: R1 for
-FFA under the lobby key (a fault in game 1 of a sitting, recovered by game
-2), R3 (the 1v1 credit stands when the rating pass fails or skips, and
-causes nothing else) and Q-G (the resent deciding 1v1 report answers 500
-through main.app and writes nothing -- behaviour documented as it stands,
-not changed here). R2, R4, R5 and R6 are recorded with their falsifiers in
-the lane's build notes; R5's per-mode coverage is test_title_ladders.py's.
+Beside the three sites: the FFA game-keyed test (two games of one lobby
+credit each rated player per game; a ghost or a graced leaver gets nothing
+for the game it did not play), and three of Codex round 2's LOW residual
+sentences (design 12.6) made tests, re-read for the game unit: R1 (a fault
+in game 1 costs game 1's credit and nothing else; game 2 credits its own),
+R3 (the 1v1 credit stands when the rating pass fails or skips, and causes
+nothing else) and Q-G (the resent deciding 1v1 report answers 500 through
+main.app and writes nothing -- behaviour documented as it stands, not
+changed here).
 
 Every H3 and H8 case also records each call main.py makes to the hook, the
 real hook still doing the work (the hook_calls fixture), and asserts it: a
@@ -57,16 +58,18 @@ skew refund -- is told apart from a line that never got there.
 
 THE SCHEMA. Every case builds its own, in a throwaway schema through
 ladder_pg_harness: every connection bound to it at connect, a census before
-anything is created or dropped. The DDL of every numbered migration but 331 is
-replayed -- statements that create or alter a table, index, function, trigger,
+anything is created or dropped. The DDL of every numbered migration but the
+ladder catalogue files (331, 365) and the refund (366, a production-census
+data migration) is replayed -- statements that create or alter a table, index, function, trigger,
 type or sequence, and DO blocks that do; no data statement, no extension, and
 nothing that names a session's temporary schema (backfill helpers) -- then the
 ORM's create_all makes the tables no migration creates, the mapped tables are
 widened to every column the models map, and the DDL is replayed again now that
 the tables it alters exist. That second pass may fail only with an
 already-exists code or on one of REPLAY_KNOWN, statements on tables none of
-the four paths touch; anything else fails the case. Migration 331 then runs
-whole, as written, and its tables and rungs are confirmed. A case that needs a
+the three paths touch; anything else fails the case. Migrations 331 and 365
+then run whole, as written, in that order, and the tables and the five-tier
+rungs are confirmed. A case that needs a
 schema change of its own makes it next, and only then is the build sealed.
 
 There is no defaults fill here, unlike test_title_ladders' ORM-only listing
@@ -117,7 +120,7 @@ import main  # noqa: E402
 import models  # noqa: E402
 import schemas  # noqa: E402
 import title_ladders as tl  # noqa: E402
-from test_title_ladders import MAIN_PY, MIGRATION  # noqa: E402
+from test_title_ladders import MAIN_PY, MIGRATION, MIGRATION_365  # noqa: E402
 import ladder_pg_harness as harness  # noqa: E402
 
 try:
@@ -132,7 +135,13 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 
 SQL_DIR = os.path.join(HERE, "..", "sql")
 HOOK = "record_completed_games"
-MODES = ("1v1", "2v2", "2v2-settled", "ffa")
+MODES = ("1v1", "2v2", "ffa")
+# Games per completion _complete plays: a 1v1 or 2v2 series of two, one FFA game.
+GAMES = {"1v1": 2, "2v2": 2, "ffa": 1}
+# Run whole after the replay, never replayed: the ladder catalogue files. 366
+# is not run at all -- it refunds a production census and refuses elsewhere.
+NOT_REPLAYED = {os.path.basename(MIGRATION), os.path.basename(MIGRATION_365),
+                "366_title_refunds_voidshot_kingslayer.sql"}
 
 # Synthetic ids below 76561197960265728, the first individual-account id, so
 # none of them can name a real account.
@@ -152,8 +161,8 @@ def _tier2_threshold(line):
     return tl.next_rung(line, 1)["threshold"]
 
 
-# P1 sits one completion below its line's second rung, so a credit that
-# lands moves a real rung -- a grant, an ownership row and an auto-equip --
+# P1 sits one game below its line's second rung, so a credit that lands
+# moves a real rung -- a grant, an ownership row and an auto-equip --
 # and not only a counter.
 WEAR = {
     P1: (LINES[0], _tier2_threshold(LINES[0]) - 1),
@@ -250,7 +259,7 @@ def _ddl_statements():
     out = []
     for path in sorted(glob.glob(os.path.join(SQL_DIR, "*.sql"))):
         name = os.path.basename(path)
-        if not re.match(r"^\d{3}_", name) or name == os.path.basename(MIGRATION):
+        if not re.match(r"^\d{3}_", name) or name in NOT_REPLAYED:
             continue
         for s in _split_sql(io.open(path, encoding="utf-8").read()):
             head = s.lstrip()
@@ -293,7 +302,7 @@ async def _widen(conn, schema):
 
 async def _build(case, extra_ddl=None):
     """Into case.schema, on case.conn (bound to it): replay, ORM, widen,
-    replay, 331 run and confirmed, the case's own change, sealed."""
+    replay, 331 then 365 run and confirmed, the case's own change, sealed."""
     conn, schema = case.conn, case.schema
     statements = _ddl_statements()
     await _replay(conn, statements)      # the ORM's tables are not there yet
@@ -311,13 +320,14 @@ async def _build(case, extra_ddl=None):
         "the second DDL pass failed on statements outside REPLAY_KNOWN: %r"
         % unexpected[:5])
     await conn.execute(io.open(MIGRATION, encoding="utf-8").read())
+    await conn.execute(io.open(MIGRATION_365, encoding="utf-8").read())
     rungs = await conn.fetchval("SELECT count(*) FROM title_ladders")
     items = await conn.fetchval(
         "SELECT count(*) FROM shop_items WHERE sku = ANY($1::text[])", list(tl.ALL_SKUS))
     tables = [await conn.fetchval("SELECT to_regclass($1)::text", t)
               for t in ("title_ladder_credits", "title_ladder_progress")]
     assert rungs == items == len(tl.ALL_SKUS) and None not in tables, (
-        "331 did not land: %d rungs, %d shop rows, tables %r" % (rungs, items, tables))
+        "331 and 365 did not land: %d rungs, %d shop rows, tables %r" % (rungs, items, tables))
     if extra_ddl is not None:
         await extra_ddl(conn, schema)
     await case.seal()
@@ -441,10 +451,10 @@ def hook_calls(monkeypatch):
     real = tl.record_completed_games
     calls = []
 
-    async def _spy(db, player_ids, *, mode, reference_id):
+    async def _spy(db, player_ids, *, mode, reference_id, rows=None):
         player_ids = list(player_ids)
         calls.append((mode, str(reference_id), len(player_ids)))
-        return await real(db, player_ids, mode=mode, reference_id=reference_id)
+        return await real(db, player_ids, mode=mode, reference_id=reference_id, rows=rows)
     monkeypatch.setattr(tl, HOOK, _spy)
     return calls
 
@@ -570,9 +580,11 @@ async def _ranked_series_id(sm, ids, a=P1, b=P2):
 
 
 async def _complete(mode, sm, ids, key, tag, submit=None):
-    """One rated completion of `mode`, through its real handler(s). `submit`
-    replaces the handler for 1v1, 2v2 and FFA (the no-savepoint control).
-    Returns (reference id, participants, answers, printed lines)."""
+    """One rated completion of `mode`, through its real handler(s): a 1v1 or
+    2v2 series of GAMES[mode] games, or one FFA game. `submit` replaces the
+    handler (the no-savepoint control). Returns (the game ids a credit is
+    keyed by, one per game that answered one, participants, answers, printed
+    lines)."""
     answers, lines = [], []
 
     def keep(res):
@@ -583,21 +595,22 @@ async def _complete(mode, sm, ids, key, tag, submit=None):
         fn = submit or main.submit_match
         for g in (1, 2):
             keep(await _submit(sm, fn, _report_1v1("ranked_lh%s_00000%d_r%d" % (tag, g, g))))
-        return str(await _ranked_series_id(sm, ids)), [P1, P2], answers, lines
+        return _game_refs(answers), [P1, P2], answers, lines
     if mode == "2v2":
         fn = submit or main.submit_team_match
         sid = await _team_series(sm, ids, "team_lh%s" % tag)
         for g in (1, 2):
             keep(await _submit(sm, fn, _report_2v2(sid, "team_lh%s_00000%d_r%d" % (tag, g, g))))
-        return str(sid), [P1, P2, P3, P4], answers, lines
-    if mode == "2v2-settled":
-        sid = await _team_series(sm, ids, "team_lh%s" % tag)
-        keep(await _admin(sm, key, sid, "complete", 1))
-        return str(sid), [P1, P2, P3, P4], answers, lines
+        return _game_refs(answers), [P1, P2, P3, P4], answers, lines
     fn = submit or main.submit_ffa_match
     lid = await _ffa_lobby(sm, ids)
     keep(await _submit(sm, fn, _report_ffa(lid, "ffa_lh%s_r1" % tag, _ffa_game(), P1)))
-    return str(lid), [P1, P2, P3, P4], answers, lines
+    return _game_refs(answers), [P1, P2, P3, P4], answers, lines
+
+
+def _game_refs(answers):
+    """The game id each answered report recorded -- the credit key."""
+    return [str(a.match_id) for a, exc, _l in answers if exc is None and a is not None]
 
 
 # -- observation, on connections of their own ---------------------------------
@@ -706,15 +719,19 @@ def _worn_games(body):
     return line, next(ld["games"] for ld in body["ladders"] if ld["line"] == line)
 
 
-def _plus_one(before, after, steams):
+def _plus_n(before, after, steams, n):
     """The progress rows `after` holds, for `steams`, when each moved by
-    exactly one on its worn line and nothing else moved anywhere."""
+    exactly `n` on its worn line and nothing else moved anywhere."""
     want = dict(before["progress"])
     for s in steams:
         line = WEAR[s][0]
         games, tier = want[(s, line)]
-        want[(s, line)] = (games + 1, tl.tier_for_games(line, games + 1))
+        want[(s, line)] = (games + n, tl.tier_for_games(line, games + n))
     return after["progress"] == want, want
+
+
+def _plus_one(before, after, steams):
+    return _plus_n(before, after, steams, 1)
 
 
 def _credited(after, ref, mode, steams):
@@ -724,13 +741,18 @@ def _credited(after, ref, mode, steams):
 
 # -- H3 / H6 / H8 per site ----------------------------------------------------
 
-def test_pg_1v1_credits_once_per_series_and_reads_back(opened, hook_calls):
-    """1v1, H3 + H6 + H8 (mid-series). Game 1 of the series credits nothing
-    and never reaches the hook; game 2 completes it and reaches the hook once
-    for both players, keyed by the series, crediting each once, P1 across its
-    second rung (granted, owned, worn); both GETs read +1; the deciding
-    report sent again dies at the flush on unique_match, before the hook,
-    with nothing written; the bystander never moves."""
+def test_pg_1v1_a_series_of_two_games_credits_two(opened, hook_calls):
+    """1v1, H3 + H6, and the brief's series-to-games test: ONE series of TWO
+    games credits each player TWO, not one. Game 1 (mid-series) reaches the
+    hook for both players keyed by its own match id and credits each +1 --
+    P1 across its second rung (granted, owned, worn); game 2 completes the
+    series and credits each +1 again under ITS id; both GETs read +2; the
+    deciding report sent again dies at the flush on unique_match, before the
+    hook, with nothing written; the bystander never moves.
+
+    Negative control (recorded in the build notes): main.py's 1v1 call keyed
+    by str(series.id) again turns this red -- the second game's claim
+    collides with the first and each player reads +1."""
     _require_live_pg()
 
     async def _go():
@@ -739,43 +761,47 @@ def test_pg_1v1_credits_once_per_series_and_reads_back(opened, hook_calls):
             seeded, _ = await _look(schema)
             g1 = await _submit(sm, main.submit_match, _report_1v1("ranked_lhA_000001_r1"))
             assert g1[1] is None and g1[0].series_status == "active", g1
+            m1 = str(g1[0].match_id)
+            assert hook_calls == [("1v1", m1, 2)], ("game 1 did not reach the hook once",
+                                                    hook_calls)
             mid, _ = await _look(schema)
-            assert mid == seeded, "H8: a mid-series 1v1 report moved the ladder"
-            assert hook_calls == [], ("H8: a mid-series 1v1 report reached the hook",
-                                      hook_calls)
+            ok, want = _plus_one(seeded, mid, [P1, P2])
+            assert ok, ("H3: after game 1, mid-series", mid["progress"], want)
+            p1_line = WEAR[P1][0]
+            top = tl.rungs_at_tier(p1_line, 2)[0]["sku"]
+            assert mid["worn"][P1] == top and (P1, top) in mid["rungs"], (
+                "the crossing credit did not grant and equip the second rung",
+                mid["worn"][P1], mid["rungs"])
             deciding = _report_1v1("ranked_lhA_000002_r2")
             g2 = await _submit(sm, main.submit_match, deciding)
             assert g2[1] is None and g2[0].series_status == "completed", g2
-            ref = str(await _ranked_series_id(sm, ids))
-            assert hook_calls == [("1v1", ref, 2)], hook_calls
+            m2 = str(g2[0].match_id)
+            assert m2 != m1 and hook_calls == [("1v1", m1, 2), ("1v1", m2, 2)], hook_calls
             done, econ = await _look(schema)
-            ok, want = _plus_one(seeded, done, [P1, P2])
-            assert ok, ("H3/H6: after the completion", done["progress"], want)
-            assert _credited(done, ref, "1v1", [P1, P2]), done["credits"]
-            assert len(done["credits"]) == 2, done["credits"]
+            ok, want = _plus_n(seeded, done, [P1, P2], 2)
+            assert ok, ("series-to-games: one series of two games must credit two",
+                        done["progress"], want)
+            assert _credited(done, m1, "1v1", [P1, P2]), done["credits"]
+            assert _credited(done, m2, "1v1", [P1, P2]), done["credits"]
+            assert len(done["credits"]) == 4, done["credits"]
             rated = {r[0]: r[1] for r in econ["glicko_ratings"]}
             assert econ["rating_history"] == 2 and rated[P1] > rated[P2], (
                 "the series' rating pass did not run", econ["rating_history"], rated)
-            p1_line = WEAR[P1][0]
-            top = tl.rungs_at_tier(p1_line, 2)[0]["sku"]
-            assert done["worn"][P1] == top and (P1, top) in done["rungs"], (
-                "the crossing credit did not grant and equip the second rung",
-                done["worn"][P1], done["rungs"])
             read = await _get_ladders(schema, [P1, P2])
             for s in (P1, P2):
                 status, body = read[s]
                 assert status == 200, (s, status)
-                assert _worn_games(body) == (WEAR[s][0], WEAR[s][1] + 1), (
-                    "H6: the GET after the completion", s, _worn_games(body))
+                assert _worn_games(body) == (WEAR[s][0], WEAR[s][1] + 2), (
+                    "H6: the GET after the series", s, _worn_games(body))
             again = await _submit(sm, main.submit_match, deciding)
             assert isinstance(again[1], IntegrityError) and "unique_match" in str(again[1]), (
                 "H3: the resent deciding report did not die on unique_match", again[1])
             after, econ2 = await _look(schema)
             assert after == done and econ2 == econ, (
                 "H3: the resent deciding report wrote something")
-            assert hook_calls == [("1v1", ref, 2)], (
+            assert len(hook_calls) == 2, (
                 "H3: the resent deciding report reached the hook", hook_calls)
-            assert not _dropped(g2[2], "1v1")
+            assert not _dropped(g1[2] + g2[2], "1v1")
     _run(_go())
 
 
@@ -809,8 +835,9 @@ def test_pg_1v1_casual_after_the_downgrade_credits_nothing(opened, hook_calls):
 
 def test_pg_1v1_anticheat_invalidated_match_credits_nothing(opened, hook_calls):
     """1v1, H8: a second sub-minute ranked game of the pair is invalidated by
-    the anti-cheat and returns before any series logic; the series never
-    completes and nothing is credited."""
+    the anti-cheat and returns before the hook; the series never completes.
+    The FIRST game was a valid ranked game and credits +1; the invalidated
+    one credits nothing and never reaches the hook."""
     _require_live_pg()
 
     async def _go():
@@ -820,12 +847,16 @@ def test_pg_1v1_anticheat_invalidated_match_credits_nothing(opened, hook_calls):
             first = await _submit(sm, main.submit_match,
                                   _report_1v1("ranked_lhC_000001_r1", duration=20))
             assert first[1] is None and first[0].series_status == "active", first
+            m1 = str(first[0].match_id)
+            after1, _ = await _look(schema)
             second = await _submit(sm, main.submit_match,
                                    _report_1v1("ranked_lhC_000002_r2", duration=20))
             assert second[1] is None and second[0].series_status == "invalidated", second
             after, econ = await _look(schema)
-            assert after == seeded, "H8: an invalidated 1v1 match moved the ladder"
-            assert hook_calls == [], hook_calls
+            ok, want = _plus_one(seeded, after1, [P1, P2])
+            assert ok, ("the valid first game did not credit", after1["progress"], want)
+            assert after == after1, "H8: an invalidated 1v1 match moved the ladder"
+            assert hook_calls == [("1v1", m1, 2)], hook_calls
             assert not any(s[0] == "completed" for s in econ["ranked_series"]), econ
     _run(_go())
 
@@ -882,13 +913,13 @@ def test_pg_1v1_abandoned_idle_series_credits_nothing(opened, hook_calls):
     _run(_go())
 
 
-def test_pg_2v2_credits_once_per_series_and_reads_back(opened, hook_calls):
-    """2v2, H3 + H6 + H8. Game 1 credits nothing (mid-series); a report
-    naming an outsider, one from another room and one with the teams split
-    differently are each refused and credit nothing; game 2 completes the
-    series and credits all four once, keyed by the team series; the GETs read
-    +1; the deciding report sent again is the duplicate echo; a report on the
-    completed series is refused."""
+def test_pg_2v2_credits_every_game_once_and_reads_back(opened, hook_calls):
+    """2v2, H3 + H6 + H8. Game 1 credits all four once, keyed by its own
+    team_matches id; a report naming an outsider, one from another room and
+    one with the teams split differently are each refused and credit
+    nothing; game 2 completes the series and credits all four again under
+    its id; the GETs read +2; the deciding report sent again is the
+    duplicate echo; a report on the completed series is refused."""
     _require_live_pg()
 
     async def _go():
@@ -899,6 +930,9 @@ def test_pg_2v2_credits_once_per_series_and_reads_back(opened, hook_calls):
             g1 = await _submit(sm, main.submit_team_match,
                                _report_2v2(sid, "team_lhD_000001_r1"))
             assert g1[1] is None and g1[0].series_status == "active", g1
+            m1 = str(g1[0].match_id)
+            assert hook_calls == [("2v2", m1, 4)], hook_calls
+            after1, _ = await _look(schema)
             refused = [
                 ("roster", _report_2v2(sid, "team_lhD_000002_r2", (P1, P2, P3, OUTSIDER))),
                 ("room", _report_2v2(sid, "team_elsewhere_000002_r2")),
@@ -908,21 +942,25 @@ def test_pg_2v2_credits_once_per_series_and_reads_back(opened, hook_calls):
                 res = await _submit(sm, main.submit_team_match, rep)
                 assert getattr(res[1], "status_code", None) in (400, 403), (label, res)
             mid, _ = await _look(schema)
-            assert mid == seeded, "H8: a mid-series or refused 2v2 report moved the ladder"
-            assert hook_calls == [], (
-                "H8: a mid-series or refused 2v2 report reached the hook", hook_calls)
+            ok, want = _plus_one(seeded, mid, [P1, P2, P3, P4])
+            assert ok, ("H3: after game 1", mid["progress"], want)
+            assert mid == after1, "H8: a refused 2v2 report moved the ladder"
+            assert hook_calls == [("2v2", m1, 4)], (
+                "H8: a refused 2v2 report reached the hook", hook_calls)
             deciding = _report_2v2(sid, "team_lhD_000002_r2")
             g2 = await _submit(sm, main.submit_team_match, deciding)
             assert g2[1] is None and g2[0].series_status == "completed", g2
-            assert hook_calls == [("2v2", str(sid), 4)], hook_calls
+            m2 = str(g2[0].match_id)
+            assert hook_calls == [("2v2", m1, 4), ("2v2", m2, 4)], hook_calls
             done, econ = await _look(schema)
-            ok, want = _plus_one(seeded, done, [P1, P2, P3, P4])
-            assert ok, ("H3/H6: after the completion", done["progress"], want)
-            assert _credited(done, str(sid), "2v2", [P1, P2, P3, P4]), done["credits"]
+            ok, want = _plus_n(seeded, done, [P1, P2, P3, P4], 2)
+            assert ok, ("H3/H6: after the series of two games", done["progress"], want)
+            assert _credited(done, m1, "2v2", [P1, P2, P3, P4]), done["credits"]
+            assert _credited(done, m2, "2v2", [P1, P2, P3, P4]), done["credits"]
             read = await _get_ladders(schema, [P1, P2, P3, P4])
             for s in (P1, P2, P3, P4):
                 assert read[s][0] == 200, (s, read[s][0])
-                assert _worn_games(read[s][1]) == (WEAR[s][0], WEAR[s][1] + 1), (
+                assert _worn_games(read[s][1]) == (WEAR[s][0], WEAR[s][1] + 2), (
                     "H6", s, _worn_games(read[s][1]))
             again = await _submit(sm, main.submit_team_match, deciding)
             assert again[1] is None and "duplicate" in again[0].message, again
@@ -932,17 +970,18 @@ def test_pg_2v2_credits_once_per_series_and_reads_back(opened, hook_calls):
             after, econ2 = await _look(schema)
             assert after == done and econ2 == econ, (
                 "H3/H8: the duplicate or the late report wrote something")
-            assert hook_calls == [("2v2", str(sid), 4)], (
+            assert len(hook_calls) == 2, (
                 "H3/H8: the duplicate or the late report reached the hook", hook_calls)
     _run(_go())
 
 
-def test_pg_2v2_settled_admin_completion_credits_once_and_reads_back(opened, hook_calls):
-    """2v2-settled, H3 + H6 + H8. The admin completion credits all four
-    once, keyed by the team series; the GETs read +1; the same completion
-    asked again is the route's noop, the helper called again on the
-    completed series returns before anything, and a report on the series the
-    helper completed is refused -- none of them credits."""
+def test_pg_2v2_settled_admin_completion_credits_nothing(opened, hook_calls):
+    """2v2 settlement, H8. The admin completion completes the series and
+    rates it, but plays no game: it never reaches the hook and nothing is
+    credited; the GETs read the seeded counts; the same completion asked
+    again is the route's noop, the helper called again on the completed
+    series returns before anything, and a report on the series the helper
+    completed is refused -- none of them credits."""
     _require_live_pg()
 
     async def _go():
@@ -952,14 +991,14 @@ def test_pg_2v2_settled_admin_completion_credits_once_and_reads_back(opened, hoo
             sid = await _team_series(sm, ids, "team_lhE")
             res = await _admin(sm, opened, sid, "complete", 1)
             assert res[1] is None and res[0]["status"] == "completed", res
-            assert hook_calls == [("2v2-settled", str(sid), 4)], hook_calls
+            assert hook_calls == [], hook_calls
             done, econ = await _look(schema)
-            ok, want = _plus_one(seeded, done, [P1, P2, P3, P4])
-            assert ok, ("H3/H6: after the admin completion", done["progress"], want)
-            assert _credited(done, str(sid), "2v2-settled", [P1, P2, P3, P4]), done["credits"]
+            assert done == seeded, ("H8: the admin completion moved the ladder",
+                                    done["progress"])
+            assert econ["glicko_ratings_2v2"], "the admin completion rated nobody"
             read = await _get_ladders(schema, [P1, P2, P3, P4])
             for s in (P1, P2, P3, P4):
-                assert _worn_games(read[s][1]) == (WEAR[s][0], WEAR[s][1] + 1), (
+                assert _worn_games(read[s][1]) == (WEAR[s][0], WEAR[s][1]), (
                     "H6", s, read[s])
             noop = await _admin(sm, opened, sid, "complete", 1)
             assert noop[1] is None and noop[0]["status"] == "noop", noop
@@ -974,7 +1013,7 @@ def test_pg_2v2_settled_admin_completion_credits_once_and_reads_back(opened, hoo
             after, econ2 = await _look(schema)
             assert after == done and econ2 == econ, (
                 "H3/H8: a repeat of the settled completion wrote something")
-            assert hook_calls == [("2v2-settled", str(sid), 4)], (
+            assert hook_calls == [], (
                 "H3/H8: a repeat of the settled completion reached the hook", hook_calls)
     _run(_go())
 
@@ -1029,15 +1068,17 @@ async def _lead_forfeit_series(monkeypatch, sm, ids, posters):
     return sid
 
 
-def test_pg_2v2_settled_lead_forfeit_credits_once(opened, hook_calls, monkeypatch):
-    """2v2-settled through the helper's other caller: team 1 up a game, a
-    team-2 disconnect in game 2 whose per-game record shows the pair from a
-    seat of each team is a lead forfeit and completes the series through the
-    helper -- one credit per player, keyed by the team series; the same report
-    again is ignored. Two negative controls come first, the same steps each on
-    a schema of its own: with no per-game record, and with team 1's post
-    alone, the same report parks the series as dc_incomplete, the hook is
-    never reached and nothing is credited (the comment above
+def test_pg_2v2_settled_lead_forfeit_credits_only_the_game_played(opened, hook_calls,
+                                                                  monkeypatch):
+    """2v2 settlement through the helper's other caller: team 1 wins game 1
+    through submit_team_match -- one credit per player, keyed by that game --
+    then a team-2 disconnect in game 2 whose per-game record shows the pair
+    from a seat of each team is a lead forfeit and completes the series
+    through the helper, which plays no game and credits nothing more; the
+    same report again is ignored. Two controls come first, the same steps
+    each on a schema of its own: with no per-game record, and with team 1's
+    post alone, the same report parks the series as dc_incomplete and the
+    ladder holds game 1's credit alone (the comment above
     _live_points_sig)."""
     _require_live_pg()
 
@@ -1046,11 +1087,17 @@ def test_pg_2v2_settled_lead_forfeit_credits_once(opened, hook_calls, monkeypatc
             ids = await _seed(sm)
             seeded, _ = await _look(schema)
             sid = await _lead_forfeit_series(monkeypatch, sm, ids, posters)
+            game1, _ = await _look(schema)
+            calls = list(hook_calls)
             dc = await _team_dc(sm, sid, P1, P3, 2, 1, "team_lhF_000002_r2")
             assert dc[1] is None and dc[0]["status"] == "dc_incomplete", (posters, dc)
-            assert hook_calls == [], (posters, hook_calls)
+            assert hook_calls == calls and [c[0] for c in calls] == ["2v2"], (
+                posters, hook_calls)
             after, _ = await _look(schema)
-            assert after == seeded, ("a credit moved without a settled lead forfeit", posters)
+            ok, want = _plus_one(seeded, after, [P1, P2, P3, P4])
+            assert ok and after == game1, ("the parked DC moved the ladder", posters,
+                                           after["progress"], want)
+            del hook_calls[:]
 
     async def _go():
         await _control(())
@@ -1059,19 +1106,23 @@ def test_pg_2v2_settled_lead_forfeit_credits_once(opened, hook_calls, monkeypatc
             ids = await _seed(sm)
             seeded, _ = await _look(schema)
             sid = await _lead_forfeit_series(monkeypatch, sm, ids, (P1, P3))
-            assert hook_calls == [], hook_calls
+            assert [(c[0], c[2]) for c in hook_calls] == [("2v2", 4)], hook_calls
+            m1 = hook_calls[0][1]
             dc = await _team_dc(sm, sid, P1, P3, 2, 1, "team_lhF_000002_r2")
             assert dc[1] is None and dc[0].get("reason") == "dc_leadforfeit", dc
-            assert hook_calls == [("2v2-settled", str(sid), 4)], hook_calls
+            assert len(hook_calls) == 1, ("the lead forfeit reached the hook", hook_calls)
             done, econ = await _look(schema)
             ok, want = _plus_one(seeded, done, [P1, P2, P3, P4])
-            assert ok, ("H3: after the lead forfeit", done["progress"], want)
-            assert _credited(done, str(sid), "2v2-settled", [P1, P2, P3, P4]), done["credits"]
+            assert ok, ("H8: the lead forfeit credited more than game 1",
+                        done["progress"], want)
+            assert _credited(done, m1, "2v2", [P1, P2, P3, P4]), done["credits"]
+            assert len(done["credits"]) == 4, done["credits"]
+            assert [s[0] for s in econ["team_series"]] == ["completed"], econ["team_series"]
             again = await _team_dc(sm, sid, P1, P3, 2, 1, "team_lhF_000002_r2")
             assert again[1] is None and again[0].get("ignored") is True, again
             after, econ2 = await _look(schema)
             assert after == done and econ2 == econ, "H3: the repeated DC report wrote something"
-            assert hook_calls == [("2v2-settled", str(sid), 4)], hook_calls
+            assert len(hook_calls) == 1, hook_calls
     _run(_go())
 
 
@@ -1143,10 +1194,10 @@ def test_pg_2v2_settled_unfilled_slot_credits_nothing(opened, hook_calls):
 
 
 def test_pg_either_2v2_path_after_the_other_adds_nothing(opened, hook_calls):
-    """2v2, H3 across the two paths: a series completed by the reports is
-    the admin route's noop, and a series completed by the admin route refuses
-    the report -- each series one credit per player, under the mode of the
-    path that completed it; two series, two credits."""
+    """2v2, H3 across the two paths: a series completed by its two reported
+    games credits each player once per game and is then the admin route's
+    noop; a series completed by the admin route credits nothing and refuses
+    the report. Two series, two games played, eight credits."""
     _require_live_pg()
 
     async def _go():
@@ -1154,10 +1205,12 @@ def test_pg_either_2v2_path_after_the_other_adds_nothing(opened, hook_calls):
             ids = await _seed(sm)
             seeded, _ = await _look(schema)
             by_reports = await _team_series(sm, ids, "team_lhJ")
+            games = []
             for g in (1, 2):
                 res = await _submit(sm, main.submit_team_match,
                                     _report_2v2(by_reports, "team_lhJ_00000%d_r%d" % (g, g)))
                 assert res[1] is None, res
+                games.append(str(res[0].match_id))
             noop = await _admin(sm, opened, by_reports, "complete", 1)
             assert noop[0]["status"] == "noop", noop
             by_admin = await _team_series(sm, ids, "team_lhK")
@@ -1168,22 +1221,21 @@ def test_pg_either_2v2_path_after_the_other_adds_nothing(opened, hook_calls):
             assert getattr(late[1], "status_code", None) == 400, late
             after, _ = await _look(schema)
             four = [P1, P2, P3, P4]
-            assert _credited(after, str(by_reports), "2v2", four), after["credits"]
-            assert _credited(after, str(by_admin), "2v2-settled", four), after["credits"]
+            for m in games:
+                assert _credited(after, m, "2v2", four), after["credits"]
             assert len(after["credits"]) == 8, after["credits"]
-            assert hook_calls == [("2v2", str(by_reports), 4),
-                                  ("2v2-settled", str(by_admin), 4)], hook_calls
+            assert hook_calls == [("2v2", m, 4) for m in games], hook_calls
             for s in four:
                 line, games = WEAR[s]
                 assert after["progress"][(s, line)][0] == games + 2, (s, after["progress"])
     _run(_go())
 
 
-def test_pg_ffa_credits_once_per_sitting_and_reads_back(opened, hook_calls):
+def test_pg_ffa_credits_once_per_game_and_reads_back(opened, hook_calls):
     """FFA, H3 + H6. The game credits every rated member once, keyed by the
-    LOBBY; the GETs read +1; the same report again is refused by the room
-    gate -- the replay echo -- with no second ffa_matches row and nothing
-    else written."""
+    GAME's ffa_matches id; the GETs read +1; the same report again is
+    refused by the room gate -- the replay echo -- with no second
+    ffa_matches row and nothing else written."""
     _require_live_pg()
 
     async def _go():
@@ -1194,11 +1246,12 @@ def test_pg_ffa_credits_once_per_sitting_and_reads_back(opened, hook_calls):
             report = _report_ffa(lid, "ffa_lhL_r1", _ffa_game(), P1)
             res = await _submit(sm, main.submit_ffa_match, report)
             assert res[1] is None, res
-            assert hook_calls == [("ffa", str(lid), 4)], hook_calls
+            m1 = str(res[0].match_id)
+            assert hook_calls == [("ffa", m1, 4)], hook_calls
             done, econ = await _look(schema)
             ok, want = _plus_one(seeded, done, [P1, P2, P3, P4])
             assert ok, ("H3/H6: after the game", done["progress"], want)
-            assert _credited(done, str(lid), "ffa", [P1, P2, P3, P4]), done["credits"]
+            assert _credited(done, m1, "ffa", [P1, P2, P3, P4]), done["credits"]
             read = await _get_ladders(schema, [P1, P2, P3, P4])
             for s in (P1, P2, P3, P4):
                 assert _worn_games(read[s][1]) == (WEAR[s][0], WEAR[s][1] + 1), (
@@ -1209,7 +1262,7 @@ def test_pg_ffa_credits_once_per_sitting_and_reads_back(opened, hook_calls):
             after, econ2 = await _look(schema)
             assert econ2["ffa_matches"] == 1 and after == done and econ2 == econ, (
                 "H3: the resend wrote something")
-            assert hook_calls == [("ffa", str(lid), 4)], (
+            assert hook_calls == [("ffa", m1, 4)], (
                 "H3: the replay echo reached the hook", hook_calls)
     _run(_go())
 
@@ -1308,19 +1361,19 @@ def test_pg_ffa_failed_skew_refund_takes_the_credit_back(opened, monkeypatch, ho
                                 _report_ffa(lid, "ffa_lhR_r1", _ffa_game(), P1))
             assert getattr(res[1], "status_code", None) == 503, res
             assert calls == [1], calls
-            assert hook_calls == [("ffa", str(lid), 4)], hook_calls
+            assert [(m, n) for m, _r, n in hook_calls] == [("ffa", 4)], hook_calls
             after, econ = await _look(schema)
             assert after == seeded and econ["ffa_matches"] == 0, (
                 "H8: a rolled-back FFA settlement kept its credit")
     _run(_go())
 
 
-# -- FFA: one credit per sitting (design V3 section 12.3) ---------------------
+# -- FFA: one credit per GAME (board row 29) ----------------------------------
 
 # W, R and G each wear the first rung of a line at a recorded count; V and X
 # wear nothing. X is the second lobby's third seat: a lobby forms at
-# FFA_MIN_PLAYERS (three), so step 7's "a new rated lobby with W and V" is
-# played three-handed.
+# FFA_MIN_PLAYERS (three), so the new rated lobby with W and V is played
+# three-handed.
 W, V, R, G, X = ("76561190000000411", "76561190000000412", "76561190000000413",
                  "76561190000000414", "76561190000000415")
 SITTING_WEAR = {W: (LINES[0], 3), R: (LINES[1], 3), G: (LINES[2], 3)}
@@ -1328,7 +1381,7 @@ NAME = {W: "W", V: "V", R: "R", G: "G", X: "X"}
 
 
 def _sitting_game_1(lobby):
-    """Game 1 of the sitting: W wins and V plays it out; R leaves with six
+    """Game 1 of the lobby: W wins and V plays it out; R leaves with six
     field points on the board, late enough to be rated; G leaves at one,
     inside the grace (FFA_LEAVE_GRACE_POINTS), and is unrated."""
     return _report_ffa(lobby, "ffa_lhS_r1", [
@@ -1391,28 +1444,26 @@ def _sitting_problems(when, look, got, games, refs):
     return out
 
 
-def test_pg_ffa_credit_is_keyed_by_the_sitting(opened, hook_calls):
-    """FFA, design V3 section 12.3 steps 1-8 (H1, H3, H6 and H8 per sitting).
+def test_pg_ffa_credit_is_keyed_by_the_game(opened, hook_calls):
+    """FFA per game (board row 29; the steps of design V3 section 12.3 with
+    the unit moved from the lobby to the game).
 
     One rated lobby L, two games. Game 1 rates W, V and R -- R left late --
     and not G, who left inside the grace; game 2, in a new room, rates W and
-    V while R and G ride as ghosts. The per-game writes stay per game: two
-    ffa_matches rows, one FFA game per rated player per game (W and V twice,
-    R once, G never), one ffa_placement gold row per rated player per game
-    referencing THAT game's match id. The ladder counts the SITTING: after
-    game 1, W and R each hold one credit keyed by the lobby and their worn
-    lines read +1 through the GET; after game 2 still exactly one each, still
-    +1, and no credit carries a game's id; G, graced and then a ghost, ends
-    the sitting with none and R, rated once and then a ghost, keeps exactly
-    one. Game 2 sent again is the replay echo and moves nothing. A new lobby
-    gives W the next +1.
+    V while R and G ride as ghosts. Every write is per game: two ffa_matches
+    rows, one FFA game per rated player per game (W and V twice, R once, G
+    never), one ffa_placement gold row per rated player per game referencing
+    THAT game's match id -- and now the ladder too: after game 1, W and R
+    each hold one credit keyed by game 1's id and read +1 through the GET;
+    after game 2, W holds a second keyed by game 2's id and reads +2, R --
+    a ghost in game 2 -- still one, G none. Game 2 sent again is the replay
+    echo and moves nothing. A new lobby gives W the next +1.
 
-    The hook is reached by both games of L -- three players, then two -- so
-    the second game's no-op is the lobby key's doing, not a path that never
-    called it. Step 8's mutation control, main.py's FFA call keyed by
-    str(match_id) again, must turn this red: the first sitting's checks are
-    collected and reported together, so the red run names W's two credits
-    and the GET's +2 rather than stopping at the first difference."""
+    The hook is reached by both games of L -- three players, then two. The
+    mutation control, main.py's FFA call keyed by str(lobby_uuid) again (the
+    series-unit build), must turn this red: the checks are collected and
+    reported together, so the red run names W's single credit and the GET's
+    +1 rather than stopping at the first difference."""
     _require_live_pg()
 
     async def _go():
@@ -1421,81 +1472,83 @@ def test_pg_ffa_credit_is_keyed_by_the_sitting(opened, hook_calls):
             seeded, _ = await _look(schema)
             start = {s: seeded["progress"][(s, line)][0]
                      for s, (line, _g) in SITTING_WEAR.items()}
-            once = {W: start[W] + 1, R: start[R] + 1, G: start[G]}
             lobby = await _ffa_lobby(sm, ids, members=(W, V, R, G))
             L = str(lobby)
             problems = []
 
-            # Steps 2-5, game 1.
+            # Game 1.
             g1 = await _submit(sm, main.submit_ffa_match, _sitting_game_1(lobby))
             assert g1[1] is None, g1
             assert any(ln.startswith("[FFA] early-leave grace for %s" % G) for ln in g1[2]), (
                 "G's leave did not take the grace", g1[2])
             m1 = str(g1[0].match_id)
             matches, played, placed = await _per_game(schema, [lobby])
-            assert matches == {L: [m1]}, ("step 3, game 1", matches)
-            assert played == {W: 1, V: 1, R: 1}, ("step 3, game 1: FFA games", played)
-            assert placed == {m1: sorted([W, V, R])}, ("step 3, game 1: placement gold", placed)
-            assert [(m, n) for m, _r, n in hook_calls] == [("ffa", 3)], hook_calls
+            assert matches == {L: [m1]}, ("game 1", matches)
+            assert played == {W: 1, V: 1, R: 1}, ("game 1: FFA games", played)
+            assert placed == {m1: sorted([W, V, R])}, ("game 1: placement gold", placed)
+            assert hook_calls == [("ffa", m1, 3)], hook_calls
             after1, _ = await _look(schema)
             got1 = await _get_ladders(schema, [W, R, G])
+            once = {W: start[W] + 1, R: start[R] + 1, G: start[G]}
             problems += _sitting_problems("after game 1", after1, got1, once,
-                                          {W: [L], V: [], R: [L], G: []})
+                                          {W: [m1], V: [], R: [m1], G: []})
 
-            # Steps 2-5, game 2.
+            # Game 2.
             game_2 = _sitting_game_2(lobby)
             g2 = await _submit(sm, main.submit_ffa_match, game_2)
             assert g2[1] is None, g2
             m2 = str(g2[0].match_id)
             assert m2 != m1, (m1, m2)
             matches, played, placed = await _per_game(schema, [lobby])
-            assert matches == {L: [m1, m2]}, ("step 3, game 2", matches)
-            assert played == {W: 2, V: 2, R: 1}, ("step 3, game 2: FFA games", played)
+            assert matches == {L: [m1, m2]}, ("game 2", matches)
+            assert played == {W: 2, V: 2, R: 1}, ("game 2: FFA games", played)
             assert placed == {m1: sorted([W, V, R]), m2: sorted([W, V])}, (
-                "step 3, game 2: placement gold", placed)
+                "game 2: placement gold", placed)
             assert [(m, n) for m, _r, n in hook_calls] == [("ffa", 3), ("ffa", 2)], hook_calls
             after2, econ2 = await _look(schema)
             got2 = await _get_ladders(schema, [W, R, G])
-            problems += _sitting_problems("after game 2", after2, got2, once,
-                                          {W: [L], V: [], R: [L], G: []})
-            by_game = sorted((NAME[c[0]], c[1]) for c in after2["credits"] if c[1] in (m1, m2))
-            if by_game:
-                problems.append("after game 2: %d credit(s) keyed by a game's id, "
-                                "not the lobby's: %r" % (len(by_game), by_game))
-            keys = sorted({r for _m, r, _n in hook_calls})
-            if keys != [L]:
-                problems.append("the hook was called with %r, not the lobby %r" % (keys, L))
+            twice = {W: start[W] + 2, R: start[R] + 1, G: start[G]}
+            problems += _sitting_problems("after game 2", after2, got2, twice,
+                                          {W: [m1, m2], V: [], R: [m1], G: []})
+            by_lobby = sorted(NAME[c[0]] for c in after2["credits"] if c[1] == L)
+            if by_lobby:
+                problems.append("after game 2: %d credit(s) keyed by the lobby, not a "
+                                "game: %r" % (len(by_lobby), by_lobby))
+            keys = [r for _m, r, _n in hook_calls]
+            if keys != [m1, m2]:
+                problems.append("the hook was called with %r, not the games %r"
+                                % (keys, [m1, m2]))
 
-            # Step 6: game 2 sent again is the replay echo.
+            # Game 2 sent again is the replay echo.
             again = await _submit(sm, main.submit_ffa_match, game_2)
             assert again[1] is None and str(again[0].match_id) == m2, (
-                "step 6: the resend was not the replay echo of game 2", again)
+                "the resend was not the replay echo of game 2", again)
             after3, econ3 = await _look(schema)
             matches3, _played, _placed = await _per_game(schema, [lobby])
-            assert matches3 == {L: [m1, m2]}, ("step 6: a third ffa_matches row", matches3)
-            assert after3 == after2 and econ3 == econ2, "step 6: the replay echo moved something"
-            assert len(hook_calls) == 2, ("step 6: the replay echo reached the hook", hook_calls)
+            assert matches3 == {L: [m1, m2]}, ("a third ffa_matches row", matches3)
+            assert after3 == after2 and econ3 == econ2, "the replay echo moved something"
+            assert len(hook_calls) == 2, ("the replay echo reached the hook", hook_calls)
 
-            assert not problems, ("the sitting did not count once:\n  "
+            assert not problems, ("the games did not count once each:\n  "
                                   + "\n  ".join(problems))
 
-            # Step 7: the sitting ends; a new lobby is the next sitting.
+            # The lobby ends; a new lobby's game is one more game.
             async with sm() as db:
                 await db.execute(text(
                     "UPDATE ffa_lobbies SET status = 'completed', completed_at = NOW() "
                     " WHERE id = :i"), {"i": lobby})
                 await db.commit()
             lobby2 = await _ffa_lobby(sm, ids, members=(W, V, X))
-            L2 = str(lobby2)
             g3 = await _submit(sm, main.submit_ffa_match,
                                _report_ffa(lobby2, "ffa_lhU_r1", _ffa_game((W, V, X)), W))
             assert g3[1] is None, g3
-            assert hook_calls[2:] == [("ffa", L2, 3)], hook_calls
+            m3 = str(g3[0].match_id)
+            assert hook_calls[2:] == [("ffa", m3, 3)], hook_calls
             after4, _ = await _look(schema)
             got4 = await _get_ladders(schema, [W, R, G])
-            twice = {W: start[W] + 2, R: start[R] + 1, G: start[G]}
-            late = _sitting_problems("after the second lobby", after4, got4, twice,
-                                     {W: [L, L2], V: [], R: [L], G: [], X: []})
+            thrice = {W: start[W] + 3, R: start[R] + 1, G: start[G]}
+            late = _sitting_problems("after the second lobby", after4, got4, thrice,
+                                     {W: [m1, m2, m3], V: [], R: [m1], G: [], X: []})
             assert not late, late
     _run(_go())
 
@@ -1510,8 +1563,8 @@ def _faulting_hook(monkeypatch, *, only_first=False):
     real = tl.record_completed_games
     wrote = []
 
-    async def _hook(db, player_ids, *, mode, reference_id):
-        events = await real(db, player_ids, mode=mode, reference_id=reference_id)
+    async def _hook(db, player_ids, *, mode, reference_id, rows=None):
+        events = await real(db, player_ids, mode=mode, reference_id=reference_id, rows=rows)
         if only_first and wrote:
             return events
         wrote.append((await db.execute(text(
@@ -1550,22 +1603,23 @@ def _answer_digest(answers):
 @pytest.mark.parametrize("mode", MODES)
 def test_pg_a_database_fault_in_the_hook_costs_the_completion_nothing(opened, monkeypatch, mode):
     """H5, per site: the same completion, clean and with the hook's call
-    faulted in the database after the real hook wrote its credits. The
-    faulted run answers the same, commits the same result, ratings, XP, gold
-    and items, holds no credit and no ladder change for anyone, and printed
-    exactly one dropped line naming its completion."""
+    faulted in the database after the real hook wrote its credits -- in
+    every game. The faulted run answers the same, commits the same results,
+    ratings, XP, gold and items, holds no credit and no ladder change for
+    anyone, and printed exactly one dropped line per game, naming it."""
     _require_live_pg()
+    n = GAMES[mode]
     clean = _run(_run_completion(mode, opened, "S"))
     wrote = _faulting_hook(monkeypatch)
     faulted = _run(_run_completion(mode, opened, "S"))
-    assert wrote and wrote[0] == len(clean["who"]), (
+    assert wrote == [len(clean["who"])] * n, (
         "the fault did not land after the real hook wrote its credits", wrote)
     assert all(exc is None for _a, exc, _l in faulted["answers"]), faulted["answers"]
     assert _answer_digest(faulted["answers"]) == _answer_digest(clean["answers"])
     assert faulted["econ"] == clean["econ"], (
         "H5: the fault changed the completion's result, rating, XP, gold or items")
-    ok, _want = _plus_one(clean["seeded"], clean["after"], clean["who"])
-    assert ok and len(clean["after"]["credits"]) == len(clean["who"]), clean["after"]
+    ok, _want = _plus_n(clean["seeded"], clean["after"], clean["who"], n)
+    assert ok and len(clean["after"]["credits"]) == len(clean["who"]) * n, clean["after"]
     table = RATING_TABLE[mode]
     assert clean["econ"][table] != clean["econ0"][table], (
         "the clean completion rated nobody, so the comparison could not see a "
@@ -1573,14 +1627,14 @@ def test_pg_a_database_fault_in_the_hook_costs_the_completion_nothing(opened, mo
     assert faulted["after"] == faulted["seeded"], (
         "H5: the faulted completion left ladder state behind", faulted["after"])
     dropped = _dropped(faulted["lines"], mode)
-    assert len(dropped) == 1 and faulted["ref"] in dropped[0], faulted["lines"]
+    assert len(dropped) == n and len(faulted["ref"]) == n, (faulted["lines"], faulted["ref"])
+    assert all(r in d for r, d in zip(faulted["ref"], dropped)), (dropped, faulted["ref"])
     assert not _dropped(clean["lines"], mode), clean["lines"]
 
 
 RATING_TABLE = {
     "1v1": "glicko_ratings",
     "2v2": "glicko_ratings_2v2",
-    "2v2-settled": "glicko_ratings_2v2",
     "ffa": "glicko_ratings_ffa",
 }
 
@@ -1588,7 +1642,6 @@ RATING_TABLE = {
 _SITE_FUNCTION = {
     "1v1": "submit_match",
     "2v2": "submit_team_match",
-    "2v2-settled": "_complete_team_series_with_ratings",
     "ffa": "submit_ffa_match",
 }
 
@@ -1629,25 +1682,19 @@ def _without_hook_savepoint(name):
 def test_pg_without_the_savepoint_the_same_fault_costs_the_completion(opened, monkeypatch, mode):
     """H5's control (#235/#536): the handler with only the hook's savepoint
     taken out, and the same fault. The handler's own except still catches it
-    and prints the dropped line -- and the completion is lost with the
-    credit: the transaction the fault aborted is the completion's own."""
+    and prints the dropped line -- and the game is lost with the credit: the
+    transaction the fault aborted is the game's own. Every game reaches the
+    hook now, so no game of the completion survives."""
     _require_live_pg()
     variant = _without_hook_savepoint(_SITE_FUNCTION[mode])
     _faulting_hook(monkeypatch)
-    submit = None
-    if mode == "2v2-settled":
-        monkeypatch.setattr(main, "_complete_team_series_with_ratings", variant)
-    else:
-        submit = variant
-    run = _run(_run_completion(mode, opened, "V", submit=submit))
+    run = _run(_run_completion(mode, opened, "V", submit=variant))
     assert _dropped(run["lines"], mode), run["lines"]
     econ = run["econ"]
-    # What survives is exactly what committed BEFORE the completing call:
-    # game 1 of a 1v1 or 2v2 series, nothing at all for the other two.
     lost = {
-        "1v1": len(econ["matches"]) == 1 and [s[0] for s in econ["ranked_series"]] == ["active"],
-        "2v2": econ["team_matches"] == 1 and [s[0] for s in econ["team_series"]] == ["active"],
-        "2v2-settled": econ["team_series"] == [("active", 0, 0, None)],
+        "1v1": econ["matches"] == [] and not any(s[0] == "completed"
+                                                 for s in econ["ranked_series"]),
+        "2v2": econ["team_matches"] == 0 and [s[0] for s in econ["team_series"]] == ["active"],
         "ffa": econ["ffa_matches"] == 0,
     }[mode]
     assert lost, ("without the savepoint the completion survived the fault -- then the "
@@ -1657,25 +1704,24 @@ def test_pg_without_the_savepoint_the_same_fault_costs_the_completion(opened, mo
 
 # -- LOW residual sentences made tests (design V3 section 12.6) ---------------
 
-def test_pg_r1_a_fault_in_game_one_is_recovered_by_game_two(opened, monkeypatch):
-    """LOW-R1 (design V3 section 12.6): "Injecting a SQL failure inside each
-    hook savepoint must leave the normal completion, rating and gold
-    committed while writing no credit and logging `[LADDER-CREDIT]`; any
-    effect on those states or a nonparticipant ladder falsifies
-    containment." B6's H5 test drives it at every site; this is the FFA
-    case under the lobby key, judged as 12.6's closing paragraph says: on
-    the game it hits. A failing SQL statement is injected into the hook's
-    call in game 1 of a two-game sitting, and only there. After game 1 the
-    game is committed exactly as a clean twin's game 1 is -- the same
-    answer, match row, ratings, XP, gold and items -- no credit exists, no
-    ladder moved (the bystander's included) and one dropped line names the
-    lobby. Game 2 of the same sitting, unfaulted, rates the same four and
-    writes each one's credit under the same lobby key: +1 each, once, and
-    the GET reads it."""
+def test_pg_r1_a_fault_in_game_one_costs_only_game_ones_credit(opened, monkeypatch):
+    """LOW-R1 (design V3 section 12.6), re-read for the game unit: "Injecting
+    a SQL failure inside each hook savepoint must leave the normal
+    completion, rating and gold committed while writing no credit and
+    logging `[LADDER-CREDIT]`; any effect on those states or a
+    nonparticipant ladder falsifies containment." A failing SQL statement is
+    injected into the hook's call in game 1 of a two-game FFA lobby, and only
+    there. After game 1 the game is committed exactly as a clean twin's game
+    1 is -- the same answer, match row, ratings, XP, gold and items -- no
+    credit exists, no ladder moved (the bystander's included) and one
+    dropped line names game 1. Game 2, unfaulted, rates the same four and
+    writes each one's credit under GAME 2's id: +1 each, once, and the GET
+    reads it. Game 1's credit is not recovered -- under the game unit it
+    belongs to game 1 alone; the residual is in the build notes."""
     _require_live_pg()
     four = [P1, P2, P3, P4]
 
-    async def _sitting(two_games):
+    async def _lobby(two_games):
         async with _case() as (schema, sm):
             ids = await _seed(sm)
             seeded, _ = await _look(schema)
@@ -1691,9 +1737,9 @@ def test_pg_r1_a_fault_in_game_one_is_recovered_by_game_two(opened, monkeypatch)
                 out.update(g2=g2, after2=after2, got2=await _get_ladders(schema, four))
             return out
 
-    clean = _run(_sitting(False))
+    clean = _run(_lobby(False))
     wrote = _faulting_hook(monkeypatch, only_first=True)
-    run = _run(_sitting(True))
+    run = _run(_lobby(True))
     assert wrote == [4], ("the fault did not land after the real hook wrote four credits",
                           wrote)
     assert run["g1"][1] is None, run["g1"]
@@ -1702,13 +1748,14 @@ def test_pg_r1_a_fault_in_game_one_is_recovered_by_game_two(opened, monkeypatch)
         "R1: the fault changed game 1's result, rating, XP, gold or items")
     assert run["after1"] == run["seeded"], (
         "R1: game 1's fault left ladder state behind", run["after1"])
+    m1 = str(run["g1"][0].match_id)
     dropped = _dropped(run["g1"][2], "ffa")
-    assert len(dropped) == 1 and run["lobby"] in dropped[0], run["g1"][2]
+    assert len(dropped) == 1 and m1 in dropped[0], run["g1"][2]
     assert run["g2"][1] is None and not _dropped(run["g2"][2], "ffa"), run["g2"]
+    m2 = str(run["g2"][0].match_id)
     ok, want = _plus_one(run["seeded"], run["after2"], four)
-    assert ok, ("R1: game 2 did not write the sitting's credit", run["after2"]["progress"],
-                want)
-    assert _credited(run["after2"], run["lobby"], "ffa", four), run["after2"]["credits"]
+    assert ok, ("R1: game 2 did not write its own credit", run["after2"]["progress"], want)
+    assert _credited(run["after2"], m2, "ffa", four), run["after2"]["credits"]
     assert len(run["after2"]["credits"]) == 4, run["after2"]["credits"]
     for s in four:
         status, body = run["got2"][s]
@@ -1754,8 +1801,9 @@ async def _r3_run(how, tag):
             if engine is not None:
                 await engine.dispose()
         after, econ = await _look(schema)
+        refs = [str(g[0].match_id) for g in (g1, g2) if g[1] is None]
         return dict(seeded=seeded, mid_econ=mid_econ, g2=g2, after=after, econ=econ,
-                    reversed=bool(reversed_), ref=str(await _ranked_series_id(sm, ids)))
+                    reversed=bool(reversed_), refs=refs)
 
 
 @pytest.mark.parametrize("how", ["fail", "skip"])
@@ -1769,8 +1817,8 @@ def test_pg_r3_the_1v1_credit_stands_when_the_rating_pass_does_not_run(opened, m
     after the completion's commit. Forced to FAIL (the rating calculation
     raises) or to take its SKIP (the series is invalidated between the two
     transactions -- what the pass's authoritative re-read exists to catch),
-    the credit committed with the completion stands: both players +1, keyed
-    by the series, and nobody else's ladder moves -- while the ratings stay
+    the credits committed with the two games stand: both players +2, one
+    keyed by each game, and nobody else's ladder moves -- while the ratings stay
     where game 1 left them and no rating history is written. And the credit
     causes nothing else: the same run with the hook made a no-op answers the
     same and commits the same matches, series, XP, gold, items and ratings."""
@@ -1781,7 +1829,7 @@ def test_pg_r3_the_1v1_credit_stands_when_the_rating_pass_does_not_run(opened, m
         monkeypatch.setattr(main, "calculate_new_rating", _refuse)
     live = _run(_r3_run(how, "R"))
 
-    async def _no_hook(db, player_ids, *, mode, reference_id):
+    async def _no_hook(db, player_ids, *, mode, reference_id, rows=None):
         return []
     monkeypatch.setattr(tl, HOOK, _no_hook)
     inert = _run(_r3_run(how, "R"))
@@ -1794,10 +1842,12 @@ def test_pg_r3_the_1v1_credit_stands_when_the_rating_pass_does_not_run(opened, m
         assert any(forced[how] in ln for ln in run["g2"][2]), (
             "the rating pass did not take the forced path", label, how, run["g2"][2])
         assert run["reversed"] == (how == "skip"), (label, run["reversed"])
-    ok, want = _plus_one(live["seeded"], live["after"], [P1, P2])
+    ok, want = _plus_n(live["seeded"], live["after"], [P1, P2], 2)
     assert ok, ("R3: the committed credit did not stand", live["after"]["progress"], want)
-    assert _credited(live["after"], live["ref"], "1v1", [P1, P2]), live["after"]["credits"]
-    assert len(live["after"]["credits"]) == 2, live["after"]["credits"]
+    assert len(live["refs"]) == 2, live["refs"]
+    for ref in live["refs"]:
+        assert _credited(live["after"], ref, "1v1", [P1, P2]), live["after"]["credits"]
+    assert len(live["after"]["credits"]) == 4, live["after"]["credits"]
     for table in ("glicko_ratings", "glicko_ratings_2v2", "glicko_ratings_ffa"):
         assert live["econ"][table] == live["mid_econ"][table], ("R3: a rating moved", table)
     assert live["econ"]["rating_history"] == 0, live["econ"]["rating_history"]
@@ -1836,7 +1886,8 @@ def test_pg_qg_the_resent_1v1_report_answers_500_and_writes_nothing(opened):
     no second result, rating, gold or ladder credit." (The line number is
     the base tree's.) Documented as it stands and NOT changed in this
     lane: through main.app, the series' two reports answer 200 and complete
-    it, crediting both players once; the deciding report sent again answers
+    it, crediting both players once per game; the deciding report sent again
+    answers
     HTTP 500 -- its match insert's flush meets unique_match before any
     series logic -- and writes no second result, rating, gold or ladder
     credit."""
@@ -1856,9 +1907,9 @@ def test_pg_qg_the_resent_1v1_report_answers_500_and_writes_nothing(opened):
                 assert second.status_code == 200, (second.status_code, second.text)
                 assert second.json()["series_status"] == "completed", second.text
                 done, econ = await _look(schema)
-                ref = str(await _ranked_series_id(sm, ids))
-                assert _credited(done, ref, "1v1", [P1, P2]), done["credits"]
-                assert len(done["credits"]) == 2, done["credits"]
+                for ref in (first.json()["match_id"], second.json()["match_id"]):
+                    assert _credited(done, str(ref), "1v1", [P1, P2]), done["credits"]
+                assert len(done["credits"]) == 4, done["credits"]
                 again = await client.post("/api/v1/matches", json=deciding)
                 assert again.status_code == 500, (again.status_code, again.text)
             after, econ2 = await _look(schema)

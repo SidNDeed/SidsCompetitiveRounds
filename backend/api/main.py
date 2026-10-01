@@ -6992,8 +6992,8 @@ _FFA_HOLD_FENCES = 1
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
 # Its sibling _LADDER_HOOK (the /health `ladder_hook` word) is DERIVED from the
-# compiled code of the four rated completion functions, so it is defined after
-# the last of them in this file, submit_team_match.
+# compiled code of the three ranked game-reporting functions, so it is defined
+# after the last of them in this file, submit_team_match.
 # Its sibling _CONNECT_FAILURE (the /health `connect_failure` word) is DERIVED
 # from the compiled code of the eight I2 writers' entry functions, so it is
 # defined beside _LADDER_HOOK, after the last of them.
@@ -7061,6 +7061,16 @@ def _janitor_selftest_marker() -> int:
 _JANITOR_SELFTEST_BUILD = 1
 
 
+def _title_ladders_health_word() -> int:
+    """/health `title_ladders`: how many ladders the catalogue this build
+    SERVES holds (title_ladders.LADDERS, the list the read route and the hook
+    read), DERIVED at request time and never written down (#342): 32 on the
+    five-tier build (board row 29), absent on any build before it. The title
+    ladders batch adds no route, so this is its release-train build word;
+    nothing else reads it (#306). Code-only, so both arms answer it alike."""
+    return title_ladders.ladder_count()
+
+
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
 async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
@@ -7085,6 +7095,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=await _pc_trading_word(db),
                               discord_fix=await _discord_fix_probe(db),
                               pc_motion=_pc_motion_health_word(),
+                              title_ladders=_title_ladders_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
@@ -7114,6 +7125,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=_pc_trading_word_cached(),
                               discord_fix=_DISCORD_FIX_LAST,
                               pc_motion=_pc_motion_health_word(),
+                              title_ladders=_title_ladders_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
@@ -9060,17 +9072,33 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         label="1v1-complete")
             except Exception as pcex:
                 print(f"[PC-EARNED] 1v1 grant failed for series {series.id}: {pcex}")
-            _lref = "?"
-            try:
-                _lref = str(series.id)
-                _lpids = [p1.id, p2.id]
-                async with db.begin_nested():
-                    await title_ladders.record_completed_games(
-                        db, _lpids, mode="1v1", reference_id=_lref)
-            except Exception as _lex:
-                print(f"[LADDER-CREDIT] 1v1 credit dropped (series={_lref}): {_lex}")
         else:
             series_status = "active"
+
+    # Title ladders: one credit per ranked GAME (board row 29), keyed on this
+    # game's own id, for both seats from the one report. Here, after every
+    # gold row of this game (xp, level, and the series result when this game
+    # completed one) is written, so a gold ladder reads them; before the
+    # commit, so a duplicate report's rollback takes the credits with it.
+    if report.is_ranked:
+        _lref = "?"
+        try:
+            _lref = str(match.id)
+            _lpids = [p1.id, p2.id]
+            _lgold = [_lref] + ([str(series.id)] if series_completed else [])
+            _lrows = {
+                str(p1.id): {**title_ladders.game_row_1v1(
+                    match, p1.id, [_canon_card_name(c.card_name) for c in report.player1.cards]),
+                    "gold_refs": _lgold},
+                str(p2.id): {**title_ladders.game_row_1v1(
+                    match, p2.id, [_canon_card_name(c.card_name) for c in report.player2.cards]),
+                    "gold_refs": _lgold},
+            }
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, _lpids, mode="1v1", reference_id=_lref, rows=_lrows)
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] 1v1 credit dropped (game={_lref}): {_lex}")
 
     try:
         await db.commit()
@@ -25606,13 +25634,16 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 # ── The one carve-out from that exemption ──────────────────────────
 #
 # Title-ladder rungs above the first are PROGRESSION, not cosmetics: each one
-# is granted by finishing a number of rated series while wearing the rung
-# below it. The shop-owner exemption above does two things that are wrong for
+# is granted by playing a number of ranked games while wearing a rung of its
+# ladder. The shop-owner exemption above does two things that are wrong for
 # such a row — it lists the whole `rotation_pool = 'achievement'` pool to the
 # exempt account whether owned or not, and it skips the ownership check on
-# equip — and the combination means an exempt account is listed all forty
-# higher rungs and can equip any of them without the ladder ever having
+# equip — and the combination means an exempt account is listed every
+# higher rung and can equip any of them without the ladder ever having
 # advanced. A rung that can be worn without being earned is not a rung.
+# The two titles migration 366 retires (title_ladders.RETIRED_SKUS) are
+# carved out too: retired means nobody can equip one, an exempt account
+# included (board row 29).
 #
 # The set is imported from `title_ladders`, which is the module that DEFINES
 # the catalogue, rather than matched on the `title_ladder_` sku prefix: a
@@ -25620,11 +25651,12 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 # a rename silently empties, which is the shape of a check that cannot fail
 # (#306/#342). This import wires nothing by itself: the ladder's read route is
 # mounted by the one include_router line beside the tournaments router, and
-# the progression hook is called from the four rated completion paths
+# the progression hook is called from the three ranked game-reporting paths
 # themselves; that module's docstring records every production reference.
 import title_ladders as _title_ladders
 
 _GRANTED_ONLY_TITLE_SKUS = _title_ladders.GRANTED_ONLY_SKUS
+_NOT_AUTO_OWNED_SKUS = _title_ladders.NOT_AUTO_OWNED_SKUS
 
 
 def _auto_owned(steam_id: str | None, sku: str | None) -> bool:
@@ -25651,7 +25683,7 @@ def _auto_owned(steam_id: str | None, sku: str | None) -> bool:
     """
     if not _is_shop_owner(steam_id):
         return False
-    return sku not in _GRANTED_ONLY_TITLE_SKUS
+    return sku not in _NOT_AUTO_OWNED_SKUS
 
 
 @app.get("/api/v1/shop/items", tags=["Shop"])
@@ -44800,12 +44832,10 @@ async def _complete_team_series_with_ratings(
                 label=f"team-{reason}")
     except Exception as pcex:
         print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
-    try:
-        async with db.begin_nested():
-            await title_ladders.record_completed_games(
-                db, gids, mode="2v2-settled", reference_id=str(series_uuid))
-    except Exception as _lex:
-        print(f"[LADDER-CREDIT] 2v2-settled credit dropped for {series_uuid} ({reason}): {_lex}")
+    # Title ladders count ranked GAMES (board row 29): this settlement completes
+    # a series after a forfeit or a disconnect and plays no game, and every game
+    # of the series was credited by submit_team_match when it was reported. So
+    # there is deliberately no ladder credit here.
 
     # Free the queue rows.
     await _lock_queue_rows_ordered(db, "team_queue", gids)
@@ -57930,11 +57960,20 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             print(f"[PC-EARNED] ffa grant failed for {match_id}: {pcex}")
     if rated:
         try:
+            # One credit per ranked GAME (board row 29): the game's own id,
+            # the gold rows this report wrote under it, and the winner seat.
+            _lrated = [p for p in report.players if p.steam_id not in unrated]
+            _lrows = {
+                str(id_by_steam[p.steam_id]): {
+                    "won": p.steam_id == report.winner_steam_id,
+                    "lost": p.steam_id != report.winner_steam_id,
+                    "gold_refs": [str(match_id)],
+                } for p in _lrated
+            }
             async with db.begin_nested():
                 await title_ladders.record_completed_games(
-                    db, [id_by_steam[p.steam_id] for p in report.players
-                         if p.steam_id not in unrated],
-                    mode="ffa", reference_id=str(lobby_uuid))  # the sitting's id, not the game's
+                    db, [id_by_steam[p.steam_id] for p in _lrated],
+                    mode="ffa", reference_id=str(match_id), rows=_lrows)
         except Exception as _lex:
             print(f"[LADDER-CREDIT] ffa credit dropped for lobby {lobby_uuid} (match {match_id}): {_lex}")
 
@@ -61051,12 +61090,6 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     label="team-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] team grant failed for {series_uuid}: {pcex}")
-        try:
-            async with db.begin_nested():
-                await title_ladders.record_completed_games(
-                    db, gids, mode="2v2", reference_id=str(series_uuid))
-        except Exception as _lex:
-            print(f"[LADDER-CREDIT] 2v2 credit dropped for {series_uuid}: {_lex}")
 
         # Free the queue rows so all 4 can re-queue.
         await _lock_queue_rows_ordered(
@@ -61168,6 +61201,27 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
             rebalance_assignments = None
             print(f"[TEAM-REBALANCE] error: {rex}")
 
+    # Title ladders: one credit per ranked GAME (board row 29), keyed on this
+    # team_matches row's own id, for all four seats; every 2v2 game is ranked
+    # (is_ranked=True above). After this game's gold rows (team_xp, level, and
+    # the series result when this game completed the series); before the
+    # commit.
+    _lref = "?"
+    try:
+        _lref = str(new_match.id)
+        _lgold = [_lref] + ([str(series_uuid)] if series_completed else [])
+        _lrows = {}
+        for _lp, _lteam in ((p_t1a, 1), (p_t1b, 1), (p_t2a, 2), (p_t2b, 2)):
+            _lrows[str(_lp.id)] = {"won": report.winner_team == _lteam,
+                                   "lost": report.winner_team != _lteam,
+                                   "gold_refs": _lgold}
+        async with db.begin_nested():
+            await title_ladders.record_completed_games(
+                db, [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id],
+                mode="2v2", reference_id=_lref, rows=_lrows)
+    except Exception as _lex:
+        print(f"[LADDER-CREDIT] 2v2 credit dropped (game={_lref}, series={series_uuid}): {_lex}")
+
     await db.commit()
 
     # Build response: series_score from the reporter's team perspective.
@@ -61192,27 +61246,24 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
 
 
 # -- The title-ladder hook build marker (/health `ladder_hook`) --------------
-# v1.41.0 item 12's server half credits the worn title ladder from every rated
-# completion path, through title_ladders.record_completed_games: submit_match
-# (1v1), submit_team_match (2v2), _complete_team_series_with_ratings (2v2
-# settled by the admin route or a lead forfeit) and submit_ffa_match (FFA,
-# once per sitting). The batch adds no route and no key to any GET answer both
-# builds serve -- the title-ladder route answers on the build before it, from
-# the same tables -- so this word is what tells the new build from the old
-# one. The release train asserts it on both roles and reads any value but the
-# expected one as the old build; nothing else reads it (#306).
+# The worn title ladder is credited once per ranked GAME (board row 29) from
+# the three ranked game-reporting paths, through
+# title_ladders.record_completed_games: submit_match (1v1), submit_team_match
+# (2v2) and submit_ffa_match (FFA). The after-the-fact 2v2 settlement
+# (_complete_team_series_with_ratings) plays no game and is no longer a site;
+# it was the fourth while ladders counted series (v1.41.0 item 12).
 #
-# DERIVED, never written down (#342): how many of those four functions' own
-# compiled code loads the hook's name -- 4 on this build, 0 on the build
-# before it, and between the two on a build that lost a site's call. It is
-# read from each function's code object (the names the function loads), not
-# from its source text, so a comment or a docstring naming the hook cannot
-# move the value. The count is title_ladders.hooked_site_count, kept beside
-# the hook so that this file names the hook at its four awaited calls and
-# nowhere else (test_title_ladders.py's whole-file test). health_check reads
-# the word at request time, so it is bound here, after the last of the four.
-_LADDER_HOOK_SITES = (submit_match, submit_team_match,
-                      _complete_team_series_with_ratings, submit_ffa_match)
+# DERIVED, never written down (#342): how many of those three functions' own
+# compiled code loads the hook's name -- 3 on this build (4 sites on the
+# series-unit build before it, 0 before that). It is read from each function's
+# code object (the names the function loads), not from its source text, so a
+# comment or a docstring naming the hook cannot move the value. The count is
+# title_ladders.hooked_site_count, kept beside the hook so that this file
+# names the hook at its three awaited calls and nowhere else
+# (test_title_ladders.py's whole-file test). health_check reads the word at
+# request time, so it is bound here, after the last of the three. The title
+# ladders batch's own build word is `title_ladders` (_title_ladders_health_word).
+_LADDER_HOOK_SITES = (submit_match, submit_team_match, submit_ffa_match)
 _LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
 # CONNECT-FAILURE, reported on /health as `connect_failure` (the connect-
 # failure design, V11). A marker whose only purpose is to be probed (#306):

@@ -1252,6 +1252,21 @@ def test_the_helper_closure_stays_affordable():
     # 177 by 2; the bound moves to 185, ~6% over it, the headroom
     # convention of every entry above; the median and worst bounds stay (76
     # against 90, 459 against 460).
+    #
+    # Title ladders (board row 29), rebuilt on main 5062f4c4 (2026-10-01),
+    # the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 5062f4c4                         387   76 / 178 / 461
+    #   lane (title ladders on 5062f4c4)      387   76 / 182 / 466
+    #
+    # The 39th route from the top is POST /api/v1/pc/portrait at 182 on both
+    # trees; POST /api/v1/tournaments/{tournament_id}/unsignup moves 178 ->
+    # 182 above it, gaining the catalogue bindings (LADDERS, LINES,
+    # rungs_at_tier, threshold) the ladder module's per-tier helpers read.
+    # The rated-game routes gain the per-game evaluator they run, and the
+    # 2v2 settlement routes lose the hook (the settlement plays no game).
+    # Inside the bound of 185 by 3, so the bound stays.
     assert all_p90 <= 185, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
