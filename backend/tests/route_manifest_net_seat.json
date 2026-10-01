@@ -3324,6 +3324,15 @@
           "main",
           "pc_trade_propose",
           "665211565b0dff7a6e6007798a1390a5887116b2"
+        ],
+        [
+          "/api/v1/internal/pc/packs/open",
+          [
+            "POST"
+          ],
+          "main",
+          "internal_pc_open_pack",
+          "e60fb4ace34f6eace7e7ad0a6dec72bf5501aeb5"
         ]
       ]
     },
@@ -3766,6 +3775,7 @@
     "GET /api/v1/internal/pc/events/pending -> main.internal_pc_events_pending",
     "POST /api/v1/internal/pc/events/ack -> main.internal_pc_events_ack",
     "POST /api/v1/internal/pc/daily -> main.internal_pc_daily",
+    "POST /api/v1/internal/pc/packs/open -> main.internal_pc_open_pack",
     "GET /api/v1/internal/pc/collection -> main.internal_pc_collection",
     "GET /api/v1/internal/pc/card -> main.internal_pc_card",
     "POST /api/v1/pc/portrait -> main.pc_portrait_upload",

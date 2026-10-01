@@ -890,6 +890,19 @@ class HealthResponse(BaseModel):
     # boxes by construction, probed by the release train and read by nothing
     # else (#306). Absent on any build before it.
     discord_collection: int | None = None
+    # discord_fix: release-train verification plumbing for the Discord fix
+    # (main._discord_fix_probe): 1 when this app routes the bot's pack opener
+    # to its handler and the read a replay of a purchase key runs (the pack
+    # row by player and nonce; round 2, M1) runs on this box's database, 0
+    # when either fails (a missing column or table answers 0, not
+    # "disconnected"). DERIVED from the route table and from _pc_open_for's
+    # own statement, never a constant (#342): the connected arm probes, the
+    # degraded arm answers the last probe's value (0 before any). Read by
+    # nothing else (#306). Declared without a default, so building the answer
+    # without it raises instead of silently leaving the key out. Absent on
+    # any build before the fix, which is how the release train reads the old
+    # build on both boxes.
+    discord_fix: int
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
@@ -998,6 +1011,26 @@ class HealthResponse(BaseModel):
     # without it raises instead of silently leaving the key out. Absent on
     # any build before that batch, which is how the old build reads.
     pc_motion: int
+    # janitor_selftest: the verdict of this api process's boot janitor SQL
+    # self-test (main._janitor_selftest_marker; 1 = it ran and every statement
+    # passed, 0 = it ran and did not pass, 2 = skipped on the read replica,
+    # 3 = not finished yet). DERIVED from the report the self-test recorded,
+    # never written down (#342), and ROLE-AWARE by design: the primary reads 1
+    # once its self-test has passed and the standby reads 2, so the release
+    # train asserts it per role; read by nothing else (#306). Declared without
+    # a default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before it, which is how the
+    # train reads the old build.
+    janitor_selftest: int
+    # janitor_selftest_build: release-train verification plumbing, not a
+    # design mechanism (main._JANITOR_SELFTEST_BUILD; 1 = this build checks
+    # each janitor statement by its class and reports janitor_selftest). A
+    # code constant, equal on both boxes by construction, so the train can
+    # read it through the edge where janitor_selftest differs by role;
+    # probed by the release train and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead
+    # of silently leaving the key out. Absent on any build before it.
+    janitor_selftest_build: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

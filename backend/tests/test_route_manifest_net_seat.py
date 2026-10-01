@@ -733,7 +733,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 391   # v1.41.0 merge pass 3, main cd8d846 into the beta: +17 over the beta's 374, main's dance cards +5, 886bed8 r5 +1 (the read-only team series status route), card trading +7 and Discord collection reveal +4, the title-ladder read both sides added counted once (main's side: 383); before that, the beta: ASKS-B lane, board rows 24 and 25: +2 (the Settings card preview and the batch shard; 372 before); v1.41.0 beta round 11: -1 (the physical game 1 issue removed with route (a), finding M1; 373 before); v1.41.0 beta round 8: +1 (the series' physical game 1 issue, finding F31; 372 before); v1.41.0 beta round 2: +1 (the pending-DM cancellation recheck; 371 before); v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 392   # v1.41.0 merge pass 4, main 0e751993 into the beta: +1, Discord fix round 1's bot pack open (internal/pc/packs/open; 391 before; main's side 384); v1.41.0 merge pass 3, main cd8d846 into the beta: +17 over the beta's 374, main's dance cards +5, 886bed8 r5 +1 (the read-only team series status route), card trading +7 and Discord collection reveal +4, the title-ladder read both sides added counted once (main's side: 383); before that, the beta: ASKS-B lane, board rows 24 and 25: +2 (the Settings card preview and the batch shard; 372 before); v1.41.0 beta round 11: -1 (the physical game 1 issue removed with route (a), finding M1; 373 before); v1.41.0 beta round 8: +1 (the series' physical game 1 issue, finding F31; 372 before); v1.41.0 beta round 2: +1 (the pending-DM cancellation recheck; 371 before); v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -744,7 +744,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 390   # v1.41.0 merge pass 3: +17 (373 before; main's side 382); ASKS-B lane: +2 (371 before); v1.41.0 beta round 11: -1 (372 before); v1.41.0 beta round 8: +1 (371 before); v1.41.0 beta round 2: +1 (370 before); v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 391   # v1.41.0 merge pass 4, main 0e751993: +1, Discord fix round 1 (390 before; main's side 383); v1.41.0 merge pass 3: +17 (373 before; main's side 382); ASKS-B lane: +2 (371 before); v1.41.0 beta round 11: -1 (372 before); v1.41.0 beta round 8: +1 (371 before); v1.41.0 beta round 2: +1 (370 before); v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -982,6 +982,32 @@ def test_the_helper_closure_stays_affordable():
     #
     # The code p90 bound moves to 95, ~5% over the measurement (90), the
     # headroom the moves above gave, for that reason and no other.
+    #
+    # Discord fix round 4 LAND (2026-09-30): measured 22 / 88 / 328 of 2940
+    # indexed bindings over 383 routes at the lane tip after its merges of
+    # main 82c0da6 and cd8d846, against 22 / 85 / 328 over the lane before
+    # them (ceddd3d, 377 routes) and 22 / 83 / 326 over main cd8d846 (382
+    # routes), the same walk with the same route seeds over each tree's own
+    # backend/api. Neither side passes 86; the composition does. The p90 is
+    # the value at sorted position int(0.9 * n), the 39th route from the top
+    # at n = 383. The lane's tournament routes keep their lane counts, above
+    # main's (signup 95 / 88, unsignup 90 / 82, time-vote 85 / 82, play-now
+    # 83 / 79, spectate/games 87 / 83: the row-32 start rule and round 4's
+    # one eligibility predicate), and main's dance cards add five routes and
+    # take POST /api/v1/pc/portrait from 86 to 88 (its motion writer); the
+    # 39th from the top is that route, at 88, 88 on main. Every count is the
+    # one its side measures; the only composed count, GET /api/v1/health (83:
+    # both sides' health words), sits below the rank.
+    #
+    # The bound moves to 92 -- ~5% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median (22) and
+    # worst bounds stay.
+    #
+    # v1.41.0 merge pass 4 (2026-10-01), main 0e751993 into the beta: the
+    # paragraph above is main's own record and its 92 is main's bound. The
+    # merged tree measures 22 / 94 / 328 (code) and 93 / 197 / 484 (all) over
+    # 391 routes and 3123 indexed bindings, the same walk with the same route
+    # seeds; the beta's 95 holds it, so the bound stays at 95.
     assert code_p90 <= 95, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
@@ -1139,6 +1165,23 @@ def test_the_helper_closure_stays_affordable():
     # and 1 is models.FetchedValue, which the lane's Player model now names for
     # migration 330's mail_discord_relay column. The bound moves to 505, the
     # same ~5%.
+    #
+    # Discord fix (2026-09-28): the same route measured 459 at the lane base
+    # 64885ef, 460 at the round-1 tip d4a284d and 461 at round 2's 12952d5 -
+    # one code binding per round, each one the route really runs:
+    # main._pc_open_for (round 1: the open path this route and the bot's
+    # POST /api/v1/internal/pc/packs/open share, keyed by the purchase's
+    # nonce) and main._pc_committed_answer (round 2: the recorded outcome a
+    # replayed key, a pack voided at open and /pc/packs/result answer, so no
+    # work after a purchase commits can fail its answer). Code tier 326 ->
+    # 327 -> 328, under its bound; median 75 and p90 164 -> 166 under
+    # theirs. The bound moves to 484, the same ~5% headroom 460 gave over
+    # 439, for that reason and no other.
+    #
+    # v1.41.0 merge pass 4 (2026-10-01), main 0e751993 into the beta: the
+    # paragraph above is main's record and its 484 is main's bound. The merged
+    # tree measures 484 (pass 3's merged tree measured 482); the beta's 505
+    # holds it, so the bound stays.
     assert all_worst <= 505, f"worst closure {all_worst} of {total}"
 
 

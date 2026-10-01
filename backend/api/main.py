@@ -1993,8 +1993,11 @@ async def _supervised(name: str, coro_factory):
 # sweep and team_queue_cleanup_loop threw UndefinedTableError every 60s for
 # FIVE DAYS before anyone looked (restored in c199d57). The per-arm try/except
 # blocks — correct for isolation — are exactly what made that silent. So at
-# every boot we EXPLAIN every SQL statement the janitor loops can reach and
-# scream if one no longer plans.
+# every boot we check every SQL statement the janitor loops can reach and
+# scream if one no longer plans or runs: a DML statement is EXPLAINed, a
+# session statement (SET, RESET, SHOW, a transaction word) is executed in a
+# transaction that is rolled back, and a statement of any other kind is a
+# failure (_janitor_statement_class).
 
 _JANITOR_SELFTEST_ROOTS = (
     ("main", "queue_cleanup_loop"),
@@ -2016,6 +2019,76 @@ _JANITOR_SELFTEST_ROOTS = (
 )
 
 _janitor_selftest_report: dict = {"status": "pending"}
+
+
+# What each harvested statement is checked BY, decided by its first keyword.
+# EXPLAIN accepts only the optimizable statements, and prefixing it to
+# anything else is a syntax error on a janitor that runs correctly: the
+# trading janitor's SET LOCAL lock_timeout read as a dead sweep on every boot
+# until this split (board row 26, 2026-09-28). The class chooses the CHECK;
+# the server still gives every verdict but one:
+#   explain       EXPLAINed verbatim with NULL binds -- the check as it was.
+#   session       EXECUTED verbatim inside the check's own transaction, which
+#                 is then rolled back. An unknown parameter or a bad value
+#                 still fails (SET LOCAL lock_timeout = 'banana' is 22023),
+#                 and PostgreSQL reverts even a session-level SET or RESET
+#                 made inside a transaction that rolls back, so nothing the
+#                 check runs follows the connection back into the pool.
+#                 Transaction words run the same way. BEGIN, START and
+#                 SAVEPOINT stay inside the check's transaction; COMMIT, END,
+#                 ROLLBACK and ABORT end it early, while it holds nothing but
+#                 the check's own SET LOCAL statement_timeout; RELEASE and
+#                 ROLLBACK TO name a savepoint an earlier statement made, which
+#                 a check of one statement at a time does not reproduce, so
+#                 they report failed -- loud, never a pass.
+#   unclassified  any other first keyword, or none (a parenthesis, an empty
+#                 or comment-only literal). Reported as a failure and never
+#                 sent to the server: the self-test cannot vouch for a class
+#                 it does not know, and refusing is the direction #605 and
+#                 #613 settle on. Teach these sets the new form instead.
+_JANITOR_EXPLAIN_WORDS = frozenset(
+    ("SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "VALUES", "MERGE"))
+_JANITOR_SESSION_WORDS = frozenset(
+    ("SET", "RESET", "SHOW", "BEGIN", "START", "COMMIT", "END", "ROLLBACK",
+     "ABORT", "SAVEPOINT", "RELEASE"))
+# ASCII whitespace only: PostgreSQL's lexer counts no Unicode space as one.
+_JANITOR_SQL_SPACE = " \t\n\r\f\v"
+_JANITOR_SQL_WORD = _re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+def _janitor_statement_class(sql: str) -> tuple:
+    """(class, keyword) of one harvested statement: 'explain', 'session' or
+    'unclassified' (the table above), and its first keyword upper-cased, or
+    '' when it has none. The keyword is read after leading whitespace, `--`
+    line comments and `/* */` block comments, which nest as they do in
+    PostgreSQL; an unterminated block comment leaves no keyword."""
+    i, n = 0, len(sql)
+    while i < n:
+        if sql[i] in _JANITOR_SQL_SPACE:
+            i += 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif sql.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if sql.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif sql.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            if depth:
+                return "unclassified", ""
+        else:
+            break
+    m = _JANITOR_SQL_WORD.match(sql, i)
+    word = m.group(0).upper() if m else ""
+    if word in _JANITOR_EXPLAIN_WORDS:
+        return "explain", word
+    if word in _JANITOR_SESSION_WORDS:
+        return "session", word
+    return "unclassified", word
 
 
 def _janitor_sql_from_sources(sources: dict, roots) -> dict:
@@ -2124,9 +2197,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
     Everything outside this subset degrades to `dynamic`, i.e. a loud
     failure — never a guess.
 
-    Returns {"statements": [{module, func, line, sql, roots}],
+    Returns {"statements": [{module, func, line, sql, roots, class, keyword}],
              "dynamic":    [{module, func, line}],
              "root_counts": {root_fn: n statements reachable}}.
+    `class` and `keyword` are _janitor_statement_class(sql): the check the
+    self-test applies to that statement.
     """
     import ast as _ast
 
@@ -2997,9 +3072,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             for line, sql in found:
                 key = (mod, line, sql)
                 touched.add(key)
+                cls, word = _janitor_statement_class(sql)
                 e = statements.setdefault(key, {
                     "module": mod, "func": fn, "line": line,
-                    "sql": sql, "roots": []})
+                    "sql": sql, "roots": [], "class": cls, "keyword": word})
                 if root_fn not in e["roots"]:
                     e["roots"].append(root_fn)
             for line in dyn:
@@ -3101,7 +3177,8 @@ def _janitor_sql_inventory() -> dict:
 
 
 def _janitor_explain_error_kind(e) -> tuple:
-    """Classify an EXPLAIN failure into ('infra'|'timeout'|'failed', detail).
+    """Classify a failed check -- an EXPLAIN, or a session statement's
+    execution -- into ('infra'|'timeout'|'failed', detail).
     'infra' is connection-level (DB down/dropped — aborts the run as
     db_unreachable); 'timeout' is our own SET LOCAL statement_timeout firing
     (the statement is UNVERIFIED, not proven broken — likely blocked behind
@@ -3139,8 +3216,77 @@ def _janitor_explain_error_kind(e) -> tuple:
     return "failed", detail
 
 
+async def _janitor_check_statement(db, s) -> tuple:
+    """Check ONE harvested statement on `db` and return (verdict, detail).
+
+    Verdicts: 'explained' or 'executed_rolled_back' by the statement's class
+    (detail None); 'unclassified', never sent to the server; and the three
+    kinds _janitor_explain_error_kind gives a check that raised: 'timed_out',
+    'failed', and 'infra' (connection-level -- the caller stops the run).
+
+    Every check gets a transaction of its own and that transaction is always
+    rolled back, EXPLAIN or not. 'executed_rolled_back' is returned only once
+    the rollback has returned, because the name claims both halves: an
+    executed session statement whose rollback raised is 'failed', with the
+    rollback's error. An EXPLAIN leaves nothing for a rollback to undo, so its
+    verdict does not wait on one (as before the split)."""
+    cls = s.get("class")
+    if cls not in ("explain", "session"):
+        word = s.get("keyword") or ""
+        return "unclassified", (
+            f"unclassified statement (first keyword {word!r}): the self-test "
+            "neither EXPLAINs nor executes a class it does not recognise -- "
+            "teach _JANITOR_EXPLAIN_WORDS or _JANITOR_SESSION_WORDS the new "
+            "form, or restructure the SQL")
+    verdict, detail, rollback_error = None, None, None
+    try:
+        # Txn-local timeout: planning takes AccessShareLock and can wait
+        # forever behind a migration's AccessExclusiveLock, wedging the
+        # report at 'running' and pinning a pool connection (Codex r1 find
+        # 5). statement_timeout covers lock waits, and SET LOCAL dies with
+        # our rollback, so nothing leaks to the pooled connection (a
+        # session-level SET would follow it back into the pool -- unless, as
+        # for a harvested session statement below, the transaction it ran in
+        # is rolled back).
+        await db.execute(text("SET LOCAL statement_timeout = '5s'"))
+        # VERBATIM: prefixing EXPLAIN to a DML statement is the only edit
+        # ever made to the SQL, and a session statement runs with none.
+        # Collapsing whitespace would let a `--` comment swallow the rest of
+        # the line and check a truncated statement (that silently ate a
+        # GROUP BY in tournaments.py during the Aug 20 validation of this
+        # feature).
+        stmt = text("EXPLAIN " + s["sql"] if cls == "explain" else s["sql"])
+        # _bindparams: SQLAlchemy's own parse of the binds -- a private attr,
+        # but the one source that can never disagree with how execute() will
+        # read the SQL. If it ever vanishes in an upgrade, bind-carrying
+        # statements fail loudly here; nothing passes silently.
+        params = {k: None for k in getattr(stmt, "_bindparams", {})}
+        await db.execute(stmt, params)
+        verdict = "explained" if cls == "explain" else "executed_rolled_back"
+    except Exception as e:
+        kind, detail = _janitor_explain_error_kind(e)
+        verdict = {"infra": "infra", "timeout": "timed_out"}.get(kind, "failed")
+    finally:
+        # Reset even after an aborted txn; guarded because a dead connection
+        # makes rollback itself raise. (An in-flight CancelledError still
+        # propagates -- it is not an Exception.)
+        try:
+            await db.rollback()
+        except Exception as e:
+            rollback_error = f"{type(e).__name__}: {e}"
+    if verdict == "executed_rolled_back" and rollback_error is not None:
+        return "failed", ("executed, but the rollback that must undo it "
+                          f"raised: {rollback_error}")
+    return verdict, detail
+
+
 async def _run_janitor_query_selftest():
-    """Boot-time EXPLAIN sweep of every janitor SQL statement.
+    """Boot-time check of every janitor SQL statement, each by its class
+    (_janitor_check_statement): DML EXPLAINed, session statements executed
+    and rolled back, anything else a failure. A finished run's report names
+    each statement's result in `outcomes` (explained, executed_rolled_back,
+    failed, unclassified, timed_out, unchecked) with its first 80 characters
+    and the janitor function that issues it; `counts` keeps every older key.
 
     Runs as a DETACHED lifespan task (off the boot path — Sid's call): not
     awaited at startup and NOT under _supervised, whose while-True wrapper
@@ -3157,13 +3303,22 @@ async def _run_janitor_query_selftest():
     try:
         inv = _janitor_sql_inventory()
         stmts = inv["statements"]
-        failures, timed_out = [], []
-        n_ok = unchecked = 0
+        failures, timed_out, outcomes = [], [], []
+        n_ok = n_exec = n_unclassified = unchecked = 0
         db_error = None
 
         def _loc(s):
             return {"module": s["module"], "func": s["func"],
                     "line": s["line"], "roots": s["roots"]}
+
+        def _outcome(s, outcome):
+            # One row per harvested statement, in harvest order: its class
+            # and what its check said. sql80 is the statement with each
+            # whitespace run folded to one space, none at either end, cut to
+            # 80 characters (a literal usually opens with a newline + indent).
+            outcomes.append({**_loc(s), "class": s.get("class"),
+                             "keyword": s.get("keyword"), "outcome": outcome,
+                             "sql80": " ".join(s["sql"].split())[:80]})
 
         # A root that reaches zero statements means the call-graph walk broke
         # — a self-test that tests nothing must scream, not pass.
@@ -3193,51 +3348,22 @@ async def _run_janitor_query_selftest():
             from database import async_session
             async with async_session() as db:
                 for i, s in enumerate(stmts):
-                    try:
-                        # Txn-local timeout: planning takes AccessShareLock
-                        # and can wait forever behind a migration's
-                        # AccessExclusiveLock, wedging the report at
-                        # 'running' and pinning a pool connection (Codex r1
-                        # find 5). statement_timeout covers lock waits, and
-                        # SET LOCAL dies with our rollback, so nothing leaks
-                        # to the pooled connection (a session-level SET
-                        # would follow it back into the pool).
-                        await db.execute(text("SET LOCAL statement_timeout = '5s'"))
-                        # VERBATIM: prefixing EXPLAIN is the only edit ever
-                        # made to the SQL. Collapsing whitespace would let a
-                        # `--` comment swallow the rest of the line and
-                        # EXPLAIN a truncated statement (that silently ate a
-                        # GROUP BY in tournaments.py during the Aug 20
-                        # validation of this feature).
-                        stmt = text("EXPLAIN " + s["sql"])
-                        # _bindparams: SQLAlchemy's own parse of the binds —
-                        # a private attr, but the one source that can never
-                        # disagree with how execute() will read the SQL. If
-                        # it ever vanishes in an upgrade, bind-carrying
-                        # statements fail loudly here; nothing passes silently.
-                        params = {k: None for k in getattr(stmt, "_bindparams", {})}
-                        await db.execute(stmt, params)
+                    verdict, detail = await _janitor_check_statement(db, s)
+                    if verdict == "infra":
+                        db_error = detail
+                        unchecked = len(stmts) - i
+                        break
+                    _outcome(s, verdict)
+                    if verdict == "explained":
                         n_ok += 1
-                    except Exception as e:
-                        kind, detail = _janitor_explain_error_kind(e)
-                        if kind == "infra":
-                            db_error = detail
-                            unchecked = len(stmts) - i
-                            break
-                        if kind == "timeout":
-                            timed_out.append({**_loc(s), "error": detail})
-                        else:
-                            failures.append({**_loc(s), "error": detail,
-                                             "sql": s["sql"]})
-                    finally:
-                        # Reset even after an aborted txn; guarded because a
-                        # dead connection makes rollback itself raise. (An
-                        # in-flight CancelledError still propagates — it is
-                        # not an Exception.)
-                        try:
-                            await db.rollback()
-                        except Exception:
-                            pass
+                    elif verdict == "executed_rolled_back":
+                        n_exec += 1
+                    elif verdict == "timed_out":
+                        timed_out.append({**_loc(s), "error": detail})
+                    else:   # 'failed' and 'unclassified': the loud case
+                        n_unclassified += verdict == "unclassified"
+                        failures.append({**_loc(s), "error": detail,
+                                         "sql": s["sql"]})
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -3255,7 +3381,13 @@ async def _run_janitor_query_selftest():
             # pre-loop synthetic failures (root-zero, dynamic sites) are
             # not statements and must not offset this (Codex r2 find 7).
             n_stmt_failures = len(failures) - n_prior_failures
-            unchecked = max(0, len(stmts) - n_ok - n_stmt_failures - len(timed_out))
+            unchecked = max(0, len(stmts) - n_ok - n_exec - n_stmt_failures
+                            - len(timed_out))
+
+        # A statement the run did not check (the DB went away at it or before
+        # it, or the session died around the loop) still gets its row.
+        for s in stmts[len(outcomes):]:
+            _outcome(s, "unchecked")
 
         if failures:
             status = "failed"
@@ -3272,25 +3404,41 @@ async def _run_janitor_query_selftest():
             "duration_ms": int((time.monotonic() - t0) * 1000),
             "counts": {"statements": len(stmts), "explained_ok": n_ok,
                        "failed": len(failures), "timed_out": len(timed_out),
-                       "dynamic": len(inv["dynamic"]), "unchecked": unchecked},
+                       "dynamic": len(inv["dynamic"]), "unchecked": unchecked,
+                       "executed_rolled_back": n_exec,
+                       "unclassified": n_unclassified},
             "root_counts": inv["root_counts"],
             "failures": failures,
             "timed_out": timed_out,
             "dynamic": inv["dynamic"],
             "db_error": db_error,
+            "outcomes": outcomes,
         }
 
         bar = "=" * 72
+        by_class = {}
+        for s in stmts:
+            by_class[s.get("class")] = by_class.get(s.get("class"), 0) + 1
         lines = [bar,
-                 f"[JANITOR-SELFTEST] EXPLAINed {n_ok}/{len(stmts)} janitor "
-                 f"statements in {time.monotonic() - t0:.1f}s "
+                 f"[JANITOR-SELFTEST] EXPLAINed {n_ok}/"
+                 f"{by_class.get('explain', 0)}, executed and rolled back "
+                 f"{n_exec}/{by_class.get('session', 0)}, unclassified "
+                 f"{n_unclassified}: {len(stmts)} janitor statements in "
+                 f"{time.monotonic() - t0:.1f}s "
                  f"({len(failures)} failed, {len(timed_out)} timed out)",
                  "[JANITOR-SELFTEST] roots: " + "  ".join(
                      f"{k}={v}" for k, v in inv["root_counts"].items())]
+        # An executed statement was run and rolled back, never planned: name
+        # each one, so "plan clean" below is not read as covering it.
+        for o in outcomes:
+            if o["outcome"] == "executed_rolled_back":
+                lines.append(f"[JANITOR-SELFTEST]   executed and rolled back, "
+                             f"not EXPLAINed: {o['module']}.py:{o['line']} "
+                             f"({o['func']}): {o['sql80']}")
         if status == "failed":
             lines.append(f"[JANITOR-SELFTEST] !!! {len(failures)} JANITOR "
-                         "QUERIES FAIL TO PLAN — those sweeps are dead EVERY "
-                         "cycle until fixed !!!")
+                         "QUERIES FAIL THEIR CHECK -- one that fails to plan "
+                         "or run is dead EVERY cycle until fixed !!!")
             for f in failures:
                 lines.append(f"[JANITOR-SELFTEST]   {f['module']}.py:{f['line']}"
                              f" ({f['func']}): {f['error'].splitlines()[0]}")
@@ -3614,6 +3762,18 @@ async def lifespan(app: FastAPI):
                 "status": "skipped",
                 "reason": "read replica: the janitor writers this validates do not run here",
             })
+            # POST-DEPLOY ACCEPTANCE is role-specific -- the row this proves
+            # cannot exist on both boxes (Codex r1 MEDIUM, board row 26).
+            # PRIMARY: the endpoint (get_janitor_selftest) reports
+            # status="ok", counts.failed == 0 and the trading janitor's row
+            # executed_rolled_back; /health reads janitor_selftest=1 and
+            # janitor_selftest_build=1. STANDBY: this block replaces the
+            # report before the box serves a request, so its own positive
+            # signal is exactly this dict -- {"status": "skipped", "reason":
+            # ...}, nothing else -- with /health reading janitor_selftest=2
+            # and janitor_selftest_build=1. Which box answered is already on
+            # /health as `replica` (HealthResponse.replica, both arms of
+            # health_check below): no new health key is added for this.
             # The janitor self-test is skipped rather than trusted: it EXPLAINs
             # janitor SQL containing FOR UPDATE SKIP LOCKED, and whether
             # recovery accepts EXPLAIN of a locking statement is UNVERIFIED
@@ -4356,7 +4516,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:50120 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:50641 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4422,7 +4582,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:49921 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:50442 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4492,7 +4652,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:49799 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:50320 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7001,6 +7161,38 @@ _RJ_TRIAGE_MARKER = 2
 _TICKET_REDACTION_MARKER = 1
 # Release-train verification plumbing, not a design mechanism: the Discord collection lane's one addition.
 _DISCORD_COLLECTION_MARKER = 1
+# JANITOR-SELFTEST, reported on /health as `janitor_selftest`: the verdict of
+# this api process's boot janitor SQL self-test (_run_janitor_query_selftest),
+# DERIVED from the report that run recorded (_janitor_selftest_report), never
+# written down (#342). 1 = it ran and every harvested statement passed its
+# check. 0 = it ran and did not pass (a statement failed its check or went
+# unverified, the database went away, or the self-test itself crashed), and
+# any status the map below does not name. 2 = skipped: the read replica,
+# whose lifespan branch records the skip before the box serves a request
+# because the janitor writers the self-test validates do not run there.
+# 3 = not finished: pending or running, from boot until the self-test ends.
+# The release train fails at once on a falsy word and waits on a truthy one
+# that is not the role's value, so "not finished" must not read 0. Read by
+# nothing but the train (#306). Both arms of the route carry it; a box on
+# the build before answers without the key.
+_JANITOR_SELFTEST_WORDS = {"ok": 1, "skipped": 2, "pending": 3, "running": 3}
+
+
+def _janitor_selftest_marker() -> int:
+    """/health `janitor_selftest`: the word for the verdict this process's
+    boot self-test recorded (see _JANITOR_SELFTEST_WORDS)."""
+    return _JANITOR_SELFTEST_WORDS.get(_janitor_selftest_report.get("status"), 0)
+
+
+# Release-train verification plumbing, not a design mechanism: the
+# JANITOR-SELFTEST lane's build marker, reported on /health as
+# `janitor_selftest_build`. A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else
+# (#306). janitor_selftest above differs by role (the primary reads 1, the
+# standby 2), and the train reads a batch that adds no route through the
+# edge only by a marker both roles answer alike, because no probe says
+# which box answered. Absent on any build before it.
+_JANITOR_SELFTEST_BUILD = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -7024,7 +7216,10 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
+                              discord_fix=await _discord_fix_probe(db),
                               pc_motion=_pc_motion_health_word(),
+                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
+                              janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
                               team_dc_fallback=team_dc_fallback)
     except Exception:
@@ -7032,10 +7227,12 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
-        # team_dc_fallback and ffa_finishing_count both need the database, so
-        # this arm answers each one's last probe on this worker (0 before the
+        # team_dc_fallback, ffa_finishing_count and discord_fix all need the
+        # database, so this arm answers each one's last probe on this worker (0 before the
         # first, which the release train reads as not proven); pc_trading
         # answers its own cache-only form.
+        # janitor_selftest is the verdict this process's boot self-test
+        # recorded in memory, so it answers here unchanged.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
@@ -7047,7 +7244,10 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
+                              discord_fix=_DISCORD_FIX_LAST,
                               pc_motion=_pc_motion_health_word(),
+                              janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
+                              janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
 
@@ -28374,6 +28574,33 @@ async def _pc_pack_answer(db: AsyncSession, row, ctx=None, prerender: bool = Fal
     return base
 
 
+async def _pc_committed_answer(db: AsyncSession, row, locale: str) -> dict:
+    """The answer for a pack row that is ALREADY COMMITTED: the replay of a
+    nonce or a pack id, and /pc/packs/result. It is the recorded outcome
+    (the pack, its prints, and what it cost: pay and price), whatever became
+    of the request that committed it (Discord fix round 2, M1). First the
+    full answer: a done pack's subjects primed, as the first answer was
+    (v4 section 5), and every print keyed to its face in `locale`. When any part of
+    that raises, the same row is answered with no face context, so the
+    prints carry no face_rev: the mod draws such a print as text (the shape
+    an api without the renderer sends), and the bot reads only the pack id
+    and the charge from an open's answer. The rollback clears
+    a failed statement so that second read can run; it also ends the
+    transaction's locks, which no caller needs past its answer, and it
+    undoes no write, because every caller reaches this with none of its own
+    pending. What can still fail is reading the committed rows themselves,
+    and the caller can simply ask again."""
+    try:
+        if row["status"] == "done":
+            await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))
+        return await _pc_pack_answer(db, row, await _pc_face_ctx(db, locale))
+    except Exception as ex:
+        print(f"[PC-OPEN] pack={row['id']} status={row['status']}: answered without face keys "
+              f"({type(ex).__name__}: {ex})")
+        await db.rollback()
+        return await _pc_pack_answer(db, row, None)
+
+
 def _pc_reject_http(reason: str, extra: dict | None = None):
     code = 402 if reason in ("insufficient_gold", "insufficient_shards") else 409
     detail = {"error": reason, "status": "rejected"}
@@ -28428,6 +28655,21 @@ async def pc_open_pack(
             raise HTTPException(status_code=422, detail="nonce, pay and expected_price are required for a purchase")
         canon = _pc.canon_open_purchase(steam_id, nonce, pay, int(expected_price))
     player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    return await _pc_open_for(db, player, steam_id, pack_id=pack_id, nonce=nonce, pay=pay,
+                              expected_price=expected_price, locale=_pc_locale(request), via="mod")
+
+
+async def _pc_open_for(db: AsyncSession, player, steam_id: str, *, pack_id, nonce, pay, expected_price,
+                       locale: str, via: str) -> dict:
+    """The open itself, for an actor already resolved and holding the shared
+    identity lock: the mod's /pc/packs/open after _pc_verified_actor (HMAC and
+    a strict Steam session), the bot's /internal/pc/packs/open after
+    _pc_bot_actor (the Discord link). ONE body for both doors, so the claim,
+    the locks, the predicates, the conditional delta debit and the mint
+    cannot drift apart between them (#279). `steam_id` is the actor's own id
+    (the cap exemption and the log line read it), `locale` keys the answer's
+    faces and the minting request's pre-render, `via` names the door in the
+    log line."""
     pid = str(player.id)
 
     # ── 1. the claim (first write) ──
@@ -28466,9 +28708,9 @@ async def pc_open_pack(
                     SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
                       FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
                 """), {"pack": pack_id, "pid": pid})).mappings().first()
-                answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request))) if row is not None else {"pack_id": pack_id}
+                answer = await _pc_committed_answer(db, row, locale) if row is not None else {"pack_id": pack_id}
                 print(f"[PC-OPEN] player={steam_id} pack={pack_id}: earned pack of an invalidated "
-                      f"{held['mode']} series voided at open")
+                      f"{held['mode']} series voided at open via={via}")
                 raise HTTPException(status_code=410, detail={"error": "voided", **answer})
         claim = (await db.execute(text("""
             UPDATE pc_packs SET status = 'opening'
@@ -28482,9 +28724,7 @@ async def pc_open_pack(
             """), {"pack": pack_id, "pid": pid})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=404, detail="Pack not found")
-            if row["status"] == "done":
-                await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
-            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+            answer = await _pc_committed_answer(db, row, locale)   # the recorded outcome, primed like the first
             if row["status"] == "done":
                 return answer
             if row["status"] == "voided":
@@ -28508,9 +28748,7 @@ async def pc_open_pack(
             """), {"pid": pid, "nonce": nonce})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=409, detail={"error": "in_progress"})
-            if row["status"] == "done":
-                await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
-            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+            answer = await _pc_committed_answer(db, row, locale)   # the recorded outcome, primed like the first
             if row["status"] == "done":
                 return answer
             if row["status"] == "rejected":
@@ -28554,7 +28792,9 @@ async def pc_open_pack(
         await _reject("no_edition")
 
     # ── 3. predicates, re-read under the locks ──
-    if source == "bought" and int(expected_price) != price:
+    # The mod always sends the price it showed (its route requires it); the
+    # bot's /buypack may send none, and its answer states the price paid (D2).
+    if source == "bought" and expected_price is not None and int(expected_price) != price:
         await _reject("price_changed", {"price": price})
     snap_id = (await db.execute(text(
         "SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).scalar_one_or_none()
@@ -28598,26 +28838,48 @@ async def pc_open_pack(
 
     # ── 6. mint, record, commit ──
     stored = await _pc_mint(db, player.id, int(edition), int(snap_id), this_pack, source, prints)
-    await db.execute(text("""
+    row = (await db.execute(text("""
         UPDATE pc_packs SET status = 'done', result = CAST(:result AS jsonb), snapshot_id = CAST(:sid AS integer),
                             opened_at = now()
          WHERE id = CAST(:pack AS uuid)
-    """), {"result": _json.dumps({"prints": stored}), "sid": int(snap_id), "pack": this_pack})
+        RETURNING id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+    """), {"result": _json.dumps({"prints": stored}), "sid": int(snap_id), "pack": this_pack})).mappings().one()
+    # Every input of the answer is read HERE, inside the transaction that
+    # debits and mints (Discord fix round 2, M1): the pack row (RETURNING
+    # above), its subjects, the face context and the answer itself. A failure
+    # among them rolls the whole purchase back, when refusing is still free:
+    # nothing charged, nothing minted, and a replay of the nonce buys afresh.
+    # Once the commit below has returned, the answer is already built and
+    # what follows can only swap in a fresher copy: a committed debit answers
+    # with its pack and its charge, and a caller cut off after the commit
+    # gets the same recorded outcome from a replay of its key.
+    subjects = await _pc_pack_subjects(db, this_pack)
+    ctx = await _pc_face_ctx(db, locale)
+    answer = await _pc_pack_answer(db, row, ctx)
+    opened_line = (f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
+                   f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
+                   f"{' foil' if any(p['foil'] for p in stored) else ''}"
+                   f"{' signed' if any(p['signed'] for p in stored) else ''} via={via}")
     await db.commit()
-    print(f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
-          f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
-          f"{' foil' if any(p['foil'] for p in stored) else ''}{' signed' if any(p['signed'] for p in stored) else ''}")
-    # Steam pictures v2 §7: the subjects this pack minted for the first time
-    # get their picture fetched NOW (bounded), before the answer's face revs
-    # are computed — so the URLs the client sees already carry it.
-    await _pc_steam_prime(await _pc_pack_subjects(db, this_pack))
-    row = (await db.execute(text("""
-        SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
-          FROM pc_packs WHERE id = CAST(:pack AS uuid)
-    """), {"pack": this_pack})).mappings().one()
-    # The one caller that asks for a pre-render: these prints were minted by
-    # this request, so no one has asked for their faces yet (v4.13 §9).
-    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)), prerender=True)
+    # After the commit: best effort only. Steam pictures v2 section 7: the
+    # subjects this pack minted for the first time get their picture fetched
+    # now (bounded) and the answer is read again, so the face revs the
+    # client sees already carry it. That read is also the one caller that
+    # asks for a pre-render, since these prints were minted by this request
+    # and nobody has asked for their faces yet (v4.13 section 9). Any failure
+    # here keeps the answer built before the commit.
+    try:
+        print(opened_line)
+        await _pc_steam_prime(subjects)
+        answer = await _pc_pack_answer(db, row, ctx, prerender=True)
+    except Exception as ex:
+        print(f"[PC-OPEN] player={steam_id} pack={this_pack}: answered as built before the commit; the "
+              f"refresh after it failed ({type(ex).__name__}: {ex}) via={via}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+    return answer
 
 
 @app.get("/api/v1/pc/packs/result", tags=["Player Cards"])
@@ -28653,9 +28915,7 @@ async def pc_pack_result(
         """), {"pid": str(player.id), "nonce": nonce})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Pack not found")
-    if row["status"] == "done":
-        await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a no-op once attempted (v2 §7)
-    answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+    answer = await _pc_committed_answer(db, row, _pc_locale(request))   # the priming: a no-op once attempted
     if row["status"] == "unopened":
         att = (await db.execute(text(
             "SELECT reject_reason, attempted_at FROM pc_open_attempts WHERE pack_id = CAST(:pack AS uuid)"),
@@ -30579,12 +30839,232 @@ async def internal_pc_daily(
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """The bot's /daily: claim today's pack for the linked player (the pack
-    opens in the mod). Same claim as /pc/daily."""
+    """The bot's /daily: claim today's pack for the linked player - the same
+    claim as /pc/daily. The bot then opens it through
+    /internal/pc/packs/open (D1, 2026-09-28)."""
     _require_internal_key(x_internal_key)
     player = await _pc_player_by_discord(db, discord_id)
     await _assert_no_service_subject(db, affected_player_ids=[player.id])
     return await _pc_claim_daily(db, player, via="discord")
+
+
+async def _pc_bot_actor(db: AsyncSession, player, discord_id: str) -> None:
+    """The bot's door into a Player Cards write, for a player resolved by
+    Discord id (_pc_player_by_discord): the shared identity lock the mod's
+    _pc_verified_actor takes, taken here before the first write, then a
+    re-read under it - the row still live and the Discord id still linked to
+    it (a rebind between the lookup and the lock refuses rather than acting
+    for the account the id just left) - and no active ban: the Discord path
+    has no session for a ban to purge, so it refuses a ban itself, as
+    _pc_claim_daily does (c5)."""
+    steam_id = player.steam_id
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    row = (await db.execute(text("SELECT deleted_at, discord_id FROM players WHERE id = CAST(:pid AS uuid)"),
+                            {"pid": str(player.id)})).mappings().first()
+    if row is None or row["deleted_at"] is not None:
+        await db.rollback()
+        raise HTTPException(status_code=410, detail="Account deleted")
+    if str(row["discord_id"] or "") != str(discord_id):
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_linked"})
+    if (await _is_banned(db, steam_id)) is not None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "banned"})
+
+
+@app.post("/api/v1/internal/pc/packs/open", tags=["Internal"])
+async def internal_pc_open_pack(
+    discord_id: str = Query(..., max_length=32),
+    pack_id: str | None = Query(None, min_length=8, max_length=64),
+    nonce: str | None = Query(None, min_length=8, max_length=64),
+    pay: str | None = Query(None),
+    expected_price: int | None = Query(None, ge=0),
+    locale: str | None = Query(None, max_length=16),
+    player_steam_id: str | None = Query(None, min_length=1, max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's pack opener, through the mod's own body (_pc_open_for), so the
+    answer, the refusals (409 / 410 / 402, each carrying the pack's own state)
+    and the replay of a key already used are exactly the mod's. Two forms, as
+    on /pc/packs/open:
+    - a held pack of the linked player, by `pack_id`: today's daily, from
+      /daily (D1, 2026-09-28);
+    - a purchase, by `nonce` + `pay` (gold | shards) + `player_steam_id`:
+      /buypack (D2, a scope addition Sid asked for on 2026-09-28). The price
+      is the api's own (PC_ECONOMY, the mod's price) and the answer states
+      it; an `expected_price`, when sent, must equal it (409 price_changed).
+      The daily paid-pack cap, the conditional delta debit under the players
+      row lock and the gold ledger row are the mod's; the key is the
+      committed row (player, nonce), so a resend answers that row.
+    A purchase names the player it is for (Discord fix round 3, M1): the bot
+    journals that player beside the nonce when it first sends it and names
+    it on every resend. The key is (player, nonce) and the actor is the
+    Discord id's player NOW, so a purchase whose Discord id has since been
+    linked to another player is refused here with 412 player_changed, before
+    any write and before any other check that could name the new player:
+    no claim, no debit, no mint, nothing for the new player. The detail
+    names the journaled player and the recorded status of its key (null when
+    none is committed), and the outcome stays readable on the mod's
+    /pc/packs/result by that player and nonce. A 200 names the player it
+    charged (`player_steam_id`).
+    The renderer gate comes first, before any write, as on the mod's route;
+    the identity is the Discord link, as on every internal route, and
+    _pc_bot_actor takes the identity lock before the claim."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if pack_id:
+        if nonce or pay or expected_price is not None or player_steam_id:
+            raise HTTPException(status_code=422,
+                                detail="a held pack takes no nonce, pay, expected_price or player_steam_id")
+    elif not nonce or pay not in _pc.PACK_PAY or not player_steam_id:
+        raise HTTPException(status_code=422,
+                            detail="pack_id, or nonce, pay (gold | shards) and player_steam_id, is required")
+    player = await _pc_player_by_discord(db, discord_id)
+    if not pack_id and str(player.steam_id) != player_steam_id:
+        recorded = (await db.execute(text("""
+            SELECT pk.status FROM players p
+              JOIN pc_packs pk ON pk.player_id = p.id AND pk.nonce = CAST(:nonce AS text)
+             WHERE p.steam_id = CAST(:sid AS text)
+        """), {"nonce": nonce, "sid": player_steam_id})).scalar_one_or_none()
+        await db.rollback()
+        print(f"[PC-OPEN] purchase {nonce[:8]} for player={player_steam_id}: refused, the Discord id is now "
+              f"linked to another player (recorded={recorded}) via=discord")
+        raise HTTPException(status_code=412, detail={"error": "player_changed", "player_steam_id": player_steam_id,
+                                                     "recorded": recorded})
+    # both ids, as the mod's door checks them (_pc_verified_actor)
+    await _assert_no_service_subject(db, affected_player_ids=[player.id], affected_steam_ids=[player.steam_id])
+    await _pc_bot_actor(db, player, discord_id)
+    try:
+        loc = _pcp.effective_locale(locale, _pc_served_locales())
+    except Exception:
+        loc = "en"
+    if pack_id:
+        return await _pc_open_for(db, player, player.steam_id, pack_id=pack_id, nonce=None, pay=None,
+                                  expected_price=None, locale=loc, via="discord")
+    # read before the open: a rollback inside it (a committed row answered
+    # without face keys) expires the player row, and a lazy read after that
+    # would fail the answer of a purchase that committed
+    charged = str(player.steam_id)
+    answer = await _pc_open_for(db, player, charged, pack_id=None, nonce=nonce, pay=pay,
+                                expected_price=expected_price, locale=loc, via="discord")
+    return {**answer, "player_steam_id": charged}
+
+
+# -- The Discord fix marker (/health `discord_fix`) ----------------------------
+# Release-train verification plumbing for the Discord fix (rounds 1 and 2),
+# read by nothing else (#306). 1 when both halves hold: this app routes the
+# bot's pack opener, POST /api/v1/internal/pc/packs/open, to
+# internal_pc_open_pack; and the read a replay of a purchase key runs --
+# _pc_open_for's read of the pack row by player and nonce, whose columns are
+# the recorded outcome the replay answers (round 2, M1) -- runs on the
+# database this box uses. 0 when the route is not bound so, when
+# _pc_open_for carries no such read (exactly one), or when the database
+# lacks a column or the table that read names. Absent on any build before
+# the fix, which is how the release train reads the old build: the route
+# alone cannot tell the builds apart on the standby, whose replica gate
+# answers 503 to every POST before any handler runs.
+#
+# DERIVED, never written down (#342): the probe is that read itself, found
+# among _pc_open_for's compiled string constants (nested code included), and
+# it binds a player id no row carries, so it reads no row and writes nothing
+# -- a plain read, which the standby serves too. It runs on the connected arm
+# only, after SELECT 1, and catches ONE class of error: the read named a
+# column or a table this database does not have (SQLSTATE 42703 or 42P01),
+# found on the error's own wrapping chain (.orig and __cause__). That error
+# aborts the transaction, so the probe rolls back before it answers 0. Any
+# other error is left to health_check's own catch, which reports the box
+# degraded: a probe that fails for any other reason is a database fault, not
+# a schema answer. The degraded arm cannot probe, so it answers the last
+# value a probe on this worker wrote -- 0 until one has run, which the train
+# reads as not proven.
+import asyncpg.exceptions as _discord_fix_apg_exc
+
+_DISCORD_FIX_ROUTE = ("POST", "/api/v1/internal/pc/packs/open")
+# The handler the route must reach, held in a DATA binding: the route
+# manifest's closure walk follows a data binding only into other data
+# bindings, so /health's reviewed surface gains this line, not the pack
+# opener's whole closure (which naming the def inside _discord_fix_bound
+# would fold in, making /health the app's largest route).
+_DISCORD_FIX_ENDPOINT = internal_pc_open_pack
+_DISCORD_FIX_READ = _re.compile(
+    r"^\s*SELECT\b.*\bFROM pc_packs WHERE player_id = CAST\(:pid AS uuid\) AND nonce = CAST\(:nonce AS text\)\s*$",
+    _re.S)
+_DISCORD_FIX_SQLSTATES = frozenset({"42703", "42P01"})   # undefined_column, undefined_table
+_DISCORD_FIX_BINDS = {"pid": "00000000-0000-0000-0000-000000000000", "nonce": ""}
+
+
+def _discord_fix_read(fn) -> str:
+    """The statement among `fn`'s compiled string constants (nested code
+    included) that reads a pack row by player and nonce, when there is
+    exactly one; else "". The function's own docstring is skipped."""
+    found = []
+    todo = [fn.__code__]
+    while todo:
+        code = todo.pop()
+        for const in code.co_consts:
+            if isinstance(const, type(code)):
+                todo.append(const)
+            elif isinstance(const, str) and const is not fn.__doc__ and _DISCORD_FIX_READ.match(const):
+                found.append(const)
+    return found[0] if len(found) == 1 else ""
+
+
+_DISCORD_FIX_PROBE = _discord_fix_read(_pc_open_for)
+_DISCORD_FIX_LAST = 0
+
+
+def _discord_fix_bound() -> bool:
+    """True when this app routes POST /api/v1/internal/pc/packs/open to
+    internal_pc_open_pack (_DISCORD_FIX_ENDPOINT)."""
+    method, path = _DISCORD_FIX_ROUTE
+    return any(getattr(r, "path", None) == path and method in (getattr(r, "methods", None) or ())
+               and getattr(r, "endpoint", None) is _DISCORD_FIX_ENDPOINT
+               for r in app.router.routes)
+
+
+def _discord_fix_schema_missing(exc) -> bool:
+    """True when the statement named a column or a table the database does
+    not have: the driver's own class for either, or SQLSTATE 42703 / 42P01,
+    on `exc` or on its wrapping chain (.orig and __cause__). An exception
+    merely raised while another was being handled (__context__) is not
+    wrapping it, and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, (_discord_fix_apg_exc.UndefinedColumnError,
+                            _discord_fix_apg_exc.UndefinedTableError)):
+            return True
+        state = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if str(state or "") in _DISCORD_FIX_SQLSTATES:
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+async def _discord_fix_probe(db) -> int:
+    """/health `discord_fix` on the connected arm, written through to the
+    cache the degraded arm reads: 1 when the route is bound and the replay
+    read ran, 0 when the route is not bound, the read is not found, or the
+    database lacks a column or the table it names. Any other error is raised
+    to health_check's own catch."""
+    global _DISCORD_FIX_LAST
+    if not _DISCORD_FIX_PROBE or not _discord_fix_bound():
+        _DISCORD_FIX_LAST = 0
+        return 0
+    try:
+        await db.execute(text(_DISCORD_FIX_PROBE), dict(_DISCORD_FIX_BINDS))
+    except Exception as exc:
+        if not _discord_fix_schema_missing(exc):
+            raise
+        await db.rollback()
+        _DISCORD_FIX_LAST = 0
+        return 0
+    _DISCORD_FIX_LAST = 1
+    return 1
 
 
 @app.get("/api/v1/internal/pc/collection", tags=["Internal"])
@@ -33525,6 +34005,7 @@ async def internal_pc_packs(
     index: int | None = Query(None, ge=1, le=2147483647),
     limit: int = Query(5, ge=1, le=10),
     locale: str | None = Query(None, max_length=16),
+    player_steam_id: str | None = Query(None, min_length=1, max_length=32),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -33544,10 +34025,16 @@ async def internal_pc_packs(
     `before`. `actor_ref` is the resolved players.id, compared by the bot
     across its reads. The renderer gate comes first, as on the strip route: this
     answer keys every face it lists (face_rev), and a box that cannot key a
-    face answers the reason instead of a list without keys."""
+    face answers the reason instead of a list without keys.
+    `player_steam_id` (Discord fix round 4, LOW 2): the reveal of a purchase
+    the bot journaled names the player it was bought for, and a Discord id
+    now linked to another player is refused 412 player_changed before any
+    read, so the reveal never reads through the player linked now."""
     _require_internal_key(x_internal_key)
     _pc_require_renderer()
     actor = await _pc_player_by_discord(db, discord_id)
+    if player_steam_id is not None and str(actor.steam_id) != player_steam_id:
+        raise HTTPException(status_code=412, detail={"error": "player_changed", "player_steam_id": player_steam_id})
     await _assert_no_service_subject(db, affected_player_ids=[actor.id])
     pid = str(actor.id)
     cursor = (before or "").strip()
@@ -40272,9 +40759,21 @@ async def internal_tournament_checkin_response(
     return result
 
 
+def _tournament_availability_live_sql():
+    """The condition (over a tournament_notices row aliased `tn`) under which
+    an availability check may still be delivered: its player is a current
+    ELIGIBLE entrant of its tournament - tournaments._ELIGIBLE_ENTRANT_SQL,
+    the quorum's one domain (Discord fix round 4, fix 4)."""
+    from tournaments import _ELIGIBLE_ENTRANT_SQL
+    return ("EXISTS (SELECT 1 FROM tournament_signups ts"
+            " WHERE ts.tournament_id = tn.tournament_id AND ts.player_id = tn.player_id"
+            f" AND {_ELIGIBLE_ENTRANT_SQL})")
+
+
 @app.get("/api/v1/internal/tournament-notices", tags=["Internal"])
 async def internal_tournament_notices(
     unnotified: bool = Query(True),
+    notice_id: str | None = Query(None, max_length=64),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -40284,11 +40783,24 @@ async def internal_tournament_notices(
     lookups. Durable ack pattern
     (learning #105) — ack via POST /internal/tournament-notices/ack after the
     DM lands (or is permanently undeliverable); transient failures don't ack
-    so the next tick retries. Rows are queued by tournament_tick."""
+    so the next tick retries. Rows are queued by tournament_tick.
+    `notice_id` (Discord fix round 4, fix 5; Codex round 3 LOW 4): the feed
+    of that one notice under every condition below. The bot reads it as the
+    last step before each availability-check DM - after it has built the
+    message and resolved the user - so a notice whose entrant left or was
+    banned since the feed was read is not sent."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     where = "tn.notified_at IS NULL" if unnotified else "TRUE"
+    one = {}
+    if notice_id is not None:
+        try:
+            one = {"nid": str(uuid.UUID(notice_id))}
+        except ValueError:
+            raise HTTPException(status_code=422, detail="bad notice_id")
+        where += " AND tn.id = CAST(:nid AS uuid)"
+    live = _tournament_availability_live_sql()
     # A deadline row can sit between enqueue and poll while its match finishes
     # or gets extended. Revalidate the live match/deadline here so the delivery
     # boundary never emits the now-stale prompt; hidden rows remain available
@@ -40312,6 +40824,15 @@ async def internal_tournament_notices(
           JOIN players p ON p.id = tn.player_id
           JOIN tournaments t ON t.id = tn.tournament_id
          WHERE {where}
+           -- An availability check goes only to a CURRENT ELIGIBLE entrant
+           -- (Discord fix round 3, item 4; round 4, fix 4: confirmed, no
+           -- active ban - the quorum's own domain): a notice that outlived
+           -- its signup, or whose entrant was banned, is never delivered.
+           -- Unsignup also deletes the unsent row; a re-signup re-arms it.
+           AND (
+               tn.notice_type <> 'availability_check'
+               OR {live}
+           )
            AND (
                tn.notice_type <> 'deadline_checkin'
                OR (
@@ -40340,7 +40861,7 @@ async def internal_tournament_notices(
                )
            )
       ORDER BY tn.created_at ASC
-         LIMIT 20"""))).mappings().all()
+         LIMIT 20"""), one)).mappings().all()
     return {
         "notices": [
             {
@@ -50227,7 +50748,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4461 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4621 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
