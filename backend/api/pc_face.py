@@ -1513,11 +1513,14 @@ def _draw_badge_name(image: Image.Image, name: str, rgb: tuple[int, int, int],
 # container gets it as a READ-ONLY bind mount at assets/pc/cards, staged per
 # box outside the build context; a clone, a test process and a box without
 # the mount simply have no bundle. A bundle is a directory holding exactly
-# index.json (canonical card name -> file, sha256, width, height, in the one
-# canonical serialization), BUNDLE-DIGEST (the sha256 of those index bytes)
-# and one PNG per name. It is ONE optional renderer input: accepted only when
-# EVERY expected name, hash, chunk set, header, mode, opacity and decode
-# checks out, and otherwise not used at all -- never partly. An absent or
+# index.json (format, the certifying tool version, the harvest provenance,
+# and canonical card name -> file, sha256, width, height, source thumbnail
+# sha256 and rect, in the one canonical serialization), BUNDLE-DIGEST (the
+# sha256 of those index bytes) and one PNG per name. It is ONE optional
+# renderer input: accepted only when the provenance is present and English
+# with the measured backing, the tool version is current, and EVERY expected
+# name, slug binding, hash, chunk set, header, mode, opacity, backing and
+# content floor checks out, and otherwise not used at all -- never partly. An absent or
 # invalid bundle keeps the fingerprint valid and every face rendering, with
 # the name-only badge for every card; it is never a reason to refuse a face or
 # a pack (the pack writer asks _pc_require_renderer BEFORE it takes payment).
@@ -1526,7 +1529,27 @@ _CARD_ART_PATH = _ASSETS_PATH / _CARD_ART_DIRNAME
 CARD_ART_W, CARD_ART_H = 80, 104
 CARD_ART_INDEX = "index.json"
 CARD_ART_DIGEST_FILE = "BUNDLE-DIGEST"
-CARD_ART_FORMAT = 1
+CARD_ART_FORMAT = 2
+# The bundle tool's checks marker. A bundle records the tool version that
+# certified it; the renderer accepts none older than CARD_ART_MIN_TOOL_VERSION,
+# the first tool that required the harvest's provenance (English, complete,
+# the game and mod build, the raw thumbnail hash bound to its name, the
+# MEASURED backing colour) and the content floors below. Format 1 bundles
+# (sitting 1) carry neither and are refused whole.
+CARD_ART_TOOL_VERSION = 2
+CARD_ART_MIN_TOOL_VERSION = 2
+# Content floors over the fitted art box of each patch (the #139 class: a
+# capture that is blank or flat is not art). Lit = a pixel with any channel
+# above the client's PROBE_CHANNEL_FLOOR (CardSnapshot.cs, 12 of 255), the
+# same 8 percent floor the client applies to its own captures. The luma
+# standard-deviation floor is far under every real thumbnail (the lowest of
+# the 67 in each 2026-10-01 harvest was 16.6) and far over a flat fill (0).
+CARD_ART_CHANNEL_FLOOR = 12
+CARD_ART_LIT_FLOOR = 0.08
+CARD_ART_LUMA_SD_FLOOR = 6.0
+_CARD_ART_PROVENANCE_KEYS = frozenset(
+    {"language", "rounds_locale", "game_build", "mod_build", "harvest", "backing_rgb", "backing_method"})
+_CARD_ART_ENTRY_KEYS = frozenset({"file", "sha256", "width", "height", "source_sha256", "source_rect"})
 _CARD_ART_MAX_FILE = 64 << 10
 _CARD_ART_MAX_INDEX = 256 << 10
 _CARD_ART_FILE_RE = regex.compile(r"\A[a-z0-9]{1,64}\.png\Z")
@@ -1552,13 +1575,100 @@ def card_art_index_bytes(index: dict) -> bytes:
             + "\n").encode("utf-8")
 
 
-def card_art_write_bundle(dest_dir, patches: dict) -> str:
+def card_art_backing_rgb() -> tuple[int, int, int]:
+    """The art backing colour the layout pins (colours.badge_art_back): the
+    value MEASURED in game at harvest, which every bundle's provenance must
+    carry exactly. The client asks for (0.08, 0.08, 0.10), i.e. Color32
+    20,20,26; the game, in its Linear colour space, puts 22,22,28 on screen
+    (read back from the framebuffer by the 2026-10-01 harvest), and the
+    layout carries what the screen shows."""
+    return tuple(int(v) for v in LAYOUT["colours"]["badge_art_back"])
+
+
+def card_art_fit_box(src_w: int, src_h: int) -> tuple[int, int, int, int]:
+    """Where a src_w x src_h thumbnail lands inside the 80x104 patch: fitted
+    into the art box (columns 2..80, the client's preserveAspect box), aspect
+    kept, centred. The bundle tool composes with this box and the content
+    check measures inside it, so both read one rule."""
+    back = LAYOUT["rects"]["badge_art_back"]
+    art = LAYOUT["rects"]["badge_art"]
+    x0, y0, x1, y1 = art[0] - back[0], art[1] - back[1], art[2] - back[0], art[3] - back[1]
+    bw, bh = x1 - x0, y1 - y0
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError("card_art_source_rect")
+    scale = min(bw / src_w, bh / src_h)
+    w, h = max(1, round(src_w * scale)), max(1, round(src_h * scale))
+    left, top = x0 + (bw - w) // 2, y0 + (bh - h) // 2
+    return left, top, left + w, top + h
+
+
+def card_art_content(image: Image.Image) -> tuple[float, float]:
+    """(luma standard deviation, lit fraction) of an image, lit as the client
+    counts it (alpha and any channel above CARD_ART_CHANNEL_FLOOR)."""
+    rgba = image.convert("RGBA")
+    floor = CARD_ART_CHANNEL_FLOOR
+    lut = [255 if v > floor else 0 for v in range(256)]
+    r, g, b, a = (band.point(lut) for band in rgba.split())
+    lit_mask = ImageChops.multiply(ImageChops.lighter(ImageChops.lighter(r, g), b), a)
+    pixels = rgba.width * rgba.height
+    lit = (lit_mask.histogram()[255] / pixels) if pixels else 0.0
+    hist = rgba.convert("RGB").convert("L").histogram()
+    count = sum(hist)
+    mean = sum(v * n for v, n in enumerate(hist)) / count if count else 0.0
+    var = sum(n * (v - mean) ** 2 for v, n in enumerate(hist)) / count if count else 0.0
+    return float(math.sqrt(var)), float(lit)
+
+
+def card_art_content_check(image: Image.Image) -> tuple[float, float]:
+    """The content floors, or ValueError naming the one that failed."""
+    sd, lit = card_art_content(image)
+    if sd < CARD_ART_LUMA_SD_FLOOR:
+        raise ValueError(f"card_art_flat (luma sd {sd:.2f} < {CARD_ART_LUMA_SD_FLOOR})")
+    if lit < CARD_ART_LIT_FLOOR:
+        raise ValueError(f"card_art_unlit (lit {lit:.4f} < {CARD_ART_LIT_FLOOR})")
+    return sd, lit
+
+
+def card_art_check_provenance(index: dict) -> None:
+    """The bundle-level admission: the tool version that certified it is not
+    older than CARD_ART_MIN_TOOL_VERSION, and the harvest provenance is
+    present and complete -- English (the mod and ROUNDS), the game and mod
+    build, the harvest stamp, and the measured backing colour equal to the
+    layout's. ValueError naming the first failure."""
+    tool = index.get("tool_version")
+    if not isinstance(tool, int) or isinstance(tool, bool) or tool < CARD_ART_MIN_TOOL_VERSION:
+        raise ValueError(f"tool_version {tool!r} predates the provenance checks "
+                         f"(minimum {CARD_ART_MIN_TOOL_VERSION})")
+    prov = index.get("provenance")
+    if not isinstance(prov, dict):
+        raise ValueError("no provenance block")
+    if set(prov) != _CARD_ART_PROVENANCE_KEYS:
+        raise ValueError(f"provenance keys {sorted(prov)}")
+    for key in ("language", "rounds_locale"):
+        code = prov[key]
+        if not isinstance(code, str) or not (code == "en" or code.startswith("en-")):
+            raise ValueError(f"provenance {key} {code!r} is not English")
+    for key in ("game_build", "mod_build", "harvest", "backing_method"):
+        if not isinstance(prov[key], str) or not prov[key].strip() or prov[key].strip() == "unknown":
+            raise ValueError(f"provenance {key} missing")
+    rgb = prov["backing_rgb"]
+    if (not isinstance(rgb, list) or len(rgb) != 3
+            or not all(isinstance(v, int) and not isinstance(v, bool) for v in rgb)
+            or tuple(rgb) != card_art_backing_rgb()):
+        raise ValueError(f"provenance backing_rgb {rgb!r} is not the layout's {card_art_backing_rgb()}")
+
+
+def card_art_write_bundle(dest_dir, patches: dict, sources: dict, provenance: dict,
+                          tool_version: int = CARD_ART_TOOL_VERSION) -> str:
     """Write a bundle directory from {canonical name: 80x104 RGBA image}: one
     canonically encoded PNG per name (IHDR/IDAT/IEND only, so no text chunk,
     path or time can ride in), index.json in its canonical serialization, and
-    BUNDLE-DIGEST last. The directory must not exist yet. Returns the digest.
-    The bundle-building tool and the tests' synthetic bundles both write
-    through this, so the format has one writer as it has one reader."""
+    BUNDLE-DIGEST last. `sources` maps each name to its harvest record
+    ({"source_sha256", "source_rect": [x, y, w, h]}); `provenance` is the
+    harvest's block (card_art_check_provenance's keys). The directory must
+    not exist yet. Returns the digest. The bundle-building tool and the
+    tests' synthetic bundles both write through this, so the format has one
+    writer as it has one reader."""
     root = Path(dest_dir)
     root.mkdir(parents=True, exist_ok=False)
     cards = {}
@@ -1571,9 +1681,13 @@ def card_art_write_bundle(dest_dir, patches: dict) -> str:
         if not stem or (root / f"{stem}.png").exists():
             raise ValueError("card_art_slug")
         (root / f"{stem}.png").write_bytes(data)
+        src = sources[name]
         cards[name] = {"file": f"{stem}.png", "sha256": hashlib.sha256(data).hexdigest(),
-                       "width": CARD_ART_W, "height": CARD_ART_H}
-    index_bytes = card_art_index_bytes({"format": CARD_ART_FORMAT, "cards": cards})
+                       "width": CARD_ART_W, "height": CARD_ART_H,
+                       "source_sha256": str(src["source_sha256"]),
+                       "source_rect": [int(v) for v in src["source_rect"]]}
+    index_bytes = card_art_index_bytes({"format": CARD_ART_FORMAT, "tool_version": int(tool_version),
+                                        "provenance": dict(provenance), "cards": cards})
     (root / CARD_ART_INDEX).write_bytes(index_bytes)
     digest = hashlib.sha256(index_bytes).hexdigest()
     (root / CARD_ART_DIGEST_FILE).write_bytes((digest + "\n").encode("ascii"))
@@ -1657,11 +1771,36 @@ def _card_art_decode(data: bytes) -> Image.Image:
     return image
 
 
+def card_art_check_entry_shape(name: str, entry) -> None:
+    """One index entry's shape, or ValueError: exactly the entry keys, the
+    file bound to its name by the slug rule (so two names cannot trade files
+    in the index), a sha256, the 80x104 size, and the harvest record (the raw
+    thumbnail's sha256 and its source rect)."""
+    if not isinstance(entry, dict) or set(entry) != _CARD_ART_ENTRY_KEYS:
+        raise ValueError("entry keys")
+    if (not isinstance(entry["file"], str) or not _CARD_ART_FILE_RE.match(entry["file"])
+            or not isinstance(entry["sha256"], str) or not _CARD_ART_SHA_RE.match(entry["sha256"])
+            or entry["width"] != CARD_ART_W or entry["height"] != CARD_ART_H):
+        raise ValueError("entry shape")
+    if entry["file"] != card_art_slug(name) + ".png":
+        raise ValueError(f"file {entry['file']!r} is not the name's slug {card_art_slug(name)!r}")
+    if not isinstance(entry["source_sha256"], str) or not _CARD_ART_SHA_RE.match(entry["source_sha256"]):
+        raise ValueError("source_sha256")
+    rect = entry["source_rect"]
+    if (not isinstance(rect, list) or len(rect) != 4
+            or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in rect)
+            or rect[2] <= 0 or rect[3] <= 0):
+        raise ValueError("source_rect")
+
+
 def card_art_check_entry(assets_dir: Path, entry: dict) -> tuple[bytes, Image.Image]:
     """(bytes, decoded patch) of one index entry, or ValueError naming why
-    not: the file present and within the cap, its sha256 the index's, and
-    _card_art_decode's checks. The bundle loader and the validation tool both
-    call this, so a tool PASS is exactly what the renderer accepts."""
+    not: the file present and within the cap, its sha256 the index's,
+    _card_art_decode's checks, every pixel outside the fitted art box the
+    layout's backing colour, and the content floors inside it. The bundle
+    loader and the validation tool both call this (after
+    card_art_check_entry_shape), so a tool PASS is exactly what the renderer
+    accepts."""
     path = Path(assets_dir) / entry["file"]
     if not path.is_file():
         raise ValueError("file missing")
@@ -1673,11 +1812,21 @@ def card_art_check_entry(assets_dir: Path, entry: dict) -> tuple[bytes, Image.Im
     if hashlib.sha256(data).hexdigest() != entry["sha256"]:
         raise ValueError("hash mismatch")
     try:
-        return data, _card_art_decode(data)
+        image = _card_art_decode(data)
     except ValueError as exc:
         raise ValueError(f"patch refused ({exc})") from exc
     except Exception as exc:                         # noqa: BLE001 -- a decode failure of any kind
         raise ValueError(f"patch refused (decode: {type(exc).__name__})") from exc
+    box = card_art_fit_box(entry["source_rect"][2], entry["source_rect"][3])
+    backing = Image.new("RGBA", image.size, card_art_backing_rgb() + (255,))
+    backing.paste(image.crop(box), box[:2])
+    if backing.tobytes() != image.tobytes():
+        raise ValueError("patch refused (card_art_backing: a pixel outside the fitted art is not the backing)")
+    try:
+        card_art_content_check(image.crop(box))
+    except ValueError as exc:
+        raise ValueError(f"patch refused ({exc})") from exc
+    return data, image
 
 
 @functools.lru_cache(maxsize=4)
@@ -1701,11 +1850,20 @@ def _card_art_bundle_at(assets_dir: str, names: tuple[str, ...], _stamps: tuple)
             index = json.loads(index_bytes.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             return _card_art_refuse("index.json is not JSON")
-        if (not isinstance(index, dict) or set(index) != {"format", "cards"}
-                or index.get("format") != CARD_ART_FORMAT or not isinstance(index.get("cards"), dict)):
+        if not isinstance(index, dict) or index.get("format") != CARD_ART_FORMAT:
+            return _card_art_refuse(f"index.json format {index.get('format') if isinstance(index, dict) else None!r}"
+                                    f" is not {CARD_ART_FORMAT} (a bundle older than the provenance checks)")
+        if not isinstance(index.get("provenance"), dict):
+            return _card_art_refuse("provenance: no provenance block")
+        if (set(index) != {"format", "tool_version", "provenance", "cards"}
+                or not isinstance(index.get("cards"), dict)):
             return _card_art_refuse("index.json shape")
         if card_art_index_bytes(index) != index_bytes:
             return _card_art_refuse("index.json is not in its canonical serialization")
+        try:
+            card_art_check_provenance(index)
+        except ValueError as exc:
+            return _card_art_refuse(f"provenance: {exc}")
         cards = index["cards"]
         if tuple(sorted(cards)) != names:
             missing = sorted(set(names) - set(cards))
@@ -1719,14 +1877,15 @@ def _card_art_bundle_at(assets_dir: str, names: tuple[str, ...], _stamps: tuple)
         files = []
         for name in names:
             entry = cards[name]
-            if (not isinstance(entry, dict) or set(entry) != {"file", "sha256", "width", "height"}
-                    or not isinstance(entry["file"], str) or not _CARD_ART_FILE_RE.match(entry["file"])
-                    or not isinstance(entry["sha256"], str) or not _CARD_ART_SHA_RE.match(entry["sha256"])
-                    or entry["width"] != CARD_ART_W or entry["height"] != CARD_ART_H):
-                return _card_art_refuse(f"entry shape: {name!r}")
+            try:
+                card_art_check_entry_shape(name, entry)
+            except ValueError as exc:
+                return _card_art_refuse(f"entry shape ({exc}): {name!r}")
             files.append(entry["file"])
         if len(set(files)) != len(files):
             return _card_art_refuse("two names share one file")
+        if len({cards[name]["source_sha256"] for name in names}) != len(names):
+            return _card_art_refuse("two names share one source thumbnail")
         if listed != sorted(files + [CARD_ART_INDEX, CARD_ART_DIGEST_FILE]):
             return _card_art_refuse("the directory holds files the index does not name, or lacks some")
         patches: dict[str, tuple[Image.Image, Image.Image]] = {}

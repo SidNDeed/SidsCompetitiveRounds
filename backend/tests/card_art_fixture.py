@@ -39,11 +39,46 @@ def synthetic_patch(name: str) -> Image.Image:
     return image
 
 
-def write_bundle(dest: Path, names=None, patches=None) -> str:
+def synthetic_provenance(**over) -> dict:
+    """A complete provenance block, marked synthetic in every free-text field
+    (the renderer checks presence, English and the backing colour; it cannot
+    tell a test bundle from a harvest, and does not need to)."""
+    prov = {"language": "en", "rounds_locale": "en", "game_build": "synthetic test bundle",
+            "mod_build": "synthetic test bundle", "harvest": "synthetic",
+            "backing_rgb": list(pc_face.card_art_backing_rgb()),
+            "backing_method": "synthetic: the layout constant (tests only)"}
+    prov.update(over)
+    return prov
+
+
+def synthetic_source(name: str) -> dict:
+    """The harvest record of a synthetic patch: a source the size of the art
+    box (78x104, so the fitted box is columns 2..80) and a per-name hash."""
+    return {"source_sha256": hashlib.sha256(b"synthetic-source\n" + name.encode("utf-8")).hexdigest(),
+            "source_rect": [0, 0, 78, 104]}
+
+
+def write_bundle(dest: Path, names=None, patches=None, provenance=None, tool_version=None) -> str:
     """A valid bundle at `dest` for `names` (default: every expected name)."""
     names = pc_face.card_art_names() if names is None else names
     patches = {} if patches is None else patches
-    return pc_face.card_art_write_bundle(dest, {n: patches.get(n) or synthetic_patch(n) for n in names})
+    kwargs = {} if tool_version is None else {"tool_version": tool_version}
+    return pc_face.card_art_write_bundle(
+        dest, {n: patches.get(n) or synthetic_patch(n) for n in names},
+        {n: synthetic_source(n) for n in names},
+        synthetic_provenance() if provenance is None else provenance, **kwargs)
+
+
+def rewrite_index(dest: Path, mutate) -> None:
+    """Apply mutate(index_dict) and keep index bytes and BUNDLE-DIGEST
+    self-consistent, so only the checks under test can refuse."""
+    dest = Path(dest)
+    index = json.loads((dest / pc_face.CARD_ART_INDEX).read_text(encoding="utf-8"))
+    mutate(index)
+    index_bytes = pc_face.card_art_index_bytes(index)
+    (dest / pc_face.CARD_ART_INDEX).write_bytes(index_bytes)
+    (dest / pc_face.CARD_ART_DIGEST_FILE).write_bytes(
+        (hashlib.sha256(index_bytes).hexdigest() + "\n").encode("ascii"))
 
 
 def rewrite_entry(dest: Path, name: str, data: bytes) -> None:
