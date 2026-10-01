@@ -669,32 +669,7 @@ _APEX_IN_ORDER = ("(CAST(:k AS timestamptz) IS NOT NULL AND "
                   "CAST(:k AS timestamptz) > title_ladder_progress.streak_at))")
 _APEX_FIRST = ("CASE WHEN CAST(:won AS boolean) AND CAST(:k AS timestamptz) IS NOT NULL "
                "THEN 1 ELSE 0 END")
-_APEX_WORN_SQL = (
-    "INSERT INTO title_ladder_progress (player_id, line, games, tier, streak, streak_at) "
-    "VALUES (:pid, :line, GREATEST(CAST(:base AS integer), " + _APEX_FIRST + "), "
-    "        CAST(:wt AS integer), " + _APEX_FIRST + ", CAST(:k AS timestamptz)) "
-    "ON CONFLICT (player_id, line) DO UPDATE "
-    "   SET streak = CASE WHEN NOT CAST(:won AS boolean) THEN 0 "
-    "                     WHEN " + _APEX_IN_ORDER + " THEN title_ladder_progress.streak + 1 "
-    "                     ELSE title_ladder_progress.streak END, "
-    "       games = GREATEST(title_ladder_progress.games, "
-    "                        CASE WHEN CAST(:won AS boolean) AND " + _APEX_IN_ORDER + " "
-    "                             THEN title_ladder_progress.streak + 1 ELSE 0 END), "
-    "       streak_at = CASE WHEN " + _APEX_IN_ORDER + " THEN CAST(:k AS timestamptz) "
-    "                        ELSE title_ladder_progress.streak_at END, "
-    "       tier = GREATEST(title_ladder_progress.tier, CAST(:wt AS integer)), "
-    "       updated_at = NOW() "
-    "RETURNING games, tier")
-# A ranked 1v1 game that is not a worn Apex win: the run ends (one statement,
-# a no-op for a player with no Apex row or no run and nothing newer to note).
-_APEX_BREAK_SQL = (
-    "UPDATE title_ladder_progress "
-    "   SET streak = 0, "
-    "       streak_at = CASE WHEN " + _APEX_IN_ORDER + " THEN CAST(:k AS timestamptz) "
-    "                        ELSE title_ladder_progress.streak_at END, "
-    "       updated_at = NOW() "
-    " WHERE player_id = :pid AND line = :line "
-    "   AND (streak <> 0 OR " + _APEX_IN_ORDER + ")")
+
 
 async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
                                  reference_id: str, rows=None) -> list:
@@ -739,6 +714,36 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
     # Late import: `main` imports THIS module at its own module level, so a
     # module-level `from main import ...` here would be an import cycle.
     from main import _grant_title_item
+
+    # The two Apex statements are defined HERE, not at module level: every
+    # statement that writes a ladder table lives in this function
+    # (test_the_ladder_tables_have_no_writer_but_the_hook).
+    _APEX_WORN_SQL = (
+        "INSERT INTO title_ladder_progress (player_id, line, games, tier, streak, streak_at) "
+        "VALUES (:pid, :line, GREATEST(CAST(:base AS integer), " + _APEX_FIRST + "), "
+        "        CAST(:wt AS integer), " + _APEX_FIRST + ", CAST(:k AS timestamptz)) "
+        "ON CONFLICT (player_id, line) DO UPDATE "
+        "   SET streak = CASE WHEN NOT CAST(:won AS boolean) THEN 0 "
+        "                     WHEN " + _APEX_IN_ORDER + " THEN title_ladder_progress.streak + 1 "
+        "                     ELSE title_ladder_progress.streak END, "
+        "       games = GREATEST(title_ladder_progress.games, "
+        "                        CASE WHEN CAST(:won AS boolean) AND " + _APEX_IN_ORDER + " "
+        "                             THEN title_ladder_progress.streak + 1 ELSE 0 END), "
+        "       streak_at = CASE WHEN " + _APEX_IN_ORDER + " THEN CAST(:k AS timestamptz) "
+        "                        ELSE title_ladder_progress.streak_at END, "
+        "       tier = GREATEST(title_ladder_progress.tier, CAST(:wt AS integer)), "
+        "       updated_at = NOW() "
+        "RETURNING games, tier")
+    # A ranked 1v1 game that is not a worn Apex win: the run ends (one statement,
+    # a no-op for a player with no Apex row or no run and nothing newer to note).
+    _APEX_BREAK_SQL = (
+        "UPDATE title_ladder_progress "
+        "   SET streak = 0, "
+        "       streak_at = CASE WHEN " + _APEX_IN_ORDER + " THEN CAST(:k AS timestamptz) "
+        "                        ELSE title_ladder_progress.streak_at END, "
+        "       updated_at = NOW() "
+        " WHERE player_id = :pid AND line = :line "
+        "   AND (streak <> 0 OR " + _APEX_IN_ORDER + ")")
 
     rows = {str(k): v for k, v in (rows or {}).items()}
     events = []

@@ -312,7 +312,8 @@ def test_pg_migrations_331_and_365_create_what_the_route_reads():
     regs, cols, skus = _run(_go())
     assert regs == {"title_ladders": True, "title_ladder_progress": True,
                     "title_ladder_credits": True}, regs
-    assert cols == ["player_id", "line", "games", "tier", "updated_at", "streak"], cols
+    assert cols == ["player_id", "line", "games", "tier", "updated_at", "streak",
+                    "streak_at"], cols
     assert skus == len(tl.ALL_SKUS) == 160, (skus, len(tl.ALL_SKUS))
 
 
