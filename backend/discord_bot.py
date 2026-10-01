@@ -9153,7 +9153,9 @@ def _pc_fix_ready_line():
     point refuses every purchase, so "NOT mounted" is the reading a release
     must stop on - how many purchases the journal holds unsettled and how
     many bought ones still await their reveal (round 3, item 2); the replay
-    policy and the purchase's player binding (round 3, M1); the sync
+    policy and the purchase's player binding (round 3, M1); the check of a
+    bought pack's player before its pointer or reveal (round 5, LOW 1: the
+    clause a deploy greps to tell this build from the one before); the sync
     availability-check rule (board row 32). Stamped
     with the process's gen, as [BOT-READY] is (r7 M2). Its only job is to be
     read by the release train. It never raises: a witness that cannot be
@@ -9167,6 +9169,7 @@ def _pc_fix_ready_line():
         return (f"[DISCORD-FIX] gen={_BOT_GEN} purchase journal {_PC_BUY_PENDING_FILE}: "
                 f"{'mounted' if mounted else 'NOT mounted'}, {held}; an unanswered open sends its key "
                 f"{_PC_OPEN_SENDS} times; every purchase names the player it was bought for; "
+                f"every bought pack is checked against its player before its pointer or reveal; "
                 f"sync availability checks wait for a start time with min_players votes")
     except Exception as ex:
         return f"[DISCORD-FIX] gen={_BOT_GEN} witness failed: {type(ex).__name__}: {ex}"
