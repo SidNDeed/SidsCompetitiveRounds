@@ -1,8 +1,41 @@
 """Verified reads, requirement 26 / finding M4: the chat socket's read-side
-protocol, specified in read_gate (the block above socket_connect_verdict) and
-tested here as executable decisions. The socket gate is NOT built:
-SOCKET_READ_GATE_BUILT stays False, and the last tests prove that no stage
-selects socket enforcement while it is.
+protocol, tested here as executable decisions (read_gate.socket_connect_verdict,
+read_gate.socket_recheck_verdict, read_gate.socket_enforcing; the same text
+stands in read_gate above socket_connect_verdict). The socket gate is NOT
+built: SOCKET_READ_GATE_BUILT stays False, and the last tests prove that no
+stage selects socket enforcement while it is.
+
+The protocol the socket read gate must implement before that constant may
+become True:
+
+1. Connect credentials, read from the handshake headers only (the
+   message-borne `auth` frame binds the inbound identity and is not a read
+   credential). Exactly the three of the HTTP gate, any one valid admits:
+     X-Internal-Key  equal to API_SECRET_KEY                   -> internal
+     X-Session-Token whose row exists, is verified, unexpired  -> session
+     X-Operator-Key  naming a live api_operator_keys row        -> operator:<name>
+2. The check runs after the version check and accept(), before the socket
+   joins the chat manager and before the first outbound frame, so a refused
+   socket receives no chat frame.
+3. Refusal closes the socket with an application close code and the HTTP
+   gate's own detail word as the reason:
+     4401 read_credential_required     nothing valid was presented
+     4401 session_required             a session token was presented and failed
+     4401 operator_key_invalid         an operator key was presented and failed
+     1013 read_gate_unavailable        a lookup raised, or the stage is unknown
+     1013 session_replication_pending  the standby has no row for the token
+4. Rechecks while open, every SOCKET_RECHECK_SECONDS (= CRED_TTL, 60 s), and
+   the stage every MODE_TTL (15 s):
+     session expiry   closed 4401 session_expired at the row's expires_at
+     session deleted  closed 4401 session_required
+     key revoked      closed 4401 operator_key_invalid
+     stage -> enforce an open socket with no valid credential is closed
+                      4401 read_credential_required
+     stage -> log/off nothing is closed
+5. Counting is unchanged: each socket is counted once at connect by its
+   class (internal, session, operator:<name>, mod_no_session, other); the
+   `other` class (no version header) is tested in
+   test_read_gate_outcomes.test_ws_connect_counted_other.
 
 The protocol tests run with the constant raised inside the test only
 (monkeypatch), which is what the future implementation will run under.
