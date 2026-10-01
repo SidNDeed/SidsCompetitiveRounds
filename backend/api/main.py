@@ -29566,6 +29566,17 @@ from fastapi.responses import Response as _PcResponse
 
 PC_FACE_CACHE_DIR = os.getenv("PC_FACE_CACHE_DIR", "/var/cache/pc-faces")
 _pc_face_cache = _pcp.FaceCache(PC_FACE_CACHE_DIR)
+
+
+def _pc_face_render_started(key) -> None:
+    """One line per face render START on this box (a cache miss that is not
+    joining an in-flight render), named by a short hash of the cache key so no
+    print id reaches the log. Residual 2's falsifier counts these per key per
+    box while the key is resident (Discord cards, LOW 2)."""
+    print(f"[PC-FACE] render start k={hashlib.sha256(str(key).encode('utf-8')).hexdigest()[:12]}", flush=True)
+
+
+_pc_face_cache.on_render_start = _pc_face_render_started
 _pc_back_cache = {"bytes": None}
 # Dance cards (design S4.6-S4.7): derived motion lives under its OWN root
 # beside the face cache's (the deploy adds its volume), in its own class; the
