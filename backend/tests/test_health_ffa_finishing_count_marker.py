@@ -222,17 +222,24 @@ def test_a_session_without_begin_nested_cannot_run_the_probe_and_leaves_the_cach
         async def rollback(self):
             pass
 
+    # The session_report marker's probe is a sibling's bare execute that names
+    # every report statement's tables, ffa_match_players among them; it is
+    # that marker's SQL, not this one's, so the scan below sets it aside by
+    # its exact text and still reads every other statement sent.
+    def ours(sent):
+        return [s for s in sent if s != main._SESSION_REPORT_PROBE]
+
     monkeypatch.setattr(main, "_FFA_FINISHING_COUNT_LAST", 1)
     db = _NoSavepoint()
     answer = run(main.health_check(db=db)).model_dump()
     assert answer["ffa_finishing_count"] == 1, answer   # the cache, untouched
-    assert not any("ffa_lobbies" in s or "ffa_match_players" in s for s in db.sent), db.sent
+    assert not any("ffa_lobbies" in s or "ffa_match_players" in s for s in ours(db.sent)), db.sent
 
     monkeypatch.setattr(main, "_FFA_FINISHING_COUNT_LAST", 0)
     db2 = _NoSavepoint()
     answer2 = run(main.health_check(db=db2)).model_dump()
     assert answer2["ffa_finishing_count"] == 0, answer2
-    assert not any("ffa_lobbies" in s or "ffa_match_players" in s for s in db2.sent), db2.sent
+    assert not any("ffa_lobbies" in s or "ffa_match_players" in s for s in ours(db2.sent)), db2.sent
 
 
 # -- live PostgreSQL: one scratch database, a schema per case ------------------

@@ -360,6 +360,8 @@ ALLOW = {
     ("__init__", "sid[:100]"): (1, "a select option value, not shown"),
     ("_normalize_bettable_lobby", "_nm[:80]"): (1, "a select option label: plain text"),
     ("_normalize_bettable_lobby", "str(val)[-4:]"): (1, "a select option label: plain text"),
+    ("_pc_open_pack_api", "str(params.get('nonce'))[:8]"):
+        (1, "a purchase nonce in the [PC-OPEN] console line, never sent to Discord"),
 }
 
 
@@ -520,8 +522,8 @@ def test_a_tournament_board_prints_every_name_literally(name):
     player in the tournament channel.
 
     MUTATION: the roster's escape removed. Must fail."""
-    ns = _lift(funcs=("_escape_md", "_fmt_pt", "_build_tournament_board_embed"),
-               assigns=("ASYNC_DEADLINE_DAYS", "_TOURNEY_HOW_IT_WORKS"),
+    ns = _lift(funcs=("_escape_md", "_fmt_pt", "_tsync_rule", "_build_tournament_board_embed"),
+               assigns=("ASYNC_DEADLINE_DAYS", "_TOURNEY_HOW_IT_WORKS", "_TSYNC_VOTE_HOW"),
                extra={"_bracket_progress_lines": lambda t: []})
     signups = [{"signup_id": i, "display_name": n, "is_speculative": False}
                for i, n in enumerate([name, "Second", "Third"])]

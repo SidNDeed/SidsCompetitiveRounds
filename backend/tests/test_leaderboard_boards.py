@@ -1285,6 +1285,10 @@ T_SYNC = chr(0x1F3C6) + " Sync Tournament"       # the titles _build_tournament_
 T_ASYNC = chr(0x1F300) + " Async Tournament"
 
 
+async def _tb_no_tally(t):
+    return None
+
+
 def _tb_fresh():
     """A fresh bot process for the tournament board: its id map and its
     owed-sweep set start empty, as at every start. The board's two embeds
@@ -1294,8 +1298,10 @@ def _tb_fresh():
     ns = {"discord": FAKE_DISCORD, "bot": _Bot(ch), "SCR_TOURNAMENTS_CHANNEL": CID,
           "_watch_cache": {"tournaments": [{"kind": "sync", "status": "voting"}]},
           "http_session": None, "API_SECRET_KEY": "", "API_BASE_URL": "", "aiohttp": None,
-          "_build_tournament_board_embed": lambda t, kind: _Embed(
+          "_build_tournament_board_embed": lambda t, kind, tally=None: _Embed(
               title=T_SYNC if kind == "sync" else T_ASYNC, description="status"),
+          # The sync board's start-rule tally (board row 32) is a stub too.
+          "_tsync_tally_for": _tb_no_tally,
           "print": lambda *a, **k: out.append(" ".join(str(x) for x in a))}
     exec(compile(ast.Module(body=_lift(TB_FUNC, TB_ASSIGN, set()), type_ignores=[]), SRC, "exec"), ns)
     ns["_log"], ns["_ch"] = out, ch
