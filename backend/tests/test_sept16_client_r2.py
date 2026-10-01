@@ -6437,8 +6437,9 @@ def test_r5_the_status_channel_reports_before_every_callback():
             return False
         ev = events(b)
         calls = [e for e in ev if e[0] == "call"]
-        if len(calls) < 4:
-            return False                      # the four exits must all be there
+        if len(calls) < 5:
+            return False                      # the five exits must all be there
+            # (verified reads added the fifth: the read-gate hold's refusal)
         for idx, (kind, _line) in enumerate(ev):
             if kind != "call":
                 continue
@@ -6480,6 +6481,17 @@ def test_r5_the_status_channel_reports_before_every_callback():
                 "            if (SensitiveTransportBlocked(url, null, callback)) yield break;",
                 "R5 the transport refusal drops its report"),
         "R5 the pre-wire refusals report before their callback")
+
+    # MUTATION 3: the read-gate hold's refusal (verified reads) stops
+    # reporting, so on that exit the banner reads the previous request's code
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "                    if (onResponseCode != null) onResponseCode(0);\n"
+                "                    callback(false, rgFail); yield break;",
+                "                    callback(false, rgFail); yield break;",
+                "R5 the read-gate refusal drops its report"),
+        "R5 the read-gate refusal reports before its callback")
 
     # NEGATIVE CONTROL: rewording the sink's own comment changes no ordering
     assert claim(_mutate(api, "Both pre-wire refusals report 0 before the callback",
