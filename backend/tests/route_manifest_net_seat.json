@@ -3419,7 +3419,7 @@
           ],
           "tournaments",
           "force_vote",
-          "068c80acaa5b195d45abc8d11507eadaa90e95b8"
+          "77c40d846e15c5a8df11fc265691667ec17d6a52"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit",
@@ -3617,7 +3617,7 @@
       [
         "main",
         "lifespan",
-        "ad962efbae6812306d12e99652336738094ef7e4"
+        "70c1f97d115ef60355bb27a55e7e79980ad18bc7"
       ]
     ]
   },
