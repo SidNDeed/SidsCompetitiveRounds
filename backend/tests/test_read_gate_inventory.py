@@ -434,3 +434,127 @@ def test_write_on_get_controls(tmp_path):
 ])
 def test_write_markers_shapes(source, expected):
     assert write_markers(source) == expected
+
+
+# -- requirement 5: the design's 30 PLAYER templates, reconciled --------------
+#
+# Design section 3.2 named 30 trunk GET templates PLAYER (every GET whose
+# handler reaches a player-session primitive). Each is mapped here to the
+# class it holds. 16 are PLAYER. The other 14 are WRITE_ON_GET: each is both
+# session-reached and a writer, and requirement 3 classes such a route
+# WRITE_ON_GET, where the gate takes no action in any stage and the handler's
+# own session requirement stands exactly as on trunk (each one's write is
+# named in read_gate.WRITE_ON_GET). No other superseding class is used.
+
+C_PLAYER, C_WOG = read_gate.C_PLAYER, read_gate.C_WRITE_ON_GET
+DESIGN_PLAYER_30 = {
+    "/api/v1/h2h/{steam_id}/{opponent_steam_id}": C_PLAYER,
+    "/api/v1/presence/ping": C_WOG,
+    "/api/v1/queue/poll/{steam_id}": C_WOG,
+    "/api/v1/pc/packs/result": C_WOG,
+    "/api/v1/pc/packs": C_PLAYER,
+    "/api/v1/pc/me": C_PLAYER,
+    "/api/v1/pc/collection": C_PLAYER,
+    "/api/v1/pc/card": C_PLAYER,
+    "/api/v1/pc/trades": C_PLAYER,
+    "/api/v1/music/ratings/mine": C_WOG,
+    "/api/v1/artist/{steam_id}/items": C_PLAYER,
+    "/api/v1/artist/{steam_id}/sales": C_PLAYER,
+    "/api/v1/artist/my-submissions": C_PLAYER,
+    "/api/v1/artist/cosmetic-preview": C_PLAYER,
+    "/api/v1/team/queue/poll/{steam_id}": C_WOG,
+    "/api/v1/ovt/queue/poll/{steam_id}": C_WOG,
+    "/api/v1/team/lobby/state": C_WOG,
+    "/api/v1/team/lobby/resolve": C_WOG,
+    "/api/v1/ovt/lobby/state": C_WOG,
+    "/api/v1/ovt/lobby/resolve": C_WOG,
+    "/api/v1/ffa/queue/poll/{steam_id}": C_WOG,
+    "/api/v1/broadcast/target": C_WOG,
+    "/api/v1/broadcast/report-status": C_PLAYER,
+    "/api/v1/report": C_PLAYER,
+    "/api/v1/mail/inbox": C_WOG,
+    "/api/v1/mail/sent": C_PLAYER,
+    "/api/v1/mail/status": C_PLAYER,
+    "/api/v1/mail/blocks": C_PLAYER,
+    "/api/v1/mail/settings": C_PLAYER,
+    "/api/v1/mail/{message_id}": C_WOG,
+}
+
+
+def check_design_player_mapping(routes, mapping=None, player=None, write_on_get=None) -> list[str]:
+    """Every problem with the 30-template reconciliation: a count other than
+    30, a template that is not a live GET, a class other than the mapping
+    says, a superseding class other than WRITE_ON_GET or one without its
+    written reason, a superseded template that is not both session-reached
+    and a writer, and a PLAYER class that differs from the mapping's PLAYER
+    rows (a route gained or lost outside the design's list)."""
+    mapping = DESIGN_PLAYER_30 if mapping is None else mapping
+    player = read_gate.PLAYER if player is None else player
+    write_on_get = read_gate.WRITE_ON_GET if write_on_get is None else write_on_get
+    problems = []
+    if len(mapping) != 30:
+        problems.append(f"the design named 30 templates; the mapping has {len(mapping)}")
+    by_path = {r.path: r for r in _get_routes(routes)}
+
+    def cls_of(t):
+        if t in write_on_get:
+            return C_WOG
+        if t in player:
+            return C_PLAYER
+        c = read_gate.route_class(t)
+        return read_gate.C_PUBLIC if c == C_PLAYER else c   # PLAYER only through `player`
+
+    for t, want in mapping.items():
+        if t not in by_path:
+            problems.append(f"{t} is not a GET route of the app")
+            continue
+        got = cls_of(t)
+        if got != want:
+            problems.append(f"{t} is {got}; the mapping says {want}")
+        if want not in (C_PLAYER, C_WOG):
+            problems.append(f"{t} maps to {want}, which no requirement justifies")
+        if want == C_WOG:
+            if not str(write_on_get.get(t, "")).strip():
+                problems.append(f"{t} is superseded by WRITE_ON_GET without a written reason")
+            seeds = [M._binding_key(by_path[t].endpoint)]
+            if not set(M._reached(seeds)) & SESSION_PRIMITIVES:
+                problems.append(f"{t} is superseded but does not reach a session primitive")
+            if not writers_reached(seeds):
+                problems.append(f"{t} is superseded but reaches no writer")
+    live_player = {p for p in by_path if cls_of(p) == C_PLAYER}
+    mapped_player = {t for t, c in mapping.items() if c == C_PLAYER}
+    for t in sorted(live_player - mapped_player):
+        problems.append(f"{t} is PLAYER but not one of the design's 30")
+    for t in sorted(mapped_player - live_player):
+        problems.append(f"{t} is one of the design's PLAYER rows but is not PLAYER")
+    return problems
+
+
+def test_design_player_30_mapping():
+    assert check_design_player_mapping(main.app.routes) == []
+    counts = {}
+    for c in DESIGN_PLAYER_30.values():
+        counts[c] = counts.get(c, 0) + 1
+    assert counts == {C_PLAYER: 16, C_WOG: 14}, counts
+    assert set(read_gate.PLAYER) == {t for t, c in DESIGN_PLAYER_30.items() if c == C_PLAYER}
+
+
+def test_design_player_30_controls():
+    """The checker reports: a template mapped to the wrong class, a 29-row
+    mapping, a PLAYER class that gained a route, one that lost a route, and a
+    superseding class no requirement justifies."""
+    wrong = dict(DESIGN_PLAYER_30, **{"/api/v1/mail/sent": C_WOG})
+    assert any("/api/v1/mail/sent is PLAYER; the mapping says WRITE_ON_GET" in p
+               for p in check_design_player_mapping(main.app.routes, mapping=wrong))
+    short = dict(DESIGN_PLAYER_30)
+    short.pop("/api/v1/report")
+    assert any("the mapping has 29" in p for p in check_design_player_mapping(main.app.routes, mapping=short))
+    gained = set(read_gate.PLAYER) | {"/api/v1/leaderboard"}
+    assert any("/api/v1/leaderboard is PLAYER but not one of the design's 30" in p
+               for p in check_design_player_mapping(main.app.routes, player=gained))
+    lost = set(read_gate.PLAYER) - {"/api/v1/mail/settings"}
+    assert any("/api/v1/mail/settings is one of the design's PLAYER rows but is not PLAYER" in p
+               for p in check_design_player_mapping(main.app.routes, player=lost))
+    odd = dict(DESIGN_PLAYER_30, **{"/api/v1/report": read_gate.C_PUBLIC})
+    assert any("which no requirement justifies" in p
+               for p in check_design_player_mapping(main.app.routes, mapping=odd))
