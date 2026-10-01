@@ -4684,7 +4684,10 @@ namespace CompetitiveRounds
                         _podiumFfaRows.Add(new object[]{row.txtName,nameDisplay,ttl,col});
                         nameDisplay=$"{nameDisplay} {PodiumSparkleSpan(ttl,col,_podiumTick)}";
                     }
-                    else nameDisplay=$"{nameDisplay} <color={col}>[{Trunc(e.title,16)}]</color>";
+                    // Five-tier ladders (board row 29): measured with the name in the
+                    // 220 px cell (FFA_LB_COL_W[1]), as on the F5 board; a 16-character
+                    // cap alone clipped "[Intermediate" behind a long name.
+                    else nameDisplay=nameDisplay+LbTitleSpan(row.txtName,nameDisplay,Trunc(e.title,16),col,FFA_LB_COL_W[1],false);
                 }
                 UIFactory.SetTextRaw(row.txtName,nameDisplay);
                 UIFactory.SetColor(row.txtName,me?C_GREEN:C_WHITE);
@@ -16557,23 +16560,25 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
         }
 
-        /// <summary>The F5 1v1 board's title span for one row: " [title]" in
-        /// its colour, measured together with the name the cell already holds
+        /// <summary>A leaderboard row's title span (the F5 1v1 board, bold, and
+        /// the FFA board, plain): " [title]" in its colour, measured together
+        /// with the name the cell already holds
         /// and elided ("Idiot Sav..") until the whole fits `width`; the name
         /// is never cut further. A cut that would leave fewer than
         /// TITLE_MIN_VISIBLE visible characters (".." included) is noise, as
         /// in FormatOpponentForRow: the cell then shows the name alone. When
         /// TMP cannot measure (0), the span is appended whole, as before: 0
         /// means unknown, never empty.</summary>
-        private static string LbTitleSpan(object cell,string name,string title,string col,float width)
+        private static string LbTitleSpan(object cell,string name,string title,string col,float width,bool bold=true)
         {
-            string full=" <b><color="+col+">["+title+"]</color></b>";
+            string open=bold?" <b><color="+col+">[":" <color="+col+">[",close=bold?"]</color></b>":"]</color>";
+            string full=open+title+close;
             float limit=width-6f;
             float w=UIFactory.MeasureTextWidth(cell,name+full);
             if(w<=0f||w<=limit)return full;
             for(int n=title.Length-1;n>=Math.Max(1,TITLE_MIN_VISIBLE-2);n--)
             {
-                string cut=" <b><color="+col+">["+title.Substring(0,n).TrimEnd()+"..]</color></b>";
+                string cut=open+title.Substring(0,n).TrimEnd()+".."+close;
                 if(UIFactory.MeasureTextWidth(cell,name+cut)<=limit)return cut;
             }
             return "";

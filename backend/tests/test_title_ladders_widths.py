@@ -5,7 +5,8 @@ player's title without being cut.
 * The FFA surfaces cut a title to a fixed character count: the FFA
   leaderboard row was 12 and the FFA recent-match row 14; both are 16.
 * The F5 1v1 leaderboard measures the name and the title together in the
-  name cell's width (LB_COL_W[2], 300 px) and elides only the title.
+  name cell's width (LB_COL_W[2], 300 px) and elides only the title; the
+  FFA leaderboard does the same in its 220 px cell (FFA_LB_COL_W[1]).
 
 Every gate carries an in-memory mutation it must catch (#391).
 """
@@ -28,7 +29,8 @@ def _nat():
 
 FFA_SITES = {
     "the FFA recent-match row": r"\[\{FfaSafeRich\(Trunc\(player\.title,(\d+)\)\)\}\]",
-    "the FFA leaderboard row": r"\[\{Trunc\(e\.title,(\d+)\)\}\]",
+    "the FFA leaderboard row":
+        r"LbTitleSpan\(row\.txtName,nameDisplay,Trunc\(e\.title,(\d+)\),col,FFA_LB_COL_W\[1\],false\)",
 }
 
 
@@ -51,9 +53,10 @@ def test_the_ffa_title_caps_hold_the_longest_tier_name():
 
 def test_the_ffa_cap_gate_can_fail():
     src = _nat()
-    for old, new in (("[{Trunc(e.title,16)}]", "[{Trunc(e.title,12)}]"),
+    for old, new in (("Trunc(e.title,16),col,FFA_LB_COL_W[1]", "Trunc(e.title,12),col,FFA_LB_COL_W[1]"),
                      ("[{FfaSafeRich(Trunc(player.title,16))}]", "[{FfaSafeRich(Trunc(player.title,14))}]"),
-                     ("[{Trunc(e.title,16)}]", "[{e.title}]")):
+                     ("LbTitleSpan(row.txtName,nameDisplay,Trunc(e.title,16),col,FFA_LB_COL_W[1],false)",
+                      "$\" <color={col}>[{Trunc(e.title,16)}]</color>\"")):
         assert src.count(old) == 1, old
         assert _cap_problems(src.replace(old, new, 1)), new
 
@@ -61,7 +64,7 @@ def test_the_ffa_cap_gate_can_fail():
 # ── the F5 1v1 board: measured, and only the title elided ────────────────
 
 LB = "private static void RefreshLeaderboard()"
-SPAN = "private static string LbTitleSpan(object cell,string name,string title,string col,float width)"
+SPAN = "private static string LbTitleSpan(object cell,string name,string title,string col,float width,bool bold=true)"
 CALL = "_lbName=_lbName+LbTitleSpan(row.txtName,_lbName,e.title,_tc,LB_COL_W[2]);"
 
 
@@ -82,11 +85,13 @@ def _f5_problems(src):
     for need in ("float w=UIFactory.MeasureTextWidth(cell,name+full);",
                  "if(w<=0f||w<=limit)return full;",
                  "if(UIFactory.MeasureTextWidth(cell,name+cut)<=limit)return cut;",
-                 "title.Substring(0,n).TrimEnd()+\"..",
+                 "string cut=open+title.Substring(0,n).TrimEnd()+\"..\"+close;",
                  "n>=Math.Max(1,TITLE_MIN_VISIBLE-2);n--",
                  'return "";'):
         if need not in span:
             bad.append("LbTitleSpan lacks %r" % need)
+    if "string full=open+title+close;" not in span:
+        bad.append("the whole span is not the one the cuts are built from")
     if "name.Substring" in span or "Trunc(name" in span:
         bad.append("LbTitleSpan cuts the name")
     return bad
