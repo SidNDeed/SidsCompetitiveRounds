@@ -230,6 +230,8 @@ def test_coverage_requires_distinct_identities():
     v = T.coverage(crossed, 1, now)
     assert v["primary"]["ok"] and not v["standby"]["ok"], v
     assert "answered as node ['primary']" in v["standby"]["why"]
+    # and those pulls cover nothing for the standby: none is counted
+    assert v["standby"]["pulls"] == 0 and v["standby"]["covered"] == 0.0, v["standby"]
     same = (_hourly(start, now, node="primary", boot="one")
             + _hourly(start, now, node="standby", boot="one"))
     v = T.coverage(same, 1, now)
