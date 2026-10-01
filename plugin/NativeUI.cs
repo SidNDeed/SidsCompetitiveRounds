@@ -1774,6 +1774,12 @@ namespace CompetitiveRounds
         private static object txtLBSteamId;
         private static GameObject lbGraphPanel;
         private static object txtRecentSeries;
+        /* Report 3 follow-up: the Recent Ranked Series page is one TMP element per
+         * series row (recentSeriesRows, built lazily under recentSeriesRowsParent),
+         * so a row TMP cannot lay out costs that row only, not all 50. txtRecentSeries
+         * keeps only the panel's status lines ("Loading", "No recent series"). */
+        private static Transform recentSeriesRowsParent;
+        private static readonly List<object> recentSeriesRows=new List<object>();
         private static int recentSeriesPage=0;private static object txtSeriesPage;private static GameObject seriesPrev,seriesNext;
         /* Bug #265: newest-row watermark + "a row arrived while you were on a
          * later page" flag. Both are render-side only; nothing else reads them. */
@@ -2423,6 +2429,7 @@ namespace CompetitiveRounds
              * Deliberately NOT cleared: chatLines (chat history, not views),
              * compareSelected (the user's picks, not views), _lblParts/
              * _lblOrder (per-call scratch). */
+            recentSeriesRows.Clear();recentSeriesRowsParent=null;   // Recent Ranked Series row pool (#147/#149/#150)
             achRows.Clear();homeCosRows.Clear();_podiumLbRows.Clear();_podiumTeamRows.Clear();_podiumFfaRows.Clear();
             infoNavBtns.Clear();infoNavTexts.Clear();infoNavKeys.Clear();   // Info tab nav pool (#147/#149/#150)
             infoNavCatHdrs.Clear();infoNavCatOfBtn.Clear();infoNoMatchGO=null;infoSearchField=null;   // Info search pool (Aug 23 r2)
@@ -7084,7 +7091,7 @@ UIFactory.SetWordWrap(txtMyBets,true);UIFactory.SetTextAutoHeight(txtMyBets);UIF
 liveBetsPager.SetActive(false);
 /* Visual spacer between Live and Recent panels - was visually jammed previously. */
 {var liveRecentSpacer=new GameObject("LRSp");liveRecentSpacer.transform.SetParent(seriesCol.transform,false);liveRecentSpacer.AddComponent<RectTransform>();UIFactory.AddLE(liveRecentSpacer,prefH:18,minH:18,flexH:0);}
-UIFactory.CreateText("RSL",seriesCol.transform,"Recent Ranked Series",17f,new Color(0.6f,0.67f,0.93f),UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));var rsSV=UIFactory.CreateScrollView("RSSV",seriesCol.transform,spacing:1);UIFactory.AddLE(rsSV.scrollGO,flexH:1);txtRecentSeries=UIFactory.CreateText("RST",rsSV.content.transform,"Loading...",16f,C_DIM,sizeDelta:new Vector2(380,20));/* Round 5 item 1: no wrap — names are truncated to fit and residue clips at the mask. */UIFactory.SetWordWrap(txtRecentSeries,false);UIFactory.SetTextAutoHeight(txtRecentSeries);var sPg=new GameObject("SPg");sPg.transform.SetParent(seriesCol.transform,false);sPg.AddComponent<RectTransform>();UIFactory.AddHLG(sPg,spacing:4,forceExpandH:true);UIFactory.AddLE(sPg,prefH:20,flexH:0);var sS1=new GameObject("S");sS1.transform.SetParent(sPg.transform,false);sS1.AddComponent<RectTransform>();UIFactory.AddLE(sS1,flexW:1);seriesPrev=UIFactory.CreateButton("sP",sPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(recentSeriesPage>0){recentSeriesPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtSeriesPage=UIFactory.CreateText("sPI",sPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));seriesNext=UIFactory.CreateButton("sN",sPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{recentSeriesPage++;dirty=true;},sizeDelta:new Vector2(50,18));var sS2=new GameObject("S");sS2.transform.SetParent(sPg.transform,false);sS2.AddComponent<RectTransform>();UIFactory.AddLE(sS2,flexW:1);/* === MIDDLE: Leaderboard list === */var mid=new GameObject("LBMid");mid.transform.SetParent(panel.transform,false);mid.AddComponent<RectTransform>();UIFactory.AddVLG(mid,spacing:2);/* Round 5 item 2 + round 6: width = exactly the table (768) + slack. flexW:0 is LOAD-BEARING — the pager row's internal flexW:1 spacers otherwise bubble up as the column's flexible width (layout groups inherit max child flex), stretching it ~100px past the table: that WAS the dead wheel-scroll strip beyond Gold, and it dragged the anchored sub-tabs off the table's center. */UIFactory.AddLE(mid,prefW:772,minW:620,flexW:0,flexH:1);/* Round 5 item 3: sub-tabs live at the TOP OF THIS COLUMN — the side panels keep full height. */MakeSubTabAnchor(1,mid.transform,true);/* July 22 item 8: search row under the sub-tabs — IMGUI field drawn over the empty anchor (CompetitiveUI.DrawLeaderboardSearch), focus-mutexed vs T-chat. No flexW:1 spacers here (learning #132 — this column's flexW:0 is load-bearing). */var lbSr=new GameObject("LBSearch");lbSr.transform.SetParent(mid.transform,false);lbSr.AddComponent<RectTransform>();UIFactory.AddHLG(lbSr,spacing:6);UIFactory.AddLE(lbSr,prefH:24,flexH:0,flexW:0);UIFactory.CreateText("LBSc",lbSr.transform,"<color=#8899AA>Search</color>",13f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(52,22));lbSearchField=UIFactory.CreateText("LBSLbl",lbSr.transform,"",13f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,22));UIFactory.CreateButton("LBSClr",lbSr.transform,"Clear",11f,C_LABEL,new Color(0.25f,0.3f,0.4f,0.9f),()=>{lbSearch="";dirty=true;},sizeDelta:new Vector2(48,20));string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};var hRow=new GameObject("LBH");hRow.transform.SetParent(mid.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:28,minH:28,flexH:0);lbSortTexts=new object[hL.Length];lbSortBtns=new GameObject[hL.Length];/* Round 4 item 4: no centering spacers — table fills the column flush-left. */for(int hi=0;hi<hL.Length;hi++){int idx=hi;string arrow=lbSort==hK[hi]?(lbSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"LH{hi}",hRow.transform,hL[hi]+arrow,14f,lbSort==hK[hi]?C_WHITE:C_LABEL,lbSort==hK[hi]?C_TABACT:C_TAB,()=>{if(lbSort==hK[idx])lbSortDesc=!lbSortDesc;else{lbSort=hK[idx];lbSortDesc=(idx>=3);}dirty=true;},sizeDelta:new Vector2(LB_COL_W[hi],22));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:LB_COL_W[hi],prefH:22,flexH:0);lbSortBtns[hi]=hBtn;lbSortTexts[hi]=UIFactory.GetButtonText(hBtn);}var sv=UIFactory.CreateScrollView("LBSV",mid.transform);UIFactory.AddLE(sv.scrollGO,flexH:1);lbListScrollGO=sv.scrollGO;/* Aug 31: captured for the showcase scroll-to-row lever (the #439-family gap: this scrollGO used to be a local). */for(int i=0;i<100;i++)lbRows.Add(CreateLBRow(sv.content.transform,$"lb{i}",i));var lbPg=new GameObject("LBPg");lbPg.transform.SetParent(mid.transform,false);lbPg.AddComponent<RectTransform>();UIFactory.AddHLG(lbPg,spacing:6,forceExpandH:true);UIFactory.AddLE(lbPg,prefH:24,flexH:0);txtLBCount=UIFactory.CreateText("LBC",lbPg.transform,"",15f,C_LABEL,sizeDelta:new Vector2(230,22));/* item d: room for "{0} active players (90d)" */var lbS1=new GameObject("S");lbS1.transform.SetParent(lbPg.transform,false);lbS1.AddComponent<RectTransform>();UIFactory.AddLE(lbS1,flexW:1);lbPrev=UIFactory.CreateButton("lbP",lbPg.transform,"< Prev",13f,C_LABEL,C_BTN,()=>{if(lbPage>0){lbPage--;dirty=true;}},sizeDelta:new Vector2(60,22));txtLBPage=UIFactory.CreateText("lbPI",lbPg.transform,"",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(40,22));lbNext=UIFactory.CreateButton("lbN",lbPg.transform,"Next >",13f,C_LABEL,C_BTN,()=>{lbPage++;dirty=true;},sizeDelta:new Vector2(60,22));/* === RIGHT: Player detail === */var right=UIFactory.CreatePanel("LBR",panel.transform,C_PANEL);UIFactory.AddVLG(right,spacing:4,padL:12,padR:12,padT:8,padB:8);/* prefW mirrors the LEFT column so the table centers (round 7). */UIFactory.AddLE(right,prefW:400,flexW:1,flexH:1);txtLBPlayerName=UIFactory.CreateText("LBName",right.transform,"Click a player",20f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,26));UIFactory.SetBold(txtLBPlayerName,true);/* item 7c sweep: 20pt in a 26px box holding a user-authored display name (routinely Cyrillic). */UIFactory.FitOneLine(txtLBPlayerName);lbGraphPanel=new GameObject("Graph");lbGraphPanel.transform.SetParent(right.transform,false);var grt=lbGraphPanel.AddComponent<RectTransform>();UIFactory.AddLE(lbGraphPanel,prefH:110,minH:110,flexH:0);/* Add mask to clip graph bars within bounds */var gMaskImg=lbGraphPanel.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMaskImg,new Color(0,0,0,0.01f));if(UIFactory.tMask!=null){var gMask=lbGraphPanel.AddComponent(UIFactory.tMask);try{UIFactory.tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMask,false);}catch{}}lbGraphPanel.SetActive(false);
+UIFactory.CreateText("RSL",seriesCol.transform,"Recent Ranked Series",17f,new Color(0.6f,0.67f,0.93f),UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));var rsSV=UIFactory.CreateScrollView("RSSV",seriesCol.transform,spacing:1);UIFactory.AddLE(rsSV.scrollGO,flexH:1);txtRecentSeries=UIFactory.CreateText("RST",rsSV.content.transform,"Loading...",16f,C_DIM,sizeDelta:new Vector2(380,20));recentSeriesRows.Clear();recentSeriesRowsParent=rsSV.content.transform;/* Round 5 item 1: no wrap — names are truncated to fit and residue clips at the mask. */UIFactory.SetWordWrap(txtRecentSeries,false);UIFactory.SetTextAutoHeight(txtRecentSeries);var sPg=new GameObject("SPg");sPg.transform.SetParent(seriesCol.transform,false);sPg.AddComponent<RectTransform>();UIFactory.AddHLG(sPg,spacing:4,forceExpandH:true);UIFactory.AddLE(sPg,prefH:20,flexH:0);var sS1=new GameObject("S");sS1.transform.SetParent(sPg.transform,false);sS1.AddComponent<RectTransform>();UIFactory.AddLE(sS1,flexW:1);seriesPrev=UIFactory.CreateButton("sP",sPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(recentSeriesPage>0){recentSeriesPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtSeriesPage=UIFactory.CreateText("sPI",sPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));seriesNext=UIFactory.CreateButton("sN",sPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{recentSeriesPage++;dirty=true;},sizeDelta:new Vector2(50,18));var sS2=new GameObject("S");sS2.transform.SetParent(sPg.transform,false);sS2.AddComponent<RectTransform>();UIFactory.AddLE(sS2,flexW:1);/* === MIDDLE: Leaderboard list === */var mid=new GameObject("LBMid");mid.transform.SetParent(panel.transform,false);mid.AddComponent<RectTransform>();UIFactory.AddVLG(mid,spacing:2);/* Round 5 item 2 + round 6: width = exactly the table (768) + slack. flexW:0 is LOAD-BEARING — the pager row's internal flexW:1 spacers otherwise bubble up as the column's flexible width (layout groups inherit max child flex), stretching it ~100px past the table: that WAS the dead wheel-scroll strip beyond Gold, and it dragged the anchored sub-tabs off the table's center. */UIFactory.AddLE(mid,prefW:772,minW:620,flexW:0,flexH:1);/* Round 5 item 3: sub-tabs live at the TOP OF THIS COLUMN — the side panels keep full height. */MakeSubTabAnchor(1,mid.transform,true);/* July 22 item 8: search row under the sub-tabs — IMGUI field drawn over the empty anchor (CompetitiveUI.DrawLeaderboardSearch), focus-mutexed vs T-chat. No flexW:1 spacers here (learning #132 — this column's flexW:0 is load-bearing). */var lbSr=new GameObject("LBSearch");lbSr.transform.SetParent(mid.transform,false);lbSr.AddComponent<RectTransform>();UIFactory.AddHLG(lbSr,spacing:6);UIFactory.AddLE(lbSr,prefH:24,flexH:0,flexW:0);UIFactory.CreateText("LBSc",lbSr.transform,"<color=#8899AA>Search</color>",13f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(52,22));lbSearchField=UIFactory.CreateText("LBSLbl",lbSr.transform,"",13f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,22));UIFactory.CreateButton("LBSClr",lbSr.transform,"Clear",11f,C_LABEL,new Color(0.25f,0.3f,0.4f,0.9f),()=>{lbSearch="";dirty=true;},sizeDelta:new Vector2(48,20));string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};var hRow=new GameObject("LBH");hRow.transform.SetParent(mid.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:28,minH:28,flexH:0);lbSortTexts=new object[hL.Length];lbSortBtns=new GameObject[hL.Length];/* Round 4 item 4: no centering spacers — table fills the column flush-left. */for(int hi=0;hi<hL.Length;hi++){int idx=hi;string arrow=lbSort==hK[hi]?(lbSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"LH{hi}",hRow.transform,hL[hi]+arrow,14f,lbSort==hK[hi]?C_WHITE:C_LABEL,lbSort==hK[hi]?C_TABACT:C_TAB,()=>{if(lbSort==hK[idx])lbSortDesc=!lbSortDesc;else{lbSort=hK[idx];lbSortDesc=(idx>=3);}dirty=true;},sizeDelta:new Vector2(LB_COL_W[hi],22));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:LB_COL_W[hi],prefH:22,flexH:0);lbSortBtns[hi]=hBtn;lbSortTexts[hi]=UIFactory.GetButtonText(hBtn);}var sv=UIFactory.CreateScrollView("LBSV",mid.transform);UIFactory.AddLE(sv.scrollGO,flexH:1);lbListScrollGO=sv.scrollGO;/* Aug 31: captured for the showcase scroll-to-row lever (the #439-family gap: this scrollGO used to be a local). */for(int i=0;i<100;i++)lbRows.Add(CreateLBRow(sv.content.transform,$"lb{i}",i));var lbPg=new GameObject("LBPg");lbPg.transform.SetParent(mid.transform,false);lbPg.AddComponent<RectTransform>();UIFactory.AddHLG(lbPg,spacing:6,forceExpandH:true);UIFactory.AddLE(lbPg,prefH:24,flexH:0);txtLBCount=UIFactory.CreateText("LBC",lbPg.transform,"",15f,C_LABEL,sizeDelta:new Vector2(230,22));/* item d: room for "{0} active players (90d)" */var lbS1=new GameObject("S");lbS1.transform.SetParent(lbPg.transform,false);lbS1.AddComponent<RectTransform>();UIFactory.AddLE(lbS1,flexW:1);lbPrev=UIFactory.CreateButton("lbP",lbPg.transform,"< Prev",13f,C_LABEL,C_BTN,()=>{if(lbPage>0){lbPage--;dirty=true;}},sizeDelta:new Vector2(60,22));txtLBPage=UIFactory.CreateText("lbPI",lbPg.transform,"",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(40,22));lbNext=UIFactory.CreateButton("lbN",lbPg.transform,"Next >",13f,C_LABEL,C_BTN,()=>{lbPage++;dirty=true;},sizeDelta:new Vector2(60,22));/* === RIGHT: Player detail === */var right=UIFactory.CreatePanel("LBR",panel.transform,C_PANEL);UIFactory.AddVLG(right,spacing:4,padL:12,padR:12,padT:8,padB:8);/* prefW mirrors the LEFT column so the table centers (round 7). */UIFactory.AddLE(right,prefW:400,flexW:1,flexH:1);txtLBPlayerName=UIFactory.CreateText("LBName",right.transform,"Click a player",20f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,26));UIFactory.SetBold(txtLBPlayerName,true);/* item 7c sweep: 20pt in a 26px box holding a user-authored display name (routinely Cyrillic). */UIFactory.FitOneLine(txtLBPlayerName);lbGraphPanel=new GameObject("Graph");lbGraphPanel.transform.SetParent(right.transform,false);var grt=lbGraphPanel.AddComponent<RectTransform>();UIFactory.AddLE(lbGraphPanel,prefH:110,minH:110,flexH:0);/* Add mask to clip graph bars within bounds */var gMaskImg=lbGraphPanel.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMaskImg,new Color(0,0,0,0.01f));if(UIFactory.tMask!=null){var gMask=lbGraphPanel.AddComponent(UIFactory.tMask);try{UIFactory.tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMask,false);}catch{}}lbGraphPanel.SetActive(false);
 var lbDetailSV=UIFactory.CreateScrollView("LBDSV",right.transform,spacing:0);UIFactory.AddLE(lbDetailSV.scrollGO,flexH:1);lbDetailScrollGO=lbDetailSV.scrollGO;/* Aug 31: captured for the showcase profile-sweep lever. */txtLBDetail=UIFactory.CreateText("LBD",lbDetailSV.content.transform,"",16f,C_DIM,sizeDelta:new Vector2(340,24));UIFactory.SetTextAutoHeight(txtLBDetail);
 /* H2H series pager (item 10 rework) — the "Series vs You" pager used to be parented to
  * the right column ABOVE the detail scroll view, so it floated at the top of the panel
@@ -15446,6 +15453,37 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return line;
         }
 
+        /* Report 3 follow-up: paint the page one TMP element per row. rows == null
+         * shows the status element (txtRecentSeries) alone; otherwise the status
+         * element hides and row i goes to pool element i, built on first use with
+         * the status element's style; spare pool elements hide. Rows are written
+         * with SetTextRaw (they carry player names; their fixed text is already
+         * translated where it is built). */
+        private static void ShowRecentSeriesRows(List<string> rows)
+        {
+            var statusGO=(txtRecentSeries as Component)?.gameObject;
+            if(statusGO!=null&&statusGO.activeSelf!=(rows==null))statusGO.SetActive(rows==null);
+            int n=rows?.Count??0;
+            if(n>0&&recentSeriesRows.Count<n&&recentSeriesRowsParent!=null)
+            {
+                while(recentSeriesRows.Count<n)
+                {
+                    var t=UIFactory.CreateText("RSR"+recentSeriesRows.Count,recentSeriesRowsParent,"",16f,C_DIM,sizeDelta:new Vector2(380,20));
+                    UIFactory.SetWordWrap(t,false);UIFactory.SetTextAutoHeight(t);
+                    recentSeriesRows.Add(t);
+                }
+                Plugin.Log.LogInfo("[NATIVE] recent series: row elements "+recentSeriesRows.Count);
+            }
+            for(int i=0;i<recentSeriesRows.Count;i++)
+            {
+                var go=(recentSeriesRows[i] as Component)?.gameObject;
+                if(go==null)continue;
+                bool on=i<n;
+                if(go.activeSelf!=on)go.SetActive(on);
+                if(on)UIFactory.SetTextRaw(recentSeriesRows[i],(rows[i]??"").TrimEnd('\n'));
+            }
+        }
+
         private static void RefreshRecentSeries()
         {
             if(txtRecentSeries==null)return;
@@ -15461,7 +15499,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     _seriesAutoFetchAt=Time.realtimeSinceStartup;
                     ApiClient.FetchRecentSeries();
                 }
-                UIFactory.SetText(txtRecentSeries,"Loading recent series...");
+                ShowRecentSeriesRows(null);UIFactory.SetText(txtRecentSeries,"Loading recent series...");
                 if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;
             }
             // Item 6: 2v2 / 1v2 / FFA results are merged into this panel for bet
@@ -15485,7 +15523,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             foreach(var e in series)merged.Add(new MergedSeriesRow{ts=e.completed_at??"",oneVone=e});
             if(multi!=null)foreach(var m in multi)merged.Add(new MergedSeriesRow{ts=m.ended_at??"",multi=m});
             merged.Sort((a,b)=>string.CompareOrdinal(b.ts,a.ts));
-            if(merged.Count==0){UIFactory.SetText(txtRecentSeries,"No recent series");if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;}
+            if(merged.Count==0){ShowRecentSeriesRows(null);UIFactory.SetText(txtRecentSeries,"No recent series");if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;}
             // 50 series per page (item 7): the list lives in a flex ScrollView, so a
             // short page left dead space between the last row and the pager. A big
             // page keeps the column visually full and scrolls; the pager only
@@ -15493,11 +15531,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             int perPage=50,totalPages=(merged.Count+perPage-1)/perPage;
             recentSeriesPage=Math.Max(0,Math.Min(recentSeriesPage,totalPages-1));
             int start=recentSeriesPage*perPage,end=Math.Min(start+perPage,merged.Count);
-            string txt="";
+            // One string per series row (its bet sub-lines included); each row gets
+            // its own TMP element (ShowRecentSeriesRows).
+            var rows=new List<string>(end-start);
             string myName=ApiClient.CachedPlayerStats?.display_name??"";
             for(int i=start;i<end;i++)
             {
-                if(merged[i].multi!=null){txt+=BuildMultimodeSeriesLine(merged[i].multi,myName);continue;}
+                if(merged[i].multi!=null){rows.Add(BuildMultimodeSeriesLine(merged[i].multi,myName));continue;}
                 var s=merged[i].oneVone;
                 bool p1Won=s.p1_wins>s.p2_wins;
                 string wName=p1Won?s.p1_name:s.p2_name;
@@ -15521,10 +15561,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // KNIGHT") orphaned the elo tail on its own line and looked
                 // awful. Cap each NAME so the whole line fits the column; the
                 // element no longer word-wraps (overflow clips at the mask).
-                // Report 3: the whole page is ONE element, so a name glyph no font
-                // carries blanked all 50 rows -- every name goes through Nm.
+                // Report 3: the page was ONE element, so a name glyph no font
+                // carried blanked all 50 rows -- every name goes through Nm, and
+                // each row now has its own element.
                 string wNameT=Nm(wName,16), lNameT=Nm(lName,16);
-                txt+=$"<color={wCol}>{wNameT}</color>{wRatingTag}{wElo}  <b>{wScore}-{lScore}</b>  <color={lCol}>{lNameT}</color>{lRatingTag}{lElo}{RulesTag(s.has_rules,s.rules_ff,s.rules_sc)}\n";
+                string txt=$"<color={wCol}>{wNameT}</color>{wRatingTag}{wElo}  <b>{wScore}-{lScore}</b>  <color={lCol}>{lNameT}</color>{lRatingTag}{lElo}{RulesTag(s.has_rules,s.rules_ff,s.rules_sc)}\n";
                 // Bet sub-rows under each series. Indent + smaller font + green for winners,
                 // dim grey for losers. Show "AsteRiA bet 500g on Sid -> +505g" style.
                 if (s.bets != null && s.bets.Count > 0)
@@ -15538,8 +15579,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             txt += $"    <color=#664444>-> {bettorTag} bet {b.amount}g on {Nm(b.bet_on_name ?? "?", 12)} - lost</color>\n";
                     }
                 }
+                rows.Add(txt);
             }
-            UIFactory.SetText(txtRecentSeries,txt);
+            ShowRecentSeriesRows(rows);
             if(seriesPrev!=null)seriesPrev.SetActive(recentSeriesPage>0);
             if(seriesNext!=null)seriesNext.SetActive(recentSeriesPage<totalPages-1);
             /* Bug #265 (Spirit: "recent game not showing up"). The DATA half was
