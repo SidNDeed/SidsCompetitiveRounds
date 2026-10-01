@@ -190,6 +190,11 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
         internal static ConfigEntry<string> BroadcastTestRoomRules;     // broadcast seat only, offline: latch a rules pair (ff=X;sc=Y) so the standing room-rules strip can be verified
+        internal static ConfigEntry<float> BroadcastShowcaseMetricSeconds; // broadcast seat only -- board row 31: the idle showcase's dwell per Compare category
+        internal static ConfigEntry<string> BroadcastTestShowcase;         // broadcast seat only -- any new value plays one showcase rotation with the stream-live gate lifted
+        internal static ConfigEntry<float> BroadcastSessionReportPageSeconds; // broadcast seat only -- board row 30g: the post-set session report's dwell per page
+        internal static ConfigEntry<string> BroadcastTestWatchedSet;       // broadcast seat only -- a NEW spectate game id replays that recorded set through the post-set report
+        internal static ConfigEntry<string> BroadcastTestSessionReport;    // broadcast seat only -- "<selector>:<key>[:<page>]" opens that set's F5 session report at a page; "close" closes it
         internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
@@ -1283,6 +1288,21 @@ namespace CompetitiveRounds
             BroadcastTestRoomRules = Config.Bind(
                 "Broadcast", "TestRoomRules", "",
                 "Broadcast seat only, outside any online room: a rules pair in the room grammar (ff=0;sc=1, ff=0;sc=0, ff=1;sc=1) latches those rules on this seat so the standing room-rules strip can be checked with nobody at the seat; logged as [ROOM-RULES] test lever lines. Applied once per distinct value; empty releases a latch this lever made. Refused inside a room.");
+            BroadcastShowcaseMetricSeconds = Config.Bind(
+                "Broadcast", "ShowcaseMetricSeconds", 15f,
+                "Broadcast seat only: how many seconds the idle showcase shows each Compare tab category; it walks every category in the tab's own order. 0 or less means the default (15); other values are held between 3 and 300. Applies from the next rotation.");
+            BroadcastTestShowcase = Config.Bind(
+                "Broadcast", "TestShowcase", "",
+                "Broadcast seat only: set to any NEW value to play one idle-showcase rotation even when the stream is not live; every other condition still applies (the director idle with nothing to watch, not in an online room, the F5 page free). Each Compare category shown logs a [SHOWCASE] metric line. A value present at startup never runs.");
+            BroadcastSessionReportPageSeconds = Config.Bind(
+                "Broadcast", "SessionReportPageSeconds", 12f,
+                "Broadcast seat only: after a watched set the broadcaster pages through the set's session report; this is how many seconds each page stays up. 0 or less means the default (12); other values are held between 3 and 300. Applies from the next page.");
+            BroadcastTestWatchedSet = Config.Bind(
+                "Broadcast", "TestWatchedSet", "",
+                "Broadcast seat only: set to a NEW spectate game id (a UUID) to replay that recorded set through the post-set report as if the director had just watched it (the server's report status, the settle, the fetches, the session report and its pages), even when the stream is not live. A value present at startup never runs.");
+            BroadcastTestSessionReport = Config.Bind(
+                "Broadcast", "TestSessionReport", "",
+                "Broadcast seat only: set to a NEW '<selector>:<key>' (selector sitting, series, match, session or lobby; key the UUID a history row carries) to open that set's session report on the open F5 page; add ':<page>' (1 is the first page) to show that page, and the same set with another page only turns the page. 'close' closes the report and leaves the F5 page open. A value set while the F5 page is closed waits for it (TestOpenTab opens it). A value present at startup never runs.");
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
@@ -2844,6 +2864,69 @@ namespace CompetitiveRounds
             }
         }
 
+        // Board row 31: [Broadcast] TestShowcase - one idle-showcase rotation
+        // with only the stream-live gate lifted, for the in-game witness (each
+        // Compare metric shown logs a [SHOWCASE] metric line). The sentinel
+        // levers' grammar and identity gate: the value present at startup is
+        // the baseline and never runs; each distinct NEW value runs once.
+        private static string _lastTestShowcase;
+        private void TickTestShowcase()
+        {
+            if (Plugin.BroadcastTestShowcase == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestShowcase.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestShowcase == null) { _lastTestShowcase = raw; return; }
+            if (raw == _lastTestShowcase) return;
+            _lastTestShowcase = raw;
+            if (raw.Length == 0) return;
+            IdleShowcase.DevRunOneRotation();
+        }
+
+        // Board row 30g: [Broadcast] TestWatchedSet - a recorded set replayed
+        // through the post-set report (PostSessionReport.DevWatchSet) for the
+        // in-game witness, a watched set not being available on demand. The
+        // sentinel levers' grammar and identity gate.
+        private static string _lastTestWatchedSet;
+        private void TickTestWatchedSet()
+        {
+            if (Plugin.BroadcastTestWatchedSet == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestWatchedSet.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestWatchedSet == null) { _lastTestWatchedSet = raw; return; }
+            if (raw == _lastTestWatchedSet) return;
+            _lastTestWatchedSet = raw;
+            if (raw.Length == 0) return;
+            // Round 2 M4: the lever replays a recorded set as if the seat had
+            // watched it, so it runs only against a local test api; while the
+            // configured API is production (or any other non-local host) it
+            // refuses and says so.
+            string apiHost;
+            if (!SessionReportRules.DevLeverApiAllowed(ApiClient.BaseUrl, out apiHost))
+            {
+                try { Plugin.Log?.LogWarning("[REPORT] test watched set refused: the configured API (" + apiHost + ") is production or another non-local server; this lever runs only against a local test api (localhost / 127.0.0.1)"); } catch { }
+                return;
+            }
+            PostSessionReport.DevWatchSet(raw);
+        }
+
+        // Board row 30f: [Broadcast] TestSessionReport - the F5 session report
+        // opened on a set and turned to a page for the in-game witness: the
+        // history row's Session button is a click the witness cannot give the
+        // overlay (#420), and a named page ties each screenshot to its page.
+        // The levers' identity gate and new-value grammar; a value that arrives
+        // while the F5 page is closed waits for it instead of being spent.
+        private static string _lastTestSessionReport;
+        private void TickTestSessionReport()
+        {
+            if (Plugin.BroadcastTestSessionReport == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestSessionReport.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestSessionReport == null) { _lastTestSessionReport = raw; return; }
+            if (raw == _lastTestSessionReport) return;
+            if (raw.Length > 0 && !NativeUI.IsOpen) return;   // wait for the F5 page
+            _lastTestSessionReport = raw;
+            if (raw.Length == 0) return;
+            NativeUI.ReleaseShowcaseOwnership();   // as TestOpenTab: the lever takes the page over from the showcase
+            SessionReportView.DevDirective(raw);
+        }
+
         // ── [Broadcast] TestSilence: headless silence-indicator verification ──
         // Sets data.silenceTime on a sandbox bot and lets vanilla
         // SilenceHandler.Update discover it — the same code path a real
@@ -3305,6 +3388,9 @@ namespace CompetitiveRounds
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }
             try { TickTestRoomRules(); } catch { }
+            try { TickTestShowcase(); } catch { }
+            try { TickTestWatchedSet(); } catch { }
+            try { TickTestSessionReport(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)

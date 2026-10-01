@@ -444,6 +444,70 @@ def test_the_privacy_tab_reset_writes_nothing(harness_run):
     assert "written=0 {}" in line, line
 
 
+def test_the_session_report_suite_ran_every_case_and_none_failed(harness_run):
+    """Board row 30a: the session report's envelope parser, executed against
+    one envelope per kind that GET /api/v1/report produced for
+    test_session_report_pg.py's seeded world (SessionReportRulesSelfTest.cs)."""
+    suites = _suites(harness_run)
+    assert "sessionreport" in suites, "the SessionReportRules suite did not report"
+    run, fail, verdict = suites["sessionreport"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[sessionreport\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 31 cases on the commit that added it, 35 once board row
+    # 30b added the overlay rule's cases, 38 with 30c's builds layout, 59
+    # with 30d's derived numbers, 63 with 30e's race axis, 67 with 30g's
+    # broadcast playback, 71 with round 2's presence rules (M1), 73 with its
+    # unknown race target (M2), 75 with its playback gate (M3), 77 with the
+    # watched-set lever's api rule (M4), 80 with the missing-data
+    # provenance (L1), 82 with round 3's score-race pairs for 2v2 and 1v2
+    # (L1) and 85 with round 4's status-target rule (LOW 2); the floor is
+    # that count (#342). Raise it when cases are added.
+    assert run >= 85, "the SessionReportRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # one envelope per kind, as the server's route produced it
+    "ranked: kind, version and roster order",
+    "ranked: three games in order with their scores",
+    "ranked: game 1 picks in pick order with their pickers",
+    "ranked: set rating before, after and delta",
+    "casual: a truncated set counts the game it left out",
+    "casual: totals are sparse - an unrecorded counter has no key, never a zero",
+    "team: kind and two sides of two",
+    "team: every seat carries its side's rounds",
+    "team: a rating delta without before and after",
+    "1v2: the solo is side 1 and the duo side 2",
+    "1v2: game 2 scores and its one recorded stream",
+    "ffa: kind, three games and the union roster in order",
+    "ffa: a player who sat a game out has no score key in it",
+    "ffa: the set rating and gold over the sitting",
+    # the slicer, with its control
+    "hostile strings: braces and quotes inside a name or card do not split members",
+    "hostile strings (control): a string-blind matcher cuts the first player short",
+])
+def test_the_session_report_parse_has_a_case_per_kind(harness_run, name):
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+@pytest.mark.parametrize("name", [
+    "overlay: an open report stands a search field down",
+    "overlay (control): report closed, page open, field on its surface -> it draws",
+    "overlay: a field off its surface stays down",
+    "overlay: the page closed keeps a field down",
+])
+def test_the_search_fields_stand_down_under_the_report(harness_run, name):
+    """Board row 30b: SessionReportRules.PageElementMayDraw, executed; every
+    F5 search field, the ranked callout and the FFA and 1v2 tabs' row hover
+    tooltips ask it (test_session_report_overlay_guard.py)."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
 def test_the_binder_order_is_total_under_every_mode_the_button_offers(harness_run):
     """The tail that makes the order total is reached from every branch, so a
     mode added later cannot quietly forget it.
@@ -901,7 +965,8 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/PcTradeRules.cs",
                       "plugin/RoomRulesStrip.cs", "plugin/MusicLevels.cs",
                       "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs",
-                      "plugin/NameGlyphs.cs"):
+                      "plugin/NameGlyphs.cs",
+                      "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -926,6 +991,185 @@ def test_the_harness_compiles_only_the_rule_files():
         assert harness_only in included, "%s is not compiled into the harness" % harness_only
         assert harness_only.replace(".cs", "") not in plugin_proj
         assert not (REPO / "plugin" / harness_only).exists()
+    # Board row 30a: the session report's envelope fixtures, likewise.
+    assert "SessionReportRulesSelfTest.cs" in included
+    assert "SessionReportRulesSelfTest" not in plugin_proj
+    assert not (REPO / "plugin" / "SessionReportRulesSelfTest.cs").exists()
+
+
+@pytest.mark.parametrize("name", [
+    "builds: pages pack as many games as fit and a tall one alone",
+    "builds (control): no cap - thirty short games share one page when they fit",
+    "builds: chips wrap in pick order and a wide chip takes its own row",
+])
+def test_the_builds_pages_pack_and_flow_by_the_rules(harness_run, name):
+    """Board row 30c: SessionReportRules.PackPages / FlowChips, executed; the
+    view measures the blocks and chips and draws where these rules put them."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "derive: 1v1 first bloods from the first point of each game",
+    "derive: 1v1 longest point streak",
+    "derive: 1v1 biggest comeback counts games won only",
+    "derive: 1v1 seconds in the lead (rounds)",
+    "derive: 1v1 lead changes over the set",
+    "derive: every game's rounds race ends on its recorded rounds",
+    "derive: points won and lost (1v1)",
+    "derive: set shortest, longest, average and total time",
+    "derive: the final score counts games won",
+    "derive: damage per game in game order",
+    "derive: 1v1 kills per game are the other fighter's recorded deaths",
+    "derive: hit and block rate per game",
+    "derive: cards picked count every pick of the player",
+    "derive: gold and XP this set are the server's totals",
+    "derive: per-game gold and XP in game order",
+    "derive (control): without the totals the legacy gold shows and XP is omitted",
+    "derive (control): a stream that skips a point is not replayed",
+    "derive: 2v2 points lost are the other side's points",
+    "derive: 2v2 has no first blood, streak, comeback or lead (no point events)",
+    "derive: an FFA player's games count only the games they played",
+    "derive: FFA has no points lost and its games are won by the top score",
+])
+def test_the_session_report_derives_every_totals_number(harness_run, name):
+    """Board row 30d: SessionReportRules.Derive / Replay1v1, executed against
+    the envelopes the server tests produced; the model and view only format
+    and draw these numbers."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "race: 1v1, 2v2 and 1v2 play to 5 rounds, FFA to its lobby's recorded target, unknown when none is recorded",
+    "race: an FFA game with no recorded target draws no race to a guessed number and is counted unknown",
+    "race (control): a recorded target is the axis even above the scores",
+    "race: a 1v1 value of rounds*2+points plots its rounds, FFA floors its half points",
+    "race (control): 2v2 and 1v2 streams are not raced (no point events)",
+    "race: every 1v1 game's rounds line ends on its recorded rounds",
+])
+def test_the_race_axis_is_the_modes_win_target(harness_run, name):
+    """Board row 30e: SessionReportRules.WinTarget / RaceDivisor /
+    RoundsSeries, executed - the race panel plots rounds won against the
+    rounds the mode is played to."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+@pytest.mark.parametrize("name", [
+    "presence: a fluid lobby's game lists only who played it, best first (Delta joins in game 2)",
+    "presence (control): the union roster names two players game 1 does not have",
+    "presence: a side's score is its first playing seat's key; a side with no key has none",
+    "presence: a two-player score line needs both keys",
+])
+def test_a_game_names_only_the_players_who_played_it(harness_run, name):
+    """Round 2 M1: SessionReportRules.Standings / SideScore / PairScores,
+    executed - a fluid FFA lobby's game omits the players who sat it out and
+    a missing score key is never read as a score."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "broadcast: a stream that dies during the report fetch defers success, failure and timeout alike",
+    "broadcast (control): a live stream plays the report or the screens; the dev entry plays down; a probe that throws defers",
+])
+def test_every_door_into_playback_asks_the_stream_then(harness_run, name):
+    """Round 2 M3: SessionReportRules.PlaybackMayStart / PlaybackAfterFetch,
+    executed with a fake stream that goes down during the report fetch."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "broadcast: the watched-set lever refuses production and every non-local api",
+    "broadcast (control): a local test api is allowed",
+])
+def test_the_watched_set_lever_runs_only_against_a_local_api(harness_run, name):
+    """Round 2 M4: SessionReportRules.DevLeverApiAllowed, executed - the
+    TestWatchedSet lever refuses the public host and the LAN production
+    addresses, and runs against a local test api only."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "broadcast: a status answer replaces the target as its granted tuple, mode and roster together",
+    "broadcast: a status roster without a mode the broadcaster plays is never adopted under the old mode",
+    "broadcast: a 1v1 status answer names exactly two distinct players",
+])
+def test_the_broadcaster_retargets_only_to_a_granted_tuple(harness_run, name):
+    """Round 4 LOW 2: SessionReportRules.StatusTarget, executed - a
+    report-status answer (the account's watch grant, the only tuple the
+    report read accepts) replaces the broadcaster's target whole or not at
+    all; test_session_report.py pins that ApplyStatus changes the target only
+    through it."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
+    "provenance: a 1v2 set with no damage reads 'not recorded for this set' - its same-mode pair carries damage",
+    "provenance (control): a metric no set of the mode can carry reads 'not supported for this mode'",
+    "provenance: every metric a captured set records is one its mode carries",
+    "provenance: a 2v2 set with no scores reads 'not recorded for this set' - its same-mode pair carries scores",
+    "provenance: a 1v2 set with no scores reads 'not recorded for this set' - its same-mode pair carries scores",
+])
+def test_an_empty_chart_names_the_set_or_the_mode(harness_run, name):
+    """Round 2 L1: SessionReportRules.ModeCarries / MissingReason, executed
+    with a same-mode 1v2 pair (one with its damage stream, one without) and
+    every captured fixture's recorded metrics; round 3 L1: the same-mode
+    2v2 and 1v2 pairs for the score race (every game's scores emptied)."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+# -- board row 31: the idle showcase's rotation -------------------------------
+
+def test_the_showcase_suite_ran_every_case_and_none_failed(harness_run):
+    """Board row 31: ShowcaseRules, executed - the idle showcase walks every
+    Compare metric in the tab's own order with one dwell each and leaves the
+    rest of its rotation as it was."""
+    suites = _suites(harness_run)
+    assert "showcase" in suites, "the ShowcaseRules suite did not report"
+    run, fail, verdict = suites["showcase"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[showcase\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 5 cases on the commit that added the suite; the floor is that count
+    # (#342). Raise it when cases are added.
+    assert run >= 5, "the ShowcaseRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    "showcase: every metric is one Compare view, in list order, one dwell each",
+    "showcase: Home, the two profiles, 2v2 and FFA keep their places and dwells",
+    "showcase: the metric dwell defaults to 15 s and is held to 3-300 s",
+    "showcase: one rotation shows all 34 metrics in order and logs each once",
+    "showcase (control): with fewer than 2 candidates the metric walk is skipped, as before",
+])
+def test_the_showcase_walk_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "showcase")
+    assert line.startswith("[showcase] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+@pytest.mark.parametrize("name", [
+    "broadcast: the page dwell defaults to 12 s and is held to 3-300 s",
+    "broadcast: the walk shows every page once, in order, then ends",
+    "broadcast: the anchor is the newest in-window game and its viewer played it",
+    "broadcast (control): no anchor when nobody of the roster played the newest game",
+])
+def test_the_broadcaster_pages_through_the_report(harness_run, name):
+    """Board row 30g: SessionReportRules.BroadcastPageDwell / BroadcastNextPage
+    / NewestAnchor, executed - the broadcaster's dwell per page, its walk over
+    every page and the game (and player) the watched set's report is asked
+    for."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
 
 
 # -- v1.41.0 item 22: the standing room-rules strip's line ----------------------

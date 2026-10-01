@@ -101,6 +101,20 @@
                         font-chain answer; U+13171 and a supplementary-plane
                         emoji are cases, the raw name is the negative control.
 
+      SessionReportRules.cs  the session report's envelope parser (board row
+                        30a) and, as the report's later items land, the
+                        numbers its pages derive. Its cases live in the
+                        harness-only SessionReportRulesSelfTest.cs and parse
+                        envelopes the server's own route produced, one per
+                        kind (captured by test_session_report_pg.py's dump
+                        hook), so the client parser is executed against the
+                        server's actual output.
+
+      ShowcaseRules.cs  the broadcast idle showcase's rotation (board row 31):
+                        every Compare metric in the tab's own order with one
+                        dwell each, the other views' places and dwells, the
+                        skip rule, and the one log line per metric shown.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -141,6 +155,9 @@
     <Compile Include="SecureRouteRulesSelfTest.cs" />
     <Compile Include="I18nHarnessStub.cs" />
     <Compile Include="../../plugin/NameGlyphs.cs" />
+    <Compile Include="../../plugin/SessionReportRules.cs" />
+    <Compile Include="SessionReportRulesSelfTest.cs" />
+    <Compile Include="../../plugin/ShowcaseRules.cs" />
   </ItemGroup>
 
 </Project>

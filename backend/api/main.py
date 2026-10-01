@@ -4516,7 +4516,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:50641 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:50652 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4582,7 +4582,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:50442 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:50453 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4652,7 +4652,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:50320 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:50331 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7193,6 +7193,11 @@ def _janitor_selftest_marker() -> int:
 # edge only by a marker both roles answer alike, because no probe says
 # which box answered. Absent on any build before it.
 _JANITOR_SELFTEST_BUILD = 1
+# Its sibling, the /health `session_report` word, asks
+# the DATABASE whether it has every table and column the report route's
+# statements name, and the app whether that route is bound. Its statements are
+# DERIVED from the report's own constants, so it is defined after
+# get_set_report.
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -7202,6 +7207,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         await db.execute(text("SELECT 1"))
         team_dc_fallback = await _team_dc_fallback_probe(db)
         ffa_finishing_count = await _ffa_finishing_count_probe(db)
+        session_report = await _session_report_probe(db)
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
@@ -7221,7 +7227,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
-                              team_dc_fallback=team_dc_fallback)
+                              team_dc_fallback=team_dc_fallback,
+                              session_report=session_report)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -7233,6 +7240,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # answers its own cache-only form.
         # janitor_selftest is the verdict this process's boot self-test
         # recorded in memory, so it answers here unchanged.
+        # session_report needs the database, so this arm answers 0: a
+        # disconnected answer proves nothing about the report route, whatever
+        # an earlier probe on this worker found (round 2 L9).
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
@@ -7249,7 +7259,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
-                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
+                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST,
+                              session_report=0)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -64575,6 +64586,121 @@ def _spectate_roster_list(roster: str) -> list:
     return [s for s in (roster or "").split(",") if s]
 
 
+# Session report round 6 MEDIUM 1: the ONE definition of what a watch grant
+# records from the room. Each entry is (the validation request's field, the
+# spectate_games column it is compared with, the spectate_watch_grants column
+# it is written to). _spectate_observed_grant_tuple compares every entry and
+# returns the request's own values keyed by grant column; the grant insert
+# binds exactly that mapping and reads no tuple column from the room row, so
+# a value can reach a grant only through this definition, i.e. only after it
+# was compared. The request's values come from the master: mode and roster
+# from its own room at the snapshot, game id, generation and source from the
+# server's answer to its last participant attest of that same mode and
+# roster. Round 7 MEDIUM 1: the generation (migration 364's
+# spectate_games.generation, drawn by that table's trigger on every change of
+# any other room value here and never reused) makes the comparison exclude a
+# row that left the observed tuple and came back to it: equal values under a
+# later generation are a different observation.
+_SPECTATE_GRANT_OBSERVED_TUPLE = (
+    ("observed_game_id", "id", "game_id"),
+    ("observed_generation", "generation", "generation"),
+    ("observed_mode", "mode", "mode"),
+    ("observed_source_ref", "source_ref", "source_ref"),
+    ("observed_roster", "roster", "roster"),
+)
+# Every other column the grant insert names, and where its value comes from.
+# None of them is a value of the room row that could change under the
+# request: test_the_grant_copies_no_room_value_it_did_not_compare pins this
+# list, the insert's column list and the table's columns (364) to each other.
+_SPECTATE_GRANT_OTHER_COLUMNS = {
+    "spectator_steam_id": "the validated entry's steam id; the grant is written only after the binding "
+                          "UPDATE found that seat's live lease on the compared game id",
+    "game_started_at": "spectate_games.started_at of the compared game id: set when the row is inserted "
+                       "and written by no other statement, so it is a property of that id",
+    "observed_seq": "nextval of the observation sequence (364), drawn under the room lock (round 5 LOW 1)",
+}
+# Session report round 8 MEDIUM 1: the room-row columns of the definition that
+# the room's AUTHORITATIVE source also decides. _spectate_authoritative_roster
+# resolves them from the server's own records (the newest live series, lobby
+# or bracket match that names the room, and its members). A writer of those
+# records does not take the room lock and does not touch the room row (a
+# same-room continuation inserts series Y and commits), so the row can still
+# hold X after Y is authoritative, and a request that echoes X and the row's
+# generation agrees with the row. A validation that records a watch therefore
+# resolves these values again, under the room lock, and grants only when the
+# resolution, the row and the request all agree
+# (_spectate_row_agrees_with_resolution).
+_SPECTATE_GRANT_RESOLVED_COLUMNS = ("source_ref", "roster")
+# Of those, the column a validation writes back when the row is behind the
+# resolution: the source is server-derived and never a caller's, so the
+# resolved value is the one the attest would write. The roster is not written
+# back: the attest records it only when the fighters' own claim EQUALS the
+# resolution, and the listing's completeness check reads the attestations
+# against it, so a row behind on its roster is refused until the fighters
+# attest again.
+_SPECTATE_ROW_REFRESHED_COLUMNS = ("source_ref",)
+
+
+def _spectate_resolved_room_values(true_roster, derived_ref):
+    """The room-row values the authoritative resolution decides, keyed by
+    spectate_games column (_SPECTATE_GRANT_RESOLVED_COLUMNS), or None when a
+    mapping should exist and none does (an empty roster: the series or lobby
+    ended, or its successor is not created yet - nothing is authoritative, so
+    nothing can be granted). A resolution with no server roster (the 1v1
+    fallback) decides the source alone. The source is cut as the attest cuts
+    it when it writes the row."""
+    if true_roster is not None and not true_roster:
+        return None
+    resolved = {"source_ref": (derived_ref or "")[:64]}
+    if true_roster is not None:
+        resolved["roster"] = ",".join(sorted(true_roster))
+    return resolved
+
+
+def _spectate_row_agrees_with_resolution(game, resolved):
+    """(agrees, refresh). agrees: the resolution exists and every value it
+    decides equals the room row's (in the comparable form of the observed
+    tuple). refresh: the resolved values of _SPECTATE_ROW_REFRESHED_COLUMNS
+    the row does not hold, which the caller writes back (the trigger of 364
+    then draws the row a new generation)."""
+    if resolved is None:
+        return False, {}
+    behind = [col for col in _SPECTATE_GRANT_RESOLVED_COLUMNS if col in resolved
+              and _spectate_observed_canon(col, resolved[col]) != _spectate_observed_canon(col, game[col])]
+    return not behind, {col: resolved[col] for col in behind if col in _SPECTATE_ROW_REFRESHED_COLUMNS}
+
+
+def _spectate_observed_canon(column: str, value) -> str:
+    """The comparable form of one observed-tuple value: a roster as its
+    distinct fighter ids sorted and comma-joined (the form the attest stores:
+    it refuses any other), a game id lower-cased, a generation as an integer
+    (the grant column is BIGINT), anything else as text."""
+    if column == "roster":
+        return ",".join(sorted(set(_spectate_roster_list(value))))
+    if column == "generation":
+        return None if value is None else int(value)
+    text_value = "" if value is None else str(value)
+    return text_value.lower() if column == "id" else text_value
+
+
+def _spectate_observed_grant_tuple(game, req):
+    """Session report round 6 MEDIUM 1 (round 5 compared mode and roster
+    only): the tuple a grant may record, or None. Every entry of
+    _SPECTATE_GRANT_OBSERVED_TUPLE is compared, the request's observed value
+    against the live room row this request read under the room lock; when
+    any one differs (or the observed roster is empty) the answer is None and
+    the caller writes nothing. Otherwise the answer is the REQUEST's values
+    (in comparable form) keyed by grant column: what the grant insert
+    binds."""
+    got = {}
+    for field, row_column, grant_column in _SPECTATE_GRANT_OBSERVED_TUPLE:
+        seen = _spectate_observed_canon(row_column, getattr(req, field))
+        if seen != _spectate_observed_canon(row_column, game[row_column]):
+            return None
+        got[grant_column] = seen
+    return got if got["roster"] else None
+
+
 async def _spectate_mandatory_class(db: AsyncSession, game) -> str:
     """Classify only an exact, live sync-tournament room binding as mandatory."""
     # DEPLOY GATE: Sid sign-off required (async tournament narrowing)
@@ -65072,6 +65198,20 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
         raise HTTPException(status_code=401, detail="session_required")
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
 
+    # Serialize per-room (attests from all fighters land within the same
+    # second) - advisory lock on the room name, then resolve, then upsert
+    # game + attest. Session report round 7 MEDIUM 1: the lock is taken
+    # BEFORE the source is resolved, so every value this attest writes to the
+    # room row is resolved inside the serialization that protects the row
+    # (#208: resolve after the lock, not before it). Each attest's resolution
+    # and write are then one step in the room's order: an attest that waited
+    # on the lock resolves from what is committed when it holds it, so it
+    # cannot write back a source resolved before a later attest's change
+    # committed. The resolver only reads (no row lock), so taking the room
+    # lock first adds no lock-order edge.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                     {"k": f"spectate:{req.room_name}"})
+
     # Server-authoritative roster check (fail CLOSED when a mapping should
     # exist): the claimed roster must be members of the room's real locked
     # group, and the claimed room must actually belong to this mode's flow.
@@ -65085,10 +65225,6 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
             raise HTTPException(status_code=409, detail="roster_mismatch")
     await _assert_no_service_subject(db, affected_steam_ids=roster)
 
-    # Serialize per-room (attests from all fighters land within the same
-    # second) — advisory lock on the room name, then upsert game + attest.
-    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
-                     {"k": f"spectate:{req.room_name}"})
     game = (await db.execute(text("""
         SELECT id, roster, room_name, room_region FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
@@ -65168,8 +65304,42 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
            "region": req.region, "target": req.fighter_target,
            "cap": req.room_capacity, "proto": req.spectator_protocol,
            "roster": req.roster, "phase": req.phase[:16]})
+    # Session report round 8 MEDIUM 1: the source is resolved AGAIN, still
+    # under the room lock, as the last step before the answer is read back. A
+    # writer of the authoritative source takes neither this lock nor the row,
+    # so a continuation can commit Y after the resolution above; this
+    # resolution sees it (READ COMMITTED), the row is rewritten to it, and the
+    # answer names it. The same checks as above apply to it: a roster that is
+    # no longer the room's refuses the attest (its writes roll back). A change
+    # that commits after this statement is not excluded here; the validation
+    # resolves again under the lock and refuses a request that echoes a
+    # source that is no longer authoritative.
+    final_roster, final_ref = await _spectate_authoritative_roster(db, req.mode, req.room_name)
+    if final_roster is not None:
+        if not final_roster:
+            raise HTTPException(status_code=409, detail="room_unknown")
+        if set(roster) != final_roster or req.steam_id not in final_roster:
+            raise HTTPException(status_code=409, detail="roster_mismatch")
+    if final_ref[:64] != derived_ref[:64]:
+        await db.execute(text("UPDATE spectate_games SET source_ref = :ref WHERE id = :gid"),
+                         {"ref": final_ref[:64], "gid": str(game["id"])})
+    # Session report round 6 MEDIUM 1: the answer names the room row this
+    # attest wrote - its game id and the server-derived source it now holds
+    # for this caller's mode and roster (the client cannot derive the source
+    # itself). Round 7 MEDIUM 1: and the row's generation after this attest's
+    # writes, all three read from the row itself while this request still
+    # holds the room lock (the trigger of 364 drew a new generation if this
+    # attest changed a grant-carried value). A master sends them back with
+    # its next spectator validation, beside the mode and roster it observes
+    # then, and the validation grants a watch only when all five are still
+    # the live row's. Released clients read only a transport failure from
+    # this answer.
+    wrote = (await db.execute(text("""
+        SELECT id, source_ref, generation FROM spectate_games WHERE id = :gid
+    """), {"gid": str(game["id"])})).mappings().first()
     await db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "game_id": str(wrote["id"]), "source_ref": wrote["source_ref"],
+            "generation": int(wrote["generation"])}
 
 
 @app.post("/api/v1/spectate/close", tags=["Spectate"])
@@ -65992,15 +66162,36 @@ async def broadcast_report_status(
     if len(requested) > 8:
         raise HTTPException(status_code=400, detail="too_many_game_ids")
 
+    # Round 2 M4: only games this broadcast account WATCHED. Since round 3
+    # (N1) that is its watched-grant record (spectate_watch_grants, migration
+    # 364: written when a master validation observed the seat in the room,
+    # never deleted, its tuple never changed), not its lease row, which the
+    # validation sweep deletes once the seat's authorization has ended.
+    # Any other id is omitted, exactly as an id with no row is.
+    # Round 4 LOW 2: what a game answers with is the account's own GRANT -
+    # the mode, roster and start its watch was recorded under - never the
+    # spectate game row's current tuple, which every participant attest
+    # rewrites in place: the client retargets its report to this answer, and
+    # the report read accepts only a granted tuple. Round 5 LOW 1: a game the
+    # seat was observed under more than one tuple of answers the tuple of its
+    # MOST RECENT successful validation: the greatest observed_seq, drawn
+    # under the room lock by every validation that observed the seat
+    # (refreshed on a repeat, so a room back on an earlier tuple answers
+    # that tuple). The row gives only ended_at, the terminal proof this
+    # route exists for.
     games = (await db.execute(text("""
-        SELECT id, mode, started_at, ended_at, roster
-          FROM spectate_games
-         WHERE id = ANY(CAST(:gids AS uuid[]))
-    """), {"gids": requested})).mappings().all()
+        SELECT DISTINCT ON (g.id)
+               g.id, l.mode, l.game_started_at AS started_at, g.ended_at, l.roster
+          FROM spectate_games g
+          JOIN spectate_watch_grants l
+            ON l.game_id = g.id AND l.spectator_steam_id = CAST(:sid AS text)
+         WHERE g.id = ANY(CAST(:gids AS uuid[]))
+         ORDER BY g.id, l.observed_seq DESC
+    """), {"gids": requested, "sid": steam_id})).mappings().all()
     by_id = {g["id"]: g for g in games}
 
     # Display names for every roster member across all found games, in one
-    # query. The roster steam-id CSV is returned exactly as stored: the
+    # query. The granted roster CSV is returned exactly as stored: the
     # broadcast seat is already trusted with roster ids at grant time
     # (SpectateGameInfo.roster), so exposing them here to the SAME
     # authenticated seat adds no new exposure.
@@ -66015,7 +66206,7 @@ async def broadcast_report_status(
         names_by_sid = {r["steam_id"]: (r["display_name"] or "?") for r in rows}
 
     out = []
-    for gid in requested:  # request order; ids with no row are omitted
+    for gid in requested:  # request order; ids with no row (or no grant of this account) are omitted
         g = by_id.get(gid)
         if g is None:
             continue
@@ -66274,7 +66465,7 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
                      {"k": f"spectate:{req.room_name}"})
     game = (await db.execute(text("""
-        SELECT id, roster, mode, source_ref, room_name, room_region, protocol_min
+        SELECT id, generation, roster, mode, source_ref, room_name, room_region, protocol_min
           FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
     """), {"room": req.room_name})).mappings().first()
@@ -66284,6 +66475,59 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
         raise HTTPException(status_code=403, detail="not_a_participant")
     await _assert_no_service_subject(
         db, affected_steam_ids=_spectate_roster_list(game["roster"]))
+    # Session report round 5 MEDIUM 1 / round 6 MEDIUM 1: the spectator
+    # inventory below and the tuple a grant records must belong to ONE
+    # observation. The master sends the tuple it holds with the inventory
+    # (_SPECTATE_GRANT_OBSERVED_TUPLE: game id, generation, mode, source,
+    # roster); a participant attest may have rewritten the live row in place
+    # since then (a delayed request, a fighter replaced, a new series in the
+    # same room), so every value of it is compared here, under the room lock
+    # the attest also takes, with the row this request just read. The
+    # generation (round 7) differs whenever any other value changed since
+    # the attest answer the master holds, including a change that later
+    # returned to the same values, so equal values alone never pass for an
+    # observation made before the row moved. A mismatch in any one
+    # writes nothing - no drain, no sweep, no binding, no grant - and answers
+    # the typed retry result; the master re-snapshots and sends again
+    # (bounded, client side). All absent (every released client) keeps the
+    # old answer and writes no grant: that request carries no observation to
+    # record. Some present and some absent is refused.
+    sent = [getattr(req, field) is not None for field, _c, _g in _SPECTATE_GRANT_OBSERVED_TUPLE]
+    if any(sent) and not all(sent):
+        raise HTTPException(status_code=422, detail="observed_tuple_incomplete")
+    records_watch = all(sent)
+    # Session report round 8 MEDIUM 1: the row is not the authority on its
+    # source. A writer of the room's authoritative source (a same-room
+    # continuation, a void, a completion) takes neither this lock nor the
+    # row, so the row and a request echoing it can both still say X, at the
+    # row's own generation, after Y is authoritative. A validation that
+    # records a watch resolves the source again here, under the room lock,
+    # after the row read (READ COMMITTED: this statement sees every commit
+    # made before it), and goes on only when the resolution agrees with the
+    # row; the comparison below then makes the request agree with both. When
+    # the row is behind, nothing is granted, drained, swept or bound: the
+    # resolved source is written to the row (its generation advances, so the
+    # next attest answer and the next validation carry the new one) and the
+    # typed retry is answered. When nothing is authoritative (no live series
+    # or lobby where one must exist) nothing is written and the retry is
+    # answered. The released request shape records no watch and keeps its
+    # answer: it is not resolved here.
+    if records_watch:
+        now_roster, now_ref = await _spectate_authoritative_roster(db, game["mode"], req.room_name)
+        agrees, refresh = _spectate_row_agrees_with_resolution(
+            game, _spectate_resolved_room_values(now_roster, now_ref))
+        if not agrees:
+            if refresh:
+                await db.execute(text("UPDATE spectate_games SET source_ref = :source_ref WHERE id = :gid"),
+                                 {**refresh, "gid": str(game["id"])})
+                await db.commit()
+            else:
+                await db.rollback()
+            return {"status": "retry", "reason": "source_changed", "results": []}
+    grant_tuple = _spectate_observed_grant_tuple(game, req) if records_watch else None
+    if records_watch and grant_tuple is None:
+        await db.rollback()
+        return {"status": "retry", "reason": "participants_changed", "results": []}
     observed_sids = {entry.steam_id for entry in req.spectators[:8] if entry.steam_id}
 
     # Materialize every authorization-ended current-row actor as a durable
@@ -66332,6 +66576,25 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
             # here too, not only at its own heartbeat. Savepoint (#235 + r3
             # find 6): a missing migration-210 column must yield ok=False for
             # this actor (fail closed), not poison the whole transaction.
+            # Session report round 3 N1 / round 4 LOW 1: a lease validated as
+            # OBSERVED also records the watch where the sweep above cannot
+            # reach it: spectate_watch_grants (migration 364), one row per
+            # game, spectator and (generation, mode, source, roster) tuple
+            # (the generation since round 7), the tuple never
+            # changed (a repeat refreshes observed_seq alone, round 5 LOW 1) -
+            # the entitlement the broadcast seat's report reads rest on.
+            # Round 5 / round 6 MEDIUM 1: the grant is written only by a
+            # request that carried the tuple it observed, and it records the
+            # REQUEST's values as compared above (grant_tuple, bound whole),
+            # never the room row's: the row supplies only game_started_at, by
+            # the compared game id. The old request shape binds and answers
+            # as it always did and records no watch, so its ok=True carries
+            # no grant (that seat's report is refused: fail closed). For a
+            # request that carried its tuple, the binding and the grant share
+            # ONE savepoint, so its answer of ok=True always carries a durable
+            # grant: when the grant insert fails (a transient error, or the
+            # API deployed before 364) the binding rolls back with it and
+            # this actor is answered ok=False, exactly as a failed binding is.
             lease = None
             try:
                 async with db.begin_nested():
@@ -66346,7 +66609,32 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
                     """), {"gid": str(game["id"]), "sid": entry.steam_id,
                            "actor": entry.actor_number,
                            "pmin": max(int(game.get("protocol_min") or 1), SPECTATE_PROTOCOL)})).first()
-            except Exception:
+                    # Round 5 LOW 1: observed_seq orders the seat's watches for
+                    # report-status. It is drawn here, while this request holds
+                    # the room lock taken above (kept to its commit), on the
+                    # first validation under a tuple and again on every repeat
+                    # (the conflict clause refreshes it and changes nothing
+                    # else), so the greatest value of a (game, seat) is its
+                    # most recent successful validation - also when the room
+                    # returns to a tuple it had before.
+                    if lease is not None and grant_tuple is not None:
+                        await db.execute(text("""
+                            INSERT INTO spectate_watch_grants
+                                (game_id, generation, mode, source_ref, roster,
+                                 spectator_steam_id, game_started_at, observed_seq)
+                            SELECT CAST(:game_id AS uuid), CAST(:generation AS bigint),
+                                   CAST(:mode AS text),
+                                   CAST(:source_ref AS text), CAST(:roster AS text),
+                                   CAST(:sid AS text),
+                                   g.started_at, nextval('spectate_watch_grants_observed_seq')
+                              FROM spectate_games g
+                             WHERE g.id = CAST(:game_id AS uuid)
+                            ON CONFLICT ON CONSTRAINT uq_spectate_watch_grants_tuple
+                            DO UPDATE SET observed_seq = EXCLUDED.observed_seq
+                        """), {**grant_tuple, "sid": entry.steam_id})
+            except Exception as ex:
+                if lease is not None:
+                    print(f"[SPECTATE] watched grant not recorded, validation refused: {type(ex).__name__}")
                 lease = None
             if lease is not None:
                 ok = True
@@ -66382,6 +66670,8 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 #   GET /api/v1/report?steam_id=<caller>&series=<uuid>
 #                                       | &match=<uuid>
 #                                       | &session=<uuid>
+#                                       | &sitting=<game uuid>
+#                                       | &lobby=<ffa game uuid>
 #
 # ONE versioned envelope behind the client's interactive "Session" report.
 # It replaces nothing: the history endpoints keep their rows and the broadcast
@@ -66401,7 +66691,11 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 #     team_series or ovt_series id; `match` one game in any of the four match
 #     tables; `session` the games sharing a reporter-minted
 #     matches.session_uuid (migration 298). Grouping is by that column ONLY —
-#     never by room, never by room+date;
+#     never by room, never by room+date. `sitting` resolves its anchor game's
+#     KIND (Sept 28, board row 30a): a 1v1 game gives that pair's games inside
+#     the caller's sitting, a 2v2 or 1v2 game its series, an FFA game its
+#     lobby sitting; `lobby` names that FFA set directly (the route's
+#     docstring has the rules);
 #   - NO room identifier of any kind is selected, let alone serialised (#463):
 #     every statement below names its columns and the serialiser builds each
 #     object field by field (test_session_report.py pins both);
@@ -66419,8 +66713,15 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 #   - the rating snapshot is joined by IDENTITY (rating_history.series_id,
 #     migration 299, linked by the series-completion writer), never by a time
 #     window — two series completing seconds apart stay distinct;
-#   - set_summary is computed ONCE per set from the set's own row(s), never
-#     summed over match rows (C-7);
+#   - set_summary is computed ONCE per set (C-7): rating and the series award
+#     from the set's own row(s), and the set's gold ledger in ONE statement
+#     whatever the number of games. Since board row 30d (Sept 28) the same
+#     pass also gives each game its own `gold` and `xp` ({steam id: n}, only
+#     where a ledger row or an XP record exists) and the summary its
+#     `gold_total` / `xp_total` (what the set earned: the series row's own
+#     totals for 2v2 and 1v2 series, the award plus the games' ledger for a
+#     ranked series, the games' ledger and XP records otherwise). `gold`
+#     keeps its old meaning for older clients;
 #   - the envelope is BOUNDED (_REPORT_MAX_BYTES, asserted by
 #     test_session_report.py against worst-case fixtures): sample pairs,
 #     picks, deaths and names are budgeted per report, see the constants.
@@ -66522,6 +66823,7 @@ _REPORT_1V1_SQL = """
            m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
            m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
            m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           m.p1_xp_gained, m.p2_xp_gained,
            rs.rules AS rules,
            BOOL_AND(m.is_ranked) OVER () AS all_ranked,
            COUNT(*) OVER () AS total_rows
@@ -66570,7 +66872,9 @@ _REPORT_TS_SQL = """
     SELECT ts.id, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id, ts.status,
            ts.completed_at, ts.invalidated_at,
            ts.t1a_rating_change, ts.t1b_rating_change,
-           ts.t2a_rating_change, ts.t2b_rating_change
+           ts.t2a_rating_change, ts.t2b_rating_change,
+           ts.t1a_gold_earned, ts.t1b_gold_earned, ts.t2a_gold_earned, ts.t2b_gold_earned,
+           ts.t1a_xp_earned, ts.t1b_xp_earned, ts.t2a_xp_earned, ts.t2b_xp_earned
       FROM team_series ts
      WHERE ts.id = CAST(:key AS uuid)
 """
@@ -66605,7 +66909,8 @@ _REPORT_OS_SQL = """
     SELECT os.id, os.solo_id, os.duo_a_id, os.duo_b_id, os.status,
            os.completed_at, os.invalidated_at,
            os.solo_rating_change, os.duo_a_rating_change, os.duo_b_rating_change,
-           os.solo_gold_earned, os.duo_a_gold_earned, os.duo_b_gold_earned
+           os.solo_gold_earned, os.duo_a_gold_earned, os.duo_b_gold_earned,
+           os.solo_xp_earned, os.duo_a_xp_earned, os.duo_b_xp_earned
       FROM ovt_series os
      WHERE os.id = CAST(:key AS uuid)
 """
@@ -66645,16 +66950,171 @@ _REPORT_FFA_SQL = f"""
                       AND NOT fpx.absent)
 """
 _REPORT_FFA_PLAYERS_SQL = """
-    SELECT fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
-           fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained,
+    SELECT fp.match_id, fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
+           fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained, fp.xp_gained,
            fp.fps_timeline, fp.ping_timeline, fp.hit_timeline, fp.block_timeline,
            fp.damage_dealt_timeline, fp.kill_timeline, fp.damage_dealt,
            fp.end_stats, fp.color_hex,
            fp.bullets_fired, fp.bullets_hit, fp.blocks_activated, fp.blocks_successful,
            fp.keys_pressed, fp.active_seconds, fp.kills
       FROM ffa_match_players fp
-     WHERE fp.match_id = CAST(:key AS uuid) AND NOT fp.absent
-     ORDER BY fp.placement ASC, fp.slot ASC
+     WHERE fp.match_id = ANY(CAST(:mids AS uuid[])) AND NOT fp.absent
+     ORDER BY fp.match_id, fp.placement ASC, fp.slot ASC
+"""
+# Sept 28 (board row 30a): what KIND of game a `sitting` anchor is. One
+# statement, four arms, each carrying its own mode's caller predicate, so the
+# dispatch never branches on a game the caller did not play: an unknown,
+# invalidated or unplayed id resolves to no row and the route answers its one
+# 404. The aliases are deliberately not the games statements' own (m, tm, om,
+# fm, fp) so neither a reader nor a test can take one statement for another.
+_REPORT_KIND_SQL = """
+    SELECT 'v1' AS report_kind, CAST(NULL AS text) AS series_id
+      FROM matches km
+     WHERE km.id = CAST(:key AS uuid) AND km.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (km.player1_id, km.player2_id)
+    UNION ALL
+    SELECT 'team', CAST(kt.series_id AS text)
+      FROM team_matches kt
+     WHERE kt.id = CAST(:key AS uuid) AND kt.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (kt.t1a_id, kt.t1b_id, kt.t2a_id, kt.t2b_id)
+    UNION ALL
+    SELECT 'ovt', CAST(ko.series_id AS text)
+      FROM ovt_matches ko
+     WHERE ko.id = CAST(:key AS uuid) AND ko.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (ko.solo_id, ko.duo_a_id, ko.duo_b_id)
+    UNION ALL
+    SELECT 'ffa', CAST(NULL AS text)
+      FROM ffa_matches kf
+     WHERE kf.id = CAST(:key AS uuid) AND kf.invalidated_at IS NULL
+       AND EXISTS (SELECT 1 FROM ffa_match_players kx
+                    WHERE kx.match_id = kf.id
+                      AND kx.player_id = CAST(:cpid AS uuid)
+                      AND NOT kx.absent)
+     LIMIT 1
+"""
+# Round 2 M4, bound to the game itself in round 3: the broadcast account's
+# `viewer=` read answers only for the game that account WATCHED. It answers a
+# row only when a watched-grant record of the calling account exists
+# (spectate_watch_grants, migration 364, round 3 N1: written when a master
+# validation observed that seat in the spectate game's room, never deleted,
+# its tuple never changed - the lease row itself is deleted by the validation sweep once its
+# authorization has ended, so it cannot carry the entitlement) whose
+# recorded tuple
+#   - lists the named viewer in its roster,
+#   - spans the requested game's end: from _REPORT_WATCH_PRE_S before the
+#     spectate game's start (the broadcaster's own history window opens
+#     WINDOW_PRE_START_SECONDS = 300 s early) to _REPORT_WATCH_POST_S after its
+#     end (or now while it is live; the end stamp is the room's close, which
+#     can trail the last game's report),
+#   - has the requested game's MODE: the mode is the table the game row lives
+#     in (matches 1v1, team_matches 2v2, ovt_matches 1v2, ffa_matches ffa),
+#     compared with the mode the server recorded for the spectate game, and
+#   - is the requested game's SOURCE: when the record carries a source
+#     identity (source_ref, derived by the server from its own queue-lock
+#     records at attest time: the team or 1v2 series, the FFA lobby, a sync
+#     tournament match), it must be the requested game's series (or lobby) id,
+#     or for 1v1 the tournament match whose series the game belongs to; when
+#     it carries none (1v1 queue and code rooms), the requested game's PLAYED
+#     roster (for FFA the players not absent) must equal the recorded roster
+#     exactly, as sets of steam ids.
+# The window's opening edge is the recorded game start; its closing edge is
+# the spectate game's ended_at, read from the row the record references.
+# The key is a game id of any mode; a series or session uuid is not one, so
+# `series` and `session` with a viewer resolve to nothing. No row = the same
+# 404 as every other refusal.
+_REPORT_WATCH_PRE_S = 300
+_REPORT_WATCH_POST_S = 600
+_REPORT_WATCHED_SQL = """
+    WITH anchor AS (
+        SELECT '1v1' AS mode, wm.ended_at, CAST(wm.series_id AS text) AS source_id,
+               ARRAY[wm.player1_id, wm.player2_id] AS played
+          FROM matches wm WHERE wm.id = CAST(:key AS uuid)
+        UNION ALL
+        SELECT '2v2', wt.ended_at, CAST(wt.series_id AS text),
+               ARRAY[wt.t1a_id, wt.t1b_id, wt.t2a_id, wt.t2b_id]
+          FROM team_matches wt WHERE wt.id = CAST(:key AS uuid)
+        UNION ALL
+        SELECT '1v2', wo.ended_at, CAST(wo.series_id AS text),
+               ARRAY[wo.solo_id, wo.duo_a_id, wo.duo_b_id]
+          FROM ovt_matches wo WHERE wo.id = CAST(:key AS uuid)
+        UNION ALL
+        SELECT 'ffa', wf.ended_at, CAST(wf.lobby_id AS text),
+               ARRAY(SELECT wx.player_id FROM ffa_match_players wx
+                      WHERE wx.match_id = wf.id AND NOT wx.absent)
+          FROM ffa_matches wf WHERE wf.id = CAST(:key AS uuid)
+    ), requested AS (
+        SELECT a.mode, a.ended_at, a.source_id,
+               ARRAY(SELECT DISTINCT CAST(wp.steam_id AS text) FROM players wp
+                      WHERE wp.id = ANY(a.played) ORDER BY 1) AS played_sids
+          FROM anchor a
+    )
+    SELECT wg.game_id AS watched_game
+      FROM requested r
+      JOIN spectate_watch_grants wg
+        ON wg.spectator_steam_id = CAST(:bsid AS text)
+       AND wg.mode = r.mode
+       AND r.ended_at >= wg.game_started_at - make_interval(secs => :pre)
+      JOIN spectate_games ws
+        ON ws.id = wg.game_id
+       AND r.ended_at <= COALESCE(ws.ended_at, NOW()) + make_interval(secs => :post)
+     WHERE CAST(:viewer AS text) = ANY(string_to_array(wg.roster, ','))
+       AND CASE WHEN wg.source_ref <> ''
+                THEN wg.source_ref = r.source_id
+                  OR (r.mode = '1v1' AND EXISTS (
+                        SELECT 1 FROM tournament_matches wtm
+                         WHERE CAST(wtm.id AS text) = wg.source_ref
+                           AND CAST(wtm.series_id AS text) = r.source_id))
+                ELSE r.played_sids = ARRAY(
+                        SELECT DISTINCT wr FROM unnest(string_to_array(wg.roster, ',')) wr
+                         WHERE wr <> '' ORDER BY 1)
+           END
+     LIMIT 1
+"""
+# Sept 28 (board row 30a): the FFA LOBBY SITTING of an anchor game: every game
+# of the anchor's lobby whose end falls inside the caller's sitting that
+# contains the anchor (_SITTING_CTES, the 3 h gap rule the 1v1 `sitting` set
+# uses), each one the caller PLAYED (not absent, #227) - the per-game
+# participant predicate is the same one _REPORT_FFA_SQL carries. A game with
+# no lobby row is its own one-game lobby (`g.id = an.id`). `total_rows` is the
+# participant-filtered size of the whole lobby sitting, as in the 1v1
+# statement, so `games_omitted` is exact whatever the LIMIT hides.
+_REPORT_FFA_LOBBY_SQL = """
+    SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
+           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s,
+           """ + _FFA_SETTINGS_COLS + """,
+           COUNT(*) OVER () AS total_rows
+      FROM ffa_matches fm
+      LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id
+     WHERE fm.id IN (
+        WITH """ + _sitting_ctes(":cpid") + """,
+        anchor AS (
+            SELECT a.id, a.lobby_id, a.ended_at FROM ffa_matches a
+             WHERE a.id = CAST(:key AS uuid) AND a.invalidated_at IS NULL
+               AND EXISTS (SELECT 1 FROM ffa_match_players ax
+                            WHERE ax.match_id = a.id
+                              AND ax.player_id = CAST(:cpid AS uuid)
+                              AND NOT ax.absent)
+        ),
+        span AS (
+            SELECT MIN(s.ended_at) AS lo, MAX(s.ended_at) AS hi
+              FROM sit s
+             WHERE s.sn = (SELECT s1.sn FROM sit s1 JOIN anchor an ON an.ended_at = s1.ended_at)
+        )
+        SELECT g.id FROM ffa_matches g
+          JOIN anchor an ON TRUE
+          LEFT JOIN span sp ON TRUE
+         WHERE g.invalidated_at IS NULL
+           AND (g.id = an.id
+                OR (g.lobby_id = an.lobby_id
+                    AND g.ended_at >= sp.lo AND g.ended_at <= sp.hi))
+     )
+       AND fm.invalidated_at IS NULL
+       AND EXISTS (SELECT 1 FROM ffa_match_players fpx
+                    WHERE fpx.match_id = fm.id
+                      AND fpx.player_id = CAST(:cpid AS uuid)
+                      AND NOT fpx.absent)
+     ORDER BY COALESCE(fm.started_at, fm.ended_at) DESC, fm.id DESC
+     LIMIT :lim
 """
 _REPORT_ROSTER_SQL = """
     SELECT p.id, p.steam_id, p.display_name
@@ -66662,11 +67122,11 @@ _REPORT_ROSTER_SQL = """
      WHERE p.id = ANY(CAST(:pids AS uuid[]))
 """
 _REPORT_GOLD_SQL = """
-    SELECT gt.player_id, SUM(gt.amount) AS amount
+    SELECT gt.player_id, gt.reference_id, gt.reason, SUM(gt.amount) AS amount
       FROM gold_transactions gt
      WHERE gt.reason = ANY(CAST(:reasons AS text[]))
        AND gt.reference_id = ANY(CAST(:refs AS text[]))
-     GROUP BY gt.player_id
+     GROUP BY gt.player_id, gt.reference_id, gt.reason
 """
 # Identity join (migration 299): the snapshot the series-completion writer
 # linked to THIS series. No time window — a snapshot written for a series
@@ -66688,6 +67148,26 @@ _REPORT_CARD_TABLES = {
     "ovt": ("ovt_match_cards", False, False),
     "ffa": ("ffa_match_cards", True, True),
 }
+
+
+def _report_card_sql(table, with_round, with_rolled):
+    """The card statement for one _REPORT_CARD_TABLES entry: every pick of
+    the games named by :mids, in pick order (round first where the table
+    records one)."""
+    round_col = "c.round_number" if with_round else "NULL AS round_number"
+    rolled_col = "c.rolled" if with_rolled else "FALSE AS rolled"
+    order = "c.round_number NULLS FIRST, c.pick_order" if with_round else "c.pick_order"
+    return f"""
+        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}, {rolled_col}
+          FROM {table} c
+         WHERE c.match_id = ANY(CAST(:mids AS uuid[]))
+         ORDER BY c.match_id, {order}"""
+
+
+# Each mode's card statement, built once so that it is a constant like the
+# report's other statements (the /health `session_report` probe analyses
+# every one of them). The text is the one the loader used to build per call.
+_REPORT_CARD_STATEMENTS = {mode: _report_card_sql(*spec) for mode, spec in _REPORT_CARD_TABLES.items()}
 
 
 def _report_parse_uuid(raw):
@@ -66848,10 +67328,10 @@ def _report_ffa_scores(timeline, slots, duration_s, cap=_REPORT_SAMPLES_MAX):
 
 
 def _report_slot(pid, rounds, points, fps=None, ping=None, hit=None, block=None,
-                 dmg=None, end_stats=None, totals=None, killtl=None):
+                 dmg=None, end_stats=None, totals=None, killtl=None, xp=None):
     return {"pid": str(pid) if pid is not None else None, "rounds": rounds, "points": points,
             "fps": fps, "ping": ping, "hit": hit, "block": block, "dmg": dmg, "killtl": killtl,
-            "end_stats": end_stats, "totals": totals or {}}
+            "end_stats": end_stats, "totals": totals or {}, "xp": xp}
 
 
 def _report_totals(shots=None, hits=None, blocks=None, blocks_ok=None, keys=None,
@@ -66887,6 +67367,7 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
     duration_s = int(game.get("duration_s") or 0)
     slots = game["slots"]
     scores, points, timelines, end_build, end_stats, totals = {}, {}, {}, {}, {}, {}
+    gold, xp = {}, {}
     available = set()
     for s in slots:
         sid = sid_of.get(s["pid"])
@@ -66907,6 +67388,15 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
         es = _clean_end_stats(s.get("end_stats"))
         if es:
             end_stats[sid] = es
+        if s.get("xp") is not None:
+            try:
+                xp[sid] = int(s["xp"])
+            except (TypeError, ValueError):
+                pass
+    for pid, amt in (game.get("gold") or {}).items():
+        sid = sid_of.get(str(pid))
+        if sid is not None:
+            gold[sid] = int(amt)
     deaths = []
     if game.get("point_times") and len(slots) == 2:
         sid_a, sid_b = sid_of.get(slots[0]["pid"]), sid_of.get(slots[1]["pid"])
@@ -66970,6 +67460,8 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
         "end_build": end_build,
         "end_stats": end_stats,
         "totals": totals,
+        "gold": gold,
+        "xp": xp,
     }
     if picks_capped:
         out["picks_capped"] = True
@@ -67057,14 +67549,16 @@ async def _report_load_1v1(db, selector, key, cpid):
                              _report_totals(r["p1_bullets_fired"], r["p1_bullets_hit"],
                                             r["p1_blocks_activated"], r["p1_blocks_successful"],
                                             r["p1_keys_pressed"], r["p1_active_seconds"],
-                                            r["p1_damage_dealt"], r["p1_deaths"])),
+                                            r["p1_damage_dealt"], r["p1_deaths"]),
+                             xp=r.get("p1_xp_gained")),
                 _report_slot(r["player2_id"], r["p2_rounds_won"], r["p2_points_total"],
                              r["p2_fps_timeline"], r["p2_ping_timeline"], r["p2_hit_timeline"],
                              r["p2_block_timeline"], r["p2_damage_timeline"], r["p2_end_stats"],
                              _report_totals(r["p2_bullets_fired"], r["p2_bullets_hit"],
                                             r["p2_blocks_activated"], r["p2_blocks_successful"],
                                             r["p2_keys_pressed"], r["p2_active_seconds"],
-                                            r["p2_damage_dealt"], r["p2_deaths"])),
+                                            r["p2_damage_dealt"], r["p2_deaths"]),
+                             xp=r.get("p2_xp_gained")),
             ],
         })
     return games, total, all_ranked
@@ -67129,36 +67623,111 @@ async def _report_load_ovt(db, selector, key, cpid):
     return games, total
 
 
+async def _report_ffa_games(db, rows):
+    """FFA match rows (oldest first) -> games, with each game's PLAYING roster
+    rows read by ONE statement for every game: `absent` rows are frozen-roster
+    ghosts and are not participants, not slots, not telemetry (#227)."""
+    if not rows:
+        return []
+    fps = await _report_rows(db, _REPORT_FFA_PLAYERS_SQL,
+                             {"mids": [str(r["id"]) for r in rows]})
+    by_match = {}
+    for fp in fps:
+        by_match.setdefault(str(fp["match_id"]), []).append(fp)
+    games = []
+    for r in rows:
+        games.append({"id": r["id"], "started_at": r["started_at"],
+                      "duration_s": r["duration_s"], "ffa_timeline": r["timeline"],
+                      "settings": _ffa_settings_block(r),
+                      "slots": [_report_ffa_slot(fp) for fp in by_match.get(str(r["id"]), [])]})
+    return games
+
+
 async def _report_load_ffa(db, key, cpid):
-    """One FFA game — the match row (only when the caller PLAYED it) and its
-    PLAYING roster rows: `absent` rows are frozen-roster ghosts and are not
-    participants, not slots, not telemetry (#227)."""
+    """One FFA game - the match row, only when the caller PLAYED it."""
     rows = await _report_rows(db, _REPORT_FFA_SQL, {"key": key, "cpid": cpid})
     if not rows:
         return [], []
-    r = rows[0]
-    fps = await _report_rows(db, _REPORT_FFA_PLAYERS_SQL, {"key": key})
-    slots = []
-    for fp in fps:
-        s = _report_slot(fp["player_id"], fp["rounds_won"], fp["points_total"],
-                         fp["fps_timeline"], fp["ping_timeline"], fp["hit_timeline"],
-                         fp["block_timeline"], fp["damage_dealt_timeline"], fp["end_stats"],
-                         _report_totals(fp["bullets_fired"], fp["bullets_hit"],
-                                        fp["blocks_activated"], fp["blocks_successful"],
-                                        fp["keys_pressed"], fp["active_seconds"],
-                                        damage=fp["damage_dealt"], kills=fp["kills"]),
-                         killtl=fp["kill_timeline"])
-        s["slot"] = fp["slot"]
-        s["placement"] = fp["placement"]
-        s["rating_before"] = fp["rating_before"]
-        s["rating_after"] = fp["rating_after"]
-        s["rating_change"] = fp["rating_change"]
-        s["gold_gained"] = fp["gold_gained"]
-        s["color_hex"] = fp["color_hex"]
-        slots.append(s)
-    game = {"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-            "ffa_timeline": r["timeline"], "settings": _ffa_settings_block(r), "slots": slots}
-    return [game], slots
+    games = await _report_ffa_games(db, rows[:1])
+    return games, games[0]["slots"]
+
+
+async def _report_load_ffa_lobby(db, key, cpid):
+    """The FFA lobby sitting of the anchor game (_REPORT_FFA_LOBBY_SQL) ->
+    (oldest-first games, total, roster pids, colours). Players join and leave
+    between the games of a lobby, so the roster is the UNION of the games'
+    playing rosters: the newest game's players in placement order, then each
+    older game's newcomers. A player is absent from the games they did not
+    play - their keys are missing there, never zero."""
+    rows = await _report_rows(db, _REPORT_FFA_LOBBY_SQL,
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
+    games = await _report_ffa_games(db, rows)
+    order, color_of = [], {}
+    for g in reversed(games):
+        for s in g["slots"]:
+            if s["pid"] not in order:
+                order.append(s["pid"])
+            if s.get("color_hex") and s["pid"] not in color_of:
+                color_of[s["pid"]] = s["color_hex"]
+    return games, total, order, color_of
+
+
+def _report_ffa_slot(fp):
+    """One PLAYING ffa_match_players row -> a slot."""
+    s = _report_slot(fp["player_id"], fp["rounds_won"], fp["points_total"],
+                     fp["fps_timeline"], fp["ping_timeline"], fp["hit_timeline"],
+                     fp["block_timeline"], fp["damage_dealt_timeline"], fp["end_stats"],
+                     _report_totals(fp["bullets_fired"], fp["bullets_hit"],
+                                    fp["blocks_activated"], fp["blocks_successful"],
+                                    fp["keys_pressed"], fp["active_seconds"],
+                                    damage=fp["damage_dealt"], kills=fp["kills"]),
+                     killtl=fp["kill_timeline"], xp=fp.get("xp_gained"))
+    s["slot"] = fp["slot"]
+    s["placement"] = fp["placement"]
+    s["rating_before"] = fp["rating_before"]
+    s["rating_after"] = fp["rating_after"]
+    s["rating_change"] = fp["rating_change"]
+    s["gold_gained"] = fp["gold_gained"]
+    s["color_hex"] = fp["color_hex"]
+    return s
+
+
+async def _report_series_set(db, key, cpid):
+    """A series id -> (kind, mode, games, total, set_row, roster_pids, team_of).
+    ranked_series first, then team_series, then ovt_series: the first table
+    that has the id owns it. An unknown or invalidated series raises the
+    route's one 404."""
+    rs = await _report_rows(db, _REPORT_RS_SQL, {"key": key})
+    if rs:
+        set_row = rs[0]
+        if set_row["invalidated_at"] is not None:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+        games, total, _ = await _report_load_1v1(db, "series", key, cpid)
+        return ("ranked", "1v1", games, total, set_row,
+                [set_row["player1_id"], set_row["player2_id"]], {})
+    ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
+    if ts:
+        set_row = ts[0]
+        if set_row["invalidated_at"] is not None:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+        games, total = await _report_load_team(db, "series", key, cpid)
+        team_of = {str(set_row["t1a_id"]): 1, str(set_row["t1b_id"]): 1,
+                   str(set_row["t2a_id"]): 2, str(set_row["t2b_id"]): 2}
+        return ("team", "team", games, total, set_row,
+                [set_row["t1a_id"], set_row["t1b_id"], set_row["t2a_id"], set_row["t2b_id"]],
+                team_of)
+    os_ = await _report_rows(db, _REPORT_OS_SQL, {"key": key})
+    if not os_:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    set_row = os_[0]
+    if set_row["invalidated_at"] is not None:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    games, total = await _report_load_ovt(db, "series", key, cpid)
+    team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
+               str(set_row["duo_b_id"]): 2}
+    return ("ovt", "ovt", games, total, set_row,
+            [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]], team_of)
 
 
 def _report_consistent(games, anchor):
@@ -67174,15 +67743,7 @@ async def _report_load_cards(db, mode, mids):
     False for every table but FFA's, which is the only one that records it."""
     if not mids:
         return {}
-    table, with_round, with_rolled = _REPORT_CARD_TABLES[mode]
-    round_col = "c.round_number" if with_round else "NULL AS round_number"
-    rolled_col = "c.rolled" if with_rolled else "FALSE AS rolled"
-    order = "c.round_number NULLS FIRST, c.pick_order" if with_round else "c.pick_order"
-    rows = await _report_rows(db, f"""
-        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}, {rolled_col}
-          FROM {table} c
-         WHERE c.match_id = ANY(CAST(:mids AS uuid[]))
-         ORDER BY c.match_id, {order}""", {"mids": [str(m) for m in mids]})
+    rows = await _report_rows(db, _REPORT_CARD_STATEMENTS[mode], {"mids": [str(m) for m in mids]})
     out = {}
     for r in rows:
         out.setdefault(str(r["match_id"]), []).append(
@@ -67217,14 +67778,45 @@ async def _report_roster(db, pids_in_order, team_of=None, color_of=None):
     return roster
 
 
-async def _report_gold(db, reasons, refs):
-    """{player_id str: gold} for the named reasons against the named references
-    — one statement per set, whatever the number of games."""
+# Sept 28 (board row 30d): the reasons a GAME's own economy is written under
+# (its XP gold and level rewards, reference_id = the game's id) and the ones a
+# SERIES award is written under (reference_id = the series id). A 1v2 series
+# row carries its own totals and FFA rows their own gold_gained, so neither
+# has a series entry here.
+_REPORT_GAME_GOLD_REASONS = {"1v1": ("xp", "level_reward"),
+                             "team": ("team_xp", "level_reward"),
+                             "ovt": ("ovt_xp", "level_reward")}
+_REPORT_SERIES_GOLD_REASONS = {"ranked": ("series_win", "series_loss"),
+                               "team": ("team_series_win", "team_series_loss")}
+
+
+async def _report_ledger(db, kind, mode, selector, key, set_row, games):
+    """The set's gold ledger in ONE statement, whatever the number of games:
+    ({game id: {player id: gold}}, {player id: series award}). A game's gold is
+    every row written under its mode's per-game reasons against its id; the
+    award every row under the series reasons against the series id (ranked
+    and 2v2 series only). Rows are split by reference AND reason, so a row
+    can never count for the wrong one. An absent key means no ledger row,
+    never zero."""
+    game_reasons = _REPORT_GAME_GOLD_REASONS.get(mode, ())
+    series_reasons = (_REPORT_SERIES_GOLD_REASONS.get(kind, ())
+                      if selector == "series" and set_row is not None else ())
+    game_ids = {str(g["id"]) for g in games} if game_reasons else set()
+    refs = sorted(game_ids) + ([str(key)] if series_reasons else [])
     if not refs:
-        return {}
+        return {}, {}
     rows = await _report_rows(db, _REPORT_GOLD_SQL,
-                              {"reasons": list(reasons), "refs": [str(x) for x in refs]})
-    return {str(r["player_id"]): int(r["amount"] or 0) for r in rows}
+                              {"reasons": list(game_reasons) + list(series_reasons), "refs": refs})
+    per_game, award = {}, {}
+    for r in rows:
+        ref, reason, pid = str(r["reference_id"]), str(r["reason"]), str(r["player_id"])
+        amt = int(r["amount"] or 0)
+        if ref in game_ids and reason in game_reasons:
+            bucket = per_game.setdefault(ref, {})
+            bucket[pid] = bucket.get(pid, 0) + amt
+        elif series_reasons and ref == str(key) and reason in series_reasons:
+            award[pid] = award.get(pid, 0) + amt
+    return per_game, award
 
 
 async def _report_rating_after(db, pids, series_id):
@@ -67262,11 +67854,15 @@ def _report_rating_entry(after, delta):
     return {"before": round(a - d, 1), "after": a, "delta": d}
 
 
-async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
+async def _report_set_summary(db, kind, selector, key, set_row, games, roster, award=None):
     """rating {sid: {before, after, delta}} and gold {sid: n}, computed ONCE
     per set from the set's own row(s) (C-7). Rating entries exist only where
     the set is rated and completed; gold entries only where a ledger row
-    exists — an absent key means "not recorded", never zero."""
+    exists — an absent key means "not recorded", never zero. `award` is the
+    series award _report_ledger read in the set's one ledger statement; each
+    game's own ledger gold is already on it (`gold`, player-id keyed).
+    Board row 30d adds gold_total / xp_total: what the set EARNED (see the
+    block comment above), sparse the same way."""
     rating, gold = {}, {}
     sid_of = {r["pid"]: r["id"] for r in roster}
     if kind == "ranked" and selector == "series" and set_row is not None:
@@ -67280,8 +67876,7 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
             if sid is None or d is None:
                 continue
             rating[sid] = _report_rating_entry(after.get(pid), d)
-        g = await _report_gold(db, ("series_win", "series_loss"), [key])
-        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+        gold = {sid_of[p]: v for p, v in (award or {}).items() if p in sid_of}
     elif kind == "team" and selector == "series" and set_row is not None:
         for slot in ("t1a", "t1b", "t2a", "t2b"):
             pid = set_row[f"{slot}_id"]
@@ -67292,8 +67887,7 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
             # 2v2 ratings keep no history snapshots: the delta is the only
             # authoritative number, before/after stay null ("not recorded").
             rating[sid] = _report_rating_entry(None, d)
-        g = await _report_gold(db, ("team_series_win", "team_series_loss"), [key])
-        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+        gold = {sid_of[p]: v for p, v in (award or {}).items() if p in sid_of}
     elif kind == "ovt" and selector == "series" and set_row is not None:
         for slot in ("solo", "duo_a", "duo_b"):
             pid = set_row[f"{slot}_id"]
@@ -67305,28 +67899,68 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
                 rating[sid] = _report_rating_entry(None, d)
             gold[sid] = int(set_row[f"{slot}_gold_earned"] or 0)
     elif kind == "ffa":
-        for s in (games[0]["slots"] if games else []):
+        # FFA rates every game on its own (ffa_match_players.rating_*): over a
+        # lobby sitting the delta is the SUM of the player's per-game changes,
+        # `before` the rating recorded at their first rated game of the set and
+        # `after` the one recorded at their last. One game reads exactly as it
+        # always did. Gold is the sum of the per-game gold_gained.
+        first_before, last_after, delta_sum = {}, {}, {}
+        for g in games:                          # oldest first
+            for s in g["slots"]:
+                sid = sid_of.get(s["pid"])
+                if sid is None:
+                    continue
+                if s.get("rating_change") is not None:
+                    delta_sum[sid] = delta_sum.get(sid, 0.0) + float(s["rating_change"])
+                    if sid not in first_before:
+                        first_before[sid] = s.get("rating_before")
+                    last_after[sid] = s.get("rating_after")
+                if s.get("gold_gained") is not None:
+                    gold[sid] = gold.get(sid, 0) + int(s["gold_gained"])
+        for sid, d in delta_sum.items():
+            rb, ra = first_before.get(sid), last_after.get(sid)
+            rating[sid] = {"before": round(float(rb), 1) if rb is not None else None,
+                           "after": round(float(ra), 1) if ra is not None else None,
+                           "delta": round(d, 1)}
+    # What each game recorded on its own: its ledger gold (_report_ledger, or
+    # FFA's gold_gained) and its XP record (1v1 and FFA rows keep one).
+    games_gold, games_xp = {}, {}
+    for gm in games:
+        for p, v in (gm.get("gold") or {}).items():
+            sid = sid_of.get(str(p))
+            if sid is not None:
+                games_gold[sid] = games_gold.get(sid, 0) + int(v)
+        for s in gm["slots"]:
             sid = sid_of.get(s["pid"])
+            if sid is not None and s.get("xp") is not None:
+                try:
+                    games_xp[sid] = games_xp.get(sid, 0) + int(s["xp"])
+                except (TypeError, ValueError):
+                    pass
+    if kind in ("ranked", "casual", "ovt", "team") and not (selector == "series" and set_row is not None):
+        # One game or a casual sitting: no rating is at stake; gold is the
+        # per-game XP/level ledger, read in the set's ONE ledger statement.
+        gold = dict(games_gold)
+    gold_total, xp_total = dict(games_gold), dict(games_xp)
+    if kind == "ranked" and selector == "series" and set_row is not None:
+        # the award is written against the series, each game's own gold against the game
+        for sid, v in gold.items():
+            gold_total[sid] = gold_total.get(sid, 0) + v
+    elif kind in ("team", "ovt") and selector == "series" and set_row is not None:
+        # these series rows accumulate every game's economy AND the award
+        gold_total, xp_total = {}, {}
+        slots = ("t1a", "t1b", "t2a", "t2b") if kind == "team" else ("solo", "duo_a", "duo_b")
+        for slot in slots:
+            pid = set_row[f"{slot}_id"]
+            sid = sid_of.get(str(pid)) if pid is not None else None
             if sid is None:
                 continue
-            if s.get("rating_change") is not None:
-                d = round(float(s["rating_change"]), 1)
-                rb = s.get("rating_before")
-                ra = s.get("rating_after")
-                rating[sid] = {"before": round(float(rb), 1) if rb is not None else None,
-                               "after": round(float(ra), 1) if ra is not None else None,
-                               "delta": d}
-            if s.get("gold_gained") is not None:
-                gold[sid] = int(s["gold_gained"])
-    else:
-        # One game or a casual sitting: no rating is at stake; gold is the
-        # per-game XP/level ledger, fetched ONCE for every game id in the set.
-        reasons = {"ovt": ("ovt_xp", "level_reward"),
-                   "team": ("team_xp", "level_reward")}.get(kind, ("xp", "level_reward"))
-        if kind in ("ranked", "casual", "ovt", "team"):
-            g = await _report_gold(db, reasons, [str(gm["id"]) for gm in games])
-            gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
-    return {"rating": rating, "gold": gold}
+            g_, x_ = set_row.get(f"{slot}_gold_earned"), set_row.get(f"{slot}_xp_earned")
+            if g_ is not None:
+                gold_total[sid] = int(g_)
+            if x_ is not None:
+                xp_total[sid] = int(x_)
+    return {"rating": rating, "gold": gold, "gold_total": gold_total, "xp_total": xp_total}
 
 
 @app.get("/api/v1/report", tags=["Players"])
@@ -67334,6 +67968,8 @@ async def get_set_report(request: Request, steam_id: str = "",
                          series: str | None = None, match: str | None = None,
                          session: str | None = None,
                          sitting: str | None = None,
+                         lobby: str | None = None,
+                         viewer: str | None = None,
                          db: AsyncSession = Depends(get_db)):
     """The session report envelope (v1) for one set — see the block comment
     above. Errors: 401 "session_required" (fail-closed session check, first
@@ -67348,68 +67984,118 @@ async def get_set_report(request: Request, steam_id: str = "",
     of the set the envelope does not carry — dropped for a different roster
     or beyond _REPORT_MAX_GAMES — and `truncated` is its boolean.
 
-    `sitting=<match uuid>` (Sept 8 item 5): the 1v1 games between that game's
-    two players whose end time falls inside the CALLER's sitting containing it
-    (_SITTING_CTES: the viewer's finished games in any mode, split at gaps over
-    SITTING_GAP_HOURS). Kind and summary follow the `session` rules: ranked only
-    when every game is, per-game gold, no rating."""
+    `sitting=<game uuid>` (Sept 8 item 5; resolved by KIND since Sept 28,
+    board row 30a). _REPORT_KIND_SQL decides what the anchor is, each arm
+    carrying its mode's caller predicate, so an id the caller did not play
+    resolves to nothing and 404s like every other refusal:
+      - a 1v1 game: the 1v1 games between that game's two players whose end
+        time falls inside the CALLER's sitting containing it (_SITTING_CTES:
+        the viewer's finished games in any mode, split at gaps over
+        SITTING_GAP_HOURS). Kind and summary follow the `session` rules:
+        ranked only when every game is, per-game gold, no rating;
+      - a 2v2 or 1v2 game: its series, exactly the `series` envelope (set row,
+        rating and series gold included), or the one game when it has none;
+      - an FFA game: its lobby sitting, exactly the `lobby` envelope.
+
+    `lobby=<ffa game uuid>` (Sept 28, board row 30a): every FFA game of the
+    anchor game's lobby whose end falls inside the caller's sitting containing
+    the anchor, each one the caller PLAYED (not absent). Players join and leave
+    between the games of a lobby, so this is the one envelope whose roster is
+    the UNION of its games' playing rosters (newest game first, placement
+    order) and a player's keys are missing from a game they did not play -
+    never zero. No game is dropped for its roster: every game is one the
+    caller played, so the union names nobody the caller's own per-game `match`
+    requests would not. A game with no lobby row is its own one-game lobby.
+
+    `viewer=<steam id>` (Sept 28, board row 30g): the set as that player is
+    served it. Participation, the sitting boundaries and the roster check are
+    decided for `viewer` instead of the caller, so the answer is exactly the
+    envelope the viewer's own request gets. Only the broadcast account may name
+    a viewer: the session check still applies to the CALLER, then a caller
+    outside SPECTATE_BROADCAST_STEAM_IDS gets 403 "broadcast_only" (the two
+    checks /broadcast/target and /broadcast/report-status make). A viewer that
+    is not a 17-digit Steam id is a 400 "bad_request"; both are decided before
+    any statement runs. Then (round 2 M4) the requested game must be one the
+    broadcast seat WATCHED: _REPORT_WATCHED_SQL requires a watched-grant
+    record of the caller (spectate_watch_grants: a master validation observed
+    the seat in that spectate game's room; round 3 N1, it outlives the lease
+    row) for a spectate game whose roster names the viewer, whose span holds the
+    requested game's end, whose recorded mode is the requested game's mode and
+    whose recorded source (series, lobby or tournament match) is the requested
+    game's, or, where it records no source, whose roster is exactly the
+    requested game's played roster (round 3); anything else - including a
+    series or session key, which is not a game id - gets the same 404 as every
+    other refusal, as does a viewer who did not play the set."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
+    # Board row 30g: whose report this is - the caller's own unless the
+    # broadcast account names a viewer (docstring).
+    reader = str(steam_id)
+    if viewer is not None:
+        if not _is_broadcast_account(steam_id):
+            raise HTTPException(status_code=403, detail="broadcast_only")
+        if not _re.fullmatch(r"[0-9]{17}", viewer):
+            raise HTTPException(status_code=400, detail="bad_request")
+        reader = viewer
     chosen = [(name, val) for name, val in
               (("series", series), ("match", match), ("session", session),
-               ("sitting", sitting)) if val]
+               ("sitting", sitting), ("lobby", lobby)) if val]
     if len(chosen) != 1:
         raise HTTPException(status_code=400, detail="bad_request")
     selector, raw = chosen[0]
     key = _report_parse_uuid(raw)
     if key is None:
         raise HTTPException(status_code=400, detail="bad_request")
+    if viewer is not None:
+        # Round 2 M4: the requested set must be one the broadcast seat watched
+        # (_REPORT_WATCHED_SQL: a watched-grant record of this account for a
+        # spectate game whose roster names the viewer, whose span holds the
+        # requested game's end, and whose mode and source - or, without a
+        # source, exact played roster - are the requested game's); otherwise
+        # the ordinary participant-closed 404.
+        watched = await _report_rows(db, _REPORT_WATCHED_SQL, {
+            "key": key, "viewer": viewer, "bsid": str(steam_id),
+            "pre": _REPORT_WATCH_PRE_S, "post": _REPORT_WATCH_POST_S})
+        if not watched:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
 
-    caller = await _report_rows(db, _REPORT_CALLER_SQL, {"sid": str(steam_id)})
+    caller = await _report_rows(db, _REPORT_CALLER_SQL, {"sid": reader})
     if not caller or caller[0]["id"] is None:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
     cpid = str(caller[0]["id"])
 
     kind, mode, games, total = None, None, [], 0
     set_row, roster_pids, team_of, color_of = None, [], {}, {}
+    # The selector and key the SET is identified by from here on: a `sitting`
+    # anchored on a 2v2/1v2 game IS that game's series (its summary reads the
+    # series row and that id's series gold), one on an FFA game its lobby.
+    eff_selector, eff_key = selector, key
+    union_roster = False
 
-    if selector == "series":
-        rs = await _report_rows(db, _REPORT_RS_SQL, {"key": key})
-        if rs:
-            set_row = rs[0]
-            if set_row["invalidated_at"] is not None:
-                raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-            kind, mode = "ranked", "1v1"
-            games, total, _ = await _report_load_1v1(db, "series", key, cpid)
-            roster_pids = [set_row["player1_id"], set_row["player2_id"]]
-        else:
-            ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
-            if ts:
-                set_row = ts[0]
-                if set_row["invalidated_at"] is not None:
-                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-                kind, mode = "team", "team"
-                games, total = await _report_load_team(db, "series", key, cpid)
-                roster_pids = [set_row["t1a_id"], set_row["t1b_id"], set_row["t2a_id"], set_row["t2b_id"]]
-                team_of = {str(set_row["t1a_id"]): 1, str(set_row["t1b_id"]): 1,
-                           str(set_row["t2a_id"]): 2, str(set_row["t2b_id"]): 2}
-            else:
-                os_ = await _report_rows(db, _REPORT_OS_SQL, {"key": key})
-                if not os_:
-                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-                set_row = os_[0]
-                if set_row["invalidated_at"] is not None:
-                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-                kind, mode = "ovt", "ovt"
-                games, total = await _report_load_ovt(db, "series", key, cpid)
-                roster_pids = [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]]
-                team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
-                           str(set_row["duo_b_id"]): 2}
-    elif selector in ("session", "sitting"):
+    if selector == "sitting":
+        kinds = await _report_rows(db, _REPORT_KIND_SQL, {"key": key, "cpid": cpid})
+        what = kinds[0]["report_kind"] if kinds else None
+        if what in ("team", "ovt"):
+            series_of = _report_parse_uuid(kinds[0]["series_id"]) if kinds[0]["series_id"] else None
+            eff_selector, eff_key = ("series", series_of) if series_of else ("match", key)
+        elif what == "ffa":
+            eff_selector = "lobby"
+        elif what != "v1":
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+
+    if eff_selector == "series":
+        (kind, mode, games, total, set_row,
+         roster_pids, team_of) = await _report_series_set(db, eff_key, cpid)
+    elif eff_selector in ("session", "sitting"):
         kind, mode = "casual", "1v1"
-        games, total, all_ranked = await _report_load_1v1(db, selector, key, cpid)
+        games, total, all_ranked = await _report_load_1v1(db, eff_selector, eff_key, cpid)
         if games and all_ranked:
             kind = "ranked"
+    elif eff_selector == "lobby":
+        games, total, roster_pids, color_of = await _report_load_ffa_lobby(db, eff_key, cpid)
+        if games:
+            kind, mode = "ffa", "ffa"
+            union_roster = True
     else:  # match
         games, total, _ = await _report_load_1v1(db, "match", key, cpid)
         if games:
@@ -67437,30 +68123,44 @@ async def get_set_report(request: Request, steam_id: str = "",
     # ONE roster per envelope: the set row's when there is one, else the
     # newest game the caller played. Games with any other roster are dropped
     # and counted in `games_omitted` — a session uuid groups only the caller's
-    # own games with the same people.
+    # own games with the same people. The FFA lobby sitting is the one set
+    # whose roster is the union of its games' (see the docstring): nothing is
+    # dropped for its roster, and the caller is in it by the statement.
     if set_row is not None:
         anchor = frozenset(str(p) for p in roster_pids if p is not None)
+    elif union_roster:
+        anchor = None
     else:
         anchor = _report_roster_key(games[-1]["slots"])
         roster_pids = [s["pid"] for s in games[-1]["slots"]]
-    if cpid not in anchor:
+    if anchor is not None:
+        if cpid not in anchor:
+            raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+        games, _dropped = _report_consistent(games, anchor)
+    elif cpid not in {str(p) for p in roster_pids}:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
-    games, _dropped = _report_consistent(games, anchor)
     if not games:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
     games_omitted = max(0, int(total) - len(games))
 
     roster = await _report_roster(db, roster_pids, team_of, color_of)
     # PARTICIPANT-ONLY, and indistinguishable from "no such set" on purpose.
-    if steam_id not in {r["id"] for r in roster}:
+    if reader not in {r["id"] for r in roster}:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
     sid_of = {r["pid"]: r["id"] for r in roster}
 
     sample_cap = _report_sample_cap(len(games), len(roster))
     card_cap = _report_card_cap(len(games), len(roster))
     cards = await _report_load_cards(db, mode, [g["id"] for g in games])
+    per_game_gold, award = await _report_ledger(db, kind, mode, eff_selector, eff_key, set_row, games)
+    for g in games:
+        if mode == "ffa":
+            g["gold"] = {s["pid"]: int(s["gold_gained"]) for s in g["slots"]
+                         if s.get("gold_gained") is not None and s["pid"] is not None}
+        else:
+            g["gold"] = per_game_gold.get(str(g["id"]), {})
     games_json = [_report_game_json(g, sid_of, cards, sample_cap, card_cap) for g in games]
-    set_summary = await _report_set_summary(db, kind, selector, key, set_row, games, roster)
+    set_summary = await _report_set_summary(db, kind, eff_selector, eff_key, set_row, games, roster, award)
     return _report_fit({
         "v": 1,
         "kind": kind,
@@ -67471,6 +68171,160 @@ async def get_set_report(request: Request, steam_id: str = "",
         "truncated": games_omitted > 0,
         "games_omitted": games_omitted,
     })
+
+
+# -- The session report marker (/health `session_report`) -------------------
+# Board rows 30a, 30d and 30g change what GET /api/v1/report answers (the
+# `sitting` selector dispatched by the anchor's mode, the FFA `lobby`
+# selector, each game's gold and XP and the set's totals, the broadcast
+# account's `viewer`) and add no route: every request they change is one the
+# build before answers too. So this word is the release train's build
+# discriminator for them. 1 when this app routes GET /api/v1/report to
+# get_set_report AND the database this box is connected to has every table
+# and column that the route's statements name; 0 when either is not so. A
+# box on the build before answers without the key. Nothing reads it (#306).
+# The caller's session check is the shared path every signed route runs, not
+# a read of this feature, and is not asked about.
+#
+# NAMED one by one in _SESSION_REPORT_NAMED, and held complete by tests
+# (#342): the statements are the report's own `_REPORT_*` constants, the ones
+# the _report_rows call sites run (a test holds the two sets equal, one holds
+# the named set equal to the same rules run over every `_REPORT_*` constant of
+# the module, and another that nothing else in the report code runs a
+# statement). Named, never collected from globals(): the janitor SQL walker
+# refuses the whole module when its namespace is handed to a call (#613), and
+# every `text(_X_SQL)` janitor site then fails the boot self-test (this
+# probe's first form did: 11 sites). A string that opens with SELECT or WITH
+# is a statement,
+# and one carrying `{where}` is a template, expanded with every fragment of
+# the `_WHERE` table of the same stem, as its loader formats it; a table whose
+# values are all statements (the card statements) gives each of them. A
+# template without its table leaves the set incomplete, and an incomplete set
+# reads 0 without asking.
+#
+# The database is asked to ANALYSE the statements, never to run them: one
+# statement, SELECT 1 WHERE false AND EXISTS (<statement>) AND ..., every
+# bind NULL. PostgreSQL resolves every table and column name of every
+# subquery before it plans, and the constant-false filter is folded before any
+# subquery is planned, so no row is read. A refusal in SQLSTATE class 42 (an
+# undefined column or table, and any other statement the analysis rejects)
+# rolls the transaction back and reads 0: not proven, the train's
+# conservative reading. That is wider than `team_dc_fallback`'s two codes on
+# purpose: this probe is composed from many statements, and a composed
+# statement the analysis cannot take must not turn the whole answer into
+# "database disconnected" on a healthy box. Anything else is left to
+# health_check's own catch, as a failed SELECT 1 is. The degraded arm cannot
+# ask, so it answers 0, which the train reads as not proven; a box counts as
+# proven only on the whole tuple status=ok, database=connected,
+# session_report=1.
+_SESSION_REPORT_STATEMENT = _re.compile(r"^\s*(?:SELECT|WITH)\b")
+
+
+def _session_report_statements(namespace) -> tuple:
+    """Every statement GET /api/v1/report runs, from the `_REPORT_*`
+    constants in `namespace` (_SESSION_REPORT_NAMED; a test runs it over the
+    module's whole namespace too), sorted, each once; () when a `{where}`
+    template has no `_WHERE` table of its stem."""
+    found = set()
+    for name, value in namespace.items():
+        if not name.startswith("_REPORT_"):
+            continue
+        if isinstance(value, str) and _SESSION_REPORT_STATEMENT.match(value):
+            if "{where}" not in value:
+                found.add(value)
+                continue
+            table = namespace.get(name[:-len("_SQL")] + "_WHERE") if name.endswith("_SQL") else None
+            if not isinstance(table, dict) or not table:
+                return ()
+            found.update(value.format(where=fragment) for fragment in table.values())
+        elif (isinstance(value, dict) and value
+              and all(isinstance(v, str) and _SESSION_REPORT_STATEMENT.match(v)
+                      for v in value.values())):
+            found.update(value.values())
+    return tuple(sorted(found))
+
+
+def _session_report_probe_sql(statements) -> str:
+    """One statement that has every one of `statements` analysed and reads
+    no row; "" when there are none."""
+    if not statements:
+        return ""
+    return "SELECT 1 WHERE false" + "".join(" AND EXISTS (" + s + ")" for s in statements)
+
+
+def _session_report_bound() -> bool:
+    """True when this app routes GET /api/v1/report to get_set_report, once."""
+    hits = [r for r in app.routes
+            if getattr(r, "path", None) == "/api/v1/report"
+            and "GET" in (getattr(r, "methods", None) or ())]
+    return len(hits) == 1 and getattr(hits[0], "endpoint", None) is get_set_report
+
+
+def _session_report_refused(exc) -> bool:
+    """True when the analysis refused the statement: SQLSTATE class 42 on
+    `exc` or on its wrapping chain (.orig and __cause__). An exception merely
+    raised while another was being handled (__context__) is not wrapping it,
+    and is not read."""
+    todo, seen = [exc], set()
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        state = str(getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None) or "")
+        if len(state) == 5 and state.startswith("42"):
+            return True
+        todo.extend((getattr(cur, "orig", None), cur.__cause__))
+    return False
+
+
+# The report's statement constants and their tables, by name (the block
+# comment above: named, never collected from globals()).
+_SESSION_REPORT_NAMED = {
+    "_REPORT_CALLER_SQL": _REPORT_CALLER_SQL,
+    "_REPORT_1V1_SQL": _REPORT_1V1_SQL,
+    "_REPORT_1V1_WHERE": _REPORT_1V1_WHERE,
+    "_REPORT_RS_SQL": _REPORT_RS_SQL,
+    "_REPORT_TS_SQL": _REPORT_TS_SQL,
+    "_REPORT_TEAM_SQL": _REPORT_TEAM_SQL,
+    "_REPORT_TEAM_WHERE": _REPORT_TEAM_WHERE,
+    "_REPORT_TEAM_TELE_SQL": _REPORT_TEAM_TELE_SQL,
+    "_REPORT_OS_SQL": _REPORT_OS_SQL,
+    "_REPORT_OVT_SQL": _REPORT_OVT_SQL,
+    "_REPORT_OVT_WHERE": _REPORT_OVT_WHERE,
+    "_REPORT_FFA_SQL": _REPORT_FFA_SQL,
+    "_REPORT_FFA_PLAYERS_SQL": _REPORT_FFA_PLAYERS_SQL,
+    "_REPORT_KIND_SQL": _REPORT_KIND_SQL,
+    "_REPORT_WATCHED_SQL": _REPORT_WATCHED_SQL,
+    "_REPORT_FFA_LOBBY_SQL": _REPORT_FFA_LOBBY_SQL,
+    "_REPORT_ROSTER_SQL": _REPORT_ROSTER_SQL,
+    "_REPORT_GOLD_SQL": _REPORT_GOLD_SQL,
+    "_REPORT_RATING_SQL": _REPORT_RATING_SQL,
+    "_REPORT_CARD_STATEMENTS": _REPORT_CARD_STATEMENTS,
+}
+_SESSION_REPORT_STATEMENTS = _session_report_statements(_SESSION_REPORT_NAMED)
+_SESSION_REPORT_PROBE = _session_report_probe_sql(_SESSION_REPORT_STATEMENTS)
+_SESSION_REPORT_BINDS = (tuple(sorted(text(_SESSION_REPORT_PROBE).compile().params))
+                         if _SESSION_REPORT_PROBE else ())
+
+
+async def _session_report_probe(db) -> int:
+    """/health `session_report` on the connected arm: 1 when the route is
+    bound and the analysis took every statement, 0 when the route is not
+    bound, the set is incomplete or the analysis refused (class 42). Any
+    other error is raised to health_check's own catch. Nothing is cached: the
+    degraded arm answers 0."""
+    if not _SESSION_REPORT_PROBE or not _session_report_bound():
+        return 0
+    try:
+        await db.execute(text(_SESSION_REPORT_PROBE),
+                         {name: None for name in _SESSION_REPORT_BINDS})
+    except Exception as exc:
+        if not _session_report_refused(exc):
+            raise
+        await db.rollback()
+        return 0
+    return 1
 
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
 

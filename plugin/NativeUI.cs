@@ -3746,11 +3746,14 @@ namespace CompetitiveRounds
             row.btnId=UIFactory.CreateButton("ID",header.transform,"ID",12f,C_DIM,C_BTN,
                 ()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(30,21));
             SetFfaLayoutWidth(row.btnId,30f,0f,30f);
-            // Sept 6 batch (Group 4 item c): one-game session report for this FFA
-            // match (FFA has no multi-game sets) -> ?match=. Reads the row's own
-            // binding at click time (#265).
+            // Sept 6 batch (Group 4 item c): the session report for this FFA game.
+            // Sept 28 (board row 30a): ?lobby= - every game of the game's lobby
+            // sitting (the caller's sitting in that lobby); a game alone in its
+            // lobby answers exactly the one-game ?match= envelope, so the row needs
+            // no lobby field it does not carry. Reads the row's own binding at
+            // click time (#265).
             row.btnSession=UIFactory.CreateButton("Ses",header.transform,I18n.Tr("Session"),12f,C_DIM,C_BTN,
-                ()=>OpenSessionReport("match",row.currentMatchId),sizeDelta:new Vector2(66,21));
+                ()=>OpenSessionReport("lobby",row.currentMatchId),sizeDelta:new Vector2(66,21));
             SetFfaLayoutWidth(row.btnSession,66f,0f,66f);
             row.btnSession.SetActive(false);
             row.root.SetActive(false);
@@ -4432,7 +4435,12 @@ namespace CompetitiveRounds
             try
             {
                 if(Event.current==null||Event.current.type!=EventType.Repaint)return;
-                if(!isOpen||currentTab!=12||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
+                /* Board row 30b: this tooltip is page IMGUI painted from the FFA
+                 * tab's own behaviour (FfaRecentGraphDrawer), outside DrawUI's
+                 * call order and asking to be on top (GUI.depth below), so it
+                 * asks the page elements' rule and stands down while the
+                 * session report is open. */
+                if(!SessionReportRules.PageElementMayDraw(isOpen,currentTab==12,SessionReportView.Active)||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
                 Vector2 mouse=Event.current.mousePosition;
                 // Cards-line tooltips first (a cards line is more specific
                 // than its row's header; the rects never overlap). Both row
@@ -6012,7 +6020,11 @@ namespace CompetitiveRounds
             try
             {
                 if(Event.current==null||Event.current.type!=EventType.Repaint)return;
-                if(!isOpen||currentTab!=11||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
+                /* Board row 30b: page IMGUI from the 1v2 tab's own behaviour
+                 * (OneVTwoHoverDrawer), as on the FFA tab: it asks the page
+                 * elements' rule and stands down while the session report is
+                 * open. */
+                if(!SessionReportRules.PageElementMayDraw(isOpen,currentTab==11,SessionReportView.Active)||CompetitiveUI.PageImguiHidden)return;/* Sept 8 item 1: never over a popup */
                 Vector2 mouse=Event.current.mousePosition;
                 string tip=null;
                 for(int i=0;i<ovtRecentRows.Count&&tip==null;i++)
@@ -6422,9 +6434,15 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>Curated-metric setter for the showcase (design review:
-        /// never blindly iterate ActiveMetrics — several entries trigger
-        /// per-player lazy fetch storms). Matches the EXACT label in
+        /// <summary>Board row 31: the Compare tab's metric list in its order,
+        /// for the idle showcase's walk. A copy, so no caller can reorder the
+        /// array the render sites switch on.</summary>
+        internal static string[] CompareMetricNames => (string[])COMPARE_METRICS.Clone();
+
+        /// <summary>Metric setter for the showcase, which walks every
+        /// COMPARE_METRICS entry since board row 31 (IdleShowcase states the
+        /// request cost: a board metric fetches once per candidate per session
+        /// through ApiClient's caches). Matches the EXACT label in
         /// COMPARE_METRICS, then (Sept 1, broadcast verification of the Cards
         /// rework) in CARD_METRICS — a card-metric match flips to the Cards
         /// sub-tab and, when nothing is selected, seeds the selection from
@@ -17056,8 +17074,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             // collapsed into one per ladder — the axis is chosen on the graph itself
             // (RatingGraphAxis: updates / calendar / since first, remembered in the
             // config), and "over games" named a count the rows never were. The
-            // rename retires the old translation keys; IdleShowcase's CURATED_METRICS
-            // byte-matches this array and moved with it; DevSetCompareMetricByName
+            // rename retires the old translation keys; the idle showcase walks this
+            // array itself (board row 31, CompareMetricNames); DevSetCompareMetricByName
             // still accepts the four old names as aliases.
             "Elo", "FFA Elo",
             "Top Cards", "Worst Cards", "Hit / Block %",

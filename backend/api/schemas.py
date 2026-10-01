@@ -1031,6 +1031,17 @@ class HealthResponse(BaseModel):
     # without a default, so building the answer without it raises instead
     # of silently leaving the key out. Absent on any build before it.
     janitor_selftest_build: int
+    # session_report: whether GET /api/v1/report is bound on this app AND the
+    # database this box is connected to has every table and column the route's
+    # statements name (main._session_report_probe: 1 yes, 0 no; the degraded
+    # arm answers the last probe). The statements are the report's own
+    # constants, named and held complete by tests (#342). The release train's
+    # build discriminator for board rows 30a/30d/30g, which add no route; read
+    # by nothing else (#306).
+    # Declared without a default, so building the answer without it raises
+    # instead of silently leaving the key out. Absent on any build before
+    # those rows, which is how the train reads the old build.
+    session_report: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
@@ -2114,6 +2125,25 @@ class SpectateValidateBody(BaseModel):
     steam_id: str = Field(min_length=1, max_length=32)
     room_name: str = Field(min_length=1, max_length=64)
     spectators: list[SpectateValidateEntry] = Field(default_factory=list, max_length=8)
+    # Session report round 5 MEDIUM 1: the participant tuple the master read
+    # from its own room when it took this spectator inventory - the room's
+    # mode and its fighters' steam ids, sorted and comma-joined exactly as
+    # its attest sends them. Round 6 MEDIUM 1: beside them, the room row's
+    # game id and server-derived source, as the server answered the master's
+    # last participant attest of that same mode and roster. The route grants
+    # a watch only when all of them are the live room row's under the room
+    # lock, and records these values (main._SPECTATE_GRANT_OBSERVED_TUPLE).
+    # Round 7 MEDIUM 1: and the room row's generation from that same attest
+    # answer (migration 364: it only increases, and advances on every change
+    # of any other value here). All five absent is the request shape of every
+    # released client (1.40.3 and earlier): it is answered as before, and
+    # writes no grant. Some without the others is refused (422), including
+    # round 6's four without the generation.
+    observed_game_id: str | None = Field(default=None, max_length=64)
+    observed_generation: int | None = Field(default=None, ge=1, le=9223372036854775807)
+    observed_mode: str | None = Field(default=None, min_length=3, max_length=8)
+    observed_source_ref: str | None = Field(default=None, max_length=64)
+    observed_roster: str | None = Field(default=None, max_length=400)
 
 
 class AllowSpectatorsBody(BaseModel):

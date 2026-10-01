@@ -14200,67 +14200,54 @@ namespace CompetitiveRounds
         /// FindMatchingBracket is only safe when string values can't contain
         /// brackets; these arrays are mostly USER-CONTROLLED display names
         /// ("[TAG] Bob", ">:[") — learning #61 family.</summary>
+        // Sept 28 (board row 30a): the implementation moved to the Unity-free
+        // SessionReportRules so tools/client-rules-harness EXECUTES it; the one
+        // behaviour change is a null string, which answers -1 instead of throwing.
         internal static int FindMatchingBracketStringAware(string s, int openPos)
-        {
-            if (openPos < 0 || openPos >= s.Length) return -1;
-            int depth = 0; bool inStr = false;
-            for (int i = openPos; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (inStr)
-                {
-                    if (c == '\\') i++;
-                    else if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') { inStr = true; continue; }
-                if (c == '[') depth++;
-                else if (c == ']') { depth--; if (depth == 0) return i; }
-            }
-            return -1;
-        }
+            => SessionReportRules.MatchBracket(s, openPos);
 
         // Curly twin of the above (learning #156: any slice over a region that
         // can carry user-authored strings must be string-aware).
         // internal since Sept 6 item a: ProfileCard slices the H2H response's
         // nested `profile` / `modes` members with it (design v2 A-4).
         internal static int FindMatchingBraceStringAware(string s, int openPos)
-        {
-            if (openPos < 0 || openPos >= s.Length) return -1;
-            int depth = 0; bool inStr = false;
-            for (int i = openPos; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (inStr)
-                {
-                    if (c == '\\') i++;
-                    else if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') { inStr = true; continue; }
-                if (c == '{') depth++;
-                else if (c == '}') { depth--; if (depth == 0) return i; }
-            }
-            return -1;
-        }
+            => SessionReportRules.MatchBrace(s, openPos);
 
         /// <summary>Sept 6 batch (Group 4 item c): GET /api/v1/report — the session
-        /// report envelope for ONE set. `selector` is series / match / session and
-        /// `key` the UUID the history row carries. Strict Steam session endpoint
+        /// report envelope for ONE set. `selector` is series / match / session /
+        /// sitting / lobby and `key` the UUID the history row carries (Sept 28,
+        /// board row 30a: `sitting` resolves its anchor's mode server-side and
+        /// `lobby` is an FFA game's lobby sitting). Strict Steam session endpoint
         /// (no token -> the same early-out the other strict callers use, so the
         /// view can say why); participant-only server side (a non-participant
         /// gets the same 404 as a missing set). Read-only. Parsing lives in
-        /// SessionReportModel.Parse — the raw text is handed to the callback.</summary>
+        /// SessionReportRules.Parse — the raw text is handed to the callback.</summary>
         public static void FetchSessionReport(string selector, string key, Action<bool, string> callback)
+            => FetchSessionReport(selector, key, null, callback);
+
+        /// <summary>Board row 30g: `viewer` (a 17-digit Steam id) asks for the set
+        /// as that player is served it. The server answers it only for the
+        /// broadcast account (strict session plus its allowlist) and refuses
+        /// every other caller with 403 "broadcast_only"; null or empty is the
+        /// caller's own report, the request the F5 view makes.</summary>
+        public static void FetchSessionReport(string selector, string key, string viewer, Action<bool, string> callback)
         {
             if (callback == null) return;
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { callback(false, "no-identity"); return; }
             if (string.IsNullOrEmpty(SteamAuth.SessionToken)) { callback(false, "session_required"); return; }   // strict-session endpoint
-            if (selector != "series" && selector != "match" && selector != "session" && selector != "sitting") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>
+            if (selector != "series" && selector != "match" && selector != "session" && selector != "sitting"
+                && selector != "lobby") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>; Sept 28 (row 30a): ?lobby=<ffa match uuid>
             Guid parsed;
             if (!Guid.TryParse(key ?? "", out parsed)) { callback(false, "bad-key"); return; }
+            bool named = !string.IsNullOrEmpty(viewer);
+            if (named)
+            {
+                if (viewer.Length != 17) { callback(false, "bad-viewer"); return; }
+                foreach (char ch in viewer) if (ch < '0' || ch > '9') { callback(false, "bad-viewer"); return; }
+            }
             string url = $"{baseUrl}/api/v1/report?steam_id={Uri.EscapeDataString(sid)}&{selector}={parsed.ToString("D")}";
+            if (named) url += "&viewer=" + viewer;
             Plugin.Instance.StartCoroutine(GetRequest(url, callback, detailedErrors: true, sessionAware: true));
         }
 
@@ -26987,13 +26974,80 @@ namespace CompetitiveRounds
                 + $"\"phase\":\"{Escape(phase)}\","
                 + $"\"roster\":\"{Escape(rosterCsv ?? "")}\""
                 + "}";
+            string attestedMode = mode ?? "", attestedRoster = rosterCsv ?? "", attestedRoom = roomName ?? "";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/spectate/participant-attest", json,
                 (ok, resp) =>
                 {
                     if (!ok && !resp.Contains("HTTP 4"))
                         Plugin.Log.LogInfo($"[SPECTATE] attest failed (transport): {resp}");
+                    try { NoteSpectateAttestAnswer(ok, resp, attestedRoom, attestedMode, attestedRoster); } catch { }
                 }));
+        }
+
+        // Session report round 6 MEDIUM 1: the server's answer to this seat's
+        // last participant attest - the room row's game id and the source the
+        // server derived for it - kept with the room, mode and roster that
+        // attest sent. A master's spectator validation carries the game id
+        // and source only while its snapshot shows that same room, mode and
+        // roster (SpectateAttestAnswerFor); the server grants a watch only
+        // when all four are still the live row's. Round 7 MEDIUM 1: the
+        // answer also carries the row's generation (an integer that only
+        // increases and advances on every change of the row's game id, mode,
+        // source or roster), kept and sent beside them; the server grants a
+        // watch only when it too is still the live row's.
+        private static string spectateAttestAnswerRoom = "", spectateAttestAnswerMode = "",
+            spectateAttestAnswerRoster = "", spectateAttestAnswerGameId = "", spectateAttestAnswerSourceRef = "",
+            spectateAttestAnswerGeneration = "";
+
+        internal static void NoteSpectateAttestAnswer(bool ok, string resp, string room, string mode, string roster)
+        {
+            resp = resp ?? "";
+            string generation = ExtractJsonIdToken(resp, "generation");
+            // Any other answer (a refusal, a transport failure, a server
+            // from before this answer named the row, or one without a
+            // generation of 1 to 18 digits) leaves no answer to send: the
+            // next validation goes out without a tuple.
+            if (!ok || ExtractJsonString(resp, "status") != "ok"
+                || !resp.Contains("\"game_id\":\"") || !resp.Contains("\"source_ref\":\"")
+                || !SpectateGenerationToken(generation))
+            {
+                if (string.Equals(spectateAttestAnswerRoom, room, StringComparison.Ordinal))
+                    spectateAttestAnswerRoom = spectateAttestAnswerGameId = spectateAttestAnswerSourceRef =
+                        spectateAttestAnswerGeneration = "";
+                return;
+            }
+            spectateAttestAnswerRoom = room ?? "";
+            spectateAttestAnswerMode = mode ?? "";
+            spectateAttestAnswerRoster = roster ?? "";
+            spectateAttestAnswerGameId = ExtractJsonString(resp, "game_id");
+            spectateAttestAnswerSourceRef = ExtractJsonString(resp, "source_ref");
+            spectateAttestAnswerGeneration = generation;
+        }
+
+        // A generation the validation may send as a bare JSON number: 1 to 18
+        // ASCII digits, not starting with 0 (the server's sequence starts at 1).
+        internal static bool SpectateGenerationToken(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > 18 || s[0] == '0') return false;
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] < '0' || s[i] > '9') return false;
+            return true;
+        }
+
+        internal static bool SpectateAttestAnswerFor(string room, string mode, string roster,
+                                                     out string gameId, out string sourceRef, out string generation)
+        {
+            gameId = sourceRef = generation = "";
+            if (spectateAttestAnswerGameId.Length == 0) return false;
+            if (!SpectateGenerationToken(spectateAttestAnswerGeneration)) return false;
+            if (!string.Equals(spectateAttestAnswerRoom, room ?? "", StringComparison.Ordinal)) return false;
+            if (!string.Equals(spectateAttestAnswerMode, mode ?? "", StringComparison.Ordinal)) return false;
+            if (!string.Equals(spectateAttestAnswerRoster, roster ?? "", StringComparison.Ordinal)) return false;
+            gameId = spectateAttestAnswerGameId;
+            sourceRef = spectateAttestAnswerSourceRef;
+            generation = spectateAttestAnswerGeneration;
+            return true;
         }
 
         /// <summary>Tell the server this fighter has left the room, so the
@@ -27758,8 +27812,34 @@ namespace CompetitiveRounds
         /// each claimed spectator actor holds a live lease for THIS room.
         /// Invalid actors are kicked; valid names are published as a room
         /// property for the roster display (names only — no credentials).
-        /// Called on spectator entry and from the periodic attest ticker.</summary>
-        public static void SpectateValidateActors()
+        /// Called on spectator entry and from the periodic attest ticker.
+        /// Session report round 5 MEDIUM 1: the request also carries the
+        /// participant tuple this master reads with the spectator snapshot
+        /// (observed_mode, observed_roster, derived as the attest derives
+        /// them); the server records a watch only when that tuple is still
+        /// the live room row's, and otherwise answers status "retry", on
+        /// which the master takes a fresh snapshot and sends again, at most
+        /// SPECTATE_VALIDATE_RETRY_MAX times. Round 6 MEDIUM 1: the tuple
+        /// also carries the room row's game id and source, from the server's
+        /// answer to this seat's last attest of the same room, mode and
+        /// roster; without one the request carries no tuple.</summary>
+        public static void SpectateValidateActors() { SpectateValidateActors(0); }
+
+        internal const int SPECTATE_VALIDATE_RETRY_MAX = 3;
+        internal const float SPECTATE_VALIDATE_RETRY_DELAY_S = 2f;
+
+        private static IEnumerator SpectateValidateRetryAfter(int attempt, string room)
+        {
+            yield return new WaitForSecondsRealtime(SPECTATE_VALIDATE_RETRY_DELAY_S);
+            try
+            {
+                if (string.Equals(Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "", room, StringComparison.Ordinal))
+                    SpectateValidateActors(attempt);
+            }
+            catch { }
+        }
+
+        private static void SpectateValidateActors(int attempt)
         {
             try
             {
@@ -27772,11 +27852,40 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(SteamAuth.SessionToken)) return;
 
                 string roomAtSend = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
+                // The participant tuple of THIS snapshot (round 5 MEDIUM 1):
+                // the mode the room's prefix names (a room with none is a
+                // code room, spectatable only as a 1v1) and the fighters'
+                // ids in the attest's canonical order. With no fighter id to
+                // report, the old request shape goes out: the seats are still
+                // validated, and no watch is recorded.
+                string seenMode = GameStateWatcher.SpectateModeOfRoomPrefix(roomAtSend);
+                if (seenMode.Length == 0) seenMode = "1v1";
+                string seenRoster = string.Join(",",
+                    GameStateWatcher.SpectateFighterIds(RoomActors.ActiveFighters()).ToArray());
+                // Round 6 MEDIUM 1: the room row's game id and source are the
+                // server's answer to this seat's last attest of this same
+                // room, mode and roster. Without such an answer (none yet,
+                // or the snapshot's roster is not the one last attested) the
+                // old request shape goes out and an attest is asked for now,
+                // so the next validation carries the whole tuple.
+                // Round 7 MEDIUM 1: with them, the row's generation from that
+                // same answer (digits only, SpectateGenerationToken), so the
+                // server can tell a row that moved and came back.
+                string seenGameId = "", seenSource = "", seenGeneration = "";
+                bool sendTuple = seenRoster.Length > 0 && SpectateAttestAnswerFor(
+                    roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource, out seenGeneration);
+                if (!sendTuple && seenRoster.Length > 0) GameStateWatcher.RequestSpectateAttestSoon();
                 var sb = new StringBuilder();
                 sb.Append('{')
                   .Append($"\"steam_id\":\"{Escape(sid)}\",")
-                  .Append($"\"room_name\":\"{Escape(roomAtSend)}\",")
-                  .Append("\"spectators\":[");
+                  .Append($"\"room_name\":\"{Escape(roomAtSend)}\",");
+                if (sendTuple)
+                    sb.Append($"\"observed_game_id\":\"{Escape(seenGameId)}\",")
+                      .Append($"\"observed_generation\":{seenGeneration},")
+                      .Append($"\"observed_mode\":\"{Escape(seenMode)}\",")
+                      .Append($"\"observed_source_ref\":\"{Escape(seenSource)}\",")
+                      .Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");
+                sb.Append("\"spectators\":[");
                 bool first = true;
                 for (int i = 0; i < specs.Length; i++)
                 {
@@ -27803,6 +27912,26 @@ namespace CompetitiveRounds
                         {
                             if (!string.Equals(Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "", roomAtSend, StringComparison.Ordinal))
                                 return;
+                        }
+                        catch { return; }
+                        // Round 5 MEDIUM 1: the room's participants changed
+                        // between this snapshot and the server's read. Nothing
+                        // was validated and nothing is rejected - no kick, no
+                        // roster publish (its results are empty) - and a
+                        // fresh snapshot goes out after a short delay, a
+                        // bounded number of times; the periodic tick after
+                        // that is the next attempt.
+                        try
+                        {
+                            if (ExtractJsonString(resp, "status") == "retry")
+                            {
+                                // the row moved on (round 6: its source or game
+                                // too): a fresh attest answer for the retry
+                                GameStateWatcher.RequestSpectateAttestSoon();
+                                if (attempt < SPECTATE_VALIDATE_RETRY_MAX)
+                                    Plugin.Instance.StartCoroutine(SpectateValidateRetryAfter(attempt + 1, roomAtSend));
+                                return;
+                            }
                         }
                         catch { return; }
                         try
