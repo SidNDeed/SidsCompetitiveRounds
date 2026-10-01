@@ -123,18 +123,20 @@ def _section_order_ok(body):
         plan = body.index("TitleLaddersUI.PlanShopSection()")
         fold = body.index("titles.RemoveAll(")
         header = body.index("shopTitlesHeader.SetActive(true)")
+        free = body.index("for (int i = 0; i < freeTitles.Count")
         paint = body.index("TitleLaddersUI.PaintShopEntries(")
-        loop = body.index("for (int i = 0; i < titles.Count")
+        paid = body.index("for (int i = 0; i < paidTitles.Count")
     except ValueError:
         return False
-    return plan < fold < header < paint < loop
+    return plan < fold < header < free < paint < paid
 
 
-def test_the_ladders_are_planned_before_the_header_and_painted_before_the_titles():
+def test_the_ladders_are_planned_before_the_header_and_painted_between_the_title_groups():
     """The fold must precede the header decision (a section holding only
     ladders still gets its header, and a folded rung is not also drawn as an
-    ordinary row), and the entries go between the header and the ordinary
-    titles -- once each."""
+    ordinary row). Five-tier build (board row 29): the titles that cost
+    nothing come first, then the ladder entries, then the priced single
+    titles -- each painted once."""
     body = code_of(_plugin("NativeUI.cs"), REFRESH_SHOP)
     assert _section_order_ok(body), body[:2000]
     assert body.count("TitleLaddersUI.PlanShopSection()") == 1
@@ -153,6 +155,28 @@ def test_the_section_order_gate_can_fail():
     assert moved.count(anchor) == 1
     moved = moved.replace(anchor, anchor + fold, 1)
     assert not _section_order_ok(moved), "a fold AFTER the header decision passed"
+    # the free titles painted after the ladders must fail too
+    free = re.search(r"            for \(int i = 0; i < freeTitles\.Count.*?\n            \}\n", body, re.S).group(0)
+    late = body.replace(free, "", 1)
+    paid_at = late.index("            for (int i = 0; i < paidTitles.Count")
+    late = late[:paid_at] + free + late[paid_at:]
+    assert not _section_order_ok(late), "free titles AFTER the ladder entries passed"
+
+
+def test_the_free_titles_split_on_price_and_put_owned_first_stably():
+    nat = _plugin("NativeUI.cs")
+    body = " ".join(code_of(nat, REFRESH_SHOP).split())
+    assert "var freeTitles = titles.FindAll(t => t != null && t.price <= 0);" in body
+    assert "var paidTitles = titles.FindAll(t => t != null && t.price > 0);" in body
+    assert "freeTitles = OrderOwnedFirst(freeTitles);" in body
+    # every title is in exactly one group: the two predicates partition
+    assert body.count("titles.FindAll(") == 2
+    helper = " ".join(code_of(nat, "private static List<ApiClient.ShopItemData> OrderOwnedFirst("
+                                   "List<ApiClient.ShopItemData> items)").split())
+    # a partition, not List.Sort (unstable): each part keeps its order
+    assert "var outp = items.FindAll(t => t.owned);" in helper
+    assert "outp.AddRange(items.FindAll(t => !t.owned));" in helper
+    assert ".Sort(" not in helper
 
 
 def test_the_entries_are_built_into_the_shop_rows_container_once():

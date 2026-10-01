@@ -11159,6 +11159,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // CreateText receives a VARIABLE, so tools/i18n_extract.py harvests the
         // literals at the CreateSectionHeader CALL sites instead (arg 2).
         // Recoloring a header re-keys its translations (#289).
+        /// <summary>The Titles section's first group, owned before not owned,
+        /// each part keeping the order it came in (List.Sort is not stable,
+        /// so this partitions instead of sorting).</summary>
+        private static List<ApiClient.ShopItemData> OrderOwnedFirst(List<ApiClient.ShopItemData> items)
+        {
+            var outp = items.FindAll(t => t.owned);
+            outp.AddRange(items.FindAll(t => !t.owned));
+            return outp;
+        }
+
         private static GameObject CreateSectionHeader(Transform parent, string name, string label)
         {
             var go = new GameObject(name);
@@ -11812,8 +11822,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
 
             // Item 12 follow-up (Sept 23): the title ladders are entries
-            // of THIS section - one per line the ladder answer carries, ahead of
-            // the ordinary titles. Planned BEFORE the header decision: a line's
+            // of THIS section - one per ladder the answer carries.
+            // ORDER (five-tier build, board row 29): the titles that cost
+            // nothing (earned titles and 0-gold titles) first, owned ones
+            // ahead; then the ladders, grouped by ladder in the answer's
+            // order (animal, card, playstyle, shop, numeral) under their
+            // sub-header; then the single shop titles, cheapest first. Planned BEFORE the header decision: a line's
             // rungs leave the ordinary list only when its entry renders
             // (TitleLadderRules.PlanSection), so every rung shows exactly once
             // (a row of its own with no board in hand, inside its entry with
@@ -11828,10 +11842,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 shopTitlesHeader.transform.SetSiblingIndex(sibling++);
             }
             else if (shopTitlesHeader != null) shopTitlesHeader.SetActive(false);
-            sibling = TitleLaddersUI.PaintShopEntries(showLadders, sibling, s != null ? balance : (int?)null);
-            for (int i = 0; i < titles.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            var freeTitles = titles.FindAll(t => t != null && t.price <= 0);
+            var paidTitles = titles.FindAll(t => t != null && t.price > 0);
+            // Stable: owned first, then the order the price sort left.
+            freeTitles = OrderOwnedFirst(freeTitles);
+            for (int i = 0; i < freeTitles.Count && rowIdx < shopRows.Count; i++, rowIdx++)
             {
-                ApplyShopRow(shopRows[rowIdx], titles[i], balance, s);
+                ApplyShopRow(shopRows[rowIdx], freeTitles[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+            sibling = TitleLaddersUI.PaintShopEntries(showLadders, sibling, s != null ? balance : (int?)null);
+            for (int i = 0; i < paidTitles.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], paidTitles[i], balance, s);
                 shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
