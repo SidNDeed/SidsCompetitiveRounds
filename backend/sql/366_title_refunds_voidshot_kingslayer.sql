@@ -6,10 +6,13 @@
 -- 021:55, 3000 gold; confusing beside Sid Slayer).
 --
 -- CENSUS (production primary, sql-readonly, counts only; first 2026-10-01
--- 05:17Z, re-taken for every holder at any price 2026-10-01 10:18Z):
---   title_voidshot  0 holders (0 paid, 0 at price 0), 0 gold paid.
+-- 05:17Z, re-taken for every holder at any price 2026-10-01 10:18Z, and with
+-- the purchase evidence 2026-10-01 22:10Z):
+--   title_voidshot  0 holders (0 paid, 0 at price 0), 0 gold paid; 0
+--                   'purchase' rows, 0 buyers, 0 gold debited.
 --   title_regicide  1 holder (1 paid, 0 at price 0), 3000 gold paid (the
---                   list price, through one 'purchase' row).
+--                   list price); 1 'purchase' row, 1 buyer, 3000 gold
+--                   debited.
 --   wearers of either 0; gold_transactions reason 'title_refunded' 0.
 --
 -- FOR EACH HOLDER, in one transaction:
@@ -31,20 +34,24 @@
 -- PREFLIGHT, which refuses rather than guesses, BEFORE ANY WRITE: it prints
 -- every holder and requires each holder's purchase_price to equal what their
 -- own 'purchase' rows debited. Then, for each sku, the database must be in
--- exactly one of two states:
+-- exactly one of two states, and BOTH carry the census's purchase evidence:
+-- the 'purchase' rows naming the sku, the distinct buyers on them and the
+-- gold they debited must equal the census's in either state (366 never
+-- writes or removes a purchase row).
 --   NOT YET APPLIED: every holder now (at ANY price, a zero-price or granted
 --     holder included) equals the census's holders, the paying holders and
 --     the gold they paid equal the census's, and no refund row exists;
---   APPLIED: no holder remains and the refund rows equal the census's paying
---     holders and gold;
---   NEVER SOLD: no holder, no refund row and no 'purchase' row naming the
---     sku -- a database these titles were never sold on (a fresh or replayed
---     schema), where there is nothing to refund and only the catalogue rows
---     are retired. Production is not in this state for title_regicide: its
---     buyer's 'purchase' row exists, so a holder lost there still refuses.
--- Anything else -- a holder gained or lost since the census, at any price --
--- refuses with nothing changed (re-census, then edit the census numbers
--- below). A second run is the APPLIED state and writes nothing.
+--   APPLIED: no holder remains (all of the census's holders are gone), the
+--     refund rows, the distinct players on them and their gold equal the
+--     census's paying holders and gold, and every refunded player is one of
+--     the sku's buyers.
+-- Anything else refuses with nothing changed (re-census, then edit the census
+-- numbers below): a holder gained or lost since the census at any price, a
+-- purchase row gained or lost, a database the census does not describe. That
+-- includes a schema these titles were never sold on while the census expects
+-- a holder or a purchase: there is no third state. A migration-replay harness
+-- that builds such a schema holds this file out (it is the production census's
+-- refund, not schema). A second run is the APPLIED state and writes nothing.
 --
 -- No dependency on the api build: it can apply before or after it. Explicit
 -- BEGIN/COMMIT (#340).
@@ -65,15 +72,22 @@ DECLARE
     n_unworn   INTEGER;
     n_retired  INTEGER;
     n_purch    INTEGER;
+    n_buyers   INTEGER;
+    debit_now  BIGINT;
+    n_refunded INTEGER;
+    n_stray    INTEGER;
     v_fresh    BOOLEAN;
     v_applied  BOOLEAN;
-    v_never    BOOLEAN;
 BEGIN
     -- The census, per sku: every holder at any price, the holders who paid,
-    -- and the gold they paid.
+    -- the gold they paid, and the purchase evidence: 'purchase' rows naming
+    -- the sku, the distinct buyers on them, and the gold they debited.
     CREATE TEMP TABLE _m366_census (sku VARCHAR(64) PRIMARY KEY, holders INTEGER,
-                                    paid_holders INTEGER, paid BIGINT) ON COMMIT DROP;
-    INSERT INTO _m366_census VALUES ('title_voidshot', 0, 0, 0), ('title_regicide', 1, 1, 3000);
+                                    paid_holders INTEGER, paid BIGINT,
+                                    purchase_rows INTEGER, buyers INTEGER,
+                                    debit BIGINT) ON COMMIT DROP;
+    INSERT INTO _m366_census VALUES ('title_voidshot', 0, 0, 0, 0, 0, 0),
+                                    ('title_regicide', 1, 1, 3000, 1, 1, 3000);
 
     FOR r IN
         SELECT si.sku, p.steam_id, pi.purchase_price,
@@ -104,18 +118,32 @@ BEGIN
         SELECT count(*), COALESCE(SUM(g.amount), 0) INTO n_done, paid_done
           FROM gold_transactions g
          WHERE g.reason = 'title_refunded' AND g.reference_id = c.sku;
-        SELECT count(*) INTO n_purch
+        SELECT count(*), count(DISTINCT g.player_id), COALESCE(SUM(-g.amount), 0)
+          INTO n_purch, n_buyers, debit_now
           FROM gold_transactions g
          WHERE g.reason = 'purchase' AND g.reference_id = c.sku;
-        RAISE NOTICE '366 preflight %: holders now % (census %), paying holders now % (census %), gold now % (census %), refunds written % for % gold, purchase rows %',
-            c.sku, n_all, c.holders, n_now, c.paid_holders, paid_now, c.paid, n_done, paid_done, n_purch;
+        SELECT count(DISTINCT g.player_id),
+               count(DISTINCT g.player_id) FILTER (WHERE NOT EXISTS (
+                   SELECT 1 FROM gold_transactions b
+                    WHERE b.player_id = g.player_id AND b.reason = 'purchase'
+                      AND b.reference_id = c.sku))
+          INTO n_refunded, n_stray
+          FROM gold_transactions g
+         WHERE g.reason = 'title_refunded' AND g.reference_id = c.sku;
+        RAISE NOTICE '366 preflight %: holders now % (census %), paying holders now % (census %), gold now % (census %), refunds written % for % gold to % players (% not buyers), purchase rows % (census %), buyers % (census %), debited % (census %)',
+            c.sku, n_all, c.holders, n_now, c.paid_holders, paid_now, c.paid, n_done, paid_done,
+            n_refunded, n_stray, n_purch, c.purchase_rows, n_buyers, c.buyers, debit_now, c.debit;
         v_fresh := n_all = c.holders AND n_now = c.paid_holders AND paid_now = c.paid
+                   AND n_purch = c.purchase_rows AND n_buyers = c.buyers AND debit_now = c.debit
                    AND n_done = 0 AND paid_done = 0;
-        v_applied := n_all = 0 AND n_done = c.paid_holders AND paid_done = c.paid;
-        v_never := n_all = 0 AND n_done = 0 AND n_purch = 0;
-        IF NOT (v_fresh OR v_applied OR v_never) THEN
-            RAISE EXCEPTION '366 refused: % has % holders now (% paying, % gold) and % refunds written (% gold); the census says % holders (% paying, % gold). Re-census before refunding',
-                c.sku, n_all, n_now, paid_now, n_done, paid_done, c.holders, c.paid_holders, c.paid;
+        v_applied := n_all = 0
+                   AND n_purch = c.purchase_rows AND n_buyers = c.buyers AND debit_now = c.debit
+                   AND n_done = c.paid_holders AND paid_done = c.paid
+                   AND n_refunded = c.paid_holders AND n_stray = 0;
+        IF NOT (v_fresh OR v_applied) THEN
+            RAISE EXCEPTION '366 refused: % has % holders now (% paying, % gold), % purchase rows from % buyers debiting %, and % refunds written (% gold); the census says % holders (% paying, % gold), % purchase rows from % buyers debiting %. Re-census before refunding',
+                c.sku, n_all, n_now, paid_now, n_purch, n_buyers, debit_now, n_done, paid_done,
+                c.holders, c.paid_holders, c.paid, c.purchase_rows, c.buyers, c.debit;
         END IF;
     END LOOP;
 
@@ -158,8 +186,10 @@ END $m366$;
 -- Post-checks, on every application.
 DO $m366post$
 DECLARE
-    bad  INTEGER;
-    want INTEGER;
+    bad       INTEGER;
+    want      INTEGER;
+    gold      BIGINT;
+    want_gold BIGINT;
 BEGIN
     SELECT count(*) INTO bad FROM player_items pi JOIN shop_items si ON si.id = pi.item_id
      WHERE si.sku IN ('title_voidshot', 'title_regicide');
@@ -176,18 +206,19 @@ BEGIN
     IF bad <> 0 THEN
         RAISE EXCEPTION '366: % retired titles are still on sale', bad;
     END IF;
-    -- One refund row per census paying holder of a sku that was ever sold
-    -- here (the census: title_regicide 1, title_voidshot 0); none where it
-    -- never was.
-    SELECT count(*) INTO bad FROM gold_transactions
+    -- Exactly the refunds the EMBEDDED census expects: one row per census
+    -- paying holder, for the census's gold. The expectation is the census
+    -- table this transaction created above, never a count of rows the
+    -- database could have lost.
+    SELECT COALESCE(SUM(paid_holders), 0), COALESCE(SUM(paid), 0) INTO want, want_gold
+      FROM _m366_census;
+    SELECT count(*), COALESCE(SUM(amount), 0) INTO bad, gold FROM gold_transactions
      WHERE reason = 'title_refunded' AND reference_id IN ('title_voidshot', 'title_regicide');
-    SELECT CASE WHEN EXISTS (SELECT 1 FROM gold_transactions
-                              WHERE reason = 'purchase' AND reference_id = 'title_regicide')
-                THEN 1 ELSE 0 END INTO want;
-    IF bad <> want THEN
-        RAISE EXCEPTION '366: expected % refund row(s) (the census''s paying holders of a title sold here), found %', want, bad;
+    IF bad <> want OR gold <> want_gold THEN
+        RAISE EXCEPTION '366: expected % refund row(s) for % gold (the census''s paying holders), found % for %',
+            want, want_gold, bad, gold;
     END IF;
-    RAISE NOTICE '366: final state holds -- no holder, no wearer, both retired, % refund row(s)', bad;
+    RAISE NOTICE '366: final state holds -- no holder, no wearer, both retired, % refund row(s) for % gold', bad, gold;
 END $m366post$;
 
 COMMIT;
