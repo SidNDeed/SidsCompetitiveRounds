@@ -43,7 +43,7 @@ MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "307_player_region_pin
 A = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 C = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
-STEAM = "76561198000000007"
+STEAM = "76561192000000007"
 
 NEAR = {"us": 60, "eu": 35}     # eu beats us by 25 for this seat
 FAR = {"us": 60, "eu": 300}     # eu is unplayable for this seat
@@ -476,8 +476,12 @@ def _main_code():
     return "".join(lines)
 
 
-WRITERS = ("team_queue_poll", "ovt_queue_poll", "ffa_queue_poll", "_lobby_state_impl")
-ISSUERS = ("team_queue_poll", "ovt_queue_poll", "ovt_lobby_start", "ffa_lobby_start", "ffa_queue_poll")
+# The FFA poll's body is _ffa_queue_poll_inner (the route wraps it to attach
+# the assembly notice), and Start's lock body is _ffa_lock_roster, shared with
+# REFORM (the connect-failure build): the sites are where the calls now live.
+WRITERS = ("team_queue_poll", "ovt_queue_poll", "_ffa_queue_poll_inner", "_lobby_state_impl")
+ISSUERS = ("team_queue_poll", "ovt_queue_poll", "ovt_lobby_start", "_ffa_lock_roster",
+           "_ffa_queue_poll_inner")
 
 
 def test_every_writer_stores_after_auth_and_before_any_queue_row_lock():
@@ -491,7 +495,7 @@ def test_every_writer_stores_after_auth_and_before_any_queue_row_lock():
     code = _main_code()
     assert code.count("await _region_pings_store(") == len(WRITERS), (
         "the writers are the four session-bound polls: 2v2 / 1v2 lobby members poll "
-        "_lobby_state_impl, FFA lobby members poll ffa_queue_poll; no browser route stores")
+        "_lobby_state_impl, FFA lobby members poll _ffa_queue_poll_inner; no browser route stores")
 
 
 def test_every_issuance_site_asks_the_rule_once_and_the_old_shapes_are_gone():
@@ -499,7 +503,7 @@ def test_every_issuance_site_asks_the_rule_once_and_the_old_shapes_are_gone():
         src = inspect.getsource(getattr(main, name))
         assert src.count("await _group_region(") == 1, name
         assert "_region_mode_of(" in src, name
-    for name in ("team_queue_poll", "ovt_queue_poll", "ffa_queue_poll"):
+    for name in ("team_queue_poll", "ovt_queue_poll", "_ffa_queue_poll_inner"):
         assert "current=_region_current(" in inspect.getsource(getattr(main, name)), (
             name, "the calling seat's own header rides into the pick it may decide")
     code = _main_code()

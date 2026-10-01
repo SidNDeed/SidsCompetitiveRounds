@@ -66,6 +66,16 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Whether the named patch's cleanup recorded an attach (the
+        /// FFA assembly's advertisement reads DamageRulesGate's).</summary>
+        internal static bool IsAttached(string name)
+        {
+            lock (Sync)
+            {
+                return AttachedPatches.Contains(name);
+            }
+        }
+
         internal static Exception Cleanup(string name, Exception exception)
         {
             try
@@ -1057,6 +1067,16 @@ namespace CompetitiveRounds
                         10);
                     yield break;
                 }
+            }
+
+            // Connect-failure V11, item 13 surface 11: a quarantined body is no
+            // revive target, nor is one whose owner is in LAG_OUT for the point
+            // (its own client reads LagOutNow(), every other client its cr_lag).
+            var reviveBody = FfaLateEntry.BodyByPlayerId(playerIDToRevive);
+            if (FfaLateEntry.IsQuarantined(reviveBody) || FfaLateEntry.BodyLagged(reviveBody))
+            {
+                FfaLateEntry.Refused("revive", reviveBody);
+                yield break;
             }
 
             Player target = null;
@@ -3480,6 +3500,15 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Connect-failure V11, item 13 surface 3: a hit whose dealer or
+                // target is quarantined is refused (inert where the gate reads
+                // ungated).
+                var qVictim = __instance != null ? __instance.GetComponent<Player>() : null;
+                if (FfaLateEntry.IsQuarantined(damagingPlayer, qVictim))
+                {
+                    FfaLateEntry.RefusedPair("damage", damagingPlayer, qVictim);
+                    return false;
+                }
                 // (b) friendly fire OFF — the verdict is computed once per hit
                 // here and consumed identically by both PoisonSync branches.
                 if (!RoomRules.FriendlyFire)

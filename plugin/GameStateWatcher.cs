@@ -1559,7 +1559,14 @@ namespace CompetitiveRounds
                 // OnMatchStarted competitive gate (#286), so freeze here the
                 // first time a complete attestable roster exists. Idempotent
                 // for queue rooms (already frozen at match start).
-                try { if (!RoomActors.RosterFrozen) RoomActors.FreezeFighterRoster(sids); } catch { }
+                try
+                {
+                    // V11 K47: in a gated room the lock roster, no fighter view.
+                    var lockIds = GatedFreezeIds();
+                    if (!RoomActors.RosterFrozen && (lockIds == null || lockIds.Count >= 2))
+                        RoomActors.FreezeFighterRoster(lockIds ?? sids);
+                }
+                catch { }
 
                 // Same class as the live-points fence: an attestation
                 // describes THIS room (it carries this room's region and this
@@ -3314,7 +3321,7 @@ namespace CompetitiveRounds
                         // transport failure; and an in-room tag here would
                         // veto the dissolution that frees an open lobby whose
                         // seat has gone.
-                        try { ApiClient.FfaLeaveQueue("seat_abandon"); } catch { }
+                        try { ApiClient.FfaLeaveQueue("seat_abandon", label: "seat_abandon"); } catch { }
                         CompetitiveUI.ShowNotification(
                             "Left your FFA lobby - you joined a competitive game",
                             Color.yellow,
@@ -3699,9 +3706,27 @@ namespace CompetitiveRounds
                     // never-started branch is untouched: it still sends the
                     // empty tag, so a room that never assembled still
                     // dissolves for the other seats.
-                    try { ApiClient.FfaLeaveQueue(FfaMode.GameStartedInRoom ? ApiClient.FfaInRoomExitCause() : ""); } catch { }
-                    try { Plugin.ClearPendingFfaSlot(); } catch { }
+                    // V11 items 1, 6 and 7: a one-shot handoff (a re-form's or
+                    // a region re-arm's own exit) skips the leave and keeps the
+                    // pending slot; a release naming this room's lobby skips
+                    // only the leave. Both are consumed on every exit, so
+                    // neither outlives the exit it was set for (K5, K50).
+                    bool asmHandoff = false, asmReleased = false;
+                    try { asmHandoff = FfaAssembly.ConsumeHandoff(photonRoomId); } catch { }
+                    try { asmReleased = FfaAssembly.ConsumeRelease(photonRoomId); } catch { }
+                    if (!asmHandoff && !asmReleased)
+                    {
+                        try { ApiClient.FfaLeaveQueue(FfaMode.GameStartedInRoom ? ApiClient.FfaInRoomExitCause() : "", label: "room_exit"); } catch { }
+                    }
+                    if (!asmHandoff)
+                    {
+                        try { Plugin.ClearPendingFfaSlot(); } catch { }
+                    }
                     try { FfaMode.OnRoomLeft(); } catch { }
+                    if (asmHandoff)
+                    {
+                        try { FfaAssembly.AfterHandoffExit(photonRoomId); } catch { }
+                    }
                 }
                 // Backup teardown for the esc-menu guard (the Photon
                 // OnLeftRoom callback is primary). Attempts the restore —
@@ -3789,11 +3814,18 @@ namespace CompetitiveRounds
                 // census: its lobby waits for the host to start, so bodies do not
                 // exist until long after the room has filled.
                 int bodies = isFfaRoom ? pc : RegisteredFighterBodies();
-                if (bodies >= fullAt) rankedRoomEverFull = true;
+                // V11 item 4: in a gated room only a started game latches the
+                // block (a count can be filled by a body no grant covers); an
+                // ungated room keeps the count.
+                if (FfaAssembly.SittingGated())
+                {
+                    if (FfaMode.GameStartedInRoom || FfaLateEntry.GameRunningFor(photonRoomId)) rankedRoomEverFull = true;
+                }
+                else if (bodies >= fullAt) rankedRoomEverFull = true;
                 if (!rankedRoomEverFull && !isTracking)
                 {
                     double waited = (DateTime.UtcNow - roomJoinTime).TotalSeconds;
-                    if (!rankedRoomStallWarned && waited >= warnAfter)
+                    if (!rankedRoomStallWarned && waited >= warnAfter && !FfaAssembly.SuppressStallWarn)
                     {
                         rankedRoomStallWarned = true;
                         CompetitiveUI.ShowNotification(isTournamentRoom
@@ -3832,7 +3864,7 @@ namespace CompetitiveRounds
                         // is dropped here so no later leave inherits it.
                         try { TransportExit.ClearCause(); } catch { }
                         if (isOvtRoom) { try { ApiClient.OvtLeaveQueue("assembly_bail"); } catch { } }
-                        if (isFfaRoom) { try { ApiClient.FfaLeaveQueue("assembly_bail"); } catch { } }
+                        if (isFfaRoom) { try { ApiClient.FfaLeaveQueue("assembly_bail", label: "stall_bail"); } catch { } }
                         // 2v2: the fenced queue leave is what tells the server this
                         // seat is gone, so the never-filled match dissolves for the
                         // other seats instead of waiting on a poll nobody sends.
@@ -4262,8 +4294,13 @@ namespace CompetitiveRounds
                             int luTeam = -1;
                             if (p.CustomProperties != null && p.CustomProperties.ContainsKey("t_id"))
                                 int.TryParse(p.CustomProperties["t_id"]?.ToString(), out luTeam);
+                            // V11 item 13 (the leaver ledger): an actor this
+                            // client does not keep never overwrites a leave.
                             if (!string.IsNullOrEmpty(luSid) && luTeam >= 0)
-                                FfaMode.RecordLeaver(luSid, name, luTeam);
+                            {
+                                if (!FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) FfaMode.RecordLeaver(luSid, name, luTeam);
+                                else JoinTimeline.Step("ledger_skip", "actor=" + p.ActorNumber + " why=unkept");
+                            }
                         }
                         catch { }
                         int remaining = RoomActors.ActiveFighterCount();   // census: fighters remaining
@@ -5098,12 +5135,15 @@ namespace CompetitiveRounds
             {
                 if (CompetitiveRoomDetect.IsCompetitiveRoom())
                 {
-                    var ids = new List<string>();
-                    foreach (var f in RoomActors.ActiveFighters())
-                    {
-                        var s = RoomActors.SteamIdOf(f);
-                        if (!string.IsNullOrEmpty(s)) ids.Add(s);
-                    }
+                    // V11 K47: in a gated room the lock roster, no fighter view.
+                    var lockIds = GatedFreezeIds();
+                    var ids = lockIds ?? new List<string>();
+                    if (lockIds == null)
+                        foreach (var f in RoomActors.ActiveFighters())
+                        {
+                            var s = RoomActors.SteamIdOf(f);
+                            if (!string.IsNullOrEmpty(s)) ids.Add(s);
+                        }
                     if (ids.Count >= 2) RoomActors.FreezeFighterRoster(ids);
                 }
             }
@@ -6498,12 +6538,15 @@ namespace CompetitiveRounds
             // per game: FFA leavers shrink the roster between games.
             try
             {
-                var ids = new List<string>();
-                foreach (var f in RoomActors.ActiveFighters())
-                {
-                    var s = RoomActors.SteamIdOf(f);
-                    if (!string.IsNullOrEmpty(s)) ids.Add(s);
-                }
+                // V11 K47: in a gated room the lock roster, no fighter view.
+                var lockIds = GatedFreezeIds();
+                var ids = lockIds ?? new List<string>();
+                if (lockIds == null)
+                    foreach (var f in RoomActors.ActiveFighters())
+                    {
+                        var s = RoomActors.SteamIdOf(f);
+                        if (!string.IsNullOrEmpty(s)) ids.Add(s);
+                    }
                 if (ids.Count >= 2) RoomActors.FreezeFighterRoster(ids);
             }
             catch { }
@@ -6761,6 +6804,25 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogError($"[FFA-REPORT] {ex.Message}"); }
         }
 
+        /// <summary>V11 K47: in a gated room each roster freeze takes the lock
+        /// roster's Steam ids (ApiClient.FfaLockedRoster) and reads no fighter
+        /// view; null for every other room, which freezes as today.</summary>
+        private static List<string> GatedFreezeIds()
+        {
+            try
+            {
+                string room = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : "";
+                if (!FfaAssembly.IsGatedRoom(room)) return null;
+                var ids = new List<string>();
+                var roster = ApiClient.FfaLockedRoster;
+                if (roster != null)
+                    foreach (var m in roster)
+                        if (m != null && !string.IsNullOrEmpty(m.steam_id)) ids.Add(m.steam_id);
+                return ids;
+            }
+            catch { return null; }
+        }
+
         private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)
         {
             var pm = PlayerManager.instance;
@@ -6772,8 +6834,25 @@ namespace CompetitiveRounds
                 return false;
             }
 
+            // V11 item 12 (the lag rule): a client that entered LAG_OUT in this
+            // game files no report of it, read from LagGame and never from its
+            // own cr_lag (#428).
+            int reportGame = FfaMode.GameNumber;
+            if (reportGame > 0 && FfaLateEntry.LagGame == reportGame)
+            {
+                Plugin.Log.LogInfo("[FFA-REPORT] report_skip why=lag_out game=" + reportGame);
+                return true;
+            }
+            // V11 item 13 (surface 8): a client that sits out files no report.
+            if (FfaLateEntry.LocalSitsOut())
+            {
+                Plugin.Log.LogInfo("[FFA-REPORT] the local seat sits out (not kept) - no report of game " + reportGame);
+                return true;
+            }
+
             var entries = new List<ApiClient.FfaReportPlayer>();
             var presentSteams = new List<string>();
+            var presentActorBySteam = new Dictionary<string, int>(StringComparer.Ordinal);
             string winnerSteam = null;
 
             // Census: the FFA report roster is fighters only — a spectator
@@ -6874,6 +6953,7 @@ namespace CompetitiveRounds
                     endStats = EndStatsFor(sid),
                 });
                 presentSteams.Add(sid);
+                presentActorBySteam[sid] = pp.ActorNumber;
                 if (teamId == winnerTeam) winnerSteam = sid;
             }
 
@@ -6921,6 +7001,36 @@ namespace CompetitiveRounds
                 });
             }
 
+            // V11 item 12 (the ghost rule): every lock-roster slot that is
+            // neither a present kept body nor in the Leavers rides as an absent
+            // ghost with zero tallies, which the server carries unrated.
+            var ghostRoster = ApiClient.FfaLockedRoster;
+            if (ghostRoster != null)
+            {
+                for (int gs = 0; gs < ghostRoster.Count; gs++)
+                {
+                    var gm = ghostRoster[gs];
+                    if (gm == null || string.IsNullOrEmpty(gm.steam_id)) continue;
+                    if (presentSteams.Contains(gm.steam_id) || FfaMode.Leavers.ContainsKey(gm.steam_id)) continue;
+                    string gName = StripRichText(gm.display_name ?? gm.steam_id);
+                    if (string.IsNullOrEmpty(gName)) gName = gm.steam_id;
+                    if (gName.Length > 60) gName = gName.Substring(0, 60);
+                    entries.Add(new ApiClient.FfaReportPlayer
+                    {
+                        steamId = gm.steam_id,
+                        displayName = gName,
+                        slot = gs,
+                        rounds = 0, points = 0, kills = 0,
+                        leftEarly = true, absent = true, fps = 0,
+                        gamePointsAtLeave = -1,
+                        cards = new List<MatchTracker.CardPickData>(),
+                        telemetry = null,
+                        damageDealt = 0,
+                    });
+                    Plugin.Log.LogInfo("[FFA-REPORT] ghost slot=" + gs + " (roster member neither present nor a leaver)");
+                }
+            }
+
             // Codex review find 6: a player who clinches the game and closes
             // the app before the report runs exists only in the Leavers set —
             // the PlayerList loop above never saw them, and an unresolved
@@ -6938,10 +7048,31 @@ namespace CompetitiveRounds
 
             // Reporter election: lowest Steam ID among PRESENT players (all FFA
             // players carry the mod — the queue is the only entry path).
-            string lowest = null; long lowVal = long.MaxValue;
+            // V11 item 12: the election skips a present player whose cr_late
+            // names this lobby (every game of the sitting) or whose cr_lag names
+            // this lobby and this game, lowest Steam id first as before; the
+            // fallback to itself is disabled for a seat carrying either, read
+            // from the local record (#428), never from its own property.
+            var cands = new List<KeyValuePair<long, string>>();
             foreach (var sid in presentSteams)
-                if (long.TryParse(sid, out long v) && v < lowVal) { lowVal = v; lowest = sid; }
-            if (lowest == null) lowest = localSteamId;
+                if (long.TryParse(sid, out long v)) cands.Add(new KeyValuePair<long, string>(v, sid));
+            cands.Sort((x, y) => x.Key.CompareTo(y.Key));
+            var candActors = new List<int>();
+            var sidOfActor = new Dictionary<int, string>();
+            foreach (var c in cands)
+                if (presentActorBySteam.TryGetValue(c.Value, out int ca)) { candActors.Add(ca); sidOfActor[ca] = c.Value; }
+            int elected = FfaLateRules.ElectReporter(candActors,
+                a => FfaLateEntry.LaggedInGame(a, reportGame), a => FfaLateEntry.LateInSitting(a));
+            string lowest = null;
+            if (elected >= 0) sidOfActor.TryGetValue(elected, out lowest);
+            int ownActor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
+            bool selfBarred = FfaLateEntry.LateInSitting(ownActor) || FfaLateEntry.LaggedInGame(ownActor, reportGame);
+            if (lowest == null && !selfBarred) lowest = localSteamId;
+            if (lowest == null)
+            {
+                Plugin.Log.LogInfo("[FFA-REPORT] no eligible reporter present and this seat is barred - game " + reportGame + " unreported");
+                return true;
+            }
             if (lowest != localSteamId)
             {
                 Plugin.Log.LogInfo($"[FFA-REPORT] reporter is {lowest}, not me — skipping");

@@ -35,6 +35,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_release_db
+from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
@@ -4456,7 +4457,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:47642 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:47745 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4522,7 +4523,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47454 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:47557 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4592,7 +4593,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47357 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:47460 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -5091,6 +5092,7 @@ async def queue_cleanup_loop():
                              WHERE l.status = 'active'
                                AND l.created_at < NOW() - INTERVAL '30 minutes'
                                AND l.games_played = 0
+                               AND l.start_granted_at IS NULL
                                AND NOT EXISTS (SELECT 1 FROM ffa_queue q
                                                WHERE q.series_id = l.id
                                                  AND q.last_polled >= NOW() - INTERVAL '15 minutes')"""))
@@ -5109,9 +5111,13 @@ async def queue_cleanup_loop():
                     upd = await db.execute(
                         text("""UPDATE ffa_lobbies
                                    SET status = 'canceled', invalidated_at = NOW(),
-                                       invalidation_reason = 'janitor_dead_lock'
+                                       invalidation_reason = 'janitor_dead_lock',"""
+                             + _FFA_CLOSE_RECORD_SET + """
                                  WHERE id = :lid AND status = 'active'
-                                RETURNING id"""), {"lid": c["id"]})
+                                   AND start_granted_at IS NULL
+                                RETURNING id"""),
+                        {"lid": c["id"], "rec_path": "janitor_dead_lock",
+                         "rec_trigger": "janitor"})
                     if upd.fetchall():
                         ffa_dead_ids.append(c["id"])
                 for lid in ffa_dead_ids:
@@ -5206,8 +5212,10 @@ async def queue_cleanup_loop():
                     await _assert_no_service_subject(
                         db, affected_player_ids=list(r[1] or []))
                     await db.execute(text(
-                        "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
-                        " WHERE id = :lid AND status = 'active'"), {"lid": r[0]})
+                        "UPDATE ffa_lobbies SET status='completed', completed_at=NOW(),"
+                        + _FFA_CLOSE_RECORD_SET +
+                        " WHERE id = :lid AND status = 'active'"),
+                        {"lid": r[0], "rec_path": "dispersed_close", "rec_trigger": "janitor"})
                     await _reconcile_ffa_lobby_bets(db, r[0], "dispersed close")
                     print(f"[FFA-CLEANUP] Dispersed lobby closed (no game in window): {r[0]}")
 
@@ -5238,8 +5246,10 @@ async def queue_cleanup_loop():
                     await _assert_no_service_subject(
                         db, affected_player_ids=list(qrow["member_ids"] or []))
                     await db.execute(text(
-                        "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
-                        " WHERE id=:lid AND status='active'"), {"lid": qrow["id"]})
+                        "UPDATE ffa_lobbies SET status='completed', completed_at=NOW(),"
+                        + _FFA_CLOSE_RECORD_SET +
+                        " WHERE id=:lid AND status='active'"),
+                        {"lid": qrow["id"], "rec_path": "quiet_close", "rec_trigger": "janitor"})
                     await _reconcile_ffa_lobby_bets(db, qrow["id"], "nobody online close")
                     print(f"[FFA-CLEANUP] Abandoned lobby closed (nobody online): {qrow['id']}")
 
@@ -6984,6 +6994,9 @@ _RJ_TRIAGE_MARKER = 2
 # Its sibling _LADDER_HOOK (the /health `ladder_hook` word) is DERIVED from the
 # compiled code of the four rated completion functions, so it is defined after
 # the last of them in this file, submit_team_match.
+# Its sibling _CONNECT_FAILURE (the /health `connect_failure` word) is DERIVED
+# from the compiled code of the eight I2 writers' entry functions, so it is
+# defined beside _LADDER_HOOK, after the last of them.
 # Its sibling _LEAD_FORFEIT_PERGAME (the /health `lead_forfeit_pergame` word)
 # is DERIVED from the two 2v2 per-game wirings rather than written here, so
 # it is defined after team_series_report_dc, whose reader call it reads.
@@ -7066,6 +7079,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               discord_collection=_DISCORD_COLLECTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
+                              connect_failure=_CONNECT_FAILURE,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -7094,6 +7108,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               discord_collection=_DISCORD_COLLECTION_MARKER,
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
+                              connect_failure=_CONNECT_FAILURE,
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -7147,13 +7162,19 @@ async def get_mod_version():
     """
     _involuntary = bool(_INVOLUNTARY_EXIT_CAUSES) and (
         _INVOLUNTARY_EXIT_CAUSES <= _IN_ROOM_EXIT_CAUSES)
-    return {
+    body = {
         "version": LATEST_MOD_VERSION,
         "min_version": MIN_MOD_VERSION_EFFECTIVE,
         # One boolean under ONE name. The transitional alias that carried the
         # first spelling went when the client lane landed on this tree.
         _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
     }
+    # The joiner's region guard (connect-failure D3): advertised only while
+    # this server enforces it. JOIN_REGION_GUARD ships False, so the answer
+    # carries no such key and a gated joiner only logs a region mismatch.
+    if JOIN_REGION_GUARD:
+        body["join_region_guard"] = 1
+    return body
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────
@@ -16078,7 +16099,8 @@ async def _region_volumes(db):
     return cache["volumes"]
 
 
-async def _group_region(db, rows, legacy_pick, label, *, current=None, room=""):
+async def _group_region(db, rows, legacy_pick, label, *, current=None, room="",
+                        explain=None):
     """The room-region pick for a multiplayer issuance (region_pick.py holds
     the rule; the block comment above, the data path). `db` is the issuing
     request's own session — the members' rows are read on it under a
@@ -16162,7 +16184,84 @@ async def _group_region(db, rows, legacy_pick, label, *, current=None, room=""):
           f"gain={_c(detail.get('gain'))} regret={_c(detail.get('max_regret'))} "
           f"tie={_c(detail.get('tie'))} members={members_txt}"
           + (f" error={detail.get('error')}" if why == "error" else ""))
+    if explain is not None:
+        # I5 (the connect-failure design): the caller keeps the pick's own
+        # explanation, and stores only _region_projection of it. Nothing
+        # else reads it; an issuance that passes no dict is unchanged.
+        explain["why"] = why
+        explain["raw"] = detail
     return pick or legacy_pick or "us"
+
+
+_REGION_WHY_TOKENS = frozenset({"baseline", "majority", "bounded", "quorum", "error"})
+_REGION_CODE_RE = _re.compile(r"^[a-z]{2,8}$")
+_REGION_SEAT_STATES = frozenset({"absent", "stale", "missing_baseline", "fresh"})
+
+
+def _region_int(value):
+    """An integer of the projection: 0-100000, or None for anything that is
+    not a finite real number (bool included)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return None
+    return max(0, min(100000, int(value)))
+
+
+def _region_code(value):
+    return value if isinstance(value, str) and _REGION_CODE_RE.match(value) else None
+
+
+def _region_projection(why, raw, slot_of) -> tuple:
+    """I5 (V11:884-913): the region pick as a fixed projection for the lobby
+    row. Returns (region_why, region_detail). Built by whitelisting: the five
+    tokens else 'other'; an error keeps no text at all; region codes must match
+    ^[a-z]{2,8}$; integers are clamped to 0-100000; a seat whose id is not in
+    `slot_of` (str(player_id) -> roster slot) is dropped, so no UUID, Steam id
+    or free text survives. Never raises: anything unexpected is the error form."""
+    token = why if why in _REGION_WHY_TOKENS else "other"
+    try:
+        if why == "error" or not isinstance(raw, dict) or "error" in raw:
+            return token, {"v": 1, "error": True}
+        tie = raw.get("tie")
+        out = {
+            "v": 1,
+            "baseline": _region_code(raw.get("baseline")),
+            "tie": tie if tie in ("measured", "lexical") else None,
+            "n": _region_int(raw.get("n")),
+        }
+        for key in ("sum_b", "sum_pick", "worst_b", "worst_pick", "gain", "max_regret"):
+            out[key] = _region_int(raw.get(key))
+        seats = []
+        for s in raw.get("seats") or []:
+            if not isinstance(s, dict):
+                continue
+            sid = s.get("id")
+            if not isinstance(sid, str) or sid not in slot_of:
+                continue
+            state = s.get("state")
+            seats.append({"slot": int(slot_of[sid]),
+                          "state": state if state in _REGION_SEAT_STATES else None,
+                          "cost_b": _region_int(s.get("cost_b")),
+                          "cost_pick": _region_int(s.get("cost_pick"))})
+        out["seats"] = seats
+        cands = []
+        for c in raw.get("candidates") or []:
+            if not isinstance(c, dict):
+                continue
+            code = _region_code(c.get("region"))
+            if code is None:
+                continue
+            adm = c.get("admitted_by")
+            cands.append({"region": code, "sum": _region_int(c.get("sum")),
+                          "worst": _region_int(c.get("worst")),
+                          "gain": _region_int(c.get("gain")),
+                          "max_regret": _region_int(c.get("max_regret")),
+                          "admitted_by": adm if adm in ("majority", "bounded") else None})
+        out["candidates"] = cands
+        return token, out
+    except Exception:
+        return token, {"v": 1, "error": True}
 
 
 def _pick_region_by_pings(p1, p2, ladder_pick, refs=()):
@@ -39479,17 +39578,21 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 ), {"h": _live[0], "lid": _lid})
         await db.execute(text(
             """UPDATE ffa_lobbies SET status='canceled', invalidation_reason='member_deleted',
-                      invalidated_at=NOW()
-                WHERE id=:lid AND status='active' AND games_played = 0"""),
-            {"lid": _lid})
+                      invalidated_at=NOW(),""" + _FFA_CLOSE_RECORD_SET + """
+                WHERE id=:lid AND status='active' AND games_played = 0
+                  AND start_granted_at IS NULL"""),
+            {"lid": _lid, "rec_path": "member_deleted", "rec_trigger": "member_delete"})
         # Round-2 review find 7: a PLAYED lobby whose member deleted their
         # account must also close (their anonymized Steam ID can never pass
         # the roster check again, so no future report can land) — completed,
         # not canceled: real games happened.
         await db.execute(text(
-            """UPDATE ffa_lobbies SET status='completed', completed_at=NOW()
-                WHERE id=:lid AND status='active' AND games_played > 0"""),
-            {"lid": _lid})
+            """UPDATE ffa_lobbies SET status='completed', completed_at=NOW(),"""
+            + _FFA_CLOSE_RECORD_SET + """
+                WHERE id=:lid AND status='active'
+                  AND (games_played > 0 OR start_granted_at IS NOT NULL)"""),
+            {"lid": _lid, "rec_path": "member_deleted_played",
+             "rec_trigger": "member_delete"})
         # Reconcile, not blanket-refund: a PLAYED lobby can hold bets whose
         # game has a recorded winner (#241 — those settle, the rest refund).
         await _reconcile_ffa_lobby_bets(db, _lid, "member deleted")
@@ -47749,7 +47852,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4561 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4562 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -48336,6 +48439,140 @@ async def ovt_recent(
 
 FFA_MIN_PLAYERS = 3
 FFA_MAX_PLAYERS = 10
+
+# -- FFA assembly: the connect-failure design's constants (V11 sec3.2) ------
+# Module-level by decision, never environment keys: a feature keyed on an env
+# key can ship inert with clean logs (#438). Every value is the design's own
+# (V11 sec3.2 "Constants", sec3.7); the names are the design's, unsubstituted.
+FFA_ASSEMBLY_ENABLED = True       # the kill switch for both paths
+ASM_EARLY_S = 20                  # rule E; every rule requires t >= 20
+ASM_BASE_S = 40                   # rule B
+ASM_SHORT_ABS_S = 46              # rule S (admission table)
+ASM_CAP_S = 75                    # rule C (fallback table; the R1 truncation)
+ASM_ABS_CAP_S = 81                # rule K (fallback table)
+ASM_CENSUS_FRESH_S = 6            # a census is fresh while census_at >= now - 6 s
+ASM_ATTEMPT_FRESH_S = 30          # the attempt hold (fallback table only)
+ASM_ADMIT_HOLD_S = 6              # the admission hold (both tables)
+ASM_SPAWN_EARLY_S = 15            # below this server age an arrival may spawn uncorroborated
+ASM_SPAWN_GRACE_S = 23            # spawn reference + this before a seat can be found bodiless
+ASM_SPAWN_OPEN_S = 6              # the client's spawn window (sent in the payload)
+ASM_TXN_DEADLINE_S = 3            # connect/assembly/release pre-COMMIT-work deadline
+ASM_START_HOLD_S = 30             # the start barrier's lease (sent in the payload)
+ASM_ADMIT_LATE_S = 140            # A, the admission deadline, from T0
+ASM_JOIN_CAP_S = 125              # a fallback room's outer join deadline
+ASM_PRESENCE_PERIOD_S = 5         # the granted seats' presence census period
+ASM_LATE_WAIT_S = 6               # the master's bounded wait for a late body
+ASM_EPOCH_ACK_S = 2               # the master's epoch acknowledgement wait (V10, N7)
+ASM_STAMP_WAIT_S = 2              # a receiver's hold for the call-in stamp (V10, N7)
+ASM_FENCE_S = 3                   # the fence's retry period (V10, N7)
+JOIN_REGION_GUARD = False         # the shipped value: a differing region is recorded, not refused
+ASM_CAPS_TOKEN = "ffa_asm1"       # assembly_v1 capability token (ffa_queue.caps)
+ADM_CAPS_TOKEN = "ffa_adm1"       # admission_v1 capability token
+ADM_PRODUCTION_ENABLED = False    # while False, admission_v1 also needs every member in ffa_g3_seats
+# Values the design states in prose without a sec3.2 name. Named here so no
+# literal repeats; none of them substitutes for a sec3.2 name above.
+ASM_WRITES_CAP = 170              # I2: a write that finds writes >= 170 answers 429
+ASM_WITNESS_FRESH_S = 10          # I2 writer 4: a current witness's census is at most 10 s old
+ASM_NOTICE_WINDOW_MIN = 60        # sec3.4 the notice: excluded within the last hour
+ASM_DEADLINE_FLOOR_MS = 200       # sec3.3: under 200 ms left at checkout -> 503 stage=pool
+ASM_SLOW_COMMIT_MS = 4000         # sec3.3: a route whose total passes 4 s prints slow_commit
+# The lock wait's bound sits this far under the statement's. PostgreSQL reports
+# the timeout that finished first, and a statement timer armed at the
+# statement's start with the lock timer's duration always finishes before the
+# lock timer armed at the lock wait's start: with equal values a lock wait
+# could only ever answer stage=stmt, never the stage=lock the deadline's own
+# 55P03 row names (S54 (i)). A tighter lock bound, never a looser one.
+ASM_LOCK_MARGIN_MS = 100
+
+# The closers' record (I3, V11:729-853): the eight columns every statement that
+# closes an active FFA lobby writes IN THE SAME STATEMENT, so no lobby closes
+# without its record. Concatenated into each closer's own UPDATE ... SET, never
+# built at runtime: the janitor's boot self-test resolves module literals and
+# their concatenations, and refuses SQL it cannot resolve statically. Binds
+# :rec_path and :rec_trigger; correlated on the row being updated. On a lobby
+# with no seat rows (a lock taken before migration 355) all eight stay NULL.
+_FFA_CLOSE_RECORD_SET = """
+       dissolve_path = CASE WHEN EXISTS (SELECT 1 FROM ffa_assembly_seats rs0
+                                          WHERE rs0.lobby_id = ffa_lobbies.id)
+                            THEN CAST(:rec_path AS varchar) END,
+       dissolve_trigger = CASE WHEN EXISTS (SELECT 1 FROM ffa_assembly_seats rs1
+                                             WHERE rs1.lobby_id = ffa_lobbies.id)
+                               THEN CAST(:rec_trigger AS varchar) END,
+       first_leaver = (SELECT fl.player_id FROM ffa_assembly_seats fl
+                        WHERE fl.lobby_id = ffa_lobbies.id AND fl.left_at IS NOT NULL
+                        ORDER BY fl.left_at, fl.slot LIMIT 1),
+       first_leave_label = (SELECT COALESCE(NULLIF(fb.left_label, ''), fb.left_cause)
+                              FROM ffa_assembly_seats fb
+                             WHERE fb.lobby_id = ffa_lobbies.id AND fb.left_at IS NOT NULL
+                             ORDER BY fb.left_at, fb.slot LIMIT 1),
+       dissolve_after_ms = CASE WHEN EXISTS (SELECT 1 FROM ffa_assembly_seats rs2
+                                              WHERE rs2.lobby_id = ffa_lobbies.id)
+                                THEN CAST(LEAST(2147483647, GREATEST(0,
+                                     EXTRACT(EPOCH FROM (NOW() - ffa_lobbies.created_at)) * 1000))
+                                     AS integer) END,
+       present_at_dissolve = CASE WHEN EXISTS (
+                                  SELECT 1 FROM ffa_assembly_seats pf
+                                   WHERE pf.lobby_id = ffa_lobbies.id
+                                     AND pf.census_at >= NOW() - interval '6 seconds')
+                             THEN ARRAY(
+                                  SELECT DISTINCT pu.e FROM (
+                                      SELECT unnest(pc.census_slots) AS e
+                                        FROM ffa_assembly_seats pc
+                                       WHERE pc.lobby_id = ffa_lobbies.id
+                                         AND pc.census_at >= NOW() - interval '6 seconds') pu
+                                   WHERE pu.e NOT IN (SELECT pl.slot FROM ffa_assembly_seats pl
+                                                       WHERE pl.lobby_id = ffa_lobbies.id
+                                                         AND pl.left_at IS NOT NULL)
+                                   ORDER BY pu.e) END,
+       absent_at_dissolve = CASE WHEN EXISTS (
+                                 SELECT 1 FROM ffa_assembly_seats af
+                                  WHERE af.lobby_id = ffa_lobbies.id
+                                    AND af.census_at >= NOW() - interval '6 seconds')
+                            THEN ARRAY(
+                                 SELECT ab.slot FROM ffa_assembly_seats ab
+                                  WHERE ab.lobby_id = ffa_lobbies.id AND ab.left_at IS NULL
+                                    AND ab.slot NOT IN (
+                                        SELECT unnest(ac.census_slots)
+                                          FROM ffa_assembly_seats ac
+                                         WHERE ac.lobby_id = ffa_lobbies.id
+                                           AND ac.census_at >= NOW() - interval '6 seconds')
+                                  ORDER BY ab.slot) END,
+       arrived_at_dissolve = CASE WHEN EXISTS (SELECT 1 FROM ffa_assembly_seats rs3
+                                                WHERE rs3.lobby_id = ffa_lobbies.id)
+                                  THEN ARRAY(SELECT ar.slot FROM ffa_assembly_seats ar
+                                              WHERE ar.lobby_id = ffa_lobbies.id
+                                                AND ar.arrived_at IS NOT NULL
+                                              ORDER BY ar.slot) END
+"""
+
+# The leave label (I3, V11:803-836): its own &label= parameter, never the
+# cause. Read only through _preroom_leave_label and written only to left_label
+# (and, by the closers' record, first_leave_label); no decision reads either.
+_PREROOM_LEAVE_LABELS = frozenset({
+    "room_exit", "stall_bail", "seat_abandon", "fresh_cancel", "end_sitting",
+    "rematch_abort", "join_gave_up", "enroll_in_comp", "stale_lobby",
+    "intent_retry", "held_in_comp", "leave_intent", "rejoin_refused",
+    "lock_declined", "loop_breaker", "menu_leave", "asm_exit", "reform_abort",
+    "wrong_region", "start_timeout", "join_timeout",
+})
+
+
+def _preroom_leave_label(label) -> str:
+    """The label when it is one of the 21 sites' values, else 'unlabelled'."""
+    return label if isinstance(label, str) and label in _PREROOM_LEAVE_LABELS else "unlabelled"
+
+
+def _ffa_epoch_chain(prev: str, lobby8: str, n: int, slot: int, actor: int) -> str:
+    """ffa_kept_epochs.chain (V7): FNV-1a 64 over the ASCII string
+    "{prev}:{lobby8}:{n}:{slot}:{actor}", as 16 lowercase hex digits; prev is
+    the previous row's chain, "0" for epoch 1."""
+    h = 0xcbf29ce484222325
+    for byte in f"{prev}:{lobby8}:{n}:{slot}:{actor}".encode("ascii"):
+        h ^= byte
+        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:016x}"
+
+
 # Once >= MIN fresh searching rows exist, the lock fires when the MIN-th
 # earliest of them has been waiting this long (a gather window so later
 # joiners can still make the lobby), or immediately at MAX. Anchoring on the
@@ -51376,6 +51613,9 @@ class _FfaLobbyCreateReq(BaseModel):
     # Aug 6 item 9. Optional everywhere: omitted / blank = a public lobby,
     # which is exactly today's behaviour for every existing client.
     password: str | None = None
+    # The connect-failure design (sec5): this member's own capability list,
+    # stored on its queue row; the lock's gates read it (_ffa_asm_gates).
+    caps: str = Field("", max_length=64)
 
 
 class _FfaLobbyJoinReq(BaseModel):
@@ -51384,6 +51624,7 @@ class _FfaLobbyJoinReq(BaseModel):
     region: str | None = None
     lobby_id: str
     password: str | None = None
+    caps: str = Field("", max_length=64)   # as _FfaLobbyCreateReq.caps
 
 
 async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> None:
@@ -51421,9 +51662,10 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
             # authenticated call, and the lobby is still OPEN (pre-lock).
             await db.execute(text(
                 "UPDATE ffa_queue SET last_polled = NOW(), display_name = :dn,"
-                "       mod_version = :mv WHERE player_id = :pid"
+                "       mod_version = :mv, caps = :caps WHERE player_id = :pid"
             ), {"pid": player.id, "dn": req.display_name[:64],
-                "mv": (_current_mod_version.get() or "")[:16] or None})
+                "mv": (_current_mod_version.get() or "")[:16] or None,
+                "caps": _ffa_caps_clean(getattr(req, "caps", ""))})
             return
         raise HTTPException(409, "Leave your current lobby first")
     if mine is not None and mine["status"] not in ("searching",):
@@ -51438,13 +51680,15 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
         inserted = (await db.execute(text("""
             INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating_deviation,
                                    games_played, fallback_rating, region, status, series_id,
-                                   joined_at, last_polled, mod_version)
-            VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'lobby', :lid, NOW(), NOW(), :mv)
+                                   joined_at, last_polled, mod_version, caps)
+            VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'lobby', :lid, NOW(), NOW(), :mv,
+                    :caps)
             ON CONFLICT (player_id) DO NOTHING
             RETURNING player_id
         """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64],
                "reg": (req.region or "")[:8] or None, "lid": lobby_id,
-               "mv": (_current_mod_version.get() or "")[:16] or None, **snap})).scalar()
+               "mv": (_current_mod_version.get() or "")[:16] or None,
+               "caps": _ffa_caps_clean(getattr(req, "caps", "")), **snap})).scalar()
         if inserted is None:
             raise HTTPException(409, "Your queue state just changed — try again")
         _enrolled = True
@@ -51458,12 +51702,13 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
                    held_until=NULL, held_lobby=NULL,
                    display_name=:dn, region=:reg, rating=:r, rating_deviation=:rd,
                    games_played=:gp, fallback_rating=:fr,
-                   joined_at=NOW(), last_polled=NOW(), mod_version=:mv
+                   joined_at=NOW(), last_polled=NOW(), mod_version=:mv, caps=:caps
              WHERE player_id=:pid AND status='searching'
             RETURNING player_id
         """), {"pid": player.id, "dn": req.display_name[:64],
                "reg": (req.region or "")[:8] or None, "lid": lobby_id,
-               "mv": (_current_mod_version.get() or "")[:16] or None, **snap})).scalar()
+               "mv": (_current_mod_version.get() or "")[:16] or None,
+               "caps": _ffa_caps_clean(getattr(req, "caps", "")), **snap})).scalar()
         if flipped is None:
             raise HTTPException(409, "Your queue state just changed — try again")
         _enrolled = True
@@ -51760,6 +52005,227 @@ async def ffa_lobby_settings(req: _FfaLobbySettingsReq, request: Request,
             "lobby_ranked": new["is_ranked"]}
 
 
+_ASM_CAP_TOKEN_RE = _re.compile(r"^[a-z0-9_]{1,16}$")
+
+
+def _ffa_caps_clean(caps) -> str:
+    """The capability list a join or create stores in ffa_queue.caps: the
+    comma-separated tokens that match ^[a-z0-9_]{1,16}$, in the order sent,
+    duplicates dropped, at most 64 characters. Anything else is dropped, so
+    the column holds only tokens the gates can compare exactly."""
+    if not isinstance(caps, str) or not caps:
+        return ""
+    out = []
+    for tok in caps.split(","):
+        tok = tok.strip()
+        if _ASM_CAP_TOKEN_RE.match(tok) and tok not in out:
+            if len(",".join(out + [tok])) > 64:
+                break
+            out.append(tok)
+    return ",".join(out)
+
+
+async def _ffa_asm_gates(db, player_ids) -> tuple:
+    """(assembly_v1, admission_v1) for a roster about to lock (sec3.2).
+    assembly_v1: the kill switch is on and EVERY member's own queue row
+    carries ASM_CAPS_TOKEN. admission_v1: assembly_v1, every member carries
+    ADM_CAPS_TOKEN, and, while ADM_PRODUCTION_ENABLED is false, every member
+    holds an unexpired ffa_g3_seats enrolment. A member with no queue row, or
+    no token, makes the gate false: the safe direction (#288)."""
+    ids = [p for p in player_ids if p is not None]
+    if not FFA_ASSEMBLY_ENABLED or not ids:
+        return False, False
+    rows = (await db.execute(text(
+        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled"
+        "  FROM ffa_queue q"
+        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"
+        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()
+    by = {r["player_id"]: r for r in rows}
+    asm = adm = True
+    for pid in ids:
+        r = by.get(pid)
+        if r is None:
+            return False, False
+        toks = set((r["caps"] or "").split(","))
+        if ASM_CAPS_TOKEN not in toks:
+            asm = False
+        if ADM_CAPS_TOKEN not in toks or not (ADM_PRODUCTION_ENABLED or r["enrolled"]):
+            adm = False
+    return asm, (asm and adm)
+
+
+async def _asm_insert_seat_rows(db, lobby_id, ordered, offered_pid=None) -> None:
+    """I2 writer 1: one seat row per member, at every lock, gated or not. The
+    slot is the sorted roster's; the member whose own response carries the
+    lock (Start's host) gets lock_offered_at in the same statement."""
+    for slot, r in enumerate(ordered):
+        await db.execute(text(
+            "INSERT INTO ffa_assembly_seats (lobby_id, player_id, slot, locked_at, lock_offered_at)"
+            " VALUES (:lid, :pid, CAST(:slot AS smallint), NOW(),"
+            "         CASE WHEN CAST(:offered AS boolean) THEN NOW() END)"
+            " ON CONFLICT (lobby_id, player_id) DO NOTHING"),
+            {"lid": lobby_id, "pid": r["player_id"], "slot": slot,
+             "offered": offered_pid is not None and r["player_id"] == offered_pid})
+
+
+async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=None):
+    """The lock body, shared by Start and REFORM (sec3.4): Start's lock body
+    moved here verbatim, plus the gates, the region projection (I5) and the
+    seat rows (writer 1). It never commits. The lobby row must be 'open' (a
+    Start's own row, or REFORM's freshly inserted L').
+
+    For REFORM (reform_of = the closing lobby): the config collapse does not
+    run (L' copies the lobby's config as it stood, already collapsed or not
+    at that lobby's own lock); kills_tiebreak is L''s copied value AND the
+    carried roster's capability; sudden_death is turned off when the carried
+    roster is not capable (both COPY-AND, sec3.4); lobby-phase wagers are not
+    re-bound (they move by lobby id, sec3.4 step 4). Returns (room, region,
+    ordered)."""
+    ordered = sorted(rows, key=lambda r: _ffa_sort_key(r["steam_id"]))
+    _pids = [r["player_id"] for r in ordered]
+    if reform_of is None:
+        # Config feature floor (sec3a): the server is the real authority, and it
+        # decides HERE -- before any Photon room exists, so there is no
+        # propagation race to lose. If ANY roster member's build is below the
+        # floor, the lobby's config collapses to the defaults AS A SET (never
+        # partially): a mixed lobby plays exactly today's rules. is_ranked is
+        # deliberately not part of the collapse (mixed-version safe -- the
+        # server ANDs it at submit; an old client only mis-renders its own HUD
+        # badge).
+        _vrows = (await db.execute(
+            select(Player.id, Player.mod_version).where(Player.id.in_(_pids))
+        )).all()
+        _floor = _parse_version(FFA_CONFIG_MIN_VERSION)
+        _all_capable = len(_vrows) == len(_pids) and all(
+            _parse_version(v.mod_version or "0") >= _floor for v in _vrows)
+        if not _all_capable:
+            # Codex round 2 (MEDIUM): sudden_death is deliberately NOT in this
+            # collapse. This check reads players.mod_version -- a potentially
+            # stale, last-write-wins observation (see the kills tie-break note
+            # below) -- and it runs BEFORE the strict per-member gate, which
+            # can only turn the flag OFF. So a roster that is genuinely capable
+            # by every member's own authenticated queue version would still
+            # have had the host's rule silently disabled by one stale players
+            # row, with no way to restore it.
+            #
+            # R3 (LOW) -- stating this precisely, because the earlier wording
+            # was false. The two gates read DIFFERENT columns, so neither
+            # strictly subsumes the other: every member's authenticated queue
+            # version can be 1.37 while one STALE players.mod_version says
+            # 1.35, in which case this general gate fires and the strict gate
+            # still (correctly) leaves sudden death ON. That is the INTENDED
+            # outcome -- the queue column is the authoritative per-member
+            # evidence (#294b) and the players column can change when the same
+            # account runs another client version. The other knobs keep riding
+            # the weaker gate because stale evidence there only mis-sizes a
+            # draw, never desyncs damage.
+            await db.execute(text("""
+                UPDATE ffa_lobbies
+                   SET score_target=5, card_candidates=5, initial_picks=1,
+                       card_cap=5, same_card_rule=FALSE
+                 WHERE id=:lid
+            """), {"lid": lobby_id})
+            print(f"[FFA-LOBBY] lobby {lobby_id}: roster below config floor "
+                  f"{FFA_CONFIG_MIN_VERSION} -- config collapsed to defaults")
+    # Kills tie-break capability, frozen HERE (migration 187): TRUE only when
+    # EVERY member's ffa_queue.mod_version -- stamped by that member's OWN
+    # session-authenticated join/create call -- clears the floor.
+    # players.mod_version is deliberately NOT consulted for this flag: it is
+    # global last-write-wins state, while a queue row is this member's own
+    # authenticated, lobby-scoped observation. NULL/missing => not capable =>
+    # legacy shared-tie semantics (the safe direction, #288).
+    _kt_vals = (await db.execute(text(
+        "SELECT mod_version FROM ffa_queue WHERE player_id = ANY(:ids)"
+    ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
+    _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
+    _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
+        _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
+    if reform_of is not None:
+        # COPY-AND (sec3.4): the re-formed lobby keeps the host's choice only
+        # where the carried roster can play it.
+        _kt_copied = (await db.execute(text(
+            "SELECT kills_tiebreak FROM ffa_lobbies WHERE id = :lid"
+        ), {"lid": lobby_id})).scalar()
+        _kills_tiebreak = bool(_kt_copied) and _kills_tiebreak
+
+    # Aug 6 item 10 -- sudden death gets a STRICTER capability gate than the
+    # rest of the config set, and deliberately does not rely on the
+    # `_all_capable` collapse above.
+    #
+    # Why: that collapse reads global, last-write-wins `players.mod_version`,
+    # which can be stale or change when one account runs two versions. For the
+    # other knobs (draw size, score target, card cap) stale evidence only
+    # mis-sizes a draw. Sudden death decides whether DAMAGE LANDS, so a
+    # client that does not implement it while its peers do produces a real
+    # cross-client divergence: one replica suppresses a hit, another applies
+    # it, and the two disagree about who is alive.
+    #
+    # So it rides the same evidence the kills tie-break uses -- each member's
+    # OWN session-authenticated `ffa_queue.mod_version`, written only by that
+    # member's own join/create request -- and it is frozen HERE at lock, never
+    # live-read per report. NULL/missing => not capable => OFF, which is the
+    # safe direction (the client's own 7th-segment parse defaults false too,
+    # so both ends fail the same way).
+    _sd_floor = _parse_version(FFA_SUDDEN_DEATH_MIN_VERSION)
+    _sd_capable = len(_kt_vals) == len(ordered) and all(
+        _parse_version((v or "0").lstrip("vV")) >= _sd_floor for v in _kt_vals)
+    if not _sd_capable:
+        await db.execute(text(
+            "UPDATE ffa_lobbies SET sudden_death=FALSE WHERE id=:lid"
+        ), {"lid": lobby_id})
+        print(f"[FFA-LOBBY] lobby {lobby_id}: sudden_death disabled -- "
+              f"not every member's own queue-stamped version clears {FFA_SUDDEN_DEATH_MIN_VERSION}")
+
+    room = f"ffa_{uuid.uuid4().hex[:12]}"
+    # Region (Sept 10, v4 group rule): mode of the members' homes as the
+    # baseline, then their stored ping maps (FFA lobby members keep theirs
+    # fresh through the FFA queue poll); see _group_region. I5: the pick's
+    # own explanation comes back through `explain` and is stored as a fixed
+    # projection (_region_projection), never as the raw detail.
+    _rx = {}
+    region = await _group_region(db, ordered, _region_mode_of(ordered),
+                                 "ffa-lobby" if reform_of is None else "ffa-reform",
+                                 room=room, explain=_rx)
+    _rwhy, _rdetail = _region_projection(
+        _rx.get("why"), _rx.get("raw"),
+        {str(r["player_id"]): slot for slot, r in enumerate(ordered)})
+    _a1, _a2 = await _ffa_asm_gates(db, _pids)
+    await db.execute(text("""
+        UPDATE ffa_lobbies
+           SET status='active', photon_room_id=:room, region=:reg,
+               player_count=:n, member_ids=:members, created_at=NOW(),
+               kills_tiebreak=:kt, assembly_v1=:a1, admission_v1=:a2,
+               region_why=:rw, region_detail=CAST(:rd AS jsonb)
+         WHERE id=:lid AND status='open'
+    """), {"room": room, "reg": (region or "us")[:8], "n": len(ordered),
+           "members": _pids, "lid": lobby_id,
+           "kt": _kills_tiebreak, "a1": _a1, "a2": _a2,
+           "rw": _rwhy, "rd": _json.dumps(_rdetail)})
+    if reform_of is None:
+        # Lobby-phase wagers resolve against the roster just frozen above
+        # (migration 207). The helper re-reads score_target/is_ranked from the
+        # row so it prices off the POST-clamp values, and never raises: a bet
+        # problem must not fail a Start. Refunds are only marked here; the
+        # gold moves after this transaction commits.
+        await _bind_lobby_bets(db, "ffa", lobby_id, {
+            "member_ids": _pids,
+            "steam_by_pid": {r["player_id"]: r["steam_id"] for r in ordered},
+        })
+    for slot, r in enumerate(ordered):
+        await db.execute(text("""
+            UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
+                   room_name=:room, room_region=:reg, matched_at=NOW(),
+                   held_until=NULL, held_lobby=NULL
+             WHERE player_id=:pid
+        """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
+               "pid": r["player_id"]})
+    await _asm_insert_seat_rows(db, lobby_id, ordered, offered_pid)
+    # Locked seats: assembly-length lease, then renewed by the authenticated
+    # in_match ping for as long as battles are actually running. Once the
+    # sitting genuinely ends nothing renews it and it lapses on its own -- no
+    # cleanup path has to fire, which is the whole point (migration 174).
+    await _lease_acquire_many(db, _pids, "ffa", lobby_id, LEASE_TTL_ASSEMBLY)
+    return room, region, ordered
 class _FfaLobbyStartReq(BaseModel):
     steam_id: str
 
@@ -51859,133 +52325,16 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
         ), {"t": _fixed_t, "c": _start_cfg["card_cap"], "lid": lobby_id})
         print(f"[FFA] lobby {lobby_id}: start-time config clamp -> "
               f"cap={_start_cfg['card_cap']} picks={_fixed_t}")
-    # EXACTLY the legacy gather-decider lock body from here. created_at is
+    # EXACTLY the legacy gather-decider lock body, shared with REFORM as
+    # _ffa_lock_roster (the connect-failure design, sec3.4). created_at is
     # reset to NOW() because every active-lobby consumer (25-min dispersed
     # close, bettable assembly window, zero-game dead sweep) reads it as the
-    # ACTIVATION time (design review find 2 — a lobby that sat open 26
-    # minutes would otherwise be janitor-closed on the next sweep).
-    ordered = sorted(live, key=lambda r: _ffa_sort_key(r["steam_id"]))
-    # Config feature floor (§3a): the server is the real authority, and it
-    # decides HERE — before any Photon room exists, so there is no propagation
-    # race to lose. If ANY roster member's build is below the floor, the
-    # lobby's config collapses to the defaults AS A SET (never partially): a
-    # mixed lobby plays exactly today's rules. is_ranked is deliberately not
-    # part of the collapse (mixed-version safe — the server ANDs it at
-    # submit; an old client only mis-renders its own HUD badge).
-    _pids = [r["player_id"] for r in ordered]
-    _vrows = (await db.execute(
-        select(Player.id, Player.mod_version).where(Player.id.in_(_pids))
-    )).all()
-    _floor = _parse_version(FFA_CONFIG_MIN_VERSION)
-    _all_capable = len(_vrows) == len(_pids) and all(
-        _parse_version(v.mod_version or "0") >= _floor for v in _vrows)
-    if not _all_capable:
-        # Codex round 2 (MEDIUM): sudden_death is deliberately NOT in this
-        # collapse. This check reads players.mod_version — a potentially stale,
-        # last-write-wins observation (see the kills tie-break note below) —
-        # and it runs BEFORE the strict per-member gate, which can only turn
-        # the flag OFF. So a roster that is genuinely capable by every
-        # member's own authenticated queue version would still have had the
-        # host's rule silently disabled by one stale players row, with no way
-        # to restore it.
-        #
-        # R3 (LOW) — stating this precisely, because the earlier wording was
-        # false. The two gates read DIFFERENT columns, so neither strictly
-        # subsumes the other: every member's authenticated queue version can
-        # be 1.37 while one STALE players.mod_version says 1.35, in which case
-        # this general gate fires and the strict gate still (correctly) leaves
-        # sudden death ON. That is the INTENDED outcome — the queue column is
-        # the authoritative per-member evidence (#294b) and the players column
-        # can change when the same account runs another client version. The
-        # other knobs keep riding the weaker gate because stale evidence there
-        # only mis-sizes a draw, never desyncs damage.
-        await db.execute(text("""
-            UPDATE ffa_lobbies
-               SET score_target=5, card_candidates=5, initial_picks=1,
-                   card_cap=5, same_card_rule=FALSE
-             WHERE id=:lid
-        """), {"lid": lobby_id})
-        print(f"[FFA-LOBBY] lobby {lobby_id}: roster below config floor "
-              f"{FFA_CONFIG_MIN_VERSION} — config collapsed to defaults")
-    # Kills tie-break capability, frozen HERE (migration 187): TRUE only when
-    # EVERY member's ffa_queue.mod_version — stamped by that member's OWN
-    # session-authenticated join/create call — clears the floor.
-    # players.mod_version is deliberately NOT consulted for this flag: it is
-    # global last-write-wins state, while a queue row is this member's own
-    # authenticated, lobby-scoped observation. NULL/missing ⇒ not capable ⇒
-    # legacy shared-tie semantics (the safe direction, #288).
-    _kt_vals = (await db.execute(text(
-        "SELECT mod_version FROM ffa_queue WHERE player_id = ANY(:ids)"
-    ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
-    _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
-    _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
-        _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
-
-    # Aug 6 item 10 — sudden death gets a STRICTER capability gate than the
-    # rest of the config set, and deliberately does not rely on the
-    # `_all_capable` collapse above.
-    #
-    # Why: that collapse reads global, last-write-wins `players.mod_version`,
-    # which can be stale or change when one account runs two versions. For the
-    # other knobs (draw size, score target, card cap) stale evidence only
-    # mis-sizes a draw. Sudden death decides whether DAMAGE LANDS, so a
-    # client that does not implement it while its peers do produces a real
-    # cross-client divergence: one replica suppresses a hit, another applies
-    # it, and the two disagree about who is alive.
-    #
-    # So it rides the same evidence the kills tie-break uses — each member's
-    # OWN session-authenticated `ffa_queue.mod_version`, written only by that
-    # member's own join/create request — and it is frozen HERE at lock, never
-    # live-read per report. NULL/missing => not capable => OFF, which is the
-    # safe direction (the client's own 7th-segment parse defaults false too,
-    # so both ends fail the same way).
-    _sd_floor = _parse_version(FFA_SUDDEN_DEATH_MIN_VERSION)
-    _sd_capable = len(_kt_vals) == len(ordered) and all(
-        _parse_version((v or "0").lstrip("vV")) >= _sd_floor for v in _kt_vals)
-    if not _sd_capable:
-        await db.execute(text(
-            "UPDATE ffa_lobbies SET sudden_death=FALSE WHERE id=:lid"
-        ), {"lid": lobby_id})
-        print(f"[FFA-LOBBY] lobby {lobby_id}: sudden_death disabled — "
-              f"not every member's own queue-stamped version clears {FFA_SUDDEN_DEATH_MIN_VERSION}")
-
-    room = f"ffa_{uuid.uuid4().hex[:12]}"
-    # Region (Sept 10, v4 group rule): mode of the members' homes as the
-    # baseline, then their stored ping maps (FFA lobby members keep theirs
-    # fresh through the FFA queue poll); see _group_region.
-    region = await _group_region(db, ordered, _region_mode_of(ordered), "ffa-lobby", room=room)
-    await db.execute(text("""
-        UPDATE ffa_lobbies
-           SET status='active', photon_room_id=:room, region=:reg,
-               player_count=:n, member_ids=:members, created_at=NOW(),
-               kills_tiebreak=:kt
-         WHERE id=:lid AND status='open'
-    """), {"room": room, "reg": (region or "us")[:8], "n": len(ordered),
-           "members": [r["player_id"] for r in ordered], "lid": lobby_id,
-           "kt": _kills_tiebreak})
-    # Lobby-phase wagers resolve against the roster just frozen above
-    # (migration 207). The helper re-reads score_target/is_ranked from the row
-    # so it prices off the POST-clamp values, and never raises: a bet problem
-    # must not fail a Start. Refunds are only marked here; the gold moves
-    # after this transaction commits.
-    await _bind_lobby_bets(db, "ffa", lobby_id, {
-        "member_ids": [r["player_id"] for r in ordered],
-        "steam_by_pid": {r["player_id"]: r["steam_id"] for r in ordered},
-    })
-    for slot, r in enumerate(ordered):
-        await db.execute(text("""
-            UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
-                   room_name=:room, room_region=:reg, matched_at=NOW(),
-                   held_until=NULL, held_lobby=NULL
-             WHERE player_id=:pid
-        """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
-               "pid": r["player_id"]})
-    # Locked seats: assembly-length lease, then renewed by the authenticated
-    # in_match ping for as long as battles are actually running. Once the
-    # sitting genuinely ends nothing renews it and it lapses on its own -- no
-    # cleanup path has to fire, which is the whole point (migration 174).
-    await _lease_acquire_many(db, [r["player_id"] for r in ordered], "ffa",
-                              lobby_id, LEASE_TTL_ASSEMBLY)
+    # ACTIVATION time (design review find 2 -- a lobby that sat open 26
+    # minutes would otherwise be janitor-closed on the next sweep). The
+    # host's seat row carries lock_offered_at: this response offers it the
+    # lock (I2 writer 1).
+    room, region, ordered = await _ffa_lock_roster(db, lobby_id, live,
+                                                   offered_pid=me["player_id"])
     await db.commit()
     print(f"[FFA-LOBBY] host {req.steam_id} started lobby {lobby_id} room {room} n={len(ordered)}")
     try:
@@ -52135,6 +52484,7 @@ async def ffa_lobby_kick(req: _LobbyKickReq, request: Request,
 async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                           expected_lobby_id: str | None = Query(None),
                           cause: str = Query("", max_length=16),
+                          label: str = Query("", max_length=16),
                           db: AsyncSession = Depends(get_db)):
     """Leave the FFA queue. Zero-game locked lobby → DISSOLVED (canceled,
     everyone else reset to searching — the #150 lifecycle rule). Lobby WITH
@@ -52170,9 +52520,17 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         # scope a retried leave could mark a departure on a NEWER lobby the
         # player joined meanwhile. A leave without a target marks nothing
         # (old-client behaviour, unchanged).
+        _asm_rplan = None
         if expected_lobby_id:
             try:
-                marked = (await db.execute(text("""
+                # Writer 5 at this branch (the connect-failure design, I2;
+                # N8): the seat's receipts, and a granted seat's departure
+                # on a started gated lobby only when two current witnesses
+                # corroborate it in this transaction.
+                _asm_rplan = await _asm_rowless_gate(db, expected_lobby_id, steam_id,
+                                                     cause, label)
+                _asm_skip = _asm_rplan is not None and not _asm_rplan.may_depart
+                marked = [] if _asm_skip else (await db.execute(text("""
                     UPDATE ffa_lobbies l
                        SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e
                                              FROM unnest(l.departed_ids || p.id) e)),
@@ -52224,15 +52582,29 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                     # (#302 — a claim a reader cannot trace to the code).
                     print(f"[FFA-LOCK] rowless leaver {steam_id} departure recorded on lobby {expected_lobby_id}")
             except Exception as ex:
+                _asm_rplan = None
                 print(f"[FFA-LOCK] rowless departure mark failed for {steam_id}: {ex}")
                 try:
                     await db.rollback()
                 except Exception:
                     pass
         await db.commit()
+        if _asm_rplan is not None:
+            _asm_rplan.ctx.emit()
         return {"status": "ok"}
     dissolved = False
+    _asm_plan = None
     lobby_id = me["series_id"]
+    # The reform-aware fence (the connect-failure design, sec3.2): a leave
+    # naming the lobby this seat's lobby was re-formed from (one hop) is a
+    # pre-room leave of the re-formed lobby, and its lease there goes too.
+    _asm_hop = bool(expected_lobby_id and lobby_id is not None
+                    and me["status"] == "ready_join"
+                    and str(lobby_id) != expected_lobby_id
+                    and await _asm_reform_hop(db, lobby_id, expected_lobby_id,
+                                              me["player_id"]))
+    if _asm_hop:
+        expected_lobby_id = str(lobby_id)
     # Delayed-retry fence for BOTH lobby shapes (impl review find 2): a leave
     # retry that was aimed at lobby A must never tear down a LATER membership
     # or lock in lobby B. New clients always send the id they mean.
@@ -52279,6 +52651,10 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         lrow = (await db.execute(text(
             "SELECT l.status, l.games_played FROM ffa_lobbies l WHERE l.id = :lid FOR UPDATE"
         ), {"lid": lobby_id})).mappings().first()
+        # Writer 5 and the gated leave (the connect-failure design, sec3.2;
+        # N8, N12): None without a seat row, which keeps today's branches.
+        _asm_plan = await _asm_leave_plan(db, lobby_id, me["player_id"], cause, label,
+                                          pre_room=_asm_hop)
         # July 30 lifecycle audit item 2: games_played stays 0 for the WHOLE of
         # live game 1 (reports land at game END), so "zero games" alone is not
         # assembly-failure evidence — one player quitting 30 minutes into a
@@ -52313,7 +52689,7 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         # `_in_room_exit` below — the two dissolution predicates and
         # `game_live_now` — is therefore covered by one change; none of them
         # compares against a literal any more.
-        _in_room_exit = _is_in_room_exit_cause(cause)
+        _in_room_exit = _is_in_room_exit_cause("" if _asm_hop else cause)
         # Round-13 REVERSAL of the round-12 fresh_cancel override: Codex
         # proved it was a hostile-void primitive — ONE member's unverified
         # claim cancelled a LIVE game (warm heartbeat and all), refunded its
@@ -52339,23 +52715,31 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                                       or _locked_at <= _PROCESS_STARTED_WALL)
         if (lrow is not None and lrow["status"] == "active"
                 and int(lrow["games_played"] or 0) == 0
+                and (_asm_plan is None or _asm_plan.may_dissolve)
                 and not _in_room_exit
                 and not _startup_indeterminate
                 and not _group_game_positively_live(str(lobby_id))):
-            await db.execute(text(
+            # I3 row 6: never on a started lobby, and the close carries its
+            # record in the same statement; the rest runs only when it closed.
+            _closed_now = (await db.execute(text(
                 "UPDATE ffa_lobbies SET status='canceled', invalidation_reason='assembly_timeout',"
-                "       invalidated_at=NOW() WHERE id=:lid AND status='active'"
-            ), {"lid": lobby_id})
-            await db.execute(text("""
-                UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
-                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
-                       held_until=NULL, held_lobby=NULL
-                 WHERE series_id = :lid AND player_id != :pid
-            """), {"lid": lobby_id, "pid": me["player_id"]})
-            await _reconcile_ffa_lobby_bets(db, lobby_id, "lobby dissolved")
-            dissolved = True
-            print(f"[FFA-LOCK] lobby dissolved by leave (lobby {lobby_id}, leaver {steam_id})")
-        elif lrow is not None and lrow["status"] == "active":
+                "       invalidated_at=NOW()," + _FFA_CLOSE_RECORD_SET +
+                " WHERE id=:lid AND status='active' AND start_granted_at IS NULL"
+                " RETURNING id"
+            ), {"lid": lobby_id, "rec_path": "leave_dissolve",
+                "rec_trigger": "leave"})).scalar()
+            if _closed_now is not None:
+                await db.execute(text("""
+                    UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
+                           room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
+                           held_until=NULL, held_lobby=NULL
+                     WHERE series_id = :lid AND player_id != :pid
+                """), {"lid": lobby_id, "pid": me["player_id"]})
+                await _reconcile_ffa_lobby_bets(db, lobby_id, "lobby dissolved")
+                dissolved = True
+                print(f"[FFA-LOCK] lobby dissolved by leave (lobby {lobby_id}, leaver {steam_id})")
+        elif (lrow is not None and lrow["status"] == "active"
+              and (_asm_plan is None or _asm_plan.may_depart)):
             # Played (or live-game-1) lobby: the lobby STAYS ACTIVE while >=2
             # members remain (closing it here made the survivors' final report
             # 409 — the leaver's client fires this the moment they quit
@@ -52386,7 +52770,10 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
             # here is closed later by the dispersed/sitting-over sweeps.
             game_live_now = (_group_game_positively_live(str(lobby_id))
                              or _in_room_exit
-                             or not _in_match_evidence_trustworthy())
+                             or not _in_match_evidence_trustworthy()
+                             # A started gated lobby's game is live (the
+                             # connect-failure design, I2 writer 5; N8).
+                             or (_asm_plan is not None and _asm_plan.started))
             all_but_one = False
             # CAST(:pid AS uuid) is LOAD-BEARING, not decoration. departed_ids
             # is uuid[], and with a bare bind parameter on the right Postgres
@@ -52428,7 +52815,13 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                 # binding one parameter under both CAST(... AS uuid) and
                 # CAST(... AS text) asks Postgres to deduce two types for one
                 # placeholder, which fails at parse time.
-                all_but_one = bool((await db.execute(text("""
+                # N8: a granted seat's own leave on a started gated lobby
+                # appends its departure, and releases the survivors, only
+                # when two current witnesses corroborated it in this
+                # transaction; otherwise the census that later corroborates
+                # the absence does both (_asm_deferred_departure).
+                _asm_defer = _asm_plan is not None and _asm_plan.defer_departure
+                all_but_one = False if _asm_defer else bool((await db.execute(text("""
                     UPDATE ffa_lobbies
                        SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),
                            departure_causes = CASE WHEN CAST(:cause AS text) = ''
@@ -52468,6 +52861,15 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                      RETURNING status
                 """), {"lid": lobby_id, "pid": me["player_id"],
                        "pidt": str(me["player_id"]), "cause": _pcause})).scalar()
+                if closed == "completed":
+                    # I3 row 7: the record of this close, in the transaction
+                    # of the statement that closed it (which completes the
+                    # lobby only on its own cardinality test).
+                    await db.execute(text(
+                        "UPDATE ffa_lobbies SET" + _FFA_CLOSE_RECORD_SET +
+                        " WHERE id = :lid AND status = 'completed' AND dissolve_path IS NULL"
+                    ), {"lid": lobby_id, "rec_path": "leave_all_but_one",
+                        "rec_trigger": "leave"})
             if closed == "completed" or all_but_one:
                 # The sitting is over — now the survivors' rows go too, so
                 # nobody stays locked out of other queues by a closed lobby.
@@ -52489,9 +52891,2152 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                 print(f"[FFA-LOCK] played lobby {lobby_id} closed — all but one member departed")
             else:
                 print(f"[FFA-LOCK] member left played lobby {lobby_id} (leaver {steam_id}) — lobby stays active for the survivors")
+    if _asm_plan is not None:
+        await _asm_leave_finish(db, _asm_plan, dissolved)
     await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"), {"pid": me["player_id"]})
     await db.commit()
+    if _asm_plan is not None:
+        await _asm_leave_after(db, _asm_plan)
     return {"status": "ok", "lock_dissolved": dissolved}
+
+
+
+
+# ===========================================================================
+# FFA assembly (the connect-failure design, V11): the seat record's writers,
+# the verdict, SHORT START, the admission, the expiry, REFORM and DISSOLVE.
+# The constants sit beside FFA_MAX_PLAYERS; the lock-time writer (writer 1)
+# is _ffa_lock_roster; the routes are below this block.
+#
+# One rule governs every function here: it runs inside its caller's locks
+# (the lobby row first, then that lobby's queue rows in UUID order, #207) and
+# never commits. The caller commits once and only then prints; the prints are
+# collected on the context so a rolled-back transaction claims nothing (#302).
+# ===========================================================================
+
+_ASM_NONFINAL = frozenset({"granted", "admissible", "admitted_late"})
+_ASM_GRANTED = frozenset({"granted", "admitted_late"})
+
+_ASM_SEATS_SQL = (
+    "SELECT s.*, p.steam_id AS seat_steam_id,"
+    "       EXISTS (SELECT 1 FROM ffa_queue q"
+    "                WHERE q.player_id = s.player_id AND q.series_id = s.lobby_id) AS in_queue"
+    "  FROM ffa_assembly_seats s JOIN players p ON p.id = s.player_id"
+    " WHERE s.lobby_id = :lid ORDER BY s.slot, s.player_id")
+
+
+def _asm_id8(lobby_id) -> str:
+    return str(lobby_id)[:8]
+
+
+async def _asm_clock(db):
+    """The server clock for one assembly transaction: the database's
+    clock_timestamp() read once, and the monotonic instant it was read at, so
+    an answer built later can say how old the lobby is when it is built."""
+    row = (await db.execute(text("SELECT clock_timestamp() AS now"))).mappings().first()
+    now = row["now"] if row is not None and row["now"] is not None else datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now, time.monotonic()
+
+
+class _AsmCtx:
+    """One assembly transaction's view: the lobby row and its seat rows as
+    this transaction last read them, the clock, and what to do after COMMIT."""
+
+    def __init__(self, db, lobby_id, *, route, trigger, t0=None):
+        self.db = db
+        self.lid = lobby_id
+        self.route = route
+        self.trigger = trigger
+        self.t0 = time.monotonic() if t0 is None else t0
+        self.lobby = None
+        self.seats = []
+        self.now = None
+        self.mono = None
+        self.expected_game = None
+        self.prints = []
+        self.refund_flush = False
+        self.decided = None
+
+    def log(self, msg: str) -> None:
+        self.prints.append(f"[FFA-ASM] lobby {_asm_id8(self.lid)} {msg}")
+
+    def t_ms(self) -> int:
+        return max(0, int((self.now - self.lobby["created_at"]).total_seconds() * 1000))
+
+    def age_now_ms(self) -> int:
+        """server_age_ms at the moment of the call: the database clock read
+        at the transaction's start plus the monotonic time since."""
+        base = (self.now - self.lobby["created_at"]).total_seconds()
+        return max(0, int((base + (time.monotonic() - self.mono)) * 1000))
+
+    def seat_of(self, player_id):
+        return next((s for s in self.seats if s["player_id"] == player_id), None)
+
+    async def reload(self, *, lobby=True) -> None:
+        if lobby:
+            row = (await self.db.execute(text("SELECT * FROM ffa_lobbies WHERE id = :lid"),
+                                         {"lid": self.lid})).mappings().first()
+            self.lobby = dict(row) if row is not None else None
+        res = await self.db.execute(text(_ASM_SEATS_SQL), {"lid": self.lid})
+        self.seats = [dict(r) for r in res.mappings().all()]
+
+    def emit(self) -> None:
+        for line in self.prints:
+            print(line)
+        self.prints = []
+
+
+async def _asm_ctx_slot(db, lobby_id, *, route, trigger, t0=None):
+    """A context under the lobby row lock: _ffa_lock_lobby_slot takes it (FOR
+    NO KEY UPDATE, a no-op beside the leave route's and the poll's FOR UPDATE)
+    and derives k = games_played + 1 from the locked row, the only number a
+    gone record may name (I2's gone rule). Then the clock, the row, the seats."""
+    _row, k = await _ffa_lock_lobby_slot(db, lobby_id)
+    ctx = _AsmCtx(db, lobby_id, route=route, trigger=trigger, t0=t0)
+    ctx.expected_game = k
+    ctx.now, ctx.mono = await _asm_clock(db)
+    await ctx.reload()
+    return ctx
+
+
+def _asm_nonfinal(s) -> bool:
+    return s["verdict"] is None or s["verdict"] in _ASM_NONFINAL
+
+
+def _asm_fresh(s, now, secs=ASM_CENSUS_FRESH_S) -> bool:
+    return s["census_at"] is not None and s["census_at"] >= now - timedelta(seconds=secs)
+
+
+def _asm_lists(s, slot, actor) -> bool:
+    """Seat s's stored census lists the resolved entry (slot, actor)."""
+    return any(sl == slot and a == actor
+               for sl, a in zip(s["census_slots"] or [], s["census_actors"] or []))
+
+
+def _asm_lists_bodied(s, slot, actor) -> bool:
+    # census_nobody is slot-level: b = 0 on any entry of that slot marks it.
+    return _asm_lists(s, slot, actor) and slot not in (s["census_nobody"] or [])
+
+
+def _asm_lists_kept(s, slot, actor) -> bool:
+    return _asm_lists(s, slot, actor) and slot not in (s["census_unkept"] or [])
+
+
+def _asm_claim_seen(p, seats, now) -> bool:
+    """Another non-final seat's FRESH census, sent from p's claimed region,
+    lists p's slot with p's claimed actor (the binding's corroboration)."""
+    if p["actor_claim"] is None or p["claim_region"] is None:
+        return False
+    for q in seats:
+        if q["player_id"] == p["player_id"] or not _asm_nonfinal(q):
+            continue
+        if _asm_fresh(q, now) and q["census_region"] == p["claim_region"] \
+                and _asm_lists(q, p["slot"], p["actor_claim"]):
+            return True
+    return False
+
+
+def _asm_corroborated(p, seats, now) -> bool:
+    """CORROBORATED (sec3.2): p's own census is fresh and p is bound for its
+    current claim, which another seat's fresh census corroborates now."""
+    return (_asm_fresh(p, now) and p["actor_nr"] is not None
+            and p["actor_nr"] == p["actor_claim"]
+            and p["actor_region"] == p["claim_region"]
+            and _asm_claim_seen(p, seats, now))
+
+
+def _asm_classify(ctx) -> dict:
+    """player_id -> LEFT | READY | SPAWNING | PENDING at ctx.now (sec3.2).
+    Every seat row is a member; only non-final rows' censuses are evidence.
+    SPAWNING counts in |READY|."""
+    out = {}
+    for p in ctx.seats:
+        v = p["verdict"]
+        if v in ("carried", "excluded", "dissolved"):
+            continue
+        if p["left_at"] is not None or v == "left" or not p["in_queue"]:
+            out[p["player_id"]] = "LEFT"
+        elif _asm_corroborated(p, ctx.seats, ctx.now) and not (
+                p["bodiless_at"] is not None and p["body_seen_at"] is None):
+            out[p["player_id"]] = "SPAWNING" if p["body_seen_at"] is None else "READY"
+        else:
+            out[p["player_id"]] = "PENDING"
+    return out
+
+
+async def _asm_bind(ctx) -> None:
+    """The binding rule (sec3.2), over every non-final seat that holds no grant:
+    a corroborated claim binds unless another seat row already holds that
+    (actor, region); the first corroborated claim wins."""
+    for p in ctx.seats:
+        if p["verdict"] not in (None, "admissible"):
+            continue
+        claim = (p["actor_claim"], p["claim_region"])
+        if claim[0] is None or claim[1] is None:
+            continue
+        if (p["actor_nr"], p["actor_region"]) == claim:
+            continue
+        if not _asm_claim_seen(p, ctx.seats, ctx.now):
+            continue
+        if any(r["player_id"] != p["player_id"]
+               and (r["actor_nr"], r["actor_region"]) == claim for r in ctx.seats):
+            ctx.log(f"actor_conflict slot={p['slot']}")
+            continue
+        await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats SET actor_nr = CAST(:a AS smallint), actor_region = :r"
+            " WHERE lobby_id = :lid AND player_id = :pid"
+            "   AND (verdict IS NULL OR verdict = 'admissible')"),
+            {"a": claim[0], "r": claim[1], "lid": ctx.lid, "pid": p["player_id"]})
+        p["actor_nr"], p["actor_region"] = claim
+
+
+async def _asm_body(ctx) -> None:
+    """The body rule (sec3.2), for the seats with no verdict or admissible and
+    a binding. body_seen_at: two other non-final seats' latest censuses from
+    the bound region list the bound actor with b = 1. bodiless_at (while no
+    body is seen): two other non-final FRESH censuses built after the spawn
+    reference + ASM_SPAWN_GRACE_S (census_seen_at) do not. Both first-write."""
+    ref_col = "spawn_ok_at" if ctx.lobby.get("admission_v1") else "arrived_at"
+    for p in ctx.seats:
+        if p["verdict"] not in (None, "admissible"):
+            continue
+        if p["actor_nr"] is None or p["actor_region"] is None or p["body_seen_at"] is not None:
+            continue
+        others = [q for q in ctx.seats
+                  if q["player_id"] != p["player_id"] and _asm_nonfinal(q)
+                  and q["census_at"] is not None and q["census_region"] == p["actor_region"]]
+        seen = sum(1 for q in others if _asm_lists_bodied(q, p["slot"], p["actor_nr"]))
+        if seen >= 2:
+            await ctx.db.execute(text(
+                "UPDATE ffa_assembly_seats SET body_seen_at = COALESCE(body_seen_at, CAST(:now AS timestamptz))"
+                " WHERE lobby_id = :lid AND player_id = :pid"),
+                {"now": ctx.now, "lid": ctx.lid, "pid": p["player_id"]})
+            p["body_seen_at"] = p["body_seen_at"] or ctx.now
+            continue
+        ref = p[ref_col]
+        if ref is None or p["bodiless_at"] is not None:
+            continue
+        grace = ref + timedelta(seconds=ASM_SPAWN_GRACE_S)
+        misses = sum(1 for q in others
+                     if _asm_fresh(q, ctx.now) and q["census_seen_at"] is not None
+                     and q["census_seen_at"] >= grace
+                     and not _asm_lists_bodied(q, p["slot"], p["actor_nr"]))
+        if misses >= 2:
+            await ctx.db.execute(text(
+                "UPDATE ffa_assembly_seats SET bodiless_at = COALESCE(bodiless_at, CAST(:now AS timestamptz))"
+                " WHERE lobby_id = :lid AND player_id = :pid AND body_seen_at IS NULL"),
+                {"now": ctx.now, "lid": ctx.lid, "pid": p["player_id"]})
+            p["bodiless_at"] = ctx.now
+
+
+def _asm_late_witnesses(ctx, subject):
+    """Late-body witnesses (writer 4): another seat's FRESH census, the seat
+    granted or admitted_late with its own late_body_game, built after the
+    subject's admission, from the subject's bound region."""
+    out = []
+    for q in ctx.seats:
+        if q["player_id"] == subject["player_id"]:
+            continue
+        v = q["verdict"]
+        if not (v == "granted" or (v == "admitted_late" and q["late_body_game"] is not None)):
+            continue
+        if not _asm_fresh(q, ctx.now) or q["census_seen_at"] is None:
+            continue
+        if q["census_seen_at"] <= subject["late_admitted_at"]:
+            continue
+        if q["census_region"] != subject["actor_region"]:
+            continue
+        out.append(q)
+    return out
+
+
+async def _asm_late_body(ctx, only_pid=None) -> None:
+    """The late-body rule (writer 4; V5): late_body_game = g, first write,
+    g >= late_game, when (i) the seat's own entered receipt names g and one
+    witness lists its bound actor kept in census_game g, or (ii) two witnesses
+    list it kept in the same census_game g. The least such g wins."""
+    for p in ctx.seats:
+        if only_pid is not None and p["player_id"] != only_pid:
+            continue
+        if p["late_admitted_at"] is None or p["late_body_game"] is not None:
+            continue
+        if p["actor_nr"] is None or p["late_game"] is None:
+            continue
+        ws = [q for q in _asm_late_witnesses(ctx, p)
+              if q["census_game"] is not None and q["census_game"] >= p["late_game"]
+              and _asm_lists_kept(q, p["slot"], p["actor_nr"])]
+        cands = []
+        claim = p["late_game_claim"]
+        if claim is not None and claim >= p["late_game"] \
+                and any(q["census_game"] == claim for q in ws):
+            cands.append((claim, "i"))
+        counts = {}
+        for q in ws:
+            counts[q["census_game"]] = counts.get(q["census_game"], 0) + 1
+        for g, n in counts.items():
+            if n >= 2:
+                cands.append((g, "ii"))
+        if not cands:
+            continue
+        g, path = min(cands)
+        res = await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats SET late_body_game = CAST(:g AS smallint),"
+            "       late_body_at = CAST(:now AS timestamptz)"
+            " WHERE lobby_id = :lid AND player_id = :pid AND late_body_game IS NULL"),
+            {"g": g, "now": ctx.now, "lid": ctx.lid, "pid": p["player_id"]})
+        if (res.rowcount or 0) > 0:
+            p["late_body_game"], p["late_body_at"] = g, ctx.now
+            ctx.log(f"late_body slot={p['slot']} game={g} path={path}")
+
+
+def _asm_current_witnesses(ctx, subject):
+    """A CURRENT witness of the gone rule (writer 4, (iii)): another seat
+    granted, or admitted_late with its own late_body_game; no gone record and
+    no protocol release of its own (N10); its claim equals its binding; its
+    latest census lists its own bound actor, is at most ASM_WITNESS_FRESH_S old
+    and was built after the subject's verdict_at."""
+    horizon = ctx.now - timedelta(seconds=ASM_WITNESS_FRESH_S)
+    out = []
+    for q in ctx.seats:
+        if q["player_id"] == subject["player_id"]:
+            continue
+        v = q["verdict"]
+        if not (v == "granted" or (v == "admitted_late" and q["late_body_game"] is not None)):
+            continue
+        if q["gone_game"] is not None or q["released_at"] is not None:
+            continue
+        if q["actor_nr"] is None or q["actor_claim"] != q["actor_nr"] \
+                or q["claim_region"] != q["actor_region"]:
+            continue
+        if not _asm_lists(q, q["slot"], q["actor_nr"]):
+            continue
+        if q["census_at"] is None or q["census_at"] < horizon:
+            continue
+        if subject["verdict_at"] is None or q["census_seen_at"] is None \
+                or q["census_seen_at"] <= subject["verdict_at"]:
+            continue
+        out.append(q)
+    return out
+
+
+def _asm_gone_subject(ctx, s) -> bool:
+    return (s["verdict"] in _ASM_GRANTED and ctx.lobby.get("start_granted_at") is not None
+            and s["gone_game"] is None and s["released_at"] is None
+            and s["actor_nr"] is not None and s["actor_region"] is not None)
+
+
+def _asm_gone_test(ctx, subject):
+    """The witness test (iii). Returns (by_slots, own_age_ms, own_lists) when
+    it holds, else None: two current witnesses omit the subject's bound actor
+    (each with census_anon = 0, from the subject's bound region), no current
+    witness lists it, and the subject's own census, when at most
+    ASM_WITNESS_FRESH_S old, does not list its own bound actor."""
+    ws = _asm_current_witnesses(ctx, subject)
+    if any(subject["actor_nr"] in (q["census_actors"] or []) for q in ws):
+        return None
+    omit = [q for q in ws
+            if (q["census_anon"] or 0) == 0 and q["census_region"] == subject["actor_region"]]
+    if len(omit) < 2:
+        return None
+    own_age = None
+    own_lists = 0
+    if subject["census_at"] is not None:
+        own_age = max(0, int((ctx.now - subject["census_at"]).total_seconds() * 1000))
+        own_lists = 1 if _asm_lists(subject, subject["slot"], subject["actor_nr"]) else 0
+        if own_age <= ASM_WITNESS_FRESH_S * 1000 and own_lists:
+            return None
+    return [q["slot"] for q in omit], own_age, own_lists
+
+
+async def _asm_gone_write(ctx, subject, found, *, deferred_ok=True) -> bool:
+    """Write the gone record for a subject the witness test found gone:
+    gone_game = k (games_played + 1 under the lobby lock), gone_path 'leave'
+    when the subject's own leave reached the server, else 'witness'. First
+    write wins. A census- or claim-triggered record of a seat whose leave
+    already landed runs the departure N8 deferred at that leave."""
+    by, own_age, own_lists = found
+    k = int(ctx.expected_game)
+    path = "leave" if subject["left_at"] is not None else "witness"
+    res = await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats SET gone_game = CAST(:k AS smallint), gone_path = :p"
+        " WHERE lobby_id = :lid AND player_id = :pid"
+        "   AND gone_game IS NULL AND released_at IS NULL"),
+        {"k": k, "p": path, "lid": ctx.lid, "pid": subject["player_id"]})
+    if (res.rowcount or 0) == 0:
+        return False
+    subject["gone_game"], subject["gone_path"] = k, path
+    ctx.log(f"gone slot={subject['slot']} game={k} path={path} "
+            f"by={','.join(str(b) for b in by)} "
+            f"own_age_ms={'none' if own_age is None else own_age} own_lists={own_lists}")
+    if path == "leave" and deferred_ok:
+        await _asm_deferred_departure(ctx, subject)
+    return True
+
+
+async def _asm_gone_census(ctx, exclude_pid=None) -> None:
+    """The gone rule at a census (writer 4, (iii)): the census just stored is a
+    witness for every other eligible subject. The sender's own seat is reached
+    only through its claim trigger (_asm_claim_trigger)."""
+    for s in ctx.seats:
+        if s["player_id"] == exclude_pid:
+            continue
+        if _asm_gone_subject(ctx, s):
+            found = _asm_gone_test(ctx, s)
+            if found is not None:
+                await _asm_gone_write(ctx, s, found)
+
+
+async def _asm_claim_trigger(ctx, me) -> None:
+    """The claim trigger (writers 3 and 4, states B and D; V10, N6). A granted
+    seat is never re-bound (V6): a corroborated claim that differs from its
+    binding prints rebind_refused and changes nothing. A claim of another
+    actor in the bound region runs the witness test (iii) for this seat and
+    decides nothing by itself; a claim of another region triggers nothing."""
+    if me["verdict"] not in _ASM_GRANTED or me["actor_nr"] is None:
+        return
+    if me["actor_claim"] is None or me["claim_region"] is None:
+        return
+    if (me["actor_claim"], me["claim_region"]) == (me["actor_nr"], me["actor_region"]):
+        return
+    if _asm_claim_seen(me, ctx.seats, ctx.now):
+        ctx.log(f"rebind_refused slot={me['slot']}")
+    if me["claim_region"] != me["actor_region"]:
+        return
+    result = "none"
+    if _asm_gone_subject(ctx, me):
+        found = _asm_gone_test(ctx, me)
+        if found is not None and await _asm_gone_write(ctx, me, found):
+            result = "witness"
+    ctx.log(f"gone_trigger slot={me['slot']} claim={me['actor_claim']} "
+            f"bound={me['actor_nr']} result={result}")
+
+
+async def _asm_deferred_departure(ctx, subject) -> None:
+    """N8: the departure a granted seat's leave did NOT write, written once two
+    current witnesses corroborated its absence. Appends it to departed_ids with
+    its recorded cause (the leave's own first-attestation semantics) and, at
+    all but one, releases the other seats' queue rows and leases, exactly as
+    the leave's live-game branch does. Never completes the lobby: a started
+    lobby closes by the janitor's closers (R48)."""
+    cause = _persistable_exit_cause(subject["left_cause"] or "")
+    abo = (await ctx.db.execute(text("""
+        UPDATE ffa_lobbies
+           SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),
+               departure_causes = CASE WHEN CAST(:cause AS text) = ''
+                                       THEN departure_causes
+                                       ELSE jsonb_build_object(CAST(:pidt AS text),
+                                                               CAST(:cause AS text))
+                                            || departure_causes END
+         WHERE id = :lid AND status = 'active'
+        RETURNING cardinality(departed_ids)
+                  >= COALESCE(player_count, cardinality(member_ids)) - 1
+    """), {"lid": ctx.lid, "pid": subject["player_id"], "pidt": str(subject["player_id"]),
+           "cause": cause})).scalar()
+    ctx.log(f"departure slot={subject['slot']} deferred=1 all_but_one={1 if abo else 0}")
+    if abo:
+        await ctx.db.execute(text(
+            "DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid"),
+            {"lid": ctx.lid, "pid": subject["player_id"]})
+        await ctx.db.execute(text(
+            "DELETE FROM queue_leases WHERE mode = 'ffa' AND group_id = :lid AND player_id != :pid"),
+            {"lid": ctx.lid, "pid": subject["player_id"]})
+
+
+async def _asm_release_row(db, lobby_id, player_id) -> None:
+    """Delete one seat's queue row for this lobby and its ffa lease for it
+    (the kick path's statement): the in-transaction release REFORM, DISSOLVE
+    and the expiry use. The leave route's own helper commits on its own, which
+    would split these one-transaction decisions."""
+    await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid"),
+                     {"pid": player_id, "lid": lobby_id})
+    await db.execute(text(
+        "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid"),
+        {"pid": player_id, "lid": lobby_id})
+
+
+async def _ffa_expire_admissions(db, lobby_id, *, lock_rows=False, now=None) -> list:
+    """The admission expiry (sec3.4): at or after A (T0 + ASM_ADMIT_LATE_S) on an
+    active short-started lobby, every seat still admissible is excluded, its
+    queue row and lease go, and it is appended to departed_ids (final, #686;
+    departure_causes is display-only and not written). Idempotent. The caller
+    holds the lobby row; lock_rows=True also takes the lobby's queue rows in
+    UUID order first (the report route holds only the lobby row). Returns
+    [(slot, t_ms)] for the caller to print after its COMMIT."""
+    lob = (await db.execute(text(
+        "SELECT status, created_at, short_started_at FROM ffa_lobbies WHERE id = :lid"),
+        {"lid": lobby_id})).mappings().first()
+    if lob is None or lob["status"] != "active" or lob["short_started_at"] is None:
+        return []
+    if now is None:
+        now, _m = await _asm_clock(db)
+    if now < lob["created_at"] + timedelta(seconds=ASM_ADMIT_LATE_S):
+        return []
+    rows = (await db.execute(text(
+        "SELECT player_id, slot FROM ffa_assembly_seats"
+        " WHERE lobby_id = :lid AND verdict = 'admissible' ORDER BY slot"),
+        {"lid": lobby_id})).mappings().all()
+    if not rows:
+        return []
+    if lock_rows:
+        qids = (await db.execute(text("SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
+                                 {"lid": lobby_id})).scalars().all()
+        await _lock_queue_rows_ordered(db, "ffa_queue", qids)
+    t_ms = max(0, int((now - lob["created_at"]).total_seconds() * 1000))
+    out = []
+    for r in rows:
+        await db.execute(text(
+            "UPDATE ffa_assembly_seats SET verdict = 'excluded', verdict_at = CAST(:now AS timestamptz)"
+            " WHERE lobby_id = :lid AND player_id = :pid AND verdict = 'admissible'"),
+            {"now": now, "lid": lobby_id, "pid": r["player_id"]})
+        await _asm_release_row(db, lobby_id, r["player_id"])
+        out.append((int(r["slot"]), t_ms))
+    await db.execute(text(
+        "UPDATE ffa_lobbies SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM"
+        " unnest(departed_ids || CAST(:ids AS uuid[])) e)) WHERE id = :lid"),
+        {"lid": lobby_id, "ids": [r["player_id"] for r in rows]})
+    return out
+
+
+def _asm_log_expired(ctx_or_lid, expired) -> list:
+    lid = ctx_or_lid.lid if isinstance(ctx_or_lid, _AsmCtx) else ctx_or_lid
+    return [f"[FFA-ASM] lobby {_asm_id8(lid)} admission expired slot={slot} t=+{t_ms}"
+            for slot, t_ms in expired]
+
+
+async def _asm_decision_record(ctx) -> None:
+    """The decision record (I2 writer 6): dec_at on every seat row of the
+    lobby, and dec_census/dec_census_at on the rows whose census the decision
+    read, first write wins. ctx.seats is the view the decision classified
+    (no decision reloads it before this runs); a row it read as final is no
+    evidence (sec3.2), so the record never keeps that row's census (S52's
+    classification fixture: the record keeps what the decision read)."""
+    read = [p["player_id"] for p in ctx.seats if _asm_nonfinal(p)]
+    await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats"
+        "   SET dec_at = COALESCE(dec_at, CAST(:now AS timestamptz)),"
+        "       dec_census = CASE WHEN dec_at IS NULL AND player_id = ANY(:read)"
+        "                         THEN census_slots ELSE dec_census END,"
+        "       dec_census_at = CASE WHEN dec_at IS NULL AND player_id = ANY(:read)"
+        "                            THEN census_at ELSE dec_census_at END"
+        " WHERE lobby_id = :lid"), {"now": ctx.now, "lid": ctx.lid, "read": read})
+
+
+async def _ffa_admission_check(ctx) -> list:
+    """The admission check (sec3.4): on an active short-started lobby before A,
+    admit every admissible seat that is CORROBORATED for its current claim and
+    whose claimed (actor, region) no other seat row holds. One transaction:
+    the binding, verdict admitted_late, late_admitted_at, late_game =
+    games_played + 1, verdict_at, and the seat's kept-epoch row. Returns the
+    admitted seats."""
+    lob = ctx.lobby
+    if lob is None or lob["status"] != "active" or lob.get("short_started_at") is None:
+        return []
+    if ctx.now >= lob["created_at"] + timedelta(seconds=ASM_ADMIT_LATE_S):
+        return []
+    adm = [p for p in ctx.seats if p["verdict"] == "admissible"]
+    admitted = []
+    g = int(lob["games_played"] or 0) + 1
+    for p in adm:
+        if not _asm_fresh(p, ctx.now) or not _asm_claim_seen(p, ctx.seats, ctx.now):
+            continue
+        claim = (p["actor_claim"], p["claim_region"])
+        if any(r["player_id"] != p["player_id"]
+               and (r["actor_nr"], r["actor_region"]) == claim for r in ctx.seats):
+            ctx.log(f"actor_conflict slot={p['slot']}")
+            continue
+        res = await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats"
+            "   SET actor_nr = CAST(:a AS smallint), actor_region = :r,"
+            "       verdict = 'admitted_late', late_admitted_at = CAST(:now AS timestamptz),"
+            "       late_game = CAST(:g AS smallint), verdict_at = CAST(:now AS timestamptz)"
+            " WHERE lobby_id = :lid AND player_id = :pid AND verdict = 'admissible'"),
+            {"a": claim[0], "r": claim[1], "now": ctx.now, "g": g,
+             "lid": ctx.lid, "pid": p["player_id"]})
+        if (res.rowcount or 0) == 0:
+            continue
+        prev = (await ctx.db.execute(text(
+            "SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"
+            " ORDER BY epoch_no DESC LIMIT 1"), {"lid": ctx.lid})).mappings().first()
+        n = int(prev["epoch_no"]) + 1 if prev is not None else 1
+        chain = _ffa_epoch_chain(prev["chain"] if prev is not None else "0",
+                                 _asm_id8(ctx.lid), n, int(p["slot"]), int(claim[0]))
+        await ctx.db.execute(text(
+            "INSERT INTO ffa_kept_epochs (lobby_id, epoch_no, slot, actor_nr, chain)"
+            " VALUES (:lid, CAST(:n AS smallint), CAST(:slot AS smallint),"
+            "         CAST(:a AS smallint), :chain)"),
+            {"lid": ctx.lid, "n": n, "slot": int(p["slot"]), "a": int(claim[0]), "chain": chain})
+        p.update({"actor_nr": claim[0], "actor_region": claim[1], "verdict": "admitted_late",
+                  "late_admitted_at": ctx.now, "late_game": g, "verdict_at": ctx.now})
+        admitted.append(p)
+        ctx.log(f"admitted slot={p['slot']} game={g} t=+{ctx.t_ms()}")
+    return admitted
+
+
+async def _asm_full_grant(ctx) -> bool:
+    """The `start` step's full-room grant (I2): in state A, on an active
+    zero-game gated lobby with no grant, when every member is READY (nobody
+    PENDING, nobody LEFT): start_granted_at, and every seat granted with
+    start_roster. Guarded by the same predicate START-SHORT uses, so a grant
+    and a closing verdict can never both commit."""
+    lob = ctx.lobby
+    if not (FFA_ASSEMBLY_ENABLED and lob.get("assembly_v1") and lob["status"] == "active"
+            and int(lob["games_played"] or 0) == 0 and lob.get("start_granted_at") is None):
+        return False
+    cls = _asm_classify(ctx)
+    if not cls or any(c in ("LEFT", "PENDING") for c in cls.values()):
+        return False
+    got = (await ctx.db.execute(text(
+        "UPDATE ffa_lobbies SET start_granted_at = NOW()"
+        " WHERE id = :lid AND status = 'active' AND games_played = 0"
+        "   AND start_granted_at IS NULL RETURNING id"), {"lid": ctx.lid})).scalar()
+    if got is None:
+        return False
+    await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats SET verdict = 'granted', start_roster = TRUE,"
+        "       verdict_at = CAST(:now AS timestamptz)"
+        " WHERE lobby_id = :lid AND verdict IS NULL"), {"now": ctx.now, "lid": ctx.lid})
+    ctx.log(f"full start n={len(cls)} t=+{ctx.t_ms()}")
+    await ctx.reload()
+    return True
+
+
+def _asm_next_threshold_ms(t: float, table: int) -> int:
+    marks = (ASM_EARLY_S, ASM_BASE_S, ASM_SHORT_ABS_S) if table == 1 else \
+            (ASM_EARLY_S, ASM_BASE_S, ASM_CAP_S, ASM_ABS_CAP_S)
+    for m in marks:
+        if m > t:
+            return int((m - t) * 1000)
+    return 0
+
+
+async def _ffa_assembly_verdict(ctx, trigger: str) -> dict:
+    """The verdict (sec3.2). Runs inside the caller's locks, never commits.
+    Returns {"outcome", "pending", "hold", "wait_ms"}: outcome is 'unknown'
+    (a veto: nothing written), 'assembling' (no rule decided), or the decision
+    taken ('start_short', 'reform', 'dissolve') through _asm_apply_decision."""
+    ans = {"outcome": "unknown", "pending": 0, "hold": 0, "wait_ms": 0}
+    lob = ctx.lobby
+    if lob is None:
+        return ans
+    cls = _asm_classify(ctx) if ctx.seats else {}
+    ans["pending"] = sum(1 for c in cls.values() if c == "PENDING")
+    # The vetoes: each leaves today's behaviour in charge and writes nothing.
+    if not FFA_ASSEMBLY_ENABLED or not lob.get("assembly_v1"):
+        return ans
+    if lob["status"] != "active" or int(lob["games_played"] or 0) > 0:
+        return ans
+    if lob.get("start_granted_at") is not None:
+        return ans
+    if not ctx.seats:
+        return ans
+    if not any(_asm_nonfinal(s) and _asm_fresh(s, ctx.now) for s in ctx.seats):
+        return ans
+    if _group_game_positively_live(str(ctx.lid)):
+        return ans
+    if not _in_match_evidence_trustworthy():
+        locked_at = (await ctx.db.execute(text(
+            "SELECT MAX(matched_at) FROM ffa_queue WHERE series_id = :lid"),
+            {"lid": ctx.lid})).scalar()
+        if locked_at is None or locked_at <= _PROCESS_STARTED_WALL:
+            return ans
+    t = (ctx.now - lob["created_at"]).total_seconds()
+    ready = [p for p in ctx.seats if cls.get(p["player_id"]) in ("READY", "SPAWNING")]
+    spawning = [p for p in ready if cls[p["player_id"]] == "SPAWNING"]
+    pending = [p for p in ctx.seats if cls.get(p["player_id"]) == "PENDING"]
+    left = [p for p in ctx.seats if cls.get(p["player_id"]) == "LEFT"]
+    admission = bool(lob.get("admission_v1"))
+    table = 1 if admission and len(ready) >= 3 else 2
+    ans["outcome"] = "assembling"
+    ans["hold"] = 1 if (pending or spawning) and len(ready) >= 3 else 0
+    ans["wait_ms"] = _asm_next_threshold_ms(t, table)
+    # Table 1's rule S also decides when only a SPAWNING seat is missing;
+    # every other rule needs a PENDING or LEFT seat (sec3.2, both tables).
+    if not pending and not left and not (table == 1 and spawning):
+        return ans
+    if t < ASM_EARLY_S:
+        return ans
+    hold_adm = any(p["admitted_at"] is not None
+                   and p["admitted_at"] >= ctx.now - timedelta(seconds=ASM_ADMIT_HOLD_S)
+                   for p in pending)
+    # Rule E reads "every pending seat": it needs at least one, or a LEFT-only
+    # lobby would record E where the rule it met is D (the walk at +20).
+    unoffered = bool(pending) and all(p["lock_offered_at"] is None for p in pending)
+    some = bool(pending or left)
+    rule = None
+    if table == 1:
+        if some and not spawning and unoffered:
+            rule = "E"
+        elif some and t >= ASM_BASE_S and not spawning and not hold_adm:
+            rule = "B"
+        elif t >= ASM_SHORT_ABS_S and len(ready) - len(spawning) >= 3:
+            rule = "S"
+        elif left and not hold_adm and not spawning:
+            rule = "D"
+        outcome = "start_short"
+    else:
+        hold_att = any(int(p["attempt"] or 0) >= 1 and p["attempt_at"] is not None
+                       and p["attempt_at"] >= ctx.now - timedelta(seconds=ASM_ATTEMPT_FRESH_S)
+                       for p in pending)
+        if left and len(ready) + len(pending) < 3:
+            rule = "D"          # D0: dissolves at once, recorded as D
+        elif unoffered:
+            rule = "E"
+        elif t >= ASM_BASE_S and not hold_att and not hold_adm:
+            rule = "B"
+        elif t >= ASM_CAP_S and not hold_adm:
+            rule = "C"
+        elif t >= ASM_ABS_CAP_S:
+            rule = "K"
+        elif left and not hold_att and not hold_adm:
+            rule = "D"
+        outcome = "reform" if len(ready) >= 3 and not admission else "dissolve"
+    if rule is None:
+        return ans
+    if await _asm_apply_decision(ctx, outcome, rule, cls, trigger):
+        ans.update({"outcome": outcome, "hold": 0, "wait_ms": 0})
+        ctx.decided = outcome
+    return ans
+
+
+async def _asm_apply_decision(ctx, outcome, rule, cls, trigger) -> bool:
+    """Take the decision the verdict reached (sec3.4), in the caller's
+    transaction, and write the decision record on every seat row with it."""
+    if outcome == "start_short":
+        done = await _asm_start_short(ctx, rule, cls)
+    elif outcome == "reform":
+        done = await _asm_reform(ctx, rule, cls, trigger)
+    else:
+        done = await _asm_dissolve(ctx, rule, cls, trigger)
+    if done:
+        await _asm_decision_record(ctx)
+        await ctx.reload()
+        if outcome == "start_short":
+            await _ffa_admission_check(ctx)
+            await ctx.reload()
+    return done
+
+
+async def _asm_start_short(ctx, rule, cls) -> bool:
+    """START-SHORT (Table 1, admission lobbies; sec3.4 steps 1-5)."""
+    got = (await ctx.db.execute(text(
+        "UPDATE ffa_lobbies SET start_granted_at = NOW(), short_started_at = NOW(),"
+        "       bets_disabled = TRUE, asm_rule = :r"
+        " WHERE id = :lid AND status = 'active' AND games_played = 0"
+        "   AND start_granted_at IS NULL RETURNING id"),
+        {"r": rule, "lid": ctx.lid})).scalar()
+    if got is None:
+        return False
+    roster = [p["player_id"] for p in ctx.seats if cls.get(p["player_id"]) == "READY"]
+    admissible = [p["player_id"] for p in ctx.seats
+                  if cls.get(p["player_id"]) in ("PENDING", "SPAWNING")]
+    left = [p["player_id"] for p in ctx.seats if cls.get(p["player_id"]) == "LEFT"]
+    await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats SET verdict = 'granted', start_roster = TRUE,"
+        "       verdict_at = CAST(:now AS timestamptz)"
+        " WHERE lobby_id = :lid AND player_id = ANY(:ids) AND verdict IS NULL"),
+        {"now": ctx.now, "lid": ctx.lid, "ids": roster})
+    if admissible:
+        await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats SET verdict = 'admissible', verdict_at = CAST(:now AS timestamptz)"
+            " WHERE lobby_id = :lid AND player_id = ANY(:ids) AND verdict IS NULL"),
+            {"now": ctx.now, "lid": ctx.lid, "ids": admissible})
+    if left:
+        await ctx.db.execute(text(
+            "UPDATE ffa_lobbies SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM"
+            " unnest(departed_ids || CAST(:ids AS uuid[])) e)) WHERE id = :lid"),
+            {"lid": ctx.lid, "ids": left})
+    if ctx.lobby.get("host_player_id") not in roster and roster:
+        host = (await ctx.db.execute(text(
+            "SELECT player_id FROM ffa_queue WHERE series_id = :lid AND player_id = ANY(:ids)"
+            " ORDER BY joined_at, CAST(player_id AS text) LIMIT 1"),
+            {"lid": ctx.lid, "ids": roster})).scalar()
+        if host is not None:
+            await ctx.db.execute(text(
+                "UPDATE ffa_lobbies SET host_player_id = :h WHERE id = :lid"),
+                {"h": host, "lid": ctx.lid})
+    ctx.log(f"short start n={len(roster)} admissible={len(admissible)} t=+{ctx.t_ms()} rule={rule}")
+    return True
+
+
+async def _asm_reform(ctx, rule, cls, trigger) -> bool:
+    """REFORM (Table 2, fallback, |READY| >= 3; sec3.4 steps 1-7). The new
+    row L' is one explicit-column INSERT in the pre-lock state: every one of
+    the 46 columns by class (COPY 10, COPY-AND 2, FRESH 14, RESET 20), never
+    a schema default (is_ranked defaults to TRUE; N12)."""
+    old = ctx.lid
+    lob = ctx.lobby
+    k_seats = sorted((p for p in ctx.seats if cls.get(p["player_id"]) in ("READY", "SPAWNING")),
+                     key=lambda p: p["slot"])
+    x_seats = [p for p in ctx.seats if cls.get(p["player_id"]) == "PENDING"]
+    k_ids = [p["player_id"] for p in k_seats]
+    if len(k_ids) < FFA_MIN_PLAYERS:
+        return False
+    host = lob.get("host_player_id") if lob.get("host_player_id") in k_ids else None
+    if host is None:
+        host = (await ctx.db.execute(text(
+            "SELECT player_id FROM ffa_queue WHERE series_id = :old AND player_id = ANY(:ids)"
+            " ORDER BY joined_at, CAST(player_id AS text) LIMIT 1"),
+            {"old": old, "ids": k_ids})).scalar()
+    new = uuid.uuid4()
+    await ctx.db.execute(text(_ASM_REFORM_INSERT_SQL), {
+        "new": new, "n": len(k_ids), "members": k_ids, "host": host, "old": old,
+        "score_target": lob["score_target"], "card_candidates": lob["card_candidates"],
+        "initial_picks": lob["initial_picks"], "card_cap": lob["card_cap"],
+        "same_card_rule": lob["same_card_rule"], "is_ranked": lob["is_ranked"],
+        "settings_known": lob["settings_known"],
+        "settings_changed_at": lob["settings_changed_at"],
+        "password_hash": lob["password_hash"], "kicked_steam_ids": lob["kicked_steam_ids"],
+        "kills_tiebreak": lob["kills_tiebreak"], "sudden_death": lob["sudden_death"],
+    })
+    await ctx.db.execute(text(
+        "UPDATE ffa_queue SET series_id = :new WHERE series_id = :old AND player_id = ANY(:ids)"),
+        {"new": new, "old": old, "ids": k_ids})
+    rows_of_k = (await ctx.db.execute(text(
+        "SELECT player_id, steam_id, display_name, rating, games_played,"
+        "       fallback_rating, region, joined_at"
+        "  FROM ffa_queue WHERE series_id = :new AND player_id = ANY(:ids)"
+        " ORDER BY joined_at, CAST(player_id AS text)"),
+        {"new": new, "ids": k_ids})).mappings().all()
+    await _ffa_lock_roster(ctx.db, new, rows_of_k, reform_of=old)
+    await ctx.db.execute(text(
+        "UPDATE ffa_lobbies SET status = 'canceled', invalidation_reason = 'assembly_reformed',"
+        "       invalidated_at = NOW(), reformed_to = :new, asm_rule = :r, "
+        + _FFA_CLOSE_RECORD_SET +
+        " WHERE id = :lid AND status = 'active'"),
+        {"new": new, "r": rule, "lid": old, "rec_path": "asm_reform", "rec_trigger": trigger})
+    await ctx.db.execute(text(
+        "UPDATE ffa_bets SET lobby_id = :new WHERE lobby_id = :old AND settled_at IS NULL"),
+        {"new": new, "old": old})
+    for p in x_seats:
+        await _asm_release_row(ctx.db, old, p["player_id"])
+    if x_seats:
+        await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats SET verdict = 'excluded', verdict_at = CAST(:now AS timestamptz)"
+            " WHERE lobby_id = :lid AND player_id = ANY(:ids)"),
+            {"now": ctx.now, "lid": old, "ids": [p["player_id"] for p in x_seats]})
+    await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats SET verdict = 'carried', verdict_at = CAST(:now AS timestamptz)"
+        " WHERE lobby_id = :lid AND player_id = ANY(:ids)"),
+        {"now": ctx.now, "lid": old, "ids": k_ids})
+    ctx.log(f"reformed -> {_asm_id8(new)} carry={len(k_ids)} excluded={len(x_seats)} "
+            f"t=+{ctx.t_ms()} rule={rule}")
+    return True
+
+
+async def _asm_dissolve(ctx, rule, cls, trigger) -> bool:
+    """DISSOLVE (Table 2, READY below 3; either kind of lobby): today's dissolve
+    statements in effect, the closers' record, READY seats back to searching,
+    PENDING seats excluded with their rows and leases released."""
+    got = (await ctx.db.execute(text(
+        "UPDATE ffa_lobbies SET status = 'canceled', invalidation_reason = 'assembly_timeout',"
+        "       invalidated_at = NOW(), asm_rule = :r, "
+        + _FFA_CLOSE_RECORD_SET +
+        " WHERE id = :lid AND status = 'active' AND start_granted_at IS NULL RETURNING id"),
+        {"r": rule, "lid": ctx.lid, "rec_path": "asm_dissolve", "rec_trigger": trigger})).scalar()
+    if got is None:
+        return False
+    ready = [p["player_id"] for p in ctx.seats if cls.get(p["player_id"]) in ("READY", "SPAWNING")]
+    pending = [p["player_id"] for p in ctx.seats if cls.get(p["player_id"]) == "PENDING"]
+    if ready:
+        await ctx.db.execute(text("""
+            UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
+                   room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
+                   held_until=NULL, held_lobby=NULL
+             WHERE series_id = :lid AND player_id = ANY(:ids)
+        """), {"lid": ctx.lid, "ids": ready})
+        await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats SET verdict = 'dissolved', verdict_at = CAST(:now AS timestamptz)"
+            " WHERE lobby_id = :lid AND player_id = ANY(:ids)"),
+            {"now": ctx.now, "lid": ctx.lid, "ids": ready})
+    for pid in pending:
+        await _asm_release_row(ctx.db, ctx.lid, pid)
+    if pending:
+        await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats SET verdict = 'excluded', verdict_at = CAST(:now AS timestamptz)"
+            " WHERE lobby_id = :lid AND player_id = ANY(:ids)"),
+            {"now": ctx.now, "lid": ctx.lid, "ids": pending})
+    await _reconcile_ffa_lobby_bets(ctx.db, ctx.lid, "assembly dissolved")
+    ctx.refund_flush = True
+    ctx.log(f"dissolved ready={len(ready)} excluded={len(pending)} rule={rule}")
+    return True
+
+
+# L' by name, every column (sec3.4 "The new lobby row L'"): FRESH values the
+# lock UPDATE of _ffa_lock_roster then overwrites (status 'open' -> 'active',
+# room, region, created_at, the gates, the projection) are written here as
+# their pre-lock values, so no column is left to a schema default.
+_ASM_REFORM_INSERT_SQL = """
+    INSERT INTO ffa_lobbies (
+        id, status, photon_room_id, region, player_count, member_ids, created_at,
+        host_player_id, reformed_from, bets_disabled, assembly_v1, admission_v1,
+        region_why, region_detail,
+        score_target, card_candidates, initial_picks, card_cap, same_card_rule,
+        is_ranked, settings_known, settings_changed_at, password_hash, kicked_steam_ids,
+        kills_tiebreak, sudden_death,
+        games_played, departed_ids, departure_causes, live_total_points, live_points_game,
+        completed_at, invalidated_at, invalidation_reason, reformed_to,
+        start_granted_at, short_started_at, asm_rule, dissolve_path, dissolve_trigger,
+        first_leaver, first_leave_label, dissolve_after_ms, present_at_dissolve,
+        absent_at_dissolve, arrived_at_dissolve)
+    VALUES (
+        :new, 'open', NULL, NULL, CAST(:n AS smallint), CAST(:members AS uuid[]), NOW(),
+        :host, :old, TRUE, FALSE, FALSE,
+        NULL, NULL,
+        :score_target, :card_candidates, :initial_picks, :card_cap, :same_card_rule,
+        :is_ranked, :settings_known, :settings_changed_at, :password_hash, :kicked_steam_ids,
+        :kills_tiebreak, :sudden_death,
+        0, CAST('{}' AS uuid[]), CAST('{}' AS jsonb), 0, 0,
+        NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL,
+        NULL, NULL)
+"""
+# The four classes the INSERT above writes, by name (S27 asserts them against
+# information_schema in both directions; N12's column-by-column control).
+_ASM_REFORM_CLASSES = {
+    "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap",
+             "same_card_rule", "is_ranked", "settings_known", "settings_changed_at",
+             "password_hash", "kicked_steam_ids"),
+    "COPY_AND": ("kills_tiebreak", "sudden_death"),
+    "FRESH": ("id", "status", "photon_room_id", "region", "player_count", "member_ids",
+              "created_at", "host_player_id", "reformed_from", "bets_disabled",
+              "assembly_v1", "admission_v1", "region_why", "region_detail"),
+    "RESET": ("games_played", "departed_ids", "departure_causes", "live_total_points",
+              "live_points_game", "completed_at", "invalidated_at", "invalidation_reason",
+              "reformed_to", "start_granted_at", "short_started_at", "asm_rule",
+              "dissolve_path", "dissolve_trigger", "first_leaver", "first_leave_label",
+              "dissolve_after_ms", "present_at_dissolve", "absent_at_dissolve",
+              "arrived_at_dissolve"),
+}
+
+
+# -- The answers (I2 writer 3 step 5; the answer table) ----------------------
+
+def _asm_state_of(lobby, seat) -> str:
+    """The final-row write matrix's state of one seat row (I2)."""
+    v = seat["verdict"]
+    if v == "granted":
+        return "B"
+    if v == "admissible":
+        return "C"
+    if v == "admitted_late":
+        return "D"
+    if v is None and lobby["status"] == "active":
+        return "A"
+    return "E"
+
+
+def _asm_is_left(s) -> bool:
+    return s["left_at"] is not None or s["verdict"] == "left" or not s["in_queue"]
+
+
+def _asm_answer_lists(ctx) -> dict:
+    """start_n, roster, admissible, late and granted, computed when the answer
+    is built (sec3.4). Only in a short-started lobby, and only before A, does
+    a start-roster seat's gone record lower roster and start_n; a full-room
+    grant fixes start_n = n."""
+    lob = ctx.lobby
+    short = lob.get("short_started_at") is not None
+    before_a = ctx.now < lob["created_at"] + timedelta(seconds=ASM_ADMIT_LATE_S)
+    active = lob["status"] == "active"
+    roster = [{"slot": int(s["slot"]), "actor": int(s["actor_nr"])}
+              for s in ctx.seats
+              if s["start_roster"] and s["verdict"] == "granted" and s["actor_nr"] is not None
+              and not (short and before_a and s["gone_game"] is not None)]
+    start_n = len(roster) if short else int(lob["player_count"] or len(roster))
+    admissible = [int(s["slot"]) for s in ctx.seats if s["verdict"] == "admissible"] if active else []
+    late = ([{"slot": int(s["slot"]), "actor": int(s["actor_nr"])}
+             for s in ctx.seats
+             if s["verdict"] == "admitted_late" and s["late_body_game"] is None
+             and s["actor_nr"] is not None] if active else [])
+    granted = [{"slot": int(s["slot"]), "actor": int(s["actor_nr"]),
+                "kind": "s" if s["verdict"] == "granted" else "l"}
+               for s in ctx.seats
+               if s["verdict"] in _ASM_GRANTED and s["actor_nr"] is not None
+               and not _asm_is_left(s)]
+    return {"start_n": start_n, "roster": roster, "admissible": admissible,
+            "late": late, "granted": granted}
+
+
+async def _asm_epoch(ctx):
+    """The lobby's kept-epoch record {n, chain, kept}, or None before its first."""
+    rows = (await ctx.db.execute(text(
+        "SELECT epoch_no, slot, actor_nr, chain FROM ffa_kept_epochs"
+        " WHERE lobby_id = :lid ORDER BY epoch_no"), {"lid": ctx.lid})).mappings().all()
+    if not rows:
+        return None
+    return {"n": int(rows[-1]["epoch_no"]), "chain": rows[-1]["chain"],
+            "kept": [{"slot": int(r["slot"]), "actor": int(r["actor_nr"])} for r in rows]}
+
+
+_ASM_STAMP_SQL = {
+    "spawn_ok_at": (
+        "UPDATE ffa_assembly_seats SET spawn_ok_at = COALESCE(spawn_ok_at, CAST(:now AS timestamptz))"
+        " WHERE lobby_id = :lid AND player_id = :pid RETURNING spawn_ok_at"),
+    "start_ok_at": (
+        "UPDATE ffa_assembly_seats SET start_ok_at = COALESCE(start_ok_at, CAST(:now AS timestamptz))"
+        " WHERE lobby_id = :lid AND player_id = :pid RETURNING start_ok_at"),
+}
+
+
+async def _asm_stamp(ctx, pid, col):
+    """First write of spawn_ok_at or start_ok_at, in the transaction that builds
+    the first answer carrying it (I2). Returns the stored value."""
+    return (await ctx.db.execute(text(_ASM_STAMP_SQL[col]),
+                                 {"now": ctx.now, "lid": ctx.lid, "pid": pid})).scalar()
+
+
+def _asm_admit_left_ms(ctx) -> int:
+    """admit_left_ms: A minus now, floored at 0, in an admission lobby;
+    ASM_JOIN_CAP_S otherwise (the client's outer join deadline)."""
+    lob = ctx.lobby
+    if not lob.get("admission_v1"):
+        return ASM_JOIN_CAP_S * 1000
+    now = ctx.now + timedelta(seconds=time.monotonic() - ctx.mono)
+    left = (lob["created_at"] + timedelta(seconds=ASM_ADMIT_LATE_S) - now).total_seconds()
+    return max(0, int(left * 1000))
+
+
+async def _asm_answer_plan(ctx, pid, *, vans=None, info=None) -> dict:
+    """The answer for the caller's state after this transaction's writes. It
+    runs before the COMMIT, because it writes spawn_ok_at and start_ok_at and
+    a carried seat's lock_offered_at in L' (first write wins);
+    _asm_answer_build adds the clock fields and a reformed lock payload after
+    the COMMIT."""
+    me = ctx.seat_of(pid)
+    lob = ctx.lobby
+    st = _asm_state_of(lob, me)
+    ans = {"assembly": 1 if lob.get("assembly_v1") else 0,
+           "asm_started": 1 if lob.get("start_granted_at") is not None else 0}
+    plan = {"ans": ans, "admit_left": False, "reformed_to": None}
+    info = info or {}
+    if st == "A":
+        if info.get("wrong_region"):
+            ans.update(status="wrong_region", spawn_ok=0)
+            return plan
+        if vans is None:
+            cls = _asm_classify(ctx)
+            vans = {"pending": sum(1 for c in cls.values() if c == "PENDING"),
+                    "hold": 0, "wait_ms": 0}
+        ans.update(status="admitted" if info.get("admitted") else "assembling",
+                   pending=int(vans["pending"]), hold=int(vans["hold"]),
+                   wait_ms=int(vans["wait_ms"]))
+        t = (ctx.now - lob["created_at"]).total_seconds()
+        ok = t < ASM_SPAWN_EARLY_S or _asm_corroborated(me, ctx.seats, ctx.now)
+        ans["spawn_ok"] = 1 if ok else 0
+        if ok:
+            at = await _asm_stamp(ctx, pid, "spawn_ok_at")
+            ans["spawn_ok_age_ms"] = max(0, int((at - lob["created_at"]).total_seconds() * 1000))
+        plan["admit_left"] = True
+        return plan
+    if st == "B":
+        lists = _asm_answer_lists(ctx)
+        ans.update(status="start_ok", start_n=lists["start_n"], roster=lists["roster"],
+                   admissible=lists["admissible"], late=lists["late"],
+                   granted=lists["granted"], game=int(lob["games_played"] or 0) + 1,
+                   spawn_ok=1)
+        ep = await _asm_epoch(ctx)
+        if ep is not None:
+            ans["epoch"] = ep
+        await _asm_stamp(ctx, pid, "spawn_ok_at")
+        await _asm_stamp(ctx, pid, "start_ok_at")
+        return plan
+    if st == "C":
+        if lob["status"] != "active":
+            ans["status"] = "dissolved"
+            return plan
+        ans.update(status="admitting", granted=_asm_answer_lists(ctx)["granted"], spawn_ok=0)
+        ep = await _asm_epoch(ctx)
+        if ep is not None:
+            ans["epoch"] = ep
+        plan["admit_left"] = True
+        return plan
+    if st == "D":
+        if lob["status"] != "active" and me["late_body_game"] is None:
+            ans["status"] = "dissolved"
+            return plan
+        lists = _asm_answer_lists(ctx)
+        ans.update(status="admitted_late", game=int(me["late_game"]),
+                   start_n=lists["start_n"], roster=lists["roster"], late=lists["late"],
+                   granted=lists["granted"], spawn_ok=0)
+        ep = await _asm_epoch(ctx)
+        if ep is not None:
+            ans["epoch"] = ep
+        return plan
+    v = me["verdict"]
+    if v == "carried" and lob.get("reformed_to") is not None:
+        await ctx.db.execute(text(
+            "UPDATE ffa_assembly_seats SET lock_offered_at = COALESCE(lock_offered_at, NOW())"
+            " WHERE lobby_id = :new AND player_id = :pid"),
+            {"new": lob["reformed_to"], "pid": pid})
+        ans["status"] = "reformed"
+        plan["reformed_to"] = lob["reformed_to"]
+    elif v == "excluded":
+        ans["status"] = "excluded"
+    else:
+        ans["status"] = "dissolved"
+    return plan
+
+
+async def _asm_answer_build(db, ctx, plan, steam_id) -> dict:
+    """After the COMMIT: server_age_ms at the moment the answer is built, the
+    admission clock, and a carried seat's new lock payload."""
+    ans = plan["ans"]
+    ans["server_age_ms"] = ctx.age_now_ms()
+    if plan["admit_left"]:
+        ans["admit_left_ms"] = _asm_admit_left_ms(ctx)
+    if plan["reformed_to"] is not None:
+        ans["lock"] = await _ffa_poll_locked_payload(db, plan["reformed_to"], steam_id)
+    return ans
+
+
+# -- The pre-COMMIT-work deadline (sec3.3; V5, V4-F4; V7, V6-F3) --------------
+
+class _AsmDeadline(Exception):
+    """The route's ASM_TXN_DEADLINE_S budget for the work before its COMMIT is
+    spent, at the stage named."""
+
+    def __init__(self, stage: str):
+        super().__init__(stage)
+        self.stage = stage
+
+
+# 55P03 lock_not_available (lock_timeout); 57014 query_canceled
+# (statement_timeout); 25P02 in_failed_sql_transaction (a statement after one
+# the session check swallowed, which is how a timeout inside it surfaces).
+_ASM_SQLSTATE_STAGE = {"55P03": "lock", "57014": "stmt", "25P02": "stmt"}
+
+
+def _asm_sqlstate(exc):
+    """The SQLSTATE an exception carries: its own, its DBAPI original's (the
+    SQLAlchemy wrapper's .orig) or its cause's (asyncpg's error)."""
+    seen = set()
+    todo = [exc]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        for attr in ("sqlstate", "pgcode"):
+            v = getattr(e, attr, None)
+            if isinstance(v, str) and v:
+                return v
+        todo.append(getattr(e, "orig", None))
+        todo.append(getattr(e, "__cause__", None))
+    return None
+
+
+def _asm_elapsed_ms(t0) -> int:
+    return int((time.monotonic() - t0) * 1000)
+
+
+async def _asm_begin(db, t0) -> None:
+    """Pool checkout, then what is left of ASM_TXN_DEADLINE_S becomes this
+    transaction's lock_timeout and statement_timeout (set_config's is_local).
+    A checkout that fails, or one that leaves under ASM_DEADLINE_FLOOR_MS, is
+    stage=pool."""
+    try:
+        await db.connection()
+    except Exception:
+        raise _AsmDeadline("pool")
+    left = ASM_TXN_DEADLINE_S * 1000 - _asm_elapsed_ms(t0)
+    if left < ASM_DEADLINE_FLOOR_MS:
+        raise _AsmDeadline("pool")
+    await db.execute(text(
+        "SELECT set_config('lock_timeout', CAST(:lv AS text), true),"
+        "       set_config('statement_timeout', CAST(:v AS text), true)"),
+        {"lv": f"{left - ASM_LOCK_MARGIN_MS}ms", "v": f"{left}ms"})
+
+
+async def _asm_rollback(db) -> None:
+    try:
+        await db.rollback()
+    except Exception:
+        pass
+
+
+def _asm_deadline_answer(route, lobby_id, stage, t0):
+    print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} deadline route={route} "
+          f"stage={stage} ms={_asm_elapsed_ms(t0)}")
+    return JSONResponse(status_code=503, content={"error": "asm_deadline"})
+
+
+async def _asm_lock(db, lobby_id, steam_id, *, route, t0, cap=True, expire=True):
+    """Writer 3's locking, keyed on the lobby the URL names (sec3.2): the
+    caller's player id by a plain read; the lobby row FOR NO KEY UPDATE through
+    _ffa_lock_lobby_slot (so k is the locked row's own next game); the seat
+    row, 404 with no write when there is none; the writes cap (429); the
+    lobby's queue rows in UUID order; then the expiry once A has passed.
+    Never _lock_queue_group_for_player, which follows the caller's queue row
+    to another lobby (sec1.4). Lobby row first, queue rows second (#207)."""
+    pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
+                            {"sid": steam_id})).scalar()
+    if pid is None:
+        raise HTTPException(404, "No seat in that lobby")
+    lob, k = await _ffa_lock_lobby_slot(db, lobby_id)
+    if lob is None:
+        raise HTTPException(404, "No seat in that lobby")
+    seat = (await db.execute(text(
+        "SELECT writes FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
+        {"lid": lobby_id, "pid": pid})).mappings().first()
+    if seat is None:
+        raise HTTPException(404, "No seat in that lobby")
+    if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:
+        raise HTTPException(429, "Too many assembly writes for this seat")
+    qids = (await db.execute(text("SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
+                             {"lid": lobby_id})).scalars().all()
+    await _lock_queue_rows_ordered(db, "ffa_queue", qids)
+    ctx = _AsmCtx(db, lobby_id, route=route, trigger=route, t0=t0)
+    ctx.expected_game = k
+    ctx.now, ctx.mono = await _asm_clock(db)
+    if expire:
+        ctx.prints.extend(_asm_log_expired(ctx, await _ffa_expire_admissions(
+            db, lobby_id, now=ctx.now)))
+    await ctx.reload()
+    return ctx, pid
+
+
+async def _asm_run(route, lobby_id, steam_id, request, db, work, req, *, pre=None):
+    """The shared transaction of the connect, assembly and release routes: the
+    checkout and the deadline's timeouts, the session check, the locks, `work`
+    (every write and the answer plan), the pre-COMMIT check, ONE COMMIT, then
+    the prints, the refund flush and the answer. An HTTPException (401, 404,
+    422, 429) rolls back and propagates. A lock or statement timeout, or a
+    budget spent before the COMMIT, rolls back and answers 503 asm_deadline.
+    What a rollback undoes is everything after the session check except a
+    `pre` step's own COMMIT: the release's marker and lease unit is durable
+    once its pre-step commits and survives any later answer (M1); the connect
+    and assembly routes have no pre-step, so theirs leave no write. Nothing
+    bounds the COMMIT itself (R39); a total over ASM_SLOW_COMMIT_MS is
+    printed."""
+    t0 = time.monotonic()
+    pre_ms = 0
+    try:
+        await _asm_begin(db, t0)
+        await _check_steam_session(request, steam_id, db)
+        if pre is not None:
+            await pre(db, t0)
+        ctx, pid = await _asm_lock(db, lobby_id, steam_id, route=route, t0=t0,
+                                   cap=(route != "release"), expire=(route != "release"))
+        plan = await work(ctx, pid, req)
+        pre_ms = _asm_elapsed_ms(t0)
+        if pre_ms > ASM_TXN_DEADLINE_S * 1000:
+            raise _AsmDeadline("precommit")
+        await db.commit()
+    except _AsmDeadline as d:
+        await _asm_rollback(db)
+        return _asm_deadline_answer(route, lobby_id, d.stage, t0)
+    except HTTPException:
+        await _asm_rollback(db)
+        raise
+    except Exception as exc:
+        stage = _ASM_SQLSTATE_STAGE.get(_asm_sqlstate(exc) or "")
+        await _asm_rollback(db)
+        if stage is None:
+            raise
+        return _asm_deadline_answer(route, lobby_id, stage, t0)
+    total = _asm_elapsed_ms(t0)
+    if total > ASM_SLOW_COMMIT_MS:
+        print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} slow_commit route={route} "
+              f"ms={total} pre_ms={pre_ms}")
+    ctx.emit()
+    if ctx.refund_flush:
+        try:
+            await _flush_lobby_bet_refunds(db, "ffa", ctx.lid)
+        except Exception as _fx:
+            print(f"[LOBBY-BETS] post-dissolve refund flush failed for ffa lobby "
+                  f"{ctx.lid}: {_fx}")
+    if plan.get("release") is not None:
+        return plan["release"]
+    return await _asm_answer_build(db, ctx, plan, steam_id)
+
+
+# -- The request bodies and their validation (I2 writers 3, 4, 8) ------------
+
+_ASM_STEPS = frozenset({"lock_seen", "countdown", "countdown_abort", "attempt", "arrived",
+                        "failed", "start", "started", "entered", "notice_seen", "lag"})
+_ASM_ABORT_TOKENS = frozenset({"gen", "leave", "lobby", "foreign", "room"})
+_ASM_LAG_WHY = frozenset({"timeout", "conflict", "scale", "scale_late", "stamp_above"})
+_ASM_RELEASE_WHY = frozenset({"fence_expired", "join_timeout"})
+_ASM_STATE_RE = _re.compile(r"^[A-Za-z]{1,24}$")
+
+
+class _AsmConnectReq(BaseModel):
+    steam_id: str = Field(..., max_length=32)
+    step: str = Field(..., max_length=16)
+    attempt: int | None = None
+    phase: str | None = Field(None, max_length=16)
+    code: int | None = None
+    state: str | None = Field(None, max_length=24)
+    region: str | None = Field(None, max_length=8)
+    count: int | None = None
+    actor: int | None = None
+    uid_missing: int | None = None
+    game: int | None = None
+    k: int | None = None
+    why: str | None = Field(None, max_length=16)
+    client_ms: int
+
+
+class _AsmCensusEntry(BaseModel):
+    a: int = Field(..., ge=1, le=9999)
+    s: str = Field("", max_length=32)
+    b: int = Field(..., ge=0, le=1)
+    k: int = Field(..., ge=0, le=1)
+
+
+class _AsmAssemblyReq(BaseModel):
+    steam_id: str = Field(..., max_length=32)
+    actor: int = Field(..., ge=1, le=9999)
+    region: str = Field(..., max_length=8)
+    game: int = Field(..., ge=0, le=999)
+    seen_age_ms: int = Field(..., ge=0)
+    epoch_seen: int = Field(0, ge=0, le=999)
+    census: list[_AsmCensusEntry] = Field(default_factory=list, max_length=20)
+    client_ms: int = Field(..., ge=0, le=600000)
+
+
+class _AsmReleaseReq(BaseModel):
+    steam_id: str = Field(..., max_length=32)
+    why: str = Field(..., max_length=16)
+
+
+def _asm_connect_problem(req) -> str | None:
+    """The connect body's validation (writer 3): the field that fails, or None.
+    Each failure is a 422 with no write."""
+    s = req.step
+    if s not in _ASM_STEPS:
+        return "step"
+    if req.attempt is not None:
+        if not 1 <= req.attempt <= 9:
+            return "attempt"
+        if req.phase not in ("leave", "connect"):
+            return "phase"
+    if s == "attempt" and req.attempt is None:
+        return "attempt"
+    if s == "failed" and req.phase not in ("join", "spawn"):
+        return "phase"
+    if s == "countdown_abort" and req.phase not in _ASM_ABORT_TOKENS:
+        return "phase"
+    if req.code is not None and not -2147483648 <= req.code <= 2147483647:
+        return "code"
+    if req.state is not None and not _ASM_STATE_RE.match(req.state):
+        return "state"
+    if req.region is not None and not _REGION_CODE_RE.match(req.region):
+        return "region"
+    if req.count is not None and not 0 <= req.count <= 20:
+        return "count"
+    if req.actor is not None and not 1 <= req.actor <= 9999:
+        return "actor"
+    if req.uid_missing is not None and req.uid_missing not in (0, 1):
+        return "uid_missing"
+    if req.game is not None and not 1 <= req.game <= 999:
+        return "game"
+    if s in ("entered", "lag") and req.game is None:
+        return "game"
+    if s == "lag":
+        if req.k is None or not 0 <= req.k <= 999:
+            return "k"
+        if req.why not in _ASM_LAG_WHY:
+            return "why"
+    elif req.k is not None or req.why is not None:
+        return "k"
+    if not 0 <= req.client_ms <= 600000:
+        return "client_ms"
+    return None
+
+
+# -- Writer 3: the connect POST ----------------------------------------------
+
+async def _asm_connect_write(ctx, me, req, state) -> dict:
+    """The step's cell of the final-row write matrix: receipts first write
+    wins in every state, telemetry in every state, the claim in A-D, and the
+    arrival's admitted_at in A. One UPDATE; `writes` counts it."""
+    p = {"lid": ctx.lid, "pid": me["player_id"], "now": ctx.now, "cms": req.client_ms}
+    sets = ["writes = writes + 1", "client_ms = CAST(:cms AS integer)"]
+    info = {"wrong_region": False, "admitted": False}
+    if req.uid_missing is not None:
+        sets.append("uid_missing = CAST(:um AS boolean)")
+        p["um"] = bool(req.uid_missing)
+    step = req.step
+    if step == "lock_seen":
+        sets.append("lock_seen_at = COALESCE(lock_seen_at, CAST(:now AS timestamptz))")
+    elif step == "countdown":
+        sets.append("countdown_at = COALESCE(countdown_at, CAST(:now AS timestamptz))")
+    elif step == "countdown_abort":
+        sets.append("countdown_abort = COALESCE(countdown_abort, CAST(:tok AS varchar))")
+        p["tok"] = req.phase
+    elif step == "attempt":
+        # Every SET reads the OLD row, so `attempt` below is the stored value.
+        sets += ["attempt_at = CASE WHEN CAST(:a AS smallint) >= attempt"
+                 " THEN CAST(:now AS timestamptz) ELSE attempt_at END",
+                 "attempt_phase = CASE WHEN CAST(:a AS smallint) >= attempt"
+                 " THEN CAST(:ph AS varchar) ELSE attempt_phase END",
+                 "first_attempt_at = COALESCE(first_attempt_at, CAST(:now AS timestamptz))",
+                 "attempt = GREATEST(attempt, CAST(:a AS smallint))"]
+        p.update(a=req.attempt, ph=req.phase)
+    elif step == "failed":
+        sets += ["fail_count = fail_count + 1",
+                 "failed_step = CASE WHEN failed_at IS NULL THEN CAST(:fs AS varchar) ELSE failed_step END",
+                 "failed_code = CASE WHEN failed_at IS NULL THEN CAST(:fc AS integer) ELSE failed_code END",
+                 "failed_state = CASE WHEN failed_at IS NULL THEN CAST(:fst AS varchar) ELSE failed_state END",
+                 "failed_at = COALESCE(failed_at, CAST(:now AS timestamptz))"]
+        p.update(fs=req.phase, fc=req.code, fst=req.state)
+        if req.phase == "spawn":
+            sets.append("spawn_failed_at = COALESCE(spawn_failed_at, CAST(:now AS timestamptz))")
+    elif step == "arrived":
+        region = ctx.lobby["region"]
+        differs = req.region is not None and region is not None and req.region != region
+        if state == "A" and differs:
+            sets.append("wrong_region = CAST(:wr AS varchar)")
+            p["wr"] = req.region
+            if JOIN_REGION_GUARD:
+                sets += ["wrong_region_n = wrong_region_n + 1", "fail_count = fail_count + 1"]
+                info["wrong_region"] = True
+        if not info["wrong_region"]:
+            sets += ["arrived_region = CASE WHEN arrived_at IS NULL"
+                     " THEN CAST(:ar AS varchar) ELSE arrived_region END",
+                     "arrived_count = CASE WHEN arrived_at IS NULL"
+                     " THEN CAST(:ac AS smallint) ELSE arrived_count END",
+                     "arrived_at = COALESCE(arrived_at, CAST(:now AS timestamptz))"]
+            p.update(ar=req.region, ac=req.count)
+            if state == "A":
+                sets.append("admitted_at = COALESCE(admitted_at, CAST(:now AS timestamptz))")
+                info["admitted"] = True
+            if state in ("A", "B", "C", "D") and req.actor is not None and req.region is not None:
+                sets += ["actor_claim = CAST(:cl AS smallint)", "claim_region = CAST(:cr AS varchar)"]
+                p.update(cl=req.actor, cr=req.region)
+    elif step == "start":
+        sets.append("start_req_at = COALESCE(start_req_at, CAST(:now AS timestamptz))")
+    elif step == "started":
+        if ctx.lobby.get("start_granted_at") is not None and (
+                me["start_roster"] or me["late_admitted_at"] is not None):
+            sets.append("started_at = COALESCE(started_at, CAST(:now AS timestamptz))")
+        else:
+            ctx.log(f"started without grant slot={me['slot']}")
+    elif step == "entered":
+        sets += ["late_game_claim = CASE WHEN late_entered_at IS NULL"
+                 " THEN CAST(:g AS smallint) ELSE late_game_claim END",
+                 "late_entered_at = COALESCE(late_entered_at, CAST(:now AS timestamptz))"]
+        p["g"] = req.game
+    elif step == "notice_seen":
+        sets.append("notice_seen_at = COALESCE(notice_seen_at, CAST(:now AS timestamptz))")
+    elif step == "lag":
+        sets.append("lag_games = ARRAY(SELECT DISTINCT e FROM"
+                    " unnest(lag_games || CAST(:g AS smallint)) e ORDER BY e)")
+        p["g"] = req.game
+        ctx.log(f"lag slot={me['slot']} game={req.game} k={req.k} why={req.why}")
+    await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats SET " + ", ".join(sets) +
+        " WHERE lobby_id = :lid AND player_id = :pid"), p)
+    return info
+
+
+async def _asm_connect_work(ctx, pid, req) -> dict:
+    """Writer 3 inside the route's transaction: the cell's writes, then what
+    the cell names (the binding rule, the full-room grant check, the verdict,
+    the claim trigger, the admission check, the late-body rule), then the
+    answer plan for the caller's state after them."""
+    me = ctx.seat_of(pid)
+    state = _asm_state_of(ctx.lobby, me)
+    info = await _asm_connect_write(ctx, me, req, state)
+    await ctx.reload(lobby=False)
+    me = ctx.seat_of(pid)
+    vans = None
+    step = req.step
+    if state == "A":
+        if step == "arrived" and not info["wrong_region"]:
+            await _asm_bind(ctx)
+        if step == "start":
+            await _asm_full_grant(ctx)
+        me = ctx.seat_of(pid)
+        if _asm_state_of(ctx.lobby, me) == "A":
+            vans = await _ffa_assembly_verdict(ctx, "connect")
+    elif state == "B":
+        if step == "arrived":
+            await _asm_claim_trigger(ctx, me)
+    elif state == "C":
+        if step == "arrived":
+            await _asm_bind(ctx)
+        if step in ("arrived", "start"):
+            await _ffa_admission_check(ctx)
+    elif state == "D":
+        if step == "arrived":
+            await _asm_claim_trigger(ctx, me)
+        if step == "entered":
+            await _asm_late_body(ctx, only_pid=pid)
+    return await _asm_answer_plan(ctx, pid, vans=vans, info=info)
+
+
+# -- Writer 4: the assembly POST (the census) --------------------------------
+
+async def _asm_census_write(ctx, me, state, req, resolved, anon, seen_at) -> None:
+    """The census columns, replaced together, and the sender's claim (A-D).
+    `resolved` is [(slot, a, b, k)] for the entries whose s names a member of
+    this lobby; every other entry only counts in census_anon (V4, V3-F2)."""
+    p = {"lid": ctx.lid, "pid": me["player_id"], "now": ctx.now, "seen": seen_at,
+         "cs": [r[0] for r in resolved], "ca": [r[1] for r in resolved],
+         "cn": sorted({r[0] for r in resolved if r[2] == 0}),
+         "cu": sorted({r[0] for r in resolved if r[3] == 0}),
+         "anon": anon, "reg": req.region, "g": req.game, "ep": req.epoch_seen,
+         "cms": req.client_ms}
+    sets = ["census_slots = CAST(:cs AS smallint[])", "census_actors = CAST(:ca AS smallint[])",
+            "census_nobody = CAST(:cn AS smallint[])", "census_unkept = CAST(:cu AS smallint[])",
+            "census_anon = CAST(:anon AS smallint)", "census_region = CAST(:reg AS varchar)",
+            "census_game = CAST(:g AS smallint)", "census_at = CAST(:now AS timestamptz)",
+            "census_seen_at = CAST(:seen AS timestamptz)", "epoch_seen = CAST(:ep AS smallint)",
+            "client_ms = CAST(:cms AS integer)", "writes = writes + 1"]
+    if state in ("A", "B", "C", "D"):
+        sets += ["actor_claim = CAST(:cl AS smallint)", "claim_region = CAST(:reg AS varchar)"]
+        p["cl"] = req.actor
+    await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats SET " + ", ".join(sets) +
+        " WHERE lobby_id = :lid AND player_id = :pid"), p)
+
+
+async def _asm_assembly_work(ctx, pid, req) -> dict:
+    """Writer 4 inside the route's transaction: the echo check, the census,
+    then the cell (the binding and body rules and the verdict in A; the
+    late-body and gone rules and the admission check after a grant), then
+    the answer plan."""
+    me = ctx.seat_of(pid)
+    state = _asm_state_of(ctx.lobby, me)
+    lob = ctx.lobby
+    at_receipt_ms = int(((ctx.now - lob["created_at"]).total_seconds()
+                         - (ctx.mono - ctx.t0)) * 1000)
+    if req.seen_age_ms > at_receipt_ms:
+        raise HTTPException(422, "seen_age_ms is later than the server's age at receipt")
+    by_steam = {s["seat_steam_id"]: s for s in ctx.seats}
+    resolved, anon = [], 0
+    for e in req.census:
+        s = by_steam.get(e.s) if e.s else None
+        if s is None:
+            anon += 1
+            continue
+        resolved.append((int(s["slot"]), int(e.a), int(e.b), int(e.k)))
+    seen_at = lob["created_at"] + timedelta(milliseconds=req.seen_age_ms)
+    await _asm_census_write(ctx, me, state, req, resolved, anon, seen_at)
+    await ctx.reload(lobby=False)
+    me = ctx.seat_of(pid)
+    vans = None
+    if state == "A":
+        await _asm_bind(ctx)
+        await _asm_body(ctx)
+        vans = await _ffa_assembly_verdict(ctx, "assembly")
+    elif state == "B":
+        await _asm_late_body(ctx)
+        await _asm_claim_trigger(ctx, me)
+        await _asm_gone_census(ctx, exclude_pid=pid)
+        await _ffa_admission_check(ctx)
+    elif state == "C":
+        await _asm_bind(ctx)
+        await _asm_body(ctx)
+        await _ffa_admission_check(ctx)
+    elif state == "D":
+        await _asm_claim_trigger(ctx, me)
+        if me["late_body_game"] is not None:
+            await _asm_late_body(ctx)
+            await _asm_gone_census(ctx, exclude_pid=pid)
+        await _ffa_admission_check(ctx)
+    return await _asm_answer_plan(ctx, pid, vans=vans)
+
+
+# -- Writer 8: the release (V11, N10) ----------------------------------------
+
+# The release's two durable writes (round 3, M1): the caller's marker, first
+# write wins, and its ffa lease for the lobby the URL names. Its pre-step and
+# its locked step both write them, through these two statements.
+_ASM_RELEASE_MARK_SQL = (
+    "UPDATE ffa_assembly_seats SET released_at = NOW(), release_why = CAST(:why AS varchar)"
+    " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL")
+_ASM_RELEASE_LEASE_SQL = (
+    "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid")
+
+
+async def _asm_release_work(ctx, pid, arg) -> dict:
+    """The release's locked step, under the lobby row and its queue rows: the
+    caller's own queue row for this lobby, then, when the caller's seat row
+    as read after the lobby lock carries no marker, the marker and the lease
+    (round 3, M1). The pre-step (_asm_release_pre) commits those two before
+    the lobby lock, but only when its own read finds the seat row, and that
+    read takes no lock: a seat row Start or REFORM has inserted and not yet
+    committed is invisible to it. _asm_lock reads the seat row again after
+    the lobby lock (404 when there is none), and this step writes the pair
+    in the transaction that deletes the queue row, so every 200 commits with
+    the marker set and neither the caller's lease for this lobby nor its
+    queue row for it left. Nothing else: no departure, cause, verdict,
+    receipt, gone record, status, bet or survivor row, and no rule runs. A
+    deadline answer here rolls back this step's writes; a marker and lease a
+    pre-step committed stay, and the row waits for the client's next try
+    (three in all). A row the tries never reach holds no lease once any
+    try's pre-step has found the seat row (else its lease expires by its
+    TTL), so the player's next FFA join clears it as an unleased husk
+    (ffa_queue_join), and the janitor's stranded-row sweep deletes it once
+    the lobby is no longer active."""
+    req, held = arg
+    me = ctx.seat_of(pid)
+    row = (await ctx.db.execute(text(
+        "DELETE FROM ffa_queue WHERE player_id = :pid AND series_id = :lid RETURNING player_id"),
+        {"pid": pid, "lid": ctx.lid})).scalar()
+    if me["released_at"] is None:
+        marked = await ctx.db.execute(text(_ASM_RELEASE_MARK_SQL),
+                                      {"why": req.why, "lid": ctx.lid, "pid": pid})
+        if (marked.rowcount or 0) > 0:
+            held["mark"] = "lock"
+        freed = await ctx.db.execute(text(_ASM_RELEASE_LEASE_SQL),
+                                     {"pid": pid, "lid": ctx.lid})
+        if (freed.rowcount or 0) > 0:
+            held["lease"] = 1
+    ctx.log(f"release slot={me['slot']} why={req.why} lease={held['lease']} "
+            f"row={0 if row is None else 1} mark={held['mark']}")
+    return {"release": {"status": "ok"}}
+
+
+def _asm_release_pre(steam_id, lobby_id, why, held):
+    """The release's durable unit (writer 8; round 2, M1): the caller's
+    release marker (released_at and release_why, first write wins) and its
+    lease for the lobby the URL names, in ONE transaction committed before
+    any other lock, the leave route's order, so no lease is held while the
+    lobby lock is awaited. The lease goes only beside a marker. The seat row
+    is read first and the pair written only when that read finds it (round
+    3, M1): main.py never deletes a seat row, so the UPDATE after a read that
+    found it finds it too, and a seat row Start or REFORM inserted and has
+    not committed is found by neither, so nothing is written here. When
+    nothing is written, _asm_lock answers 404 if no seat row exists under the
+    lobby lock, and otherwise the locked step writes the pair
+    (_asm_release_work). A deadline answer before this COMMIT therefore
+    leaves nothing durable, and one after it (the pool stage of the checkout
+    that follows it, or the lock, statement or pre-commit arm of _asm_run)
+    leaves a released seat, which the gone rule and writer 7 (d) exclude
+    (N10), and at most the caller's own queue row (_asm_release_work). The
+    seat row is written before the lease, the order the post-start writers
+    take the two (the expiry; a gone record and its deferred departure).
+    `held["lease"]` records whether this request removed the lease, and
+    `held["mark"]` which step wrote the marker ("pre" here, "lock" in the
+    locked step, "kept" when one already stood). The COMMIT ends the
+    transaction the deadline's timeouts were set in, so they are set again
+    after it."""
+    async def _pre(db, t0):
+        pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
+                                {"sid": steam_id})).scalar()
+        if pid is None:
+            return
+        seat = (await db.execute(text(
+            "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
+            {"lid": lobby_id, "pid": pid})).scalar()
+        if seat is None:
+            return
+        marked = await db.execute(text(_ASM_RELEASE_MARK_SQL),
+                                  {"why": why, "lid": lobby_id, "pid": pid})
+        if (marked.rowcount or 0) > 0:
+            held["mark"] = "pre"
+        freed = await db.execute(text(_ASM_RELEASE_LEASE_SQL),
+                                 {"pid": pid, "lid": lobby_id})
+        held["lease"] = 1 if (freed.rowcount or 0) > 0 else 0
+        await db.commit()
+        await _asm_begin(db, t0)
+    return _pre
+
+
+# -- The routes (I2 writers 3, 4 and 8) --------------------------------------
+
+@app.post("/api/v1/ffa/lobby/{lobby_id}/connect", tags=["FFA Queue"])
+async def ffa_lobby_connect(lobby_id: uuid.UUID, req: _AsmConnectReq, request: Request,
+                            db: AsyncSession = Depends(get_asm_db)):
+    """I2 writer 3: a seat's connect receipts and telemetry for the lobby the
+    URL names, the cell of the final-row write matrix, and the answer for the
+    seat's state (the connect-failure design, V11). Session-checked; its own
+    pool; ASM_TXN_DEADLINE_S bounds the work before its COMMIT (503
+    asm_deadline). A 404 when the caller has no seat row in that lobby."""
+    problem = _asm_connect_problem(req)
+    if problem is None and not _pg_text_ok(req.steam_id):
+        problem = "steam_id"
+    if problem is not None:
+        raise HTTPException(422, f"invalid connect field: {problem}")
+    return await _asm_run("connect", lobby_id, req.steam_id, request, db,
+                          _asm_connect_work, req)
+
+
+@app.post("/api/v1/ffa/lobby/{lobby_id}/assembly", tags=["FFA Queue"])
+async def ffa_lobby_assembly(lobby_id: uuid.UUID, req: _AsmAssemblyReq, request: Request,
+                             db: AsyncSession = Depends(get_asm_db)):
+    """I2 writer 4: a seat's census of the lobby's room and its own claim, the
+    verdict's driver before a start and the presence census after it. The
+    same session check, locks, matrix, answers and deadline as the connect
+    route."""
+    if not _REGION_CODE_RE.match(req.region) or not _pg_text_ok(req.steam_id) \
+            or not all(_pg_text_ok(e.s) for e in req.census):
+        raise HTTPException(422, "invalid assembly field")
+    return await _asm_run("assembly", lobby_id, req.steam_id, request, db,
+                          _asm_assembly_work, req)
+
+
+@app.post("/api/v1/ffa/lobby/{lobby_id}/release", tags=["FFA Queue"])
+async def ffa_lobby_release(lobby_id: uuid.UUID, req: _AsmReleaseReq, request: Request,
+                            db: AsyncSession = Depends(get_asm_db)):
+    """I2 writer 8 (V11, N10): the two protocol exits, FENCE_EXPIRED and an
+    admitted late seat's own two-boundary bound. Records released_at and
+    release_why and frees the caller's lease for this lobby in one committed
+    unit before the lobby lock (round 2, M1), then, under the lock, deletes
+    its own queue row for it and writes that pair itself when the seat row
+    it reads there carries no marker (round 3, M1), so every 200 commits
+    with the marker set and neither that lease nor that queue row left;
+    writes nothing else; idempotent (200 on a repeat)."""
+    if req.why not in _ASM_RELEASE_WHY or not _pg_text_ok(req.steam_id):
+        raise HTTPException(422, "invalid release")
+    held = {"lease": 0, "mark": "kept"}
+    return await _asm_run("release", lobby_id, req.steam_id, request, db,
+                          _asm_release_work, (req, held),
+                          pre=_asm_release_pre(req.steam_id, lobby_id, req.why, held))
+
+
+# -- Writer 5: the leave (sec3.2 "A leave on a gated lobby"; N8) --------------
+
+class _AsmLeavePlan:
+    """What the gated leave decided for ffa_queue_leave's own branches: whether
+    today's dissolve may run, whether today's departure branch may run,
+    whether the lobby is started (its game reads as live), whether a granted
+    seat's departure waits for two witnesses (N8), and the branch to record."""
+
+    def __init__(self, ctx, player_id):
+        self.ctx = ctx
+        self.pid = player_id
+        self.may_dissolve = True
+        self.may_depart = True
+        self.started = False
+        self.defer_departure = False
+        self.path = None
+        # Today's dissolve path runs (steps 4 and 6); `kept_path` is what the
+        # leave records when today's vetoes keep the lobby: 'kept' at step 4,
+        # 'veto' at step 6.
+        self.today = False
+        self.kept_path = None
+
+
+async def _asm_leave_receipts(ctx, player_id, cause, label) -> None:
+    """Writer 5's receipts, first write wins: left_at, left_cause (the value
+    the route persists, first non-empty), left_label; and verdict 'left' only
+    for a seat that holds no grant (no verdict, or admissible, N8)."""
+    await ctx.db.execute(text(
+        "UPDATE ffa_assembly_seats"
+        "   SET left_at = COALESCE(left_at, CAST(:now AS timestamptz)),"
+        "       left_cause = COALESCE(left_cause, NULLIF(CAST(:lc AS varchar), '')),"
+        "       left_label = COALESCE(left_label, CAST(:ll AS varchar)),"
+        "       verdict_at = CASE WHEN verdict IS NULL OR verdict = 'admissible'"
+        "                         THEN CAST(:now AS timestamptz) ELSE verdict_at END,"
+        "       verdict = CASE WHEN verdict IS NULL OR verdict = 'admissible'"
+        "                      THEN 'left' ELSE verdict END"
+        " WHERE lobby_id = :lid AND player_id = :pid"),
+        {"now": ctx.now, "lc": _persistable_exit_cause(cause),
+         "ll": _preroom_leave_label(label), "lid": ctx.lid, "pid": player_id})
+
+
+async def _asm_leave_trigger(ctx, me) -> bool:
+    """The gone rule's leave trigger (i): the witness test (iii) for the
+    leaver's seat, in the leave's own transaction, with k read under the lobby
+    row lock. Returns True when the record was written (gone_path 'leave')."""
+    result = "none"
+    if _asm_gone_subject(ctx, me):
+        found = _asm_gone_test(ctx, me)
+        if found is not None and await _asm_gone_write(ctx, me, found, deferred_ok=False):
+            result = "witness"
+    ctx.log(f"gone_trigger slot={me['slot']} path=leave result={result}")
+    return result == "witness"
+
+
+async def _asm_leave_plan(db, lobby_id, player_id, cause, label, *, pre_room=False):
+    """Writer 5 and the gated leave, for a leaver that has a seat row in the
+    lobby the route holds (lobby row FOR UPDATE, then its queue rows). None
+    without a seat row: today's branches, byte for byte. Runs the expiry,
+    writes the receipts, then the ordered steps (N12): (2) a started gated
+    lobby takes the departure path whatever the cause, and a granted seat's
+    departure waits for two witnesses (N8); (3) an in-room cause takes
+    today's departure path (not for a leave the reform-aware fence redirected,
+    `pre_room`, which is pre-room by construction); (4) before T0+20 only a
+    leave that leaves fewer than three READY or PENDING may run today's
+    dissolve, else the lobby is kept; (5) from T0+20 the verdict runs with
+    trigger 'leave'; (6) when it answers unknown, today's vetoes and dissolve
+    run."""
+    has = (await db.execute(text(
+        "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
+        {"lid": lobby_id, "pid": player_id})).scalar()
+    if has is None:
+        return None
+    ctx = await _asm_ctx_slot(db, lobby_id, route="leave", trigger="leave")
+    plan = _AsmLeavePlan(ctx, player_id)
+    ctx.prints.extend(_asm_log_expired(ctx, await _ffa_expire_admissions(
+        db, lobby_id, now=ctx.now)))
+    await _asm_leave_receipts(ctx, player_id, cause, label)
+    await ctx.reload()
+    me = ctx.seat_of(player_id)
+    lob = ctx.lobby
+    gated = bool(lob.get("assembly_v1"))
+    if gated and lob.get("start_granted_at") is not None:
+        plan.started = True
+        plan.may_dissolve = False
+        plan.path = "departure"
+        if me["verdict"] in _ASM_GRANTED:
+            await _asm_leave_trigger(ctx, me)
+            # N8's corroboration is the gone record, whichever transaction
+            # wrote it: this leave's own witness test, or the witnesses'
+            # record from before the leave landed (gone_path 'witness'),
+            # which no later trigger rewrites (first write wins).
+            plan.defer_departure = me["gone_game"] is None
+        return plan
+    if not pre_room and _is_in_room_exit_cause(cause):
+        plan.path = "departure"
+        return plan
+    if not (gated and lob["status"] == "active" and int(lob["games_played"] or 0) == 0):
+        return plan
+    if (ctx.now - lob["created_at"]).total_seconds() < ASM_EARLY_S:
+        cls = _asm_classify(ctx)
+        rest = sum(1 for p, c in cls.items()
+                   if p != player_id and c in ("READY", "SPAWNING", "PENDING"))
+        if rest < 3:
+            plan.today = True
+            plan.kept_path = "kept"
+        else:
+            plan.may_dissolve = plan.may_depart = False
+            plan.path = "kept"
+        return plan
+    vans = await _ffa_assembly_verdict(ctx, "leave")
+    if vans["outcome"] == "unknown":
+        plan.today = True
+        plan.kept_path = "veto"
+    else:
+        plan.may_dissolve = plan.may_depart = False
+        plan.path = "verdict"
+    return plan
+
+
+async def _asm_leave_finish(db, plan, dissolved) -> None:
+    """left_path, in the leave's own transaction, once the route knows the
+    branch it took (writer 5)."""
+    if plan.path is not None:
+        path = plan.path
+    elif dissolved:
+        path = "dissolve"
+    elif plan.today:
+        path = plan.kept_path
+    elif plan.ctx.lobby is not None and plan.ctx.lobby["status"] == "active":
+        path = "departure"
+    else:
+        return
+    await db.execute(text(
+        "UPDATE ffa_assembly_seats SET left_path = COALESCE(left_path, CAST(:p AS varchar))"
+        " WHERE lobby_id = :lid AND player_id = :pid"),
+        {"p": path, "lid": plan.ctx.lid, "pid": plan.pid})
+
+
+async def _asm_leave_after(db, plan) -> None:
+    """After the leave's COMMIT: the prints, and the refund flush of a DISSOLVE
+    the verdict took."""
+    plan.ctx.emit()
+    if plan.ctx.refund_flush:
+        try:
+            await _flush_lobby_bet_refunds(db, "ffa", plan.ctx.lid)
+        except Exception as _fx:
+            print(f"[LOBBY-BETS] post-dissolve refund flush failed for ffa lobby "
+                  f"{plan.ctx.lid}: {_fx}")
+
+
+async def _asm_rowless_gate(db, expected_lobby_id, steam_id, cause, label):
+    """Writer 5 at the rowless branch (a leaver whose queue row is gone): on a
+    lobby where the leaver has a seat row, the lobby row is locked, then its
+    queue rows, the expiry runs and the receipts are written; a granted seat
+    of a started gated lobby runs the leave trigger, and its departure is
+    appended only when two witnesses corroborate it (N8). None without a
+    seat row (today's rowless mark, unchanged)."""
+    try:
+        lid = uuid.UUID(str(expected_lobby_id))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
+                            {"sid": steam_id})).scalar()
+    if pid is None:
+        return None
+    has = (await db.execute(text(
+        "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
+        {"lid": lid, "pid": pid})).scalar()
+    if has is None:
+        return None
+    ctx = await _asm_ctx_slot(db, lid, route="leave", trigger="leave")
+    plan = _AsmLeavePlan(ctx, pid)
+    ctx.prints.extend(_asm_log_expired(ctx, await _ffa_expire_admissions(
+        db, lid, lock_rows=True, now=ctx.now)))
+    await _asm_leave_receipts(ctx, pid, cause, label)
+    await ctx.reload()
+    me = ctx.seat_of(pid)
+    lob = ctx.lobby
+    plan.path = "departure"
+    if lob.get("assembly_v1") and lob.get("start_granted_at") is not None \
+            and me["verdict"] in _ASM_GRANTED:
+        plan.started = True
+        await _asm_leave_trigger(ctx, me)
+        # As the queue-row path: a record written before this leave counts.
+        plan.may_depart = me["gone_game"] is not None
+    await _asm_leave_finish(db, plan, False)
+    return plan
+
+
+async def _asm_reform_hop(db, lobby_id, expected_lobby_id, player_id) -> bool:
+    """The reform-aware fence (sec3.2; fallback lobbies): the caller's lobby L'
+    was re-formed from the lobby its leave names (one hop). Its leave is then
+    a pre-room leave of L', and its ffa lease for L' goes with the kick path's
+    statement, because the route's release was keyed on the old lobby."""
+    rf = (await db.execute(text("SELECT reformed_from FROM ffa_lobbies WHERE id = :lid"),
+                           {"lid": lobby_id})).scalar()
+    if rf is None or str(rf) != str(expected_lobby_id):
+        return False
+    await db.execute(text(
+        "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid"),
+        {"pid": player_id, "lid": lobby_id})
+    return True
+
+
+# -- Writer 2 and the poll's verdict trigger; the notice ---------------------
+
+async def _asm_poll_offer(db, lobby_id, player_id) -> None:
+    """I2 writer 2: the poll served this seat its lock payload (rule E's only
+    input, server-observed)."""
+    await db.execute(text(
+        "UPDATE ffa_assembly_seats SET lock_offered_at = COALESCE(lock_offered_at, NOW())"
+        " WHERE lobby_id = :lid AND player_id = :pid AND lock_offered_at IS NULL"),
+        {"lid": lobby_id, "pid": player_id})
+
+
+async def _asm_poll_step(db, me, steam_id):
+    """The ready_join branch's last step for a seat with a seat row, under the
+    poll's group lock and before its COMMIT (a write after it is lost): the
+    lock offer, the expiry, and the verdict with trigger 'poll' for a seat no
+    decision has reached; then ONE COMMIT and the answer for the caller's
+    queue row as the decision left it. None without a seat row (today's
+    commit and payload)."""
+    lid, pid = me["series_id"], me["player_id"]
+    has = (await db.execute(text(
+        "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
+        {"lid": lid, "pid": pid})).scalar()
+    if has is None:
+        return None
+    ctx = await _asm_ctx_slot(db, lid, route="poll", trigger="poll")
+    await _asm_poll_offer(db, lid, pid)
+    ctx.prints.extend(_asm_log_expired(ctx, await _ffa_expire_admissions(
+        db, lid, now=ctx.now)))
+    await ctx.reload()
+    mine = ctx.seat_of(pid)
+    if mine is not None and _asm_state_of(ctx.lobby, mine) == "A":
+        await _ffa_assembly_verdict(ctx, "poll")
+    row = (await db.execute(text(
+        "SELECT status, series_id FROM ffa_queue WHERE player_id = :pid"),
+        {"pid": pid})).mappings().first()
+    out = None
+    target = None
+    if row is None:
+        out = {"status": "not_in_queue", "queue_count": 0}
+    elif row["status"] == "searching" or row["series_id"] is None:
+        n = (await db.execute(text(
+            "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
+            "   AND last_polled > NOW() - INTERVAL '75 seconds'"))).scalar() or 0
+        out = {"status": "searching", "queue_count": int(n)}
+    else:
+        target = row["series_id"]
+        if target != lid:
+            await _asm_poll_offer(db, target, pid)
+    await db.commit()
+    ctx.emit()
+    if ctx.refund_flush:
+        try:
+            await _flush_lobby_bet_refunds(db, "ffa", lid)
+        except Exception as _fx:
+            print(f"[LOBBY-BETS] post-dissolve refund flush failed for ffa lobby "
+                  f"{lid}: {_fx}")
+    if out is not None:
+        return out
+    return await _ffa_poll_locked_payload(db, target, steam_id)
+
+
+async def _ffa_attach_asm_notice(db, steam_id, out):
+    """The notice (sec3.4, round-1 F13): after the poll's own COMMIT, one
+    read-only query for the caller's newest excluded seat row with no
+    notice_seen receipt, excluded within the last ASM_NOTICE_WINDOW_MIN; when
+    one exists, asm_notice {lobby_id, outcome, upload: 1} rides the answer,
+    whatever its status. It writes nothing, and a failure only loses the
+    notice for this poll."""
+    if not isinstance(out, dict):
+        return out
+    try:
+        pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
+                                {"sid": steam_id})).scalar()
+        if pid is None:
+            return out
+        row = (await db.execute(text(
+            "SELECT s.lobby_id, l.reformed_to, l.short_started_at"
+            "  FROM ffa_assembly_seats s JOIN ffa_lobbies l ON l.id = s.lobby_id"
+            " WHERE s.player_id = :pid AND s.verdict = 'excluded'"
+            "   AND s.notice_seen_at IS NULL"
+            "   AND s.verdict_at > NOW() - make_interval(mins => CAST(:w AS integer))"
+            " ORDER BY s.verdict_at DESC LIMIT 1"),
+            {"pid": pid, "w": ASM_NOTICE_WINDOW_MIN})).mappings().first()
+    except Exception as ex:
+        await _asm_rollback(db)
+        print(f"[FFA-ASM] notice read failed: {type(ex).__name__}")
+        return out
+    if row is not None:
+        outcome = ("reformed" if row["reformed_to"] is not None
+                   else "started" if row["short_started_at"] is not None else "dissolved")
+        out["asm_notice"] = {"lobby_id": str(row["lobby_id"]), "outcome": outcome, "upload": 1}
+    return out
+
+
+async def _asm_payload_fields(db, lobby, lobby_id, steam_id) -> dict:
+    """The lock payload's assembly fields (I2 'Payload'). Every value comes
+    from the server; the windows are the sec3.2 constants."""
+    now, _mono = await _asm_clock(db)
+    created = lobby.get("created_at")
+    age = max(0, int((now - created).total_seconds() * 1000)) if created is not None else 0
+    admission = bool(lobby.get("admission_v1"))
+    out = {
+        "server_age_ms": age,
+        "assembly": 1 if lobby.get("assembly_v1") else 0,
+        "asm_started": 1 if lobby.get("start_granted_at") is not None else 0,
+        "admission": 1 if admission else 0,
+        "admissible": 0,
+        "admit_left_ms": (max(0, int(((created + timedelta(seconds=ASM_ADMIT_LATE_S)) - now)
+                                      .total_seconds() * 1000))
+                          if admission and created is not None else ASM_JOIN_CAP_S * 1000),
+        "start_hold_s": ASM_START_HOLD_S,
+        "late_wait_s": ASM_LATE_WAIT_S,
+        "spawn_open_s": ASM_SPAWN_OPEN_S,
+        "epoch_ack_s": ASM_EPOCH_ACK_S,
+        "stamp_wait_s": ASM_STAMP_WAIT_S,
+        "fence_s": ASM_FENCE_S,
+    }
+    if lobby.get("reformed_from") is not None:
+        out["reformed_from"] = str(lobby["reformed_from"])
+    if lobby.get("assembly_v1"):
+        v = (await db.execute(text(
+            "SELECT s.verdict FROM ffa_assembly_seats s JOIN players p ON p.id = s.player_id"
+            " WHERE s.lobby_id = :lid AND p.steam_id = :sid"),
+            {"lid": lobby_id, "sid": steam_id})).scalar()
+        out["admissible"] = 1 if v == "admissible" else 0
+    return out
+
+
+# -- Writer 7: the report's own rules (V3-F4; V5; V9, N1; V11, N9, N10) ------
+
+async def _asm_report_rules(db, *, lobby, lobby_uuid, g, report, id_by_steam,
+                            unrated, progress):
+    """Writer 7 in an assembly_v1 lobby, after `unrated = ghosts | graced` and
+    before any row is written. First the refusals, each through
+    _ffa_record_and_refuse (which always raises): (c) late_reporter, sticky
+    for the sitting; (d) left_reporter, a reporter whose seat's gone record
+    names an earlier game; (e) lag_reporter, the reporter's own lag step named
+    this game. Then the unrating, which only ever adds: (a) an admitted seat
+    for every game up to the first its peers saw it kept in; (b) in a
+    short-started lobby, a seat the server never granted game g; (d) a seat
+    whose gone record names an earlier game. No report field is read (N1)."""
+    rows = (await db.execute(text(
+        "SELECT p.steam_id, s.slot, s.start_roster, s.late_admitted_at, s.late_game,"
+        "       s.late_body_game, s.gone_game, s.lag_games"
+        "  FROM ffa_assembly_seats s JOIN players p ON p.id = s.player_id"
+        " WHERE s.lobby_id = :lid ORDER BY s.slot"), {"lid": lobby_uuid})).mappings().all()
+    if not rows:
+        return unrated
+    g = int(g)
+    by = {r["steam_id"]: r for r in rows}
+    short = lobby.get("short_started_at") is not None
+    rep = by.get(report.reported_by_steam_id)
+    if rep is not None:
+        if rep["late_admitted_at"] is not None or (short and not rep["start_roster"]):
+            await _ffa_record_and_refuse(
+                db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+                reason="late_reporter",
+                why=f"reporter slot {rep['slot']} holds no start grant of this sitting",
+                detail="This seat may not report this sitting's games", progress=progress)
+        if rep["gone_game"] is not None and g > int(rep["gone_game"]):
+            await _ffa_record_and_refuse(
+                db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+                reason="left_reporter",
+                why=f"reporter slot {rep['slot']} left at game {rep['gone_game']}",
+                detail="This seat left the sitting", progress=progress)
+        if g in [int(x) for x in (rep["lag_games"] or [])]:
+            await _ffa_record_and_refuse(
+                db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+                reason="lag_reporter",
+                why=f"reporter slot {rep['slot']} sat a point of game {g} out",
+                detail="This seat may not report this game", progress=progress)
+    out = set(unrated)
+    added = []
+    for sid, r in by.items():
+        if sid not in id_by_steam:
+            continue
+        admitted_for_g = (r["late_admitted_at"] is not None and r["late_game"] is not None
+                          and int(r["late_game"]) <= g)
+        reason = None
+        if admitted_for_g and (r["late_body_game"] is None or g <= int(r["late_body_game"])):
+            reason = "a"
+        elif short and not r["start_roster"] and not admitted_for_g:
+            reason = "b"
+        elif r["gone_game"] is not None and g > int(r["gone_game"]):
+            reason = "d"
+        if reason is not None and sid not in out:
+            out.add(sid)
+            added.append(f"{r['slot']}:{reason}")
+    if added:
+        print(f"[FFA-ASM] lobby {_asm_id8(lobby_uuid)} report game={g} "
+              f"unrated={','.join(added)}")
+    return out
+
+
+async def _asm_report_entered(db, lobby, lobby_uuid, g) -> None:
+    """Writer 7's audit copy: the first accepted report with g >= late_body_game
+    copies late_body_game into entered_game, in the accepted report's own
+    transaction (placed at its COMMIT, so no refused report writes it). No
+    rule reads entered_game."""
+    if not lobby.get("assembly_v1"):
+        return
+    await db.execute(text(
+        "UPDATE ffa_assembly_seats SET entered_game = late_body_game"
+        " WHERE lobby_id = :lid AND late_body_game IS NOT NULL AND entered_game IS NULL"
+        "   AND late_body_game <= CAST(:g AS smallint)"), {"lid": lobby_uuid, "g": int(g)})
+
+
+# -- The G3 enrolment (sec5.1; V5, V4-F3) ------------------------------------
+
+@app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])
+async def admin_ffa_g3_seat(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Enrol one test seat for G3 (the admission path's pre-release walk):
+    while ADM_PRODUCTION_ENABLED is False, admission_v1 also needs every member
+    enrolled here. Admin-HMAC canonical:
+    admin:{admin}:ffa_g3_seat:{target}:{hours}, so the duration is signed too.
+    hours is an integer 0-72; 0 expires the row at once. The production-
+    enabling release deletes this route with the table."""
+    admin_id = str(payload.get("admin_steam_id", ""))[:20]
+    target = str(payload.get("target_steam_id", ""))[:20]
+    if not _pg_text_ok(target):   # G3 enrolment: the target's key, before the admin check
+        raise HTTPException(422, "target_steam_id is not storable text")
+    hours = payload.get("hours")
+    if isinstance(hours, bool) or not isinstance(hours, int) or not 0 <= hours <= 72:
+        raise HTTPException(422, "hours must be an integer from 0 to 72")
+    _sig = payload.get("signature")
+    if not isinstance(_sig, str) or not _sig.isascii():
+        _sig = ""
+    await _require_admin(db, admin_id, "ffa_g3_seat", f"{target}:{hours}", _sig)
+    pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :s"),
+                            {"s": target})).scalar()
+    if pid is None:
+        raise HTTPException(404, "player not found")
+    exp = (await db.execute(text(
+        "INSERT INTO ffa_g3_seats (player_id, added_at, expires_at)"
+        " VALUES (:pid, NOW(), NOW() + make_interval(hours => CAST(:h AS integer)))"
+        " ON CONFLICT (player_id) DO UPDATE SET expires_at = EXCLUDED.expires_at"
+        " RETURNING expires_at"), {"pid": pid, "h": hours})).scalar()
+    await db.commit()
+    iso = exp.isoformat() if exp is not None else ""
+    print(f"[FFA-G3] seat {str(pid)[:8]} expires={iso}")
+    return {"status": "ok", "expires_at": iso}
 
 
 @app.get("/api/v1/ffa/queue/recent-joins", tags=["FFA Queue"])
@@ -52580,6 +55125,14 @@ async def ffa_queue_list(db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/v1/ffa/queue/poll/{steam_id}", tags=["FFA Queue"])
 async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """Poll the FFA queue (_ffa_queue_poll_inner), then attach the assembly
+    notice after the poll's own COMMIT, whatever its status (the
+    connect-failure design, sec3.4)."""
+    out = await _ffa_queue_poll_inner(steam_id, request, db)
+    return await _ffa_attach_asm_notice(db, steam_id, out)
+
+
+async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSession):
     """Poll the FFA queue. Lock rule: with >= FFA_MIN_PLAYERS fresh searching
     rows, the lowest Steam ID AMONG THE LOCKED SET (ovt lesson — the decider
     must be a member) locks up to FFA_MAX_PLAYERS earliest joiners once the
@@ -52773,7 +55326,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Already locked → self-heal dead locks, else report the lobby.
     if me["status"] == "ready_join" and me["series_id"] is not None:
         lrow = (await db.execute(text(
-            "SELECT l.status, l.games_played, l.player_count, l.member_ids"
+            "SELECT l.status, l.games_played, l.player_count, l.member_ids,"
+            "       l.start_granted_at"
             "  FROM ffa_lobbies l WHERE l.id = :lid"
         ), {"lid": me["series_id"]})).mappings().first()
         if lrow is not None:
@@ -52790,7 +55344,9 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         # zero-game old lock is only DEAD when no member has pinged presence
         # in the last 3 minutes (all clients gone/crashed).
         zero_game_stale = (lrow is not None and lrow["status"] == "active"
-                           and int(lrow["games_played"] or 0) == 0 and lock_age > 600)
+                           and int(lrow["games_played"] or 0) == 0 and lock_age > 600
+                           # I3 row 9: a started lobby never meets it.
+                           and lrow["start_granted_at"] is None)
         members_online = False
         if zero_game_stale and not _in_match_evidence_trustworthy():
             # Round-6 gate find (the last F1 hole): a FRESH process has an
@@ -52892,9 +55448,15 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
             ), {"lid": me["series_id"]})).mappings().first()
             all_polling = (mem_polls is not None and int(mem_polls["total"] or 0) > 0
                            and int(mem_polls["total"]) == int(mem_polls["fresh"]))
-            if all_polling and int(lrow["games_played"] or 0) > 0:
+            if all_polling and (int(lrow["games_played"] or 0) > 0
+                                # I3 row 8: extended to started lobbies, whose
+                                # clock starts at the grant.
+                                or lrow["start_granted_at"] is not None):
                 last_game = (await db.execute(text(
-                    "SELECT MAX(ended_at) FROM ffa_matches WHERE lobby_id = :lid"
+                    "SELECT COALESCE(MAX(m.ended_at),"
+                    "                (SELECT l.start_granted_at FROM ffa_lobbies l"
+                    "                  WHERE l.id = :lid))"
+                    "  FROM ffa_matches m WHERE m.lobby_id = :lid"
                 ), {"lid": me["series_id"]})).scalar()
                 # 900s, not 300s (Sid, July 30 - this closed a LIVE sitting 5m04s
                 # after its game 1 recorded, and game 2's report then 409'd with
@@ -52920,6 +55482,7 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                         and not _group_game_in_progress(me["series_id"])):
                     sitting_over = True
             elif (all_polling and int(lrow["games_played"] or 0) == 0 and lock_age > 300
+                  and lrow["start_granted_at"] is None   # I3 row 9
                   # Round-7 gate: "all polling" must mean the COMPLETE frozen
                   # roster, not every SURVIVING row — a husk-swept roster
                   # leaves one fresh survivor reading as "everyone". The
@@ -52933,8 +55496,10 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 assembly_failed = True
         if sitting_over:
             await db.execute(text(
-                "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
-                " WHERE id=:lid AND status='active'"), {"lid": me["series_id"]})
+                "UPDATE ffa_lobbies SET status='completed', completed_at=NOW(),"
+                + _FFA_CLOSE_RECORD_SET +
+                " WHERE id=:lid AND status='active'"),
+                {"lid": me["series_id"], "rec_path": "sitting_over", "rec_trigger": "poll"})
             # Reconcile-before-refund (Codex sitting-over review find 3): a
             # report can commit while its bet-settlement savepoint rolled
             # back (the deliberate #187 split) — those bets are unsettled
@@ -52952,8 +55517,11 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 reason = "assembly_failed" if assembly_failed else "assembly_timeout"
                 await db.execute(text(
                     "UPDATE ffa_lobbies SET status='canceled', invalidation_reason=:rsn,"
-                    "       invalidated_at=NOW() WHERE id=:lid AND status='active'"
-                ), {"lid": me["series_id"], "rsn": reason})
+                    "       invalidated_at=NOW()," + _FFA_CLOSE_RECORD_SET +
+                    " WHERE id=:lid AND status='active'"
+                ), {"lid": me["series_id"], "rsn": reason,
+                    "rec_path": "poll_assembly_failed" if assembly_failed else "poll_dead_lock",
+                    "rec_trigger": "poll"})
                 await _reconcile_ffa_lobby_bets(db, me["series_id"], "dead lock reset")
             await db.execute(text("""
                 UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
@@ -52968,6 +55536,11 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 "   AND last_polled > NOW() - INTERVAL '75 seconds'"
             ))).scalar() or 0
             return {"status": "searching", "queue_count": int(n)}
+        # Writer 2 and the poll's verdict trigger (the connect-failure design,
+        # I2): before this branch's COMMIT, since a write after it is lost.
+        _asm_out = await _asm_poll_step(db, me, steam_id)
+        if _asm_out is not None:
+            return _asm_out
         await db.commit()
         return await _ffa_poll_locked_payload(db, me["series_id"], steam_id)
 
@@ -53077,8 +55650,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         db, affected_player_ids=[r["player_id"] for r in ordered])
     await db.execute(text("""
         INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_count, member_ids,
-                                 created_at, kills_tiebreak)
-        VALUES (:lid, 'active', :room, :reg, :n, :members, NOW(), :kt)
+                                 created_at, kills_tiebreak, assembly_v1, admission_v1)
+        VALUES (:lid, 'active', :room, :reg, :n, :members, NOW(), :kt, FALSE, FALSE)
     """), {"lid": lobby_id, "room": room, "reg": (region or "us")[:8],
            "n": len(ordered), "members": [r["player_id"] for r in ordered],
            "kt": _kills_tiebreak})
@@ -53144,6 +55717,7 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
     my_slot = next((int(m["slot"]) for m in members
                     if m["steam_id"] == steam_id and m["slot"] is not None), -1)
     _cfg = _ffa_lobby_config(lobby)
+    _asm_fields = await _asm_payload_fields(db, lobby, lobby_id, steam_id)
     return {
         "status": "ready_join",
         "lobby_id": str(lobby_id),
@@ -53211,6 +55785,8 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
         # stale reading has. Naming an AHEAD number is the direction that would
         # cost a second settlement, and this read cannot produce one.
         **_ffa_progress(int(lobby["games_played"] or 0)),
+        # The assembly fields (the connect-failure design, I2 "Payload").
+        **_asm_fields,
         "players": [
             {"steam_id": m["steam_id"], "display_name": m["display_name"],
              "slot": int(m["slot"]) if m["slot"] is not None else -1}
@@ -54336,6 +56912,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             db, affected_player_ids=list(lobby["member_ids"] or []))
     except HTTPException as _svc:
         raise FfaReportRefusal(_svc.status_code, str(_svc.detail), _progress)
+    # The admission expiry (the connect-failure design, sec3.4), under the
+    # lobby lock and then its queue rows. Its lines print only after this
+    # report's own COMMIT: a refusal's capture rolls it back with the rest.
+    _asm_rep_expired = (await _ffa_expire_admissions(db, lobby_uuid, lock_rows=True)
+                        if lobby.get("short_started_at") is not None else [])
     # ── Kills tie-break capability: read the flag FROZEN at lock time
     # (migration 187), computed there from each member's OWN session-
     # authenticated join call (ffa_queue.mod_version) — never from the global,
@@ -54742,6 +57323,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # the carried-roster subset on its own; every "did they play THIS game"
     # question below asks `unrated`.
     unrated = ghosts | graced
+    # Writer 7 (the connect-failure design, I2): the refusals (c), (d), (e)
+    # and the unrating (a), (b), (d) of an assembly lobby, before anything
+    # reads `unrated`. The set only ever grows.
+    if lobby.get("assembly_v1"):
+        unrated = await _asm_report_rules(
+            db, lobby=lobby, lobby_uuid=lobby_uuid, g=_game_number, report=report,
+            id_by_steam=id_by_steam, unrated=unrated, progress=_progress)
     # Strictly-beaten counts drive XP (a tied pair didn't beat each other).
     beaten_count = {
         p.steam_id: sum(1 for q in report.players
@@ -55446,8 +58034,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             raise FfaReportRefusal(
                 503, "Could not settle this game's wagers - retry", _progress)
 
+    await _asm_report_entered(db, lobby, lobby_uuid, _game_number)
     await _ffa_advance_lobby_slot(db, lobby_uuid)
     await db.commit()
+    for _asm_line in _asm_log_expired(lobby_uuid, _asm_rep_expired):
+        print(_asm_line)
 
     rep_place = placements.get(report.reported_by_steam_id, 0)
     rep_xp, rep_gold = award_info.get(report.reported_by_steam_id, (0, 0))
@@ -56531,6 +59122,8 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
            AND l.is_ranked          -- §6: no betting on casual lobbies (odds
                                     -- are rating-derived; a casual sitting has
                                     -- no rating stakes to price)
+           AND NOT l.bets_disabled  -- a re-formed or short-started lobby
+                                    -- takes no new wagers (connect-failure I3)
          ORDER BY l.created_at DESC LIMIT 20
     """))).mappings().all()
     me = None
@@ -56632,6 +59225,7 @@ async def place_ffa_bet(
     lobby = (await db.execute(text(
         "SELECT id, status, member_ids, departed_ids, games_played, created_at,"
         "       score_target, is_ranked, live_total_points, live_points_game,"
+        "       bets_disabled,"
         "       (SELECT MAX(m.ended_at) FROM ffa_matches m"
         "         WHERE m.lobby_id = ffa_lobbies.id AND m.invalidated_at IS NULL) AS last_game_at"
         "  FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
@@ -56644,6 +59238,10 @@ async def place_ffa_bet(
         # §6: the listing filters casual lobbies, and the POST must agree with
         # the listing rather than trust it (same-predicate rule, wave-5 find 6).
         raise HTTPException(status_code=409, detail="Casual lobbies are not bettable")
+    if lobby["bets_disabled"]:
+        # The connect-failure design (I3): a re-formed or short-started lobby
+        # takes no new wagers -- the listing's own predicate.
+        raise HTTPException(status_code=409, detail="Betting is closed for this lobby")
     if not _ffa_lobby_is_live(lobby):
         raise HTTPException(status_code=409, detail="Betting closed - this sitting has ended")
     if not await _live_points_capable(db, list(lobby["member_ids"] or [])):
@@ -58616,6 +61214,25 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
 _LADDER_HOOK_SITES = (submit_match, submit_team_match,
                       _complete_team_series_with_ratings, submit_ffa_match)
 _LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
+# CONNECT-FAILURE, reported on /health as `connect_failure` (the connect-
+# failure design, V11). A marker whose only purpose is to be probed (#306):
+# nothing reads it and no behaviour depends on it. DERIVED, never written
+# down (#342): how many of the eight I2 writers' entry functions load their
+# seat-row writer's name in their own compiled code (co_names) -- 8 on this
+# build, 0 on the build before it, and between the two on a build that lost
+# a writer's wiring. A comment or a docstring naming a writer cannot move it.
+_CONNECT_FAILURE_SITES = (
+    (_ffa_lock_roster, "_asm_insert_seat_rows"),      # writer 1, the lock
+    (_ffa_queue_poll_inner, "_asm_poll_step"),        # writer 2, the poll
+    (ffa_lobby_connect, "_asm_connect_work"),         # writer 3
+    (ffa_lobby_assembly, "_asm_assembly_work"),       # writer 4
+    (ffa_queue_leave, "_asm_leave_plan"),             # writer 5
+    (_ffa_assembly_verdict, "_asm_apply_decision"),   # writer 6
+    (submit_ffa_match, "_asm_report_rules"),          # writer 7
+    (ffa_lobby_release, "_asm_release_pre"),          # writer 8 (the marker, M1)
+)
+_CONNECT_FAILURE = sum(1 for _cf_fn, _cf_name in _CONNECT_FAILURE_SITES
+                       if _cf_name in _cf_fn.__code__.co_names)
 
 
 # Dance cards (design S11.3): `pc_motion` on /health is how many of the
@@ -61264,6 +63881,53 @@ def _broadcast_public(candidate: dict) -> dict:
         "score", "names", "ratings", "phase")}
 
 
+async def _asm_attest_expiry(db: AsyncSession, room: str, steam_id: str) -> None:
+    """The admission expiry on the FFA spectate attest (connect-failure round
+    2, M2). The attest below compares the fighters' roster with the lobby's
+    live membership (members minus departed). An admissible seat is in that
+    set, so an attest whose roster leaves it out (the seat is not among the
+    fighters) answers 409 roster_mismatch; after A this step excludes the
+    seat at the first attest of a member, without waiting on one of the
+    expiry's other triggers (the lock step of connect and assembly, the
+    leave, the rowless gate, the poll, the report). For the lobby
+    _spectate_authoritative_roster reads (the room's newest active lobby),
+    once A has passed on a short-started lobby that still holds an
+    admissible seat, and only for a caller who is one of its members: the
+    lobby row FOR NO KEY UPDATE, then its queue rows in UUID order
+    (lock_rows), the expiry and its own COMMIT, before the roster is read;
+    the expired lines print after it. Otherwise it takes no lock and writes
+    nothing. The expiry re-checks A, the status and the admissible seats
+    under the lock, so a second run writes nothing."""
+    lob = (await db.execute(text("""
+        SELECT id, created_at, short_started_at, member_ids FROM ffa_lobbies
+         WHERE photon_room_id = :room AND status = 'active'
+         ORDER BY created_at DESC LIMIT 1
+    """), {"room": room})).mappings().first()
+    if lob is None or lob["short_started_at"] is None:
+        return
+    now, _mono = await _asm_clock(db)
+    a_at = lob["created_at"] + timedelta(seconds=ASM_ADMIT_LATE_S)
+    if now < a_at:
+        return
+    pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
+                            {"sid": steam_id})).scalar()
+    if pid is None or pid not in (lob["member_ids"] or []):
+        return
+    pending = (await db.execute(text(
+        "SELECT 1 FROM ffa_assembly_seats WHERE lobby_id = :lid AND verdict = 'admissible'"
+        " LIMIT 1"), {"lid": lob["id"]})).scalar()
+    if pending is None:
+        return
+    # The lobby row in the statement every other expiry trigger locks it with
+    # (_FFA_LOBBY_LOCK_SQL, through _ffa_lock_lobby_slot), without that
+    # helper's games_played catch-up write.
+    await db.execute(text(_FFA_LOBBY_LOCK_SQL), {"lid": lob["id"]})
+    expired = await _ffa_expire_admissions(db, lob["id"], lock_rows=True)
+    await db.commit()
+    for line in _asm_log_expired(lob["id"], expired):
+        print(line)
+
+
 async def _spectate_authoritative_roster(db: AsyncSession, mode: str, room: str):
     """Resolve the room's TRUE roster + source id from the server's own
     queue-lock records (Codex r1 find 5: a caller-authored roster lets two
@@ -61396,6 +64060,11 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
     if not await _strict_steam_session_ok(request, req.steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
+    if req.mode == "ffa":
+        # After A an admissible seat is excluded here too (connect-failure
+        # round 2, M2), so the roster check below does not wait on another
+        # route's request.
+        await _asm_attest_expiry(db, req.room_name, req.steam_id)
 
     # Server-authoritative roster check (fail CLOSED when a mapping should
     # exist): the claimed roster must be members of the room's real locked

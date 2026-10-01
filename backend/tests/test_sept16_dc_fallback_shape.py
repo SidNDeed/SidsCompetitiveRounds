@@ -2508,11 +2508,15 @@ def test_the_seat_binding_check_rejects_a_missing_and_a_late_binding():
 # names, under the session check's own policy (soft-fail where enforcement is
 # not armed for the caller). That class is filed in the round-9 notes and
 # not changed here; a renewer added later is unclassified and reddens this.
+# The ffa poll's body, its lease renewal with it, runs as _ffa_queue_poll_inner
+# since the connect-failure landing; ffa_queue_poll is now the route wrapper
+# that attaches the assembly notice after the poll's own COMMIT and renews
+# nothing itself. Same body, same class.
 LEASE_RENEWERS = {
     "presence_ping": "IN-GAME",
     "team_queue_poll": "LOBBY SEAT",
     "ovt_queue_poll": "LOBBY SEAT",
-    "ffa_queue_poll": "LOBBY SEAT",
+    "_ffa_queue_poll_inner": "LOBBY SEAT",
     "_lobby_state_impl": "LOBBY SEAT",
 }
 
@@ -2861,7 +2865,16 @@ LIVENESS_VETO_READERS = {
     "ovt_queue_leave": "OPEN",
     "ovt_queue_poll": "OPEN",
     "ffa_queue_leave": "OPEN",
-    "ffa_queue_poll": "OPEN",
+    # The ffa poll's body runs as _ffa_queue_poll_inner since the
+    # connect-failure landing (ffa_queue_poll wraps it and reads no veto).
+    "_ffa_queue_poll_inner": "OPEN",
+    # The connect-failure assembly verdict: it reads the veto inside the
+    # assembly lock step (_asm_lock, the ffa lobby row FOR NO KEY UPDATE) and
+    # holds no team_series lock, and a start-short / reform / dissolve write
+    # through _asm_apply_decision rests on the read. The same class as the ffa
+    # poll and leave: no publisher locks an ffa row, so it cannot be
+    # serialized against one.
+    "_ffa_assembly_verdict": "OPEN",
     "_ffa_game_in_progress_tristate": "HELPER",
     "_ffa_poll_locked_payload": "REPORTED",
 }
@@ -2998,6 +3011,37 @@ def test_mod_version_advertises_no_series_status_capability():
     returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
     assert len(returns) == 1, [ast.unparse(r) for r in returns]
     answer = returns[0].value
+    # Since the connect-failure landing the route builds the same mapping as
+    # `body` and sets ONE key more, "join_region_guard", only while
+    # JOIN_REGION_GUARD (the joiner's region guard; it ships False). A dict
+    # literal cannot carry a conditional key except through a ** entry, whose
+    # key this pin could not name, so the pin is restated for that shape
+    # rather than the route rewritten: the one return is `body`; `body` is
+    # bound exactly once, to a dict literal, which the checks below read; the
+    # only other write to it is body['join_region_guard'] = 1, alone under
+    # `if JOIN_REGION_GUARD:`; and no method is called on it. Any other key --
+    # the series-status flag above all -- still turns this red.
+    if isinstance(answer, ast.Name):
+        assert answer.id == "body", ast.unparse(returns[0])
+        binds = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                 and any(isinstance(t, ast.Name) and t.id == "body"
+                         for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+        assert len(binds) == 1 and isinstance(binds[0], ast.Assign), [
+            ast.unparse(b) for b in binds]
+        writes = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                  and any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                          and t.value.id == "body"
+                          for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+        assert [ast.unparse(w) for w in writes] == ["body['join_region_guard'] = 1"], [
+            ast.unparse(w) for w in writes]
+        guards = [n for n in ast.walk(node) if isinstance(n, ast.If) and n.body == writes]
+        assert len(guards) == 1 and ast.unparse(guards[0].test) == "JOIN_REGION_GUARD", [
+            ast.unparse(g.test) for g in guards]
+        calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                 and n.func.value.id == "body"]
+        assert calls == [], [ast.unparse(c) for c in calls]
+        answer = binds[0].value
     assert isinstance(answer, ast.Dict), ast.unparse(returns[0])
     keys = sorted(ast.unparse(k) for k in answer.keys)
     assert keys == sorted(["'version'", "'min_version'",
