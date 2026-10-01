@@ -695,6 +695,10 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
             // v1.29: always-on presence ping (mod-clients-online counter).
             Plugin.Instance.StartCoroutine(PresenceLoop());
+            // Verified reads (requirement 35): the read gate's stage, re-read
+            // from the OPEN /mod-version every 5 minutes and once after any
+            // gate refusal. DoCheckModVersion feeds the boot answer.
+            Plugin.Instance.StartCoroutine(ReadGateModePoll());
             // Sept 6 (in-game mail): unread/revision status poll — 60 s cadence
             // anchored 30 s off the presence ping (design B-6), plugin-level so
             // it keeps running with the F5 page closed (#50).
@@ -2558,6 +2562,7 @@ namespace CompetitiveRounds
             yield return req.SendWebRequest();
             if (req.result == UnityWebRequest.Result.Success)
             {
+                ReadGateAdvert(req.downloadHandler.text, "version-check");
                 string ver = ExtractJsonString(req.downloadHandler.text, "version");
                 string minVer = ExtractJsonString(req.downloadHandler.text, "min_version");
                 // Re-read on EVERY successful response, not only the first: an
@@ -5444,16 +5449,30 @@ namespace CompetitiveRounds
         private static IEnumerator GetMotionAtlas(string url, int cap, Action<bool, byte[], long, string> callback)
         {
             if (ConsentBlocksRequest(url)) { callback(false, null, 0, "no-consent"); yield break; }
+            // Verified reads (requirements 33-34): the same hold and the same
+            // refusal retries as GetRequest.
+            var rgAttempts = new ReadGateRules.Attempts();
+            while (true)
+            {
+            string rgFail = null;
+            yield return ReadGateHold(url, w => rgFail = w);
+            if (rgFail != null) { callback(false, null, 0, rgFail); yield break; }
             NoteAttempt();
+            ReadGateRules.Verdict rgv;
             using (var request = UnityWebRequest.Get(url))
             {
                 var handler = new CappedDownload(cap);
                 request.downloadHandler = handler;
                 StampVersionHeader(request);
+                string _rgTok = SteamAuth.SessionToken;
                 request.timeout = 30;
                 yield return request.SendWebRequest();
 
                 if (HandleVersionGate(request)) { callback(false, null, 426, "outdated"); yield break; }
+                rgv = ReadGateVerdict(request, ReadGateBody(request, handler), rgAttempts, _rgTok);
+                if (rgv.Next != ReadGateRules.Next.Deliver) NoteResult(false, request.responseCode);
+                else
+                {
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
                 byte[] data = null;
@@ -5481,7 +5500,26 @@ namespace CompetitiveRounds
                     err = request.responseCode > 0 ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}" : request.error;
                 }
                 callback(success, data, request.responseCode, err);
+                yield break;
+                }
             }
+            if (rgv.Next == ReadGateRules.Next.DelayRetry)
+                yield return new WaitForSecondsRealtime((float)rgv.Delay);
+            }
+        }
+
+        /// <summary>A refusal body out of a capped byte download, for the
+        /// read-gate verdict: only a 401 or 503 is read, and only its first
+        /// 512 bytes.</summary>
+        private static string ReadGateBody(UnityWebRequest request, CappedDownload handler)
+        {
+            if (request.responseCode != 401 && request.responseCode != 503) return null;
+            try
+            {
+                var b = handler.Taken();
+                return b == null ? null : Encoding.UTF8.GetString(b, 0, Math.Min(b.Length, 512));
+            }
+            catch { return null; }
         }
 
         /// <summary>`retry_after` of a refusal, top-level or inside the detail
@@ -5598,16 +5636,30 @@ namespace CompetitiveRounds
         private static IEnumerator GetBytes(string url, int cap, Action<bool, byte[], long> callback)
         {
             if (ConsentBlocksRequest(url)) { callback(false, null, 0); yield break; }
+            // Verified reads (requirements 33-34): the same hold and the same
+            // refusal retries as GetRequest.
+            var rgAttempts = new ReadGateRules.Attempts();
+            while (true)
+            {
+            string rgFail = null;
+            yield return ReadGateHold(url, w => rgFail = w);
+            if (rgFail != null) { callback(false, null, 0); yield break; }
             NoteAttempt();
+            ReadGateRules.Verdict rgv;
             using (var request = UnityWebRequest.Get(url))
             {
                 var handler = new CappedDownload(cap);
                 request.downloadHandler = handler;
                 StampVersionHeader(request);
+                string _rgTok = SteamAuth.SessionToken;
                 request.timeout = 20;
                 yield return request.SendWebRequest();
 
                 if (HandleVersionGate(request)) { callback(false, null, 426); yield break; }
+                rgv = ReadGateVerdict(request, ReadGateBody(request, handler), rgAttempts, _rgTok);
+                if (rgv.Next != ReadGateRules.Next.Deliver) NoteResult(false, request.responseCode);
+                else
+                {
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
                 byte[] data = null;
@@ -5632,6 +5684,11 @@ namespace CompetitiveRounds
                     catch { success = false; data = null; }
                 }
                 callback(success, data, request.responseCode);
+                yield break;
+                }
+            }
+            if (rgv.Next == ReadGateRules.Next.DelayRetry)
+                yield return new WaitForSecondsRealtime((float)rgv.Delay);
             }
         }
 
@@ -24493,36 +24550,177 @@ namespace CompetitiveRounds
                     if (onResponseCode != null) onResponseCode(0);
                     callback(ok0, body0);
                 })) yield break;
-            NoteAttempt();
-            using (var request = UnityWebRequest.Get(url))
+            // Verified reads (requirements 33-34): the hold before each send,
+            // and the gate's refusals retried here; every other answer leaves
+            // through the unchanged path below. In `off` and `log` the hold
+            // sends at once and no answer is a gate refusal, so one pass.
+            var rgAttempts = new ReadGateRules.Attempts();
+            while (true)
             {
-                StampVersionHeader(request);
-                if (!string.IsNullOrEmpty(extraHeaderName) && extraHeaderValue != null)
-                    request.SetRequestHeader(extraHeaderName, extraHeaderValue);
-                if (!string.IsNullOrEmpty(extraHeader2Name) && extraHeader2Value != null)
-                    request.SetRequestHeader(extraHeader2Name, extraHeader2Value);
-                // Capture the token this request rides out with (same pattern
-                // as PostRequest): the compare inside HandleSessionReject
-                // guards the race where a slow 401 lands after a newer
-                // session was already minted.
-                string _sentTok = sessionAware ? SteamAuth.SessionToken : null;
-                request.timeout = 20;
-                yield return request.SendWebRequest();
-
-                if (HandleVersionGate(request))
+                string rgFail = null;
+                yield return ReadGateHold(url, w => rgFail = w);
+                if (rgFail != null)
                 {
-                    // The box DID answer this one, with the gate's own status.
-                    if (onResponseCode != null) onResponseCode(request.responseCode);
-                    callback(false, "outdated"); yield break;
+                    if (onResponseCode != null) onResponseCode(0);
+                    callback(false, rgFail); yield break;
                 }
-                if (sessionAware) HandleSessionReject(request, _sentTok);
-                bool success = request.result == UnityWebRequest.Result.Success;
-                NoteResult(success, request.responseCode);
-                if (onResponseCode != null) onResponseCode(request.responseCode);
-                callback(success, success
-                    ? request.downloadHandler.text
-                    : (detailedErrors ? FormatRequestError(request) : request.error));
+                NoteAttempt();
+                ReadGateRules.Verdict rgv;
+                using (var request = UnityWebRequest.Get(url))
+                {
+                    StampVersionHeader(request);
+                    if (!string.IsNullOrEmpty(extraHeaderName) && extraHeaderValue != null)
+                        request.SetRequestHeader(extraHeaderName, extraHeaderValue);
+                    if (!string.IsNullOrEmpty(extraHeader2Name) && extraHeader2Value != null)
+                        request.SetRequestHeader(extraHeader2Name, extraHeader2Value);
+                    // Capture the token this request rides out with (same pattern
+                    // as PostRequest): the compare inside HandleSessionReject
+                    // guards the race where a slow 401 lands after a newer
+                    // session was already minted.
+                    string _sentTok = sessionAware ? SteamAuth.SessionToken : null;
+                    string _rgTok = SteamAuth.SessionToken;
+                    request.timeout = 20;
+                    yield return request.SendWebRequest();
+
+                    if (HandleVersionGate(request))
+                    {
+                        // The box DID answer this one, with the gate's own status.
+                        if (onResponseCode != null) onResponseCode(request.responseCode);
+                        callback(false, "outdated"); yield break;
+                    }
+                    string rgBody = null;
+                    try { rgBody = request.downloadHandler?.text; } catch { }
+                    rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok);
+                    if (rgv.Next == ReadGateRules.Next.Deliver)
+                    {
+                        if (sessionAware) HandleSessionReject(request, _sentTok);
+                        bool success = request.result == UnityWebRequest.Result.Success;
+                        NoteResult(success, request.responseCode);
+                        if (onResponseCode != null) onResponseCode(request.responseCode);
+                        callback(success, success
+                            ? request.downloadHandler.text
+                            : (detailedErrors ? FormatRequestError(request) : request.error));
+                        yield break;
+                    }
+                    NoteResult(false, request.responseCode);
+                }
+                if (rgv.Next == ReadGateRules.Next.DelayRetry)
+                    yield return new WaitForSecondsRealtime((float)rgv.Delay);
             }
+        }
+
+        // -- Verified reads: the client half (requirements 32-35) -------------
+        //
+        // Every decision is ReadGateRules' (executed by the client-rules
+        // harness, suite `readgate`); these helpers only act on it.
+
+        /// <summary>The hold a GET passes before it is sent: returns at once
+        /// when the rules say send, polls every 0.5 s while they say wait, and
+        /// hands `failed` the local failure word when they say fail. A gated
+        /// GET is never sent without the session under `enforce`.</summary>
+        private static IEnumerator ReadGateHold(string url, Action<string> failed)
+        {
+            var rules = ReadGateRules.Current;
+            float t0 = Time.realtimeSinceStartup;
+            bool waited = false;
+            while (true)
+            {
+                double w = Time.realtimeSinceStartup - t0;
+                var h = rules.ShouldHold(url, CredentialedTransportAllowed(url), SteamAuth.HasFreshToken, w);
+                if (h == ReadGateRules.Hold.Send)
+                {
+                    if (waited) Plugin.Log.LogInfo($"[READ-GATE] held {(int)(w * 1000)} ms");
+                    yield break;
+                }
+                if (h == ReadGateRules.Hold.FailSecureRoute)
+                {
+                    NoteReadGateFallback();
+                    failed(ReadGateRules.FailSecureRouteWord);
+                    yield break;
+                }
+                if (h == ReadGateRules.Hold.FailPending)
+                {
+                    Plugin.Log.LogWarning($"[READ-GATE] held {(int)(w * 1000)} ms without a session; not sent ({ReadGateRules.FailPendingWord})");
+                    failed(ReadGateRules.FailPendingWord);
+                    yield break;
+                }
+                waited = true;
+                yield return new WaitForSecondsRealtime((float)ReadGateRules.HoldPollSeconds);
+            }
+        }
+
+        /// <summary>The rules' verdict on one answer, with the session reject
+        /// and the log line its retry calls for. Never a toast.</summary>
+        private static ReadGateRules.Verdict ReadGateVerdict(UnityWebRequest req, string body,
+            ReadGateRules.Attempts attempts, string sentToken)
+        {
+            long code = req.responseCode;
+            if (code != 401 && code != 503)
+                return new ReadGateRules.Verdict { Next = ReadGateRules.Next.Deliver, Refusal = "" };
+            string cc = null;
+            try { cc = req.GetResponseHeader("Cache-Control"); } catch { }
+            var v = ReadGateRules.Current.OnRefusal(code, body, cc, attempts);
+            if (v.PassToSessionReject) HandleSessionReject(req, sentToken);
+            if (v.Next == ReadGateRules.Next.ResessionRetry)
+                Plugin.Log.LogInfo($"[READ-GATE] retried after refusal ({v.Refusal})");
+            else if (v.Next == ReadGateRules.Next.DelayRetry && v.ReplicationRetry > 0)
+                Plugin.Log.LogInfo($"[READ-GATE] replication pending, retry {v.ReplicationRetry}");
+            else if (v.Next == ReadGateRules.Next.DelayRetry)
+                Plugin.Log.LogInfo($"[READ-GATE] gate unavailable, retry once after {v.Delay:0} s");
+            else if (v.Refusal.Length > 0)
+                Plugin.Log.LogWarning($"[READ-GATE] refused again ({v.Refusal}); reported as a failure");
+            return v;
+        }
+
+        /// <summary>One /mod-version answer's read-gate fields into the rules,
+        /// and the `[READ-GATE] mode=` line the self-verify reads.</summary>
+        private static void ReadGateAdvert(string body, string source)
+        {
+            try
+            {
+                var rules = ReadGateRules.Current;
+                string word = rules.OnModeAdvert(ExtractJsonString(body, "read_gate"), body);
+                Plugin.Log.LogInfo($"[READ-GATE] mode={word} enforce_latched={rules.EnforceLatched} open_list={(rules.HasOpenList ? "yes" : "none")} source={source}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[READ-GATE] advert unreadable: {ex.Message}"); }
+        }
+
+        /// <summary>The mode poll (requirement 35): reads only the read-gate
+        /// fields of the OPEN /mod-version, every 5 minutes and once after any
+        /// gate refusal, on whichever route the session is on. It never runs
+        /// DoCheckModVersion's update decision.</summary>
+        private static IEnumerator ReadGateModePoll()
+        {
+            float next = Time.realtimeSinceStartup + (float)ReadGateRules.ModePollSeconds;
+            while (true)
+            {
+                yield return new WaitForSecondsRealtime(1f);
+                bool asked = ReadGateRules.Current.TakePollRequest();
+                if (!asked && Time.realtimeSinceStartup < next) continue;
+                next = Time.realtimeSinceStartup + (float)ReadGateRules.ModePollSeconds;
+                using (var req = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version"))
+                {
+                    req.timeout = 20;
+                    yield return req.SendWebRequest();
+                    if (req.result == UnityWebRequest.Result.Success)
+                        ReadGateAdvert(req.downloadHandler.text, asked ? "after-refusal" : "poll");
+                    else
+                        Plugin.Log.LogInfo($"[READ-GATE] mode poll failed ({req.responseCode}); stage kept");
+                }
+            }
+        }
+
+        /// <summary>The one notice per session for a gated read the backup
+        /// connection cannot carry (design 7.2).</summary>
+        private static void NoteReadGateFallback()
+        {
+            if (!ReadGateRules.Current.TakeFallbackNotice()) return;
+            Plugin.Log.LogWarning($"[READ-GATE] gated reads need the secure route; not sent on the backup connection ({ReadGateRules.FailSecureRouteWord})");
+            try
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Stats and profiles need the secure connection. Retrying every 5 minutes."), new Color(1f, 0.85f, 0.2f), 8f);
+            }
+            catch { }
         }
 
         /// <summary>The string form. Delegates so there is ONE POST body: the
