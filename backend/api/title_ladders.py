@@ -51,8 +51,6 @@ rung-up and the caller decides what to do with it. No client rendering: rung
 names are ``shop_items`` rows like every other title.
 """
 
-from datetime import timezone
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -566,10 +564,14 @@ def game_row_1v1(match, player_id, cards=()) -> dict:
 
 
 def _aware(ts):
+    # The UTC import is local on purpose: a module-level `timezone` binding here
+    # becomes the identity the route-manifest gate resolves main.py's own
+    # `timezone` to, which moved 310 unrelated route fingerprints.
+    from datetime import timezone as _tz
     if ts is None:
         return None
     if getattr(ts, "tzinfo", None) is None:
-        return ts.replace(tzinfo=timezone.utc)
+        return ts.replace(tzinfo=_tz.utc)
     return ts
 
 
