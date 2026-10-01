@@ -20,9 +20,12 @@
 --      no stored count is in the old unit.
 --   1. Adds title_ladder_progress.streak (the current run of consecutive
 --      ranked 1v1 wins, for the Apex ladder; its best run is `games`) and
---      title_ladder_progress.streak_at (the order key of the last ranked 1v1
---      game the run consumed, so a delayed report never extends a run behind
---      a later game; NULL until the first one).
+--      title_ladder_progress.streak_at (the SERVER's clock when the run was
+--      last written; informational, no decision reads it -- the run follows
+--      the order in which the server claims each game under the player's row
+--      lock; NULL until the first one). Makes title_ladder_credits.line
+--      nullable: every participant of every ranked game is claimed, keyed
+--      (player, game id), and the line is NULL when no ladder rung was worn.
 --   2. Deletes the nine 331 rungs the new catalogue does not have (rat's two
 --      tier-4 rungs and every tier 6); their title_ladders rows go with them
 --      (ON DELETE CASCADE).
@@ -93,9 +96,10 @@ BEGIN
     ALTER TABLE title_ladder_progress
         ADD COLUMN IF NOT EXISTS streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0),
         ADD COLUMN IF NOT EXISTS streak_at TIMESTAMPTZ DEFAULT NULL;
+    ALTER TABLE title_ladder_credits ALTER COLUMN line DROP NOT NULL;
 
     COMMENT ON TABLE title_ladder_credits IS
-        'One row per player per ranked GAME credited to the worn ladder (migration 365). The PK (player_id, reference_id) is the unit and the double-credit gate: every caller passes the game id (1v1 matches.id, 2v2 team_matches.id, the FFA match id), so a re-reported game counts once. Rows written before 365 (none existed in production) were keyed on a series id.';
+        'One row per player per ranked GAME, claimed for every participant whatever they wear (migration 365): line is the ladder the worn rung belongs to, NULL when none. The PK (player_id, reference_id) is the unit and the double-credit gate: every caller passes the game id (1v1 matches.id, 2v2 team_matches.id, the FFA match id), so a re-reported game changes nothing, whatever is worn at the replay. Rows written before 365 (none existed in production) were keyed on a series id.';
 
     -- 2. The rungs the new catalogue does not have.
     DELETE FROM shop_items WHERE sku IN ('title_ladder_rat_4_king', 'title_ladder_rat_4_queen', 'title_ladder_cat_6', 'title_ladder_dog_6', 'title_ladder_turtle_6', 'title_ladder_rabbit_6', 'title_ladder_bear_6', 'title_ladder_eagle_6', 'title_ladder_shark_6');
@@ -509,6 +513,12 @@ BEGIN
        AND column_name IN ('streak', 'streak_at');
     IF bad <> 2 THEN
         RAISE EXCEPTION 'title ladders 365: title_ladder_progress.streak or streak_at is missing';
+    END IF;
+    SELECT count(*) INTO bad FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = 'title_ladder_credits'
+       AND column_name = 'line' AND is_nullable = 'YES';
+    IF bad <> 1 THEN
+        RAISE EXCEPTION 'title ladders 365: title_ladder_credits.line is not nullable (a game claimed with no ladder worn needs it)';
     END IF;
     RAISE NOTICE 'title ladders 365: final state holds -- % ladders, % rungs, every entry rung on sale', 32, 160;
 END $m365post$;
