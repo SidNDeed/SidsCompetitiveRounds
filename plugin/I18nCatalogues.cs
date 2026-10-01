@@ -3003,6 +3003,27 @@ namespace CompetitiveRounds
             ["Tier {0}"] = "Nivel {0}",
             ["Upgrade"] = "Mejorar",
             ["{0} tiers - click to see them all"] = "{0} niveles - haz clic para verlos todos",
+            // Added 2026-10-01: five-tier title ladders (board row 29), the
+            // dropdown under a ladder's Shop entry (TitleLaddersUI.cs) and the
+            // counts in each ladder's own unit. Sorted among themselves; entries
+            // above are untouched.
+            ["(only the ladder you are wearing counts)"] = "(solo cuenta la escalera que llevas puesta)",
+            ["Best run: {0}"] = "Mejor racha: {0}",
+            ["Current run: {0}"] = "Racha actual: {0}",
+            ["Earned at {0}"] = "Se gana con {0}",
+            ["Not started - buy {0} in the Shop to begin this ladder."] = "Sin empezar - compra {0} en la Tienda para empezar esta escalera.",
+            ["Top of the ladder."] = "En lo más alto de la escalera.",
+            ["Wear it and finish ranked series"] = "Llévalo puesto y termina series Ranked",
+            ["click to close"] = "haz clic para cerrar",
+            ["{0} - top of the ladder."] = "{0} - en lo más alto de la escalera.",
+            ["{0} games"] = "{0} partidas",
+            ["{0} gold"] = "{0} de oro",
+            ["{0} losses"] = "{0} derrotas",
+            ["{0} of {1} - {2} to go."] = "{0} de {1} - faltan {2}.",
+            ["{0} of {1} to {2} - {3} to go."] = "{0} de {1} para {2} - faltan {3}.",
+            ["{0} series"] = "{0} series completadas",
+            ["{0} wins"] = "{0} victorias",
+            ["{0} wins in a row"] = "{0} victorias seguidas",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -5972,6 +5993,27 @@ namespace CompetitiveRounds
             ["Tier {0}"] = "Уровень {0}",
             ["Upgrade"] = "Улучшить",
             ["{0} tiers - click to see them all"] = "Уровней: {0} - нажмите, чтобы увидеть все",
+            // Added 2026-10-01: five-tier title ladders (board row 29), the
+            // dropdown under a ladder's Shop entry (TitleLaddersUI.cs) and the
+            // counts in each ladder's own unit. Sorted among themselves; entries
+            // above are untouched.
+            ["(only the ladder you are wearing counts)"] = "(засчитывается только лестница, которую вы носите)",
+            ["Best run: {0}"] = "Лучшая серия побед: {0}",
+            ["Current run: {0}"] = "Текущая серия побед: {0}",
+            ["Earned at {0}"] = "Даётся за {0}",
+            ["Not started - buy {0} in the Shop to begin this ladder."] = "Не начато - купите {0} в Магазине, чтобы начать эту лестницу.",
+            ["Top of the ladder."] = "Вершина лестницы.",
+            ["Wear it and finish ranked series"] = "Носите его и завершайте рейтинговые серии",
+            ["click to close"] = "нажмите, чтобы закрыть",
+            ["{0} - top of the ladder."] = "{0} - вершина лестницы.",
+            ["{0} games"] = "{0} игр",
+            ["{0} gold"] = "{0} золота",
+            ["{0} losses"] = "{0} поражений",
+            ["{0} of {1} - {2} to go."] = "{0} из {1} - осталось {2}.",
+            ["{0} of {1} to {2} - {3} to go."] = "{0} из {1} до {2} - осталось {3}.",
+            ["{0} series"] = "{0} серий",
+            ["{0} wins"] = "{0} побед",
+            ["{0} wins in a row"] = "{0} побед подряд",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -8867,6 +8909,27 @@ namespace CompetitiveRounds
             ["Tier {0}"] = "Рівень {0}",
             ["Upgrade"] = "Покращити",
             ["{0} tiers - click to see them all"] = "Рівнів: {0} - натисніть, щоб побачити всі",
+            // Added 2026-10-01: five-tier title ladders (board row 29), the
+            // dropdown under a ladder's Shop entry (TitleLaddersUI.cs) and the
+            // counts in each ladder's own unit. Sorted among themselves; entries
+            // above are untouched.
+            ["(only the ladder you are wearing counts)"] = "(зараховується лише драбина, яку ви носите)",
+            ["Best run: {0}"] = "Найкраща серія перемог: {0}",
+            ["Current run: {0}"] = "Поточна серія перемог: {0}",
+            ["Earned at {0}"] = "Дається за {0}",
+            ["Not started - buy {0} in the Shop to begin this ladder."] = "Не розпочато - купіть {0} у Магазині, щоб розпочати цю драбину.",
+            ["Top of the ladder."] = "Вершина драбини.",
+            ["Wear it and finish ranked series"] = "Носіть його та завершуйте рейтингові серії",
+            ["click to close"] = "натисніть, щоб закрити",
+            ["{0} - top of the ladder."] = "{0} - вершина драбини.",
+            ["{0} games"] = "{0} ігор",
+            ["{0} gold"] = "{0} золота",
+            ["{0} losses"] = "{0} поразок",
+            ["{0} of {1} - {2} to go."] = "{0} з {1} - залишилося {2}.",
+            ["{0} of {1} to {2} - {3} to go."] = "{0} з {1} до {2} - залишилося {3}.",
+            ["{0} series"] = "{0} серій",
+            ["{0} wins"] = "{0} перемог",
+            ["{0} wins in a row"] = "{0} перемог поспіль",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -11762,6 +11825,27 @@ namespace CompetitiveRounds
             ["Tier {0}"] = "Nivå {0}",
             ["Upgrade"] = "Uppgradera",
             ["{0} tiers - click to see them all"] = "{0} nivåer - klicka för att se alla",
+            // Added 2026-10-01: five-tier title ladders (board row 29), the
+            // dropdown under a ladder's Shop entry (TitleLaddersUI.cs) and the
+            // counts in each ladder's own unit. Sorted among themselves; entries
+            // above are untouched.
+            ["(only the ladder you are wearing counts)"] = "(bara stegen du bär räknas)",
+            ["Best run: {0}"] = "Bästa vinstsvit: {0}",
+            ["Current run: {0}"] = "Nuvarande vinstsvit: {0}",
+            ["Earned at {0}"] = "Tjänas in vid {0}",
+            ["Not started - buy {0} in the Shop to begin this ladder."] = "Inte påbörjad - köp {0} i Butiken för att börja den här stegen.",
+            ["Top of the ladder."] = "Högst upp på stegen.",
+            ["Wear it and finish ranked series"] = "Bär den och avsluta Ranked-serier",
+            ["click to close"] = "klicka för att stänga",
+            ["{0} - top of the ladder."] = "{0} - högst upp på stegen.",
+            ["{0} games"] = "{0} matcher",
+            ["{0} gold"] = "{0} guld",
+            ["{0} losses"] = "{0} förluster",
+            ["{0} of {1} - {2} to go."] = "{0} av {1} - {2} kvar.",
+            ["{0} of {1} to {2} - {3} to go."] = "{0} av {1} till {2} - {3} kvar.",
+            ["{0} series"] = "{0} serier",
+            ["{0} wins"] = "{0} vinster",
+            ["{0} wins in a row"] = "{0} vinster i rad",
         };
     }
 }

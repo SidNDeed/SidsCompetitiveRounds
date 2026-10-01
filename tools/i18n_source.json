@@ -40,6 +40,7 @@
   "(menu only)",
   "(no log content read from: {0})",
   "(no previous-session log yet — gets written by the mod when ROUNDS is closed cleanly, so on first ever launch this is empty)\n\nExpected path: {0}",
+  "(only the ladder you are wearing counts)",
   "(partial)",
   "(placements {0})",
   "(self)",
@@ -614,6 +615,7 @@
   "BepInEx (prev session)",
   "Berserker",
   "Best Win Streak",
+  "Best run: {0}",
   "Best seller",
   "Best-of-3: first side to 2 game wins. 1v2 is an unranked beta - every game is recorded, and no rating moves yet.",
   "Bet",
@@ -701,7 +703,6 @@
   "Burgundy",
   "Bursts",
   "Buy",
-  "Buy the first rung of a line in the Shop and wear it. Every ranked series you finish while a rung of that line is worn counts one toward the next rung.",
   "Buying {0}...",
   "Bye!",
   "CANCELLED (not enough players)",
@@ -904,6 +905,7 @@
   "Current Game: {0}",
   "Current Rank",
   "Current Series: {0}",
+  "Current run: {0}",
   "Current tier",
   "Current tier: {0} - {1}",
   "Cursor",
@@ -1038,7 +1040,7 @@
   "Eagle God",
   "Eaglet",
   "Earned",
-  "Earned at {0} series",
+  "Earned at {0}",
   "Earned by {0} player  <color=#888>(in the order they got it - click again to close)</color>",
   "Earned by {0} players  <color=#888>(in the order they got it - click again to close)</color>",
   "Earned pack (ranked win)",
@@ -1668,7 +1670,7 @@
   "Not on sale yet",
   "Not ready yet",
   "Not started",
-  "Not started - buy {0} in the Shop to begin this line.",
+  "Not started - buy {0} in the Shop to begin this ladder.",
   "Not started.",
   "Nothing playing",
   "Nothing sent yet.",
@@ -1734,7 +1736,6 @@
   "Overall Series: {0}",
   "Override the default orange/blue team color with a tint of your choice. Only visible to modded players. Premium tiers (Prismatic, Chrome) animate during combat.",
   "Owned",
-  "Owned - not worn",
   "PHOTON CLOUD",
   "PICK YOUR CARD - {0}s",
   "PLACEMENT PAYS",
@@ -2475,6 +2476,7 @@
   "Top card: {0}",
   "Top cards (all modes)",
   "Top of the food chain",
+  "Top of the ladder.",
   "Total Mayhem",
   "Total XP",
   "Total: {0} ({1}W / {2}L)  <color=#FFD94D>Gold: {3}</color>",
@@ -2599,6 +2601,7 @@
   "Warm desert sand tones.",
   "Warm honey-gold body color.",
   "Warm orange blocks on a sunset-toned backdrop.",
+  "Wear it and finish ranked series",
   "Well Wraped Hat",
   "Well played!",
   "Wet teal-grey stone walls under an overcast slate sky, rain streaking down the backdrop.",
@@ -2673,7 +2676,6 @@
   "Won",
   "World Turtle",
   "Worn by those who climbed the mountain.",
-  "Worn: {0}",
   "Worst Cards",
   "Wrap your name in <b>bold</b>. Stackable with other name styles.",
   "Wrap your name in <i>italic</i>. Stackable with other name styles.",
@@ -2759,6 +2761,7 @@
   "cleared - flags alone never punish",
   "click Preview again to stop",
   "click a phrase - Esc closes",
+  "click to close",
   "color",
   "common",
   "competitive clock: 120 FPS",
@@ -2931,6 +2934,7 @@
   "{0}  {1}%  ({2} picks)",
   "{0} ({1} ratings, {2} listeners)",
   "{0} + {1} more",
+  "{0} - top of the ladder.",
   "{0} - {1} games - {2} played",
   "{0} / {1} unlocked",
   "{0} <b>won</b> {1}-{2}",
@@ -2947,23 +2951,26 @@
   "{0} days ago",
   "{0} dps",
   "{0} elo",
+  "{0} games",
   "{0} games    {1}W - {2}L    {3}",
   "{0} games  {1} wins  Top3 {2}%  Avg place {3}",
   "{0} gold",
   "{0} h ago",
   "{0} half-point events",
-  "{0} is earned at {1} series on this line.",
   "{0} is now your title.",
   "{0} item(s), {1} cop(ies) out there.",
   "{0} keys/s",
   "{0} kills   {1} dmg",
+  "{0} losses",
   "{0} lost {1}",
   "{0} matches ({1}W / {2}L)  WR: {3}%",
   "{0} min ago",
   "{0} months ago",
+  "{0} of {1} - {2} to go.",
   "{0} of {1} left",
   "{0} of {1} paid packs today - {2} cards each",
   "{0} of {1} players",
+  "{0} of {1} to {2} - {3} to go.",
   "{0} opening picks",
   "{0} paid packs today - no daily limit on this account - {1} cards each",
   "{0} picked {1}",
@@ -2973,9 +2980,7 @@
   "{0} players ranked",
   "{0} ready! Joining...",
   "{0} searching",
-  "{0} series - top of the line.",
-  "{0} series - {1} to go to {2}.",
-  "{0} series - {1} to go.",
+  "{0} series",
   "{0} series played",
   "{0} shards",
   "{0} tiers - click to see them all",
@@ -2985,6 +2990,8 @@
   "{0} unread",
   "{0} weeks ago",
   "{0} winning picks",
+  "{0} wins",
+  "{0} wins in a row",
   "{0} wins the game!",
   "{0} years ago",
   "{0}-card draw",
@@ -3192,6 +3199,11 @@
    "surface": "CompetitiveUI",
    "location": "DrawLogViewerModal",
    "kind": "TrF"
+  },
+  "(only the ladder you are wearing counts)": {
+   "surface": "TitleLaddersUI",
+   "location": "PaintDrop",
+   "kind": "Tr"
   },
   "(partial)": {
    "surface": "PostSessionReport",
@@ -6063,6 +6075,11 @@
    "location": "BuildCompareBarChart",
    "kind": "Tr"
   },
+  "Best run: {0}": {
+   "surface": "TitleLaddersUI",
+   "location": "ProgressText",
+   "kind": "TrF"
+  },
   "Best seller": {
    "surface": "NativeUI",
    "location": "BuildCompareShopSalesPanel",
@@ -6495,13 +6512,8 @@
   },
   "Buy": {
    "surface": "NativeUI, TitleLaddersUI",
-   "location": "ActionLabel, ApplyShopRow, BuildEntry +2",
+   "location": "ActionLabel, ApplyShopRow, BuildEntry +1",
    "kind": "CreateButton, SetText, Tr"
-  },
-  "Buy the first rung of a line in the Shop and wear it. Every ranked series you finish while a rung of that line is worn counts one toward the next rung.": {
-   "surface": "TitleLaddersUI",
-   "location": "OpenPopup",
-   "kind": "Tr"
   },
   "Buying {0}...": {
    "surface": "NativeUI, TitleLaddersUI",
@@ -7014,8 +7026,8 @@
    "kind": "CreateText"
   },
   "Close": {
-   "surface": "CompetitiveUI, NativeUI, SessionReportView +1",
-   "location": "BuildUtilityPopup, DrawFooter, DrawLogViewerModal +4",
+   "surface": "CompetitiveUI, NativeUI, SessionReportView",
+   "location": "BuildUtilityPopup, DrawFooter, DrawLogViewerModal +3",
    "kind": "CreateButton, Tr"
   },
   "Clown": {
@@ -7513,6 +7525,11 @@
    "location": "ComposeBarLine",
    "kind": "TrF"
   },
+  "Current run: {0}": {
+   "surface": "TitleLaddersUI",
+   "location": "ProgressText",
+   "kind": "TrF"
+  },
   "Current tier": {
    "surface": "TitleLaddersUI",
    "location": "PaintTierRow",
@@ -7520,7 +7537,7 @@
   },
   "Current tier: {0} - {1}": {
    "surface": "TitleLaddersUI",
-   "location": "PaintEntry, RefreshPopup",
+   "location": "PaintEntry",
    "kind": "TrF"
   },
   "Cursor": {
@@ -8183,7 +8200,7 @@
    "location": "BuildCompareShopSalesPanel",
    "kind": "Tr"
   },
-  "Earned at {0} series": {
+  "Earned at {0}": {
    "surface": "TitleLaddersUI",
    "location": "PaintTierRow, ReasonText",
    "kind": "TrF"
@@ -11330,17 +11347,17 @@
   },
   "Not started": {
    "surface": "TitleLaddersUI",
-   "location": "PaintEntry, RefreshPopup",
+   "location": "PaintEntry",
    "kind": "Tr"
   },
-  "Not started - buy {0} in the Shop to begin this line.": {
+  "Not started - buy {0} in the Shop to begin this ladder.": {
    "surface": "TitleLaddersUI",
-   "location": "Caption",
+   "location": "ProgressText",
    "kind": "TrF"
   },
   "Not started.": {
    "surface": "TitleLaddersUI",
-   "location": "Caption",
+   "location": "ProgressText",
    "kind": "Tr"
   },
   "Nothing playing": {
@@ -11661,11 +11678,6 @@
   "Owned": {
    "surface": "TitleLaddersUI",
    "location": "PaintTierRow",
-   "kind": "Tr"
-  },
-  "Owned - not worn": {
-   "surface": "TitleLaddersUI",
-   "location": "RefreshPopup",
    "kind": "Tr"
   },
   "PHOTON CLOUD": {
@@ -15270,7 +15282,7 @@
   },
   "Title Ladders": {
    "surface": "TitleLaddersUI",
-   "location": "OpenPopup",
+   "location": "BuildShopEntries",
    "kind": "Tr"
   },
   "Titles": {
@@ -15367,6 +15379,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Top of the ladder.": {
+   "surface": "TitleLaddersUI",
+   "location": "PaintEntry",
+   "kind": "Tr"
   },
   "Total Mayhem": {
    "surface": "ApiClient",
@@ -15988,6 +16005,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Wear it and finish ranked series": {
+   "surface": "TitleLaddersUI",
+   "location": "PaintDrop",
+   "kind": "Tr"
+  },
   "Well Wraped Hat": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -16357,11 +16379,6 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
-  },
-  "Worn: {0}": {
-   "surface": "TitleLaddersUI",
-   "location": "RefreshPopup",
-   "kind": "TrF"
   },
   "Worst Cards": {
    "surface": "NativeUI",
@@ -16786,6 +16803,11 @@
   "click a phrase - Esc closes": {
    "surface": "CompetitiveUI",
    "location": "DrawQuickChat",
+   "kind": "Tr"
+  },
+  "click to close": {
+   "surface": "TitleLaddersUI",
+   "location": "PaintEntry",
    "kind": "Tr"
   },
   "color": {
@@ -17648,6 +17670,11 @@
    "location": "BuildTerminalLine",
    "kind": "TrF"
   },
+  "{0} - top of the ladder.": {
+   "surface": "TitleLaddersUI",
+   "location": "ProgressText",
+   "kind": "TrF"
+  },
   "{0} - {1} games - {2} played": {
    "surface": "SessionReportModel",
    "location": "Build",
@@ -17728,6 +17755,11 @@
    "location": "FfaPlayerLine, RefreshHistory, SeriesHeaderText +1",
    "kind": "TrF"
   },
+  "{0} games": {
+   "surface": "TitleLaddersUI",
+   "location": "UnitCount",
+   "kind": "TrF"
+  },
   "{0} games    {1}W - {2}L    {3}": {
    "surface": "NativeUI",
    "location": "RefreshSession",
@@ -17739,8 +17771,8 @@
    "kind": "TrF"
   },
   "{0} gold": {
-   "surface": "PlayerCardsUI",
-   "location": "Refresh",
+   "surface": "PlayerCardsUI, TitleLaddersUI",
+   "location": "Refresh, UnitCount",
    "kind": "TrF"
   },
   "{0} h ago": {
@@ -17751,11 +17783,6 @@
   "{0} half-point events": {
    "surface": "NativeUI",
    "location": "ParseFfaTimeline",
-   "kind": "TrF"
-  },
-  "{0} is earned at {1} series on this line.": {
-   "surface": "TitleLaddersUI",
-   "location": "PopupReason",
    "kind": "TrF"
   },
   "{0} is now your title.": {
@@ -17778,6 +17805,11 @@
    "location": "FfaPlayerLine",
    "kind": "TrF"
   },
+  "{0} losses": {
+   "surface": "TitleLaddersUI",
+   "location": "UnitCount",
+   "kind": "TrF"
+  },
   "{0} lost {1}": {
    "surface": "FfaMode",
    "location": "ApplyManifestPick",
@@ -17798,6 +17830,11 @@
    "location": "Ago",
    "kind": "TrF"
   },
+  "{0} of {1} - {2} to go.": {
+   "surface": "TitleLaddersUI",
+   "location": "ProgressText",
+   "kind": "TrF"
+  },
   "{0} of {1} left": {
    "surface": "NativeUI",
    "location": "RefreshArtistTab",
@@ -17811,6 +17848,11 @@
   "{0} of {1} players": {
    "surface": "NativeUI",
    "location": "RefreshLeaderboard",
+   "kind": "TrF"
+  },
+  "{0} of {1} to {2} - {3} to go.": {
+   "surface": "TitleLaddersUI",
+   "location": "ProgressText",
    "kind": "TrF"
   },
   "{0} opening picks": {
@@ -17858,19 +17900,9 @@
    "location": "RefreshQueueUI",
    "kind": "TrF"
   },
-  "{0} series - top of the line.": {
+  "{0} series": {
    "surface": "TitleLaddersUI",
-   "location": "Caption, PaintEntry",
-   "kind": "TrF"
-  },
-  "{0} series - {1} to go to {2}.": {
-   "surface": "TitleLaddersUI",
-   "location": "Caption",
-   "kind": "TrF"
-  },
-  "{0} series - {1} to go.": {
-   "surface": "TitleLaddersUI",
-   "location": "Caption",
+   "location": "UnitCount",
    "kind": "TrF"
   },
   "{0} series played": {
@@ -17916,6 +17948,16 @@
   "{0} winning picks": {
    "surface": "NativeUI",
    "location": "BuildCompareCardLeaders",
+   "kind": "TrF"
+  },
+  "{0} wins": {
+   "surface": "TitleLaddersUI",
+   "location": "UnitCount",
+   "kind": "TrF"
+  },
+  "{0} wins in a row": {
+   "surface": "TitleLaddersUI",
+   "location": "UnitCount",
    "kind": "TrF"
   },
   "{0} wins the game!": {

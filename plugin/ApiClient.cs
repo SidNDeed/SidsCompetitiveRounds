@@ -4902,13 +4902,20 @@ namespace CompetitiveRounds
             return c;
         }
 
-        // ── Animal title ladders (v1.41.0 item 12) ─────────────────────────
+        // ── Title ladders (v1.41.0 item 12; five tiers, board row 29) ──────
         //
         // GET /api/v1/players/{steam_id}/title-ladders answers
         //   {steam_id, active_line, ladders:[{line, name, games, tier,
         //     max_tier, next_tier, next_threshold, next_names, games_to_next,
         //     rungs:[{tier, sku, item_id, name, description, rarity,
-        //             preview_color, threshold, price, owned, active}]}]}
+        //             preview_color, threshold, price, owned, active,
+        //             reached}],
+        //     group, kind, unit, modes, condition, streak}]}
+        //
+        // The keys after `rungs` (and a rung's `reached`) were APPENDED by the
+        // five-tier server build. A server before it omits them: `unit` reads
+        // null and every caller falls back to the old "series" wording, which
+        // is what that server counted.
         //
         // Depth-aware reads are not a style choice here. `name`, `tier`, `sku`
         // and `threshold` ALL recur inside `rungs[]`, and
@@ -4929,6 +4936,9 @@ namespace CompetitiveRounds
             public long item_id;
             public int threshold, price;
             public bool owned, active;
+            /// <summary>The count has reached this tier (appended key; false
+            /// from a server before the five-tier build).</summary>
+            public bool reached;
         }
 
         /// <summary>One animal line. `has_next` is false at the top of the
@@ -4943,6 +4953,16 @@ namespace CompetitiveRounds
             public int next_tier, next_threshold, games_to_next;
             public string[] next_names = new string[0];
             public List<TitleLadderRung> rungs = new List<TitleLadderRung>();
+            /// <summary>Appended by the five-tier server build, null before it:
+            /// `group` (animal, card, playstyle, shop, numeral), `kind`, `unit`
+            /// (games, wins, losses, gold, streak: what `games` counts),
+            /// `modes` (any or 1v1) and `condition` (the English rule the
+            /// dropdown shows through I18n.Tr).</summary>
+            public string group, kind, unit, modes, condition;
+            /// <summary>The current run of ranked 1v1 wins (Apex only);
+            /// `has_streak` is false where the server sent null or nothing.</summary>
+            public bool has_streak;
+            public int streak;
 
             /// <summary>Does the player hold any rung of this line? A line with
             /// none is NOT STARTED — it can show no progress at all, because
@@ -5014,6 +5034,7 @@ namespace CompetitiveRounds
                 price = PcInt(PcTopLevel(obj, "price")),
                 owned = PcBool(PcTopLevel(obj, "owned")),
                 active = PcBool(PcTopLevel(obj, "active")),
+                reached = PcBool(PcTopLevel(obj, "reached")),
             };
         }
 
@@ -5043,7 +5064,17 @@ namespace CompetitiveRounds
                     tier = PcInt(PcTopLevel(obj, "tier")),
                     max_tier = PcInt(PcTopLevel(obj, "max_tier")),
                     next_names = PcStrArray(PcTopLevel(obj, "next_names")),
+                    group = PcStr(PcTopLevel(obj, "group")),
+                    kind = PcStr(PcTopLevel(obj, "kind")),
+                    unit = PcStr(PcTopLevel(obj, "unit")),
+                    modes = PcStr(PcTopLevel(obj, "modes")),
+                    condition = PcStr(PcTopLevel(obj, "condition")),
                 };
+                // Presence, as for next_tier below: a null streak is "this
+                // ladder keeps no run", not a run of 0.
+                string sk = PcTopLevel(obj, "streak");
+                ln.has_streak = !string.IsNullOrEmpty(sk) && sk != "null";
+                if (ln.has_streak) ln.streak = PcInt(sk);
                 // Presence, not value: at the top of a line the server sends
                 // null for all three, and PcInt reads a null as 0.
                 string nt = PcTopLevel(obj, "next_tier");
