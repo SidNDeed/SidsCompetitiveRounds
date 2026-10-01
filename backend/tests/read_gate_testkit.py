@@ -28,6 +28,9 @@ import database                 # noqa: E402
 import read_gate                # noqa: E402
 
 LIVE_VERSION = "1.40.3"
+# The first client version that receives the stage advert in /mod-version
+# (read_gate.READ_GATE_ADVERT_MIN).
+ADVERT_VERSION = "1.41.0"
 INTERNAL_KEY = "test-internal-key-for-read-gate"
 
 

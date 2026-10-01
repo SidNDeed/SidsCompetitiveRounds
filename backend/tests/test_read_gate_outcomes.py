@@ -398,7 +398,7 @@ def test_first_load_failure_unknown_503(env):
     assert env.calls["public"] == []
     assert read_gate.mode_word() == read_gate.UNKNOWN
     # OPEN and the classes whose behaviour does not depend on the stage still answer
-    mv = _get(env, "/api/v1/mod-version", version=None)
+    mv = _get(env, "/api/v1/mod-version", version=K.ADVERT_VERSION)
     assert mv.status_code == 200 and mv.json()["read_gate"] == "unknown"
     # within the TTL the failed read is not repeated per request
     calls = env.stub.calls["mode"]
@@ -471,13 +471,13 @@ def test_probe_reports_credential_class(env):
 def test_mod_version_reports_mode(env):
     K.reset_gate()
     env.stub.mode_row = "log"
-    body = _get(env, "/api/v1/mod-version", version=None).json()
+    body = _get(env, "/api/v1/mod-version", version=K.ADVERT_VERSION).json()
     assert body["read_gate"] == "log"
     assert body["read_gate_open"] == read_gate.ungated_templates(main.app.routes)
     env.stub.mode_row = "enforce"
-    assert _get(env, "/api/v1/mod-version", version=None).json()["read_gate"] == "log"   # TTL
+    assert _get(env, "/api/v1/mod-version", version=K.ADVERT_VERSION).json()["read_gate"] == "log"   # TTL
     env.clock.advance(read_gate.MODE_TTL + 1)
-    assert _get(env, "/api/v1/mod-version", version=None).json()["read_gate"] == "enforce"
+    assert _get(env, "/api/v1/mod-version", version=K.ADVERT_VERSION).json()["read_gate"] == "enforce"
 
 
 # -- M7 in-repo half / requirement 23: Cache-Control --------------------------
@@ -535,3 +535,35 @@ def test_ws_connect_counted_by_class(env):
         ws.receive_text()
     assert read_gate._census == {}
     assert read_gate.SOCKET_READ_GATE_BUILT is False
+
+
+# -- bar BV-A: the advert only for a client that reads it ---------------------
+
+TRUNK_MOD_VERSION_KEYS = {"version", "min_version", main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD}
+
+
+@pytest.mark.parametrize("sent", [None, "1.40.3", "1.40.99", "1.4", "0.0.0", "abc", "1.41.0-beta",
+                                  " 1.41.0", "1.41.0.0.1", "-1.41.0"])
+def test_mod_version_without_advert_for_older_clients(env, sent):
+    """No header, an older version or an unparseable one: exactly trunk's
+    three keys, so a 1.40.3 client's answer is trunk's byte for byte."""
+    env.stub.mode_row = "enforce"
+    body = _get(env, "/api/v1/mod-version", version=sent).json()
+    assert set(body) == TRUNK_MOD_VERSION_KEYS, body
+
+
+@pytest.mark.parametrize("sent", ["1.41.0", "1.41", "1.41.1", "1.42.0", "2.0.0"])
+def test_mod_version_advert_for_1410_and_later(env, sent):
+    env.stub.mode_row = "log"
+    body = _get(env, "/api/v1/mod-version", version=sent).json()
+    assert set(body) == TRUNK_MOD_VERSION_KEYS | {"read_gate", "read_gate_open"}, body
+    assert body["read_gate"] == "log"
+    assert body["read_gate_open"] == read_gate.ungated_templates(main.app.routes)
+
+
+def test_advert_requested_is_strict():
+    assert read_gate.READ_GATE_ADVERT_MIN == (1, 41, 0)
+    for v in ("1.41.0", "1.41", "1.41.0.0", "10.0.0"):
+        assert read_gate.advert_requested(v), v
+    for v in (None, "", "1.40.9", "1.41.0 ", "v1.41.0", "1.41.x", "1..41", 1410, b"1.41.0"):
+        assert not read_gate.advert_requested(v), v

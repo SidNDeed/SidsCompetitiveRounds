@@ -87,6 +87,25 @@ MODE_SETTING_KEY = "read_gate_mode"
 # (409 client_floor_unnamed).
 READ_GATE_CLIENT_MIN: str | None = None
 
+# The first client version that reads the stage advert. /api/v1/mod-version
+# carries `read_gate` and `read_gate_open` only for a request whose
+# X-Mod-Version parses to this or later (advert_requested); every other
+# request receives the trunk body unchanged. The header is client-attested,
+# so it selects the response shape and nothing else.
+READ_GATE_ADVERT_MIN = (1, 41, 0)
+_ADVERT_VERSION_RE = re.compile(r"^[0-9]{1,6}(\.[0-9]{1,6}){0,3}$")
+
+
+def advert_requested(version) -> bool:
+    """True only for a strictly dotted-decimal version at or above
+    READ_GATE_ADVERT_MIN; absent, empty or unparseable answers False."""
+    if not isinstance(version, str) or not _ADVERT_VERSION_RE.match(version):
+        return False
+    parts = tuple(int(x) for x in version.split("."))
+    parts += (0,) * (len(READ_GATE_ADVERT_MIN) - len(parts))
+    return parts >= READ_GATE_ADVERT_MIN
+
+
 # The chat socket's outbound read side is COUNTED in this build, not gated.
 # The mode route refuses `enforce` (409 socket_read_gate_absent) while this is
 # False, so stage 2 cannot run before the socket gate is built and reviewed.

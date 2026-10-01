@@ -2994,27 +2994,42 @@ def test_mod_version_advertises_no_series_status_capability():
 
     Verified reads adds two keys, `read_gate` (the stage this box acts on) and
     `read_gate_open` (the GET templates its read gate never refuses for want of
-    a read credential). They are the client's one signal for OPEN versus gated
-    (requirement 32). Both boxes read the stage from the same replicated
-    runtime_settings row and serve the same route table, and the client
-    treats the advert as a hint: a gate refusal from whichever box answers
-    latches enforce on its own (ReadGateRules.OnRefusal), so a later request
-    never depends on this answer's box. Pinned here by name and by value.
+    a read credential), and ONLY for a request whose X-Mod-Version is the
+    advert version or later: every other request gets exactly the three keys
+    above, byte for byte as before the read gate. They are the client's one
+    signal for OPEN versus gated (requirement 32). Both boxes read the stage
+    from the same replicated runtime_settings row and serve the same route
+    table, and the client treats the advert as a hint: a gate refusal from
+    whichever box answers latches enforce on its own
+    (ReadGateRules.OnRefusal), so a later request never depends on this
+    answer's box. Pinned here by name, by value and by its condition.
     """
     node = node_named("get_mod_version")
     joined = "\n".join(code_lines_of(node))
     assert "series_status_readonly" not in joined, joined
     returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
     assert len(returns) == 1, [ast.unparse(r) for r in returns]
-    answer = returns[0].value
-    assert isinstance(answer, ast.Dict), ast.unparse(returns[0])
+    assert ast.unparse(returns[0].value) == "body", ast.unparse(returns[0])
+    built = [n for n in ast.walk(node) if isinstance(n, ast.Assign)
+             and [ast.unparse(t) for t in n.targets] == ["body"]]
+    assert len(built) == 1, [ast.unparse(b) for b in built]
+    answer = built[0].value
+    assert isinstance(answer, ast.Dict), ast.unparse(built[0])
     keys = sorted(ast.unparse(k) for k in answer.keys)
     assert keys == sorted(["'version'", "'min_version'",
-                           "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD",
-                           "'read_gate'", "'read_gate_open'"]), keys
+                           "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD"]), keys
     values = {ast.unparse(k): ast.unparse(v) for k, v in zip(answer.keys, answer.values)}
-    assert values["'read_gate'"] == "await read_gate.current_mode()", values
-    assert values["'read_gate_open'"] == "read_gate.ungated_templates(app.routes)", values
+    # The advert: exactly two subscript writes to body, both under the one
+    # version condition.
+    ifs = [n for n in ast.walk(node) if isinstance(n, ast.If)
+           and ast.unparse(n.test) == "read_gate.advert_requested(request.headers.get('x-mod-version'))"]
+    assert len(ifs) == 1, [ast.unparse(n.test) for n in ast.walk(node) if isinstance(n, ast.If)]
+    writes = {ast.unparse(t): ast.unparse(n.value) for n in ast.walk(node)
+              if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Subscript)}
+    assert writes == {"body['read_gate']": "await read_gate.current_mode()",
+                      "body['read_gate_open']": "read_gate.ungated_templates(app.routes)"}, writes
+    in_if = {ast.unparse(t) for s in ifs[0].body if isinstance(s, ast.Assign) for t in s.targets}
+    assert in_if == set(writes), in_if
     # The two version numbers are the two constants, not a literal.
     assert values["'version'"] == "LATEST_MOD_VERSION", values
     assert values["'min_version'"] == "MIN_MOD_VERSION_EFFECTIVE", values

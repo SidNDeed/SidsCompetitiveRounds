@@ -4,8 +4,8 @@ changes for the v1.40.3 client.
 The GETs v1.40.3 sends before a session exists, from
 `git show v1.40.3:plugin/ApiClient.cs` and `MailClient.cs` (the grep is in
 BUILD-NOTES, and `test_replay_list_is_the_tags_own` re-checks every URL
-fragment against the tag). Each is replayed with the 1.40.3 headers and no
-session, in off and in log, and its status, body and EVERY header must equal
+fragment against the tag). Each is replayed with the 1.40.3 headers (no X-Locale, which the tag never
+sends) and no session, in off and in log, and its status, body and EVERY header must equal
 the same request with `read_gate` replaced by a no-op through
 `app.dependency_overrides`.
 
@@ -45,7 +45,8 @@ REPLAY = (
     ("/api/v1/mail/status", "/api/v1/mail/status", "MailClient.cs"),
 )
 WRITERS = {"/api/v1/presence/ping?steam_id=" + ME}
-HEADERS_1403 = {"X-Mod-Version": "1.40.3", "X-Locale": "ru",
+# The headers the tag's transport stamps (read_gate_1403_requests): no X-Locale.
+HEADERS_1403 = {"X-Mod-Version": "1.40.3",
                 "User-Agent": "UnityPlayer/2019.4.40f1 (UnityWebRequest/1.0, libcurl/7.80.0-DEV)"}
 
 

@@ -7150,7 +7150,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
-async def get_mod_version():
+async def get_mod_version(request: Request):
     """Returns the latest recommended mod version, the gating floor, and the
     capability flags a client must see BEFORE it changes what it puts on the
     wire.
@@ -7189,20 +7189,26 @@ async def get_mod_version():
     """
     _involuntary = bool(_INVOLUNTARY_EXIT_CAUSES) and (
         _INVOLUNTARY_EXIT_CAUSES <= _IN_ROOM_EXIT_CAUSES)
-    return {
+    body = {
         "version": LATEST_MOD_VERSION,
         "min_version": MIN_MOD_VERSION_EFFECTIVE,
         # One boolean under ONE name. The transitional alias that carried the
         # first spelling went when the client lane landed on this tree.
         _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
-        # Verified reads: the stage this box acts on (off | log | enforce |
-        # unknown), which a running client polls to learn a flip or a
-        # rollback, and the GET templates the gate never refuses for want of a
-        # read credential, which the client sends in every stage. Computed
-        # from the live routing table, never written down.
-        "read_gate": await read_gate.current_mode(),
-        "read_gate_open": read_gate.ungated_templates(app.routes),
     }
+    # Verified reads: the stage this box acts on (off | log | enforce |
+    # unknown), which a running client polls to learn a flip or a rollback,
+    # and the GET templates the gate never refuses for want of a read
+    # credential, which the client sends in every stage (computed from the
+    # live routing table, never written down). Present only for a request
+    # whose X-Mod-Version is READ_GATE_ADVERT_MIN or later; any other request
+    # (an older client, no header, an unparseable one) gets the body above
+    # byte for byte. The header selects the response SHAPE only: both fields
+    # are readable by anyone, and nothing is admitted or refused on it.
+    if read_gate.advert_requested(request.headers.get("x-mod-version")):
+        body["read_gate"] = await read_gate.current_mode()
+        body["read_gate_open"] = read_gate.ungated_templates(app.routes)
+    return body
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────

@@ -134,7 +134,7 @@ def test_advertised_mode(client, lane, clock):
                  "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
     _as_other_box("off", clock)
     clock.advance(read_gate.MODE_TTL + 1)
-    mv = client.get("/api/v1/mod-version", headers=K.headers())
+    mv = client.get("/api/v1/mod-version", headers=K.headers(version=K.ADVERT_VERSION))
     assert mv.status_code == 200 and mv.json()["read_gate"] == "log"
     health = client.get("/api/v1/health")
     assert health.status_code == 200

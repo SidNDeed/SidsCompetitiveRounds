@@ -37,7 +37,7 @@ def _independent():
 def test_client_open_set_equals_server_open(monkeypatch, stage):
     with K.gate_env(monkeypatch, mode=stage):
         client = TestClient(main.app, raise_server_exceptions=False)
-        r = client.get("/api/v1/mod-version", headers=K.headers())
+        r = client.get("/api/v1/mod-version", headers=K.headers(version=K.ADVERT_VERSION))
         assert r.status_code == 200
         advertised = r.json()["read_gate_open"]
         assert len(advertised) == len(set(advertised)), "duplicate templates"
@@ -56,8 +56,8 @@ def test_advert_moves_with_the_classes(monkeypatch):
     template = "/api/v1/release-notes/{locale}"
     with K.gate_env(monkeypatch, mode="log"):
         client = TestClient(main.app, raise_server_exceptions=False)
-        before = client.get("/api/v1/mod-version", headers=K.headers()).json()["read_gate_open"]
+        before = client.get("/api/v1/mod-version", headers=K.headers(version=K.ADVERT_VERSION)).json()["read_gate_open"]
         assert template in before
         monkeypatch.setattr(read_gate, "OPEN", {k: v for k, v in read_gate.OPEN.items() if k != template})
-        after = client.get("/api/v1/mod-version", headers=K.headers()).json()["read_gate_open"]
+        after = client.get("/api/v1/mod-version", headers=K.headers(version=K.ADVERT_VERSION)).json()["read_gate_open"]
         assert template not in after and set(after) == _independent()
