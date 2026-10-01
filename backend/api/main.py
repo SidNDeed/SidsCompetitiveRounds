@@ -57167,8 +57167,9 @@ async def _asm_reform(ctx, rule, cls, trigger) -> bool:
 
 async def _asm_dissolve(ctx, rule, cls, trigger) -> bool:
     """DISSOLVE (Table 2, READY below 3; either kind of lobby): today's dissolve
-    statements in effect, the closers' record, READY seats back to searching,
-    PENDING seats excluded with their rows and leases released."""
+    statements in effect, the closers' record, READY seats back to searching
+    with this lobby's leases released, PENDING seats excluded with their rows
+    and leases released."""
     got = (await ctx.db.execute(text(
         "UPDATE ffa_lobbies SET status = 'canceled', invalidation_reason = 'assembly_timeout',"
         "       invalidated_at = NOW(), asm_rule = :r, "
@@ -57186,6 +57187,13 @@ async def _asm_dissolve(ctx, rule, cls, trigger) -> bool:
                    held_until=NULL, held_lobby=NULL
              WHERE series_id = :lid AND player_id = ANY(:ids)
         """), {"lid": ctx.lid, "ids": ready})
+        # A1: a live lease keeps a seat out of FFA discovery, so a seat put
+        # back to 'searching' must not keep this lobby's lease (the leave
+        # dissolve's A1 r2 release). Keyed on the lobby, so a lease taken for
+        # anything else is left alone.
+        await ctx.db.execute(text(
+            "DELETE FROM queue_leases WHERE mode = 'ffa' AND group_id = :lid AND player_id = ANY(:ids)"),
+            {"lid": ctx.lid, "ids": ready})
         await ctx.db.execute(text(
             "UPDATE ffa_assembly_seats SET verdict = 'dissolved', verdict_at = CAST(:now AS timestamptz)"
             " WHERE lobby_id = :lid AND player_id = ANY(:ids)"),

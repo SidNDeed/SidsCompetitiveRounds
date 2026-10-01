@@ -1751,6 +1751,30 @@ def test_s35_dissolve_releases_the_pending_seats(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_s35b_dissolve_releases_the_ready_seats_leases(monkeypatch):
+    """v1.41.0 merge pass 4 (c): the beta lane's A1 keeps a seat holding a
+    live lease out of FFA discovery (_FFA_CANDIDATE_SQL), so a READY seat the
+    DISSOLVE puts back to 'searching' must not keep this lobby's lease, or it
+    cannot be matched until LEASE_TTL_ASSEMBLY lapses. The leave dissolve
+    releases the same leases (A1 r2); this is the assembly's dissolve."""
+    async def body(env):
+        lob = await env.lobby(4, t=40.0)
+        for s in (0, 1):
+            held = await env.lease(lob, s)
+            assert held is not None and held["mode"] == "ffa" and held["group_id"] == lob.lid, \
+                ("S35b the READY seats hold this lobby's lease first", s, held)
+        await env.set_seat(lob, 3, left_at=8.0, verdict="left", verdict_at=8.0)
+        await env.conn.execute("DELETE FROM ffa_queue WHERE player_id = $1", lob.pids[3])
+        a = await _post(env, lob, 0, [0, 1])
+        row = await env.lobby_row(lob)
+        assert row["status"] == "canceled" and row["dissolve_path"] == "asm_dissolve", ("S35b dissolve", a)
+        for s in (0, 1):
+            q = await env.queue_row(lob, s)
+            assert q is not None and q["status"] == "searching", ("S35b ready searching", s, q)
+            assert await env.lease(lob, s) is None, ("S35b ready lease released", s)
+    run_env(monkeypatch, body)
+
+
 def test_s36_every_closer_on_a_started_lobby(monkeypatch):
     """S36a-k: on a started zero-game lobby (start_granted_at set) each
     closer either leaves it active or closes it completed; none cancels it."""
