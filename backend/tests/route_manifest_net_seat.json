@@ -1813,7 +1813,7 @@
           ],
           "main",
           "health_check",
-          "5401b48c97fe9f5a115cc94794fafd7408677bf4"
+          "3ce267aa1c03e051bf1f1a1f040ac61dd417bc46"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3098,7 +3098,7 @@
           ],
           "main",
           "get_set_report",
-          "53ac3b4e4f9f29d3035567e295cf85c9bdcf5b35"
+          "847370a0d80bc5d4ae7bf6cf9d29486f3e45e98e"
         ],
         [
           "/api/v1/admin/pc/portrait/clear",
