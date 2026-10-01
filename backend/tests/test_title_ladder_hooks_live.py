@@ -1917,3 +1917,109 @@ def test_pg_qg_the_resent_1v1_report_answers_500_and_writes_nothing(opened):
             assert after == done and econ2 == econ, (
                 "Q-G: the resent deciding report wrote something")
     _run(_go())
+
+
+# -- round 2: Gold Rush is passed each game's play gold by its caller ----------
+#
+# Findings 3 and 9. The oracle is the ledger AFTER the fact: the positive play
+# rows the completion wrote for each player (xp, level, series or placement,
+# achievement). The hook never reads them; the three callers pass the sum.
+
+PLAY_REASONS = ("xp", "level_reward", "series_win", "series_loss", "team_xp",
+                "team_series_win", "team_series_loss", "ffa_xp", "ffa_placement",
+                "achievement")
+GOLD_WEAR = {s: ("gold_rush", 0) for s in (P1, P2, P3, P4)}
+
+
+async def _play_ledger(schema):
+    conn = await harness.connect_bound(DSN, schema)
+    try:
+        rows = await conn.fetch(
+            "SELECT p.steam_id, g.reason, g.amount FROM gold_transactions g "
+            "  JOIN players p ON p.id = g.player_id WHERE g.amount > 0")
+    finally:
+        await conn.close()
+    play, ach = {}, {}
+    for r in rows:
+        if r["reason"] in PLAY_REASONS:
+            play[r["steam_id"]] = play.get(r["steam_id"], 0) + r["amount"]
+        if r["reason"] == "achievement":
+            ach[r["steam_id"]] = ach.get(r["steam_id"], 0) + r["amount"]
+    return play, ach
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_pg_r2_gold_rush_counts_the_play_gold_each_path_paid(opened, monkeypatch, mode):
+    """Through each real handler, with Gold Rush worn by every seat: each
+    player's ladder moves by exactly the play gold the completion paid them
+    -- achievement gold paid while recording the game included (1v1: a
+    paid achievement granted beside the twins check; 2v2: one granted beside
+    the rating achievements at the series' end). FFA pays no achievement in
+    this game; its xp, placement and level gold are still counted."""
+    _require_live_pg()
+
+    if mode == "1v1":
+        real_twins = main._check_twins_achievement
+
+        async def _twins_plus(db, report, p1_id, p2_id):
+            await real_twins(db, report, p1_id, p2_id)
+            await main._grant_achievement_inline(db, p1_id, "twins")
+        monkeypatch.setattr(main, "_check_twins_achievement", _twins_plus)
+    elif mode == "2v2":
+        real_rating = main._grant_rating_achievements
+
+        async def _rating_plus(db, player_id, new_rating):
+            await real_rating(db, player_id, new_rating)
+            await main._grant_achievement_inline(db, player_id, "team_sweep")
+        monkeypatch.setattr(main, "_grant_rating_achievements", _rating_plus)
+
+    async def _go():
+        async with _case() as (schema, sm):
+            ids = await _seed(sm, wear=GOLD_WEAR)
+            before, _ = await _look(schema)
+            refs, people, answers, lines = await _complete(mode, sm, ids, opened, "G" + mode[0])
+            assert len(refs) == GAMES[mode], (refs, answers)
+            assert not _dropped(lines, mode), lines
+            after, _ = await _look(schema)
+            play, ach = await _play_ledger(schema)
+            for s in people:
+                got = after["progress"][(s, "gold_rush")][0] - before["progress"][(s, "gold_rush")][0]
+                assert got == play.get(s, 0) and got > 0, (mode, s, got, play)
+            if mode != "ffa":
+                assert ach and all(v > 0 for v in ach.values()), ach
+                assert sum(ach.values()) <= sum(play.values())
+    _run(_go())
+
+
+def test_pg_r2_a_rolled_back_achievement_is_not_play_gold(opened):
+    """The FFA achievement savepoint marks the note and restores it when the
+    savepoint rolls back (main.py, the [FFA-ACH] handler): gold that was
+    rolled back is not counted. Live: a real grant inside a savepoint that
+    then fails leaves no ledger row and, restored, no note. NEGATIVE
+    CONTROL: without the restore the note still carries the gold."""
+    _require_live_pg()
+
+    async def _go():
+        async with _case() as (schema, sm):
+            ids = await _seed(sm, wear=GOLD_WEAR)
+            async with sm() as db:
+                mark = main._ladder_achievement_mark(db)
+                try:
+                    async with db.begin_nested():
+                        assert await main._grant_achievement_inline(db, ids[P1], "twins")
+                        await db.flush()
+                        unrestored = main._ladder_achievement_gold(db, ids[P1])
+                        raise RuntimeError("savepoint fails after the grant")
+                except RuntimeError:
+                    main._ladder_achievement_restore(db, mark)
+                assert unrestored == main._achievement_gold("twins") > 0, unrestored
+                assert main._ladder_achievement_gold(db, ids[P1]) == 0
+                await db.commit()
+            play, ach = await _play_ledger(schema)
+            assert ach == {}, ach
+    _run(_go())
+    src = io.open(MAIN_PY, encoding="utf-8").read()
+    i = src.index("[FFA-ACH] achievement evaluation failed")
+    assert "_ladder_achievement_restore(db, _ffa_ach_mark)" in src[i - 200:i], (
+        "the FFA achievement savepoint's handler does not restore the note")
+    assert src.count("_ffa_ach_mark = _ladder_achievement_mark(db)") == 1

@@ -8816,6 +8816,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # (the old response hardcoded "+5"/"+1" while 10/+2 was credited).
     _series_gold_winner = 0
     _series_gold_loser = 0
+    _ladder_series_gold: dict = {}
     _series_gold_winner_labels: list[str] = []
     _series_gold_loser_labels: list[str] = []
 
@@ -9026,6 +9027,10 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             _series_gold_loser_labels.insert(0, f"Series loss +{loser_bonus}")
             _series_gold_winner = winner_bonus
             _series_gold_loser = loser_bonus
+            # Title ladders (Gold Rush): this game's series-result gold per
+            # player, as credited just below.
+            _ladder_series_gold[str(series_winner.id)] = winner_bonus
+            _ladder_series_gold[str(series_loser.id)] = max(0, loser_bonus)
 
             # r4 find 1: atomic delta + expire — an absolute ORM write here
             # flushes a STALE total and erases any credit committed in
@@ -9077,22 +9082,28 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
 
     # Title ladders: one credit per ranked GAME (board row 29), keyed on this
     # game's own id, for both seats from the one report. Here, after every
-    # gold row of this game (xp, level, and the series result when this game
-    # completed one) is written, so a gold ladder reads them; before the
-    # commit, so a duplicate report's rollback takes the credits with it.
+    # gold amount of this game is credited -- xp gold, level reward,
+    # achievement gold paid while recording it, and the series result when
+    # this game completed one -- so the Gold Rush ladder is passed their sum
+    # (play_gold) and never reads the ledger; before the commit, so a
+    # duplicate report's rollback takes the credits with it.
     if report.is_ranked:
         _lref = "?"
         try:
             _lref = str(match.id)
             _lpids = [p1.id, p2.id]
-            _lgold = [_lref] + ([str(series.id)] if series_completed else [])
+
+            def _lplay(pid, xp_gold, lvl_gold):
+                return (max(0, int(xp_gold or 0)) + max(0, int(lvl_gold or 0))
+                        + int(_ladder_series_gold.get(str(pid), 0))
+                        + _ladder_achievement_gold(db, pid))
             _lrows = {
                 str(p1.id): {**title_ladders.game_row_1v1(
                     match, p1.id, [_canon_card_name(c.card_name) for c in report.player1.cards]),
-                    "gold_refs": _lgold},
+                    "play_gold": _lplay(p1.id, gold_p1, level_gold_p1)},
                 str(p2.id): {**title_ladders.game_row_1v1(
                     match, p2.id, [_canon_card_name(c.card_name) for c in report.player2.cards]),
-                    "gold_refs": _lgold},
+                    "play_gold": _lplay(p2.id, gold_p2, level_gold_p2)},
             }
             async with db.begin_nested():
                 await title_ladders.record_completed_games(
@@ -40347,6 +40358,51 @@ async def _achievement_payment_eligible(db: AsyncSession, player_id, achievement
     return paid == 0 or clawed >= paid
 
 
+# -- Achievement gold paid while a game is being recorded (title ladders) -----
+# The Gold Rush ladder counts the play gold of each ranked game, achievement
+# gold included (board row 29, round 2 finding 3). The three game-reporting
+# paths pass that sum to title_ladders.record_completed_games as a number they
+# already hold, so the hook never reads the ledger (finding 9). The achievement
+# part is the one amount those paths do not compute themselves: it is paid
+# here, inside _grant_achievement_inline, so this note records it on the
+# request's own session, per player, as it is paid. A caller reads it with
+# _ladder_achievement_gold. A path that grants achievements inside a savepoint
+# that can roll back takes a _ladder_achievement_mark before it and restores
+# it on the rollback, so gold that was rolled back is never counted.
+_LADDER_ACH_GOLD = "scr_ladder_achievement_gold"
+
+
+def _ladder_note_bag(db):
+    """The session's info dict, or None for a stand-in session without one
+    (unit-test fakes): no note is then kept and every read answers 0."""
+    info = getattr(db, "info", None)
+    return info if isinstance(info, dict) else None
+
+
+def _note_ladder_achievement_gold(db, player_id, amount: int) -> None:
+    info = _ladder_note_bag(db)
+    if info is None:
+        return
+    note = info.setdefault(_LADDER_ACH_GOLD, {})
+    note[str(player_id)] = note.get(str(player_id), 0) + int(amount)
+
+
+def _ladder_achievement_gold(db, player_id) -> int:
+    info = _ladder_note_bag(db)
+    return int(((info or {}).get(_LADDER_ACH_GOLD) or {}).get(str(player_id), 0))
+
+
+def _ladder_achievement_mark(db) -> dict:
+    info = _ladder_note_bag(db)
+    return dict((info or {}).get(_LADDER_ACH_GOLD) or {})
+
+
+def _ladder_achievement_restore(db, mark: dict) -> None:
+    info = _ladder_note_bag(db)
+    if info is not None:
+        info[_LADDER_ACH_GOLD] = dict(mark)
+
+
 async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:
     """Idempotent inline grant — insert PlayerAchievement row (+ gold when the
     key pays anything), no commit.
@@ -40387,6 +40443,7 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
             player_id=player_id, amount=gold_amt,
             reason="achievement", reference_id=achievement_key,
         ))
+        _note_ladder_achievement_gold(db, player_id, gold_amt)
     # Achievement-gated titles (Sid Slayer / Stan Slayer) become equippable
     # the moment the achievement lands, whatever the grant path.
     title_sku = ACHIEVEMENT_TITLE_SKUS.get(achievement_key)
@@ -57846,6 +57903,9 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # question was moot because they were 0g — true for one day, and exactly the
     # kind of "no money moves here" claim that must not be left standing once it
     # stops being true.)
+    # Title ladders (Gold Rush): this savepoint can roll its grants back, so
+    # the achievement-gold note is marked here and restored on the rollback.
+    _ffa_ach_mark = _ladder_achievement_mark(db)
     try:
         if rated:
             await db.flush()
@@ -57947,6 +58007,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                             await _grant_achievement_inline(
                                 db, _ach_pid, "ffa_half_point_heartbreak")
     except Exception as _ach_ex:
+        _ladder_achievement_restore(db, _ffa_ach_mark)
         print(f"[FFA-ACH] achievement evaluation failed (report unaffected): {_ach_ex}")
     # Player Cards (WP-D): the earned-pack roll for a RANKED FFA match (own
     # savepoint; reconciled from the match row if it is lost).
@@ -57961,13 +58022,16 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     if rated:
         try:
             # One credit per ranked GAME (board row 29): the game's own id,
-            # the gold rows this report wrote under it, and the winner seat.
+            # the winner seat, and the play gold this report credited each
+            # seat for this game (xp, placement and level gold from
+            # award_info, plus achievement gold paid above) as one number.
             _lrated = [p for p in report.players if p.steam_id not in unrated]
             _lrows = {
                 str(id_by_steam[p.steam_id]): {
                     "won": p.steam_id == report.winner_steam_id,
                     "lost": p.steam_id != report.winner_steam_id,
-                    "gold_refs": [str(match_id)],
+                    "play_gold": (max(0, int(award_info.get(p.steam_id, (0, 0))[1] or 0))
+                                  + _ladder_achievement_gold(db, id_by_steam[p.steam_id])),
                 } for p in _lrated
             }
             async with db.begin_nested():
@@ -60721,6 +60785,9 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     # can render +Ng/+Nxp beside each player's name in their own series).
     series_xp_by_pid: dict = {}
     series_gold_by_pid: dict = {}
+    # Title ladders (Gold Rush): this game's play gold per player as it is
+    # credited below (xp gold, level reward, then the series result).
+    _ladder_play_gold: dict = {}
     # July 20 item 6: opposing-TEAM tier multiplier (avg of the two opposing
     # players' 2v2 ratings, pre-update — 2v2 Glicko only applies at series
     # completion, later than this block). Missing rating rows default 1500.
@@ -60772,6 +60839,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                         player_id=p.id, amount=lvl_reward,
                         reason="level_reward", reference_id=str(new_match.id),
                     ))
+                    _ladder_play_gold[str(p.id)] = _ladder_play_gold.get(str(p.id), 0) + lvl_reward
             # 100 XP = 1 gold conversion (mirrors submit_match logic).
             gold_delta = (new_xp // 100) - (old_xp // 100)
             if gold_delta > 0:
@@ -60785,6 +60853,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     reason="team_xp", reference_id=str(new_match.id),
                 ))
                 series_gold_by_pid[p.id] = series_gold_by_pid.get(p.id, 0) + gold_delta
+                _ladder_play_gold[str(p.id)] = _ladder_play_gold.get(str(p.id), 0) + gold_delta
     except Exception as xpex:
         print(f"[TEAM-ECON] per-match XP failed for match {new_match.id}: {xpex}")
 
@@ -61077,6 +61146,11 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     "t2b_g": bonus_by_pid.get(slot_pid["t2b"], 0),
                 })
                 await db.flush()
+            # The savepoint released: the series gold stands, so it is this
+            # game's play gold too (title ladders, Gold Rush). A rolled-back
+            # savepoint never reaches this line.
+            for _bp, _bg in bonus_by_pid.items():
+                _ladder_play_gold[str(_bp)] = _ladder_play_gold.get(str(_bp), 0) + max(0, int(_bg))
         except Exception as gex:
             print(f"[TEAM-ECON] series-bonus gold failed for {series_uuid}: {gex}")
         # Player Cards (WP-D): the earned-pack roll for the completed series
@@ -61203,18 +61277,19 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
 
     # Title ladders: one credit per ranked GAME (board row 29), keyed on this
     # team_matches row's own id, for all four seats; every 2v2 game is ranked
-    # (is_ranked=True above). After this game's gold rows (team_xp, level, and
-    # the series result when this game completed the series); before the
-    # commit.
+    # (is_ranked=True above). After this game's gold is credited (team_xp,
+    # level, achievement gold paid while recording it, and the series result
+    # when this game completed the series), passed as one play_gold number;
+    # before the commit.
     _lref = "?"
     try:
         _lref = str(new_match.id)
-        _lgold = [_lref] + ([str(series_uuid)] if series_completed else [])
         _lrows = {}
         for _lp, _lteam in ((p_t1a, 1), (p_t1b, 1), (p_t2a, 2), (p_t2b, 2)):
             _lrows[str(_lp.id)] = {"won": report.winner_team == _lteam,
                                    "lost": report.winner_team != _lteam,
-                                   "gold_refs": _lgold}
+                                   "play_gold": (_ladder_play_gold.get(str(_lp.id), 0)
+                                                 + _ladder_achievement_gold(db, _lp.id))}
         async with db.begin_nested():
             await title_ladders.record_completed_games(
                 db, [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id],

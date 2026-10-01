@@ -139,16 +139,25 @@ KIND_CONDITION = {
     "streak": "Wear it and win ranked 1v1 games in a row",
 }
 
-# Gold that counts for a "gold" ladder: what ranked PLAY pays (xp, level
-# rewards, series results), never bets, refunds, boosters, grants or
-# purchases. Every reason here is written with the game's id or the id of the
-# series that game completed as its reference_id, which is how the hook finds
-# the gold of THIS game. Achievement gold is referenced by the achievement key,
-# not by a game, so it cannot be attributed to one and is not counted
-# (recorded as a residual in the build notes).
-PLAY_GOLD_REASONS = ("xp", "level_reward", "series_win", "series_loss",
-                     "team_xp", "team_series_win", "team_series_loss",
-                     "ffa_xp", "ffa_placement")
+# Gold that counts for a "gold" ladder: what ranked PLAY pays for THIS game,
+# never bets, refunds, boosters, grants or purchases. The hook does not look
+# it up: each of the three game-reporting callers already holds the amounts it
+# credited to each player for the game it is recording and passes their sum
+# as the row's `play_gold` -- the xp gold, the level reward, the series result
+# (1v1, 2v2) or the placement (FFA), and the achievement gold newly paid
+# while recording that game (main._ladder_achievement_gold). So the hook's
+# work per player is fixed by the catalogue, not by the player's ledger
+# history (round 2, findings 3 and 9).
+PLAY_GOLD_KEY = "play_gold"
+
+
+def play_gold_of(row) -> int:
+    """The row's play gold for this game, as a non-negative int. A row without
+    it (a caller that pays no play gold) counts 0."""
+    try:
+        return max(0, int((row or {}).get(PLAY_GOLD_KEY) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 # -- Building the catalogue ---------------------------------------------
@@ -455,7 +464,7 @@ def line_of_sku(sku):
 #
 # One game row per player per game. `game_row_1v1` builds it from the 1v1
 # `matches` row the report just inserted; 2v2 and FFA callers build the small
-# row (`won`, `gold_refs`) themselves. Every condition below is a pure
+# row (`won`, `lost`, `play_gold`) themselves. Every condition below is a pure
 # function of ONE row.
 
 def _norm_card(name) -> str:
@@ -592,7 +601,8 @@ _CONDITIONS = {
 
 def counted_delta(line: str, row) -> int:
     """What one claimed game adds to this ladder's count, for every kind but
-    `gold` (needs the ledger) and `streak` (needs the stored run). Pure."""
+    `gold` (the caller's play_gold scalar, play_gold_of) and `streak` (needs
+    the stored run). Pure."""
     ld = LINES[line]
     kind = ld["kind"]
     row = row or {}
@@ -624,8 +634,8 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
     but is not part of the key.
 
     `rows` maps str(player_id) -> that player's game row: `won`, `lost`,
-    `gold_refs` (the game id, plus the series id when this game completed a
-    series) and, for 1v1, everything `game_row_1v1` reads. A 2v2 or FFA game
+    `play_gold` (the play gold the caller credited this player for this game,
+    see PLAY_GOLD_KEY) and, for 1v1, everything `game_row_1v1` reads. A 2v2 or FFA game
     claims nothing for a 1v1-only kind (card, playstyle, Apex).
 
     WHERE IT IS CALLED. Inside the reporting transaction, after the game row
@@ -724,16 +734,7 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
                 continue
         else:
             if kind == "gold":
-                refs = [str(r) for r in (game.get("gold_refs") or []) if r]
-                delta = 0
-                if refs:
-                    delta = int((await db.execute(text(
-                        "SELECT COALESCE(SUM(amount), 0) FROM gold_transactions "
-                        " WHERE player_id = :pid AND amount > 0 "
-                        "   AND reason = ANY(CAST(:reasons AS text[])) "
-                        "   AND reference_id = ANY(CAST(:refs AS text[]))"
-                    ), {"pid": pid, "reasons": list(PLAY_GOLD_REASONS),
-                        "refs": refs})).scalar() or 0)
+                delta = play_gold_of(game)   # the caller's per-game scalar
             else:
                 delta = counted_delta(line, game)
             if delta <= 0:

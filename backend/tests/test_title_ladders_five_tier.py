@@ -410,10 +410,12 @@ def _engine(schema):
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-def hook_scenario(wear, calls, *, held=(), gold=()):
+def hook_scenario(wear, calls, *, held=(), gold=(), history=0):
     """One player wearing (and owning) `wear`, also holding `held`, with
-    `gold` = [(reason, amount, reference_id)] on the ledger; then one hook
-    call per (mode, reference_id, row), each committed. Returns what landed."""
+    `gold` = [(reason, amount, reference_id)] on the ledger plus `history`
+    play rows of other games; then one hook call per (mode, reference_id,
+    row), each committed. Returns what landed, with the SQL statements each
+    hook call executed."""
     from sqlalchemy import text
 
     _require_live_pg()
@@ -441,12 +443,30 @@ def hook_scenario(wear, calls, *, held=(), gold=()):
                         "INSERT INTO gold_transactions (player_id, amount, reason, reference_id) "
                         "VALUES (:pid, :a, :r, :ref)"),
                         {"pid": pid, "a": amount, "r": reason, "ref": ref})
+                if history:
+                    # Lifetime ledger history: play rows of other games.
+                    await db.execute(text(
+                        "INSERT INTO gold_transactions (player_id, amount, reason, reference_id) "
+                        "SELECT :pid, 5, 'xp', 'old-' || g FROM generate_series(1, :n) g"),
+                        {"pid": pid, "n": history})
                 await db.commit()
                 events = []
-                for mode, ref, row in calls:
-                    events.append(await tl.record_completed_games(
-                        db, [pid], mode=mode, reference_id=ref, rows={str(pid): row}))
-                    await db.commit()
+                statements = []
+                seen = []
+
+                def _count(conn, cursor, statement, parameters, context, executemany):
+                    seen.append(statement)
+                from sqlalchemy import event as _sa_event
+                _sa_event.listen(engine.sync_engine, "before_cursor_execute", _count)
+                try:
+                    for mode, ref, row in calls:
+                        del seen[:]
+                        events.append(await tl.record_completed_games(
+                            db, [pid], mode=mode, reference_id=ref, rows={str(pid): row}))
+                        statements.append(list(seen))
+                        await db.commit()
+                finally:
+                    _sa_event.remove(engine.sync_engine, "before_cursor_execute", _count)
                 progress = {ln: (g, t, s) for ln, g, t, s in (await db.execute(text(
                     "SELECT line, games, tier, streak FROM title_ladder_progress "
                     " WHERE player_id = :pid"), {"pid": pid})).all()}
@@ -460,7 +480,7 @@ def hook_scenario(wear, calls, *, held=(), gold=()):
                     "SELECT si.sku FROM player_items pi JOIN shop_items si ON si.id = pi.item_id "
                     " WHERE pi.player_id = :pid"), {"pid": pid})).all()}
                 return SimpleNamespace(events=events, progress=progress, credits=credits,
-                                       active=active, owned=owned)
+                                       active=active, owned=owned, statements=statements)
         finally:
             await engine.dispose()
             await _drop_schema(schema)
@@ -519,19 +539,51 @@ def test_pg_wins_and_losses_ladders_count_their_own_results():
     assert idiot.progress["idiot"][0] == 2 and idiot.credits == 3, idiot.progress
 
 
-def test_pg_the_gold_ladder_counts_play_gold_of_this_game_only():
+# What the game-reporting caller passes for a game that paid 40 xp gold, a
+# 150-gold series result and a 500-gold achievement (findings 3 and 9): the
+# sum, 690. The bet payout, refund, booster, grant and purchase rows that
+# also name this game are not play gold and must not move the ladder.
+LEDGER_NOT_PLAY = [("bet_win", 1000, "m-1"), ("ffa_bet_refund", 250, "m-1"),
+                   ("booster_monthly", 300, "m-1"), ("admin", 700, "m-1"),
+                   ("purchase", -1000, "m-1"), ("title_refunded", 3000, "m-1")]
+
+
+def test_pg_the_gold_ladder_counts_the_play_gold_the_caller_passes():
     ledger = [("xp", 40, "m-1"), ("series_win", 150, "s-1"),
-              ("achievement", 500, "first_blood"), ("bet_payout", 1000, "m-1"),
-              ("xp", 30, "m-other"), ("purchase", -1000, "m-1")]
+              ("achievement", 500, "twins")] + LEDGER_NOT_PLAY
     got = hook_scenario("title_ladder_gold_rush_1",
-                        [("1v1", "m-1", {"won": True, "gold_refs": ["m-1", "s-1"]})],
+                        [("1v1", "m-1", {"won": True, "play_gold": 40 + 150 + 500})],
                         gold=ledger)
-    assert got.progress["gold_rush"][0] == 190, got.progress
-    # Control: the refs decide -- a game whose refs name nothing earns 0 and
-    # writes no progress row, though the credit is spent.
+    assert got.progress["gold_rush"][0] == 690, got.progress
+    # Controls: the ledger decides nothing. A game whose caller passes no play
+    # gold earns 0 and writes no progress row, though the credit is spent --
+    # with every one of the ledger rows above naming that very game.
     none = hook_scenario("title_ladder_gold_rush_1",
-                         [("1v1", "m-9", {"won": True, "gold_refs": ["m-9"]})], gold=ledger)
-    assert "gold_rush" not in none.progress and none.credits == 1
+                         [("1v1", "m-1", {"won": True})], gold=ledger)
+    assert "gold_rush" not in none.progress and none.credits == 1, none.progress
+    neg = hook_scenario("title_ladder_gold_rush_1",
+                        [("2v2", "m-1", {"won": True, "play_gold": -50})], gold=ledger)
+    assert "gold_rush" not in neg.progress, neg.progress
+
+
+# The statements the hook may run for one player and one game when no rung is
+# crossed, per mode (finding 9): a fixed number, whatever the ledger holds.
+HOOK_STATEMENT_CEILING = {"1v1": 4, "2v2": 4, "ffa": 4}
+
+
+@pytest.mark.parametrize("mode", ["1v1", "2v2", "ffa"])
+def test_pg_the_gold_ladder_work_does_not_grow_with_ledger_history(mode):
+    """Finding 9: the same game for a Gold Rush wearer with an empty ledger
+    and with 3000 rows of lifetime history runs the SAME statements, no more
+    than the ceiling, and none of them reads gold_transactions."""
+    row = {"won": True, "play_gold": 25}
+    fresh = hook_scenario("title_ladder_gold_rush_1", [(mode, "g-1", row)])
+    long_ = hook_scenario("title_ladder_gold_rush_1", [(mode, "g-1", row)], history=3000)
+    assert fresh.progress["gold_rush"][0] == long_.progress["gold_rush"][0] == 25
+    a, b = fresh.statements[0], long_.statements[0]
+    assert a == b, (a, b)
+    assert len(a) <= HOOK_STATEMENT_CEILING[mode], (len(a), a)
+    assert not any("gold_transactions" in s for s in a), a
 
 
 def test_pg_a_card_ladder_credits_a_family_pick_and_not_another():
