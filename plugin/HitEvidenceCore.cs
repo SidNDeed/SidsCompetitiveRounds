@@ -15,7 +15,7 @@ namespace CompetitiveRounds
     /// damage and the knockback as TWO messages (~271-299: CallTakeDamage, then
     /// CallTakeForce; HealthHandler ~208-212 RPCA_SendTakeDamage and ~119-123
     /// RPCA_SendTakeForce). The receiver applies the damage with ignoreBlock
-    /// (HealthHandler ~258), so a block that is up on the victim's own screen
+    /// (HealthHandler ~237), so a block that is up on the victim's own screen
     /// does not stop a hit the shooter's seat judged unblocked. Nothing here
     /// changes any of that -- it counts.</summary>
     internal static class HitEvidenceCore
