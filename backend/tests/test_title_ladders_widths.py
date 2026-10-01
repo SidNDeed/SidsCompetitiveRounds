@@ -56,3 +56,61 @@ def test_the_ffa_cap_gate_can_fail():
                      ("[{Trunc(e.title,16)}]", "[{e.title}]")):
         assert src.count(old) == 1, old
         assert _cap_problems(src.replace(old, new, 1)), new
+
+
+# ── the F5 1v1 board: measured, and only the title elided ────────────────
+
+LB = "private static void RefreshLeaderboard()"
+SPAN = "private static string LbTitleSpan(object cell,string name,string title,string col,float width)"
+CALL = "_lbName=_lbName+LbTitleSpan(row.txtName,_lbName,e.title,_tc,LB_COL_W[2]);"
+
+
+def _flat(t):
+    return " ".join(t.split())
+
+
+def _f5_problems(src):
+    bad = []
+    body = code_of(src, LB)
+    if body.count(CALL) != 1:
+        bad.append("the plain-title branch does not call LbTitleSpan once")
+    if "[{e.title}]" in body:
+        bad.append("a raw title is appended to the name cell")
+    if "LB_COL_W={40,40,300," not in code_of(src).replace(" ", ""):
+        bad.append("the name column is not the 300 px cell")
+    span = _flat(code_of(src, SPAN))
+    for need in ("float w=UIFactory.MeasureTextWidth(cell,name+full);",
+                 "if(w<=0f||w<=limit)return full;",
+                 "if(UIFactory.MeasureTextWidth(cell,name+cut)<=limit)return cut;",
+                 "title.Substring(0,n).TrimEnd()+\"..",
+                 "n>=Math.Max(1,TITLE_MIN_VISIBLE-2);n--",
+                 'return "";'):
+        if need not in span:
+            bad.append("LbTitleSpan lacks %r" % need)
+    if "name.Substring" in span or "Trunc(name" in span:
+        bad.append("LbTitleSpan cuts the name")
+    return bad
+
+
+def test_the_f5_cell_measures_name_and_title_and_elides_only_the_title():
+    assert not _f5_problems(_nat())
+
+
+F5_MUTATIONS = [
+    ("the raw append comes back", CALL,
+     '_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";'),
+    ("the title measured alone", "float w=UIFactory.MeasureTextWidth(cell,name+full);",
+     "float w=UIFactory.MeasureTextWidth(cell,full);"),
+    ("an unmeasurable cell drops the title", "if(w<=0f||w<=limit)return full;",
+     "if(w<=limit&&w>0f)return full;"),
+    ("cuts are never measured", "if(UIFactory.MeasureTextWidth(cell,name+cut)<=limit)return cut;",
+     "return cut;"),
+    ("a one-letter stub is shown", "n>=Math.Max(1,TITLE_MIN_VISIBLE-2);n--", "n>=1;n--"),
+]
+
+
+def test_the_f5_gate_can_fail():
+    src = _nat()
+    for name, old, new in F5_MUTATIONS:
+        assert src.count(old) == 1, (name, old)
+        assert _f5_problems(src.replace(old, new, 1)), name
