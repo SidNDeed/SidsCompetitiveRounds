@@ -42,10 +42,14 @@ import asyncio
 import datetime as _dt
 import os
 import re
+import sys
 import uuid
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import title_ladders_lane_schema as _lane  # noqa: E402
 
 try:
     import asyncpg
@@ -173,11 +177,21 @@ PREREQ = {
             released_at     TIMESTAMPTZ,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW());
     """,
+    # 365 and 366 run on the production-faithful schema the title ladders
+    # lane built from the primary's catalogue (title_ladders_lane_schema):
+    # 331 applied, the reused shop titles seeded with their live values; for
+    # 366 also 365, and the census 366 refunds.
+    "365": _lane.prereq_sql(),
+    "366": (_lane.prereq_sql() + "\n" + _lane.migration_text("365_title_ladders_five_tiers.sql")
+            + "\n" + _lane.CENSUS_SEED),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
 # value-and-version after each run.
 TABLES = {
+    "365": ("shop_items", "title_ladders", "title_ladder_progress",
+            "title_ladder_credits"),
+    "366": ("shop_items", "players", "player_items", "gold_transactions"),
     "331": ("shop_items", "title_ladders", "title_ladder_progress",
             "title_ladder_credits"),
     "332": ("pc_editions",),
@@ -192,6 +206,8 @@ MIGRATION_FILES = {
     "333": "333_pc_card_themes.sql",
     "336": "336_bug_reports_kind.sql",
     "337": "337_demon_body_color.sql",
+    "365": "365_title_ladders_five_tiers.sql",
+    "366": "366_title_refunds_voidshot_kingslayer.sql",
 }
 
 
@@ -350,7 +366,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -362,7 +378,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -375,7 +391,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -394,7 +410,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 

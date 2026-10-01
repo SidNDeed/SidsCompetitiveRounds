@@ -51,6 +51,13 @@ LINE_KEYS = {"line", "name", "games", "tier", "max_tier", "next_tier",
 RUNG_KEYS = {"tier", "sku", "item_id", "name", "description", "rarity",
              "preview_color", "threshold", "price", "owned", "active"}
 
+# Appended by the title ladders build (board row 29). APPENDED: every key
+# above keeps its name, object and meaning, so an older client reads the
+# answer exactly as before (test_title_ladders_five_tier.py drives a port of
+# the client's parser over it).
+APPENDED_LINE_KEYS = {"group", "kind", "unit", "modes", "condition", "streak"}
+APPENDED_RUNG_KEYS = {"reached"}
+
 
 def _run(coro):
     loop = asyncio.new_event_loop()
@@ -164,12 +171,28 @@ def _answer(owned=(), progress=(), active_sku=None):
 def test_the_answer_carries_every_key_the_client_reads():
     a = _answer()
     assert TOP_KEYS <= set(a), TOP_KEYS - set(a)
-    assert len(a["ladders"]) == 8
+    assert len(a["ladders"]) == 32
     for ln in a["ladders"]:
-        assert LINE_KEYS <= set(ln), (ln["line"], LINE_KEYS - set(ln))
+        assert LINE_KEYS | APPENDED_LINE_KEYS <= set(ln), (
+            ln["line"], (LINE_KEYS | APPENDED_LINE_KEYS) - set(ln))
         assert ln["rungs"], ln["line"]
         for r in ln["rungs"]:
-            assert RUNG_KEYS <= set(r), (r.get("sku"), RUNG_KEYS - set(r))
+            assert RUNG_KEYS | APPENDED_RUNG_KEYS <= set(r), (
+                r.get("sku"), (RUNG_KEYS | APPENDED_RUNG_KEYS) - set(r))
+
+
+def test_the_appended_keys_come_after_every_key_an_older_client_reads():
+    """Append-only, literally: in each object the new keys follow every old
+    key, so the answer an older client reads is the old answer with more
+    text after it."""
+    a = _answer()
+    for ln in a["ladders"]:
+        keys = list(ln)
+        assert max(keys.index(k) for k in LINE_KEYS) < min(
+            keys.index(k) for k in APPENDED_LINE_KEYS), (ln["line"], keys)
+        for r in ln["rungs"]:
+            rk = list(r)
+            assert max(rk.index(k) for k in RUNG_KEYS) < rk.index("reached"), rk
 
 
 def test_the_repeated_key_names_are_real():
@@ -193,7 +216,7 @@ def test_the_repeated_key_names_are_real():
 
 def test_zero_progress_answers_a_full_board_with_nothing_owned():
     """What an account with no ladder progress looks like -- any account
-    until it completes a rated series wearing a rung: eight lines, 48 rungs,
+    until it completes a ranked game wearing a rung: 32 ladders, 160 rungs,
     games 0, tier 1, nothing owned, nothing active. The
     client renders this as NOT STARTED per line -- which it can only do if
     `owned` is present and false rather than absent."""
@@ -201,32 +224,33 @@ def test_zero_progress_answers_a_full_board_with_nothing_owned():
     assert a["active_line"] is None
     for ln in a["ladders"]:
         assert ln["games"] == 0 and ln["tier"] == 1
-        assert ln["next_tier"] == 2 and ln["next_threshold"] == 10
-        assert ln["games_to_next"] == 10
+        assert ln["next_tier"] == 2
+        assert ln["next_threshold"] == tl.threshold(ln["line"], 2) > 0
+        assert ln["games_to_next"] == ln["next_threshold"]
+        assert [r["reached"] for r in ln["rungs"]] == [True, False, False, False, False]
         assert ln["next_names"], ln["line"]
         assert not any(r["owned"] for r in ln["rungs"])
         assert not any(r["active"] for r in ln["rungs"])
 
 
 def test_a_seeded_player_reports_progress_and_the_worn_rung():
-    """30 series on the rat line: tier 3, next rung at 75, 45 to go, and the
-    two rungs already crossed owned. The rat tier-4 pair is the case the
-    client renders as two chips at one tier."""
+    """50 games on the rat line: tier 3, next rung at 100, 50 to go, and the
+    rungs already crossed owned and reached."""
     line = "rat"
     owned = [r["sku"] for r in tl.LINES[line]["rungs"] if r["tier"] <= 3]
     active = "title_ladder_rat_3"
-    a = _answer(owned=owned, progress=[(line, 30, 3)], active_sku=active)
+    a = _answer(owned=owned, progress=[(line, 50, 3, 0)], active_sku=active)
     assert a["active_line"] == line
     rat = [ln for ln in a["ladders"] if ln["line"] == line][0]
-    assert rat["games"] == 30 and rat["tier"] == 3
-    assert rat["next_tier"] == 4 and rat["next_threshold"] == 75
-    assert rat["games_to_next"] == 45
-    assert rat["next_names"] == ["Rat King", "Rat Queen"]
+    assert rat["games"] == 50 and rat["tier"] == 3
+    assert rat["next_tier"] == 4 and rat["next_threshold"] == 100
+    assert rat["games_to_next"] == 50
+    assert rat["next_names"] == ["Rat Lord"]
     assert [r["sku"] for r in rat["rungs"] if r["owned"]] == owned
     assert [r["sku"] for r in rat["rungs"] if r["active"]] == [active]
-    # Two rungs at tier 4, which is why `rungs` is a list and `next_names` is
-    # a list -- a client reading either as a single value shows one crown.
-    assert len([r for r in rat["rungs"] if r["tier"] == 4]) == 2
+    assert [r["reached"] for r in rat["rungs"]] == [True, True, True, False, False]
+    assert (rat["group"], rat["kind"], rat["unit"], rat["streak"]) == (
+        "animal", "games", "games", None)
     # Untouched lines stay at zero in the same answer.
     cat = [ln for ln in a["ladders"] if ln["line"] == "cat"][0]
     assert cat["games"] == 0 and not any(r["owned"] for r in cat["rungs"])
@@ -236,12 +260,35 @@ def test_the_top_of_a_line_answers_null_and_not_zero():
     """A player at the top has no next rung. The three next_* fields must be
     null: a 0 there reads as "0 more to go", and the client's `has_next` is
     a PRESENCE test for exactly this reason."""
-    a = _answer(progress=[("cat", 400, 6)])
+    a = _answer(progress=[("cat", 400, 5, 0)])
     cat = [ln for ln in a["ladders"] if ln["line"] == "cat"][0]
     assert cat["next_tier"] is None
     assert cat["next_threshold"] is None
     assert cat["games_to_next"] is None
     assert cat["next_names"] == []
+
+
+def test_an_owner_of_a_higher_existing_title_reads_that_tier_before_any_game():
+    """An existing shop title that became a higher rung puts its owner on
+    that tier at once: Tryhard is Grinder tier 5, so its owner reads tier 5
+    with no progress row, every rung reached, and no next rung."""
+    a = _answer(owned=["title_tryhard"])
+    g = [ln for ln in a["ladders"] if ln["line"] == "grinder"][0]
+    assert g["tier"] == 5 and g["next_tier"] is None, g
+    assert g["games"] == tl.threshold("grinder", 5)
+    assert all(r["reached"] for r in g["rungs"])
+    # Control: the same answer without the title starts at tier 1.
+    b = _answer()
+    g0 = [ln for ln in b["ladders"] if ln["line"] == "grinder"][0]
+    assert g0["tier"] == 1 and g0["next_tier"] == 2
+
+
+def test_apex_reports_its_current_run_and_no_other_ladder_does():
+    a = _answer(progress=[("apex", 9, 3, 4)])
+    by = {ln["line"]: ln for ln in a["ladders"]}
+    assert by["apex"]["kind"] == "streak" and by["apex"]["streak"] == 4
+    assert by["apex"]["games"] == 9 and by["apex"]["games_to_next"] == 3
+    assert all(ln["streak"] is None for k, ln in by.items() if k != "apex")
 
 
 def test_every_rung_carries_an_item_id_and_a_preview_colour():

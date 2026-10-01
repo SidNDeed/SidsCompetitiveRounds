@@ -1,65 +1,54 @@
-"""Animal title ladders — the rungs, the thresholds, the progression.
+"""Title ladders -- the catalogue, the per-kind rules, the per-game credit.
 
-An upgradeable title: you buy the first rung of a line (``Rat``, 1000 g,
-ordinary shop item), equip it, and every COMPLETED RATED SERIES you finish
-while a rung of that line is equipped counts +1 toward the next rung. One
-series, one credit -- not one per game within it; see WHAT ONE CREDIT IS on
-``record_completed_games``. Cross a
-threshold and the next rung is granted, owned for ever, and auto-equipped.
+An upgradeable title: you buy the first rung of a ladder (an ordinary shop
+title), wear it, and every RANKED GAME you finish while a rung of that ladder
+is worn can count toward the next rung. What a game counts for depends on the
+ladder's KIND (``KIND_THRESHOLDS``): one per game, one per win, one per loss,
+the play gold that game paid, one per 1v1 game with a card of the ladder's
+family in the build, one per 1v1 win meeting a playstyle condition, or the
+best run of consecutive 1v1 wins. Cross a threshold and the next rung is
+granted, owned for ever, and auto-equipped.
 
-Three pieces live here and nothing else does:
+Every ladder has exactly five tiers: tier 1 is the entry rung (bought), tiers
+2-5 are earned (granted only). The names, the kinds and the thresholds are
+the approved proposal (ai-collab/v1410/TITLE-LADDERS-PROPOSAL.md, v2); the
+one name that differs is recorded on the Grinder ladder below.
 
-  * ``LADDERS`` — the whole catalogue as data: eight animal lines, each an
-    ordered list of rungs (sku, display name, tier, threshold, rarity,
-    colour). Migration 331 is GENERATED from this structure and
-    ``backend/tests/test_title_ladders.py`` re-derives the migration's rows
-    from it, so the table and this file cannot drift apart silently.
-  * the pure rules — ``tier_for_games``, ``rungs_at_tier``, ``next_rung`` —
-    which take numbers and return numbers, no database, no clock.
-  * ``record_completed_games`` — the hook the four rated completion paths
-    call, and the ``GET /api/v1/players/{steam_id}/title-ladders`` read route
-    the client draws the progress bar from. Both are reached from main.py --
-    see HOW PRODUCTION REACHES THIS MODULE below.
+Four pieces live here:
 
-WHAT IS NOT HERE. No mail. A rung-up should tell the player, and the system
-mail + Discord relay that would carry that message is a different item's
-surface; ``record_completed_games`` RETURNS one event per rung-up and the
-caller decides what to do with it. No client rendering: rung names are
-``shop_items`` rows like every other title and render through the existing
-title path.
+  * ``LADDERS`` -- the whole catalogue as data. Migration 365 is GENERATED
+    from this structure and ``backend/tests/test_title_ladders.py`` re-derives
+    the migration's rows from it, so the table and this file cannot drift
+    apart silently.
+  * the pure rules -- ``tier_for_games``, ``rungs_at_tier``, ``next_rung``,
+    ``game_row_1v1`` and the ``meets_*`` conditions -- which take numbers and
+    rows and return numbers, no database, no clock.
+  * ``record_completed_games`` -- the hook the three ranked game-reporting
+    paths call once per GAME.
+  * the ``GET /api/v1/players/{steam_id}/title-ladders`` read route.
 
 HOW PRODUCTION REACHES THIS MODULE. In three places, and no others:
 
   1. THE HOOK. main.py calls ``record_completed_games`` once in each of the
-     four rated completion paths -- ``submit_match`` (1v1),
-     ``submit_team_match`` and ``_complete_team_series_with_ratings`` (2v2:
-     the reported path and the after-the-fact settlement), and
-     ``submit_ffa_match`` (FFA) -- each call inside a savepoint of its own,
-     so a failed credit is logged as ``[LADDER-CREDIT] ... dropped`` and
-     never costs the completion. The reference_id is the 1v1 series id, the
-     team series id at both 2v2 paths, and for FFA the lobby id: one lobby is
-     one sitting, however many games it plays. 1v2 (``submit_ovt_match``)
-     reports unrated and is not hooked. ``backend/tests/test_title_ladders.py``
-     asserts the set per mode, each call's reference expression, and that
-     main.py holds exactly those four calls.
-  2. THE ROUTER. main.py includes the ``router`` defined below exactly once,
-     so ``GET /api/v1/players/{steam_id}/title-ladders`` is served;
-     ``backend/tests/test_title_ladder_route_contract.py`` pins the mount and
-     every key the client reads.
-  3. THE CARVE-OUT. ``main`` reads ``GRANTED_ONLY_SKUS`` to take the forty
-     earned rungs out of the shop-owner exemption, on the ``/shop/items``
-     listing and on the set-active ownership check.
+     three ranked game-reporting paths -- ``submit_match`` (1v1),
+     ``submit_team_match`` (2v2) and ``submit_ffa_match`` (FFA) -- each call
+     inside a savepoint of its own, so a failed credit is logged as
+     ``[LADDER-CREDIT] ... dropped`` and never costs the report. The
+     reference_id is the GAME's id at all three: the 1v1 ``matches`` row,
+     the 2v2 ``team_matches`` row and the FFA match id. The after-the-fact
+     2v2 settlement (``_complete_team_series_with_ratings``) completes no
+     game and is not hooked; 1v2 (``submit_ovt_match``) reports unrated and
+     is not hooked. ``backend/tests/test_title_ladders.py`` asserts the set
+     per mode, each call's reference expression, and that main.py holds
+     exactly those three calls.
+  2. THE ROUTER. main.py includes the ``router`` defined below exactly once.
+  3. THE CARVE-OUT. ``main`` reads ``NOT_AUTO_OWNED_SKUS`` to take the earned
+     rungs and the two retired titles out of the shop-owner exemption, on the
+     ``/shop/items`` listing and on the set-active ownership check.
 
-(Earlier versions of this docstring said production did not import this
-module at all, then that it imported it for one constant and mounted no
-route, then that the hook was not called yet; each was true when written and
-went stale the moment main.py gained a reference.)
-
-Migration 331 still lists nothing: every tier-1 rung lands ``catalog_ready =
-FALSE``, so nothing is listed and nothing can be bought, and the only account
-that can wear a rung -- so the only one the hook can credit -- is the
-shop-owner exemption's. Opening the entry rungs for sale is a decision of its
-own, not a consequence of the wiring.
+WHAT IS NOT HERE. No mail. ``record_completed_games`` RETURNS one event per
+rung-up and the caller decides what to do with it. No client rendering: rung
+names are ``shop_items`` rows like every other title.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -72,212 +61,373 @@ from models import Player, PlayerItem, ShopItem
 router = APIRouter(tags=["Titles"])
 
 
-# ── The hidden pool ────────────────────────────────────────────────
+# -- The hidden pool ---------------------------------------------------
 #
 # Rungs above the first are granted by progress and must not be buyable. The
-# repo already has exactly one mechanism for "granted only, still equippable
-# by its owner": `shop_items.rotation_pool = 'achievement'`. It does two
-# things at once, both of which a ladder rung needs:
-#
-#   * `/shop/items` appends an item of this pool that the REQUESTING steam_id
-#     owns, so the Shop tab can render its Set Active button, and shows it to
-#     nobody else -- with one pre-existing carve-out that is not ours:
-#     `_is_shop_owner` accounts see the whole pool owned or not. That surface
-#     exists at all because achievement titles spent three releases with no
-#     way for their owners to equip them (#151).
-#   * the purchase endpoint 403s the pool by name
-#     ("Unlocked by achievement, not purchasable").
-#
-# The plan for this item proposed a NEW pool name, 'ladder'. A new name buys
-# a tidier label and costs both of the behaviours above: main.py knows the
-# string 'achievement' and no other, so a 'ladder' rung would be invisible to
-# the player who earned it AND purchasable for its listed price by anything
-# that can name the sku — the shop hides it, the purchase path does not
-# refuse it. Reusing the pool that already carries both gates is a deliberate
-# deviation from the plan, recorded here rather than made silently.
-#
-# If a later change does introduce a 'ladder' pool, both main.py sites move
-# together: the `/shop/items` append and the purchase refusal. Changing this
-# constant alone is not enough, which is why it is a constant and not a
-# literal sprinkled through the migration.
+# repo has exactly one mechanism for "granted only, still equippable by its
+# owner": `shop_items.rotation_pool = 'achievement'`. `/shop/items` appends an
+# item of this pool that the requesting steam_id owns (so the Shop tab can
+# render its Set Active button) and the purchase endpoint 403s the pool by
+# name. main.py knows the string 'achievement' and no other, which is why a
+# rung reuses it rather than a new 'ladder' pool (a new name would be matched
+# by neither gate). If a 'ladder' pool is ever introduced, both main.py sites
+# move together with this constant.
 HIDDEN_POOL = "achievement"
 
-# The first rung sits in the ORDINARY POOL — that is the whole of what this
-# constant says. It is not hidden behind ``rotation_pool`` the way rungs 2+
-# are. It is NOT on sale: migration 331 lands every tier-1 rung
-# ``catalog_ready = FALSE``, because a line that can be bought before the
-# progression hook exists is a line that can never advance. Flipping that flag
-# is a later activation migration, not this one.
+# The first rung sits in the ORDINARY POOL and is on sale. A new entry sku
+# costs ENTRY_PRICE; an existing shop title that becomes a ladder's first rung
+# keeps the price its buyers paid (the proposal names no prices).
 ENTRY_POOL = None
 ENTRY_PRICE = 1000
 
-# Cumulative games needed for each tier, indexed by tier number. Tier 1 is
-# the purchased rung, so its threshold is 0. From the plan's proposal, which
-# Sid has not yet ruled on. NOTE the asymmetry this produces, stated as an
-# observation and not defended: Rat is the one five-rung line, so Rat God
-# lands at tier 5 = 150 games while every other line's top rung is tier 6 =
-# 300.
+TIERS = (1, 2, 3, 4, 5)
+
+# Rarity for a NEW rung, climbing the shop's palette (no 'mythic' exists).
+# An existing shop title keeps the rarity it was sold with.
+TIER_RARITY = {1: "rare", 2: "rare", 3: "epic", 4: "epic", 5: "legendary"}
+
+
+# -- Kinds: what one game counts for, and the thresholds ---------------
 #
-# WHERE A THRESHOLD ACTUALLY LIVES: in this dict AND in the
-# ``title_ladders.threshold`` column. Both the granting path and the GET
-# response read THIS dict, so an UPDATE to the column alone moves nothing —
-# the ladder keeps granting and reporting the old number. Changing a threshold
-# means editing here and redeploying; the column exists so the schedule can be
-# read out of the database on its own, not as the source of truth. (An earlier
-# comment here said one UPDATE was enough. It was wrong.)
-TIER_THRESHOLDS = {1: 0, 2: 10, 3: 30, 4: 75, 5: 150, 6: 300}
+# Cumulative count needed for each tier, tier 1 first (always 0: it is the
+# rung you buy). WHERE A THRESHOLD ACTUALLY LIVES: here AND in the
+# ``title_ladders.threshold`` column. The granting path and the GET read THIS
+# table, so a change means editing here, regenerating 365's rows and
+# redeploying; the column exists so the schedule can be read out of the
+# database on its own, not as the source of truth.
+KIND_THRESHOLDS = {
+    "games":     (0, 15, 40, 100, 200),    # ranked games worn, any mode
+    "wins":      (0, 8, 20, 50, 100),      # ranked wins worn, any mode
+    "losses":    (0, 8, 20, 50, 100),      # ranked losses worn, any mode
+    "gold":      (0, 500, 1500, 3000, 6000),   # play gold of ranked games worn
+    "card":      (0, 10, 25, 60, 120),     # ranked 1v1 games worn, family card in the build
+    "sniper":    (0, 3, 8, 18, 35),        # ranked 1v1 wins, hit rate >= 30 pct over >= 40 shots
+    "berserker": (0, 3, 8, 20, 40),        # ranked 1v1 wins 5-0
+    "blitz":     (0, 3, 8, 16, 30),        # ranked 1v1 wins in 210 s or less
+    "phoenix":   (0, 2, 4, 8, 15),         # ranked 1v1 wins after trailing by 5 points
+    "specter":   (0, 2, 5, 10, 20),        # ranked 1v1 wins conceding 2 points or fewer
+    "streak":    (0, 5, 8, 12, 20),        # best run of consecutive ranked 1v1 wins
+}
 
-# Rarity by tier, climbing the shop's existing palette. There is no 'mythic'
-# rarity in this codebase (five values appear in backend/sql: common,
-# uncommon, rare, epic, legendary), so the top rung is legendary and the
-# "reads like a god at a glance" job is done by preview_color.
-TIER_RARITY = {1: "rare", 2: "rare", 3: "epic", 4: "epic", 5: "legendary", 6: "legendary"}
+# The unit a ladder's count is in, for the client's "12 / 15 <unit>".
+KIND_UNIT = {
+    "games": "games", "wins": "wins", "losses": "losses", "gold": "gold",
+    "card": "games", "sniper": "wins", "berserker": "wins", "blitz": "wins",
+    "phoenix": "wins", "specter": "wins", "streak": "streak",
+}
+
+# Kinds measured on a ranked 1v1 game's own row. A 2v2 or FFA game claims
+# nothing for them: the stats they read exist only on the 1v1 `matches` row.
+ONE_V_ONE_KINDS = frozenset({"card", "sniper", "berserker", "blitz", "phoenix",
+                             "specter", "streak"})
+
+# The per-kind condition text, shown in the client's dropdown and used as the
+# shop description of every rung this file creates. English source strings:
+# the client renders them through I18n.Tr (section 5 of the build notes lists
+# them). "Wear it" is the rule for every ladder: progress is credited only to
+# the ladder whose rung is equipped when the game is reported.
+KIND_CONDITION = {
+    "games": "Wear it and play ranked games",
+    "wins": "Wear it and win ranked games",
+    "losses": "Wear it and lose ranked games",
+    "gold": "Wear it and earn gold from ranked play",
+    "sniper": "Wear it and win ranked 1v1 with 30% accuracy over 40+ shots",
+    "berserker": "Wear it and win ranked 1v1 games 5-0",
+    "blitz": "Wear it and win ranked 1v1 games in 3:30 or less",
+    "phoenix": "Wear it and win ranked 1v1 after trailing by 5 points",
+    "specter": "Wear it and win ranked 1v1 conceding 2 points or fewer",
+    "streak": "Wear it and win ranked 1v1 games in a row",
+}
+
+# Gold that counts for a "gold" ladder: what ranked PLAY pays (xp, level
+# rewards, series results), never bets, refunds, boosters, grants or
+# purchases. Every reason here is written with the game's id or the id of the
+# series that game completed as its reference_id, which is how the hook finds
+# the gold of THIS game. Achievement gold is referenced by the achievement key,
+# not by a game, so it cannot be attributed to one and is not counted
+# (recorded as a residual in the build notes).
+PLAY_GOLD_REASONS = ("xp", "level_reward", "series_win", "series_loss",
+                     "team_xp", "team_series_win", "team_series_loss",
+                     "ffa_xp", "ffa_placement")
 
 
-def _rung(line, tier, slug, name, color, description):
-    """One catalogue entry. `slug` distinguishes two rungs sharing a tier."""
-    sku = f"title_ladder_{line}_{tier}" if slug is None else f"title_ladder_{line}_{tier}_{slug}"
+# -- Building the catalogue ---------------------------------------------
+
+def _rung(line, tier, spec, *, kind, color, condition):
+    """One catalogue entry. `spec` is a tier name (a NEW rung, sku
+    title_ladder_<line>_<tier>) or a dict naming an EXISTING shop title: its
+    sku, the name it now carries, and the rarity, colour, description and
+    price it already has on the shop row (an existing sku's row is renamed and
+    re-pooled, never re-priced at tier 1 or re-coloured)."""
+    if isinstance(spec, str):
+        spec = {"name": spec}
+    existing = "sku" in spec
+    sku = spec.get("sku") or f"title_ladder_{line}_{tier}"
+    if tier == 1:
+        price = spec.get("price", ENTRY_PRICE)
+    else:
+        price = 0
     return {
         "line": line,
         "tier": tier,
         "sku": sku,
-        "name": name,
-        "description": description,
-        "threshold": TIER_THRESHOLDS[tier],
-        "rarity": TIER_RARITY[tier],
-        "preview_color": color,
-        "price": ENTRY_PRICE if tier == 1 else 0,
+        "name": spec["name"],
+        "description": spec.get("description", condition),
+        "threshold": KIND_THRESHOLDS[kind][tier - 1],
+        "rarity": spec.get("rarity", TIER_RARITY[tier]),
+        "preview_color": spec.get("color", color),
+        "price": price,
         "rotation_pool": ENTRY_POOL if tier == 1 else HIDDEN_POOL,
+        "existing": existing,
     }
 
 
-def _line(line, display, entries):
-    """entries: (tier, slug, name, colour, description) in ascending tier."""
+def _ladder(line, display, group, kind, color, specs, *, family=None, condition=None):
+    """specs: exactly five, tier 1 first."""
+    assert len(specs) == len(TIERS), line
+    cond = condition or KIND_CONDITION[kind]
     return {
         "line": line,
         "display": display,
-        "rungs": [_rung(line, t, slug, name, color, desc) for (t, slug, name, color, desc) in entries],
+        "group": group,
+        "kind": kind,
+        "unit": KIND_UNIT[kind],
+        "modes": "1v1" if kind in ONE_V_ONE_KINDS else "any",
+        "condition": cond,
+        "family": tuple(family or ()),
+        "rungs": [_rung(line, t, s, kind=kind, color=color, condition=cond)
+                  for t, s in zip(TIERS, specs)],
     }
 
 
-# ── The catalogue ──────────────────────────────────────────────────
+def _x(sku, name, rarity, color, description, price=None):
+    """An existing shop title, with the values its live row carries."""
+    d = {"sku": sku, "name": name, "rarity": rarity, "color": color,
+         "description": description}
+    if price is not None:
+        d["price"] = price
+    return d
+
+
+def _animal(line, display, names, colors):
+    """An animal ladder. Its five skus are the existing title_ladder_<line>_<n>
+    rows (migration 331), renamed in place; nobody holds any of them."""
+    return _ladder(line, display, "animal", "games", colors[0],
+                   [{"name": n, "color": c} for n, c in zip(names, colors)])
+
+
+def _card(line, display, family, names, color, entry):
+    """A card ladder: ranked 1v1 games worn with any card of the family."""
+    cond = "Wear it and play ranked 1v1 with " + _or_list(family)
+    return _ladder(line, display, "card", "card", color, [entry] + list(names[1:]),
+                   family=family, condition=cond)
+
+
+def _or_list(names):
+    names = list(names)
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+
+
+def _numeral(line, sku, base, price, color, description):
+    """A pronoun title climbing I to V like the rank titles."""
+    numerals = ("I", "II", "III", "IV", "V")
+    specs = [_x(sku, f"{base} {numerals[0]}", "common", color, description, price)]
+    specs += [f"{base} {n}" for n in numerals[1:]]
+    return _ladder(line, base, "numeral", "games", color, specs)
+
+
+# -- The catalogue ------------------------------------------------------
 #
-# Names are the plan's proposal and the skus do not encode them — but a
-# rename is NOT just an UPDATE of ``shop_items.name``. The display names below
-# are also what the upgrade event, ``next_names`` and the GET response return,
-# so a database-only rename leaves this module still reporting the old name to
-# the client. A rename means editing here too. (An earlier comment claimed it
-# touched nothing else. It was wrong.)
-# Rat is the only line whose top tier is 4-with-two-rungs
-# (King and Queen, either of which IS rung 4) — every consumer here reads
-# rungs as a list per tier for exactly that reason, never as one row.
+# A rename is NOT just an UPDATE of ``shop_items.name``: the names below are
+# also what the upgrade event, ``next_names`` and the GET response return, so
+# a database-only rename leaves this module reporting the old name. Group
+# order (animal, card, playstyle, shop, numeral) is the order the read route
+# answers in.
 LADDERS = [
-    _line("rat", "Rat", [
-        (1, None, "Rat", "#9AA0A6", "Small, quick, everywhere."),
-        (2, None, "Rat Leader", "#B6BDC6", "The other rats listen."),
-        (3, None, "Rat Lord", "#A88CE0", "A lordship of gutters."),
-        (4, "king", "Rat King", "#E0B33A", "Crowned in the tunnels."),
-        (4, "queen", "Rat Queen", "#E0B33A", "Crowned in the tunnels."),
-        (5, None, "Rat God", "#FFE066", "Worshipped. Still a rat."),
+    # Animal (proposal: "Animal ladders"); colours are the 331 rows' own.
+    _animal("rat", "Rat", ["Baby Mouse", "Mouse", "Rat", "Rat Lord", "CAPYBARA"],
+            ["#9AA0A6", "#B6BDC6", "#A88CE0", "#E0B33A", "#FFE066"]),
+    _animal("cat", "Cat", ["Stray", "Prowler", "Alley King", "Sabertooth", "Sekhmet"],
+            ["#F2C1A0", "#E8A87C", "#C97B4A", "#B25E2E", "#E5A83B"]),
+    _animal("dog", "Dog", ["Pup", "Dog", "Hound", "Hellhound", "Cerberus"],
+            ["#C7A87B", "#B08D5A", "#98703C", "#D4913A", "#E9AE45"]),
+    _animal("turtle", "Turtle", ["Hatchling", "Turtle", "Snapper", "Leatherback", "World Turtle"],
+            ["#8FBF9F", "#6FA882", "#4E8C66", "#3F7A57", "#6BC49A"]),
+    _animal("rabbit", "Rabbit", ["Bunny", "Rabbit", "Jackrabbit", "Jackalope", "Moon Rabbit"],
+            ["#F3C6D6", "#E3A0BC", "#CE7A9E", "#B85C86", "#C79BF0"]),
+    _animal("bear", "Bear", ["Cub", "Bear", "Grizzly", "Kodiak", "Ursa Major"],
+            ["#C59A6B", "#A87A4E", "#8A5C35", "#6F4526", "#D9A85C"]),
+    _animal("eagle", "Eagle", ["Eaglet", "Eagle", "Golden Eagle", "Roc", "Thunderbird"],
+            ["#D9CBA3", "#BFA96B", "#D4AF37", "#9FC6E8", "#7FA9FF"]),
+    _animal("shark", "Shark", ["Shark Pup", "Reef Shark", "Great White", "Megalodon", "Leviathan"],
+            ["#A9C6D6", "#7FA8BF", "#5B88A3", "#416B87", "#2F5570"]),
+
+    # Card (one effect family each; any family card qualifies, decision 2).
+    _card("tracker", "Tracker", ("Homing", "Target Bounce", "Remote"),
+          ["Homing User", "Target Bouncer", "Remote Killer", "Elite Tracker", "No Escape"], "#FF6677",
+          _x("title_tracker", "Homing User", "rare", "#FF6677", "Homing main", 2000)),
+    _card("poisoner", "Poisoner", ("Poison", "Toxic Cloud", "Decay"),
+          ["Poison", "Toxic Cloud", "Decay", "Plague Doctor", "Pestilence"], "#66CC44",
+          _x("title_poisoner", "Poison", "rare", "#66CC44", "Poison main", 1500)),
+    _card("windup", "Windup", ("Wind Up", "Quick Shot", "Fastball", "Steady Shot"),
+          ["Wind Up", "Quick Shot", "Fastball", "Steady Shot", "Railgun"], "#AA66FF",
+          _x("title_windup", "Wind Up", "rare", "#AA66FF", "Windup main", 1500)),
+    _card("reloader", "Reloader", ("Quick Reload", "Refresh", "Scavenger", "Tactical Reload"),
+          ["Quick Reload", "Refresh", "Scavenger", "Tactical", "Bottomless"], "#99CCDD",
+          _x("title_reloader", "Quick Reload", "rare", "#99CCDD", "Quick Reload main", 1500)),
+    _ladder("colossus", "Colossus", "card", "card", "#FFCC33", [
+        _x("title_huge", "Huge", "rare", "#FFCC33", "Huge main", 1500),
+        "Brawler",
+        _x("title_tank", "Tank", "rare", "#88AA88", "Eats damage"),
+        "Pristine",
+        "Colossus",
+    ], family=("Huge", "Brawler", "Tank", "Pristine Perseverance", "Defender"),
+        condition="Wear it and play ranked 1v1 with "
+                  + _or_list(("Huge", "Brawler", "Tank", "Pristine Perseverance", "Defender"))),
+    _card("hasty", "Hasty", ("Fast Forward", "Chase", "Sneaky", "Thruster"),
+          ["Fast Forward", "Chase", "Sneaky", "Thruster", "Lightspeed"], "#FF6633",
+          _x("title_hasty", "Fast Forward", "rare", "#FF6633", "Fast Forward main", 1500)),
+    _ladder("bounce", "Bounce", "card", "card", "#66CCEE", [
+        _x("title_bouncy", "Bouncy", "rare", "#66CCEE", "Bouncy main", 1500),
+        _x("title_bouncer", "Bouncer", "rare", "#BBDD44", "Target Bounce main"),
+        "Ricochet",
+        "Mayhem",
+        "Trick Shot",
+    ], family=("Bouncy", "Ricochet", "Mayhem", "Trickster"),
+        condition="Wear it and play ranked 1v1 with "
+                  + _or_list(("Bouncy", "Ricochet", "Mayhem", "Trickster"))),
+    _card("healer", "Healer", ("Healing Field", "Leech", "Lifestealer", "Parasite"),
+          ["Healing Field", "Leech", "Lifestealer", "Parasite", "Immortal"], "#44DD99",
+          _x("title_healer", "Healing Field", "rare", "#44DD99", "Healing Field main", 2000)),
+    _card("echo", "Echo", ("Echo", "Empower", "Shockwave", "Supernova"),
+          ["Echo", "Empower", "Shockwave", "Supernova", "Big Bang"], "#88FFCC",
+          _x("title_echo", "Echo", "rare", "#88FFCC", "Echo main", 2000)),
+
+    # Playstyle (ranked 1v1 only; Pacifist stays single, decision 4). The
+    # existing title carries the tier-2 name (tier 3 for Apex), so its owners
+    # land there; tier 1 is a new entry rung.
+    _ladder("sniper", "Sniper", "playstyle", "sniper", "#88CCFF", [
+        "Marksman",
+        _x("title_sniper", "Sniper", "rare", "#88CCFF", "Precision shooter"),
+        "Sharpshooter", "Deadeye", "Headhunter"]),
+    _ladder("berserker", "Berserker", "playstyle", "berserker", "#FF3333", [
+        "Bruiser",
+        _x("title_berserker", "Berserker", "rare", "#FF3333", "Pure aggression"),
+        "Rampage", "Bloodbath", "Warlord"]),
+    _ladder("blitz", "Blitz", "playstyle", "blitz", "#FFEE33", [
+        "Rush",
+        _x("title_blitz", "Blitz", "rare", "#FFEE33", "Fast finisher"),
+        "Lightning", "Speedrunner", "Warp Speed"]),
+    _ladder("phoenix", "Phoenix", "playstyle", "phoenix", "#FF8833", [
+        "Ember",
+        _x("title_phoenix", "Phoenix", "epic", "#FF8833", "Reborn after defeat"),
+        "Rebirth", "From the Ashes", "Undying"]),
+    _ladder("specter", "Specter", "playstyle", "specter", "#AABBFF", [
+        "Shade",
+        _x("title_specter", "Specter", "epic", "#AABBFF", "Hard to hit"),
+        "Phantom", "Wraith", "Untouchable"]),
+    _ladder("apex", "Apex", "playstyle", "streak", "#FFAA00", [
+        "Contender", "Predator",
+        _x("title_apex", "Apex", "epic", "#FFAA00", "Top of the food chain"),
+        "Alpha", "Undefeated"]),
+
+    # Shop titles that become ladders.
+    _ladder("clown", "Clown", "shop", "games", "#FF6688", [
+        _x("title_clown", "Clown", "common", "#FF6688", "Honk honk.", 800),
+        "Jester", "Harlequin", "Ringmaster", "The Joker"]),
+    _ladder("idiot", "Idiot", "shop", "losses", "#DDAA33", [
+        _x("title_idiot", "Idiot", "uncommon", "#DDAA33", "Self-awareness is a virtue.", 1000),
+        "Moron", "Buffoon", "Village Idiot", "Idiot Savant"]),
+    _ladder("grandma", "Grandma", "shop", "games", "#FF66EE", [
+        _x("title_grandma", "Grandma", "uncommon", "#FF66EE", "Wise beyond your years.", 1000),
+        "Nana", "Great-Grandma", "Ancestor", "Ancient One"]),
+    _ladder("decent", "Decent", "shop", "wins", "#88CC44", [
+        _x("title_decent", "Decent", "uncommon", "#88CC44", "Not great. Not terrible.", 1000),
+        "Fine", "Pretty Good", "Actually Good", "Too Good"]),
+    # title_gold_rush (named Royal by 022, 0 holders) carries the tier-2 name
+    # the proposal gives, "Gold Rush"; tier 1 is a new entry rung.
+    _ladder("gold_rush", "Gold Rush", "shop", "gold", "#FFD94D", [
+        "Prospector",
+        _x("title_gold_rush", "Gold Rush", "legendary", "#FFD94D",
+           "Worn by those who climbed the mountain."),
+        "Forty-Niner", "Tycoon", "Midas"]),
+    # Grinder: the five existing titles, owners landing on the tier they own.
+    # Tier 1 stays "Noobie", NOT the proposal's "Beginner": migration 105
+    # renamed title_beginner per Sid because "Beginner" is an Elo rank tier
+    # name and a wearer looked like a player at that rank (bug #49). Recorded
+    # as a deviation in the build notes for Sid.
+    _ladder("grinder", "Grinder", "shop", "games", "#AAAAAA", [
+        _x("title_beginner", "Noobie", "common", "#AAAAAA", "Everyone starts somewhere.", 500),
+        _x("title_regular", "Regular", "common", "#FFFFFF", "You show up."),
+        _x("title_active", "Active", "common", "#44CC88", "More ranked than not."),
+        _x("title_sweaty", "Sweaty", "rare", "#FFCC33", "Sweat is just XP in liquid form."),
+        _x("title_tryhard", "Tryhard", "rare", "#FF9933", "Trying, hard."),
     ]),
-    _line("cat", "Cat", [
-        (1, None, "Kitten", "#F2C1A0", "Mostly paws."),
-        (2, None, "Cat", "#E8A87C", "Sovereign of the sofa."),
-        (3, None, "Big Cat", "#C97B4A", "No longer a lap animal."),
-        (4, None, "Alpha Cat", "#B25E2E", "The fight ends when you say."),
-        (5, None, "President Meow", "#E5A83B", "Elected unopposed."),
-        (6, None, "Cat Deity", "#FFD966", "Nine lives, one throne."),
-    ]),
-    _line("dog", "Dog", [
-        (1, None, "Pup", "#C7A87B", "Enthusiasm exceeds skill."),
-        (2, None, "Dog", "#B08D5A", "Reliable. Loud."),
-        (3, None, "Good Dog", "#98703C", "Told so, repeatedly."),
-        (4, None, "Top Dog", "#D4913A", "Head of the pack."),
-        (5, None, "Big Dog", "#E9AE45", "The pack is now a problem."),
-        (6, None, "Dog God", "#FFDE8A", "Very good. Divine, even."),
-    ]),
-    _line("turtle", "Turtle", [
-        (1, None, "Hatchling", "#8FBF9F", "Freshly out of the shell."),
-        (2, None, "Turtle", "#6FA882", "Slow is a strategy."),
-        (3, None, "Snapper", "#4E8C66", "The bite lands first."),
-        (4, None, "Elder Turtle", "#3F7A57", "Outlasted everyone."),
-        (5, None, "Turtle Sage", "#6BC49A", "Patience as a weapon."),
-        (6, None, "World Turtle", "#9BF0C4", "Everything rests on you."),
-    ]),
-    _line("rabbit", "Rabbit", [
-        (1, None, "Bunny", "#F3C6D6", "Twitchy and fast."),
-        (2, None, "Rabbit", "#E3A0BC", "Gone before the shot."),
-        (3, None, "Jackrabbit", "#CE7A9E", "Nothing catches you."),
-        (4, None, "Hare Apparent", "#B85C86", "Next in line."),
-        (5, None, "Moon Rabbit", "#C79BF0", "Pounding something on the moon."),
-        (6, None, "Rabbit God", "#EBD1FF", "A god of small quick things."),
-    ]),
-    _line("bear", "Bear", [
-        (1, None, "Cub", "#C59A6B", "Cute until it is not."),
-        (2, None, "Bear", "#A87A4E", "Simply large."),
-        (3, None, "Grizzly", "#8A5C35", "The argument is over."),
-        (4, None, "Bear Boss", "#6F4526", "Runs the woods."),
-        (5, None, "Ursa Major", "#D9A85C", "Written into the sky."),
-        (6, None, "Bear God", "#FFDDA1", "The woods run themselves now."),
-    ]),
-    _line("eagle", "Eagle", [
-        (1, None, "Eaglet", "#D9CBA3", "Not yet airborne."),
-        (2, None, "Eagle", "#BFA96B", "The sky is a map."),
-        (3, None, "Golden Eagle", "#D4AF37", "Gilded and patient."),
-        (4, None, "Sky Lord", "#9FC6E8", "Owns the airspace."),
-        (5, None, "Thunderbird", "#7FA9FF", "Arrives with the storm."),
-        (6, None, "Eagle God", "#CFE4FF", "The storm arrives with you."),
-    ]),
-    _line("shark", "Shark", [
-        (1, None, "Shark Pup", "#A9C6D6", "Teeth already."),
-        (2, None, "Shark", "#7FA8BF", "Never stops moving."),
-        (3, None, "Great White", "#5B88A3", "The water empties."),
-        (4, None, "Apex Shark", "#416B87", "Top of every chain here."),
-        (5, None, "Megalodon", "#2F5570", "Too big for the ocean."),
-        (6, None, "Shark God", "#8FD8FF", "The ocean is the pet."),
-    ]),
+
+    # Numeral ladders: the pronoun titles climb I to V.
+    _numeral("pronoun_he", "title_pronoun_he", "He/him", 100, "#EEEEEE", "Pronoun title."),
+    _numeral("pronoun_she", "title_pronoun_she", "She/her", 100, "#EEEEEE", "Pronoun title."),
+    _numeral("pronoun_they", "title_pronoun_they", "They/them", 100, "#EEEEEE", "Pronoun title."),
 ]
 
+GROUPS = ("animal", "card", "playstyle", "shop", "numeral")
 
-# ── Derived indexes ────────────────────────────────────────────────
+# The titles the proposal removes. Their buyers are refunded by migration 366,
+# their shop rows are retired (catalog_ready FALSE), and the shop-owner
+# exemption must not cover them either, or an exempt account could still
+# equip one by sku.
+RETIRED_SKUS = frozenset({"title_voidshot", "title_regicide"})
+
+# Skus 331 created that this catalogue no longer has: rat's two tier-4 rungs
+# and every line's tier 6. Migration 365 deletes them after proving nobody
+# holds one.
+DROPPED_SKUS = ("title_ladder_rat_4_king", "title_ladder_rat_4_queen",
+                "title_ladder_cat_6", "title_ladder_dog_6", "title_ladder_turtle_6",
+                "title_ladder_rabbit_6", "title_ladder_bear_6", "title_ladder_eagle_6",
+                "title_ladder_shark_6")
+
+
+# -- Derived indexes ----------------------------------------------------
 
 LINES = {ld["line"]: ld for ld in LADDERS}
 ALL_RUNGS = [r for ld in LADDERS for r in ld["rungs"]]
 SKU_TO_RUNG = {r["sku"]: r for r in ALL_RUNGS}
 ALL_SKUS = tuple(r["sku"] for r in ALL_RUNGS)
-# The entry rung of each line: ordinary pool, priced, and the row a future
-# activation migration flips to ``catalog_ready = TRUE``. `/shop/items` filters
-# on readiness, so it surfaces NONE of these today — see ENTRY_POOL above.
 ENTRY_SKUS = tuple(r["sku"] for r in ALL_RUNGS if r["tier"] == 1)
-# The forty rungs above the first. These are EARNED, never bought and never
-# auto-owned: `main._is_shop_owner` treats its accounts as owning every
-# cosmetic and lists them the whole hidden pool, and both of those are wrong
-# for a progression rung. An account that holds all forty by fiat is an
-# account for which the ladder has no rungs left, and "wearing Shark God"
-# stops meaning "finished 300 rated series". main.py reads this set to carve
-# the rungs out of that exemption on BOTH surfaces -- the /shop/items listing
-# and the set-active ownership check -- because carving out only the listing
-# leaves the equip reachable by sku for anything that can name one.
+# The rungs above the first. EARNED, never bought and never auto-owned:
+# `main._is_shop_owner` treats its accounts as owning every cosmetic, which is
+# wrong for a progression rung -- an account that holds every rung by fiat has
+# no ladder left, and wearing "Leviathan" stops meaning "200 ranked games".
 GRANTED_ONLY_SKUS = frozenset(r["sku"] for r in ALL_RUNGS if r["tier"] > 1)
+# What main's shop-owner exemption must never cover: the earned rungs and the
+# retired titles. main.py reads this one set on every surface that asks.
+NOT_AUTO_OWNED_SKUS = GRANTED_ONLY_SKUS | RETIRED_SKUS
+
+
+def ladder_count() -> int:
+    """How many ladders this build serves -- the /health `title_ladders` word."""
+    return len(LADDERS)
 
 
 def max_tier(line: str) -> int:
-    """Highest tier defined for a line (5 for rat, 6 for the rest)."""
+    """Highest tier defined for a line (5 for every ladder)."""
     return max(r["tier"] for r in LINES[line]["rungs"])
 
 
 def rungs_at_tier(line: str, tier: int) -> list:
-    """Every rung at this tier. A LIST because rat's tier 4 is King AND
-    Queen: both are rung 4 and reaching it grants both."""
+    """Every rung at this tier (one per tier in this catalogue; a list so a
+    shared tier would not need a new reader)."""
     return [r for r in LINES[line]["rungs"] if r["tier"] == tier]
 
 
-def tier_for_games(line: str, games: int) -> int:
-    """Highest tier whose threshold this game count has reached.
+def threshold(line: str, tier: int) -> int:
+    rows = rungs_at_tier(line, tier)
+    return rows[0]["threshold"] if rows else 0
 
-    Never below 1: tier 1's threshold is 0, and a player only has a progress
-    row at all because they bought and equipped rung 1.
-    """
+
+def tier_for_games(line: str, games: int) -> int:
+    """Highest tier whose threshold this count has reached (never below 1).
+    `games` is the ladder's count in its own unit (games, wins, gold, ...)."""
     earned = 1
     for r in LINES[line]["rungs"]:
         if games >= r["threshold"] and r["tier"] > earned:
@@ -286,11 +436,7 @@ def tier_for_games(line: str, games: int) -> int:
 
 
 def next_rung(line: str, tier: int):
-    """The (tier, threshold) after this one, or None at the top of the line.
-
-    The threshold is the same for every rung sharing a tier — migration 331's
-    post-check asserts that, so reading the first is reading all of them.
-    """
+    """The (tier, threshold, names) after this one, or None at the top."""
     nxt = tier + 1
     rows = rungs_at_tier(line, nxt)
     if not rows:
@@ -300,128 +446,214 @@ def next_rung(line: str, tier: int):
 
 
 def line_of_sku(sku):
-    """Which ladder line a sku belongs to, or None if it is not a rung."""
+    """Which ladder a sku belongs to, or None if it is not a rung."""
     r = SKU_TO_RUNG.get(sku or "")
     return r["line"] if r else None
 
 
-# ── The completion hook ────────────────────────────────────────────
+# -- The per-game evaluator (pure) -------------------------------------
+#
+# One game row per player per game. `game_row_1v1` builds it from the 1v1
+# `matches` row the report just inserted; 2v2 and FFA callers build the small
+# row (`won`, `gold_refs`) themselves. Every condition below is a pure
+# function of ONE row.
 
-async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, reference_id: str) -> list:
-    """Credit one completed rated SERIES to every listed player's equipped
-    ladder line. Returns one event dict per rung-up (usually none).
+def _norm_card(name) -> str:
+    return " ".join(str(name or "").split()).lower()
+
+
+def parse_timeline(raw):
+    """`point_timeline` -> [(a, b), ...] cumulative points, or None when it is
+    absent or malformed (a malformed timeline answers no condition)."""
+    pts = []
+    for tok in str(raw or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        a, sep, b = tok.partition(":")
+        if not sep:
+            return None
+        try:
+            pts.append((int(a), int(b)))
+        except ValueError:
+            return None
+    return pts or None
+
+
+def raw_points(pts):
+    """[(a, b), ...] running POINTS SCORED per side, one per timeline token,
+    or None when a token is not exactly one point.
+
+    The timeline's values are not points scored: each is the side's
+    `rounds_won * 2 + points in the current round` (models.Match), so the
+    side that LOSES a round drops back to its rounds * 2 -- "5:1,4:2" is the
+    second side scoring and taking the round. Every token is exactly one
+    point: the scorer's value rises by one and the other side's holds or
+    falls. A token that is not (both rise, neither rises, a jump of two) is
+    malformed, and a malformed timeline answers no condition."""
+    a = b = 0
+    pa = pb = 0
+    out = []
+    for x, y in pts:
+        da, db = x - pa, y - pb
+        if da == 1 and db <= 0:
+            a += 1
+        elif db == 1 and da <= 0:
+            b += 1
+        else:
+            return None
+        pa, pb = x, y
+        out.append((a, b))
+    return out or None
+
+
+def game_row_1v1(match, player_id, cards=()) -> dict:
+    """The one-player view of a 1v1 game. `match` is the `matches` row (any
+    object with its attributes); `cards` the canonical names of this player's
+    picks in that game.
+
+    The timeline is read ORIENTATION-FREE: the winning side is the side whose
+    final value is larger, so no p1/p2 mapping can be wrong. Both timeline
+    conditions are in POINTS SCORED (raw_points): `worst_deficit` is the most
+    points the winner was ever behind by, `loser_points` how many points the
+    loser scored in the whole game. A tied, absent or malformed timeline
+    answers neither the comeback nor the conceded-points condition."""
+    pid = str(player_id)
+    is_p1 = str(match.player1_id) == pid
+    me, opp = ("p1", "p2") if is_p1 else ("p2", "p1")
+    winner = getattr(match, "winner_id", None)
+    won = winner is not None and str(winner) == pid
+    lost = winner is not None and not won
+    duration = getattr(match, "duration_seconds", None)
+    if duration is None:
+        duration = getattr(match, "match_duration", None)
+    worst_deficit = None
+    loser_points = None
+    pts = parse_timeline(getattr(match, "point_timeline", None))
+    raw = raw_points(pts) if pts else None
+    if raw:
+        fa, fb = pts[-1]
+        if fa != fb:
+            w = 0 if fa > fb else 1
+            loser_points = raw[-1][1 - w]
+            worst_deficit = max([0] + [(b - a) if w == 0 else (a - b) for a, b in raw])
+    return {
+        "won": won,
+        "lost": lost,
+        "own_rounds": getattr(match, f"{me}_rounds_won", None),
+        "opp_rounds": getattr(match, f"{opp}_rounds_won", None),
+        "shots": getattr(match, f"{me}_bullets_fired", None),
+        "hits": getattr(match, f"{me}_bullets_hit", None),
+        "duration_s": duration,
+        "worst_deficit": worst_deficit,
+        "loser_points": loser_points,
+        "cards": frozenset(_norm_card(c) for c in (cards or ()) if c),
+    }
+
+
+def meets_sniper(row) -> bool:
+    shots = row.get("shots") or 0
+    hits = row.get("hits") or 0
+    return bool(row.get("won")) and shots >= 40 and hits * 100 >= 30 * shots
+
+
+def meets_berserker(row) -> bool:
+    return (bool(row.get("won")) and row.get("opp_rounds") == 0
+            and (row.get("own_rounds") or 0) > 0)
+
+
+def meets_blitz(row) -> bool:
+    d = row.get("duration_s")
+    return bool(row.get("won")) and d is not None and 0 < d <= 210
+
+
+def meets_phoenix(row) -> bool:
+    w = row.get("worst_deficit")
+    return bool(row.get("won")) and w is not None and w >= 5
+
+
+def meets_specter(row) -> bool:
+    lp = row.get("loser_points")
+    return bool(row.get("won")) and lp is not None and lp <= 2
+
+
+def holds_family(row, family) -> bool:
+    fam = {_norm_card(c) for c in family}
+    return bool(fam & set(row.get("cards") or ()))
+
+
+_CONDITIONS = {
+    "sniper": meets_sniper, "berserker": meets_berserker, "blitz": meets_blitz,
+    "phoenix": meets_phoenix, "specter": meets_specter,
+}
+
+
+def counted_delta(line: str, row) -> int:
+    """What one claimed game adds to this ladder's count, for every kind but
+    `gold` (needs the ledger) and `streak` (needs the stored run). Pure."""
+    ld = LINES[line]
+    kind = ld["kind"]
+    row = row or {}
+    if kind == "games":
+        return 1
+    if kind == "wins":
+        return 1 if row.get("won") else 0
+    if kind == "losses":
+        return 1 if row.get("lost") else 0
+    if kind == "card":
+        return 1 if holds_family(row, ld["family"]) else 0
+    if kind in _CONDITIONS:
+        return 1 if _CONDITIONS[kind](row) else 0
+    raise ValueError(f"counted_delta does not answer kind {kind!r}")
+
+
+# -- The per-game hook -------------------------------------------------
+
+async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
+                                 reference_id: str, rows=None) -> list:
+    """Credit one completed RANKED GAME to every listed player's worn ladder.
+    Returns one event dict per rung-up (usually none).
 
     WHAT ONE CREDIT IS. One row of `title_ladder_credits`, keyed
-    (player_id, reference_id) -- so the unit of credit is whatever the caller
-    passes as `reference_id`, and for every mode that is the SERIES or sitting,
-    never an individual game inside it. A best-of-three 2v2 series is ONE
-    credit, because both of its completion sites pass the team series id (see
-    below) and the second insert loses the key. That is the intended
-    behaviour, not a limitation: the plan specifies "a 1v1 series, a 2v2
-    series, or an FFA sitting each count 1".
+    (player_id, reference_id), and every caller passes the GAME's id: a 1v1
+    series of two games credits two. The insert is the gate: the counter only
+    moves for the caller that wins it, so a re-reported game, or the same game
+    arriving twice, counts once -- a streak reset included. `mode` is stored
+    but is not part of the key.
 
-    Earlier drafts of this docstring and of migration 331 called the unit a
-    "game" while simultaneously requiring a series id, which cannot both hold.
-    The wording is fixed; the BEHAVIOUR was always what was asked for.
+    `rows` maps str(player_id) -> that player's game row: `won`, `lost`,
+    `gold_refs` (the game id, plus the series id when this game completed a
+    series) and, for 1v1, everything `game_row_1v1` reads. A 2v2 or FFA game
+    claims nothing for a 1v1-only kind (card, playstyle, Apex).
 
-    AND THE THRESHOLDS MATCH IT -- checked, because an earlier version of this
-    paragraph claimed they did not. QUESTIONS.md #8 reads "+1 per completed
-    rated game (1v1 series, 2v2 series, FFA sitting) ... thresholds 10 / 30 /
-    75 / 150 / 300": the parenthetical DEFINES a "game" as a series, in the
-    same settled sentence that sets the numbers. So 300 means 300 series and
-    always did. Do not re-open this with Sid on the strength of the word
-    "game" appearing here -- that question was asked and answered, and a
-    docstring claiming otherwise is how it gets asked twice.
+    WHERE IT IS CALLED. Inside the reporting transaction, after the game row
+    and its gold are written, before the commit, in a savepoint of its own.
+    Its WRITE FOOTPRINT is four tables: `title_ladder_credits`,
+    `title_ladder_progress`, `players.active_title_id` (the auto-equip) and
+    `player_items` (every granted rung goes through `main._grant_title_item`).
 
-    If the unit is ever changed to a real per-game credit, `reference_id` has
-    to become per-game AND the after-the-fact settlement path needs its own
-    dedupe key, or a forfeit-settled series double-credits. The thresholds
-    would need revisiting in that case, since they were set against series.
+    WHAT IT DOES NOT CHECK. It does not know whether the game was ranked. The
+    caller does, and calls only from a ranked game.
 
-    HOW A HOOK AUTHOR CALLS THIS — one line per completion site::
-
-        events = await title_ladders.record_completed_games(
-            db, [p1.id, p2.id], mode="1v1", reference_id=str(series.id))
-
-    Inside the completing transaction, after the result is settled, before the
-    commit. Its WRITE FOOTPRINT is FOUR tables, not the three named after this
-    module: `title_ladder_credits` (the once-per-completion gate),
-    `title_ladder_progress` (the counter and the stored tier),
-    `players.active_title_id` (the auto-equip) AND `player_items` -- every
-    granted rung goes through `main._grant_title_item`, which inserts the
-    ownership row. That fourth one is the write that actually gives the player
-    the title, and an earlier version of this paragraph left it out, which
-    made the footprint read as ladder-local when it reaches the shared
-    inventory table. It takes no lock the caller does not already hold, and
-    returns [] for a player on no ladder — which is almost everyone.
-
-    THERE ARE FOUR CALL SITES ACROSS THREE MODES, NOT ONE PER MODE. 2v2
-    completes in two different places: `submit_team_match` and
-    `_complete_team_series_with_ratings`, which settles a forfeit or a
-    disconnect after the fact and is reached from two callers of its own. A
-    hook that lives only in `submit_team_match` stops counting for every
-    forfeit-settled series, and an "exactly one call per function" check
-    passes while it does. The four sites are `submit_match` (1v1),
-    `submit_team_match` and `_complete_team_series_with_ratings` (2v2), and
-    `submit_ffa_match` (FFA) — all four re-derived by symbol against merged
-    main, none of them by line number.
-
-    1v2 IS DELIBERATELY NOT ONE OF THEM, and this is the one exclusion in the
-    list. `submit_ovt_match` writes `is_ranked` as a literal `false` — not a
-    parameter, a constant — and its own docstring says "NO rating at launch".
-    Crediting it would make the first line of this module ("every COMPLETED
-    RATED SERIES") false, and the plan's enumeration of what counts names
-    1v1, 2v2 and FFA and not 1v2. The exclusion is asserted rather than
-    assumed: `test_ovt_is_excluded_while_it_reports_unrated` reads that
-    literal out of the INSERT and fails the day it stops being `false`, which
-    is the day the question has to be answered properly. Whether a 1v2-only
-    player should advance a ladder they bought is a design question, not this
-    module's to settle.
-
-    WHICH IS WHY DOUBLE-CREDIT IS STRUCTURAL HERE, NOT A CALLER PROMISE. The
-    two 2v2 paths can both run for one series, and a retried report can run a
-    path twice. `title_ladder_credits` has PRIMARY KEY (player_id,
-    reference_id) and the insert is the gate: the increment only happens for
-    the caller that wins that insert. `mode` is stored but is NOT part of the
-    key, deliberately — if it were, the same series arriving under two
-    different mode strings would be credited twice, which is precisely the
-    2v2 shape. **Both 2v2 sites must pass the TEAM SERIES id as
-    reference_id**; passing a per-match id from one and a series id from the
-    other reopens the hole the key exists to close.
-
-    WHAT IT DOES NOT CHECK. It does not know whether the game was rated. The
-    caller does, and must only call from a rated completion. A wrong call is
-    at least auditable after the fact: every credit row carries its mode and
-    reference_id.
+    A FIRST PROGRESS ROW starts at the highest tier of this ladder the player
+    holds (at least the worn rung's), with the count at that tier's
+    threshold: an owner of an existing title that became a higher rung starts
+    there, and no rung at or below one they hold is granted or auto-equipped
+    by a later game.
 
     LOCKING. Players are processed in canonical `str(pid)` order and the only
-    row lock taken is `FOR NO KEY UPDATE` on `players` — the weakest mode that
+    row lock taken is `FOR NO KEY UPDATE` on `players` -- the weakest mode that
     still conflicts with this function's own later write of
-    `active_title_id`, and the mode a plain UPDATE would take anyway, so it
-    enrols no foreign-key insert in the lock graph (#202). That order was
-    chosen to match the completion paths rather than to differ from them:
-    `submit_match` locks its players with `sorted(pids, key=str)` and
-    `FOR NO KEY UPDATE`, and the 2v2 completion helper takes the same sorted
-    pass (#202). `submit_team_match` and `submit_ffa_match` take the same
-    sorted pass over every player they credit before their call (FFA's is the
-    players pass ahead of its placements), so at all four sites this
-    re-locks rather than waits; 1v2 is not hooked. The progress row is an
-    upsert rather than a lock-then-write: it
-    may not exist yet, and a gate on a row that does not exist locks nothing
-    (#203/#207). `games` is only ever moved by a delta (#326).
-
-    `active_title_id` is read INSIDE this transaction under that lock, and the
-    auto-equip only fires when the title still equipped at that moment is a
-    rung of the line being credited — a player who switched to another line
-    mid-series keeps their choice.
+    `active_title_id` (#202). The progress row is an upsert (it may not exist
+    yet, and a gate on a row that does not exist locks nothing, #203/#207).
+    Counts move by a delta (#326); the Apex best run moves by GREATEST over
+    the stored run inside the same statement.
     """
-    # Late import, and it has to stay late: `main` imports THIS module at its
-    # own module level (for GRANTED_ONLY_SKUS), so a module-level
-    # `from main import ...` here would be a genuine import cycle. Deferring
-    # it to call time keeps the cycle out of the import graph and keeps this
-    # module importable on its own, which is how its tests load it.
+    # Late import: `main` imports THIS module at its own module level, so a
+    # module-level `from main import ...` here would be an import cycle.
     from main import _grant_title_item
 
+    rows = {str(k): v for k, v in (rows or {}).items()}
     events = []
     for pid in sorted(player_ids, key=lambda p: str(p)):
         row = (await db.execute(text(
@@ -436,6 +668,11 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
         line = line_of_sku(row[1])
         if line is None:
             continue   # not wearing a ladder rung: nothing to credit
+        ld = LINES[line]
+        kind = ld["kind"]
+        if kind in ONE_V_ONE_KINDS and mode != "1v1":
+            continue   # measured on the 1v1 row only: this game claims nothing
+        game = rows.get(str(pid)) or {}
 
         claimed = (await db.execute(text(
             "INSERT INTO title_ladder_credits (player_id, reference_id, line, mode) "
@@ -444,52 +681,99 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
             "RETURNING 1"
         ), {"pid": pid, "ref": str(reference_id), "line": line, "mode": mode})).first()
         if claimed is None:
-            continue   # this completion already counted for this player
+            continue   # this game already counted for this player
 
-        games, tier_before = (await db.execute(text(
-            "INSERT INTO title_ladder_progress (player_id, line, games, tier) "
-            "VALUES (:pid, :line, 1, 1) "
-            "ON CONFLICT (player_id, line) DO UPDATE "
-            "   SET games = title_ladder_progress.games + 1, updated_at = NOW() "
-            "RETURNING games, tier"
-        ), {"pid": pid, "line": line})).one()
+        # The tier a first progress row starts at: the highest rung of this
+        # ladder the player HOLDS (the read route reports the same number),
+        # never below the one being worn.
+        held = [s for (s,) in (await db.execute(text(
+            "SELECT si.sku FROM player_items pi "
+            "  JOIN shop_items si ON si.id = pi.item_id "
+            " WHERE pi.player_id = :pid AND si.sku = ANY(CAST(:skus AS text[]))"
+        ), {"pid": pid, "skus": [r["sku"] for r in ld["rungs"]]})).all()]
+        worn_tier = max([SKU_TO_RUNG[row[1]]["tier"]]
+                        + [SKU_TO_RUNG[s]["tier"] for s in held if s in SKU_TO_RUNG])
+        base = threshold(line, worn_tier)
 
+        if kind == "streak":
+            if game.get("won"):
+                res = (await db.execute(text(
+                    "INSERT INTO title_ladder_progress (player_id, line, games, tier, streak) "
+                    "VALUES (:pid, :line, GREATEST(CAST(:base AS integer), 1), CAST(:wt AS integer), 1) "
+                    "ON CONFLICT (player_id, line) DO UPDATE "
+                    "   SET streak = title_ladder_progress.streak + 1, "
+                    "       games = GREATEST(title_ladder_progress.games, "
+                    "                        title_ladder_progress.streak + 1), "
+                    "       tier = GREATEST(title_ladder_progress.tier, CAST(:wt AS integer)), "
+                    "       updated_at = NOW() "
+                    "RETURNING games, tier"
+                ), {"pid": pid, "line": line, "base": base, "wt": worn_tier})).one()
+            elif game.get("lost"):
+                await db.execute(text(
+                    "INSERT INTO title_ladder_progress (player_id, line, games, tier, streak) "
+                    "VALUES (:pid, :line, CAST(:base AS integer), CAST(:wt AS integer), 0) "
+                    "ON CONFLICT (player_id, line) DO UPDATE "
+                    "   SET streak = 0, "
+                    "       tier = GREATEST(title_ladder_progress.tier, CAST(:wt AS integer)), "
+                    "       updated_at = NOW()"
+                ), {"pid": pid, "line": line, "base": base, "wt": worn_tier})
+                continue   # a loss never raises the best run
+            else:
+                continue
+        else:
+            if kind == "gold":
+                refs = [str(r) for r in (game.get("gold_refs") or []) if r]
+                delta = 0
+                if refs:
+                    delta = int((await db.execute(text(
+                        "SELECT COALESCE(SUM(amount), 0) FROM gold_transactions "
+                        " WHERE player_id = :pid AND amount > 0 "
+                        "   AND reason = ANY(CAST(:reasons AS text[])) "
+                        "   AND reference_id = ANY(CAST(:refs AS text[]))"
+                    ), {"pid": pid, "reasons": list(PLAY_GOLD_REASONS),
+                        "refs": refs})).scalar() or 0)
+            else:
+                delta = counted_delta(line, game)
+            if delta <= 0:
+                continue   # claimed, counts nothing: the game is spent for this player
+            res = (await db.execute(text(
+                "INSERT INTO title_ladder_progress (player_id, line, games, tier) "
+                "VALUES (:pid, :line, CAST(:base AS integer) + CAST(:d AS integer), CAST(:wt AS integer)) "
+                "ON CONFLICT (player_id, line) DO UPDATE "
+                "   SET games = title_ladder_progress.games + CAST(:d AS integer), "
+                "       tier = GREATEST(title_ladder_progress.tier, CAST(:wt AS integer)), "
+                "       updated_at = NOW() "
+                "RETURNING games, tier"
+            ), {"pid": pid, "line": line, "base": base, "d": delta, "wt": worn_tier})).one()
+
+        games, tier_before = res
         earned = tier_for_games(line, games)
         if earned <= tier_before:
             continue
 
-        # Grant every rung CROSSED, not just the top one. A threshold edit or
-        # a backfilled count can move a player more than one tier in a single
-        # game, and a hole in the middle of a ladder is not repairable by
-        # playing on — the player is already past that threshold for ever.
+        # Grant every rung CROSSED, not just the top one. A hole in the middle
+        # of a ladder is not repairable by playing on -- the player is already
+        # past that threshold for ever.
         granted = []
         reached = tier_before
         for t in range(tier_before + 1, earned + 1):
-            rungs = rungs_at_tier(line, t)
             missing = []
-            for r in rungs:
+            for r in rungs_at_tier(line, t):
                 if await _grant_title_item(db, pid, r["sku"]):
                     granted.append(r["sku"])
                 else:
                     missing.append(r["sku"])
             if missing:
-                # STOP at the last tier the player actually holds. Advancing
-                # past a rung that was not granted is the one move that cannot
-                # be undone by playing on, because the threshold is already
-                # behind them. Leaving `tier` where it is keeps the games
-                # count climbing and makes the NEXT completed game retry the
-                # grant, so a shop row that comes back repairs itself (#276).
+                # STOP at the last tier actually held; the count keeps
+                # climbing and the next credited game retries (#276).
                 print(f"[LADDER] {line} tier {t} NOT granted to {pid}: "
                       f"{missing} absent from shop_items. Holding at tier "
-                      f"{reached}; the next completed game retries.")
+                      f"{reached}; the next credited game retries.")
                 break
             reached = t
 
         if reached == tier_before:
-            # Nothing landed. No tier write, no auto-equip, no event: an event
-            # here would tell the player they had been promoted to a title
-            # they do not own.
-            continue
+            continue   # nothing landed: no tier write, no equip, no event
         earned = reached
 
         await db.execute(text(
@@ -497,14 +781,8 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
             " WHERE player_id = :pid AND line = :line"
         ), {"t": earned, "pid": pid, "line": line})
 
-        # Auto-equip the new top rung. `row[1]` was read under the
-        # FOR NO KEY UPDATE this transaction still holds on that players
-        # row, and it was a rung of `line`, so for as long as that lock
-        # stands this replaces one rung of the player's own line with a
-        # higher one. It is NOT a claim about a player who equips something
-        # else after this transaction commits -- that write is theirs and
-        # wins. Where a tier has two rungs (rat 4), the first listed is the
-        # one worn; the other is owned and equippable from the Shop tab.
+        # Auto-equip the new top rung. `row[1]` was read under the FOR NO KEY
+        # UPDATE this transaction still holds, and it was a rung of `line`.
         top = rungs_at_tier(line, earned)
         equipped_sku = None
         if top:
@@ -518,7 +796,7 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
         events.append({
             "player_id": str(pid),
             "line": line,
-            "line_display": LINES[line]["display"],
+            "line_display": ld["display"],
             "games": games,
             "from_tier": tier_before,
             "to_tier": earned,
@@ -530,49 +808,37 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str, ref
     return events
 
 
-# ── The build word main.py derives from the hook ───────────────────
+# -- The build word main.py derives from the hook ---------------------
 
-# The hook's own name, read off the function rather than typed a second time.
 _HOOK_NAME = record_completed_games.__name__
 
 
 def hooked_site_count(functions) -> int:
     """How many of `functions` load the name record_completed_games in their
-    own compiled code -- the names each function's code object loads, which
-    a call of the hook does and a comment or a docstring naming it does not.
-    main.py binds its /health `ladder_hook` build word to this over the four
-    rated completion functions, and test_title_ladders.py holds main.py to
-    one awaited call of the hook in each of the four and no other reference.
-    The count lives here, beside the hook, so that main.py need not name the
-    hook anywhere else."""
+    own compiled code (a call does; a comment or a docstring does not).
+    main.py binds its /health `ladder_hook` word to this."""
     return sum(1 for fn in functions if _HOOK_NAME in fn.__code__.co_names)
 
 
-# ── The read route ─────────────────────────────────────────────────
+# -- The read route -----------------------------------------------------
 
 @router.get("/api/v1/players/{steam_id}/title-ladders")
 async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
-    """Every ladder line, what this player owns on it, and how far to the next
-    rung. Pure read — no row is written, so it is safe on the read replica.
+    """Every ladder, what this player owns on it, and how far to the next
+    rung. Pure read -- safe on the read replica.
 
-    Unknown steam_id is a 404 rather than an empty board: the client uses this
-    to draw a progress bar for an account it believes exists, and a silent
-    all-zeroes answer would render as "you have made no progress" for what is
-    actually a wrong id.
+    THE ANSWER'S SHAPE IS APPEND-ONLY. The client parses it with depth-aware
+    manual string splitting (ApiClient.ParseTitleLadders); every key an older
+    client reads keeps its name, object and meaning. Appended in the title
+    ladders build: per ladder `group`, `kind`, `unit`, `modes`, `condition`,
+    `streak`; per rung `reached`. `games` is the ladder's count in its own
+    `unit`.
+
+    Unknown steam_id is a 404 rather than an empty board.
     """
-    # One snapshot per request. The answer is built from up to five SELECTs,
-    # and under READ COMMITTED each takes its own snapshot, so a GET racing a
-    # ladder-credit commit could pair the old worn title and ownership with
-    # the new progress. REPEATABLE READ makes every read below see the
-    # snapshot taken at the first SELECT; READ ONLY makes any table write
-    # here an error. PostgreSQL refuses this statement once the transaction
-    # has run a query, so it must stay first; get_db's session has run none.
+    # One snapshot per request: every read below sees the first SELECT's
+    # snapshot, and READ ONLY makes any write here an error. Must stay first.
     await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-    # Late, for the reason record_completed_games gives for its own late
-    # import: `main` imports this module at module level. `owned` asks the
-    # exemption the same function /shop/items and equip ask (#279), so an
-    # exempt account wearing an entry rung it never bought reads it as owned
-    # here too, and a granted-only rung never does.
     from main import _auto_owned
 
     player = (await db.execute(
@@ -595,8 +861,8 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
         )).all()
     }
     progress = {
-        line: (games, tier) for (line, games, tier) in (await db.execute(text(
-            "SELECT line, games, tier FROM title_ladder_progress WHERE player_id = :pid"
+        line: (games, tier, streak) for (line, games, tier, streak) in (await db.execute(text(
+            "SELECT line, games, tier, streak FROM title_ladder_progress WHERE player_id = :pid"
         ), {"pid": player.id})).all()
     }
     active_sku = None
@@ -608,7 +874,16 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
     out = []
     for ld in LADDERS:
         line = ld["line"]
-        games, tier = progress.get(line, (0, 1))
+        # The highest rung the player HOLDS on this ladder: an owner of an
+        # existing title that became a higher rung is at that tier before
+        # the first credited game writes a progress row.
+        held = max([r["tier"] for r in ld["rungs"] if r["sku"] in owned_skus] or [1])
+        if line in progress:
+            games, tier, streak = progress[line]
+            tier = max(tier, held)
+        else:
+            tier = held
+            games, streak = threshold(line, tier), 0
         nxt = next_rung(line, tier)
         out.append({
             "line": line,
@@ -619,7 +894,6 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
             "next_tier": nxt["tier"] if nxt else None,
             "next_threshold": nxt["threshold"] if nxt else None,
             "next_names": nxt["names"] if nxt else [],
-            # Never negative: a player past the top has no next rung at all.
             "games_to_next": max(0, nxt["threshold"] - games) if nxt else None,
             "rungs": [{
                 "tier": r["tier"],
@@ -633,6 +907,15 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
                 "price": r["price"],
                 "owned": r["sku"] in owned_skus or _auto_owned(steam_id, r["sku"]),
                 "active": r["sku"] == active_sku,
+                # appended (title ladders build)
+                "reached": r["tier"] <= tier,
             } for r in ld["rungs"]],
+            # appended (title ladders build)
+            "group": ld["group"],
+            "kind": ld["kind"],
+            "unit": ld["unit"],
+            "modes": ld["modes"],
+            "condition": ld["condition"],
+            "streak": streak if ld["kind"] == "streak" else None,
         })
     return {"steam_id": steam_id, "active_line": line_of_sku(active_sku), "ladders": out}
