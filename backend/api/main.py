@@ -15950,8 +15950,15 @@ FORMATION_MAX_ATTEMPTS = 3
 FORMATION_LOCK_TIMEOUT_MS = 2500
 
 
-async def _identity_lock_many(db: AsyncSession, steam_ids) -> list:
+async def _identity_lock_many(db: AsyncSession, steam_ids, *,
+                              timeout_ms: int | None = None) -> list:
     """Take the per-identity advisory lock for EVERY sid, in ONE canonical order.
+
+    `timeout_ms` bounds the wait instead of FORMATION_LOCK_TIMEOUT_MS, for a
+    caller whose transaction carries a tighter budget of its own (the FFA
+    assembly routes' ASM_TXN_DEADLINE_S, _asm_identity_phase). It changes the
+    bound only: the keys, the order, the release-on-timeout and the 503 are
+    the same for every caller.
 
     LOCK-ONLY, on purpose. _enrollment_identity_gate performs the same
     acquisition and then reads ban + deletion-tombstone state and RAISES, which
@@ -15982,6 +15989,7 @@ async def _identity_lock_many(db: AsyncSession, steam_ids) -> list:
     cannot fail -- #441).
     """
     ordered = sorted({s for s in steam_ids if s}, key=_ffa_sort_key)
+    _wait_ms = int(timeout_ms) if timeout_ms is not None else FORMATION_LOCK_TIMEOUT_MS
     # Bound the WAIT, not just the retry count (self-review finding 2). The
     # SET and the handler below have deliberately IDENTICAL extent: armed
     # for the barrier, disarmed the moment it is crossed, so there is no
@@ -15995,9 +16003,10 @@ async def _identity_lock_many(db: AsyncSession, steam_ids) -> list:
     # are about to lock; what is still ahead of us is short unordered
     # traffic — match completion, leave, admin — not another matchmaker.
     # Interpolated rather than bound because SET takes no bind parameters;
-    # the value is a module constant, never a request input.
+    # the value is an int() the server computed (the module constant, or a
+    # caller's own remaining budget), never a request input.
     await db.execute(text(
-        f"SET LOCAL lock_timeout = '{FORMATION_LOCK_TIMEOUT_MS}ms'"))
+        f"SET LOCAL lock_timeout = '{max(1, _wait_ms)}ms'"))
     try:
         for sid in ordered:
             await db.execute(
@@ -16013,7 +16022,7 @@ async def _identity_lock_many(db: AsyncSession, steam_ids) -> list:
         # dependency closes. The transaction is in a failed state anyway.
         await db.rollback()
         print(f"[LOCK] identity barrier timed out after "
-              f"{FORMATION_LOCK_TIMEOUT_MS}ms over {len(ordered)} identities")
+              f"{max(1, _wait_ms)}ms over {len(ordered)} identities")
         # The same answer these paths already give when contended out, and
         # for the same reason: somebody else holds the identity, come back
         # next poll. The client branches on the 503, not on the detail.
@@ -56398,6 +56407,11 @@ class _AsmCtx:
         self.prints = []
         self.refund_flush = False
         self.decided = None
+        # The trigger of a REFORM the verdict reached but could not take here,
+        # because this transaction does not hold the identity barrier of every
+        # seat it would carry (_asm_reform). Nothing of that reform was written;
+        # the caller retries it from discovery (_asm_run, _asm_reform_formation).
+        self.reform_due = None
 
     def log(self, msg: str) -> None:
         self.prints.append(f"[FFA-ASM] lobby {_asm_id8(self.lid)} {msg}")
@@ -56439,6 +56453,137 @@ async def _asm_ctx_slot(db, lobby_id, *, route, trigger, t0=None):
     ctx.now, ctx.mono = await _asm_clock(db)
     await ctx.reload()
     return ctx
+
+
+# -- A1 for the REFORM: the carried seats' identity barrier (merge pass 4, fix
+# round 2). A REFORM writes a lease for L' over every carried seat
+# (_ffa_lock_roster -> _lease_acquire, which supersedes whatever lease the seat
+# holds), so it is a formation like any other and must hold the identity of
+# every seat it carries before it reads their leases: the A1 order identity ->
+# lobby row -> queue rows -> lease. The verdict that decides a REFORM runs
+# under the lobby row, where no identity may be taken, so the barrier is taken
+# BEFORE the lobby row by the entries that can reach it (_asm_run's connect
+# and assembly, _asm_reform_formation for the poll and the leave), and
+# _asm_reform checks what is actually held (_asm_identities_held) instead of
+# trusting the route.
+
+def _asm_may_reform(lob) -> bool:
+    """A lobby the verdict can still RE-FORM, read from a lobby row (locked or
+    not): the verdict's own vetoes on the row, and Table 2 (a fallback lobby,
+    not an admission one). Used to skip the barrier where no REFORM can be
+    decided; a lobby that becomes one after this read is caught by
+    _asm_reform's held check and retried from discovery."""
+    return (lob is not None and FFA_ASSEMBLY_ENABLED and bool(lob.get("assembly_v1"))
+            and not bool(lob.get("admission_v1")) and lob.get("status") == "active"
+            and int(lob.get("games_played") or 0) == 0
+            and lob.get("start_granted_at") is None)
+
+
+async def _asm_identity_phase(db, lobby_id, *, t0=None) -> list:
+    """A1's unlocked discovery and identity barrier (its phase 3) for a
+    transaction that may RE-FORM lobby_id, run before its lobby row and queue
+    rows are locked: an unlocked read of the
+    lobby; when it can still re-form, an unlocked discovery of every seat's
+    and every queue row's steam id (a superset of any carried set), then the
+    identity barrier over them (_identity_lock_many: its keys, its order).
+    Returns the identities locked ([] when the lobby cannot re-form).
+
+    t0 given (the assembly routes): the wait is bounded by what is left of
+    ASM_TXN_DEADLINE_S, and a wait that runs out raises _AsmDeadline
+    ('identity'), the routes' 503 asm_deadline. The caller re-arms the
+    deadline's timeouts afterwards (_identity_lock_many resets lock_timeout)."""
+    lob = (await db.execute(text(
+        "SELECT status, assembly_v1, admission_v1, games_played, start_granted_at"
+        "  FROM ffa_lobbies WHERE id = :lid"), {"lid": lobby_id})).mappings().first()
+    if not _asm_may_reform(dict(lob) if lob is not None else None):
+        return []
+    sids = (await db.execute(text(
+        "SELECT p.steam_id FROM ffa_assembly_seats s JOIN players p ON p.id = s.player_id"
+        " WHERE s.lobby_id = :lid"
+        " UNION SELECT steam_id FROM ffa_queue WHERE series_id = :lid"),
+        {"lid": lobby_id})).scalars().all()
+    wait = None
+    if t0 is not None:
+        wait = ASM_TXN_DEADLINE_S * 1000 - _asm_elapsed_ms(t0) - ASM_LOCK_MARGIN_MS
+        if wait < 1:
+            raise _AsmDeadline("identity")
+    try:
+        return await _identity_lock_many(db, sids, timeout_ms=wait)
+    except HTTPException as exc:
+        # _identity_lock_many rolled back and answers 503 on a wait that ran
+        # out; the assembly routes answer that as their own deadline.
+        if t0 is not None and exc.status_code == 503:
+            raise _AsmDeadline("identity")
+        raise
+
+
+async def _asm_identities_held(db, steam_ids) -> set:
+    """The steam ids, of those given, whose identity barrier THIS transaction
+    holds: a granted advisory lock of this backend in pg_locks whose 64-bit key
+    (classid high, objid low; objsubid 1 for a one-bigint key) equals
+    hashtext(steam_id), the key _identity_lock_many and
+    _enrollment_identity_gate take. Read from the server, so it answers for
+    the transaction as it is, whichever route led here."""
+    sids = sorted({s for s in steam_ids if s})
+    if not sids:
+        return set()
+    rows = (await db.execute(text(
+        "SELECT s.sid FROM unnest(CAST(:sids AS text[])) AS s(sid)"
+        " WHERE EXISTS (SELECT 1 FROM pg_locks l"
+        "                WHERE l.locktype = 'advisory' AND l.granted"
+        "                  AND l.pid = pg_backend_pid() AND l.objsubid = 1"
+        "                  AND ((CAST(l.classid AS bigint) << 32) | CAST(l.objid AS bigint))"
+        "                      = CAST(hashtext(s.sid) AS bigint))"),
+        {"sids": sids})).scalars().all()
+    return set(rows)
+
+
+async def _asm_reform_formation(db, lobby_id, trigger):
+    """A REFORM the verdict reached in a transaction that did not hold the
+    carried identities (the leave; a poll whose group did not cover a carried
+    seat), taken again as a formation of its own. Called after that
+    transaction's COMMIT, holding nothing: discovery and the barrier
+    (_asm_identity_phase), the lobby row (_asm_ctx_slot), the lobby's queue
+    rows in UUID order, then the verdict under them with the same trigger.
+    When the carried set moved past the barrier (ctx.reform_due again) it
+    rolls back and rediscovers, at most FORMATION_MAX_ATTEMPTS times.
+    Returns the decision taken, or None: the bound reached, a lobby that no
+    longer re-forms, or any error, each rolled back and printed, the lobby
+    left as it was for its next trigger."""
+    try:
+        for attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+            held = await _asm_identity_phase(db, lobby_id)
+            if not held:
+                await _asm_rollback(db)
+                return None
+            ctx = await _asm_ctx_slot(db, lobby_id, route=trigger, trigger=trigger)
+            qids = (await db.execute(text(
+                "SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
+                {"lid": lobby_id})).scalars().all()
+            await _lock_queue_rows_ordered(db, "ffa_queue", qids)
+            await ctx.reload()
+            await _ffa_assembly_verdict(ctx, trigger)
+            if ctx.reform_due is None:
+                await db.commit()
+                ctx.emit()
+                if ctx.refund_flush:
+                    try:
+                        await _flush_lobby_bet_refunds(db, "ffa", lobby_id)
+                    except Exception as _fx:
+                        print(f"[LOBBY-BETS] post-dissolve refund flush failed for ffa lobby "
+                              f"{lobby_id}: {_fx}")
+                return ctx.decided
+            await _asm_rollback(db)
+            print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform identities moved; "
+                  f"retry {attempt}/{FORMATION_MAX_ATTEMPTS} trigger={trigger}")
+        print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform deferred after "
+              f"{FORMATION_MAX_ATTEMPTS} attempts trigger={trigger}")
+        return None
+    except Exception as exc:
+        await _asm_rollback(db)
+        print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform formation failed "
+              f"trigger={trigger}: {type(exc).__name__}")
+        return None
 
 
 def _asm_nonfinal(s) -> bool:
@@ -57051,6 +57196,10 @@ async def _asm_apply_decision(ctx, outcome, rule, cls, trigger):
         done = await _asm_start_short(ctx, rule, cls)
     elif outcome == "reform":
         done = await _asm_reform(ctx, rule, cls, trigger)
+        if done is None:
+            # The carried identities are not held here: no decision is taken
+            # in this transaction (ctx.reform_due; the caller retries).
+            return None
         if not done:
             outcome = "dissolve"
             done = await _asm_dissolve(ctx, rule, cls, trigger)
@@ -57107,32 +57256,57 @@ async def _asm_start_short(ctx, rule, cls) -> bool:
     return True
 
 
-async def _asm_reform(ctx, rule, cls, trigger) -> bool:
+async def _asm_reform(ctx, rule, cls, trigger):
     """REFORM (Table 2, fallback, |READY| >= 3; sec3.4 steps 1-7). The new
     row L' is one explicit-column INSERT in the pre-lock state: every one of
     the 46 columns by class (COPY 10, COPY-AND 2, FRESH 14, RESET 20), never
-    a schema default (is_ranked defaults to TRUE; N12)."""
+    a schema default (is_ranked defaults to TRUE; N12). Returns True when
+    re-formed, False when too few seats carry (the caller dissolves), None
+    when this transaction does not hold every carried identity (nothing
+    written; ctx.reform_due names the trigger for the caller's retry)."""
     old = ctx.lid
     lob = ctx.lobby
     k_seats = sorted((p for p in ctx.seats if cls.get(p["player_id"]) in ("READY", "SPAWNING")),
                      key=lambda p: p["slot"])
     x_seats = [p for p in ctx.seats if cls.get(p["player_id"]) == "PENDING"]
-    # A1 (v1.41.0 merge pass 4 (c)): the carry gives each carried seat a lease
-    # for L' through _ffa_lock_roster, whose acquisition supersedes whatever
-    # lease the seat holds. A1 lets a formation supersede only its own
-    # predecessor, so a carried seat must hold ("ffa", L) or no live lease; a
-    # seat committed elsewhere is not carried and is released from L like a
-    # PENDING seat (its lease for the other commitment is not touched).
+    # A1 (merge pass 4 fix round 2): the carry is a formation, so this
+    # transaction must hold the identity barrier of every seat it would carry
+    # before it reads their leases, and it must have taken it before the lobby
+    # row (the callers' order; see _asm_identity_phase). Checked against
+    # pg_locks rather than assumed: a seat whose identity is not held is a
+    # carried set that moved past the caller's discovery, so nothing is
+    # written here and the caller rediscovers.
+    _held = await _asm_identities_held(ctx.db, [p["seat_steam_id"] for p in k_seats])
+    _unheld = [p for p in k_seats if p["seat_steam_id"] not in _held]
+    if _unheld:
+        ctx.reform_due = trigger
+        ctx.log(f"reform deferred: {len(_unheld)} of {len(k_seats)} carried identities not held "
+                f"t=+{ctx.t_ms()} rule={rule}")
+        return None
+    # Under that barrier, the revalidation (merge pass 4 (c) fu8, then fix
+    # round 2). The carry gives each carried seat a lease for L' through
+    # _ffa_lock_roster, whose acquisition supersedes whatever lease the seat
+    # holds, and A1 lets a formation supersede only its own predecessor: a
+    # carried seat must hold ("ffa", L) or no live lease. A seat whose release
+    # marker is set (its release pre-step committed before this barrier) has
+    # left L and is not carried either. A seat refused here is released from L
+    # like a PENDING seat; _asm_release_row is fenced to L, so its lease and
+    # roster for any other commitment are not touched.
     _carry_from = ("ffa", uuid.UUID(str(old)))
-    refused = []
+    refused, released = [], []
     for p in k_seats:
-        if await _formation_lease_conflict(ctx.db, [(p["seat_steam_id"], p["player_id"])],
-                                           allow=_carry_from) is not None:
+        if p["released_at"] is not None:
+            released.append(p)
+        elif await _formation_lease_conflict(ctx.db, [(p["seat_steam_id"], p["player_id"])],
+                                             allow=_carry_from) is not None:
             refused.append(p)
+    if released:
+        ctx.log(f"carry released={len(released)} release marker set")
     if refused:
-        k_seats = [p for p in k_seats if p not in refused]
-        x_seats = x_seats + refused
         ctx.log(f"carry refused={len(refused)} committed elsewhere")
+    if released or refused:
+        k_seats = [p for p in k_seats if p not in refused and p not in released]
+        x_seats = x_seats + released + refused
     k_ids = [p["player_id"] for p in k_seats]
     if len(k_ids) < FFA_MIN_PLAYERS:
         # Too few seats to carry: the caller dissolves instead (Table 2's
@@ -57505,18 +57679,19 @@ def _asm_elapsed_ms(t0) -> int:
     return int((time.monotonic() - t0) * 1000)
 
 
-async def _asm_begin(db, t0) -> None:
+async def _asm_begin(db, t0, *, stage="pool") -> None:
     """Pool checkout, then what is left of ASM_TXN_DEADLINE_S becomes this
     transaction's lock_timeout and statement_timeout (set_config's is_local).
     A checkout that fails, or one that leaves under ASM_DEADLINE_FLOOR_MS, is
-    stage=pool."""
+    stage=pool; `stage` names the step for a re-arm after one (the identity
+    barrier re-arms with stage=identity)."""
     try:
         await db.connection()
     except Exception:
-        raise _AsmDeadline("pool")
+        raise _AsmDeadline(stage)
     left = ASM_TXN_DEADLINE_S * 1000 - _asm_elapsed_ms(t0)
     if left < ASM_DEADLINE_FLOOR_MS:
-        raise _AsmDeadline("pool")
+        raise _AsmDeadline(stage)
     await db.execute(text(
         "SELECT set_config('lock_timeout', CAST(:lv AS text), true),"
         "       set_config('statement_timeout', CAST(:v AS text), true)"),
@@ -57583,17 +57758,38 @@ async def _asm_run(route, lobby_id, steam_id, request, db, work, req, *, pre=Non
     once its pre-step commits and survives any later answer (M1); the connect
     and assembly routes have no pre-step, so theirs leave no write. Nothing
     bounds the COMMIT itself (R39); a total over ASM_SLOW_COMMIT_MS is
-    printed."""
+    printed.
+
+    The connect and assembly routes can reach a REFORM, a formation, so each
+    attempt takes the identity barrier of the lobby's seats before the locks
+    (_asm_identity_phase; A1's identity -> lobby row -> queue rows). When the
+    REFORM finds a carried identity it does not hold (ctx.reform_due: the set
+    moved past discovery), the attempt rolls back and rediscovers; the last
+    of FORMATION_MAX_ATTEMPTS commits the route's own writes without the
+    REFORM, which the lobby's next trigger decides again. The release route
+    runs no verdict and takes no barrier."""
     t0 = time.monotonic()
     pre_ms = 0
     try:
-        await _asm_begin(db, t0)
-        await _check_steam_session(request, steam_id, db)
-        if pre is not None:
-            await pre(db, t0)
-        ctx, pid = await _asm_lock(db, lobby_id, steam_id, route=route, t0=t0,
-                                   cap=(route != "release"), expire=(route != "release"))
-        plan = await work(ctx, pid, req)
+        for attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+            await _asm_begin(db, t0)
+            await _check_steam_session(request, steam_id, db)
+            if pre is not None:
+                await pre(db, t0)
+            if route != "release":
+                if await _asm_identity_phase(db, lobby_id, t0=t0):
+                    await _asm_begin(db, t0, stage="identity")
+            ctx, pid = await _asm_lock(db, lobby_id, steam_id, route=route, t0=t0,
+                                       cap=(route != "release"), expire=(route != "release"))
+            plan = await work(ctx, pid, req)
+            if ctx.reform_due is None:
+                break
+            if attempt == FORMATION_MAX_ATTEMPTS:
+                ctx.log(f"reform deferred after {attempt} attempts trigger={ctx.reform_due}")
+                break
+            await _asm_rollback(db)
+            print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform identities moved; "
+                  f"retry {attempt}/{FORMATION_MAX_ATTEMPTS} route={route}")
         pre_ms = _asm_elapsed_ms(t0)
         if pre_ms > ASM_TXN_DEADLINE_S * 1000:
             raise _AsmDeadline("precommit")
@@ -58204,8 +58400,12 @@ async def _asm_leave_finish(db, plan, dissolved) -> None:
 
 
 async def _asm_leave_after(db, plan) -> None:
-    """After the leave's COMMIT: the prints, and the refund flush of a DISSOLVE
-    the verdict took."""
+    """After the leave's COMMIT: the prints, the refund flush of a DISSOLVE
+    the verdict took, and a REFORM the verdict reached. The leave's group
+    lock takes no identity barrier, so a REFORM its verdict reaches finds the
+    carried identities not held and is deferred (ctx.reform_due); it is taken
+    here as its own formation, holding nothing when it starts
+    (_asm_reform_formation)."""
     plan.ctx.emit()
     if plan.ctx.refund_flush:
         try:
@@ -58213,6 +58413,8 @@ async def _asm_leave_after(db, plan) -> None:
         except Exception as _fx:
             print(f"[LOBBY-BETS] post-dissolve refund flush failed for ffa lobby "
                   f"{plan.ctx.lid}: {_fx}")
+    if plan.ctx.reform_due is not None:
+        await _asm_reform_formation(db, plan.ctx.lid, plan.ctx.reform_due)
 
 
 async def _asm_rowless_gate(db, expected_lobby_id, steam_id, cause, label):
@@ -58301,6 +58503,15 @@ async def _asm_poll_step(db, me, steam_id):
     mine = ctx.seat_of(pid)
     if mine is not None and _asm_state_of(ctx.lobby, mine) == "A":
         await _ffa_assembly_verdict(ctx, "poll")
+    if ctx.reform_due is not None:
+        # The poll's group lock took the barrier over the lobby's queue rows
+        # (_lock_group_snapshot), which covers every seat a REFORM can carry
+        # in the ordinary case. When it did not cover one, this poll's own
+        # writes commit here and the REFORM is taken as its own formation;
+        # the answer below is read after it.
+        await db.commit()
+        ctx.emit()
+        await _asm_reform_formation(db, lid, ctx.reform_due)
     row = (await db.execute(text(
         "SELECT status, series_id FROM ffa_queue WHERE player_id = :pid"),
         {"pid": pid})).mappings().first()

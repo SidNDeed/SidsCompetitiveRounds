@@ -345,6 +345,214 @@ def test_s12c_the_reform_carries_only_seats_it_may_lease(monkeypatch):
     run_env(monkeypatch, body)
 
 
+# -- Merge pass 4 fix round 2 (H1): the REFORM's carry behind the identity
+# barrier. A formation of another mode is the 2v2 lobby create: it takes the
+# player's identity (_enrollment_identity_gate), refuses a live lease of
+# another mode, and writes its own roster (a team_lobbies row the player
+# hosts, its team_queue row) and its own lease.
+
+async def _team_create(env, sid):
+    """The 2v2 lobby create for `sid`, in its own session."""
+    req = main._LobbyCreateReq(steam_id=sid, display_name="cf cross")
+
+    async def go():
+        async with env.sm() as db:
+            return await main._lobby_create_impl("team", req, cf_asm.FakeRequest(), db)
+    return await env._call(go)
+
+
+async def _team_side(env, pid):
+    """The player's 2v2 roster rows and lease, as committed: (lobby, queue row, lease)."""
+    lob = await env.conn.fetchrow(
+        "SELECT id, status, host_player_id FROM team_lobbies WHERE host_player_id = $1", pid)
+    q = await env.conn.fetchrow(
+        "SELECT status, series_id FROM team_queue WHERE player_id = $1", pid)
+    lease = await env.conn.fetchrow(
+        "SELECT mode, group_id, generation, expires_at FROM queue_leases WHERE player_id = $1", pid)
+    return (dict(lob) if lob else None, dict(q) if q else None, dict(lease) if lease else None)
+
+
+async def _formations_holding(env, lob, slot):
+    """Which formations hold the seat's player, as committed: 'ffa:<L'>' when a
+    lobby re-formed from L names the player in its roster, 'team:<id>' when a
+    2v2 lobby the player hosts is open; and the player's one lease."""
+    pid = lob.pids[slot]
+    out = []
+    for r in await env.conn.fetch(
+            "SELECT id FROM ffa_lobbies WHERE reformed_from = $1 AND $2 = ANY(member_ids)",
+            lob.lid, pid):
+        out.append("ffa:%s" % r["id"])
+    for r in await env.conn.fetch(
+            "SELECT id FROM team_lobbies WHERE host_player_id = $1 AND status = 'open'", pid):
+        out.append("team:%s" % r["id"])
+    lease = await env.lease(lob, slot)
+    return out, lease
+
+
+def _pause_the_carry(env):
+    """Pause the first REFORM inside _ffa_lock_roster: after its discovery, its
+    identity barrier, its revalidation, L''s INSERT and the queue rows' move,
+    before any lease is written. box["pid"] is the paused backend."""
+    orig = main._ffa_lock_roster
+    paused, go, box = asyncio.Event(), asyncio.Event(), {}
+
+    async def hooked(db, lobby_id, rows, **kw):
+        if kw.get("reform_of") is not None and "pid" not in box:
+            box["pid"] = (await db.execute(main.text("SELECT pg_backend_pid()"))).scalar()
+            paused.set()
+            await asyncio.wait_for(go.wait(), 20)
+        return await orig(db, lobby_id, rows, **kw)
+    env.mp.setattr(main, "_ffa_lock_roster", hooked)
+    return paused, go, box
+
+
+async def _done_or_waiting(task, bpid, env, tries=150):
+    """Bounded: until the task is done or a backend waits on bpid's locks.
+    Returns 'done', 'waiting' or 'neither'."""
+    for _ in range(tries):
+        if task.done():
+            return "done"
+        n = await env.conn.fetchval(
+            "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", bpid)
+        if n:
+            return "waiting"
+        await asyncio.sleep(0.02)
+    return "done" if task.done() else "neither"
+
+
+def test_s12d_release_and_cross_mode_race_the_paused_carry(monkeypatch):
+    """H1, first ordering. The REFORM of L (assembly POST, rule B) is paused
+    after its discovery, barrier and revalidation, before its leases. Carried
+    seat 1's release then commits its pre-step (marker set, its ("ffa", L)
+    lease deleted) and a 2v2 lobby create for the same player starts. The
+    create waits on the player's identity instead of forming; the carry
+    resumes and commits; the create then answers 409 and writes nothing. One
+    formation holds the player (L', with L''s lease); every wait is bounded."""
+    async def body(env):
+        lob = await env.lobby(5, t=40.0)
+        paused, go, box = _pause_the_carry(env)
+        reform = asyncio.ensure_future(_post(env, lob, 0, [0, 1, 2, 3]))
+        try:
+            await asyncio.wait_for(paused.wait(), 20)
+            release = asyncio.ensure_future(env.release(lob, 1, "fence_expired"))
+            for _ in range(250):
+                if (await env.seat(lob, 1))["released_at"] is not None:
+                    break
+                await asyncio.sleep(0.02)
+            assert (await env.seat(lob, 1))["released_at"] is not None, \
+                "S12d the release pre-step committed while the carry was paused"
+            assert await env.lease(lob, 1) is None, "S12d the pre-step deleted the L lease"
+            cross = asyncio.ensure_future(_team_create(env, lob.sids[1]))
+            state = await _done_or_waiting(cross, box["pid"], env)
+        finally:
+            go.set()
+        a = await asyncio.wait_for(reform, 30)
+        c = await asyncio.wait_for(cross, 30)
+        r = await asyncio.wait_for(release, 30)
+        held, lease = await _formations_holding(env, lob, 1)
+        assert len(held) == 1, ("S12d one formation holds the player", held, lease, a, c)
+        assert a["status"] == "reformed", ("S12d reformed", a)
+        new = (await env.lobby_row(lob))["reformed_to"]
+        assert held == ["ffa:%s" % new] and lease is not None and lease["mode"] == "ffa" \
+            and lease["group_id"] == new, ("S12d the player is in L' with its lease", held, lease)
+        assert state == "waiting", ("S12d the cross-mode formation waited on the identity", state, c)
+        assert c.status == 409, ("S12d the cross-mode formation refused", c)
+        assert (await _team_side(env, lob.pids[1]))[:2] == (None, None), "S12d no 2v2 rows"
+        assert r.status in (200, 503), ("S12d the release answered", r)
+    run_env(monkeypatch, body)
+
+
+def test_s12e_a_formation_committed_before_discovery_is_left_whole(monkeypatch):
+    """H1, second ordering. (i) Seat 1's release pre-step commits and a 2v2
+    lobby create for the same player commits before the REFORM's discovery.
+    The REFORM's revalidation, under the barrier, does not carry seat 1: L'
+    forms from the other three, and the 2v2 lobby, queue row and lease are
+    byte-for-byte as the create left them. (ii) The pre-step alone (no other
+    formation): the released seat is not carried and holds no lease."""
+    async def body(env):
+        for case in ("i", "ii"):
+            lob = await env.lobby(5, t=40.0)
+            held = {"lease": 0, "mark": "kept"}
+            async with env.sm() as db:
+                await main._asm_release_pre(lob.sids[1], lob.lid, "fence_expired", held)(
+                    db, main.time.monotonic())
+            assert (await env.seat(lob, 1))["released_at"] is not None, ("S12e pre-step", case)
+            before = None
+            if case == "i":
+                c = await _team_create(env, lob.sids[1])
+                assert c.status == 200, ("S12e i the 2v2 create formed", c)
+                before = await _team_side(env, lob.pids[1])
+                assert before[0] is not None and before[2]["mode"] == "team", ("S12e i 2v2", before)
+            a = await _post(env, lob, 0, [0, 1, 2, 3])
+            assert a["status"] == "reformed", ("S12e reformed", case, a)
+            new = (await env.lobby_row(lob))["reformed_to"]
+            members = (await env.lobby_row(new))["member_ids"]
+            assert lob.pids[1] not in members and len(members) == 3, \
+                ("S12e the released seat is not carried", case, members)
+            assert (await env.seat(lob, 1))["verdict"] == "excluded", ("S12e excluded", case)
+            if case == "i":
+                assert await _team_side(env, lob.pids[1]) == before, \
+                    ("S12e i the other formation untouched", before)
+            else:
+                assert await env.lease(lob, 1) is None, ("S12e ii no lease", await env.lease(lob, 1))
+    run_env(monkeypatch, body)
+
+
+def test_s12f_the_reform_retry_bound_and_the_held_check(monkeypatch):
+    """H1, the bound. (i) The identity check reads pg_locks: a locked steam id
+    is held and an unlocked one is not, for keys of both signs. (ii) While the
+    barrier misses one carried seat on every attempt, the assembly POST
+    retries from discovery FORMATION_MAX_ATTEMPTS times, then commits its own
+    writes without the REFORM: 200 'assembling', L active, no L', every lease
+    still ("ffa", L). (iii) The next POST with the barrier whole re-forms."""
+    async def body(env):
+        lob = await env.lobby(5, t=40.0)
+        signs = {}
+        for i in range(200):
+            s = "cf-held-%d" % i
+            h = await env.conn.fetchval("SELECT hashtext($1)", s)
+            signs.setdefault(h < 0, s)
+            if len(signs) == 2:
+                break
+        neg, pos = signs[True], signs[False]
+        async with env.sm() as db:
+            await main._identity_lock_many(db, [neg])
+            assert await main._asm_identities_held(db, [neg, pos]) == {neg}, "S12f i negative key"
+            await main._identity_lock_many(db, [pos])
+            assert await main._asm_identities_held(db, [neg, pos]) == {neg, pos}, "S12f i both"
+            await db.rollback()
+            assert await main._asm_identities_held(db, [neg, pos]) == set(), "S12f i released"
+
+        orig = main._identity_lock_many
+        box = {"short": True}
+
+        async def short(db, sids, **kw):
+            if box["short"]:
+                sids = [s for s in sids if s != lob.sids[2]]
+            return await orig(db, sids, **kw)
+        env.mp.setattr(main, "_identity_lock_many", short)
+        start = len(env.lines)
+        a = await _post(env, lob, 0, [0, 1, 2, 3])
+        lines = env.lines[start:]
+        row = await env.lobby_row(lob)
+        assert a.status == 200 and a["status"] == "assembling" and row["status"] == "active" \
+            and row["reformed_to"] is None, ("S12f ii deferred", a, row["status"])
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_lobbies WHERE reformed_from = $1", lob.lid) == 0, "S12f ii no L'"
+        retries = [ln for ln in lines if "reform identities moved; retry" in ln]
+        assert len(retries) == main.FORMATION_MAX_ATTEMPTS - 1, ("S12f ii retries", retries)
+        assert any("reform deferred after %d attempts" % main.FORMATION_MAX_ATTEMPTS in ln
+                   for ln in lines), ("S12f ii bound line", lines)
+        for s in range(5):
+            lease = await env.lease(lob, s)
+            assert lease is not None and (lease["mode"], lease["group_id"]) == ("ffa", lob.lid), \
+                ("S12f ii leases untouched", s, lease)
+        box["short"] = False
+        a = await _post(env, lob, 0, [0, 1, 2, 3])
+        assert a["status"] == "reformed", ("S12f iii the next trigger re-forms", a)
+    run_env(monkeypatch, body)
+
+
 def test_s18_rule_d_and_d0(monkeypatch):
     """S18: a leave at 8 decides nothing (and a POST at 8 still answers
     assembling); at 20 rule D starts short (admission) or re-forms
@@ -1261,6 +1469,10 @@ def test_s21_grant_and_verdict_exclude_each_other(monkeypatch):
             sess = env.sm()
             db = await sess.__aenter__()
             try:
+                # Merge pass 4 fix round 2 (H1): A takes the lobby's identity
+                # barrier before its lobby row, the order every REFORM entry
+                # takes (_asm_identity_phase), or its REFORM defers.
+                await main._asm_identity_phase(db, lob.lid)
                 ctx = await main._asm_ctx_slot(db, lob.lid, route="assembly", trigger="assembly")
                 apid = (await db.execute(main.text("SELECT pg_backend_pid()"))).scalar()
                 if own:
