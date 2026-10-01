@@ -8881,8 +8881,14 @@ _PC_OPEN_REPLAY_PAUSE_S = (2.0, 5.0)   # the pause before each replay
 # or shows the pack it bought (round 3, item 2). "revealing": true (round 4,
 # LOW 1) is written, under the journal lock, immediately BEFORE the reveal's
 # send: a send can reach Discord and still fail or never return, so an entry
-# carrying it is never revealed again - the next /buypack sends the short
-# pointer at /pack once and takes the entry out.
+# carrying it is never revealed again - the next /buypack, once the api has
+# answered for the journaled player (round 5, LOW 1), sends the short
+# pointer at /pack and takes the entry out once that send has returned. The
+# pointer is a notification (no gold, no holding, no reveal moves with it),
+# and a pointer that became visible before its send returned cannot be told
+# from one that never arrived, so it is sent at least once and may repeat
+# (round 5, LOW 2): one reveal at most; the pointer may repeat after a failed
+# acknowledgement; never a second debit, never a second reveal.
 _PC_BUY_PENDING_FILE = "/opt/bot-state/pc_buy_pending.json"
 _PC_BUY_UNCONFIRMED = ("Your purchase is still being confirmed. `/pack` shows the pack once it has gone through,"
                        " and your next `/buypack` completes this same purchase instead of buying another.")
@@ -9208,9 +9214,10 @@ async def _pc_buy_bound(ctx, me, entry):
     settled entry is sent or forgotten: one read of the bought pack naming
     entry["player"] (the reveal's own step-1 read, round 4 LOW 2). Returns
     (answer, status, body): "bound" when the api answered past its player
-    check (main.py internal_pc_packs refuses a changed player 412 before it
-    reads anything, so a 200, or the route's own 404 for a pack it no longer
-    lists, was answered for the journaled player); "rebound" on 412
+    check (main.py internal_pc_packs resolves the Discord id's player and
+    refuses a changed one 412 before it reads any pack, so a 200, or the
+    route's own 404 "Not found" for a pack it does not list, was answered
+    for the journaled player); "rebound" on 412
     player_changed; "unconfirmed" on anything else - no answer, 5xx, the
     renderer gate, pacing, an unlinked or deleted account - since then the
     player the Discord id resolves to now is not known."""
@@ -9249,11 +9256,20 @@ async def _pc_buy_deliver(ctx, me, entry, earlier):
     first. Immediately before the reveal's send the entry is marked
     "revealing" (_pc_buy_mark_revealing, under the journal lock); an entry
     found carrying that mark - its reveal was sent, and may have been seen -
-    is never revealed again: the pointer at /pack is sent once and the entry
-    leaves. The worst case is one reveal and one pointer, or a pointer alone
-    (a send that failed before Discord showed it); never two reveals, never
-    nothing, never a purchase request. A mark that cannot be written sends
-    no reveal (the pointer instead)."""
+    is never revealed again: the pointer at /pack is sent instead, and the
+    entry leaves only once that send has returned. A mark that cannot be
+    written sends no reveal (the pointer instead).
+    Round 5, LOW 2, the bound as the bot can keep it: one reveal at most; the
+    pointer may repeat after a failed acknowledgement; never a second debit,
+    never a second reveal. A pointer that Discord showed but whose send
+    raised (or whose process ended) before _pc_buy_forget, or whose removal
+    could not be written, leaves the entry marked, and the next /buypack
+    sends the pointer again: at least once, not exactly once, since a send
+    that became visible before it returned cannot be told from one that
+    never arrived. The pointer moves no gold, no holding and no reveal. The
+    reveal itself may also never be seen (the mark committed, the send
+    failed before Discord showed it): the next /buypack then sends the
+    pointer, and /pack shows the pack."""
     s = entry["settled"]
     bound, status, first = await _pc_buy_bound(ctx, me, entry)
     if bound == "rebound":

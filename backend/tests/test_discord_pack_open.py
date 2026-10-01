@@ -1844,14 +1844,17 @@ def test_low2r4_the_pack_read_refuses_a_player_the_discord_id_no_longer_resolves
 # Codex round 3 LOW 1: the reveal's send can reach Discord and still raise, or never return, and the
 # entry left the journal only after it returned, so a restart posted the reveal again. The direction
 # chosen: the entry is marked "revealing" under the journal lock immediately BEFORE the send, and an
-# entry carrying the mark is never revealed again - the next /buypack sends the pointer at /pack once
-# and takes it out. Worst case one reveal plus one pointer, or a pointer alone.
+# entry carrying the mark is never revealed again - the next /buypack sends the pointer at /pack and
+# takes it out once that send has returned. Round 5, LOW 2: the pointer is at least once, not exactly
+# once - one reveal at most; the pointer may repeat after a failed acknowledgement; never a second
+# debit, never a second reveal (test_low2r5_...).
 
 def test_low1r4_a_reveal_whose_send_may_have_been_seen_is_never_posted_twice(monkeypatch, tmp_path):
     """The reviewer's falsifier, adapted. The first reveal's send reaches
     Discord (recorded as visible) and the process ends before it returns;
     after the restart exactly one reveal was ever posted, the restart sent no
-    purchase request and read no pack, and it sent the pointer once; the
+    purchase request, read the pack only for its player check (round 5),
+    and its one /buypack sent one pointer; the
     entry is gone. The decisive line is the first assertion after the
     restart: without the mark the restart revealed the pack a second time."""
     async def body(env):
@@ -2027,5 +2030,62 @@ def test_low1r5_a_check_that_cannot_be_answered_sends_no_pointer_and_forgets_not
         await buypack(again, own.discord, "gold")
         assert calls_to(again, OPEN) == [] and journal(again) == {} and len(again.sent) == 1
         assert (again.sent[0].content == again.ns["_PC_BUY_SHOWN_BEFORE"]) if marked else (again.sent[0].file is not None)
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 5, LOW 2: the pointer's bound is what the bot can keep ----------------------------------
+# Codex round 4 LOW 2: a pointer that Discord showed can still raise, or its process end, before
+# _pc_buy_forget, and the next /buypack sends it again. A send that became visible before it returned
+# cannot be told from one that never arrived, so the pointer is at least once (the integrator's
+# default, 2026-10-01): one reveal at most; the pointer may repeat after a failed acknowledgement;
+# never a second debit, never a second reveal.
+
+def test_low2r5_a_pointer_seen_before_its_send_failed_may_repeat_and_nothing_else_does(monkeypatch, tmp_path):
+    """The reviewer's falsifier, with the disclosed outcome. A's marked entry
+    (one reveal was shown); a /buypack's pointer becomes visible and the
+    process ends before the send returns, so the entry stays as it was; after
+    a restart the next /buypack sends the pointer again - a second pointer is
+    permitted - with zero purchase requests and zero reveals, and the entry
+    leaves the journal only after that acknowledged send. The decisive lines
+    are the zero purchase requests and the entry still journaled while the
+    second pointer's send runs: with the entry forgotten before the send, the
+    failed acknowledgement left no entry, and the next /buypack bought a
+    second pack."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        d = own.discord
+        bought, kept, reveals = await settled_for(env, own, True)
+        deal(env, subs)   # a deal for a second purchase, should a retry make one
+        first = rig_over(env)
+        ctx = first.ctx(d)
+        pointers = []
+
+        async def seen_then_dies(content=None, **k):
+            pointers.append(SimpleNamespace(content=content, file=k.get("file")))
+            raise ProcessEnded("the pointer reached Discord and the process ended before its send returned")
+        ctx.send = seen_then_dies
+        with pytest.raises(ProcessEnded):
+            await buypack(first, d, "gold", ctx=ctx)
+        assert journal_bytes(first) == kept, f"the entry did not outlast the failed acknowledgement: {journal(first)}"
+        after = rig_over(env)
+        actx = after.ctx(d)
+        real, during = actx.send, []
+
+        async def watched(*a, **k):
+            during.append(journal(after))
+            return await real(*a, **k)
+        actx.send = watched
+        await buypack(after, d, "gold", ctx=actx)
+        assert calls_to(first, OPEN) == [] and calls_to(after, OPEN) == [], "a retry sent a purchase request"
+        assert during == [json.loads(kept)], f"the entry left before the acknowledged send: {during}"
+        shown = after.ns["_PC_BUY_SHOWN_BEFORE"]
+        assert [p.content for p in pointers] == [shown] and [s.content for s in after.sent] == [shown]
+        assert len(pointers) + len(after.sent) == 2   # the second pointer is permitted (at least once)
+        assert all(s.file is None for s in pointers + after.sent) and len(reveals) == 1   # zero further reveals
+        assert all(r[1:] == (own.steam, 200) for r in pack_reads(first) + pack_reads(after))   # player checks only
+        assert journal(after) == {}
         assert await holdings(env, own) == (price, 1, 1)
     e2e(monkeypatch, tmp_path, body)
