@@ -340,7 +340,7 @@ namespace CompetitiveRounds
         /// of these on a spectator, so a blind re-assert cannot fight another
         /// writer). Restoration on leave is NOT needed: leaving spectate goes
         /// through NetworkRestart, which reloads the scene fresh.</summary>
-        private static void PinSpectatorClockAndLifecycle(string why)
+        internal static void PinSpectatorClockAndLifecycle(string why)
         {
             try
             {
@@ -2250,7 +2250,8 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!PhotonNetwork.InRoom || !PhotonNetwork.IsMasterClient) return;
+                // The authority fence (connect-failure V11, item 13).
+                if (!PhotonNetwork.InRoom || !FfaLateEntry.MasterMaySend()) return;
                 if (SpectatorSession.IsLocalSpectator) return;
                 // Unauthorized non-spectator actors are re-closed on this
                 // cadence too (r9 find 4: a close issued during a master
@@ -2314,13 +2315,25 @@ namespace CompetitiveRounds
 
         private static void HandleRequest(EventData e)
         {
-            if (!PhotonNetwork.InRoom || !PhotonNetwork.IsMasterClient) return;
+            // The authority fence (connect-failure V11, item 13): a master this
+            // client does not keep, or one in LAG_OUT, answers nothing.
+            if (!PhotonNetwork.InRoom || !FfaLateEntry.MasterMaySend()) return;
             if (SpectatorSession.IsLocalSpectator) return;   // a spectator-master answers nothing
             var a = e.CustomData as object[];
             if (a == null || a.Length < 2) return;
             if (!(a[0] is byte) || (byte)a[0] != SpectatorSession.PROTOCOL) return;
             int seq;
             try { seq = (int)a[1]; } catch { return; }
+
+            // The late entry's branch (item 5, step 3): a fighter's request
+            // carrying the late marker is judged by FfaLateEntry (kind l in
+            // this master's grant set, in its late list, its u_id at that
+            // slot) and answered at the next boundary, never here.
+            if (a.Length >= 3 && a[2] as string == FfaLateEntry.LateMarker)
+            {
+                FfaLateEntry.OnLateRequest(e.Sender, seq);
+                return;
+            }
 
             // Only classified spectators are answered. The classification is
             // the pre-join property (immutable, #287) — an unauthorized actor
@@ -2351,6 +2364,14 @@ namespace CompetitiveRounds
                     SendOptions.SendReliable);
             }
             catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] snapshot send: {ex.Message}"); }
+        }
+
+        /// <summary>The late entry's snapshot base (connect-failure V11, item 5
+        /// step 4): the spectator's own snapshot, to which FfaLateEntry
+        /// appends the late tail.</summary>
+        internal static object[] BuildSnapshotForLate(int seq)
+        {
+            return BuildSnapshot(seq);
         }
 
         private static object[] BuildSnapshot(int seq)
@@ -2531,9 +2552,13 @@ namespace CompetitiveRounds
             if (a == null || a.Length < 16) return;
             if (!(a[0] is byte) || (byte)a[0] != SpectatorSession.PROTOCOL) return;
 
-            // Only the CURRENT master may describe the match to us.
+            // Only the CURRENT master may describe the match to us, and only
+            // one this client keeps (connect-failure V11, item 13: the
+            // receiver half of the authority fence; always true where the gate
+            // reads ungated, a spectator's own view included).
             try
             {
+                if (!FfaLateEntry.MasterKept()) { FfaLateEntry.Refused("authority", e.Sender); return; }
                 var m = PhotonNetwork.MasterClient;
                 if (m == null || m.ActorNumber != e.Sender) return;
             }

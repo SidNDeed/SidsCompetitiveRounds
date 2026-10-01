@@ -89,7 +89,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
+                if (!FfaLateEntry.MasterMaySend() || PhotonNetwork.CurrentRoom == null) return;
                 var h = new ExitGames.Client.Photon.Hashtable();
                 // 7th segment appended: an old client's parser takes p[0..5] and
                 // ignores the tail, so the string stays readable both ways.
@@ -389,6 +389,38 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>V11 item 5 (C6): the late seat's seed from a snapshot it
+        /// accepted, the fighter twin of SpectatorSeedScores. It adopts the
+        /// room's game number, the score tables, pointsTotal and kills (the
+        /// snapshot's appended fields), and marks the game started in this
+        /// room; the normal broadcasts keep the tables current after it.
+        /// Never called on a spectator.</summary>
+        internal static void LateSeedScores(int g, int[] roundsByTeam, int[] pointsByTeam,
+                                            int[] pointsTotalByTeam, int[] killsByTeam)
+        {
+            if (RoomActors.LocalIsSpectator) return;
+            if (g > 0) gameNumber = g;
+            try { lastGameRoomName = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+            rounds.Clear(); points.Clear(); pointsTotal.Clear(); kills.Clear();
+            if (roundsByTeam != null)
+                for (int t = 0; t < roundsByTeam.Length; t++) rounds[t] = roundsByTeam[t];
+            if (pointsByTeam != null)
+                for (int t = 0; t < pointsByTeam.Length; t++) points[t] = pointsByTeam[t];
+            if (pointsTotalByTeam != null)
+                for (int t = 0; t < pointsTotalByTeam.Length; t++) pointsTotal[t] = pointsTotalByTeam[t];
+            if (killsByTeam != null)
+                for (int t = 0; t < killsByTeam.Length; t++) kills[t] = killsByTeam[t];
+            isTransitioning = false;
+            pointLatched = false;
+            gameOverFired = false;
+            if (matchStartRealtime <= 0f) matchStartRealtime = Time.realtimeSinceStartup;
+            // The card sequence latches lazily per game; this seat never ran
+            // the game's start, so its per-game state starts clean here.
+            try { FfaCardSequence.OnGameStart(); } catch { }
+            GameStartedInRoom = true;
+            Plugin.Log.LogInfo($"[FFA] late entry seeded game {gameNumber} in {NonceForLog(PhotonNetwork.CurrentRoom?.Name ?? "(no room)")}");
+        }
+
         /// <summary>One-shot per game: whichever observer path (round delta
         /// or snapshot seed) first sees a team at/above the latched target
         /// announces the winner and resets the accumulators the snapshots do
@@ -679,13 +711,14 @@ namespace CompetitiveRounds
                 if (IsAtMatchPoint(dealer.TeamID)) return false;
                 if (IsAtMatchPoint(victim.TeamID)) return false;
 
-                var pm = PlayerManager.instance;
-                if (pm == null || pm.players == null) return false;
-                foreach (var p in pm.players)
+                if (PlayerManager.instance == null) return false;
+                // V11 item 13 (row 47): the third-party match-point loop reads
+                // the kept view, so a quarantined leader switches nothing off.
+                foreach (var p in RoomActors.KeptPlayers())
                 {
                     if (p == null || p.gameObject == null || p.data == null) continue;
                     if (p.data.dead) continue;
-                    if (IsAtMatchPoint(p.TeamID)) return true;   // a live leader → FF off
+                    if (IsAtMatchPoint(p.TeamID)) return true;   // a live leader -> FF off
                 }
                 return false;                                     // all leaders dead → normal
             }
@@ -834,6 +867,14 @@ namespace CompetitiveRounds
                 var src = killed.data.lastSourceOfDamage;
                 if (src == null || src.gameObject == null || src.data == null) return;
                 if (src.TeamID == killed.TeamID) return;
+                // V11 item 13 surface 3 and N9: kill credit skips a quarantined
+                // source or target, and a LAG_OUT death credits nobody.
+                if (FfaLateEntry.IsQuarantined(src, killed))
+                {
+                    FfaLateEntry.RefusedPair("kill", src, killed);
+                    return;
+                }
+                if (FfaLateEntry.BodyLagged(killed)) return;   // its lag_out line already printed
                 kills[src.TeamID] = KillsFor(src.TeamID) + 1;
             }
             catch { }
@@ -1109,9 +1150,15 @@ namespace CompetitiveRounds
             // v1.36 config + same-card sequence lifecycle. Config latch is
             // idempotent (frozen per lobby); the seed publish is derived so a
             // master-migration republish can never fork it.
-            LatchConfigFromRoom();
+            // V11 N4: a gated fighter applies its lock's config and reads no
+            // room property (cfg_apply site=start); every other seat latches
+            // from the room as today.
+            if (!RoomActors.LocalIsSpectator && FfaAssembly.SittingGated()) FfaAssembly.ApplyLockConfig("start");
+            else LatchConfigFromRoom();
             try { MasterPublishConfig(); } catch { }
             try { FfaCardSequence.OnGameStart(); } catch { }
+            // V11 item 13: the point counter, the LAG_OUT carry and kept src=start.
+            try { FfaLateEntry.OnGameStart(); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-LATE] game start: " + ex.Message); }
             // In-room capability republish WITH the pool hash (find 3): the
             // pre-join advert can only carry the level; the hash needs the
             // loaded card pool. Every client does this, so a mixed-pool room
@@ -1147,6 +1194,13 @@ namespace CompetitiveRounds
             // Masked on the broadcast seat (§7.1 — this line RUNS on observer
             // seats by design, which is why it prints the spectator flag).
             Plugin.Log.LogInfo($"[FFA] Game {gameNumber} starting in {NonceForLog(PhotonNetwork.CurrentRoom?.Name ?? "(no room)")} (players needed: {Diag2v2.PlayersNeeded()}, spectator={RoomActors.LocalIsSpectator})");
+            // V11 I1: game_start n={players}, then the timeline disarms.
+            try
+            {
+                JoinTimeline.Step("game_start", "n=" + RoomActors.ActiveFighterCount().ToString(System.Globalization.CultureInfo.InvariantCulture));
+                JoinTimeline.Disarm("started");
+            }
+            catch { }
         }
 
         public static void OnRoomLeft()
@@ -1188,6 +1242,9 @@ namespace CompetitiveRounds
             spectatorGameOverAnnounced = false;
             LocalOffers.Clear();
             GameStartedInRoom = false;
+            // V11: the assembly's and the late entry's per-room state (held
+            // scenes, spawn gate, LAG_OUT, EVT_SCALE records, the fence).
+            try { FfaAssembly.OnRoomLeft(PhotonNetwork.CurrentRoom?.Name ?? lastGameRoomName); } catch { }
         }
 
         /// <summary>Capture a leaver's tallies before Photon destroys their
@@ -1243,13 +1300,34 @@ namespace CompetitiveRounds
         {
             var alive = new List<Player>();
             if (PlayerManager.instance == null) return alive;
-            foreach (var p in PlayerManager.instance.players)
+            // V11 item 13 surface 6: over the kept view, so a quarantined body
+            // can neither end a point nor keep one alive (every body outside a
+            // gated sitting).
+            foreach (var p in RoomActors.KeptPlayers())
             {
                 if (p == null || p.gameObject == null || p.data == null) continue;   // Unity fake-null = destroyed/left
                 if (p.data.dead) continue;
                 alive.Add(p);
             }
             return alive;
+        }
+
+        /// <summary>Vanilla's GameOverTransition and GameOverRematch index
+        /// GetPlayersInTeam(anchor)[0] on the raw list, so an anchor the raw
+        /// list lacks (this client's kept view was empty) falls back to any
+        /// raw body. Display only: the anchor drives vanilla's victory flow,
+        /// never a score, a point or a report.</summary>
+        private static int RawAnchorFallback(int team)
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.GetPlayersInTeam(team).Length > 0) return team;
+                foreach (var pAny in pm.players)
+                    if (pAny != null && pAny.gameObject != null) return pAny.TeamID;
+            }
+            catch { }
+            return team;
         }
 
         /// <summary>A peer left mid-battle. Photon destroys their player
@@ -1262,8 +1340,12 @@ namespace CompetitiveRounds
             yield return new WaitForSecondsRealtime(0.7f);
             if (!EngineActive()) yield break;
             PurgeDepartedPlayers("after leave");
+            // V11 item 13 (V8, V7-F1): a client that sits out resolves nothing
+            // (neither the fresh-game cancel nor the resolve), and its
+            // last-player exit counts the room, never its empty kept set.
+            bool sitsOut = FfaLateEntry.LocalSitsOut();
             int remaining = 0;
-            try { remaining = RoomActors.ActiveFighterCount(); } catch { }   // spectators are not fighters (census)
+            try { remaining = FfaLateEntry.LocalSitsOut() ? RoomActors.PresentNonSpectators().Count : RoomActors.ActiveFighterCount(); } catch { }   // spectators are not fighters (census)
 
             bool battle = false;
             try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
@@ -1274,7 +1356,7 @@ namespace CompetitiveRounds
             // battleOngoing keeps this out of the game-over/rematch flow,
             // whose own below-minimum checks already own the sitting.
             int scored = TotalPointsScored();
-            if (!gameOverFired && battle && remaining > 0 && remaining < 3 && scored < 2)
+            if (!gameOverFired && !sitsOut && battle && remaining > 0 && remaining < 3 && scored < 2)
             {
                 if (!freshGameCancelFired)
                 {
@@ -1286,7 +1368,7 @@ namespace CompetitiveRounds
                 yield break;
             }
 
-            if (!gameOverFired)
+            if (!gameOverFired && !sitsOut)
             {
                 // Last player standing: nobody else can die, so no PlayerDied
                 // ever fires — resolve the round from the alive count.
@@ -1305,7 +1387,7 @@ namespace CompetitiveRounds
             {
                 yield return new WaitForSecondsRealtime(2.5f);   // let a resolving point finish
                 if (!EngineActive()) yield break;
-                try { remaining = RoomActors.ActiveFighterCount(); } catch { }   // census: a spectator must not keep the FFA "alive"
+                try { remaining = FfaLateEntry.LocalSitsOut() ? RoomActors.PresentNonSpectators().Count : RoomActors.ActiveFighterCount(); } catch { }   // census: a spectator must not keep the FFA "alive"
                 if (remaining > 1) yield break;
                 Plugin.Log.LogInfo("[FFA] last player in the room — ending the FFA and returning to menu");
                 try
@@ -1332,6 +1414,10 @@ namespace CompetitiveRounds
                 // round (the EndScreenKill vanilla-fix class of bug — a stray
                 // kill after the decisive point would re-fire the round RPC).
                 if (gameOverFired || !GameManager.instance.battleOngoing) return;
+                // V11 item 13 (V8, V7-F1): a client that sits out returns beside
+                // the spectator gate below, before DoSlowDown; no state mutation
+                // precedes either return, so it is read first.
+                if (FfaLateEntry.LocalSitsOut()) return;
                 var alive = AlivePlayers();
                 if (alive.Count > 1) return;
                 // Spectator gate BEFORE any state mutation (Codex r2 find 9:
@@ -1341,7 +1427,7 @@ namespace CompetitiveRounds
                 // latching/broadcasting a round result.
                 if (RoomActors.LocalIsSpectator) return;
                 TimeHandler.instance.DoSlowDown();
-                if (!PhotonNetwork.IsMasterClient || pointLatched || isTransitioning) return;
+                if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;
                 // Review find 5: vanilla invokes PlayerDied per victim, so a
                 // double-KO (same explosion) reaches here on the FIRST death
                 // with the second victim still counted alive — latching them
@@ -1404,7 +1490,7 @@ namespace CompetitiveRounds
                 // server round trip. FfaMapScale's self-publish ticket is what
                 // makes the publisher agree with the peers; do not assume this
                 // line alone is sufficient.
-                try { FfaMapScale.MasterPublishCount(); } catch { }
+                try { FfaMapScale.MasterPublishCount(FfaLateEntry.PointK + 1); } catch { }
                 gm.view.RPC("RPCA_NextRound", RpcTarget.All, winnerTeam, winnerTeam, 0, 0, 0, 0);
             }
             catch (Exception ex)
@@ -1490,6 +1576,8 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return;
             if (isTransitioning || gameOverFired) return;
             isTransitioning = true;
+            // V11 item 13: one more point in this game (the load's k).
+            try { FfaLateEntry.OnNextRound(); } catch { }
             pointLatched = false;
             GameManager.instance.battleOngoing = false;
             // A leave in the same physics step as the decisive death would
@@ -1510,7 +1598,7 @@ namespace CompetitiveRounds
                 // keeps a 10-player lobby from sending ten copies.
                 try
                 {
-                    if (PhotonNetwork.IsMasterClient
+                    if (FfaLateEntry.MasterMaySend()
                         && !string.IsNullOrEmpty(ApiClient.ActiveFfaLobbyId)
                         && !string.IsNullOrEmpty(MatchTracker.LocalSteamId))
                     {
@@ -1587,7 +1675,9 @@ namespace CompetitiveRounds
                     {
                         // Census: spectators must not prevent the below-minimum
                         // shutdown (design §4.2 — FFA survivor/quorum).
-                        int remaining = RoomActors.ActiveFighterCount();
+                        // V11 item 13 (V8, V7-F1): while LocalSitsOut() the
+                        // minimum counts the room, never the empty kept set.
+                        int remaining = FfaLateEntry.LocalSitsOut() ? RoomActors.PresentNonSpectators().Count : RoomActors.ActiveFighterCount();
                         if (remaining < 3 && Plugin.Instance != null)
                             Plugin.Instance.StartCoroutine(EndSittingBelowMinimum());
                     }
@@ -1601,17 +1691,22 @@ namespace CompetitiveRounds
                 // the winner left the instant they clinched, anchor the visual
                 // flow on a team that still has a live player (the report
                 // above already carried the true winner).
+                // V11 item 13 (row 51): the fallback reads the kept view; every
+                // kept body is in the raw list vanilla indexes, and an anchor
+                // the raw list still lacks gets RawAnchorFallback's last resort.
                 int anchorTeam = winnerTeam;
-                if (PlayerManager.instance.GetPlayersInTeam(winnerTeam).Length == 0)
+                var keptNow = RoomActors.KeptPlayers();
+                if (!keptNow.Exists(pk => pk != null && pk.gameObject != null && pk.TeamID == winnerTeam))
                 {
                     var anyAlive = AlivePlayers();
                     if (anyAlive.Count > 0) anchorTeam = anyAlive[0].TeamID;
                     else
                     {
-                        foreach (var pAny in PlayerManager.instance.players)
+                        foreach (var pAny in keptNow)
                             if (pAny != null && pAny.gameObject != null) { anchorTeam = pAny.TeamID; break; }
                     }
                 }
+                anchorTeam = RawAnchorFallback(anchorTeam);
                 gm.currentWinningTeamID = anchorTeam;
                 TransitionGeneration++;   // #185 fence: game-over is a transition too
                 gm.StartCoroutine(gm.GameOverTransition(anchorTeam));
@@ -1642,6 +1737,10 @@ namespace CompetitiveRounds
 
             yield return BoundedSyncUp(gm, 10f);
             PurgeDepartedPlayers("pre-move");
+            // V11 item 5/13: the master's boundary (the late snapshots, the
+            // epoch proposal and the call-in stamp) runs just before its
+            // call-in; it returns at once outside an admission room.
+            if (FfaLateEntry.MasterMaySend()) yield return FfaLateEntry.MasterBoundary();
             // Bug #99: any vanilla throw from here on used to kill this
             // coroutine, so DoSpeedUp/battleOngoing never ran and the whole
             // lobby sat in permanent slow motion. The recovery lines below
@@ -1650,6 +1749,8 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] CallInNewMap: {ex.Message}"); }
             try { PlayerManager.instance.RevivePlayers(); }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] RevivePlayers: {ex.Message}"); }
+            // V11 item 13 surface 5: the quarantine after every call-in and revive.
+            try { FfaLateEntry.ApplyQuarantine(); } catch { }
             ClearLastDamageSources();
             yield return new WaitForSecondsRealtime(0.3f);
             try { TimeHandler.instance.DoSpeedUp(); } catch { }
@@ -1709,7 +1810,9 @@ namespace CompetitiveRounds
             // request — a player-visible timing change, the one thing the
             // spectator design forbids (design §2). The spectator's own
             // transitions are driven by observation, not by this handshake.
-            if (RoomActors.LocalIsSpectator) yield break;
+            // V11 item 13 (V8, V7-F1): a client that sits out neither sends nor
+            // answers a sync-up, as a spectator.
+            if (RoomActors.LocalIsSpectator || FfaLateEntry.LocalSitsOut()) yield break;
             // Census (design §2, FFA row): sync PEERS are other FIGHTERS.
             // Spectators never reply (their RPCO_RequestSyncUp handler is
             // suppressed), so counting one here would guarantee the timeout
@@ -1744,7 +1847,8 @@ namespace CompetitiveRounds
             // FIGHTER count, not actor count: every caller is a below-minimum
             // quorum check, and a spectator must not satisfy any of them
             // (census, design §4.2). Inert when no spectator is in the room.
-            try { return RoomActors.ActiveFighterCount(); } catch { return 0; }
+            // V11 item 13 (V8, V7-F1): while LocalSitsOut() it counts the room.
+            try { return FfaLateEntry.LocalSitsOut() ? RoomActors.PresentNonSpectators().Count : RoomActors.ActiveFighterCount(); } catch { return 0; }
         }
 
         private static int TotalPointsScored()
@@ -1783,7 +1887,7 @@ namespace CompetitiveRounds
             // leave cause in FfaLeaveQueue on the way past.
             GameStartedInRoom = false;
             try { TransportExit.ClearCause(); } catch { }
-            try { ApiClient.FfaLeaveQueue("fresh_cancel"); } catch { }
+            try { ApiClient.FfaLeaveQueue("fresh_cancel", label: "fresh_cancel"); } catch { }
             try { NetworkConnectionHandler.instance.NetworkRestart(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
         }
@@ -1812,7 +1916,7 @@ namespace CompetitiveRounds
             // recorded cause, so it normally sends today's tag; it reads the
             // store anyway because a seat CAN reach here right after a
             // transport failure, and both values are in-room.
-            try { ApiClient.FfaLeaveQueue(ApiClient.FfaInRoomExitCause()); } catch { }
+            try { ApiClient.FfaLeaveQueue(ApiClient.FfaInRoomExitCause(), label: "end_sitting"); } catch { }
             try { NetworkConnectionHandler.instance.NetworkRestart(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
         }
@@ -1845,8 +1949,30 @@ namespace CompetitiveRounds
             // below increments gameNumber — on a spectator that counter later
             // leaks into their next FIGHTER room (bug 204's first domino).
             if (RoomActors.LocalIsSpectator) yield break;
+            // V11 item 8, the start barrier: the first start in a gated room
+            // (a rematch passes, GameStartedInRoom is already true there).
+            if (!GameStartedInRoom)
+            {
+                string asmRoom = PhotonNetwork.CurrentRoom?.Name ?? "";
+                if (FfaAssembly.BarrierApplies(asmRoom))
+                {
+                    // Step 1: a room this seat moved out of never starts.
+                    if (asmRoom == FfaAssembly.MovedOutOf) yield break;
+                    // Step 2: re-entry during the hold (the start guard's force
+                    // invoke, and item 4's) must not start a second flow.
+                    if (FfaAssembly.StartHoldActive) yield break;
+                    FfaAssembly.StartHoldActive = true;
+                    if (!FfaAssembly.HoldsStartGrant(asmRoom))
+                        JoinTimeline.Step("start_hold", "age_ms=" + FfaAssembly.LatestAgeMs.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    // Steps 3-5: the hold, the kind-s master, the lock's config.
+                    var barrier = new FfaAssembly.Barrier(asmRoom);
+                    yield return barrier.Run();
+                    if (!barrier.Passed) yield break;
+                }
+            }
             GameStartedInRoom = true;
             OnGameStart();
+            try { FfaAssembly.AfterGameStart(); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-ASM] after start: " + ex.Message); }
             PurgeDepartedPlayers("game start");
             // Bug #104 + review find 12: below the 3-player minimum, wait
             // briefly IN PLACE (a reconnect can restore the count), then
@@ -1878,7 +2004,7 @@ namespace CompetitiveRounds
                     // possibly still in flight — same report-preserving rule
                     // as EndSittingBelowMinimum, and the same bug-392 choice
                     // of WHICH in-room tag.
-                    try { ApiClient.FfaLeaveQueue(ApiClient.FfaInRoomExitCause()); } catch { }
+                    try { ApiClient.FfaLeaveQueue(ApiClient.FfaInRoomExitCause(), label: "rematch_abort"); } catch { }
                     try { NetworkConnectionHandler.instance.NetworkRestart(); }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
                     yield break;
@@ -1898,8 +2024,8 @@ namespace CompetitiveRounds
             // every FFA room unscaled while every peer scaled it (bug #269).
             // FfaMapScale's self-publish ticket closes that; this ordering
             // comment is about the peers only.
-            if (PhotonNetwork.IsMasterClient)
-                try { FfaMapScale.MasterPublishCount(); } catch { }
+            if (FfaLateEntry.MasterMaySend())
+                try { FfaMapScale.MasterPublishCount(0); } catch { }
             MapManager.instance.LoadNextLevel();
             TimeHandler.instance.DoSpeedUp();
             yield return new WaitForSecondsRealtime(1f);
@@ -1920,8 +2046,12 @@ namespace CompetitiveRounds
             // a picker leaving as the opening draw resolves would otherwise
             // NRE the move/visibility passes and strand the game start.
             PurgeDepartedPlayers("pre-move start");
+            // V11 item 5/13: boundary 0's master boundary, just before the call-in.
+            if (FfaLateEntry.MasterMaySend()) yield return FfaLateEntry.MasterBoundary();
             try { MapManager.instance.CallInNewMapAndMovePlayers(MapManager.instance.currentLevelID); }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] CallInNewMap(start): {ex.Message}"); }
+            // V11 item 13 surface 5: the quarantine after every call-in.
+            try { FfaLateEntry.ApplyQuarantine(); } catch { }
             ClearLastDamageSources();
             TimeHandler.instance.DoSpeedUp();
             TimeHandler.instance.StartGame();
@@ -1977,8 +2107,9 @@ namespace CompetitiveRounds
             PurgeDepartedPlayers("pick phase");
 
             // Local picker computation (master publishes; others use as fallback).
+            // V11 item 13 surface 1: the pickers are the kept bodies.
             var pickerIds = new List<int>();
-            foreach (var p in PlayerManager.instance.players)
+            foreach (var p in RoomActors.KeptPlayers())
             {
                 if (p == null || p.gameObject == null || p.data == null) continue;
                 if (roundWinnerTeam >= 0 && p.TeamID == roundWinnerTeam) continue;
@@ -2017,7 +2148,7 @@ namespace CompetitiveRounds
                 (g, c) => g > game || (g == game && c > cycle);
             string rawCycleAtEntry = ReadRawRoomProp(PropCycle);
 
-            if (PhotonNetwork.IsMasterClient)
+            if (FfaLateEntry.MasterMaySend())
                 SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
 
             // Wait for the manifest (all clients, incl. master reading its own write).
@@ -2056,7 +2187,7 @@ namespace CompetitiveRounds
                 }
                 // Master migration: if the original master died before
                 // publishing, the new master publishes.
-                if (PhotonNetwork.IsMasterClient && Time.realtimeSinceStartup - phaseStart > 2f)
+                if (FfaLateEntry.MasterMaySend() && Time.realtimeSinceStartup - phaseStart > 2f)
                     SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
                 yield return null;
             }
@@ -2139,7 +2270,7 @@ namespace CompetitiveRounds
             // (Codex cold review, finding 1.)
             int lastGotCount = 0;
             float lastCollect = -999f;
-            bool wasMaster = PhotonNetwork.IsMasterClient;
+            bool wasMaster = FfaLateEntry.MasterMaySend();
             pickPhaseActive = true;
             pickDeadlineRealtime = deadline;
             // The master's own deadline IS the authority; everyone else runs
@@ -2213,7 +2344,7 @@ namespace CompetitiveRounds
             // the drift detector — a drifted master could otherwise consume a
             // stale result for its old identity before ever observing peers'
             // ahead picks. One detector pass BEFORE the first result read.
-            if (PhotonNetwork.IsMasterClient)
+            if (FfaLateEntry.MasterMaySend())
             {
                 var pre = DetectAheadPickIdentity(manifest, game, cycle);
                 if (pre != null)
@@ -2234,7 +2365,7 @@ namespace CompetitiveRounds
                     // picks under an identity strictly AHEAD of ours, we are
                     // the drifted one — adopt it and republish the manifest
                     // so the phase converges instead of running one behind.
-                    if (PhotonNetwork.IsMasterClient)
+                    if (FfaLateEntry.MasterMaySend())
                     {
                         var ahead = DetectAheadPickIdentity(manifest, game, cycle);
                         if (ahead != null)
@@ -2293,14 +2424,14 @@ namespace CompetitiveRounds
                     // past OUR cap, and clamping would yank it backward —
                     // potentially behind `now` — closing the window in the
                     // handover instant.
-                    if (PhotonNetwork.IsMasterClient && !wasMaster)
+                    if (FfaLateEntry.MasterMaySend() && !wasMaster)
                     {
                         wasMaster = true;
                         pickDeadlineShared = true;   // we are the authority now
                         deadline = Mathf.Max(deadline, now + PickGraceSeconds);
                         Plugin.Log.LogInfo($"[FFA] pick cycle {cycle}: became master mid-cycle — extending window");
                     }
-                    if (PhotonNetwork.IsMasterClient)
+                    if (FfaLateEntry.MasterMaySend())
                     {
                         // Authoritative deadline: republished on every change
                         // (initial, grace extensions, migration handover), so
@@ -2324,7 +2455,7 @@ namespace CompetitiveRounds
                         if (shared > 0f) { deadline = shared; pickDeadlineShared = true; }
                     }
                     pickDeadlineRealtime = deadline;
-                    if (PhotonNetwork.IsMasterClient)
+                    if (FfaLateEntry.MasterMaySend())
                     {
                         bool allIn = got.Count >= CountStillPresent(manifest);
                         // Propagation barrier: never CLOSE the window inside
@@ -2451,8 +2582,9 @@ namespace CompetitiveRounds
             int n = 0;
             foreach (var pid in manifest)
             {
-                var p = PlayerManager.instance?.GetPlayerWithID(pid);
-                if (p != null && p.gameObject != null && p.data?.view?.Owner != null) n++;
+                // V11 item 13 (row 50): kept manifest entries only.
+                if (PlayerManager.instance?.GetPlayerWithID(pid) is Player p && !FfaLateEntry.IsQuarantined(p)
+                    && p.gameObject != null && p.data?.view?.Owner != null) n++;
             }
             return Math.Max(1, n);
         }
@@ -2652,7 +2784,8 @@ namespace CompetitiveRounds
                 string prefix = $"{RoomNonce()}:{game}:{cycle}:";
                 foreach (var pid in manifest)
                 {
-                    var pl = PlayerManager.instance?.GetPlayerWithID(pid);
+                    // V11 item 13 (row 50): a quarantined pid's entry is skipped.
+                    var pl = (PlayerManager.instance?.GetPlayerWithID(pid) is Player q && !FfaLateEntry.IsQuarantined(q)) ? q : null;
                     var owner = pl?.data?.view?.Owner;
                     var props = owner?.CustomProperties;
                     if (props == null || !props.ContainsKey(PropPick)) continue;
@@ -2679,7 +2812,8 @@ namespace CompetitiveRounds
                 var counts = new Dictionary<string, int>();
                 foreach (var pid in manifest)
                 {
-                    var pl = PlayerManager.instance?.GetPlayerWithID(pid);
+                    // V11 item 13 (row 50): kept manifest entries only.
+                    var pl = (PlayerManager.instance?.GetPlayerWithID(pid) is Player q && !FfaLateEntry.IsQuarantined(q)) ? q : null;
                     var props = pl?.data?.view?.Owner?.CustomProperties;
                     if (props == null || !props.ContainsKey(PropPick)) continue;
                     string v = props[PropPick] as string ?? "";
@@ -3061,7 +3195,13 @@ namespace CompetitiveRounds
             // between Add and Remove, this pid's card-bar adds would stay
             // suppressed for the rest of the game — clear on every new apply.
             deckViewRebuilds.Remove(pid);
-            var player = PlayerManager.instance?.GetPlayerWithID(pid);
+            // V11 item 13 surface 2 (row 50): a quarantined pid gets no card.
+            Player player;
+            if (FfaLateEntry.IsQuarantined(player = PlayerManager.instance?.GetPlayerWithID(pid)))
+            {
+                FfaLateEntry.Refused("pick", player);
+                yield break;
+            }
             if (player == null || player.gameObject == null || player.data == null)
             {
                 Plugin.Log.LogWarning($"[FFA] apply skipped — player {pid} gone (card {cardName})");
@@ -3252,6 +3392,8 @@ namespace CompetitiveRounds
                 PickOrder = hist.Count + 1,
                 RoundNumber = Math.Max(1, RoundsTotalAll() + 1),
             });
+            // V11 item 5: a deck changed, so the board digest (cr_bd) republishes.
+            try { FfaLateEntry.MarkDigestDirty(); } catch { }
         }
 
         private static CardInfo ResolveCard(string cardName)
@@ -3585,8 +3727,9 @@ namespace CompetitiveRounds
             if (!FfaMode.EngineActive()) return true;
             try
             {
+                // V11 item 13 (row 51): the alive count over the kept view.
                 int num = 0;
-                foreach (var p in __instance.players)
+                foreach (var p in RoomActors.KeptPlayers())
                 {
                     if (p == null || p.gameObject == null || p.data == null) continue;
                     if (!p.data.dead) num++;
@@ -3622,6 +3765,15 @@ namespace CompetitiveRounds
             // invoked by the observer prefix. Return false to keep vanilla
             // suppressed regardless of prefix ordering.
             if (RoomActors.LocalIsSpectator) return false;
+            // V11 item 13 (N7, N9): LatchMaster for the next point is the master
+            // this dispatch sees (the prefix has no PhotonMessageInfo), and an
+            // RPCA_NextRound under a master MasterKept() rejects is ignored.
+            try { FfaLateEntry.NoteLatch(); } catch { }
+            if (!FfaLateEntry.MasterKept())
+            {
+                FfaLateEntry.RefusedAuthority();
+                return false;
+            }
             FfaMode.HandleNextRound(__instance, winningTeamID);
             return false;
         }
@@ -3646,6 +3798,16 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return false;
             __result = FfaMode.FfaDoStartGame(__instance);
             return false;
+        }
+
+        /// <summary>V11 sec5.1 condition: the start barrier lives behind this
+        /// prefix, so ffa_asm1 needs it attached.</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(System.Reflection.MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) FfaAssembly.DoStartPrefixAttached = true;
+            return exception;
         }
     }
 
@@ -3818,8 +3980,10 @@ namespace CompetitiveRounds
         {
             Player best = null;
             float bestDist = float.PositiveInfinity;
-            if (pm?.players == null) return null;
-            foreach (var p in pm.players)
+            if (pm == null) return null;
+            // V11 item 13 surface 7: automatic targeting over the kept view
+            // (pm is PlayerManager.instance, the list the view filters).
+            foreach (var p in RoomActors.KeptPlayers())
             {
                 if (p == null || p.gameObject == null || p.data == null) continue;
                 if (p.data.dead) continue;
@@ -3922,7 +4086,7 @@ namespace CompetitiveRounds
                 var owner = __instance.owner;
                 if (owner == null) return false;
                 var pm = PlayerManager.instance;
-                if (pm?.players == null) return false;
+                if (pm == null) return false;
 
                 // THE SWEEP MUST BE LIVE. LineEffect.DrawLine deactivates
                 // itself once counter > 1, which STOPS the counter advancing
@@ -3955,7 +4119,8 @@ namespace CompetitiveRounds
                 // crossed SINCE THE LAST FRAME, and count whose crossing is
                 // still unconsumed.
                 int unconsumed = 0;
-                foreach (var p in pm.players)
+                // V11 item 13 (row 51): the line-range victims are the kept bodies.
+                foreach (var p in RoomActors.KeptPlayers())
                 {
                     if (p == null || p.gameObject == null || p.data == null) continue;
                     // Excludes the owner by construction (FFA gives every
