@@ -92,7 +92,7 @@ BEGIN
     -- 1. The Apex run.
     ALTER TABLE title_ladder_progress
         ADD COLUMN IF NOT EXISTS streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0),
-        ADD COLUMN IF NOT EXISTS streak_at TIMESTAMPTZ;
+        ADD COLUMN IF NOT EXISTS streak_at TIMESTAMPTZ DEFAULT NULL;
 
     COMMENT ON TABLE title_ladder_credits IS
         'One row per player per ranked GAME credited to the worn ladder (migration 365). The PK (player_id, reference_id) is the unit and the double-credit gate: every caller passes the game id (1v1 matches.id, 2v2 team_matches.id, the FFA match id), so a re-reported game counts once. Rows written before 365 (none existed in production) were keyed on a series id.';
