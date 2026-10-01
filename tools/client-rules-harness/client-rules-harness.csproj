@@ -158,6 +158,8 @@
     <Compile Include="../../plugin/SessionReportRules.cs" />
     <Compile Include="SessionReportRulesSelfTest.cs" />
     <Compile Include="../../plugin/ShowcaseRules.cs" />
+    <Compile Include="../../plugin/ReadGateRules.cs" />
+    <Compile Include="ReadGateRulesSelfTest.cs" />
   </ItemGroup>
 
 </Project>
