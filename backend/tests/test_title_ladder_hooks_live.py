@@ -186,7 +186,7 @@ def _require_live_pg():
                     "against a real server. Install it, or set %s=1 to waive "
                     "deliberately." % OPTOUT_VAR)
     pytest.fail(
-        "%s is unset, so none of the four completion paths was driven through "
+        "%s is unset, so none of the three ranked-game hook sites was driven through "
         "its real handler against migration 331's tables. Point it at a "
         "throwaway database, or set %s=1 to waive the coverage deliberately."
         % (DSN_VAR, OPTOUT_VAR))
@@ -242,7 +242,7 @@ _DO_DDL = re.compile(r"\b(ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX|CREATE\s+TA
 # Codes the second pass answers because the first one (or the ORM) already
 # made the object: duplicate table/relation, object, column, schema, function.
 _ALREADY = {"42P07", "42710", "42701", "42P06", "42723"}
-# The second pass's other failures, each on a table none of the four paths
+# The second pass's other failures, each on a table none of the three hook sites
 # touches: the card_stats unique indexes (card_stats is made by neither a
 # migration's DDL nor the ORM), the bug_reports numbering sequence (made by a
 # data statement), and a VALIDATE of a constraint whose ADD sits in a
@@ -475,7 +475,7 @@ def _dropped(lines, mode):
     return [ln for ln in lines if ln.startswith("[LADDER-CREDIT] %s credit dropped" % mode)]
 
 
-# -- the four completion paths ------------------------------------------------
+# -- the three ranked-game hook sites (the 2v2 settlement is unhooked) -------
 
 def _pd(steam):
     return schemas.PlayerMatchData(steam_id=steam, display_name="Ladder " + steam[-3:])

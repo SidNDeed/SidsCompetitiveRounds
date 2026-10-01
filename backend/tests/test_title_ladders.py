@@ -777,8 +777,8 @@ def test_the_whole_file_scan_sees_the_three_and_each_kind_of_fourth():
     """Control: the fake file reads as the three awaited calls; a fourth in
     ffa_queue_leave, a module-level alias, an import and a getattr string
     are each reported as what they are."""
-    four = sorted((o, k) for o, _l, k in hook_references(FAKE_MAIN))
-    assert four == sorted((fn, "awaited call") for fn in COMPLETION_SITES.values()), four
+    three = sorted((o, k) for o, _l, k in hook_references(FAKE_MAIN))
+    assert three == sorted((fn, "awaited call") for fn in COMPLETION_SITES.values()), three
     planted = {
         "fifth call": ("    await db.commit()\n",
                        "    await title_ladders.record_completed_games(db, [1], mode='ffa', reference_id='c')\n"
@@ -798,7 +798,7 @@ def test_the_whole_file_scan_sees_the_three_and_each_kind_of_fourth():
         src = FAKE_MAIN.replace(old, new, 1)
         assert src != FAKE_MAIN, label
         got = sorted((o, k) for o, _l, k in hook_references(src))
-        assert got == sorted(four + [extra]), (label, got)
+        assert got == sorted(three + [extra]), (label, got)
 
 
 def test_the_table_writer_scan_sees_a_write_and_skips_prose():

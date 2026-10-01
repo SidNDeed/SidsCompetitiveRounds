@@ -5799,13 +5799,16 @@ app.include_router(tournaments_router)
 # progress bars from. Pure read, no writes, safe on the replica: one
 # REPEATABLE READ, READ ONLY snapshot per request.
 #
-# The module's per-series completion hook is not called from here. The four
-# rated completion paths call it themselves -- submit_match (1v1),
-# submit_team_match and _complete_team_series_with_ratings (2v2) and
+# The module's per-game credit hook (title_ladders.record_completed_games) is
+# not called from here. THREE ranked-game sites call it themselves, once per
+# accepted ranked game -- submit_match (1v1), submit_team_match (2v2) and
 # submit_ffa_match (FFA) -- each inside a savepoint of its own, so a failed
-# credit is logged and dropped and never costs the completion. 1v2 reports
-# unrated and is not hooked. test_title_ladders.py asserts that set per mode,
-# each call's reference id, and exactly four calls in this file.
+# credit is logged and dropped and never costs the game. The after-the-fact
+# 2v2 settlement (_complete_team_series_with_ratings: admin completion, lead
+# forfeit) plays no game and is deliberately NOT hooked; crediting it would
+# grant progress for a game nobody played. 1v2 reports unrated and is not
+# hooked. test_title_ladders.py asserts exactly that set of three per mode,
+# each call's reference id, and exactly three calls in this file.
 import title_ladders
 app.include_router(title_ladders.router)
 
