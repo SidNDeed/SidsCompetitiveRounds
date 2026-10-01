@@ -537,6 +537,28 @@ def test_ws_connect_counted_by_class(env):
     assert read_gate.SOCKET_READ_GATE_BUILT is False
 
 
+def test_ws_connect_counted_other(env, monkeypatch):
+    """The fifth class: no valid credential and no version header. Reachable
+    only while the socket admits a missing version (REQUIRE_MOD_VERSION
+    False); with it True such a socket is closed `outdated` before it is
+    counted at all."""
+    env.set_mode("log")
+    monkeypatch.setattr(main, "REQUIRE_MOD_VERSION", False)
+    for hdrs in ({}, {"X-Operator-Key": OP_UNISSUED}):
+        read_gate.census_reset()
+        with env.client.websocket_connect("/api/v1/ws/chat", headers=hdrs) as ws:
+            ws.receive_text()
+        rows = K.census_rows(route=read_gate.SOCKET_TEMPLATE)
+        assert [(r["class"], r["version_header"], r["refused"]) for r in rows] == \
+            [("other", False, False)], (hdrs, rows)
+    monkeypatch.setattr(main, "REQUIRE_MOD_VERSION", True)
+    read_gate.census_reset()
+    with pytest.raises(Exception):
+        with env.client.websocket_connect("/api/v1/ws/chat", headers={}) as ws:
+            ws.receive_text()
+    assert K.census_rows(route=read_gate.SOCKET_TEMPLATE) == []
+
+
 # -- bar BV-A: the advert only for a client that reads it ---------------------
 
 TRUNK_MOD_VERSION_KEYS = {"version", "min_version", main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD}

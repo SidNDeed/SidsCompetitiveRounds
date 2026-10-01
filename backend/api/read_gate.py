@@ -900,6 +900,112 @@ async def count_socket(ws) -> None:
         _log_once("socket-count", f"[READ-GATE] socket count failed: {ex}")
 
 
+# -- The chat socket's read-side protocol (specified; NOT wired) ----------------
+#
+# Requirement 26 / finding M4. This build COUNTS the socket (count_socket) and
+# refuses nothing on it; the mode route refuses `enforce` while
+# SOCKET_READ_GATE_BUILT is False. What follows is the protocol the socket
+# read gate must implement before that constant may become True, written as
+# pure decision functions so the protocol is executable and tested
+# (test_read_gate_socket_protocol.py). Nothing in the app calls them yet.
+#
+# 1. Connect credentials, read from the HANDSHAKE headers only (the
+#    message-borne `auth` frame binds the inbound identity and is not a read
+#    credential). Exactly the three of the HTTP gate:
+#      X-Internal-Key  equal to API_SECRET_KEY                -> internal
+#      X-Session-Token whose row exists, is verified, unexpired -> session
+#      X-Operator-Key  naming a live api_operator_keys row     -> operator:<name>
+#    Any one valid credential admits (as evaluate). The verifiers and their
+#    caches are the HTTP gate's own (verify_session, verify_operator_key).
+# 2. Where it runs: after the version check and accept(), BEFORE the socket
+#    joins the chat manager and before the first outbound frame (the lockdown
+#    snapshot), so a refused socket never receives a chat frame.
+# 3. Refusal: the socket is closed with an application close code and the
+#    HTTP gate's own detail word as the reason --
+#      4401 read_credential_required   nothing valid was presented
+#      4401 session_required           a session token was presented and failed
+#      4401 operator_key_invalid       an operator key was presented and failed
+#      1013 read_gate_unavailable      a lookup raised, or the stage is unknown
+#      1013 session_replication_pending  the standby has no row for the token
+#    (4401 mirrors HTTP 401; 1013 is the protocol's "try again later").
+# 4. Rechecks while open, every SOCKET_RECHECK_SECONDS (the 60 s revocation
+#    bound of the HTTP gate), and the stage every MODE_TTL:
+#      session expiry   closed 4401 session_expired at the row's expires_at
+#      session deleted  closed 4401 session_required
+#      key revoked      closed 4401 operator_key_invalid
+#      stage -> enforce an open socket with no valid credential is closed
+#                       4401 read_credential_required
+#      stage -> log/off nothing is closed; rechecks stop refusing
+# 5. Counting is unchanged: every socket counted once at connect by its class
+#    (internal, session, operator:<name>, mod_no_session, other), a refused
+#    one with refused=True.
+# socket_enforcing() is the one switch: it answers True only for `enforce`
+# AND a built socket gate, so while SOCKET_READ_GATE_BUILT is False no stage
+# can select socket enforcement.
+
+SOCKET_REFUSE_CODE = 4401
+SOCKET_RETRY_CODE = 1013
+SOCKET_RECHECK_SECONDS = CRED_TTL
+
+
+def socket_enforcing(mode: str) -> bool:
+    return mode == "enforce" and SOCKET_READ_GATE_BUILT is True
+
+
+def socket_connect_verdict(mode: str, internal_ok: bool, session: str, operator: str,
+                           operator_name: str = "", replica: bool = False,
+                           version_present: bool = True) -> tuple:
+    """(admit, close_code, reason, credential_class) for one handshake.
+    `session` and `operator` are the verifiers' verdict words (absent, bad,
+    miss, error, valid). An unverified socket's class is the HTTP gate's
+    unverified class (lookup_error, replication_pending, bad_session,
+    bad_operator_key, mod_no_session, other)."""
+    if internal_ok:
+        return True, None, None, "internal"
+    if session == "valid":
+        return True, None, None, "session"
+    if operator == "valid":
+        return True, None, None, "operator:" + operator_name
+    if session == "error" or operator == "error":
+        cls, code, reason = "lookup_error", SOCKET_RETRY_CODE, "read_gate_unavailable"
+    elif session == "miss" and replica:
+        cls, code, reason = "replication_pending", SOCKET_RETRY_CODE, "session_replication_pending"
+    elif session in ("bad", "miss"):
+        cls, code, reason = "bad_session", SOCKET_REFUSE_CODE, "session_required"
+    elif operator == "bad":
+        cls, code, reason = "bad_operator_key", SOCKET_REFUSE_CODE, "operator_key_invalid"
+    else:
+        cls = "mod_no_session" if version_present else "other"
+        code, reason = SOCKET_REFUSE_CODE, "read_credential_required"
+    if mode == UNKNOWN and SOCKET_READ_GATE_BUILT is True:
+        return False, SOCKET_RETRY_CODE, "read_gate_unavailable", cls
+    if not socket_enforcing(mode):
+        return True, None, None, cls
+    return False, code, reason, cls
+
+
+def socket_recheck_verdict(mode: str, credential: str, now: float,
+                           session_expires_at: float | None = None,
+                           session_still_valid: bool = True,
+                           operator_still_live: bool = True) -> tuple:
+    """(keep, close_code, reason) for one open socket at one recheck."""
+    if not socket_enforcing(mode):
+        return True, None, None
+    if credential == "internal":
+        return True, None, None
+    if credential == "session":
+        if session_expires_at is not None and now >= session_expires_at:
+            return False, SOCKET_REFUSE_CODE, "session_expired"
+        if not session_still_valid:
+            return False, SOCKET_REFUSE_CODE, "session_required"
+        return True, None, None
+    if credential.startswith("operator:"):
+        if not operator_still_live:
+            return False, SOCKET_REFUSE_CODE, "operator_key_invalid"
+        return True, None, None
+    return False, SOCKET_REFUSE_CODE, "read_credential_required"
+
+
 def ungated_templates(routes) -> list[str]:
     """The GET templates of `routes` the gate never refuses for want of a read
     credential (published as `read_gate_open`)."""
