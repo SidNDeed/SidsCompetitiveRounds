@@ -103,6 +103,13 @@ class _Face:
     def render_back(self):
         return b"\x89PNGback"
 
+    # The top cards whose art the fake's bundle carries (Discord card render
+    # parity): the routes ask the renderer, never decide it themselves.
+    art = frozenset({"Leach"})
+
+    def card_art_drawn(self, spec):
+        return (spec.get("top_card") or "").strip() in self.art
+
 
 def _png_body(n=2000):
     return b"\x89PNG\r\n\x1a\n" + bytes(n - 8)
@@ -1343,9 +1350,37 @@ def test_internal_print_face_answers_the_current_revision_in_a_header(monkeypatc
     resp = _run(main.internal_pc_face_print(str(PID), "fr", "card", "k", Scripted({})))
     assert resp.headers["x-face-rev"] == main._pc_face_inputs(row, _ctx(locale="en"))[3]
     assert resp.headers["cache-control"] == "private, max-age=60"
+    # Discord card render parity: whether the face carries the top card's art
+    # and which still it shows, from the row the pixels were drawn from.
+    assert resp.headers["x-face-art"] == "drawn" and resp.headers["x-face-still"] == "none"
+    row.update(top_card="Not In The Bundle", portrait_hash="ab" * 32)
+
+    async def still(_db, _phash):
+        return b"still"
+    monkeypatch.setattr(main, "_pc_portrait_bytes", still)
+    resp =_run(main.internal_pc_face_print(str(PID), "fr", "card", "k", Scripted({})))
+    assert resp.headers["x-face-art"] == "none" and resp.headers["x-face-still"] == "base"
     with pytest.raises(HTTPException) as ex:
         _run(main.internal_pc_face_print(str(PID), "en", "poster", "k", Scripted({})))
     assert ex.value.status_code == 404
+
+
+def test_the_bot_face_row_is_the_motion_select_with_the_subject_id_rule(monkeypatch):
+    """LOW 1: the bot's face read is ONE statement carrying the face columns
+    AND the servable columns, so the still header and the pixels come from the
+    same row snapshot; there is no second read for the still."""
+    seen = []
+
+    class _Db:
+        async def execute(self, statement, params=None):
+            seen.append(" ".join(str(statement).split()))
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None))
+    assert _run(main._pc_bot_face_row(_Db(), str(PID))) is None
+    assert len(seen) == 1
+    motion = " ".join(main._PC_PRINT_MOTION_SELECT.split())
+    assert seen[0].startswith(motion) and main._PC_FACE_SUBJECT_ID_SQL.split()[0] in seen[0]
+    for column in ("m_hash", "m_static", "m_descriptor", "m_item", "active_dance_id", "subject_sid"):
+        assert column in motion, column
 
 
 def test_preview_face_reapplies_the_card_gate_before_the_member_read(monkeypatch):

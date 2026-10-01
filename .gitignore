@@ -218,6 +218,11 @@ backend/api/assets/fonts/*.ttf
 backend/api/assets/fonts/*.otf
 backend/api/assets/fonts/*.ttc
 backend/api/assets/fonts/*.part
+# Player Cards top-card art: a private bundle bind-mounted read-only into the api
+# container at assets/pc/cards, never committed (game-derived art). The box-side
+# staging root sits beside the clone's tracked tree and must never read as content.
+backend/api/assets/pc/cards/
+/private/
 backend/tests/_out/
 # Working scratch left in the repo root by tooling; never content.
 scratchpad/
