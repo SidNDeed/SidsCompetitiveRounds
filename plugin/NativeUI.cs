@@ -4007,7 +4007,7 @@ namespace CompetitiveRounds
                 // "name [title]" (leaderboards, chat); this row was the one
                 // place with the order flipped (Sid, July 29 item 1).
                 string title=string.IsNullOrEmpty(player.title)?""
-                    :$" <color={FfaTitleHex(player.title_color)}>[{FfaSafeRich(Trunc(player.title,14))}]</color>";
+                    :$" <color={FfaTitleHex(player.title_color)}>[{FfaSafeRich(Trunc(player.title,16))}]</color>";
                 string nameColor=winner?"#FFD700":"#FFFFFF";
                 /* Leading space INSIDE the key: a spaceless "(left)" token fails the
                    extractor's single-token rule and could never be harvested. */
@@ -4703,7 +4703,7 @@ namespace CompetitiveRounds
                         _podiumFfaRows.Add(new object[]{row.txtName,nameDisplay,ttl,col});
                         nameDisplay=$"{nameDisplay} {PodiumSparkleSpan(ttl,col,_podiumTick)}";
                     }
-                    else nameDisplay=$"{nameDisplay} <color={col}>[{Trunc(e.title,12)}]</color>";
+                    else nameDisplay=$"{nameDisplay} <color={col}>[{Trunc(e.title,16)}]</color>";
                 }
                 UIFactory.SetTextRaw(row.txtName,nameDisplay);
                 UIFactory.SetColor(row.txtName,me?C_GREEN:C_WHITE);
