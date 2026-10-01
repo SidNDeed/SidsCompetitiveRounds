@@ -99,7 +99,7 @@ BEGIN
     ALTER TABLE title_ladder_credits ALTER COLUMN line DROP NOT NULL;
 
     COMMENT ON TABLE title_ladder_credits IS
-        'One row per player per ranked GAME, claimed for every participant whatever they wear (migration 365): line is the ladder the worn rung belongs to, NULL when none. The PK (player_id, reference_id) is the unit and the double-credit gate: every caller passes the game id (1v1 matches.id, 2v2 team_matches.id, the FFA match id), so a re-reported game changes nothing, whatever is worn at the replay. Rows written before 365 (none existed in production) were keyed on a series id.';
+        'One row per player per ranked GAME, claimed for every participant whatever they wear (migration 365): line is the ladder the worn rung belongs to, NULL when none. The PK (player_id, reference_id) is the unit and the double-credit gate: every caller passes the game id (1v1 matches.id, 2v2 team_matches.id, the FFA match id), so a re-reported game changes nothing, whatever is worn at the replay. A 1v1 game whose rating pass pays achievement gold after the game was claimed adds one more row for a player whose claim of that game is on the Gold Rush line, keyed game-id#late-source (source rating, slayer or streak) with that same line: the supplement is claimed once, so a replay of it changes nothing. Rows written before 365 (none existed in production) were keyed on a series id.';
 
     -- 2. The rungs the new catalogue does not have.
     DELETE FROM shop_items WHERE sku IN ('title_ladder_rat_4_king', 'title_ladder_rat_4_queen', 'title_ladder_cat_6', 'title_ladder_dog_6', 'title_ladder_turtle_6', 'title_ladder_rabbit_6', 'title_ladder_bear_6', 'title_ladder_eagle_6', 'title_ladder_shark_6');
