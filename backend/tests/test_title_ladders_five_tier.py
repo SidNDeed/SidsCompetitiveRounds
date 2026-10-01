@@ -1,6 +1,6 @@
 """The five-tier title ladders (board row 29): the catalogue, the per-game
 unit, every playstyle boundary, the Apex run, the card families, the refund
-migration 366, the old client's parser over the extended answer, and the
+migration 366, the unreleased v1.41 client's parser over the extended answer, and the
 /health `title_ladders` word.
 
 Every behavioural test here is paired with a NEGATIVE CONTROL: a mutated
@@ -1148,13 +1148,15 @@ def _sql366_at(rev):
         check=True, capture_output=True, text=True, encoding="utf-8").stdout
 
 
-# -- 6. The old client's parser over the extended answer ---------------------
+# -- 6. The unreleased v1.41 client's parser over the extended answer --------
 #
 # A line-for-line port of ApiClient.PcTopLevel / PcRawValue / PcStr / PcInt /
 # PcLong / PcBool / PcStrArray / SliceTopLevelObjects / ParseTitleLadderRung /
-# ParseTitleLadders as the v1.40.3 client ships them. The extended answer must
-# parse to exactly what the same answer parses to with the appended keys
-# removed: an older client sees no difference.
+# ParseTitleLadders as the v1.41 client lane carries them. That client is not
+# released: no released client (v1.40.3 and earlier) has ParseTitleLadders or
+# reads this route. The extended answer must parse to exactly what the same
+# answer parses to with the appended keys removed: the v1.41 parser sees no
+# difference.
 
 WS = " \t\r\n"
 
@@ -1426,7 +1428,7 @@ def _wire(obj, compact=True):
 
 
 @pytest.mark.parametrize("compact", [True, False])
-def test_the_old_parser_reads_the_extended_answer_as_the_old_one(compact):
+def test_the_v141_parser_reads_the_extended_answer_as_the_plain_one(compact):
     answer = _rich_answer()
     full = parse_title_ladders(_wire(answer, compact))
     old = parse_title_ladders(_wire(_strip(answer), compact))
@@ -1446,14 +1448,14 @@ def test_the_old_parser_reads_the_extended_answer_as_the_old_one(compact):
 
 
 def test_the_compatibility_check_sees_a_renamed_key():
-    """NEGATIVE CONTROL: a change an old client DOES see -- a key it reads,
+    """NEGATIVE CONTROL: a change the v1.41 parser DOES see -- a key it reads,
     renamed -- must make the two parses differ."""
     answer = _rich_answer()
     renamed = json.loads(json.dumps(answer))
     for ld in renamed["ladders"]:
         ld["count"] = ld.pop("games")
     assert parse_title_ladders(_wire(renamed)) != parse_title_ladders(_wire(_strip(answer)))
-    # And an appended key spelled like one the old client reads, placed
+    # And an appended key spelled like one the v1.41 parser reads, placed
     # before it, changes what it reads.
     shadow = json.loads(json.dumps(answer))
     shadow["ladders"] = [dict([("tier", 0)] + [(k, v) for k, v in ld.items() if k != "tier"])
