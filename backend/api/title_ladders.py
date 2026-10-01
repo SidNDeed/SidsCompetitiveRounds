@@ -11,7 +11,7 @@ granted, owned for ever, and auto-equipped.
 
 Every ladder has exactly five tiers: tier 1 is the entry rung (bought), tiers
 2-5 are earned (granted only). The names, the kinds and the thresholds are
-the approved proposal (ai-collab/v1410/TITLE-LADDERS-PROPOSAL.md, v2); the
+the approved proposal for board row 29 (its v2); the
 one name that differs is recorded on the Grinder ladder below.
 
 Four pieces live here:
