@@ -2735,7 +2735,7 @@ namespace CompetitiveRounds
         // I18n.Tr calls run at ACCESS time — after I18nCatalogues.Install() — and
         // re-evaluate after a language switch (which rebuilds the page).
         private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info"),I18n.Tr("Music"),I18n.Tr("Mail"),I18n.Tr("Collection")};
-        private const int NUM_TABS=19;   // Sept 23 (item 12 follow-up): 19 = Titles is gone - the animal title ladders are entries of the Shop's Titles section (TitleLaddersUI.cs), and 19 was the LAST index, so no other tab moved. Sept 10: 18 = Collection (Player Cards, Shop sub-tab). Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music; Sept 6: 17 = Mail; Sept 7: 16 and 17 became header-icon popups (indices kept, panels null)
+        private const int NUM_TABS=19;   // Sept 23 (item 12 follow-up): 19 = Titles is gone - the title ladders are entries of the Shop's Titles section (TitleLaddersUI.cs), and 19 was the LAST index, so no other tab moved. Sept 10: 18 = Collection (Player Cards, Shop sub-tab). Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music; Sept 6: 17 = Mail; Sept 7: 16 and 17 became header-icon popups (indices kept, panels null)
         private const int TAB_HOME=13;
         private const int TAB_BANNED=14;
         private const int TAB_INFO=15;   // Aug 23 (Sid): the explainer library — Settings group sub-tab
@@ -11074,7 +11074,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // player report about "missing" items).
             for (int i = 0; i < 320; i++)
                 shopRows.Add(CreateShopRow(shopRowsContainer.transform, i));
-            // Item 12 follow-up (Sept 23): the animal title ladders' entries
+            // Item 12 follow-up (Sept 23): the title ladders' entries
             // (and their one note row) live in this container too; RefreshShop
             // places them in the Titles section.
             TitleLaddersUI.BuildShopEntries(shopRowsContainer.transform);
@@ -11810,7 +11810,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
-            // Item 12 follow-up (Sept 23): the animal title ladders are entries
+            // Item 12 follow-up (Sept 23): the title ladders are entries
             // of THIS section - one per line the ladder answer carries, ahead of
             // the ordinary titles. Planned BEFORE the header decision: a line's
             // rungs leave the ordinary list only when its entry renders
