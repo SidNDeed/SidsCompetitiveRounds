@@ -500,6 +500,7 @@
   "Action Log",
   "Action Log...",
   "Active",
+  "Actually Good",
   "Add a subject.",
   "Add an underline to your name. Stackable with other name styles.",
   "Add at least one recipient.",
@@ -529,12 +530,14 @@
   "All picks (oldest first) - red = replaced:",
   "All spectator seats are taken.",
   "All-time: {0} games ({1}W-{2}L), series {3}-{4}",
+  "Alley King",
   "Allow data reporting",
   "Allow other players to spectate your ranked games. Turning this off also removes current spectators.",
   "Allow spectators: <color=#888>...</color>",
   "Allow spectators: <color=#88FF88>ON</color>",
   "Allow spectators: <color=#FF9966>OFF</color>",
   "Allow the mod to report your match results and stats to the community server.",
+  "Alpha",
   "Alpha Cat",
   "Already a recipient.",
   "Also DM new mail to your linked Discord. You can reply from there.",
@@ -544,6 +547,8 @@
   "Amethyst",
   "Ammo",
   "An aurora follows you. Green and violet shimmer with sparkles.",
+  "Ancestor",
+  "Ancient One",
   "Animated cosmetics: <color=#88FF88>ON</color>",
   "Animated cosmetics: <color=#FF9966>OFF</color>",
   "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = everything freezes on a static frame.",
@@ -591,6 +596,7 @@
   "BOARD",
   "BOARD\u0004pc.stat.board",
   "Babel",
+  "Baby Mouse",
   "Back",
   "Back in the Quick Match queue — searching for an opponent.",
   "Balance: -",
@@ -632,6 +638,7 @@
   "Betting",
   "Betting Record",
   "Between 5 and 10",
+  "Big Bang",
   "Big Cat",
   "Big Dog",
   "Bigger Name",
@@ -660,6 +667,7 @@
   "Blocks",
   "Blood Gradient",
   "Blood Moon",
+  "Bloodbath",
   "Blue Cursor",
   "Body colors",
   "Body colors in ROUNDS are team colors: the game holds four body skins and picks one by team number. Who gets which color follows from how each mode numbers its teams.\n\n<color=#FFD94D><b>VANILLA 1v1</b></color>\n\nIn a 1v1 each player is their own team: the first seat is team 0 and plays <color=#7FD4FF>orange</color>, the second is team 1 and plays <color=#7FD4FF>blue</color>. Vanilla never uses more than these two teams online.\n\n<color=#FFD94D><b>TEAM MODES: 2v2 AND 1v2</b></color>\n\n- <color=#7FD4FF>2v2</color> - the server splits the four players into two pairs when the match locks. Teammates share one body color: orange for the first team, blue for the second.\n- <color=#7FD4FF>1v2</color> - the solo player is one team (orange); the duo shares the other (blue).\n\n<color=#FFD94D><b>FFA: TEN PLAYERS, FOUR SKINS</b></color>\n\nIn FFA every player is their own team, numbered by lobby slot. ROUNDS ships exactly four body skins, so <color=#FF6666>colors repeat every four players</color>: the 1st, 5th and 9th players share a color, the 2nd, 6th and 10th share the next, and so on. That's deliberate - the mod adds no new skins, and the overhead nametags are what keep same-colored players apart. In a big lobby, read the name, not just the body.\n\n<color=#FFD94D><b>THE CARD-PICK SCREEN</b></color>\n\nThe body standing on the pick stage is a clone of the picker's skin. In team modes vanilla has two problems there: a load-order race can bake the WRONG team's color into that clone, and vanilla only ever presents one picker per round even when a losing team has two.\n\nThe mod fixes both. It re-checks the real team colors a few frames after the stage appears and retints the body if it came out wrong, and in 2v2 and 1v2 it re-runs the stage for each picker in turn - so every picker appears as themselves, in the right color. FFA doesn't use the vanilla stage at all: everyone picks at the same time on their own screen.\n\n<color=#FFD94D><b>CUSTOM PLAYER COLORS</b></color>\n\nA <color=#7FD4FF>player color</color> cosmetic from the shop (see <color=#7FD4FF>Shop & cosmetics</color>) replaces your team color on every modded player's screen; viewers can opt out with the Show Player Colors setting. Animated specials like Prismatic and Chrome cycle their color about 30 times a second. <color=#7FE87F>Players without the mod keep seeing standard orange and blue - to them your game looks untouched.</color>\n\nOn modded screens the color is also your team identity: point announcements call out your color's name (MUSTARD got a point, instead of ORANGE), the round-counter dots and the FFA score strip tint to match, and your in-game nametag tints too - unless a paid nametag color is equipped, which always wins. Identity is resolved from shared data, so everyone with the feature on sees the same names and dots; a player with it off sees vanilla bodies and tints (the custom team NAMES still show).",
@@ -670,6 +678,8 @@
   "Boosters",
   "Both clients watch everything; only the elected reporter sends. Duplicates are absorbed, and the server re-checks ranked or casual when the report lands.",
   "Both ready! Joining match...",
+  "Bottomless",
+  "Bounce",
   "Bouncer",
   "Bounces",
   "Bouncy",
@@ -677,13 +687,16 @@
   "Bracket",
   "Bracket Reset",
   "Brain Cane",
+  "Brawler",
   "Bright electric-cyan body color.",
   "Bright embers cooling into ash. Two-color gradient.",
   "Bright industrial blue body color.",
   "Broadcast [{0}] \"{1}\" to ALL players? It stands until revoked.",
   "Bronze",
   "Browse open lobbies below, or create your own.",
+  "Bruiser",
   "Bubbles",
+  "Buffoon",
   "Bug Reports...",
   "Bug fixes the mod ships",
   "Bug report sent. Thanks!",
@@ -707,6 +720,7 @@
   "Bye!",
   "CANCELLED (not enough players)",
   "CAPS",
+  "CAPYBARA",
   "CASUAL, RECORDED",
   "COM",
   "COM\u0004pc.band_short.common",
@@ -756,6 +770,7 @@
   "Cat Mouth",
   "Category:",
   "Century Club",
+  "Cerberus",
   "Change view",
   "Changes the menu cursor's shape. Works alongside an equipped cursor color.",
   "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
@@ -763,6 +778,7 @@
   "Charcoal",
   "Charcoal walls rimmed with corona amber on a true black sky.",
   "Charred timber — warm dark brown verging on black.",
+  "Chase",
   "Chat  <color=#888>(press T to chat)</color>",
   "Chat Lockdown...",
   "Chat Mutes...",
@@ -835,6 +851,7 @@
   "Connecting to the game...",
   "Connection was lost — returning to menu.",
   "Constantly cycles through the rainbow during a match.",
+  "Contender",
   "Controlled Burst",
   "Controls & keys",
   "Cool blue energy crackling behind you.",
@@ -943,10 +960,12 @@
   "Date format: <color=#88CCFF>{0}</color>",
   "Date obtained",
   "Day/Month/Year",
+  "Deadeye",
   "Deadlines & forfeits",
   "Deal Conditional damage",
   "Deal damage",
   "Deaths",
+  "Decay",
   "Decent",
   "Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes.",
   "Decline",
@@ -1058,6 +1077,7 @@
   "Elder Turtle",
   "Electric sparks snap and dart around you.",
   "Electric-cyan neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
+  "Elite Tracker",
   "Elo",
   "Ember",
   "Ember Gradient",
@@ -1067,6 +1087,7 @@
   "Emerald Gradient",
   "Emerald Name",
   "Emote dances for the hold-E wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
+  "Empower",
   "Empty Power main",
   "Enable",
   "Enable Ranked first - the RLFP ping is for ranked matches.",
@@ -1135,11 +1156,14 @@
   "Failed",
   "Failed: {0}",
   "False",
+  "Fast Forward",
   "Fast Forward main",
   "Fast finisher",
+  "Fastball",
   "Favorite ranked cards",
   "Few reach it. Fewer afford the title.",
   "Field Medic",
+  "Fine",
   "Finish a game with the exact same 5 cards (and copies) as your opponent",
   "Finish or leave your current game before joining the 1v2 queue.",
   "Finish or leave your current game before joining the FFA queue.",
@@ -1171,6 +1195,7 @@
   "Forfeit",
   "Forfeit failed",
   "Forfeit recorded - the match will be resolved shortly.",
+  "Forty-Niner",
   "Fragile Perfection",
   "Frames per second, top-left corner. Handy for checking whether a setting actually helped.",
   "Free daily pack",
@@ -1179,6 +1204,7 @@
   "Friendly fire off",
   "Friendly fire: OFF",
   "Friendly fire: ON",
+  "From the Ashes",
   "From the art of the \"Healing Field\" card",
   "From:",
   "Frost",
@@ -1233,6 +1259,7 @@
   "God Build",
   "Gold",
   "Gold Name",
+  "Gold Rush",
   "Gold Sources",
   "Gold betting runs on live 1v1, 2v2 and FFA games. This page covers who can bet, how the odds are priced, exactly when windows open and close, and what happens to your stake.\n\n<color=#FFD94D><b>WHO CAN BET</b></color>\n\n- Any registered player, staking 1 to 2000 Gold per bet. The stake is taken the moment the bet is placed.\n- You cannot bet on a match or lobby you are playing in, and banned players cannot bet.\n- <color=#7FE87F>Spectators CAN bet.</color> That is safe by design: the windows below close on early scoring, so watching a game never gets you a bet on a result that is already decided.\n- One bet per series in 1v1 and 2v2; one bet per game in FFA.\n- If any participant runs a mod older than 1.38.1, betting on that game is refused. Older clients cannot report live points, so the scoring cutoff could never fire - <color=#FF6666>the system fails closed rather than leave a window open.</color>\n- A linked Discord account can place the same bets through the bot's commands.\n\n<color=#FFD94D><b>ODDS: 1v1 AND 2v2</b></color>\n\n- Your multiplier is 1 divided by your side's win chance, computed from both sides' ratings AND their RD (see <color=#7FD4FF>Ratings (Glicko-2)</color>). Floor: 1.01x.\n- Uncertainty caps the price. With both sides established (RD 100 or below) the multiplier can reach 3.0x; the cap slides down to 1.0x as the higher RD rises to 300. A fresh account at RD 350 caps the price below the 1.10x acceptance gate - <color=#FF6666>an unknown simply can't be bet on, so a smurf can't be farmed for Gold.</color>\n- A side only accepts bets at 1.10x or better; below that it is locked.\n- 2v2 prices off the pair's average rating. A player's own 2v2 rating counts once they have 10 completed series; before that their 1v1 rating stands in.\n\n<color=#FFD94D><b>ODDS: FFA</b></color>\n\n- The server races every player to the lobby's score target and computes your pick's true chance of banking it first. Your multiplier is half of the fair price - the house keeps the other half.\n- Floors: 2.0x in lobbies of 5 or more, 1.4x at 3-4 players. For heavy favourites the floor gives way to 0.95 divided by their win chance, so a guaranteed-profit bet cannot exist.\n- Cap: 5.0x, or half the lobby size if that is lower, and it shrinks when ratings are uncertain.\n- A player with no FFA games yet is priced off their 1v1 rating at full uncertainty.\n\n<color=#FFD94D><b>WHEN BETS OPEN AND CLOSE</b></color>\n\nThe cutoff is scored points, never a clock:\n\n- <color=#7FD4FF>1v1 and 2v2</color> - open from the moment the series exists. Closed once 2 total points are scored in game 1, or the moment any game of the series is decided. Tournament series stay listed through the whole multi-day wait before the pair actually plays.\n- <color=#7FD4FF>FFA</color> - each bet targets the lobby's NEXT game. The window closes when the field scores 2 points in that game (1 point if the lobby's score target is 3 or lower). A lobby is only listed while a next game is plausible: up to 15 minutes while assembling with no games yet, and up to 30 minutes after its last recorded game. <color=#FF6666>Casual lobbies are never bettable.</color> Departed members are not valid targets.\n- <color=#7FD4FF>Lobby-phase bets</color> - hosted 2v2 and FFA lobbies take wagers while still FILLING. No odds are quoted yet; at Start the bet is priced from the final field and becomes a normal bet - provided your target is still there and the usual checks pass. Anything else (target left, odds too low, lobby never starts within 6 hours) refunds the stake.\n- 1v2 has no betting at all.\n\n<color=#FFD94D><b>PAYOUTS AND THE FIGHTER TAX</b></color>\n\n- A winning payout includes your stake back. 1v1 and 2v2 pay stake x odds rounded to the nearest Gold; FFA rounds DOWN.\n- If your winning bet's stored odds were 1.50x or below, 20% of the PROFIT goes to the fighter or team you backed - being worth betting on pays them too. The potential payout quoted when you place the bet already includes this tax.\n\n<color=#FFD94D><b>REFUNDS, AND WHERE TO SEE IT ALL</b></color>\n\nA refund returns exactly your stake:\n\n- 1v1: a non-tournament series with no game reported in its first 30 minutes is abandoned and refunds its bets. A series stalled for 60 minutes mid-series refunds its bets too, while the series itself stays resumable - <color=#FF6666>a refunded bet stays refunded even if that series is finished later.</color>\n- 2v2: refunds only when a series is cancelled. Disconnect-paused series wait for the admin ruling before anything settles.\n- FFA: refunds only for a game that never produced a recorded result. Played games always settle as won or lost.\n- At tiny stakes a WIN can pay exactly your stake (1g at 1.10x pays 1g). It is still a win: every bet's stored state - open, won, lost or refunded - is what displays, not the arithmetic.\n- Your full bet history across all modes is the bets ledger in the F5 menu. Live bettable games are listed in-game and mirrored in the Discord live-bets channel and its bet commands.",
   "Golden Eagle",
@@ -1254,9 +1281,11 @@
   "Grant data consent first (Settings)",
   "Graphs {0}/{1}",
   "Great White",
+  "Great-Grandma",
   "Green Cursor",
   "Green Name",
   "Grey Cat",
+  "Grinder",
   "Grizzly",
   "Grounded",
   "Grow",
@@ -1275,10 +1304,18 @@
   "Harassment",
   "Hard to hit",
   "Hare Apparent",
+  "Harlequin",
   "Hasty",
   "Hatchling",
   "He/him",
+  "He/him I",
+  "He/him II",
+  "He/him III",
+  "He/him IV",
+  "He/him V",
+  "Headhunter",
   "Healer",
+  "Healing Field",
   "Healing Field main",
   "Heart Eyes",
   "Heartbreak",
@@ -1286,6 +1323,7 @@
   "Held by the top 3 on the 1v1 ranked leaderboard",
   "Held by the top 3 on the 2v2 leaderboard",
   "Held by the top 3 on the FFA leaderboard",
+  "Hellhound",
   "Hello!",
   "Help translate the mod - opens the web portal in your browser. An admin has to give you translator access before you can submit.",
   "Hide Gold",
@@ -1306,12 +1344,14 @@
   "Hit-sound NRE swallow",
   "Hold on!",
   "Home",
+  "Homing User",
   "Homing main",
   "Honk honk.",
   "Hop to attention - arms snap up and out on every beat. Dancing locks your controls for the duration.",
   "Hop to the beat, arms pumping. Play it between rounds with the E wheel.",
   "Hostile Takeover",
   "Hot-pink neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
+  "Hound",
   "How It Works",
   "How It Works - Async (6-week)",
   "How It Works - Sync (weekly)",
@@ -1334,6 +1374,7 @@
   "I'm ready",
   "Icy blue trail fading to white. Two-color gradient.",
   "Idiot",
+  "Idiot Savant",
   "If no earlier rule settles it, score, check-in, no-show rate and a fixed tiebreak decide.",
   "Immortal",
   "Immovable Object",
@@ -1361,7 +1402,9 @@
   "Is RefreshValid true?",
   "Italic",
   "Ivory",
+  "Jackalope",
   "Jackrabbit",
+  "Jester",
   "Join",
   "Join Competitive Rounds!",
   "Joined the match!",
@@ -1382,6 +1425,7 @@
   "Knight Great-Helm",
   "Knockback",
   "Known vanilla bugs",
+  "Kodiak",
   "LEAVE MATCH",
   "LEG",
   "LEG\u0004pc.band_short.legendary",
@@ -1415,6 +1459,7 @@
   "Latest Releases",
   "Lavender",
   "Leaderboard",
+  "Leatherback",
   "Leave",
   "Leave All Queues",
   "Leave Lobby",
@@ -1426,6 +1471,7 @@
   "Leave your current game first.",
   "Leave your custom 1v2 lobby first.",
   "Leaving queue...",
+  "Leech",
   "Left 1v1 queue - you joined a game",
   "Left all queues",
   "Left the 1v1 match queue - you joined a game",
@@ -1439,10 +1485,14 @@
   "Level 1",
   "Level {0}",
   "Level-ups",
+  "Leviathan",
   "Life steal",
   "Lifesteal",
+  "Lifestealer",
   "Lifetime totals for your account, from the live server. The rules behind each source are in the article below.",
   "Lifts your nametag a fraction above its baseline so it appears to hover.",
+  "Lightning",
+  "Lightspeed",
   "Lime",
   "Link code: {0}",
   "Link codes are disabled on the broadcast seat.",
@@ -1511,6 +1561,7 @@
   "Map skins",
   "Maps",
   "Marked false positive. You still need to repair the rewards and series by hand.",
+  "Marksman",
   "Maroon",
   "Master",
   "Match canceled (disconnect)",
@@ -1525,6 +1576,7 @@
   "Max {0} cards",
   "Max {0} players",
   "Maxed",
+  "Mayhem",
   "Megalodon",
   "Menu music: <color=#88CCFF>Default</color>",
   "Menu music: <color=#88FF88>My playlist</color>",
@@ -1555,6 +1607,7 @@
   "More ranked than not.",
   "More than 10",
   "More...",
+  "Moron",
   "Moss",
   "Most 5-0 sweeps carrying these cards (casual + ranked)",
   "Most Similar Player",
@@ -1603,6 +1656,7 @@
   "Name",
   "Name Styles",
   "Name styling",
+  "Nana",
   "Near-black blocks on a black background — max contrast.",
   "Near-black volcanic glass. Disappears into the night.",
   "Nemesis Comparison",
@@ -1758,6 +1812,7 @@
   "Pale mint blocks on a cool dim backdrop.",
   "Pale silver-blue walls over a pitch-black night, with a faint star glint.",
   "Pale spearmint body color.",
+  "Parasite",
   "Party Crasher",
   "Party Crown",
   "Pass Rate",
@@ -1785,6 +1840,8 @@
   "Per-letter white → dark charcoal gradient. Fades out as it goes.",
   "Perfect balance. One light, one dark.",
   "Performance master switch — flips ALL the patches below at once.",
+  "Pestilence",
+  "Phantom",
   "Phoenix",
   "Phoenix Flame",
   "Phoneix Gaze",
@@ -1801,6 +1858,7 @@
   "Pink Cursor",
   "Pink Name",
   "Place bet",
+  "Plague Doctor",
   "Platinum",
   "Play",
   "Play Now (skip break)",
@@ -1835,6 +1893,7 @@
   "Posted to Discord - good luck!",
   "Precision shooter",
   "Precision-stepped poses, one servo at a time. Dancing locks your controls for the duration.",
+  "Predator",
   "Premium: cold silver walls that glint to pure white, over gunmetal dark",
   "Premium: molten gold walls that glint to white-gold, over a deep bronze vault",
   "Premium: northern-lights walls shimmering between polar teal and violet in a polar night",
@@ -1843,6 +1902,7 @@
   "President Meow",
   "Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.",
   "Press Esc to leave",
+  "Pretty Good",
   "Preview",
   "Preview art isn't downloaded yet - try again in a minute.",
   "Preview logs",
@@ -1855,6 +1915,7 @@
   "Print {0}",
   "Prismatic",
   "Prismatic Wake",
+  "Pristine",
   "Pristine Perfection",
   "Private 1v2 lobby",
   "Private 2v2 lobby",
@@ -1864,6 +1925,8 @@
   "Prizes & Rules",
   "Prizes are announced when signups open.",
   "Pronoun title.",
+  "Prospector",
+  "Prowler",
   "Pup",
   "Pure aggression",
   "Pure greyscale — minimum visual distraction.",
@@ -1879,7 +1942,9 @@
   "QShoot",
   "QUICK SHOTS INSIDE THE 0.35 SECOND WINDOW",
   "Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in the room has this on. Applies from your next game.",
+  "Quick Reload",
   "Quick Reload main",
+  "Quick Shot",
   "Quick chat",
   "Quick chat is on cooldown - one message every couple of seconds.",
   "Quick chat works once you are in a game with your character spawned.",
@@ -1912,6 +1977,7 @@
   "Radioactive green with lime droplets. Probably safe.",
   "Radioactive yellow-green neon name with a hot glow halo. Visible to everyone; modded players also see the glow.",
   "Rage Quit %",
+  "Railgun",
   "Rainbow",
   "Rainbow Aura",
   "Rainbow Name",
@@ -1972,6 +2038,7 @@
   "Ready-up failed — retrying search",
   "Reason",
   "Reason (optional)",
+  "Rebirth",
   "Reborn after defeat",
   "Recent Async Tournaments",
   "Recent Ranked Series",
@@ -1984,6 +2051,7 @@
   "Red Cursor",
   "Red Name",
   "Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.",
+  "Reef Shark",
   "Refresh",
   "Refresh?",
   "Refreshing too fast - give it a sec",
@@ -1995,6 +2063,7 @@
   "Reload",
   "Reloader",
   "Rematch?",
+  "Remote Killer",
   "Remove",
   "Removed from 1v2 queue after 30 minutes of searching - rejoin if you're still here!",
   "Removed from 2v2 queue after 30 minutes of searching - rejoin if you're still here!",
@@ -2034,9 +2103,12 @@
   "Revoke which translation role?",
   "Rich forest-green body color.",
   "Rich purple blocks on a dim cool backdrop.",
+  "Ricochet",
+  "Ringmaster",
   "Rise from the Ashes",
   "Rising Star",
   "Riveted steel great-helm with a T-slit visor.",
+  "Roc",
   "Rolling DPS (15 s window)",
   "Rolling block % (15 s window)",
   "Rolling hit % (15 s window)",
@@ -2053,6 +2125,7 @@
   "Royal Gradient",
   "Royal purple drifting into pale cyan. Two-color gradient.",
   "Royal violet body color.",
+  "Rush",
   "S p a c e d",
   "SALES OPEN",
   "SERIES COMPLETE {0}!",
@@ -2074,6 +2147,7 @@
   "SPECTATING",
   "SPECTATOR",
   "SYNC (weekly)",
+  "Sabertooth",
   "Sadness",
   "Same Cards: OFF",
   "Same cards",
@@ -2087,6 +2161,7 @@
   "Save Votes",
   "Scale",
   "Scarlet",
+  "Scavenger",
   "Score",
   "Score progression",
   "Score race (points per game)",
@@ -2104,6 +2179,7 @@
   "Seasonal Spring",
   "Seats full",
   "Secure connection unavailable - signed-in features are disabled this session.",
+  "Sekhmet",
   "Select 2-12 players (left) to see who beats each of them most.",
   "Select 2-12 players to find their common nemesis.",
   "Select players (left) to chart {0}.",
@@ -2154,13 +2230,21 @@
   "Set summary",
   "Settings",
   "Severity:",
+  "Shade",
   "Shades for those who want to show that they are the true genius of the battlefield",
   "Shark",
   "Shark God",
   "Shark Pup",
+  "Sharpshooter",
   "She/her",
+  "She/her I",
+  "She/her II",
+  "She/her III",
+  "She/her IV",
+  "She/her V",
   "Shifts through the spectrum as you move. Pure show-off.",
   "Shock Shades",
+  "Shockwave",
   "Shoot",
   "Shop",
   "Shop & cosmetics",
@@ -2216,6 +2300,7 @@
   "Smart Specs",
   "Smoking",
   "Snapper",
+  "Sneaky",
   "Sniper",
   "Sniper Medal",
   "So close!",
@@ -2248,6 +2333,7 @@
   "Spectators ({0})",
   "Spectators ({0}): {1}",
   "Specter",
+  "Speedrunner",
   "Spilled Icecream",
   "Spooky Head-Bouncers",
   "Spray and Pray",
@@ -2268,6 +2354,7 @@
   "Status: <color=#88FF88>Allowed</color> - match data and linking are active.",
   "Status: <color=#DDDD66>Unset</color> - the consent prompt will appear on next launch.",
   "Status: <color=#FF9966>Denied</color> - mod runs offline. No data leaves your machine.",
+  "Steady Shot",
   "Steam ID copied to clipboard",
   "Steam ID not ready yet — try again in a few seconds",
   "Steam identity is not available yet",
@@ -2294,6 +2381,7 @@
   "Stop spectating?",
   "Stopped searching",
   "Storm Halo",
+  "Stray",
   "Strike",
   "Strike through your name. Stackable with other name styles.",
   "Stun null-guard",
@@ -2305,6 +2393,7 @@
   "Sunburst Halo",
   "Sunset",
   "Sunset Gradient",
+  "Supernova",
   "Sure? Discard",
   "Sure? Discard dupes",
   "Sustained Power",
@@ -2334,6 +2423,7 @@
   "TOURNAMENT MATCH vs {0} IS WAITING - LEAVE THIS GAME NOW!{1}",
   "TOURNAMENT STARTING - matches are being created, hold tight...",
   "TOURNAMENT STARTS IN {0} - stay in ROUNDS at the main menu!",
+  "Tactical",
   "Tag Team Sweep",
   "Take 2nd place in a live (sync) tournament",
   "Take 2nd place in an async tournament",
@@ -2341,6 +2431,7 @@
   "Tan",
   "Tank",
   "Target Bounce main",
+  "Target Bouncer",
   "Target Steam ID",
   "Tattered Cape",
   "Tattered crimson bat wings straight from the pit. Soul sold separately.",
@@ -2377,6 +2468,7 @@
   "The Cryptid",
   "The Floss",
   "The Helicopter",
+  "The Joker",
   "The Mobsta",
   "The Mod & Vanilla",
   "The Robot",
@@ -2424,6 +2516,11 @@
   "The white line is your rating; the band is the rating deviation - it shrinks as you play, and your rating moves less once it is narrow.",
   "They already left the lobby.",
   "They/them",
+  "They/them I",
+  "They/them II",
+  "They/them III",
+  "They/them IV",
+  "They/them V",
   "Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface.",
   "Thicker menu text: <color=#88FF88>ON</color>",
   "Thicker menu text: <color=#FF9966>OFF</color>",
@@ -2440,6 +2537,7 @@
   "This rung has no shop row on the server, so it cannot be worn.",
   "Thorn Crown",
   "Three orbiting spheres of raw energy. ANIMATED.",
+  "Thruster",
   "Thunderbird",
   "Thunderstore",
   "Tidepool",
@@ -2463,6 +2561,7 @@
   "To: {0}",
   "To: {0} and {1} others",
   "Today's free pack is already claimed",
+  "Too Good",
   "Too many messages - try again in {0} hours.",
   "Too many messages - try again in {0} minutes.",
   "Too many messages - try again in {0} seconds.",
@@ -2496,6 +2595,7 @@
   "Trans pride colors with particle sparkles.",
   "Translate SCR (web portal)",
   "Translation role revoked.",
+  "Trick Shot",
   "Tride",
   "Trigger Refresh",
   "Tropical teal sinking into deep blue. Two-color gradient.",
@@ -2512,6 +2612,7 @@
   "Two crossed battle standards. For the cause!",
   "Two glowing green feelers. Take me to your leader.",
   "Two teams of two play a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- Random queue uses an Elo band that widens as you wait.\n  The server auto-balances the teams.\n- Custom lobbies have no Elo band.\n  Joining the lobby is consent to play.\n- All 4 players have 120 seconds to ready up.\n  If time expires, auto-queue players go back to\n  searching; a custom lobby is simply released.\n- Designed but not live yet: after an auto-queue game\n  with a point margin of 3 or more, the weakest winner\n  will trade places with the strongest loser. Until\n  that ships, teams stay locked all series.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first team to win 2 games wins the series.\n- 2v2 uses its own Glicko rating.\n  It does not change your 1v1 rating.\n- Rating updates after the completed series.\n- W-L and WR count completed series, not individual games.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Each game gives 600 base XP.\n  A game win gets x1.5, for 900 base XP.\n- A series win gives 50 base Gold.\n  A series loss gives 25 base Gold.\n- The opposing team's rating tier can multiply base rewards.\n- Game XP converts to Gold at 100 XP = 1 Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n<color=#7FD4FF>Rank</color> - Position in the currently selected sort.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>Rating</color> - The player's separate 2v2 Glicko rating.\n<color=#7FD4FF>W-L</color> - Completed series won and lost.\n<color=#7FD4FF>WR</color> - Series wins divided by completed series.\n<color=#7FD4FF>Avg Mate Elo</color> - Average rating of past teammates.\n  A teammate uses 2v2 rating after 5 completed series.\n  Before that, their 1v1 rating is used, or 1500 if absent.\n<color=#7FD4FF>Gold</color> - Lifetime Gold earned from 2v2 only.\n<color=#7FD4FF>XP</color> - Lifetime XP earned from 2v2 only.\n  Gold and XP do not affect your rating-based rank.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving mid-game is recorded.",
+  "Tycoon",
   "Type !link CODE in Discord",
   "Typing channel",
   "Typing: {0}  (Alt to change)",
@@ -2528,8 +2629,10 @@
   "Unclosed quote — usage: /report \"Multi Word Name\" [reason]",
   "Uncommon",
   "Uncommon\u0004card rarity",
+  "Undefeated",
   "Underline",
   "Underworld",
+  "Undying",
   "Unequip",
   "Unfocused 120 FPS cap: <color=#88FF88>ON</color>",
   "Unfocused 120 FPS cap: <color=#FF9966>OFF</color>",
@@ -2577,6 +2680,7 @@
   "Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on this page comes straight from the game's code.\n\n<color=#FFD94D><b>THE SHIELD EDGE BOUNCE</b></color>\n\nThe arena has a hard kill boundary just off-screen. While you are past it, the game checks you every 0.1 seconds:\n\n- <color=#FF6666>Not blocking:</color> you take a 51-damage lethal hit and an impulse back toward the arena. At 100 HP, two unshielded edge hits kill you.\n- <color=#7FE87F>Blocking:</color> no damage at all, and the return impulse is twice as strong. Your old velocity is zeroed first, so the bounce is clean and predictable no matter how fast you were flying out.\n\nThe block window is 0.3 seconds and the edge check ticks every 0.1 seconds, so the press can slightly TRAIL your exit and still count. Getting launched off-screen is survivable on demand: block as you cross the edge and you come back harder, for free. In a knockback war this is the difference between a lost point and a return volley.\n\n<color=#FFD94D><b>WALL JUMPS AND JUMP REFRESH</b></color>\n\n- Touching a wall in the air while holding movement INTO it counts as a wall grab. Unless you jumped within the last 0.15 seconds, <color=#7FE87F>a wall touch refreshes ALL of your jumps</color>.\n- Pressing jump within 0.1 seconds of a wall touch performs a wall jump: up and away from the wall instead of straight up.\n- Ground jumps add extra horizontal push proportional to how fast you were already moving sideways; wall jumps skip that bonus.\n- Holding jump keeps adding upward force for a short moment after takeoff - tap for a short hop, hold for full height.\n- While hanging close to a wall, your time-in-air counts more slowly for game systems that care about air time.\n\n<color=#FFD94D><b>THE FLYING BOUNCE</b></color>\n\nA hit big enough to set you 'flying' changes how walls treat you: while flying, hitting map geometry reflects your velocity off the surface, stuns you for 0.2 seconds, and deals a 5-damage self-hit. The reflected launch comes out after a quarter-second hold.\n\nThat self-hit is an ordinary blockable hit: <color=#7FE87F>blocking at the moment of wall impact negates the 5 damage</color>.\n\n<color=#FFD94D><b>MYTHS THE CODE SAYS NO TO</b></color>\n\n- <color=#8A8A93>Wall sliding is real, but not where you'd think: pressing into a wall damps your speed a little and keeps resetting the gravity ramp, so you do fall slower - while the stat actually named 'wall grab drag' does nothing at all.</color>\n- <color=#8A8A93>Cards that advertise a self-push on block do nothing on a normal block press - the game's own block window suppresses the push before it can apply. Do not draft them for movement.</color>\n\n<color=#FFD94D><b>SHIELD CHARGE IS THE REAL BLOCK MOVEMENT</b></color>\n\nShield Charge launches you along your AIM direction on any block press, and the launch works during your own block window. Hitting a player cancels the launch, damages and knocks them back, and grants a bonus block. It also combos with the wall rules above: charge into a wall, get your jumps refreshed, wall-jump out.",
   "View channel",
   "Viewing: {0}  <color=#888>(press T to chat)</color>",
+  "Village Idiot",
   "Visuals & Effects",
   "Vivid orange neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
   "Void",
@@ -2596,12 +2700,33 @@
   "Waiting for opponent...",
   "Waiting for your Steam sign-in - Player Cards need it",
   "Waiting for {0} ({1:F0})...",
+  "Warlord",
   "Warm coral-orange body color.",
   "Warm cream + tan palette.",
   "Warm desert sand tones.",
   "Warm honey-gold body color.",
   "Warm orange blocks on a sunset-toned backdrop.",
+  "Warp Speed",
+  "Wear it and earn gold from ranked play",
   "Wear it and finish ranked series",
+  "Wear it and lose ranked games",
+  "Wear it and play ranked 1v1 with Bouncy, Ricochet, Mayhem or Trickster",
+  "Wear it and play ranked 1v1 with Echo, Empower, Shockwave or Supernova",
+  "Wear it and play ranked 1v1 with Fast Forward, Chase, Sneaky or Thruster",
+  "Wear it and play ranked 1v1 with Healing Field, Leech, Lifestealer or Parasite",
+  "Wear it and play ranked 1v1 with Homing, Target Bounce or Remote",
+  "Wear it and play ranked 1v1 with Huge, Brawler, Tank, Pristine Perseverance or Defender",
+  "Wear it and play ranked 1v1 with Poison, Toxic Cloud or Decay",
+  "Wear it and play ranked 1v1 with Quick Reload, Refresh, Scavenger or Tactical Reload",
+  "Wear it and play ranked 1v1 with Wind Up, Quick Shot, Fastball or Steady Shot",
+  "Wear it and play ranked games",
+  "Wear it and win ranked 1v1 after trailing by 5 points",
+  "Wear it and win ranked 1v1 conceding 2 points or fewer",
+  "Wear it and win ranked 1v1 games 5-0",
+  "Wear it and win ranked 1v1 games in 3:30 or less",
+  "Wear it and win ranked 1v1 games in a row",
+  "Wear it and win ranked 1v1 with 30% accuracy over 40+ shots",
+  "Wear it and win ranked games",
   "Well Wraped Hat",
   "Well played!",
   "Wet teal-grey stone walls under an overcast slate sky, rain streaking down the backdrop.",
@@ -2664,6 +2789,7 @@
   "Win with two or more Saws",
   "Win with two or more Supernovas",
   "Win/Loss Record",
+  "Wind Up",
   "Wind up the right arm and take off. Dancing locks your controls for the duration.",
   "Windup",
   "Windup main",
@@ -2677,6 +2803,7 @@
   "World Turtle",
   "Worn by those who climbed the mountain.",
   "Worst Cards",
+  "Wraith",
   "Wrap your name in <b>bold</b>. Stackable with other name styles.",
   "Wrap your name in <i>italic</i>. Stackable with other name styles.",
   "Write a message first.",
@@ -5500,6 +5627,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Actually Good": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Add a subject.": {
    "surface": "MailClient, MailUI",
    "location": "ErrorDetail, SendCurrent",
@@ -5645,6 +5777,11 @@
    "location": "Compose1v1",
    "kind": "TrF"
   },
+  "Alley King": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Allow data reporting": {
    "surface": "CompetitiveUI, NativeUI",
    "location": "DrawConsentModal, RefreshSettings",
@@ -5674,6 +5811,11 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
+  },
+  "Alpha": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Alpha Cat": {
    "surface": "shop catalog",
@@ -5716,6 +5858,16 @@
    "kind": "Tr"
   },
   "An aurora follows you. Green and violet shimmer with sparkles.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Ancestor": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Ancient One": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -5955,6 +6107,11 @@
    "location": "AchievementDefs, cosmetic name/description",
    "kind": "shop, table"
   },
+  "Baby Mouse": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Back": {
    "surface": "MailUI",
    "location": "BuildReaderView",
@@ -6160,6 +6317,11 @@
    "location": "BuildRefreshFlow, TextFallback",
    "kind": "Tr"
   },
+  "Big Bang": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Big Cat": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6300,6 +6462,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Bloodbath": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Blue Cursor": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6350,6 +6517,16 @@
    "location": "ReadyUp, UpdateQueuePoll",
    "kind": "ShowNotification"
   },
+  "Bottomless": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Bounce": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Bouncer": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6385,6 +6562,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Brawler": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Bright electric-cyan body color.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6415,7 +6597,17 @@
    "location": "BuildFfaTab, RefreshFfaTab",
    "kind": "CreateText, Tr"
   },
+  "Bruiser": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Bubbles": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Buffoon": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -6534,6 +6726,11 @@
    "surface": "InfoViz",
    "location": "BuildKeyboard",
    "kind": "Tr"
+  },
+  "CAPYBARA": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "CASUAL, RECORDED": {
    "surface": "InfoViz",
@@ -6780,6 +6977,11 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Cerberus": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Change view": {
    "surface": "NativeUI",
    "location": "BuildHomeTab, RefreshChatLog",
@@ -6811,6 +7013,11 @@
    "kind": "shop"
   },
   "Charred timber — warm dark brown verging on black.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Chase": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -7171,6 +7378,11 @@
    "kind": "ShowNotification"
   },
   "Constantly cycles through the rainbow during a match.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Contender": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -7715,6 +7927,11 @@
    "location": "BuildSettingsTab, RefreshSettings",
    "kind": "Tr"
   },
+  "Deadeye": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Deadlines & forfeits": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -7734,6 +7951,11 @@
    "surface": "SessionReportModel",
    "location": "BuildTotals",
    "kind": "Tr"
+  },
+  "Decay": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Decent": {
    "surface": "shop catalog",
@@ -8290,6 +8512,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Elite Tracker": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Elo": {
    "surface": "NativeUI",
    "location": "TrMetric",
@@ -8334,6 +8561,11 @@
    "surface": "NativeUI",
    "location": "SHOP_TAB_DESCS",
    "kind": "table"
+  },
+  "Empower": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Empty Power main": {
    "surface": "shop catalog",
@@ -8675,12 +8907,22 @@
    "location": "SeqTable, SeqText",
    "kind": "Tr"
   },
+  "Fast Forward": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Fast Forward main": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
   },
   "Fast finisher": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Fastball": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -8699,6 +8941,11 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Fine": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Finish a game with the exact same 5 cards (and copies) as your opponent": {
    "surface": "ApiClient",
@@ -8855,6 +9102,11 @@
    "location": "TournamentForfeit",
    "kind": "ShowNotification"
   },
+  "Forty-Niner": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Fragile Perfection": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -8894,6 +9146,11 @@
    "surface": "NativeUI",
    "location": "BuildOneVTwoTab, BuildTeamTab, RenderHostLobbySection",
    "kind": "CreateButton, Tr"
+  },
+  "From the Ashes": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "From the art of the \"Healing Field\" card": {
    "surface": "shop catalog",
@@ -9165,6 +9422,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Gold Rush": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Gold Sources": {
    "surface": "NativeUI",
    "location": "TrMetric",
@@ -9270,6 +9532,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Great-Grandma": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Green Cursor": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -9281,6 +9548,11 @@
    "kind": "shop"
   },
   "Grey Cat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Grinder": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9375,6 +9647,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Harlequin": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Hasty": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -9390,7 +9667,42 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "He/him I": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "He/him II": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "He/him III": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "He/him IV": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "He/him V": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Headhunter": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Healer": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Healing Field": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9426,6 +9738,11 @@
    "kind": "shop"
   },
   "Held by the top 3 on the FFA leaderboard": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Hellhound": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9530,6 +9847,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Homing User": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Homing main": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -9556,6 +9878,11 @@
    "kind": "table"
   },
   "Hot-pink neon name with a soft glow halo. Visible to everyone; modded players also see the glow.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Hound": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9670,15 +9997,20 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Idiot Savant": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "If no earlier rule settles it, score, check-in, no-show rate and a fixed tiebreak decide.": {
    "surface": "InfoViz",
    "location": "BuildForfeitClock",
    "kind": "Tr"
   },
   "Immortal": {
-   "surface": "ApiClient",
-   "location": "AchievementDefs",
-   "kind": "table"
+   "surface": "ApiClient, shop catalog",
+   "location": "AchievementDefs, cosmetic name/description",
+   "kind": "shop, table"
   },
   "Immovable Object": {
    "surface": "ApiClient",
@@ -9805,7 +10137,17 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Jackalope": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Jackrabbit": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Jester": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9909,6 +10251,11 @@
    "surface": "InfoLibrary",
    "location": "(file scope)",
    "kind": "Tr"
+  },
+  "Kodiak": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "LEAVE MATCH": {
    "surface": "EscLeaveRow",
@@ -10075,6 +10422,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Leatherback": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Leave": {
    "surface": "NativeUI, SpectatorHud",
    "location": "BuildFfaTab, DrawLeaveMenu",
@@ -10129,6 +10481,11 @@
    "surface": "NativeUI",
    "location": "RefreshQueueUI",
    "kind": "SetText"
+  },
+  "Leech": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Left 1v1 queue - you joined a game": {
    "surface": "GameStateWatcher",
@@ -10195,6 +10552,11 @@
    "location": "BuildGoldSourcesLegend, GoldBucketName",
    "kind": "Tr"
   },
+  "Leviathan": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Life steal": {
    "surface": "TabStatsOverlay",
    "location": "EnsureLocaleStrings",
@@ -10205,12 +10567,27 @@
    "location": "BuildDamageMatrix, TextFallback",
    "kind": "Tr"
   },
+  "Lifestealer": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Lifetime totals for your account, from the live server. The rules behind each source are in the article below.": {
    "surface": "InfoViz",
    "location": "BuildGoldSourcesChart",
    "kind": "Tr"
   },
   "Lifts your nametag a fraction above its baseline so it appears to hover.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Lightning": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Lightspeed": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -10555,6 +10932,11 @@
    "location": "SubmitFlagEvidenceVerdict",
    "kind": "ShowNotification"
   },
+  "Marksman": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Maroon": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -10624,6 +11006,11 @@
    "surface": "TitleLaddersUI",
    "location": "ActionLabel",
    "kind": "Tr"
+  },
+  "Mayhem": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Megalodon": {
    "surface": "shop catalog",
@@ -10775,6 +11162,11 @@
    "location": "QcLabel",
    "kind": "Tr"
   },
+  "Moron": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Moss": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -10816,9 +11208,9 @@
    "kind": "Tr"
   },
   "Mouse": {
-   "surface": "InfoViz",
-   "location": "BuildKeyboard",
-   "kind": "Tr"
+   "surface": "InfoViz, shop catalog",
+   "location": "BuildKeyboard, cosmetic name/description",
+   "kind": "Tr, shop"
   },
   "Mouse-cursor color tint (local-only). Pick the cursor SHAPE — arrow, dot, crosshair, circle — in Settings; the tint colors whichever shape you choose.": {
    "surface": "NativeUI",
@@ -11015,6 +11407,11 @@
    "location": "BuildVisibilitySeats",
    "kind": "Tr"
   },
+  "Nana": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Near-black blocks on a black background — max contrast.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -11151,9 +11548,9 @@
    "kind": "shop"
   },
   "No Escape": {
-   "surface": "ApiClient",
-   "location": "AchievementDefs",
-   "kind": "table"
+   "surface": "ApiClient, shop catalog",
+   "location": "AchievementDefs, cosmetic name/description",
+   "kind": "shop, table"
   },
   "No Refresh": {
    "surface": "InfoViz",
@@ -11790,6 +12187,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Parasite": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Party Crasher": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -11925,6 +12327,16 @@
    "location": "BuildSettingsTab",
    "kind": "Tr"
   },
+  "Pestilence": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Phantom": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Phoenix": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -12004,6 +12416,11 @@
    "surface": "CompetitiveUI",
    "location": "DrawCustomBetPrompt",
    "kind": "Tr"
+  },
+  "Plague Doctor": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Platinum": {
    "surface": "shop catalog",
@@ -12175,6 +12592,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Predator": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Premium: cold silver walls that glint to pure white, over gunmetal dark": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -12214,6 +12636,11 @@
    "surface": "SpectatorHud",
    "location": "DrawBlackout",
    "kind": "Tr"
+  },
+  "Pretty Good": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Preview": {
    "surface": "NativeUI",
@@ -12275,6 +12702,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Pristine": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Pristine Perfection": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -12316,6 +12748,16 @@
    "kind": "ShowInfoPopup"
   },
   "Pronoun title.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Prospector": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Prowler": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -12395,7 +12837,17 @@
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
   },
+  "Quick Reload": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Quick Reload main": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Quick Shot": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -12560,6 +13012,11 @@
    "location": "TrMetric",
    "kind": "Tr"
   },
+  "Railgun": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Rainbow": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -12586,9 +13043,9 @@
    "kind": "shop"
   },
   "Rampage": {
-   "surface": "ApiClient",
-   "location": "AchievementDefs",
-   "kind": "table"
+   "surface": "ApiClient, shop catalog",
+   "location": "AchievementDefs, cosmetic name/description",
+   "kind": "shop, table"
   },
   "Random Queue": {
    "surface": "NativeUI",
@@ -12860,6 +13317,11 @@
    "location": "ChatMuteMsgDuration, StartAdminBanFlow, StartAdminReverseFlow +1",
    "kind": "Tr"
   },
+  "Rebirth": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Reborn after defeat": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -12920,10 +13382,15 @@
    "location": "BuildRefreshGate",
    "kind": "Tr"
   },
+  "Reef Shark": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Refresh": {
-   "surface": "CompetitiveUI, InfoViz, NativeUI",
-   "location": "BuildAdminTab, BuildPage, DrawLogViewerModal +2",
-   "kind": "CreateButton, Tr"
+   "surface": "CompetitiveUI, InfoViz, NativeUI +1",
+   "location": "BuildAdminTab, BuildPage, DrawLogViewerModal +3",
+   "kind": "CreateButton, Tr, shop"
   },
   "Refresh?": {
    "surface": "InfoViz",
@@ -12974,6 +13441,11 @@
    "surface": "QuickChat",
    "location": "Phrases",
    "kind": "table"
+  },
+  "Remote Killer": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Remove": {
    "surface": "NativeUI",
@@ -13170,6 +13642,16 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Ricochet": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Ringmaster": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Rise from the Ashes": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -13181,6 +13663,11 @@
    "kind": "table"
   },
   "Riveted steel great-helm with a T-slit visor.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Roc": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -13261,6 +13748,11 @@
    "kind": "shop"
   },
   "Royal violet body color.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Rush": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -13370,6 +13862,11 @@
    "location": "BuildTournamentsTab",
    "kind": "CreateButton"
   },
+  "Sabertooth": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Sadness": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -13431,6 +13928,11 @@
    "kind": "Tr"
   },
   "Scarlet": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Scavenger": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -13519,6 +14021,11 @@
    "surface": "ApiClient",
    "location": "PostSteamAuth",
    "kind": "Tr"
+  },
+  "Sekhmet": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Select 2-12 players (left) to see who beats each of them most.": {
    "surface": "NativeUI",
@@ -13770,6 +14277,11 @@
    "location": "DrawBugReportModal",
    "kind": "Tr"
   },
+  "Shade": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Shades for those who want to show that they are the true genius of the battlefield": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -13790,7 +14302,37 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Sharpshooter": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "She/her": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "She/her I": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "She/her II": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "She/her III": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "She/her IV": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "She/her V": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -13801,6 +14343,11 @@
    "kind": "shop"
   },
   "Shock Shades": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Shockwave": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -14080,6 +14627,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Sneaky": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Sniper": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -14240,6 +14792,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Speedrunner": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Spilled Icecream": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -14339,6 +14896,11 @@
    "surface": "NativeUI",
    "location": "RefreshSettings",
    "kind": "Tr"
+  },
+  "Steady Shot": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Steam ID copied to clipboard": {
    "surface": "NativeUI",
@@ -14470,6 +15032,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Stray": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Strike": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -14521,6 +15088,11 @@
    "kind": "shop"
   },
   "Sunset Gradient": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Supernova": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -14670,6 +15242,11 @@
    "location": "DrawTournamentBanner",
    "kind": "TrF"
   },
+  "Tactical": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Tag Team Sweep": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -14701,6 +15278,11 @@
    "kind": "shop"
   },
   "Target Bounce main": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Target Bouncer": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -14881,6 +15463,11 @@
    "kind": "shop"
   },
   "The Helicopter": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "The Joker": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -15120,6 +15707,31 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "They/them I": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "They/them II": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "They/them III": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "They/them IV": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "They/them V": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -15196,6 +15808,11 @@
    "kind": "shop"
   },
   "Three orbiting spheres of raw energy. ANIMATED.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Thruster": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -15314,6 +15931,11 @@
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
    "kind": "Tr"
+  },
+  "Too Good": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Too many messages - try again in {0} hours.": {
    "surface": "MailClient",
@@ -15441,9 +16063,9 @@
    "kind": "Tr"
   },
   "Toxic Cloud": {
-   "surface": "InfoViz",
-   "location": "BuildDotTimeline",
-   "kind": "Tr"
+   "surface": "InfoViz, shop catalog",
+   "location": "BuildDotTimeline, cosmetic name/description",
+   "kind": "Tr, shop"
   },
   "Toxic Spill": {
    "surface": "shop catalog",
@@ -15479,6 +16101,11 @@
    "surface": "NativeUI",
    "location": "BuildAdminTab",
    "kind": "Tr"
+  },
+  "Trick Shot": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Tride": {
    "surface": "shop catalog",
@@ -15560,6 +16187,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Tycoon": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Type !link CODE in Discord": {
    "surface": "NativeUI",
    "location": "BuildHomeTab",
@@ -15640,12 +16272,22 @@
    "location": "RefreshCardStats",
    "kind": "TrC:card rarity"
   },
+  "Undefeated": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Underline": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
   },
   "Underworld": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Undying": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -15736,9 +16378,9 @@
    "kind": "table"
   },
   "Untouchable": {
-   "surface": "ApiClient",
-   "location": "AchievementDefs",
-   "kind": "table"
+   "surface": "ApiClient, shop catalog",
+   "location": "AchievementDefs, cosmetic name/description",
+   "kind": "shop, table"
   },
   "Update": {
    "surface": "NativeUI",
@@ -15885,6 +16527,11 @@
    "location": "RefreshChatLog",
    "kind": "TrF"
   },
+  "Village Idiot": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Visuals & Effects": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -15980,6 +16627,11 @@
    "location": "RefreshQueueUI",
    "kind": "TrF"
   },
+  "Warlord": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Warm coral-orange body color.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -16005,10 +16657,110 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Warp Speed": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and earn gold from ranked play": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Wear it and finish ranked series": {
    "surface": "TitleLaddersUI",
    "location": "PaintDrop",
    "kind": "Tr"
+  },
+  "Wear it and lose ranked games": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Bouncy, Ricochet, Mayhem or Trickster": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Echo, Empower, Shockwave or Supernova": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Fast Forward, Chase, Sneaky or Thruster": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Healing Field, Leech, Lifestealer or Parasite": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Homing, Target Bounce or Remote": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Huge, Brawler, Tank, Pristine Perseverance or Defender": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Poison, Toxic Cloud or Decay": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Quick Reload, Refresh, Scavenger or Tactical Reload": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked 1v1 with Wind Up, Quick Shot, Fastball or Steady Shot": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and play ranked games": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and win ranked 1v1 after trailing by 5 points": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and win ranked 1v1 conceding 2 points or fewer": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and win ranked 1v1 games 5-0": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and win ranked 1v1 games in 3:30 or less": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and win ranked 1v1 games in a row": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and win ranked 1v1 with 30% accuracy over 40+ shots": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Wear it and win ranked games": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Well Wraped Hat": {
    "surface": "shop catalog",
@@ -16320,6 +17072,11 @@
    "location": "BuildMyStatsTab",
    "kind": "CreateText"
   },
+  "Wind Up": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Wind up the right arm and take off. Dancing locks your controls for the duration.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -16384,6 +17141,11 @@
    "surface": "NativeUI",
    "location": "TrMetric",
    "kind": "Tr"
+  },
+  "Wraith": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Wrap your name in <b>bold</b>. Stackable with other name styles.": {
    "surface": "shop catalog",
