@@ -742,10 +742,29 @@ def test_pg_an_owner_of_a_higher_rung_starts_there():
 
 # -- 5. The refund migration 366, on the seeded census ----------------------
 
-def refund_scenario(before="", runs=1, sql366=None, seed=None):
+async def _refund_state(conn):
+    return {
+        "players": sorted(tuple(r) for r in await conn.fetch(
+            "SELECT p.steam_id, p.gold_earned, p.gold_spent, si.sku "
+            "  FROM players p LEFT JOIN shop_items si ON si.id = p.active_title_id")),
+        "items": sorted(tuple(r) for r in await conn.fetch(
+            "SELECT p.steam_id, si.sku, pi.purchase_price FROM player_items pi "
+            "  JOIN players p ON p.id = pi.player_id "
+            "  JOIN shop_items si ON si.id = pi.item_id")),
+        "ledger": sorted(tuple(r) for r in await conn.fetch(
+            "SELECT p.steam_id, g.amount, g.reason, g.reference_id "
+            "  FROM gold_transactions g JOIN players p ON p.id = g.player_id")),
+        "ready": dict(tuple(r) for r in await conn.fetch(
+            "SELECT sku, catalog_ready FROM shop_items "
+            " WHERE sku IN ('title_voidshot', 'title_regicide')")),
+    }
+
+
+def refund_scenario(before="", runs=1, sql366=None, seed=None, snapshots=False):
     """prereq + 365 + `seed` (default the census seed) + `before`, then 366
     (or `sql366`, a control's text) `runs` times. Returns (state, [None or
-    the refusal text per run])."""
+    the refusal text per run]); with snapshots=True, (the full state before
+    the first run and after each run, outcomes)."""
     _require_live_pg()
     schema = _schema_name()
     sql366 = sql366 or lane.migration_text(M366)
@@ -757,6 +776,7 @@ def refund_scenario(before="", runs=1, sql366=None, seed=None):
         try:
             await conn.execute('SET search_path TO "%s"' % schema)
             outcomes = []
+            states = [await _refund_state(conn)]
             for _ in range(runs):
                 try:
                     await conn.execute(sql366)
@@ -764,22 +784,8 @@ def refund_scenario(before="", runs=1, sql366=None, seed=None):
                 except Exception as exc:     # the refusal is the outcome under test
                     outcomes.append(str(exc))
                     await conn.execute("ROLLBACK")
-            state = {
-                "players": sorted(tuple(r) for r in await conn.fetch(
-                    "SELECT p.steam_id, p.gold_earned, p.gold_spent, si.sku "
-                    "  FROM players p LEFT JOIN shop_items si ON si.id = p.active_title_id")),
-                "items": sorted(tuple(r) for r in await conn.fetch(
-                    "SELECT p.steam_id, si.sku, pi.purchase_price FROM player_items pi "
-                    "  JOIN players p ON p.id = pi.player_id "
-                    "  JOIN shop_items si ON si.id = pi.item_id")),
-                "ledger": sorted(tuple(r) for r in await conn.fetch(
-                    "SELECT p.steam_id, g.amount, g.reason, g.reference_id "
-                    "  FROM gold_transactions g JOIN players p ON p.id = g.player_id")),
-                "ready": dict(tuple(r) for r in await conn.fetch(
-                    "SELECT sku, catalog_ready FROM shop_items "
-                    " WHERE sku IN ('title_voidshot', 'title_regicide')")),
-            }
-            return state, outcomes
+                states.append(await _refund_state(conn))
+            return (states if snapshots else states[-1]), outcomes
         finally:
             await conn.close()
             await _drop_schema(schema)
@@ -888,22 +894,103 @@ def test_pg_r2_366_refuses_a_lost_holder_with_no_refund_row():
     assert state == untouched
 
 
-# A database these titles were never sold on -- a fresh or replayed schema,
-# which every migration-replay harness builds -- has no holder, no refund and
-# no purchase row. 366 retires both catalogue rows there and writes nothing
-# else; a second run is a no-op. Production is never in this state for
-# title_regicide (its buyer's purchase row exists), which the lost-holder
-# refusal above pins.
-def test_pg_r2_366_on_a_database_never_sold_on_retires_and_refunds_nothing():
-    state, outcomes = refund_scenario(seed="", runs=2)
+# Round 3 finding 3: 366 accepts exactly two states, NOT YET APPLIED and
+# APPLIED, and each carries the census's purchase evidence (purchase rows,
+# buyers, debit total). The round-2 NEVER SOLD state is gone. Each refusal
+# below compares the FULL state before and after the run (players, inventory,
+# ledger, catalogue): nothing changed. Each negative control is the 5605ae95
+# text (round 2's final 366, which carried NEVER SOLD and no purchase
+# evidence), which accepts the same state.
+R2_366 = "5605ae95cb7c08d967b0e85c0e694f9c28c08542"   # 366 as round 2 left it
+HOLDER_AND_PURCHASE_GONE = (
+    "DELETE FROM player_items WHERE item_id = "
+    "(SELECT id FROM shop_items WHERE sku = 'title_regicide');"
+    "DELETE FROM gold_transactions WHERE reason = 'purchase' "
+    "   AND reference_id = 'title_regicide';")
+ORPHAN_PURCHASE = (
+    "INSERT INTO gold_transactions (player_id, amount, reason, reference_id) "
+    "SELECT id, -3000, 'purchase', 'title_regicide' FROM players "
+    " WHERE steam_id = 'census-bystander';")
+
+
+def _sql366_r2():
+    text = _sql366_at(R2_366)
+    assert "v_never" in text            # the control is the text with NEVER SOLD
+    return text
+
+
+def test_pg_r3_366_refuses_a_deleted_holder_and_deleted_purchase_and_changes_nothing():
+    """The census holder's title AND its purchase row are gone before 366:
+    neither state, so it refuses with the full state unchanged. Control: the
+    round-2 text took NEVER SOLD here, retired the title and refunded nothing."""
+    (before, after), outcomes = refund_scenario(before=HOLDER_AND_PURCHASE_GONE, snapshots=True)
+    assert outcomes[0] and "366 refused" in outcomes[0] and "Re-census" in outcomes[0], outcomes
+    assert after == before, (before, after)
+    assert before["ready"] == {"title_voidshot": True, "title_regicide": True}
+    (_, old), old_out = refund_scenario(before=HOLDER_AND_PURCHASE_GONE, sql366=_sql366_r2(),
+                                        snapshots=True)
+    assert old_out == [None], old_out
+    assert old["ready"] == {"title_voidshot": False, "title_regicide": False}
+    assert not any(r[2] == "title_refunded" for r in old["ledger"])
+
+
+def test_pg_r3_366_refuses_an_extra_orphan_purchase_row_and_changes_nothing():
+    """A second 'purchase' row naming title_regicide, from a player who holds
+    no such title: the purchase rows and buyers no longer equal the census, so
+    366 refuses with the full state unchanged. Control: the round-2 text
+    counted holders only, applied, and refunded the census holder."""
+    (before, after), outcomes = refund_scenario(before=ORPHAN_PURCHASE, snapshots=True)
+    assert outcomes[0] and "366 refused" in outcomes[0] and "2 purchase rows" in outcomes[0], outcomes
+    assert after == before, (before, after)
+    (_, old), old_out = refund_scenario(before=ORPHAN_PURCHASE, sql366=_sql366_r2(), snapshots=True)
+    assert old_out == [None], old_out
+    assert ("census-holder-1", 3000, "title_refunded", "title_regicide") in old["ledger"]
+
+
+def test_pg_r3_366_refuses_a_database_never_sold_on_and_changes_nothing():
+    """A fresh schema (no holder, no purchase row, no refund) while the census
+    expects one paying title_regicide holder: refused, nothing changed. A
+    replay harness holds 366 out instead (test_pc_trades). Control: round 2's
+    NEVER SOLD state retired both titles here."""
+    (before, after), outcomes = refund_scenario(seed="", snapshots=True)
+    assert outcomes[0] and "366 refused" in outcomes[0] and "title_regicide" in outcomes[0], outcomes
+    assert after == before, (before, after)
+    (_, old), old_out = refund_scenario(seed="", sql366=_sql366_r2(), snapshots=True)
+    assert old_out == [None], old_out
+    assert old["ready"] == {"title_voidshot": False, "title_regicide": False}
+
+
+def test_pg_r3_366_fresh_then_applied_snapshots():
+    """The two accepted states, by full snapshot: the first run moves exactly
+    the census holder's refund, the removal of the title and both retirements; the
+    second run (APPLIED) leaves the state byte-for-byte as the first left it."""
+    (s0, s1, s2), outcomes = refund_scenario(runs=2, snapshots=True)
     assert outcomes == [None, None], outcomes
-    assert state["items"] == [] and state["ledger"] == [], state
-    assert state["ready"] == {"title_voidshot": False, "title_regicide": False}
-    # Negative control: the a39bb4e2 text (holders and applied states only)
-    # refuses the same never-sold database.
-    old, old_out = refund_scenario(seed="", sql366=_sql366_at("a39bb4e2"))
-    assert old_out[0] and "366 refused" in old_out[0], old_out
-    assert old["ready"] == {"title_voidshot": True, "title_regicide": True}
+    assert s1 != s0 and s2 == s1, (s0, s1, s2)
+    assert s1["ledger"] == s0["ledger"] + [
+        ("census-holder-1", 3000, "title_refunded", "title_regicide")], s1["ledger"]
+    assert ("census-holder-1", 8000, 3000, None) in s1["players"]
+    assert ("census-holder-1", "title_regicide", 3000) not in s1["items"]
+    assert s1["ready"] == {"title_voidshot": False, "title_regicide": False}
+
+
+def test_pg_r3_366_postcheck_expects_the_census_refunds_not_surviving_rows():
+    """The post-check's expected refunds come from the embedded census. With
+    the preflight's state check switched off (a mutation of THIS text) on a
+    database whose holder and purchase row are gone, the refund loop writes
+    nothing and the post-check refuses (it expects the census's one refund for
+    3000). Control: the round-2 post-check derived its expectation from the
+    surviving purchase row, found none, and accepted the same database."""
+    cur = lane.migration_text(M366)
+    no_pre = cur.replace("IF NOT (v_fresh OR v_applied) THEN", "IF FALSE THEN")
+    assert no_pre != cur
+    _, outcomes = refund_scenario(before=HOLDER_AND_PURCHASE_GONE, sql366=no_pre)
+    assert outcomes[0] and "expected 1 refund row(s) for 3000 gold" in outcomes[0], outcomes
+    old = _sql366_r2()
+    old_no_pre = old.replace("IF NOT (v_fresh OR v_applied OR v_never) THEN", "IF FALSE THEN")
+    assert old_no_pre != old
+    _, old_out = refund_scenario(before=HOLDER_AND_PURCHASE_GONE, sql366=old_no_pre)
+    assert old_out == [None], old_out
 
 
 def _sql366_at(rev):

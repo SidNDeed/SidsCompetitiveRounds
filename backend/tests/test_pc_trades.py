@@ -218,8 +218,17 @@ def _bare(stmt):
     return " ".join(re.sub(r"--[^\n]*|/\*.*?\*/", "", stmt, flags=re.S).split())
 
 
+# Held out of every replay here: 366 is the refund of a production census (one
+# paying title_regicide holder) and refuses, changing nothing, on any database
+# that census does not describe -- this harness's fresh schema included. It
+# touches no object this module reads (shop_items, players, player_items and
+# gold_transactions rows of two retired titles only).
+HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql"})
+
+
 def _numbered(upto=None, above=None):
-    files = sorted(p for p in SQL_DIR.glob("*.sql") if re.match(r"^\d{3}_", p.name))
+    files = sorted(p for p in SQL_DIR.glob("*.sql")
+                   if re.match(r"^\d{3}_", p.name) and p.name not in HELD_OUT)
     if upto is not None:
         files = [p for p in files if int(p.name[:3]) <= upto]
     if above is not None:
