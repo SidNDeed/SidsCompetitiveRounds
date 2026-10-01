@@ -427,9 +427,12 @@ _ENDTXN = _re.compile(r"await db\.(commit|rollback)\(\)")
 # _lobby_start_common is listed rather than team_lobby_start/ovt_lobby_start:
 # the two routes share it, and it is where the locking actually happens, so
 # checking the routes would pass trivially and prove nothing.
+# v1.41.0 merge pass 4 (c): main's connect-failure landing runs the FFA poll's
+# body as _ffa_queue_poll_inner (ffa_queue_poll wraps it and gathers nothing),
+# so every FFA gather site below names the body.
 WIRED_SITES = ["queue_poll", "queue_ready", "_lobby_start_common",
                "ffa_lobby_start", "team_queue_poll", "ovt_queue_poll",
-               "ffa_queue_poll"]
+               "_ffa_queue_poll_inner"]
 
 # The gather paths. A FRESH automatic roster, so the gate must be called with
 # no `allow` at all -- the exact mirror of HOSTED_STARTS, and the same one-word
@@ -439,7 +442,7 @@ WIRED_SITES = ["queue_poll", "queue_ready", "_lobby_start_common",
 # issuance, with a different policy. A handler with two policies belongs in a
 # test that pins both -- see test_ranked_poll_gates_its_two_branches_
 # differently -- not in one that counts to one.
-FRESH_ROSTER_SITES = ["ovt_queue_poll", "ffa_queue_poll"]
+FRESH_ROSTER_SITES = ["ovt_queue_poll", "_ffa_queue_poll_inner"]
 
 # The two hosted-Start paths and the `allow` expression each must pass.
 HOSTED_STARTS = {
@@ -804,7 +807,7 @@ def test_a_committed_peer_ends_the_resume_instead_of_rediscovering():
 @pytest.mark.parametrize("site,const,runs", [
     ("queue_poll", "_RANKED_CANDIDATE_SQL", 2),
     ("ovt_queue_poll", "_OVT_CANDIDATE_SQL", 2),
-    ("ffa_queue_poll", "_FFA_CANDIDATE_SQL", 3),
+    ("_ffa_queue_poll_inner", "_FFA_CANDIDATE_SQL", 3),
 ])
 def test_gather_predicates_are_one_statement_run_more_than_once(site, const, runs):
     src = _inspect.getsource(getattr(main, site))
@@ -863,7 +866,7 @@ def test_ffa_rediscovery_re_elects_the_decider():
     Counted rather than grepped for presence: three uses is the election, the
     re-election and the slot ordering, so dropping any one of them fails here
     instead of passing on the other two (#432)."""
-    src = _inspect.getsource(main.ffa_queue_poll)
+    src = _inspect.getsource(main._ffa_queue_poll_inner)
     assert src.count("_ffa_sort_key") == 3, src.count("_ffa_sort_key")
 
 
@@ -892,7 +895,7 @@ def _attempt_budgets(fn_src):
     return openings, counters, loops
 
 
-@pytest.mark.parametrize("site", ["ovt_queue_poll", "ffa_queue_poll",
+@pytest.mark.parametrize("site", ["ovt_queue_poll", "_ffa_queue_poll_inner",
                                   "team_queue_poll"])
 def test_gather_loops_are_bounded_and_end_in_a_refusal(site):
     """Bounded on purpose: identity locks stabilise only the identities
@@ -929,7 +932,7 @@ def test_gather_loops_are_bounded_and_end_in_a_refusal(site):
     assert 'raise HTTPException(status_code=503, detail="queue_contended")' in src, site
 
 
-@pytest.mark.parametrize("site", ["ovt_queue_poll", "ffa_queue_poll"])
+@pytest.mark.parametrize("site", ["ovt_queue_poll", "_ffa_queue_poll_inner"])
 def test_gather_drift_rolls_back_and_never_commits(site):
     """A commit inside the formation loop would publish a half-formation AND
     release the barrier -- option (a)'s failure, reached from inside the retry
@@ -1151,6 +1154,15 @@ _GATED_BY_SOLE_CALLER = {
     "_team_relock_existing_series": "_team_resolve_live_family",
 }
 
+# The same claim for an acquirer with MORE than one caller (v1.41.0 merge pass
+# 4 (c)): main's connect-failure rework moved the FFA lock's lease acquisition
+# into _ffa_lock_roster, which the hosted Start and the assembly's REFORM both
+# call. The proof below re-derives the caller set, requires it to be exactly
+# the claimed one, and requires each caller to run a gate BEFORE its first call.
+_GATED_BY_EVERY_CALLER = {
+    "_ffa_lock_roster": frozenset({"ffa_lobby_start", "_asm_reform"}),
+}
+
 
 def _callers_of(name, spans, lines):
     """Every function in main.py whose body calls `name`."""
@@ -1183,6 +1195,30 @@ def test_every_sole_caller_delegation_is_still_sole_and_still_gates():
             claimed, "is the claimed gate but does not gate")
 
 
+def test_every_caller_delegation_names_every_caller_and_each_gates_first():
+    """The proof behind _GATED_BY_EVERY_CALLER (v1.41.0 merge pass 4 (c)).
+    The derived caller set must equal the claim (a new caller fails here
+    until it is argued in), and in each caller the first gate line must come
+    before the first call, or the acquisition runs on an unproved roster."""
+    _acquirers, _gaters, spans = commitment_points()
+    src = _io.open(_inspect.getsourcefile(main), encoding="utf-8",
+                   newline="").read()
+    lines = src.split(chr(10))
+    for name, claimed in _GATED_BY_EVERY_CALLER.items():
+        assert name in spans, (
+            name, "delegation claimed but the function is gone")
+        callers = _callers_of(name, spans, lines)
+        assert callers == set(claimed), (
+            name, "claims these gating callers; main.py has", callers)
+        pat = _re.compile(r"\b" + _re.escape(name) + r"\s*\(")
+        for caller in sorted(claimed):
+            body = _body_lines(caller, spans, lines)
+            gates = [n for n, ln in body if _GATE.search(ln)]
+            calls = [n for n, ln in body if pat.search(ln)]
+            assert gates and calls and min(gates) < min(calls), (
+                caller, "must gate before it calls", name, gates, calls)
+
+
 def test_every_lease_acquisition_is_gated_in_its_own_transaction():
     """THE round-2 acceptance test, and the one that defines the batch's scope.
 
@@ -1193,7 +1229,8 @@ def test_every_lease_acquisition_is_gated_in_its_own_transaction():
     acquirers, gaters, spans = commitment_points()
     ungated = sorted(n for n in acquirers
                      if n not in gaters and n not in _NOT_A_FORMATION
-                     and n not in _GATED_BY_SOLE_CALLER)
+                     and n not in _GATED_BY_SOLE_CALLER
+                     and n not in _GATED_BY_EVERY_CALLER)
     assert not ungated, (
         "these acquire a formation lease with nothing proving the seat is "
         "free:\n" + "\n".join(
@@ -1486,7 +1523,7 @@ def test_the_ffa_gather_decision_is_pure_and_asked_twice():
     EXECUTED (#441): the releases are pinned by calling the function, not by
     reading it."""
     assert main.FFA_MIN_PLAYERS < main.FFA_MAX_PLAYERS
-    src = _inspect.getsource(main.ffa_queue_poll)
+    src = _inspect.getsource(main._ffa_queue_poll_inner)
     # Structure, not a substring count. Two asks can both APPEAR while
     # only one can run: `x = (a, b) or f(...)` short-circuits on a truthy
     # tuple and never asks again, and a count of "_ffa_gather_decide("

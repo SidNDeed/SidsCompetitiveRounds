@@ -294,6 +294,57 @@ def test_s4_corroboration(monkeypatch):
     run_env(monkeypatch, body)
 
 
+async def _commit_elsewhere(env, lob, slot):
+    """The seat's one lease names another commitment (ranked discovery's
+    (ranked, NULL)), live: what a formation elsewhere would have written."""
+    await env.conn.execute(
+        "UPDATE queue_leases SET mode = 'ranked', group_id = NULL WHERE player_id = $1",
+        lob.pids[slot])
+
+
+def test_s12c_the_reform_carries_only_seats_it_may_lease(monkeypatch):
+    """v1.41.0 merge pass 4 (c), A1 meets the REFORM: the carry leases L' over
+    each carried seat's own lease, so a READY seat whose live lease names
+    another commitment is not carried. (i) Three others still carry: the seat
+    is released from L like a PENDING seat and its other lease is untouched.
+    (ii) Fewer than three would carry: the lobby dissolves (Table 2's outcome
+    below three READY seats), and the other lease is still untouched."""
+    async def body(env):
+        lob = await env.lobby(5, t=40.0)
+        await _commit_elsewhere(env, lob, 3)
+        a = await _post(env, lob, 0, [0, 1, 2, 3])
+        row = await env.lobby_row(lob)
+        assert row["status"] == "canceled" and row["reformed_to"] is not None, ("S12c i reformed", a)
+        assert env.asm_lines("carry refused=1 committed elsewhere"), "S12c i print"
+        new = row["reformed_to"]
+        for s in (0, 1, 2):
+            assert (await env.seat(lob, s))["verdict"] == "carried", ("S12c i carried", s)
+            held = await env.lease(lob, s)
+            assert held is not None and held["group_id"] == new, ("S12c i carried lease", s, held)
+        assert (await env.seat(lob, 3))["verdict"] == "excluded", "S12c i excluded"
+        assert await env.queue_row(lob, 3) is None, "S12c i released from L"
+        other = await env.lease(lob, 3)
+        assert other is not None and other["mode"] == "ranked" and other["group_id"] is None, \
+            ("S12c i other lease untouched", other)
+
+        lob = await env.lobby(5, t=40.0)
+        await _commit_elsewhere(env, lob, 2)
+        a = await _post(env, lob, 0, [0, 1, 2])
+        row = await env.lobby_row(lob)
+        assert row["status"] == "canceled" and row["reformed_to"] is None \
+            and row["dissolve_path"] == "asm_dissolve", ("S12c ii dissolved", a, row["status"])
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_lobbies WHERE reformed_from = $1", lob.lid) == 0, "S12c ii no L'"
+        for s in (0, 1):
+            q = await env.queue_row(lob, s)
+            assert q is not None and q["status"] == "searching", ("S12c ii searching", s, q)
+            assert await env.lease(lob, s) is None, ("S12c ii lease released", s)
+        other = await env.lease(lob, 2)
+        assert other is not None and other["mode"] == "ranked" and other["group_id"] is None, \
+            ("S12c ii other lease untouched", other)
+    run_env(monkeypatch, body)
+
+
 def test_s18_rule_d_and_d0(monkeypatch):
     """S18: a leave at 8 decides nothing (and a POST at 8 still answers
     assembling); at 20 rule D starts short (admission) or re-forms

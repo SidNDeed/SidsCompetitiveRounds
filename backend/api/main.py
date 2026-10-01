@@ -57034,19 +57034,26 @@ async def _ffa_assembly_verdict(ctx, trigger: str) -> dict:
         outcome = "reform" if len(ready) >= 3 and not admission else "dissolve"
     if rule is None:
         return ans
-    if await _asm_apply_decision(ctx, outcome, rule, cls, trigger):
-        ans.update({"outcome": outcome, "hold": 0, "wait_ms": 0})
-        ctx.decided = outcome
+    taken = await _asm_apply_decision(ctx, outcome, rule, cls, trigger)
+    if taken is not None:
+        ans.update({"outcome": taken, "hold": 0, "wait_ms": 0})
+        ctx.decided = taken
     return ans
 
 
-async def _asm_apply_decision(ctx, outcome, rule, cls, trigger) -> bool:
+async def _asm_apply_decision(ctx, outcome, rule, cls, trigger):
     """Take the decision the verdict reached (sec3.4), in the caller's
-    transaction, and write the decision record on every seat row with it."""
+    transaction, and write the decision record on every seat row with it.
+    Returns the outcome taken, None when none was. A REFORM that cannot carry
+    FFA_MIN_PLAYERS seats (A1: a seat committed elsewhere is not carried)
+    dissolves instead, Table 2's outcome below three READY seats."""
     if outcome == "start_short":
         done = await _asm_start_short(ctx, rule, cls)
     elif outcome == "reform":
         done = await _asm_reform(ctx, rule, cls, trigger)
+        if not done:
+            outcome = "dissolve"
+            done = await _asm_dissolve(ctx, rule, cls, trigger)
     else:
         done = await _asm_dissolve(ctx, rule, cls, trigger)
     if done:
@@ -57055,7 +57062,7 @@ async def _asm_apply_decision(ctx, outcome, rule, cls, trigger) -> bool:
         if outcome == "start_short":
             await _ffa_admission_check(ctx)
             await ctx.reload()
-    return done
+    return outcome if done else None
 
 
 async def _asm_start_short(ctx, rule, cls) -> bool:
@@ -57110,8 +57117,26 @@ async def _asm_reform(ctx, rule, cls, trigger) -> bool:
     k_seats = sorted((p for p in ctx.seats if cls.get(p["player_id"]) in ("READY", "SPAWNING")),
                      key=lambda p: p["slot"])
     x_seats = [p for p in ctx.seats if cls.get(p["player_id"]) == "PENDING"]
+    # A1 (v1.41.0 merge pass 4 (c)): the carry gives each carried seat a lease
+    # for L' through _ffa_lock_roster, whose acquisition supersedes whatever
+    # lease the seat holds. A1 lets a formation supersede only its own
+    # predecessor, so a carried seat must hold ("ffa", L) or no live lease; a
+    # seat committed elsewhere is not carried and is released from L like a
+    # PENDING seat (its lease for the other commitment is not touched).
+    _carry_from = ("ffa", uuid.UUID(str(old)))
+    refused = []
+    for p in k_seats:
+        if await _formation_lease_conflict(ctx.db, [(p["seat_steam_id"], p["player_id"])],
+                                           allow=_carry_from) is not None:
+            refused.append(p)
+    if refused:
+        k_seats = [p for p in k_seats if p not in refused]
+        x_seats = x_seats + refused
+        ctx.log(f"carry refused={len(refused)} committed elsewhere")
     k_ids = [p["player_id"] for p in k_seats]
     if len(k_ids) < FFA_MIN_PLAYERS:
+        # Too few seats to carry: the caller dissolves instead (Table 2's
+        # other outcome, _asm_apply_decision).
         return False
     host = lob.get("host_player_id") if lob.get("host_player_id") in k_ids else None
     if host is None:
