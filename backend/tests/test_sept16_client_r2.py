@@ -6459,9 +6459,11 @@ def test_r5_the_status_channel_reports_before_every_callback():
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                "                if (onResponseCode != null) onResponseCode(request.responseCode);\n"
-                "                callback(success, success",
-                "                callback(success, success",
+                # Verified reads moved the answered exit inside the read-gate
+                # retry loop, two blocks deeper than it was.
+                "                        if (onResponseCode != null) onResponseCode(request.responseCode);\n"
+                "                        callback(success, success",
+                "                        callback(success, success",
                 "R5 the answered exit stops reporting its code"),
         "R5 every GetRequest exit reports its code before the callback")
 
