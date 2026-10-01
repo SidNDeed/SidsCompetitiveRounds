@@ -136,17 +136,25 @@ def _hourly(start, end, step=900, **kw):
     return out
 
 
+def _both(start, end, step=900, **kw):
+    """Steady successful pulls of BOTH boxes, each answering as itself with
+    its own boot id."""
+    return (_hourly(start, end, step, node="primary", boot="p1", **kw)
+            + _hourly(start, end, step, node="standby", boot="s1", **kw))
+
+
 def test_coverage_fails_on_three_hour_gap():
     now = T0 + 14 * 86400
     start = now - 14 * 86400
-    steady = _hourly(start, now)
+    steady = _both(start, now)
     ok = T.coverage(steady, 14, now)
-    assert ok["primary"]["ok"] and ok["primary"]["longest_gap"] <= 900
-    assert ok["primary"]["covered"] == 1.0
+    for box in ("primary", "standby"):
+        assert ok[box]["ok"] and ok[box]["longest_gap"] <= 900, ok
+        assert ok[box]["covered"] == 1.0
     hole_a, hole_b = start + 5 * 86400, start + 5 * 86400 + 3 * 3600
-    holed = [r for r in steady if not (hole_a < r["at"] < hole_b)]
+    holed = [r for r in steady if not (r["box"] == "primary" and hole_a < r["at"] < hole_b)]
     bad = T.coverage(holed, 14, now)
-    assert not bad["primary"]["ok"]
+    assert not bad["primary"]["ok"] and bad["standby"]["ok"]
     assert bad["primary"]["longest_gap"] >= 3 * 3600 - 900
     assert bad["primary"]["covered"] < 1.0
 
@@ -156,16 +164,77 @@ def test_coverage_cli_exit_code(tmp_path, capsys):
     sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "..", "tools")))
     now = T0 + 86400
     path = str(tmp_path / "ledger.jsonl")
-    for r in _hourly(now - 86400, now):
+    for r in _both(now - 86400, now):
         T.append(path, r)
     assert T.coverage_cli(path, 1, now) == 0
     path2 = str(tmp_path / "ledger2.jsonl")
-    for r in _hourly(now - 86400, now):
+    for r in _both(now - 86400, now):
         if not (now - 50000 < r["at"] < now - 40000):
             T.append(path2, r)
     assert T.coverage_cli(path2, 1, now) == 1
     out = capsys.readouterr().out
-    assert "primary" in out and "longest gap" in out
+    assert "primary" in out and "standby" in out and "longest gap" in out
+
+
+def test_coverage_cli_primary_only_fails(tmp_path, capsys):
+    """Fourteen days of successful primary pulls and only FAILED standby pulls:
+    the standby has no successful pull, so the verdict is exit 1."""
+    now = T0 + 14 * 86400
+    path = str(tmp_path / "ledger.jsonl")
+    for r in _hourly(now - 14 * 86400, now, node="primary", boot="p1"):
+        T.append(path, r)
+    for r in _hourly(now - 14 * 86400, now, node="standby", ok=False):
+        T.append(path, r)
+    v = T.coverage(T.load(path), 14, now)
+    assert v["primary"]["ok"] and not v["standby"]["ok"], v
+    assert "no successful pull" in v["standby"]["why"]
+    assert T.coverage_cli(path, 14, now) == 1
+    assert "standby: 0 pulls" in capsys.readouterr().out
+    # and an empty ledger reports both boxes and fails
+    empty = str(tmp_path / "empty.jsonl")
+    assert T.coverage_cli(empty, 14, now) == 1
+
+
+def test_coverage_cli_late_first_pull_fails(tmp_path):
+    """Both boxes' first success three hours into the window: the clipped
+    leading interval is the longest gap, so the verdict is exit 1; the same
+    for a trailing interval (last success three hours before now)."""
+    now = T0 + 14 * 86400
+    start = now - 14 * 86400
+    late = str(tmp_path / "late.jsonl")
+    for r in _both(start + 3 * 3600, now):
+        T.append(late, r)
+    v = T.coverage(T.load(late), 14, now)
+    for box in ("primary", "standby"):
+        assert not v[box]["ok"] and v[box]["longest_gap"] == 3 * 3600, v
+        assert v[box]["covered"] < 1.0
+    assert T.coverage_cli(late, 14, now) == 1
+    stale = str(tmp_path / "stale.jsonl")
+    for r in _both(start, now - 3 * 3600):
+        T.append(stale, r)
+    v = T.coverage(T.load(stale), 14, now)
+    assert not v["primary"]["ok"] and v["primary"]["longest_gap"] == 3 * 3600, v
+    assert T.coverage_cli(stale, 14, now) == 1
+    # a pull before the window anchors it: no leading interval
+    anchored = _both(start - 600, now)
+    assert all(x["ok"] for x in T.coverage(anchored, 14, now).values())
+
+
+def test_coverage_requires_distinct_identities():
+    """A pull of the standby address that answered as the primary does not
+    count for the standby; one boot id answering for both boxes fails both."""
+    now = T0 + 86400
+    start = now - 86400
+    crossed = (_hourly(start, now, node="primary", boot="p1")
+               + [dict(r, box="standby") for r in _hourly(start, now, node="primary", boot="p9")])
+    v = T.coverage(crossed, 1, now)
+    assert v["primary"]["ok"] and not v["standby"]["ok"], v
+    assert "answered as node ['primary']" in v["standby"]["why"]
+    same = (_hourly(start, now, node="primary", boot="one")
+            + _hourly(start, now, node="standby", boot="one"))
+    v = T.coverage(same, 1, now)
+    assert not v["primary"]["ok"] and not v["standby"]["ok"], v
+    assert "one process" in v["standby"]["why"]
 
 
 def test_canary_counts_exactly_n(seat):

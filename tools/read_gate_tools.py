@@ -28,11 +28,14 @@ A JSON-lines file, one record per pull attempt:
   pulls, plus, at a boot change, the UNRECORDED interval: from the old
   series' last successful pull to the new series' `since` (what the old
   process counted after its last pull is lost).
-* coverage(records, days, now): per node over [now - days, now]: the
-  covered fraction (window time not inside an uncovered interval: a gap over
-  GAP_LIMIT, an unrecorded boot interval, the time before the first pull, the
-  time since the last) and the longest gap. Fails when any gap exceeds
-  GAP_LIMIT (60 minutes).
+* coverage(records, days, now): per EXPECTED box (primary and standby, each
+  always reported) over [now - days, now]: the covered fraction and the
+  longest interval without a successful pull, the leading interval (window
+  start to the first pull) and the trailing one (last pull to now) included.
+  A box fails when it has no successful pull, when a pull of it answered as
+  the other node or a boot id answered for both boxes, or when that longest
+  interval exceeds GAP_LIMIT (60 minutes). coverage_cli exits 0 only when
+  both boxes pass.
 """
 from __future__ import annotations
 
@@ -208,28 +211,62 @@ def gaps(records) -> list:
     return out
 
 
-def coverage(records, days: float, now: float) -> dict:
-    """{node: {"covered": fraction, "longest_gap": seconds, "ok": bool}}."""
+# The two boxes a coverage verdict needs, each with the census identity it
+# must answer as. A box is the LAN address pulled (the ledger's `box`); its
+# identity is the `node` the census reports.
+EXPECTED_BOXES = {"primary": "primary", "standby": "standby"}
+
+
+def coverage(records, days: float, now: float, expected=None) -> dict:
+    """{box: {"covered", "longest_gap", "ok", "pulls", "why"}} for EVERY
+    expected box, in the window [now - days, now].
+
+    A box passes only when: it has at least one successful pull; every
+    successful pull of that box reports the box's own identity, and no boot
+    id is reported by both boxes (two distinct processes answered); and the
+    longest interval without a successful pull, the clipped LEADING interval
+    (window start to the first pull) and the clipped TRAILING one (last pull
+    to now) included, is at most GAP_LIMIT. `covered` is the window fraction
+    outside every such interval longer than GAP_LIMIT and outside every
+    unrecorded restart."""
+    expected = EXPECTED_BOXES if expected is None else expected
     start = now - days * 86400
+    span = max(1.0, now - start)
+    ok_recs = [r for r in records if r.get("ok")]
+    boots = {}
+    for r in ok_recs:
+        boots.setdefault(r["boot_id"], set()).add(r.get("box"))
+    shared = {b for b, boxes in boots.items() if len(boxes & set(expected)) > 1}
     result = {}
-    succ = _successes(records)
-    all_gaps = gaps(records)
-    for node, pulls in succ.items():
-        uncovered = []
-        first, last = pulls[0]["at"], pulls[-1]["at"]
-        if first > start:
-            uncovered.append((start, first))
-        if now > last:
-            uncovered.append((last, now))
-        node_gaps = [g for g in all_gaps if g.node == node]
-        for g in node_gaps:
-            if g.kind == "unrecorded_boot" or g.seconds > GAP_LIMIT:
-                uncovered.append((g.start, g.end))
-        lost = _union_length([(max(a, start), min(b, now)) for a, b in uncovered if b > start])
-        span = max(1.0, now - start)
-        longest = max([g.seconds for g in node_gaps] + [max(0.0, now - last)])
-        result[node] = {"covered": round(max(0.0, 1 - lost / span), 6),
-                        "longest_gap": longest, "ok": longest <= GAP_LIMIT}
+    for box, identity in expected.items():
+        mine = sorted((r for r in ok_recs if r.get("box") == box), key=lambda r: r["at"])
+        why = []
+        wrong = [r for r in mine if r["node"] != identity]
+        if wrong:
+            why.append(f"{len(wrong)} pull(s) of box {box} answered as node "
+                       f"{sorted({r['node'] for r in wrong})}, not {identity}")
+        if any(r["boot_id"] in shared for r in mine):
+            why.append("a boot id answered for both boxes: one process, not two")
+        pulls = [r for r in mine if r["node"] == identity]
+        if not pulls:
+            why.append("no successful pull")
+            result[box] = {"covered": 0.0, "longest_gap": span, "ok": False,
+                           "pulls": 0, "why": "; ".join(why)}
+            continue
+        times = [r["at"] for r in pulls]
+        intervals = [(start, times[0])] + list(zip(times, times[1:])) + [(times[-1], now)]
+        clipped = [(max(a, start), min(b, now)) for a, b in intervals]
+        clipped = [(a, b) for a, b in clipped if b > a]
+        longest = max([b - a for a, b in clipped] + [0.0])
+        lost = [(a, b) for a, b in clipped if b - a > GAP_LIMIT]
+        for g in gaps(pulls):
+            if g.kind == "unrecorded_boot":
+                lost.append((max(g.start, start), min(g.end, now)))
+        covered = round(max(0.0, 1 - _union_length(lost) / span), 6)
+        if longest > GAP_LIMIT:
+            why.append(f"longest gap {longest / 60:.1f} min exceeds {GAP_LIMIT / 60:.0f} min")
+        result[box] = {"covered": covered, "longest_gap": longest, "ok": not why,
+                       "pulls": len(pulls), "why": "; ".join(why)}
     return result
 
 
@@ -295,15 +332,14 @@ def pull_cli(ledger: str, callers: dict, at: float | None = None) -> int:
 
 
 def coverage_cli(ledger: str, days: float, at: float | None = None) -> int:
+    """Exit 0 only when BOTH expected boxes pass (coverage)."""
     records = load(ledger)
     result = coverage(records, days, now() if at is None else at)
-    if not result:
-        print("no successful pulls in the ledger")
-        return 1
     bad = 0
-    for node, v in sorted(result.items()):
-        print(f"{node}: covered {v['covered'] * 100:.2f}% of {days:g} days, "
-              f"longest gap {v['longest_gap'] / 60:.1f} min, {'ok' if v['ok'] else 'FAIL'}")
+    for box, v in sorted(result.items()):
+        print(f"{box}: {v['pulls']} pulls, covered {v['covered'] * 100:.2f}% of {days:g} days, "
+              f"longest gap {v['longest_gap'] / 60:.1f} min, "
+              + ("ok" if v["ok"] else "FAIL " + v["why"]))
         bad += 0 if v["ok"] else 1
     return 1 if bad else 0
 
