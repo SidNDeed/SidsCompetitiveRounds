@@ -4,6 +4,7 @@
 ApiClient.cs	ApiClient	FetchFfaBettable	players	N	JSON record field `.players` of a server answer, no body	
 ApiClient.cs	ApiClient	FetchPlayerNemesis	players	N	JSON record field, no body	
 ApiClient.cs	ApiClient	ParseFfaRecentList	players	N	JSON record field, no body	
+ApiClient.cs	ApiClient	SpectateValidateActors	ActiveFighters	V	the attest roster's fighter ids read ActiveFighters(), the kept view; the send is the master-only validation (MasterMaySend, row 48)	
 ApiClient.cs	ApiClient	SpectateValidateActors	GetPlayer	F	resolves the invalid spectator the master closes; the master-only validation send is fenced (row 48), and the close in its answer reads MasterMaySend() (V9, N5)	
 ApiClient.cs	ApiClient	SpectateValidateActors	MasterMaySend	F	master-only spectator validation send; reads MasterMaySend()	
 CompetitiveUI.cs	CompetitiveUI	DrawDanceWheel	players	N	UI	
@@ -84,16 +85,12 @@ FfaMapScale.cs	FfaMapScale.PlayerManager_MovePlayers_FfaScale_Patch	Prefix	playe
 FfaMode.cs	CardBarHandler_AddCard_Ffa_Patch	Prefix	players	N	finds the local body (IsMine) only	
 FfaMode.cs	FfaMode	AlivePlayers	AlivePlayers	V	alive count over KeptPlayers() (surface 6)	
 FfaMode.cs	FfaMode	AlivePlayers	KeptPlayers	V	alive count over KeptPlayers() (surface 6)	
-FfaMode.cs	FfaMode	ApplyManifestPick	GetPlayerWithID	V	NEW V7 pick surface: skips a quarantined pid before ApplyCardTo (row 50)	
 FfaMode.cs	FfaMode	BoundedSyncUp	OtherActiveFighterCount	V	sync peers via OtherActiveFighterCount(), the kept view; LocalSitsOut returns first		LocalSitsOut
 FfaMode.cs	FfaMode	CheckRoundAfterLeave	ActiveFighterCount	V	leave quorum via ActiveFighterCount(), the kept view; while LocalSitsOut() it resolves nothing and its last-player exit counts PresentNonSpectators() (V8, V7-F1)		LocalSitsOut
 FfaMode.cs	FfaMode	CheckRoundAfterLeave	PresentNonSpectators	V	LocalSitsOut() selects: a client that sits out counts the present seats, every other the kept view (row 51)	
 FfaMode.cs	FfaMode	ClearLastDamageSources	players	R	clears kill-credit memory on every body; a reset gives no body an effect	
 FfaMode.cs	FfaMode	CollectMatchPointTeams	players	N	HUD match-point label (CompetitiveUI.cs:1095)	
-FfaMode.cs	FfaMode	CollectPicks	GetPlayerWithID	V	NEW V7 site: manifest entries of quarantined pids are skipped (row 50)	
-FfaMode.cs	FfaMode	CountStillPresent	GetPlayerWithID	V	NEW V7 site: counts kept manifest entries only (row 50)	
 FfaMode.cs	FfaMode	CurrentLeader	players	N	crown cosmetic (Plugin.cs:5926)	
-FfaMode.cs	FfaMode	DetectAheadPickIdentity	GetPlayerWithID	V	NEW V7 site: reads kept manifest entries only (row 50)	
 FfaMode.cs	FfaMode	Dictionary	Leavers	R	the leaver ledger's declaration (FfaMode.cs:238); its writer and every reader are census rows of their own	
 FfaMode.cs	FfaMode	FfaDoStartGame	MasterMaySend	F	master-driven game start; MasterMaySend() and the kind-s start barrier (row 48)	
 FfaMode.cs	FfaMode	FfaPickPhase	KeptPlayers	V	pickers over KeptPlayers() (surface 1)	
@@ -116,6 +113,7 @@ FfaMode.cs	FfaMode	RawAnchorFallback	GetPlayersInTeam	R	vanilla indexes GetPlaye
 FfaMode.cs	FfaMode	RawAnchorFallback	players	R	the anchor fallback's raw body (vanilla's victory flow); never a score, a point or a report	
 FfaMode.cs	FfaMode	RecordLeaver	Leavers	R	the ledger's only writer, keyed by Steam id (FfaMode.cs:1195-1213); each call site is a census row of its own, classified there (row 53)	
 FfaMode.cs	FfaMode	RecordLeaver	RecordLeaver	R	the ledger writer's own declaration; each call site is a census row of its own (row 53)	
+FfaMode.cs	FfaMode	ResolveFighter	players	R	the beta lane's pid-to-body resolution, vanilla GetPlayerWithID's linear search with holes and destroyed bodies skipped; its four manifest callers (ApplyManifestPick, CollectPicks, CountStillPresent, DetectAheadPickIdentity) each test FfaLateEntry.IsQuarantined on the body it returns (row 50)	
 FfaMode.cs	FfaMode	ResolvePointNow	AlivePlayers	V	alive count via AlivePlayers() (surface 6)	
 FfaMode.cs	FfaMode	RoomCount	ActiveFighterCount	V	RoomCount via ActiveFighterCount(), the kept view; while LocalSitsOut() it counts PresentNonSpectators() (V8, V7-F1)		LocalSitsOut
 FfaMode.cs	FfaMode	RoomCount	PresentNonSpectators	V	LocalSitsOut() selects: a client that sits out counts the present seats, every other the kept view	
@@ -143,7 +141,6 @@ GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	NotifyPlayerLeftRoom	R
 GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	RecordLeaver	V	the actor-left callback's ledger write: in a gated running room it records a leave only for an actor this client keeps, read before the leave changes anything, so an unkept return's leave writes nothing and the entry of the game its seat left stands (V8, V7-F2)		IsKeptActor|IsQuarantinedActor
 GameStateWatcher.cs	GameStateWatcher	OnFfaGameOver	Leavers	N	local placement for this client's own end screen (GameStateWatcher.cs:6712-6737); the server ranks from the report	
 GameStateWatcher.cs	GameStateWatcher	OnFfaGameOver	players	N	local team lookup (IsMine) for the result screen	
-GameStateWatcher.cs	GameStateWatcher	OnFfaMatchStarted	ActiveFighters	R	roster freeze; a gated room passes the lock roster (K47)	
 GameStateWatcher.cs	GameStateWatcher	OnGameOver	ActiveFighterCount	N	1v1/2v2/OVT game over; FFA ends in OnFfaGameOver	
 GameStateWatcher.cs	GameStateWatcher	OnGameOver	ActiveFighters	N	1v1/2v2/OVT game over; FFA ends in OnFfaGameOver	
 GameStateWatcher.cs	GameStateWatcher	OnGameOver	PlayerList	N	1v1/2v2/OVT game over; FFA ends in OnFfaGameOver	
@@ -167,6 +164,7 @@ GameStateWatcher.cs	GameStateWatcher	TickSpectateAttest	ActiveFighters	R	attesta
 GameStateWatcher.cs	GameStateWatcher	TickSpectateAttest	IsMasterClient	N	code-room master attestation (codeRoom guard, GameStateWatcher.cs:1478)	
 GameStateWatcher.cs	GameStateWatcher	TickSpectateAttest	IsMasterClient#2	N	the master's spectate-validation cadence (GameStateWatcher.cs:1502-1518); its callees SpectateValidateActors and MasterSweepUnvalidated read the fence in their own spans (row 48; V9 per-occurrence override, N5)	
 GameStateWatcher.cs	GameStateWatcher	TryPublishSharedGameToken	IsMasterClient	N	1v1 shared game token	
+GameStateWatcher.cs	GameStateWatcher	TryPublishTeamToken	IsMasterClient	N	the team-game token publisher's host bit (TeamGameNumber, round 7 F29): it decides only which seat writes the room's game token, sends no gameplay and reads no roster	
 GameStateWatcher.cs	GameStateWatcher	TryReportFfaMatch	ActiveFighters	V	report roster over the kept view (surface 8)	
 GameStateWatcher.cs	GameStateWatcher	TryReportFfaMatch	Leavers	V	the report's leaver entries: a client that sits out files no report, so the builder returns before any entry while LocalSitsOut() (V8, V7-F1); the ledger holds only kept actors' leaves (row 53)		LocalSitsOut
 GameStateWatcher.cs	GameStateWatcher	TryReportFfaMatch	players	V	report roster over the kept view (surface 8)	
@@ -224,6 +222,7 @@ Plugin.cs	Cr2v2DiagCallbacks	OnPlayerEnteredRoom	OnPlayerEnteredRoom	R	the actor
 Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	ActiveFighters	V	reporter election over ActiveFighters(), the kept view (Plugin.cs:4106)	
 Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	NotifyPlayerLeftRoom	R	relays every non-spectator leave to the banner and the ledger; the ledger write reads the view at its own row (row 53)	
 Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	OnPlayerLeftRoom	R	the actor-left callback: spectator, impostor and firewall resolution over the leaving actor, raw by design (a leave is seen whatever the view says); its FFA ledger write is classified at NotifyPlayerLeftRoom (row 53)	
+Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	PlayerList	N	the 2v2 DC election's survivor walk; OnPlayerLeftRoom returns before it for an OVT or FFA room (Diag2v2.IsOvt() || Diag2v2.IsFfa())	
 Plugin.cs	Cr2v2DiagCallbacks	OnPlayerPropertiesUpdate	OnPlayerPropertiesUpdate	R	identity bookkeeping: a change of u_id, a spectator mark or the proximity capability invalidates the roster identity cache (Plugin.cs:4138)	
 Plugin.cs	Cr2v2DiagCallbacks	RepeatedCompetitiveCosmeticReapply	ActiveFighters	N	cosmetic reapply	
 Plugin.cs	Diag2v2	DescribeRoom	PlayerCount	N	diag text	
@@ -246,6 +245,7 @@ PortraitRender.cs	PortraitRender	DevLeverBlocked	players	N	dev lever
 PostSessionReport.cs	PostSessionReport	FfaRosterOverlapEnough	players	N	JSON record field	
 PostSessionReport.cs	PostSessionReport	FfaRosterPlayers	players	N	JSON record field	
 PostSessionReport.cs	PostSessionReport	FfaSessionMatches	players	N	JSON record field	
+PostSessionReport.cs	PostSessionReport	SessionAnchor	players	N	JSON record field	
 ProximityVictimPatches.cs	ProximityVictimGate	Census	PlayerList	R	whole-room capability predicate over every actor	
 QuickChat.cs	QuickChat	Send	GetPlayerWithActorID	N	chat	
 RoomActors.cs	RoomActors	ActiveFighterCount	ActiveFighterCount	V	view definition: no fast path while GatedRunning; counts ActiveFighters()	
@@ -255,6 +255,7 @@ RoomActors.cs	RoomActors	ActiveFighters	ActiveFighters	V	view definition: skips 
 RoomActors.cs	RoomActors	ActiveFighters	IsKeptActor	V	the fighter view filters through IsKeptActor in a gated room	
 RoomActors.cs	RoomActors	ActiveFighters	PlayerList	V	view definition: skips every actor IsKeptActor() rejects	
 RoomActors.cs	RoomActors	AnySpectatorPresent	RoomPlayers	R	whole-room spectator predicate (RoomActors.cs:447-457); a quarantined fighter is not a spectator, so the view has nothing to filter	
+RoomActors.cs	RoomActors	CaptureAssemblyActors	RoomPlayers	R	RJ-2: the assembly window, every actor present when the roster is first taken, raw by design; the roster rules decide from it	
 RoomActors.cs	RoomActors	IsImpostorReplicated	RoomPlayers	R	identity resolution: the duplicate-identity rule compares every earlier present actor, kept or not (RoomActors.cs:251-272)	
 RoomActors.cs	RoomActors	IsUnauthorized	RoomPlayers	R	the registration firewall's duplicate-identity rule reads every earlier present actor (RoomActors.cs:361-381); the firewall decides the roster, the kept set decides play	
 RoomActors.cs	RoomActors	KeptPlayers	KeptPlayers	R	a same-named delegate of FfaLateEntry.KeptPlayers(), whose own row is V; the own-name rule cannot read through it	
@@ -268,15 +269,23 @@ RoomActors.cs	RoomActors	OtherActiveFighters	ActiveFighters	V	view definition ov
 RoomActors.cs	RoomActors	OtherActiveFighters	OtherActiveFighters	V	view definition over ActiveFighters()	
 RoomActors.cs	RoomActors	PresentNonSpectators	PresentNonSpectators	R	the present-actor accessor's own declaration: the room's actors minus spectators, raw by design (the census, the barrier)	
 RoomActors.cs	RoomActors	PresentNonSpectators	RoomPlayers	R	the present-actor accessor walks the room's actors raw by design	
+RoomActors.cs	RoomActors	RawActorCensus	RoomPlayers	R	RJ-2: the raw actor census, no roster and no latch test by design; RosterCensusRules decides the union and the releases from it	
 RoomActors.cs	RoomActors	Spectators	PlayerList	N	spectator list	
+SessionReportModel.cs	SessionReportModel	BlockHeader	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
 SessionReportModel.cs	SessionReportModel	Build	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
-SessionReportModel.cs	SessionReportModel	BuildTotals	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportModel.cs	SessionReportModel	BuildTotalsPages	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
 SessionReportModel.cs	SessionReportModel	FfaScoreLabel	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
-SessionReportModel.cs	SessionReportModel	Parse	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
+SessionReportModel.cs	SessionReportModel	FillTable	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
+SessionReportModel.cs	SessionReportModel	FinalScore	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
+SessionReportModel.cs	SessionReportModel	FinishRace	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
+SessionReportModel.cs	SessionReportModel	MakeBars	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
+SessionReportModel.cs	SessionReportModel	RatingCell	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
 SessionReportModel.cs	SessionReportModel	ScoreLine	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
 SessionReportModel.cs	SessionReportModel	TeamScoreLabel	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
-SessionReportView.cs	SessionReportView	DrawBuilds	RoomPlayers	N	the session report view reads the model's own player list (SessionReportModel.cs:461), not the room's	
-SessionReportView.cs	SessionReportView	MeasureBuildPages	RoomPlayers	N	the session report view reads the model's own player list (SessionReportModel.cs:461), not the room's	
+SessionReportRules.cs	SessionReportRules	Derive	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
+SessionReportRules.cs	SessionReportRules	Parse	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
+SessionReportView.cs	SessionReportView	DrawBars	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
+SessionReportView.cs	SessionReportView	DrawProgressPage	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
 SpectatorPatches.cs	Spectator_NoMapAuthority_CallInBare_Patch	Prefix	MasterFenced	F	a fenced master sends no call-in (item 13, row 48)	
 SpectatorPatches.cs	Spectator_NoMapAuthority_CallIn_Patch	Prefix	MasterFenced	F	a fenced master sends no call-in (item 13, row 48)	
 SpectatorPatches.cs	Spectator_NoMapAuthority_Load_Patch	Prefix	MasterFenced	F	a fenced master sends no map load (item 13, row 48)	
@@ -331,3 +340,10 @@ VanillaFixes.cs	PlayerNicknameRepairDriver	OnPlayerPropertiesUpdate	OnPlayerProp
 VanillaFixes.cs	RemotePlayerIdOrderPatch	Prefix	IsMasterClient	N	remote identity order; the master bit is the two-seat rule	
 VanillaFixes.cs	RemotePlayerIdOrderPatch	StartWhenIdsLand	ActiveFighterCount	N	remote identity order; counts decide only the two-seat fallback	
 VanillaFixes.cs	RemotePlayerIdOrderPatch	StartWhenIdsLand	PlayerCount	N	remote identity order; counts decide only the two-seat fallback	
+VanillaFixes.cs	SawDeadTargetPatch	AfterUpdate	players	R	a null and shape check on the raw list before the dead-target correction; it selects nothing	
+VanillaFixes.cs	SawDeadTargetPatch	Select	players	R	replays vanilla Saw.Update's own target scan over the raw list, so the correction compares against the body vanilla chose	
+VanillaFixes.cs	SawLiveTargetPatch	BeforeUpdate	players	R	masks corpses by reordering the raw list for one vanilla Saw.Update call; it must see every entry to restore the order	
+VanillaFixes.cs	SawLiveTargetPatch	RestoreOrder	players	R	restores the raw list's order after the masked Saw.Update; it must see every entry	
+VanillaFixes.cs	SawTargetSync	AllFightersCapable	PlayerList	R	whole-room capability quorum over every non-spectator actor, kept or not: an unkept actor only makes the quorum stricter	
+VanillaFixes.cs	WeaponCooldownReset	AllFightersCapable	PlayerList	R	whole-room capability quorum over every non-spectator actor, kept or not: an unkept actor only makes the quorum stricter	
+VanillaFixes.cs	WeaponCooldownReset	ApplyToAll	players	R	a per-boundary cooldown reset on every body vanilla holds; it chooses no target, point or report	

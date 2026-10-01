@@ -24794,7 +24794,9 @@ namespace CompetitiveRounds
                 StampVersionHeader(request);
                 string _sentTok = SteamAuth.SessionToken;
                 // V11: the assembly's POSTs are single-try with a 4 s timeout
-                // (AsmPost); every other caller keeps the 20 s default.
+                // (AsmPost). The session exchange passes
+                // SecureRouteRules.SteamAuthExchangeTimeoutSeconds; every other
+                // caller takes the 20 s default.
                 request.timeout = timeoutSeconds;
                 if (onTokenStamped != null)
                 {

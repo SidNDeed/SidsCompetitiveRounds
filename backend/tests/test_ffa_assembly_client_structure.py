@@ -1325,8 +1325,11 @@ def test_k23_timeouts_and_single_flight():
             posts.append((f.name, member_of(t, at), "timeout: PostTimeout" in args))
     pt = re.search(r"const int PostTimeout = (\d+);", kept(fa))
     api = kept(src("ApiClient.cs"))
-    defaults = re.findall(r"(?:public|private|internal) static \w+ (AsmPost|PostRequest)\([^)]*int timeout = (\d+)\)",
-                          api)
+    # v1.41.0 merge pass 4 (c): the beta lane's PostRequest names its timeout
+    # timeoutSeconds, takes it before redactErrorText, and passes it on to
+    # PostRequestRaw, which sets request.timeout; all three defaults are read.
+    defaults = re.findall(r"(?:public|private|internal) static \w+ (AsmPost|PostRequest|PostRequestRaw)\("
+                          r"[^)]*?\bint timeout(?:Seconds)? = (\d+)[,)]", api)
     flags = {}
     for flag in ("_censusInFlight", "_startInFlight", "_releaseInFlight"):
         clears = []
@@ -1340,7 +1343,8 @@ def test_k23_timeouts_and_single_flight():
     trace(facts)
     assert posts and all(p[2] for p in posts), ("K23 timeout 4", posts)
     assert facts["post_timeout"] == "4", ("K23 four seconds", facts["post_timeout"])
-    assert sorted(defaults) == [("AsmPost", "20"), ("PostRequest", "20")], ("K23 defaults", defaults)
+    assert sorted(defaults) == [("AsmPost", "20"), ("PostRequest", "20"), ("PostRequestRaw", "20")], \
+        ("K23 defaults", defaults)
     assert all(v and all(v) for v in flags.values()), ("K23 single flight", flags)
 
 
@@ -2049,7 +2053,15 @@ def test_k45_harness_and_boundary_model():
 
 def test_k47_gated_roster_freeze():
     """K47: each of the three roster freezes passes the lock roster's ids in
-    a gated room and reads a fighter view only when ungated."""
+    a gated room and reads a fighter view only when ungated.
+
+    v1.41.0 merge pass 4 (c): the third freeze (OnFfaMatchStarted) composes
+    with the beta lane's RJ-2 per-game refreeze. Gated, it freezes the lock
+    roster's ids; ungated, it calls RoomActors.RefreezeFighterRosterForGameFromRoom,
+    which unions a raw census into the roster and reads no fighter view at all
+    (the lane's Codex client r2 HIGH: a census built from ActiveFighters()
+    cannot widen the roster to a latched seat). So two sites read the view
+    ungated, and the third names lockIds and the refreeze."""
     gw = src("GameStateWatcher.cs")
     freezes = []
     for mm in re.finditer(r"RoomActors\.FreezeFighterRoster\(", masked(gw)):
@@ -2062,10 +2074,15 @@ def test_k47_gated_roster_freeze():
     facts = {"freezes": freezes, "fighter_reads_ungated": len(fighter_reads),
              "gated_ids": "FfaAssembly.IsGatedRoom(" in gf and "ApiClient.FfaLockedRoster" in gf
              and "ActiveFighters" not in gf,
-             "lock_ids": len(re.findall(r"var lockIds = GatedFreezeIds\(\);", kept(gw)))}
+             "lock_ids": len(re.findall(r"var lockIds = GatedFreezeIds\(\);", kept(gw))),
+             "refreeze": [member_of(gw, mm.start()) for mm in re.finditer(
+                 r"var lockIds = GatedFreezeIds\(\);\s*if \(lockIds != null\)\s*\{\s*"
+                 r"if \(lockIds\.Count >= 2\) RoomActors\.FreezeFighterRoster\(lockIds\);[\s\S]*?\}\s*"
+                 r"else\s*\{\s*var census = RoomActors\.RefreezeFighterRosterForGameFromRoom\(\);", kept(gw))]}
     trace(facts)
-    assert freezes == ["lockIds ?? sids", "ids", "ids"], ("K47 three freezes", freezes)
-    assert facts["fighter_reads_ungated"] == 2 and facts["lock_ids"] == 3, ("K47 ungated only", facts)
+    assert freezes == ["lockIds ?? sids", "ids", "lockIds"], ("K47 three freezes", freezes)
+    assert facts["fighter_reads_ungated"] == 1 and facts["lock_ids"] == 3, ("K47 ungated only", facts)
+    assert facts["refreeze"] == ["OnFfaMatchStarted"], ("K47 gated lock roster, else the raw refreeze", facts)
     assert facts["gated_ids"], ("K47 lock roster", gf[:200])
 
 
