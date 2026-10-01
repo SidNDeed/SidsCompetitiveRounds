@@ -19,7 +19,10 @@
 --      progress table is what makes the series-to-games unit change free:
 --      no stored count is in the old unit.
 --   1. Adds title_ladder_progress.streak (the current run of consecutive
---      ranked 1v1 wins, for the Apex ladder; its best run is `games`).
+--      ranked 1v1 wins, for the Apex ladder; its best run is `games`) and
+--      title_ladder_progress.streak_at (the order key of the last ranked 1v1
+--      game the run consumed, so a delayed report never extends a run behind
+--      a later game; NULL until the first one).
 --   2. Deletes the nine 331 rungs the new catalogue does not have (rat's two
 --      tier-4 rungs and every tier 6); their title_ladders rows go with them
 --      (ON DELETE CASCADE).
@@ -88,7 +91,8 @@ BEGIN
 
     -- 1. The Apex run.
     ALTER TABLE title_ladder_progress
-        ADD COLUMN IF NOT EXISTS streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0);
+        ADD COLUMN IF NOT EXISTS streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0),
+        ADD COLUMN IF NOT EXISTS streak_at TIMESTAMPTZ;
 
     COMMENT ON TABLE title_ladder_credits IS
         'One row per player per ranked GAME credited to the worn ladder (migration 365). The PK (player_id, reference_id) is the unit and the double-credit gate: every caller passes the game id (1v1 matches.id, 2v2 team_matches.id, the FFA match id), so a re-reported game counts once. Rows written before 365 (none existed in production) were keyed on a series id.';
@@ -484,7 +488,7 @@ BEGIN
     END IF;
     SELECT count(*) INTO bad
       FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku
-     WHERE tl.tier > 1 AND NOT (si.rotation_pool = 'achievement' AND si.price = 0);
+     WHERE tl.tier > 1 AND NOT (COALESCE(si.rotation_pool, '') = 'achievement' AND si.price = 0);
     IF bad > 0 THEN
         RAISE EXCEPTION 'title ladders 365: % earned rungs are not granted-only at price 0', bad;
     END IF;
@@ -502,9 +506,9 @@ BEGIN
     END IF;
     SELECT count(*) INTO bad FROM information_schema.columns
      WHERE table_schema = current_schema() AND table_name = 'title_ladder_progress'
-       AND column_name = 'streak';
-    IF bad <> 1 THEN
-        RAISE EXCEPTION 'title ladders 365: title_ladder_progress.streak is missing';
+       AND column_name IN ('streak', 'streak_at');
+    IF bad <> 2 THEN
+        RAISE EXCEPTION 'title ladders 365: title_ladder_progress.streak or streak_at is missing';
     END IF;
     RAISE NOTICE 'title ladders 365: final state holds -- % ladders, % rungs, every entry rung on sale', 32, 160;
 END $m365post$;
