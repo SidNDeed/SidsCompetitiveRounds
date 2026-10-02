@@ -82,7 +82,11 @@ def test_m3_the_envelope_takes_exactly_the_bound_and_refuses_one_byte_over():
 def test_m3_a_budgeted_record_near_the_bound_parses_whole():
     owner, _meas = fx.over_cap_pair()
     text = cm.budget_record(owner)
-    assert cm.RECORD_MAX_BYTES - 512 < len(text) <= cm.RECORD_MAX_BYTES
+    proof = cm.byte_proof()
+    # removal is whole entries: the budgeter stops at most one removed protected
+    # group (with its point) under the bound
+    assert cm.RECORD_MAX_BYTES - proof["group_max"] - proof["point_max"] - 2 < len(text)
+    assert len(text) <= cm.RECORD_MAX_BYTES
     env = ce.parse_envelope(fx.envelope(None, text=text))
     assert ce.parse_record(env) == json.loads(text)
     assert len(text) > se.RECORD_MAX_BYTES        # beyond the seat contract's own bound
@@ -219,7 +223,10 @@ def test_m6_a_measure_that_needs_an_omitted_cycle_reads_not_run():
     view = cm.pair_view(fx.records(o, m))
     d = _owner_dir(view)
     rows = d["cycles"]
-    assert len(rows) == 25
+    # one row per cycle a record still names (24 kept summaries); the 25th is
+    # carried only by the totals and the omitted count
+    assert len(rows) == 24 and len({r["s0"] for r in rows}) == 24
+    assert d["cx"]["meas_omitted"] == 1 and d["totals"]["meas"]["cycles"] == 25
     trimmed = [r for r in rows if r["not_run"] == "trimmed"]
     assert trimmed, "an over-cap pair has cycles one record no longer lists"
     for r in trimmed:
@@ -575,7 +582,8 @@ def test_l3_a20_a_ramped_point_and_a_point_without_ramp():
 def test_a21_a_timer_refill_carries_three_clocks_and_a_card_reload_ends_external():
     owner, meas = fx.a24_pair()
     row = _owner_dir(cm.pair_view(fx.records(owner, meas)))["cycles"][0]
-    assert row["refill"]["end"]["rl_g"] == [1500, 1500] and row["refill"]["end"]["rl_r"] == [1600, 1600]
+    assert list(row["refill"]["end"]["rl_g"]) == [1500, 1500]
+    assert list(row["refill"]["end"]["rl_r"]) == [1600, 1600]
     ext = fx.clone(owner)
     ext["sh_s"][0][0][cm.HDR["end"]] = cm.END["external"]
     ext["cx_s"][0][cm.CX["end"]] = cm.END["external"]
@@ -687,7 +695,7 @@ def test_l5_before_the_release_the_gate_passes_and_after_it_the_426_is_byte_iden
 
 # -- A15: the statement scan, the match path, the worker role, the health word ----------
 
-_WRITE = re.compile(r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([a-z_]+)")
+_WRITE = re.compile(r"\b(?:INSERT\s+INTO|(?<!KEY )(?<!FOR )UPDATE|DELETE\s+FROM)\s+([a-z_]+)")
 
 
 def _writes(fn_or_src):

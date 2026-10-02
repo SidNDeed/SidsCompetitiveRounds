@@ -849,6 +849,21 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
             if not any(_shot_key(s) in covered for s in c["shots"]):
                 rows.append(_cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots,
                                        meas_shots, False))
+    # A cycle a kept summary names but whose shot group neither record still
+    # lists: shown from its summary, every per-shot comparison NOT-RUN.
+    seen = {r["s0"] for r in rows}
+    for acct, rec, ck in (("meas", meas_rec, "cx_o"), ("self", owner_rec, "cx_s")):
+        if rec is None:
+            continue
+        for e in rec[ck]:
+            if e[CX["s0"]] in seen:
+                continue
+            seen.add(e[CX["s0"]])
+            rows.append({"s0": e[CX["s0"]], "pt": None, "self": None, "meas": None,
+                         "summary": {acct: _named(e, SPEC[ck][3])}, "shots": [], "refill": None,
+                         "differs": False, "not_run": "trimmed",
+                         "stat": {"self": None, "meas": None, "diff": None},
+                         "time": {"self": None, "meas": None}})
     out = {"case": case, "case_text": None, "cycles": rows,
            "self_label": LABEL_SELF, "meas_label": LABEL_MEAS,
            "self_present": owner_rec is not None, "meas_present": meas_rec is not None}
@@ -932,6 +947,24 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
             srow["absent_in"] = theirs
             row["differs"] = True
         row["shots"].append(srow)
+    if partner is not None:
+        # Shots only the other account lists: NOT-RUN when this account's
+        # cycle is incomplete or its list was trimmed, else absent here.
+        listed = {_shot_key(s) for s in c["shots"]}
+        own_rec = meas_rec if primary_is_meas else owner_rec
+        own_gk = "sh_o" if primary_is_meas else "sh_s"
+        for s in partner["shots"]:
+            if _shot_key(s) in listed:
+                continue
+            srow = {"pid": s["pid"], "stamp": s["stamp"], mine: None, theirs: _shot_fields(s),
+                    "d_ammo": None, "d_reloading": None, "d_counter": None, "not_run": None,
+                    "absent_in": None}
+            if not c["complete"] or _trimmed(own_rec, own_gk):
+                srow["not_run"] = "trimmed"
+            else:
+                srow["absent_in"] = mine
+                row["differs"] = True
+            row["shots"].append(srow)
     sb = owner_rec and stat_at(owner_rec["gun_s"], c["pt"])
     mb = meas_rec and stat_at(meas_rec["gun_o"], c["pt"])
     row["stat"] = {"self": _named(sb, SPEC["gun_s"][3]) if sb else None,

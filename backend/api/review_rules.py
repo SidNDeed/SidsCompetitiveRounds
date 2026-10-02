@@ -800,13 +800,22 @@ def run_combat_selftest(rs, cases, deadline):
         if (not isinstance(case, dict) or set(case) != {"combat", "fire"}
                 or not isinstance(case["combat"], list)):
             raise Refused("malformed", "selftest case")
+        records = []
         for r in case["combat"]:
             try:
-                cm.check_record(r["rec"])
+                # A stored case is JSON whose key order the store does not
+                # keep; the key SET must be the layout's, and the record is
+                # checked in the layout's order.
+                rec = r["rec"]
+                if not isinstance(rec, dict) or set(rec) != set(cm.KEYS):
+                    raise cm.Refusal("record")
+                rec = {k: rec[k] for k in cm.KEYS}
+                cm.check_record(rec)
+                records.append({"seat": r["seat"], "other": r["other"], "rec": rec})
             except (cm.Refusal, KeyError, TypeError):
                 raise Refused("malformed", "selftest record")
         try:
-            _f, fired, errors = rs.evaluate_combat(case["combat"], budget=budget)
+            _f, fired, errors = rs.evaluate_combat(records, budget=budget)
         except _WorkExceeded:
             raise Refused("work", "selftest work")
         if errors or sorted(fired) != sorted(case["fire"]):
