@@ -61,7 +61,19 @@ MUTANTS = [
     ("canonical_raw_attach", "Sha256Hex(Encoding.ASCII.GetBytes(attach))", "attach", "server", "json"),
     ("dll_ok_without_sha", 'bool ok = state == "ok" && sha != null && sha.Length == 64;', 'bool ok = state == "ok";', "server", "json"),
     ("age_ms_unclamped", "r[i] = i == a.Length - 1 ? Cnt(a[i]) : Ms(a[i]);", "r[i] = Cnt(a[i]);", "server", "json"),
+    ("end_null_emitted", 'if (IsEndKind(End)) o.Add("end", End);', 'o.Add("end", End);', "server", "json"),
+    ("end_after_build", 'if (IsEndKind(End)) o.Add("end", End);\n                o.Add("build", new List<object> { Build[0], Build[1], Build[2] });',
+     'o.Add("build", new List<object> { Build[0], Build[1], Build[2] });\n                if (IsEndKind(End)) o.Add("end", End);', "server", "json"),
+    ("cutscore_awards_self", "return new[] { self, 5 };", "return new[] { 5, other };", "end", "json"),
+    ("cutscore_ignores_departure", "if (!otherLeft && self >= 4 && other >= 4)", "if (self >= 4 && other >= 4)", "end", "json"),
+    ("sender_no_limit", "if (elapsedMs > COMPAT_SEND_LIMIT_MS) return SendStep.GiveUp;", "", "sender", "end"),
+    ("sender_ignores_consent", "if (!consent) return SendStep.NoConsent;", "", "sender", "end"),
+    ("sender_runs_enabled", "if (!disabled || !queued) return SendStep.Stop;", "if (!queued) return SendStep.Stop;", "sender", "end"),
 ]
+
+# Amendment A1 (build notes, "Contract amendments for the integrator"): an
+# optional "end" key right after "rounds", one of these kinds.
+END_KINDS = ("left", "other_left", "lost", "closing")
 
 
 def sha(path):
@@ -94,8 +106,44 @@ def load_server(root):
     return mod, path
 
 
+def amended_budget(sev, full):
+    """The reference budgeter with amendment A1. Without an "end" key it IS
+    budget_record. With one, budget_record runs over the record without it
+    under a limit smaller by the bytes the key adds, and the key goes back
+    after "rounds": the same removal sequence the reference would make, since
+    the key's bytes are a constant."""
+    if "end" not in full:
+        return sev.budget_record(full)
+    keys = list(full.keys())
+    if keys.index("end") != keys.index("rounds") + 1 or full["end"] not in END_KINDS:
+        raise ValueError("end key misplaced or unknown")
+    rest = {k: v for k, v in full.items() if k != "end"}
+    ins = ',"end":' + json.dumps(full["end"])
+    text = sev.budget_record(rest, limit=sev.RECORD_MAX_BYTES - len(ins))
+    at = text.index(',"build":')
+    return text[:at] + ins + text[at:]
+
+
+def amended_parse(sev, env):
+    """parse_record with amendment A1: an "end" key, when present, must sit
+    right after "rounds" and name a known kind; the rest is the reference's
+    own check_record, unchanged."""
+    rec = json.loads(env["record_text"], parse_float=sev._refuse_float, parse_constant=sev._refuse_float)
+    if isinstance(rec, dict) and "end" in rec:
+        keys = list(rec.keys())
+        if keys.index("end") != keys.index("rounds") + 1 or rec["end"] not in END_KINDS:
+            raise sev.EvidenceRefused(422, "end")
+        sev.check_record({k: v for k, v in rec.items() if k != "end"})
+    else:
+        sev.check_record(rec)
+    return rec
+
+
 def server_check(sev, dll, tag, verbose):
-    """The comparison against the server's own functions. Returns (ok, lines)."""
+    """The comparison against the server's own functions. Returns (ok, lines).
+    A record without "end" goes through the server's functions unchanged; one
+    with "end" through the amendment-A1 wrappers above (and the line says
+    what the unamended server answers)."""
     d = os.path.join(WORK, tag, "fixtures")
     if os.path.isdir(d):
         shutil.rmtree(d)
@@ -108,15 +156,25 @@ def server_check(sev, dll, tag, verbose):
         try:
             full = json.loads(open(p(".input.json"), encoding="ascii").read())
             mine = open(p(".record.txt"), "rb").read()
-            ref = sev.budget_record(full).encode("ascii")
+            has_end = "end" in full
+            ref = (amended_budget(sev, full) if has_end else sev.budget_record(full)).encode("ascii")
             same = ref == mine
             env = sev.parse_envelope(json.loads(open(p(".envelope.json"), encoding="ascii").read()))
-            sev.parse_record(env)
+            note = ""
+            if has_end:
+                amended_parse(sev, env)
+                try:
+                    sev.parse_record(env)
+                    note = ", unamended server: accepts"
+                except Exception as ex:  # expected until the server adopts A1
+                    note = ", unamended server: refuses %s" % getattr(ex, "field", ex)
+            else:
+                sev.parse_record(env)
             sig_ok = sev.verify_sig(FIXTURE_KEY, env)
             text_ok = env["record_bytes"] == mine
             good = same and sig_ok and text_ok
-            lines.append("%s %s: %d bytes, budget_record equal=%s, parse+check ok, verify_sig=%s, envelope record equal=%s"
-                         % ("OK " if good else "BAD", name, len(mine), same, sig_ok, text_ok))
+            lines.append("%s %s: %d bytes, %sbudget_record equal=%s, parse+check ok, verify_sig=%s, envelope record equal=%s%s"
+                         % ("OK " if good else "BAD", name, len(mine), "A1 " if has_end else "", same, sig_ok, text_ok, note))
             ok = ok and good
         except Exception as ex:  # a refusal names its field
             lines.append("BAD %s: %s %s" % (name, type(ex).__name__, getattr(ex, "field", ex)))

@@ -296,6 +296,43 @@ namespace SeatEvidenceTests
             Check(!C.IsAttachKey(new string('k', 60), new string('k', 60) + "_r99x"), "suffix shape");
         }
 
+        // The end kind of a cut game (amendment A1): absent on a game this seat
+        // saw over, right after "rounds" otherwise, only a known kind; the cut
+        // score follows the report the game gets.
+        private static void End()
+        {
+            var r = Sample(1, false);
+            string over = C.Json(r.ToObj());
+            Check(!over.Contains("\"end\""), "no end key on a game seen over");
+            Check(over.Contains("\"rounds\":[5,3],\"build\":"), "rounds then build when no end");
+            r.End = "other_left";
+            Check(C.Json(r.ToObj()).Contains("\"rounds\":[5,3],\"end\":\"other_left\",\"build\":"), "end right after rounds");
+            r.End = "quit";
+            Check(!C.Json(r.ToObj()).Contains("\"end\""), "an unknown kind is never written");
+            foreach (var k in new[] { "left", "other_left", "lost", "closing" }) Check(C.IsEndKind(k), "kind " + k);
+            Check(!C.IsEndKind(null) && !C.IsEndKind("") && !C.IsEndKind("Left"), "not kinds");
+            Eq("[4,5]", J(Array.ConvertAll(C.CutScore(4, 4, false), x => (long)x)), "the leaver of a tied 4-4 carries the awarded 5");
+            Eq("[4,4]", J(Array.ConvertAll(C.CutScore(4, 4, true), x => (long)x)), "the other seat left first: as observed");
+            Eq("[3,4]", J(Array.ConvertAll(C.CutScore(3, 4, false), x => (long)x)), "below match point: as observed");
+            Eq("[4,2]", J(Array.ConvertAll(C.CutScore(4, 2, false), x => (long)x)), "not tied: as observed");
+        }
+
+        // The compat sender's step (V1 6.4): only a disabled seat with a queued
+        // outcome acts; never without consent; gives up after the bound.
+        private static void Sender()
+        {
+            long lim = C.COMPAT_SEND_LIMIT_MS;
+            Eq(C.SendStep.Stop, C.CompatSenderStep(false, true, true, true, 0), "an enabled seat: the queue's own pump sends");
+            Eq(C.SendStep.Stop, C.CompatSenderStep(true, true, false, true, 0), "nothing queued");
+            Eq(C.SendStep.NoConsent, C.CompatSenderStep(true, false, true, true, 0), "no consent: nothing sent");
+            Eq(C.SendStep.NoConsent, C.CompatSenderStep(true, false, true, false, lim + 1), "no consent wins over the bound");
+            Eq(C.SendStep.Auth, C.CompatSenderStep(true, true, true, false, 0), "no session: the ticket exchange");
+            Eq(C.SendStep.Auth, C.CompatSenderStep(true, true, true, false, lim), "the bound is inclusive");
+            Eq(C.SendStep.GiveUp, C.CompatSenderStep(true, true, true, false, lim + 1), "past the bound: give up");
+            Eq(C.SendStep.GiveUp, C.CompatSenderStep(true, true, true, true, lim + 1), "past the bound even with a session");
+            Eq(C.SendStep.Post, C.CompatSenderStep(true, true, true, true, 10), "a session: post");
+        }
+
         // -- the server-comparison fixtures --------------------------------------------
 
         private static void Fixtures(string dir)
@@ -315,6 +352,12 @@ namespace SeatEvidenceTests
             var pub = Sample(40, true); pub.OtherPub = new long[] { 144, 60, 300, 41, 30, 18 }; pub.OtherBuildV = "1.41.0|standalone|0123456789ab";
             pub.T0Src = "o"; pub.Master = 0; pub.Omit[1] = 7;
             cases.Add(new KeyValuePair<string, C.Record>("pub_omit_seed", pub));
+            // amendment A1: a cut game's end kind (compared with the amended
+            // reference in run_tests.py; the current server refuses the key)
+            var left = Sample(4, false); left.End = "left"; left.RoundsSelf = 4; left.RoundsOther = 5;
+            cases.Add(new KeyValuePair<string, C.Record>("end_left", left));
+            var closing = Sample(200, true); closing.End = "closing";
+            cases.Add(new KeyValuePair<string, C.Record>("end_closing_over", closing));
             var lines = new StringBuilder();
             foreach (var kv in cases)
             {
@@ -343,7 +386,7 @@ namespace SeatEvidenceTests
             { "json", Json }, { "budget", Budget }, { "entries", Entries }, { "drift", Drift },
             { "congestion", Congestion }, { "buckets", Buckets }, { "cadence", Cadence }, { "ordinals", Ordinals },
             { "window", Window }, { "decide", Decide }, { "line", Line }, { "build", Build },
-            { "reservoir", Reservoir }, { "envelope", Envelope },
+            { "reservoir", Reservoir }, { "envelope", Envelope }, { "end", End }, { "sender", Sender },
         };
 
         private static int Main(string[] args)
