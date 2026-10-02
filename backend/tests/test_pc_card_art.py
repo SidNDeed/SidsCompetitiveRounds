@@ -34,8 +34,9 @@ import pc_face  # noqa: E402
 import card_art_fixture as fx  # noqa: E402
 from pc_themes_data import rows as _theme_rows  # noqa: E402
 
-CARD_RECT = (92, 646, 172, 750)
-TILE_RECT = (46, 323, 86, 375)
+# The 1.41.0 client's overlay rect (bug 408) and its tile-scale image.
+CARD_RECT = (100, 651, 167, 745)
+TILE_RECT = (50, 326, 84, 373)
 RECTS = {"card": CARD_RECT, "tile": TILE_RECT}
 
 
@@ -332,7 +333,7 @@ def test_a_written_bundle_carries_pixels_only(tmp_path):
 
 def test_the_motion_atlas_carries_the_art(bundle, monkeypatch):
     """An atlas cell is a crop of a full render_face over CARD_WINDOW, which
-    overlaps the art rect (x 92..172, y 646..740): a cell derived with the
+    overlaps the art rect (x 100..167, y 651..740): a cell derived with the
     art differs, IN THAT REGION, from one derived with the layer bypassed."""
     import pc_motion as pcm
     import pc_motion_fixtures as mfx
@@ -347,7 +348,7 @@ def test_the_motion_atlas_carries_the_art(bundle, monkeypatch):
     bare, _tile2 = pcm.derive_atlases(spec, {}, body)
     w = pcm.CARD_WINDOW
     scale = pcm.CARD_CELL / float(w[2] - w[0])
-    region = (int((92 - w[0]) * scale) + 1, int((646 - w[1]) * scale) + 1,
-              int((172 - w[0]) * scale) - 1, pcm.CARD_CELL)
+    region = (int((CARD_RECT[0] - w[0]) * scale) + 1, int((CARD_RECT[1] - w[1]) * scale) + 1,
+              int((CARD_RECT[2] - w[0]) * scale) - 1, pcm.CARD_CELL)
     a, b = _img(card).crop(region), _img(bare).crop(region)
     assert a.tobytes() != b.tobytes()

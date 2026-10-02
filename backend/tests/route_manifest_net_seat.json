@@ -682,7 +682,7 @@
           ],
           "main",
           "pc_card_face",
-          "1ce6c606bb389b7176881595a375e7d4c60886e1"
+          "4925e32515ed82d8edb72b129f97061b9894c1ad"
         ],
         [
           "/api/v1/pc/collection",
@@ -691,7 +691,7 @@
           ],
           "main",
           "pc_collection",
-          "fe6a2845b6fbb55b7106752dc9de168bb2152845"
+          "1799cffe603f2300295f95241a2285cd5dff784b"
         ],
         [
           "/api/v1/pc/daily",
@@ -718,7 +718,7 @@
           ],
           "main",
           "pc_packs_history",
-          "ad751d73a182ad5f89ddf5184e3974d90f5baf61"
+          "51e8666c3bdeda0365c3a75999262ff64f88d462"
         ],
         [
           "/api/v1/pc/packs/open",
@@ -727,7 +727,7 @@
           ],
           "main",
           "pc_open_pack",
-          "4489ffcbb36fb19b0392cd7e86ec3d9fe6b747fa"
+          "7616971e53ff801552fbdfcfae0572aa0d9eed7c"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -736,7 +736,7 @@
           ],
           "main",
           "pc_pack_result",
-          "ec6ffb5783b8e8977a55bf67fbd229f74ac7147a"
+          "4b6c5646103d8b0d8bc5f76e84ee353ca13b5796"
         ],
         [
           "/api/v1/pc/pool",
@@ -1849,7 +1849,7 @@
           ],
           "main",
           "health_check",
-          "f36dc28cc25df22616a121d30f98591f92b4d76e"
+          "5f80d12452c1052683f7dfa2ce0310ecaaf6147b"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_pc_binder",
-          "c0dd3f4ffe299cf804004b1d3db70397413ef701"
+          "8d93aad2af43a06ebecd5d7f8a198eaa2e8916ec"
         ],
         [
           "/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png",
@@ -2990,7 +2990,7 @@
           ],
           "main",
           "internal_pc_binder_page",
-          "59fc5aaa464d6af2e16e9b11698fdc110274575e"
+          "db48570d20f68a0859ebafaef574a074fb5b306d"
         ],
         [
           "/api/v1/internal/pc/card",
@@ -3008,7 +3008,7 @@
           ],
           "main",
           "internal_pc_collection",
-          "5cb78be0a453df989196136073e6a0259568030f"
+          "df4a3f743864008b0fee36b17991074693076ed6"
         ],
         [
           "/api/v1/internal/pc/daily",
@@ -3188,7 +3188,7 @@
           ],
           "main",
           "internal_pc_face_back",
-          "5a0c5209db853facd4ee5bf1225b0922bf995696"
+          "938a8cffff0dd5c2b13c6cde25cbd45d8cbc1cf8"
         ],
         [
           "/api/v1/internal/pc/face/preview/{player_ref}/{locale}",
@@ -3197,7 +3197,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "0cfc64f0652df43dfa4a6955d168135439c8ee1d"
+          "3fcfbc9c594e9254745d109cdf683f8e05e7bda9"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3206,7 +3206,7 @@
           ],
           "main",
           "internal_pc_face_print",
-          "fff677cb1f556f5a3fbd043f55016047224201e9"
+          "56c719e0aa78c83387c2e9d9df82f966ae0afd82"
         ],
         [
           "/api/v1/internal/pc/lease",
@@ -3242,7 +3242,7 @@
           ],
           "main",
           "internal_pc_packs",
-          "6f3bf73f11f88b8f8b8cec3253be4515b462290b"
+          "7abfb09207a5819ac3e75d695410b04a1e15c8db"
         ],
         [
           "/api/v1/internal/pc/packs/open",
@@ -3251,7 +3251,7 @@
           ],
           "main",
           "internal_pc_open_pack",
-          "821b7ffb27746e0c195798cdf98591ef59cecdbf"
+          "3960fb5b714e7a4323b8658c812639ede6cb3428"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
@@ -3260,7 +3260,7 @@
           ],
           "main",
           "internal_pc_pack_strip",
-          "14ab8a778dbf9f8bcaf731a6473c1e39c4b82a75"
+          "537e3695914a6ba67a654a5d42d2a98a410dffc4"
         ],
         [
           "/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png",
@@ -3269,7 +3269,7 @@
           ],
           "main",
           "pc_face_png",
-          "e74adae9a0b453e852ef7fe9b5a07e9633647fb9"
+          "2495f2949ae1d5ca507e1fe0155fd96ec1a1a3f8"
         ],
         [
           "/api/v1/pc/portrait",
@@ -3278,7 +3278,7 @@
           ],
           "main",
           "pc_portrait_upload",
-          "e7e17b01523851e2fa5a30665f290476162b655e"
+          "1d67472ee8fa553ae1bc3af6fd549ee8bce31dec"
         ],
         [
           "/api/v1/pc/portrait/motion",
@@ -3287,7 +3287,7 @@
           ],
           "main",
           "pc_motion_upload",
-          "4352ebaa56762d1ab0ce7336b9668c21bed3f94b"
+          "9a86585693bf8eff9f7929b1b564987b609e068c"
         ],
         [
           "/api/v1/pc/dance",
@@ -3305,7 +3305,7 @@
           ],
           "main",
           "pc_face_motion_read",
-          "d7e6f15470cc66846c96b4c990e477769754f5f9"
+          "90bcafb0eac9b282042e3df8b8cfce7a90402bdd"
         ],
         [
           "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
@@ -3314,7 +3314,7 @@
           ],
           "main",
           "pc_face_motion_atlas",
-          "b79017c53a8832352d8a0211ed26b973f0e35995"
+          "3bcb0e4ccbec9c8cfa05688f2056b00de5034ea7"
         ],
         [
           "/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif",
@@ -3323,7 +3323,7 @@
           ],
           "main",
           "internal_pc_motion_preview",
-          "2ee93ac457df4090ab57b2b79a1f93a66cefc731"
+          "11d51422d689d227c9120fff3cca5a04d8a17c25"
         ],
         [
           "/api/v1/pc/trades",
@@ -3332,7 +3332,7 @@
           ],
           "main",
           "pc_trades",
-          "a625e2257172ad6d474e6c4a721bbf3b8991a9b7"
+          "4e7f63bd34ea81063ef319fcd90fab15d94dd656"
         ],
         [
           "/api/v1/pc/trades/accept",
@@ -3341,7 +3341,7 @@
           ],
           "main",
           "pc_trade_accept",
-          "a7a2b709a50c4feae12b48dd92059322b618b054"
+          "7d50ff131dafee52f0c2a662f4b3558cb442825e"
         ],
         [
           "/api/v1/pc/trades/cancel",
@@ -3350,7 +3350,7 @@
           ],
           "main",
           "pc_trade_cancel",
-          "1fc2ea8f66f5bd151d3831733049cc8fafed1322"
+          "2181103cc1e03d23fcbb938a5db8e7b7dc180c07"
         ],
         [
           "/api/v1/pc/trades/decline",
@@ -3359,7 +3359,7 @@
           ],
           "main",
           "pc_trade_decline",
-          "884dfc09bdb8c791ffa920e7548eb4fcdaa0c5bd"
+          "1439c91cd9ff3eea2e9ea29938da412159ec107b"
         ],
         [
           "/api/v1/pc/trades/propose",
@@ -3368,7 +3368,7 @@
           ],
           "main",
           "pc_trade_propose",
-          "a0ca7673ac507bd67d0caeb4a3176162accb6019"
+          "7f4f157c2d730ce43b410e123cb181f4cbda1aca"
         ]
       ]
     },
@@ -3563,7 +3563,7 @@
       [
         "main",
         "lifespan",
-        "137331d34d2bf07f752191cb2df2d4fe27cfe103"
+        "e1fbe112b6d34d5c21e42598fec841a465d16cb9"
       ]
     ]
   },
