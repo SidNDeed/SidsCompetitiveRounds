@@ -55,13 +55,13 @@ OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_re
                                "_pc_buy_pending_write", "_pc_buy_and_show", "_pc_buy_player",
                                "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver", "_faq_discord_link",
                                "_pc_buy_journal_update", "_pc_buy_entry", "_pc_buy_record", "_pc_buy_settle",
-                               "_pc_buy_mark_revealing"}
+                               "_pc_buy_mark_revealing", "_pc_buy_bound"}
 # _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
 # the test's own folder instead of the container's /opt/bot-state
 OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
                                    "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED",
                                    "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER", "_pc_buy_journal_lock", "_PC_BUY_KEEP",
-                                   "_PC_BUY_REBOUND",
+                                   "_PC_BUY_REBOUND", "_PC_BUY_UNCHECKED",
                                    "_PC_BUY_SHOWN_BEFORE"}
 
 
@@ -1844,14 +1844,17 @@ def test_low2r4_the_pack_read_refuses_a_player_the_discord_id_no_longer_resolves
 # Codex round 3 LOW 1: the reveal's send can reach Discord and still raise, or never return, and the
 # entry left the journal only after it returned, so a restart posted the reveal again. The direction
 # chosen: the entry is marked "revealing" under the journal lock immediately BEFORE the send, and an
-# entry carrying the mark is never revealed again - the next /buypack sends the pointer at /pack once
-# and takes it out. Worst case one reveal plus one pointer, or a pointer alone.
+# entry carrying the mark is never revealed again - the next /buypack sends the pointer at /pack and
+# takes it out once that send has returned. Round 5, LOW 2: the pointer is at least once, not exactly
+# once - one reveal at most; the pointer may repeat after a failed acknowledgement; never a second
+# debit, never a second reveal (test_low2r5_...).
 
 def test_low1r4_a_reveal_whose_send_may_have_been_seen_is_never_posted_twice(monkeypatch, tmp_path):
     """The reviewer's falsifier, adapted. The first reveal's send reaches
     Discord (recorded as visible) and the process ends before it returns;
     after the restart exactly one reveal was ever posted, the restart sent no
-    purchase request and read no pack, and it sent the pointer once; the
+    purchase request, read the pack only for its player check (round 5),
+    and its one /buypack sent one pointer; the
     entry is gone. The decisive line is the first assertion after the
     restart: without the mark the restart revealed the pack a second time."""
     async def body(env):
@@ -1881,7 +1884,10 @@ def test_low1r4_a_reveal_whose_send_may_have_been_seen_is_never_posted_twice(mon
                               "settled": {"pack_id": bought, "pay": "gold", "price": price}, "revealing": True}}, marked
         assert [s.content for s in after.sent] == [after.ns["_PC_BUY_SHOWN_BEFORE"]], [s.content for s in after.sent]
         assert all(ord(ch) < 128 for ch in after.ns["_PC_BUY_SHOWN_BEFORE"])
-        assert calls_to(after, OPEN) == [] and calls_to(after, PACKS, "GET") == []
+        assert calls_to(after, OPEN) == []
+        # round 5, LOW 1: the restart's only read is the journaled player's check, before the pointer
+        assert [(c.params["pack_id"], c.params.get("player_steam_id"), c.status)
+                for c in calls_to(after, PACKS, "GET")] == [(bought, own.steam, 200)]
         assert journal(after) == {}
         assert await holdings(env, own) == (price, 1, 1)
     e2e(monkeypatch, tmp_path, body)
@@ -1900,5 +1906,186 @@ def test_low1r4_a_reveal_whose_mark_cannot_be_written_is_not_sent(monkeypatch, t
         assert [s.content for s in rig.sent] == [rig.ns["_PC_OPENED_UNSHOWN"]], [s.content for s in rig.sent]
         assert any("its delivery mark could not be written" in line for line in rig.logs), rig.logs
         assert journal(rig) == {}
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 5, LOW 1: every settled state is checked against its journaled player first -------------
+# Codex round 4 LOW 1: the branch on the delivery mark ("revealing": true) came before the player
+# check, so a marked entry whose Discord id had been linked to another player was answered with the
+# pointer at /pack - which reads the player linked now - and taken out of the journal. Now the check
+# (_pc_buy_bound: the bought pack's read naming the journaled player) comes first for every settled
+# entry, marked or not, and nothing is sent or forgotten until it has answered for that player.
+
+def journal_bytes(rig):
+    """The journal file's bytes, to compare an entry kept byte for byte."""
+    with open(rig.ns["_PC_BUY_PENDING_FILE"], "rb") as f:
+        return f.read()
+
+
+async def settled_for(env, own, marked):
+    """A's purchase, bought and settled in the journal, its reveal never
+    delivered: `marked` - the reveal's send reached Discord and the process
+    ended before it returned, so the entry carries "revealing": true;
+    otherwise the process ended at the reveal's first read, before any mark.
+    Returns (pack id, the journal's bytes, the reveals Discord showed)."""
+    visible = []
+    if marked:
+        before = rig_over(env)
+        ctx = before.ctx(own.discord)
+
+        async def seen_then_dies(content=None, **k):
+            visible.append(SimpleNamespace(content=content, file=k.get("file")))
+            raise ProcessEnded("the send reached Discord and the process ended before it returned")
+        ctx.send = seen_then_dies
+    else:
+        before = rig_over(env, dies_at_the_reveal_read({}))
+        ctx = None
+    with pytest.raises(ProcessEnded):
+        await buypack(before, own.discord, "gold", ctx=ctx)
+    (buy,) = calls_to(before, OPEN)
+    bought = json.loads(buy.reply.body)["pack_id"]
+    entry = {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+             "settled": {"pack_id": bought, "pay": "gold", "price": price_of(env, "gold")}}
+    if marked:
+        entry["revealing"] = True
+    assert journal(before) == {own.discord: entry}, journal(before)
+    return bought, journal_bytes(before), visible
+
+
+def pack_reads(rig):
+    return [(c.params["pack_id"], c.params.get("player_steam_id"), c.status)
+            for c in calls_to(rig, PACKS, "GET") if c.params.get("pack_id")]
+
+
+@pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
+def test_low1r5_a_settled_entry_marked_or_not_stays_bound_to_its_journaled_player(marked, monkeypatch, tmp_path):
+    """The reviewer's falsifier, for both orders of the check. A's purchase is
+    settled in the journal - marked "revealing" (its reveal's send may have
+    been seen) or not - and the Discord id is linked to B: a /buypack answers
+    _PC_BUY_REBOUND, keeps the journal byte for byte, sends no pointer at
+    /pack and no purchase request. Linked back to A, the same purchase
+    resolves with no purchase request: the marked entry with the pointer
+    (never a second reveal), the unmarked one with its reveal; the entry
+    leaves. The decisive line for [marked] is the first assertion after the
+    link to B: with the mark's branch above the check, B's /buypack sent the
+    pointer and took A's entry out of the journal."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        bought, kept, visible = await settled_for(env, own, marked)
+        await env.rebind(d, other)
+        deal(env, subs)   # a deal for a purchase, should the retry make one
+        moved = rig_over(env)
+        await buypack(moved, d, "gold")
+        assert journal_bytes(moved) == kept, f"A's entry was not kept byte for byte: {journal(moved)}"
+        assert [s.content for s in moved.sent] == [moved.ns["_PC_BUY_REBOUND"]], [s.content for s in moved.sent]
+        assert calls_to(moved, OPEN) == []
+        assert pack_reads(moved) == [(bought, own.steam, 412)], pack_reads(moved)
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+        await env.rebind(d, own)
+        back = rig_over(env)
+        await buypack(back, d, "gold")
+        assert calls_to(back, OPEN) == []
+        if marked:
+            assert [s.content for s in back.sent] == [back.ns["_PC_BUY_SHOWN_BEFORE"]], [s.content for s in back.sent]
+            assert pack_reads(back) == [(bought, own.steam, 200)], pack_reads(back)
+            assert len(visible) == 1   # the one reveal Discord showed before the restart; none since
+        else:
+            assert len(back.sent) == 1 and back.sent[0].file is not None, [s.content for s in back.sent]
+            assert back.sent[0].content.startswith(
+                f"Your earlier purchase went through - **Pack bought for {price} gold**")
+            assert {r[0] for r in pack_reads(back)} == {bought} and all(r[1:] == (own.steam, 200)
+                                                                         for r in pack_reads(back))
+        assert journal(back) == {}
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+@pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
+def test_low1r5_a_check_that_cannot_be_answered_sends_no_pointer_and_forgets_nothing(marked, monkeypatch, tmp_path):
+    """When the journaled player cannot be confirmed - here the pack read
+    answers 503 - nothing is sent but one plain line, nothing is forgotten,
+    and nothing is bought; the next /buypack, with the read answering again,
+    resolves the purchase as above with no purchase request."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        bought, kept, _visible = await settled_for(env, own, marked)
+        deal(env, subs)
+
+        async def down(call):
+            if call.method == "GET" and call.path == PACKS:
+                return H.Reply(503, json={"detail": "unavailable"})
+            return None
+        dark = rig_over(env, down)
+        await buypack(dark, own.discord, "gold")
+        assert journal_bytes(dark) == kept
+        assert [s.content for s in dark.sent] == [dark.ns["_PC_BUY_UNCHECKED"]], [s.content for s in dark.sent]
+        assert "`/pack`" not in dark.ns["_PC_BUY_UNCHECKED"] and all(ord(ch) < 128 for ch in dark.ns["_PC_BUY_UNCHECKED"])
+        assert calls_to(dark, OPEN) == [] and pack_reads(dark) == [(bought, own.steam, 503)]
+        assert any("its player could not be confirmed (HTTP 503)" in line for line in dark.logs), dark.logs
+        again = rig_over(env)
+        await buypack(again, own.discord, "gold")
+        assert calls_to(again, OPEN) == [] and journal(again) == {} and len(again.sent) == 1
+        assert (again.sent[0].content == again.ns["_PC_BUY_SHOWN_BEFORE"]) if marked else (again.sent[0].file is not None)
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 5, LOW 2: the pointer's bound is what the bot can keep ----------------------------------
+# Codex round 4 LOW 2: a pointer that Discord showed can still raise, or its process end, before
+# _pc_buy_forget, and the next /buypack sends it again. A send that became visible before it returned
+# cannot be told from one that never arrived, so the pointer is at least once (the integrator's
+# default, 2026-10-01): one reveal at most; the pointer may repeat after a failed acknowledgement;
+# never a second debit, never a second reveal.
+
+def test_low2r5_a_pointer_seen_before_its_send_failed_may_repeat_and_nothing_else_does(monkeypatch, tmp_path):
+    """The reviewer's falsifier, with the disclosed outcome. A's marked entry
+    (one reveal was shown); a /buypack's pointer becomes visible and the
+    process ends before the send returns, so the entry stays as it was; after
+    a restart the next /buypack sends the pointer again - a second pointer is
+    permitted - with zero purchase requests and zero reveals, and the entry
+    leaves the journal only after that acknowledged send. The decisive lines
+    are the zero purchase requests and the entry still journaled while the
+    second pointer's send runs: with the entry forgotten before the send, the
+    failed acknowledgement left no entry, and the next /buypack bought a
+    second pack."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        d = own.discord
+        bought, kept, reveals = await settled_for(env, own, True)
+        deal(env, subs)   # a deal for a second purchase, should a retry make one
+        first = rig_over(env)
+        ctx = first.ctx(d)
+        pointers = []
+
+        async def seen_then_dies(content=None, **k):
+            pointers.append(SimpleNamespace(content=content, file=k.get("file")))
+            raise ProcessEnded("the pointer reached Discord and the process ended before its send returned")
+        ctx.send = seen_then_dies
+        with pytest.raises(ProcessEnded):
+            await buypack(first, d, "gold", ctx=ctx)
+        assert journal_bytes(first) == kept, f"the entry did not outlast the failed acknowledgement: {journal(first)}"
+        after = rig_over(env)
+        actx = after.ctx(d)
+        real, during = actx.send, []
+
+        async def watched(*a, **k):
+            during.append(journal(after))
+            return await real(*a, **k)
+        actx.send = watched
+        await buypack(after, d, "gold", ctx=actx)
+        assert calls_to(first, OPEN) == [] and calls_to(after, OPEN) == [], "a retry sent a purchase request"
+        assert during == [json.loads(kept)], f"the entry left before the acknowledged send: {during}"
+        shown = after.ns["_PC_BUY_SHOWN_BEFORE"]
+        assert [p.content for p in pointers] == [shown] and [s.content for s in after.sent] == [shown]
+        assert len(pointers) + len(after.sent) == 2   # the second pointer is permitted (at least once)
+        assert all(s.file is None for s in pointers + after.sent) and len(reveals) == 1   # zero further reveals
+        assert all(r[1:] == (own.steam, 200) for r in pack_reads(first) + pack_reads(after))   # player checks only
+        assert journal(after) == {}
         assert await holdings(env, own) == (price, 1, 1)
     e2e(monkeypatch, tmp_path, body)

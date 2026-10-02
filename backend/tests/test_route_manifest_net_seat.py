@@ -1165,7 +1165,50 @@ def test_the_helper_closure_stays_affordable():
     # Main's four new assembly routes join the ranking; the median and worst
     # did not move. 99 is inside both sides' bounds (main's 100, the beta's
     # 102), and the beta's 102 stays, the bound the merged tree carries.
-    assert code_p90 <= 102, f"p90 code closure {code_p90} of {total}"
+    #
+    # Discord card render parity LAND, merge main 5062f4c4 (the
+    # connect-failure landing) into the lane (2026-10-01): the same walk with
+    # the same route seeds over each tree's own backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   base 0e751993                         383   22 / 88 / 328
+    #   lane fb9081c2                         383   22 / 90 / 370
+    #   trunk 5062f4c4                        387   22 / 95 / 328
+    #   merge                                 387   22 / 105 / 370
+    #
+    # Route by route, every count at the merge is the trunk's plus the lane's
+    # minus the base's (the trunk's, for its four new routes); no binding
+    # appears only when both sides are present. A rank effect: two routes
+    # that sat below the trunk's p90 crossed it with the lane's card art
+    # layer -- GET /api/v1/health 89 -> 265 (the pc_card_art self-test draws a
+    # face) and POST /api/v1/pc/portrait 88 -> 126 (the lane's card art
+    # bindings it reaches) -- so position 348 moves two ranks up the trunk's own ordering,
+    # from POST /api/v1/tournaments/{tournament_id}/signup (95, unmoved) to
+    # POST /api/v1/spectate/grant (105, unmoved on every tree). 39 routes sit
+    # above 100 on the merge, 35 on the trunk. The bound moves to 111, ~6%
+    # over the measurement, for that reason and no other; the median and
+    # worst bounds stay (22 against 24, 370 against 380).
+    #
+    # v1.41.0 merge pass 5 (2026-10-02), main 14127702 (the card render and
+    # Discord fix landings, whose paragraph is above, bound 111) into the
+    # beta at 6c88948d (bound 102): the same walk, the same route seeds,
+    #
+    #   tree                         routes   code median / p90 / worst   all median / p90 / worst
+    #   base 5062f4c4                   387   22 / 95 / 328               76 / 178 / 461
+    #   beta 6c88948d                   395   22 / 102 / 328              94 / 204 / 484
+    #   main 14127702                   387   22 / 105 / 370              76 / 197 / 503
+    #   the merge                       395   22 / 111 / 370              94 / 210 / 526
+    #
+    # Route by route, every code count at the merge is the beta's plus
+    # main's minus the base's, except GET /api/v1/pc/face/preview (a beta
+    # route main does not have): 282 on the beta, 324 at the merge, the 42
+    # card art bindings main's face module adds, reached through the beta's
+    # route. The rank effect: GET /api/v1/health (190 on the beta, 265 on
+    # main, 366 at the merge) and the face preview routes sit above the rank,
+    # and position 355 of 395 is POST /api/v1/spectate/grant at 111 (unmoved
+    # on main). 111 is main's bound, which the merged tree carries; the
+    # median and worst bounds stay (22 against 24, 370 against 380).
+    assert code_p90 <= 111, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1197,7 +1240,22 @@ def test_the_helper_closure_stays_affordable():
     # data-into-data hub case measured worst 279 at MEDIAN 179, i.e. a runaway
     # shows up in the median long before it shows up here) rather than on a
     # feature module a route genuinely runs. The median and p90 bounds stay.
-    assert code_worst <= 335, f"worst code closure {code_worst} of {total}"
+    #
+    # Discord card render parity (2026-10-01): the same walk with the same
+    # route seeds measured 22 / 88 / 328 of 2949 over main 0e75199's
+    # backend/api and 22 / 90 / 357 of 2988 over the lane tip, the worst still
+    # POST /api/v1/pc/packs/open. Its +29 are all bindings that did not exist
+    # on main, all in pc_face -- the card art layer (_draw_badge_art,
+    # card_art_bundle/_patch/_names/_check_entry/_index_bytes, the bundle
+    # reader's _card_art_* helpers, the CardArtBundle record, top_card_name,
+    # _kit_pngs and the CARD_ART_* / _CARD_ART_* constants) -- and nothing
+    # main reached stopped being reached. 26 routes moved, none shrank: the
+    # face, strip, grid, motion and pack routes by 25 to 41 each, and GET
+    # /api/v1/health by 163 (87 -> 250), because the pc_card_art health word
+    # runs card_art_selftest, which draws a face to prove the layer. The
+    # bound moves to 380, ~6% over the measurement, for that reason and no
+    # other; the median and p90 bounds stay.
+    assert code_worst <= 380, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -1356,7 +1414,50 @@ def test_the_helper_closure_stays_affordable():
     # measured 94 / 204 / 484 over 395 routes (main's side 76 / 178 / 461,
     # its bound 185; the beta's 93 / 199 / 484), the table at the code p90.
     # 204 is inside the beta's 208, which stays.
-    assert all_p90 <= 208, f"p90 closure {all_p90} of {total}"
+    #
+    # Discord card render parity (2026-10-01): 76 / 171 / 461 over the 383
+    # routes of main 0e75199, 76 / 177 / 490 over the lane tip. A rank
+    # effect again: two routes that sat at or below main's p90 crossed it --
+    # GET /api/v1/health 137 -> 332 (the pc_card_art self-test draws a face)
+    # and GET /api/v1/internal/pc/face/back 157 -> 183 (the face module's art
+    # layer) -- so position 344 moves from GET /api/v1/spectate/games (171,
+    # unmoved) to POST /api/v1/ffa/lobby/start (177, unmoved). 40 routes sit
+    # above 174 on the tip, 38 on main. The lane's bound was 188, ~6% over
+    # that measurement; the median bound stayed.
+    #
+    # Discord card render parity LAND, merge main 5062f4c4 (the
+    # connect-failure landing) into the lane (2026-10-01), the same walk,
+    # whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   base 0e751993                         383   76 / 171 / 461
+    #   lane fb9081c2                         383   76 / 177 / 503
+    #   trunk 5062f4c4                        387   76 / 178 / 461
+    #   merge                                 387   76 / 197 / 503
+    #
+    # Every count at the merge is the trunk's plus the lane's minus the
+    # base's (the trunk's, for its four new routes). The same rank effect as
+    # the code p90 above: GET /api/v1/health (139 on the trunk, 347 on the
+    # merge) and GET /api/v1/internal/pc/face/back (157 -> 197) crossed the
+    # trunk's p90, so position 348 is now the face back route itself at 197; POST /api/v1/spectate/grant (200,
+    # unmoved on every tree) sits one rank above it. 39 routes sit above 185
+    # on the merge, 36 on the trunk. The bound moves to 209, ~6% over the
+    # measurement, for that reason and no other; the median and worst bounds
+    # stay (76 against 90, 503 against 520).
+    #
+    # v1.41.0 merge pass 5 (2026-10-02), main 14127702 into the beta at
+    # 6c88948d: measured 94 / 210 / 526 over 395 routes (base 5062f4c4
+    # 76 / 178 / 461, the beta 94 / 204 / 484, main 76 / 197 / 503). 27 routes
+    # sit above both sides, each the beta's plus main's minus the base's (the
+    # card render's art bindings on the Player Cards routes, beside the beta's
+    # own), with two exceptions reached only by the union: GET /api/v1/health
+    # (283 + 347 - 139 = 491; 492 at the merge) and the beta's
+    # GET /api/v1/pc/face/preview (432 on the beta, 474 at the merge). Position
+    # 355 of 395 is POST /api/v1/team/lobby/start at 210 (unmoved). 40 routes
+    # sit above 209 at the merge, 39 on the beta, 36 on main. The bound moves to
+    # 220, ~5% over the measurement, for that reason and no other; the median
+    # bound stays (94 against 98).
+    assert all_p90 <= 220, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -1402,7 +1503,19 @@ def test_the_helper_closure_stays_affordable():
     # paragraph above is main's record and its 484 is main's bound. The merged
     # tree measures 484 (pass 3's merged tree measured 482); the beta's 505
     # holds it, so the bound stays.
-    assert all_worst <= 505, f"worst closure {all_worst} of {total}"
+    #
+    # Discord card render parity (2026-10-01): the same route measured 461 on
+    # main 0e75199 and 490 on the lane tip -- +29, exactly the 29 card art
+    # code bindings accounted for at the code bound above, with no import
+    # line added. The bound moves to 520, ~6% over the measurement, for that
+    # reason and no other.
+    #
+    # v1.41.0 merge pass 5 (2026-10-02), main 14127702 into the beta at
+    # 6c88948d: the same route, POST /api/v1/pc/packs/open, measures 526,
+    # exactly the beta's 484 plus main's 503 minus the base's 461 (the beta's
+    # +23 and main's +42 bindings, none reached only by the union). The bound
+    # moves to 552, ~5% over the measurement, for that reason and no other.
+    assert all_worst <= 552, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

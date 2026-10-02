@@ -2218,6 +2218,8 @@ def ready_rig(env):
         # line (discord_bot._pc_card_gif_signal). This rig drives the pending-DM
         # poller, so that line is a fixed stub here, as the generation is.
         "_pc_card_gif_signal": lambda: "[BOT-FEATURE] card_motion_gif=1 -- gen=fixture",
+        # ...and the card art witness before the Discord fix's (test_pc_bot_card_art).
+        "_pc_card_art_signal": lambda: "[BOT-FEATURE] card_art=1 -- gen=fixture",
     }
 
     async def noop():

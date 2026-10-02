@@ -453,11 +453,12 @@ ROWS = [
       [E(B, "_pc_leases", "        if remaining <= 0:", "        if False:")]),
 ] + [
     V("24", "test_pc_api_bytes_returns_three_and_every_caller_unpacks_three",
-      [E(B, span, old, old.replace(", _ = ", " = "))], label=span)
+      [E(B, span, old, old.replace(", _ = ", " = ").replace(", fmeta = ", " = "))], label=span)
     for span, old in (("_pc_back_bytes", "st, data, _ = await _pc_api_bytes("),
                       ("_pc_best_face", "st, face, _ = await _pc_api_bytes("),
                       ("cmd_pc_card", "st, face, _ = await _pc_api_bytes("),
-                      ("poll_pc_events", "st, face, _ = await _pc_api_bytes("))
+                      # the drain keeps the face answer's headers for its art note (Discord cards)
+                      ("poll_pc_events", "st, face, fmeta = await _pc_api_bytes("))
 ] + [
     V("24b", "test_pc_api_bytes_honours_max_bytes_per_call",
       [E(B, "_pc_api_bytes", "            if declared <= 0 or declared > max_bytes:",

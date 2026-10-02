@@ -955,6 +955,7 @@ REVEAL_FUNCS = frozenset({
     "_pc_lease", "_pc_lease_left", "_pc_lease_live", "_pc_lease_release", "_pc_lease_release_all",
     "_pc_leases", "_pc_detail", "_pc_name", "_pc_print_line", "_pc_fit_field", "_pc_when",
     "_pc_api", "_pc_api_bytes", "_pc_not_linked", "_maybe_defer", "_pc_locale_of",
+    "_pc_art_note",
 })
 REVEAL_ASSIGNS = frozenset({
     "_PC_COMPOSITE_MAX_BYTES", "_PC_COMPOSITE_RETRIES", "_PC_COMPOSITE_WAIT_CAP_S", "_PC_REVEAL_SPAN_S",
