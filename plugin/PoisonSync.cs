@@ -958,6 +958,7 @@ namespace CompetitiveRounds
                 _inbox.Clear();
                 _hitStack.Clear();
                 _skipLines = 0;
+                _prefixFaults = 0;
                 _refusedLines = 0;
             }
             catch { }
@@ -1700,6 +1701,7 @@ namespace CompetitiveRounds
         private static int _currentArmClaim;
         private static int _claimStartDepth;
         private static int _skipLines;
+        private static int _prefixFaults;
 
         internal static void HitEnter(ProjectileHit ph)
         {
@@ -1802,7 +1804,14 @@ namespace CompetitiveRounds
         {
             bool run;
             try { run = _claims.FaultBeforeStart(); } catch { return false; }
-            try { Plugin.Log.LogWarning("[POISON-CLAIM] poison prefix faulted before its start decision: " + (run ? "ran, claims off" : "skipped")); } catch { }
+            try
+            {
+                _prefixFaults++;
+                if (_prefixFaults <= 20)   // bounded like the skip lines; n counts every fault
+                    Plugin.Log.LogWarning("[POISON-CLAIM] poison prefix faulted before its start decision: "
+                        + (run ? "ran, claims off" : "skipped") + " n=" + _prefixFaults);
+            }
+            catch { }
             return run;
         }
 
@@ -1898,10 +1907,16 @@ namespace CompetitiveRounds
         }
 
         /// <summary>A started claim runs the bullet's poison effects on this
-        /// victim; the outcome names the streams it opened.</summary>
+        /// victim; the outcome (ClaimLine.Started) counts the streams it opened
+        /// with their first and last id, the children it ran and the children
+        /// that threw, in a bounded field of the claim's one line.</summary>
         private static string StartClaim(int claimId, PhotonView vv, RayHitPoison[] poisons)
         {
-            int first = _nextStream;
+            // Fix pass 3 (M2): a child that throws is counted, not written on a
+            // line of its own; the claim's one recv line carries the counts and
+            // the first thrower's type (ClaimLine.Started, bounded).
+            int first = _nextStream, children = 0, threw = 0;
+            string firstThrew = null;
             try
             {
                 _claimStartDepth++;
@@ -1911,16 +1926,15 @@ namespace CompetitiveRounds
                     foreach (var c in poisons)
                     {
                         if (c == null) continue;
+                        children++;
                         try { c.DoHitEffect(hit); }
-                        catch (Exception ex) { Plugin.Log.LogWarning("[POISON-CLAIM] start threw c=" + claimId + ": " + ex.Message); }
+                        catch (Exception ex) { threw++; if (firstThrew == null) firstThrew = ex.GetType().Name; }
                     }
                 }
                 finally { _claimStartDepth--; }
             }
-            catch (Exception ex) { return "started fault:" + ex.GetType().Name; }
-            var sb = new System.Text.StringBuilder();
-            for (int s = first; s < _nextStream; s++) sb.Append(sb.Length > 0 ? "," : "").Append('s').Append(s);
-            return "started streams=" + (sb.Length > 0 ? sb.ToString() : "none");
+            catch (Exception ex) { return ClaimLine.StartFault(ex.GetType().Name); }
+            return ClaimLine.Started(_nextStream - first, first, children, threw, firstThrew);
         }
 
         // ── Tick sound ────────────────────────────────────────────────────

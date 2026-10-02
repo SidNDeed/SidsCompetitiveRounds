@@ -488,13 +488,47 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The sender's claim id is consumed: "dup" for an id at or
-        /// below the sender's high water, else null (the high water moves to it).</summary>
-        private string Consume(int sender, int claimId)
+        /// below the sender's high water, else null (the high water moves to
+        /// it). Fix pass 3 (M2): the high water moves only where evidence names
+        /// it -- rateSecond -1: a claim with its own line (c= is the new high
+        /// water); else a claim past the rate, counted in the aggregate line of
+        /// that aligned second, which carries hw=. DupState names it.</summary>
+        private string Consume(int sender, int claimId, long rateSecond)
         {
             int hw;
             if (_highWater.TryGetValue(sender, out hw) && !PoisonLedgerCore.After(claimId, hw)) return "dup";
             _highWater[sender] = claimId;
+            _hwSecond[sender] = rateSecond;
             return null;
+        }
+
+        /// <summary>The state that decides "dup" for this sender: the high
+        /// water and where its evidence is (its own line, or the rate aggregate
+        /// of an aligned second).</summary>
+        internal string DupState(int sender)
+        {
+            int hw;
+            long sec;
+            if (!_highWater.TryGetValue(sender, out hw)) return "hw=none";
+            if (!_hwSecond.TryGetValue(sender, out sec) || sec < 0) return "hw=" + hw + " hw_from=line";
+            return "hw=" + hw + " hw_from=rate second=" + sec;
+        }
+
+        /// <summary>The state that refuses a start once the seat is saturated.</summary>
+        internal string SaturatedState()
+        {
+            return "saturated=" + (_faultSaturated ? "prefix-fault" : "start-cap") + " starts=" + _started.Count;
+        }
+
+        /// <summary>A result as the outcome field of its claim line, with the
+        /// state that decided it where that state is not the claim's own: the
+        /// high water for "dup", the saturation for "start-refused".</summary>
+        internal string RecvOutcome(int sender, string result)
+        {
+            string o = ClaimLine.Outcome(result);
+            if (result == "dup") return o + " " + DupState(sender);
+            if (result == "start-refused") return o + " " + SaturatedState();
+            return o;
         }
 
         /// <summary>A claim the rate admission let through, past its type
@@ -507,7 +541,7 @@ namespace CompetitiveRounds
         internal string Handle(int sender, int claimId, long nowMs, Func<ClaimFacts> collect, out ClaimFacts facts)
         {
             facts = null;
-            string dup = Consume(sender, claimId);
+            string dup = Consume(sender, claimId, -1);
             if (dup != null) return dup;
             try { facts = collect(); }
             catch (Exception ex) { return "fault:" + ex.GetType().Name; }
@@ -517,7 +551,8 @@ namespace CompetitiveRounds
 
         /// <summary>A claim with its facts already in hand, behind the same rate
         /// admission as Receive: past the rate it is "rate" (counted, its id
-        /// consumed), else Handle.</summary>
+        /// consumed), else Handle, and the admitted claim gets its one line
+        /// like Receive's (fix pass 3: every high-water move is on a line).</summary>
         internal string VictimDecide(ClaimFacts f)
         {
             int sender = f.Sender;
@@ -527,29 +562,35 @@ namespace CompetitiveRounds
                 return "rate";
             }
             ClaimFacts got;
-            return Handle(sender, f.ClaimId, f.NowMs, () => f, out got);
+            string r = Handle(sender, f.ClaimId, f.NowMs, () => f, out got);
+            Lines.Add(ClaimLine.Recv(sender, f.ClaimId, f.ProjView, f.VictimView, RecvOutcome(sender, r)));
+            return r;
         }
 
         // ── Received claims: the rate first, then one line each (fix pass 2, M1, M2) ──
 
         /// <summary>The claims of one sender past the rate in one aligned
         /// second: their count, the first and the last payload (their tuples
-        /// are read only when the line is written), and the sender's running
-        /// total for the room.</summary>
+        /// are read only when the line is written), the sender's running total
+        /// for the room, and the high water those claims moved the sender to
+        /// (-1: none moved it).</summary>
         private sealed class Excess
         {
             internal long Second;
             internal int Count;
             internal object[] First, Last;
             internal long Total;
+            internal int Hw = -1;
         }
 
         private readonly Dictionary<int, Excess> _excess = new Dictionary<int, Excess>();
         private long _roomExcess;
+        private readonly Dictionary<int, long> _hwSecond = new Dictionary<int, long>();   // -1: own line
+        private bool _faultSaturated;
 
         /// <summary>The claim evidence lines, in order, for the shell to write
-        /// and clear: one per claim Receive admitted, one per sender and aligned
-        /// second that had claims past the rate (VictimDecide writes none).</summary>
+        /// and clear: one per admitted claim (Receive or VictimDecide), one per
+        /// sender and aligned second that had claims past the rate.</summary>
         internal readonly List<string> Lines = new List<string>();
 
         /// <summary>The aligned second a receive time lies in.</summary>
@@ -586,15 +627,16 @@ namespace CompetitiveRounds
         /// aggregate is one line, written by the first FlushRate after its
         /// second ends (the shell's upkeep, about once a second; the next
         /// admitted claim; or that sender's next claim past the rate in a later
-        /// second), or at room exit.</summary>
+        /// second), or at room exit. When the id moves the sender's high water,
+        /// that aggregate carries it (hw=), so a later "dup" names its evidence.</summary>
         private void Refuse(int sender, long nowMs, object[] a)
         {
-            if (a != null && a.Length > 4 && a[4] is int) Consume(sender, (int)a[4]);
             Excess x;
             if (!_excess.TryGetValue(sender, out x)) { x = new Excess(); _excess[sender] = x; }
             long sec = SecondOf(nowMs);
             if (x.Count > 0 && x.Second != sec) Flush(sender, x);
-            if (x.Count == 0) { x.Second = sec; x.First = a; }
+            if (x.Count == 0) { x.Second = sec; x.First = a; x.Hw = -1; }
+            if (a != null && a.Length > 4 && a[4] is int && Consume(sender, (int)a[4], sec) == null) x.Hw = (int)a[4];
             x.Count++;
             x.Last = a;
             x.Total++;
@@ -603,10 +645,11 @@ namespace CompetitiveRounds
 
         private void Flush(int sender, Excess x)
         {
-            Lines.Add(ClaimLine.Rate(sender, x.Second, x.Count, x.First, x.Last, x.Total, _roomExcess));
+            Lines.Add(ClaimLine.Rate(sender, x.Second, x.Count, x.First, x.Last, x.Total, _roomExcess, x.Hw));
             x.Count = 0;
             x.First = null;
             x.Last = null;
+            x.Hw = -1;
         }
 
         /// <summary>Writes the aggregate of every sender whose second has ended
@@ -625,9 +668,10 @@ namespace CompetitiveRounds
         /// for a field the payload does not carry as an int) and one named
         /// terminal result -- "malformed" for a payload short of its nine typed
         /// elements, "fault:&lt;type&gt;" for a fault anywhere, else Handle's
-        /// result, where start(claim id) runs a started claim and names the
-        /// streams it opened. fill() is the fact collection Handle runs after
-        /// the id is consumed.</summary>
+        /// result with the state that decided it (RecvOutcome), where start(claim
+        /// id) runs a started claim and returns its bounded outcome
+        /// (ClaimLine.Started). fill() is the fact collection Handle runs after
+        /// the id is consumed. Every line is at most ClaimLine.RecvMax bytes.</summary>
         internal void Receive(int sender, object[] a, long nowMs, Action<ClaimFacts> fill, Func<int, string> start)
         {
             if (!AdmitRate(sender, nowMs)) { Refuse(sender, nowMs, a); return; }
@@ -657,7 +701,7 @@ namespace CompetitiveRounds
                         fill(c);
                         return c;
                     }, out f);
-                    outcome = result == "started" ? start(claimId) : ClaimLine.Outcome(result);
+                    outcome = result == "started" ? start(claimId) : RecvOutcome(sender, result);
                 }
             }
             catch (Exception ex) { outcome = ClaimLine.Outcome("fault:" + ex.GetType().Name); }
@@ -711,6 +755,7 @@ namespace CompetitiveRounds
         internal bool FaultBeforeStart()
         {
             if (_claimStarts > 0) return false;
+            if (!_saturated) _faultSaturated = true;   // the state a later "start-refused" names
             _saturated = true;
             return true;
         }
@@ -721,8 +766,8 @@ namespace CompetitiveRounds
         {
             _sentPairs.Clear(); _sendTimes.Clear();
             _highWater.Clear(); _recvTimes.Clear(); _started.Clear();
-            _saturated = false; _claimStarts = 0;
-            _excess.Clear(); _roomExcess = 0; Lines.Clear();
+            _saturated = false; _claimStarts = 0; _faultSaturated = false;
+            _excess.Clear(); _roomExcess = 0; Lines.Clear(); _hwSecond.Clear();
         }
     }
 
@@ -1201,27 +1246,61 @@ namespace CompetitiveRounds
 
     internal static class ClaimLine
     {
+        /// <summary>Fix pass 3 (M2): the outcome field of an arm or recv line
+        /// is at most OutcomeMax characters and an exception type name inside
+        /// one at most NameMax, so a recv line is at most RecvMax and a rate
+        /// line at most RateMax (int and long fields at their widest).</summary>
+        internal const int OutcomeMax = 192, NameMax = 48;
+        internal const int RecvMax = 95 + OutcomeMax, RateMax = 294;
+
+        /// <summary>Text cut to at most max characters ("..." marks a cut).</summary>
+        internal static string Cap(string s, int max)
+        {
+            if (s == null) return "";
+            return s.Length <= max ? s : s.Substring(0, max - 3) + "...";
+        }
+
         internal static string Arm(int from, int claimId, int projView, int victimView, string outcome)
         {
             return "[POISON-CLAIM] arm from=" + from + " c=" + claimId + " proj=" + projView + " victim=" + victimView
-                + " outcome=" + outcome;
+                + " outcome=" + Cap(outcome, OutcomeMax);
         }
 
         internal static string Recv(int from, int claimId, int projView, int victimView, string outcome)
         {
             return "[POISON-CLAIM] recv from=" + from + " c=" + claimId + " proj=" + projView + " victim=" + victimView
-                + " outcome=" + outcome;
+                + " outcome=" + Cap(outcome, OutcomeMax);
+        }
+
+        /// <summary>Fix pass 3 (M2): a started claim's outcome, one field per
+        /// fact and no per-child or per-stream list: the streams it opened (a
+        /// count and the first and last id: a claim's streams take consecutive
+        /// ids), the poison children it ran, how many threw and the first
+        /// thrower's exception type.</summary>
+        internal static string Started(int streams, int firstStream, int children, int threw, string firstThrew)
+        {
+            return "started streams=" + streams
+                + (streams > 0 ? " first=s" + firstStream + " last=s" + (firstStream + streams - 1) : "")
+                + " children=" + children + " threw=" + threw
+                + (threw > 0 ? " first_threw=" + Cap(firstThrew, NameMax) : "");
+        }
+
+        /// <summary>A start that faulted outside its children.</summary>
+        internal static string StartFault(string typeName)
+        {
+            return "started fault:" + Cap(typeName, NameMax);
         }
 
         /// <summary>Fix pass 2 (M2): one sender's claims past the rate in one
         /// aligned second, as one line: their count, the first and the last
-        /// tuple, the sender's running total and the room's.</summary>
+        /// tuple, the sender's running total and the room's, and the high
+        /// water those claims moved the sender to (fix pass 3; -1: none).</summary>
         internal static string Rate(int from, long second, int excess, object[] first, object[] last, long total,
-                                    long roomTotal)
+                                    long roomTotal, int hw)
         {
             return "[POISON-CLAIM] rate from=" + from + " second=" + second + " excess=" + excess
                 + " first=(" + Tuple(first) + ") last=(" + Tuple(last) + ") total=" + total + " room_total=" + roomTotal
-                + " outcome=drop reason=rate";
+                + " hw=" + hw + " outcome=drop reason=rate";
         }
 
         private static string Tuple(object[] a)

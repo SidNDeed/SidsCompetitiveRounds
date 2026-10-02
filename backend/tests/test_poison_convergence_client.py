@@ -186,7 +186,7 @@ def check_claim_decided_before_start(src):
     assert "}, claimId => StartClaim(claimId, vv, poisons));" in on, "a started claim is not started by StartClaim"
     rcv = _code(_member(src[CORE], "internal void Receive("))
     decide = rcv.index("string result = Handle(sender, claimId, nowMs, () =>")
-    gate = rcv.index('outcome = result == "started" ? start(claimId) : ClaimLine.Outcome(result);')
+    gate = rcv.index('outcome = result == "started" ? start(claimId) : RecvOutcome(sender, result);')
     assert decide < gate, "a claim can start poison before the victim's decision"
     assert rcv.count("start(") == 1, "a claim can start other than on Handle's \"started\""
     assert "DoHitEffect(" not in on
@@ -514,6 +514,40 @@ def check_claim_dispatch_terminal(src):
         "a claim can leave the dispatcher before OnClaim: %s" % exits
 
 
+CLAIM_LINE_CAPS = ("if (_skipLines < 20)", "if (_prefixFaults <= 20)")
+
+
+def check_claim_evidence_bounded(src):
+    """Fix pass 3 (M2): a started claim's child faults and streams are folded
+    into its one bounded outcome (ClaimLine.Started), and every other
+    [POISON-CLAIM] line the shell writes itself sits under a per-room cap."""
+    start = _code(_member(src[PS], "private static string StartClaim("))
+    assert "Plugin.Log" not in start, "a started claim writes a line beside its own"
+    assert "catch (Exception ex) { threw++; if (firstThrew == null) firstThrew = ex.GetType().Name; }" in start
+    assert "return ClaimLine.Started(_nextStream - first, first, children, threw, firstThrew);" in start
+    assert "catch (Exception ex) { return ClaimLine.StartFault(ex.GetType().Name); }" in start
+    assert "StringBuilder" not in start and "Append(" not in start, "a started claim lists its streams"
+    ps = _code(src[PS])
+    uses = [m.start() for m in re.finditer(re.escape('"[POISON-CLAIM]'), ps)]
+    assert len(uses) == len(CLAIM_LINE_CAPS), "%d shell-written claim lines" % len(uses)
+    for i, cap in zip(uses, CLAIM_LINE_CAPS):
+        assert cap in ps[max(0, i - 300):i], "a shell-written claim line is not under its cap " + cap
+    reset = _code(_member(src[PS], "private static void ResetForRoomExit("))
+    assert "_skipLines = 0;" in reset and "_prefixFaults = 0;" in reset
+
+
+# check_claim_evidence_bounded: one mutation per bounded structure (each red).
+CLAIM_EVIDENCE_MUTANTS = {
+    "per-child-line": (PS, "catch (Exception ex) { threw++; if (firstThrew == null) firstThrew = ex.GetType().Name; }",
+                       'catch (Exception ex) { threw++; Plugin.Log.LogWarning("[POISON-CLAIM] start threw c=" + claimId + ": " + ex.Message); }'),
+    "prefix-fault-uncapped": (PS, "if (_prefixFaults <= 20)", "if (_prefixFaults >= 0)"),
+    "skip-uncapped": (PS, "if (_skipLines < 20)", "if (_skipLines >= 0)"),
+    "stream-list": (PS, "return ClaimLine.Started(_nextStream - first, first, children, threw, firstThrew);",
+                    "var sb = new System.Text.StringBuilder();\n            for (int s = first; s < _nextStream; s++) sb.Append('s').Append(s);\n"
+                    "            return \"started streams=\" + sb;"),
+}
+
+
 def check_silent_arm(src):
     shadow = _code(_member(src[PS], "internal static IEnumerator ShadowDot("))
     assert '" arm=" + SilentArm.Label(armClaim)' in shadow, "the SILENT line does not name its arm"
@@ -529,7 +563,7 @@ CHECKS = {f.__name__: f for f in (
     check_funnel_is_closed, check_shared_predicates, check_epoch_wire, check_flush_on_every_stop,
     check_evidence_tags, check_point_binding, check_replay_wiring, check_unstamped_break, check_silent_arm,
     check_header_failure_retires, check_fence_failure_retires, check_v3_live_names_every_dependency,
-    check_claim_dispatch_terminal,
+    check_claim_dispatch_terminal, check_claim_evidence_bounded,
 )}
 
 # (check, file, old, new): one named mutation per check that must turn it red.
@@ -569,6 +603,7 @@ MUTANTS = {
                                     "if (__exception != null) { }"),
     "check_v3_live_names_every_dependency": (PS, "                    && ReviveFenceLive\n", ""),
     "check_claim_dispatch_terminal": (PS, "if (a == null || a.Length < 2) return;", "if (a == null || a.Length < 4) return;"),
+    "check_claim_evidence_bounded": CLAIM_EVIDENCE_MUTANTS["per-child-line"],
 }
 
 # check_v3_live_names_every_dependency: one mutation per term of V3PatchesLive
@@ -621,6 +656,14 @@ def test_each_check_turns_red(name):
     with pytest.raises(AssertionError):
         CHECKS[name](mutant)
     CHECKS[name](control)
+
+
+@pytest.mark.parametrize("which", sorted(CLAIM_EVIDENCE_MUTANTS))
+def test_claim_evidence_turns_red(which):
+    src = _normal(_load())
+    with pytest.raises(AssertionError):
+        check_claim_evidence_bounded(_mutate(src, CLAIM_EVIDENCE_MUTANTS[which]))
+    check_claim_evidence_bounded(_mutate(src, CONTROL))
 
 
 @pytest.mark.parametrize("term", sorted(V3_LIVE_MUTANTS))

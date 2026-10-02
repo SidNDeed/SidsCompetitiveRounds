@@ -184,10 +184,10 @@ MUTANTS = [
      "if (_started.Count >= StartedCap) _started.Clear();", "start_durable", "broadcast_then_claim"),
     # F5: the id is consumed before any lookup
     ("collect_before_admit",
-     "string dup = Consume(sender, claimId);\n            if (dup != null) return dup;\n"
+     "string dup = Consume(sender, claimId, -1);\n            if (dup != null) return dup;\n"
      "            try { facts = collect(); }\n            catch (Exception ex) { return \"fault:\" + ex.GetType().Name; }",
      "try { facts = collect(); }\n            catch (Exception ex) { return \"fault:\" + ex.GetType().Name; }\n"
-     "            string dup = Consume(sender, claimId);\n            if (dup != null) return dup;",
+     "            string dup = Consume(sender, claimId, -1);\n            if (dup != null) return dup;",
      "claim_fault_terminal", "claim_starts_once"),
     # F6: the traffic terms are the payloads' sizes
     ("wire_activate_short", "return new object[] { TypeActivate, Protocol, aid, fighters, point.Ts, point.Set };",
@@ -223,6 +223,17 @@ MUTANTS = [
     # M2: past the rate a claim is refused and counted
     ("recv_rate_unbounded", "if (q.Count >= ClaimsPerRollingSecond) return false;", "",
      "claim_rate_bounded", "dup_verdict"),
+    # Fix pass 3 (M2): every state that decides a claim's result is on a line, every line bounded
+    ("refused_hw_unnamed", "Consume(sender, (int)a[4], sec)", "Consume(sender, (int)a[4], -1)",
+     "claim_dup_explained", "claim_rate_refusal_durable"),
+    ("victim_decide_no_line",
+     "Lines.Add(ClaimLine.Recv(sender, f.ClaimId, f.ProjView, f.VictimView, RecvOutcome(sender, r)));", "",
+     "victim_decide_lines", "claim_starts_once"),
+    ("saturation_unnamed", "if (!_saturated) _faultSaturated = true;", "",
+     "start_refused_explained", "prefix_fault_no_second_stream"),
+    ("outcome_uncapped", "return s.Length <= max ? s : s.Substring(0, max - 3) + \"...\";", "return s;",
+     "claim_line_bounded", "dup_verdict"),
+    ("room_excess_uncounted", "_roomExcess++;", "", "rate_totals_counted", "dup_verdict"),
 ]
 
 

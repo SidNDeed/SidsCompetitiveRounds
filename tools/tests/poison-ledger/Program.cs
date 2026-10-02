@@ -1219,7 +1219,7 @@ namespace PoisonLedgerTests
             c.FlushRate(3000, false);
             Eq(ClaimCore.ClaimsPerRollingSecond + 1, c.Lines.Count, "the excess is one aggregate line");
             Eq("[POISON-CLAIM] rate from=3 second=2 excess=8 first=(c=-1 proj=-1 victim=-1) last=(c=-1 proj=-1 victim=-1)"
-                + " total=8 room_total=8 outcome=drop reason=rate", c.Lines[c.Lines.Count - 1], "counted, the tuples as far as present");
+                + " total=8 room_total=8 hw=-1 outcome=drop reason=rate", c.Lines[c.Lines.Count - 1], "counted, the tuples as far as present");
         }
 
         // 81. M2: ten times the rate from one sender, two seconds running.
@@ -1245,15 +1245,105 @@ namespace PoisonLedgerTests
             Eq(2 * R + 1, recv.Count, "own lines");
             Eq(2 * R + 1, filled, "facts collected for admitted claims only");
             Eq("[POISON-CLAIM] rate from=2 second=1 excess=288 first=(c=33 proj=533 victim=1001) last=(c=320 proj=820 victim=1001)"
-                + " total=288 room_total=288 outcome=drop reason=rate", rate[0], "the first second's aggregate");
+                + " total=288 room_total=288 hw=320 outcome=drop reason=rate", rate[0], "the first second's aggregate");
             Eq("[POISON-CLAIM] rate from=2 second=2 excess=288 first=(c=353 proj=853 victim=1001) last=(c=640 proj=1140 victim=1001)"
-                + " total=576 room_total=576 outcome=drop reason=rate", rate[1], "the second's");
+                + " total=576 room_total=576 hw=640 outcome=drop reason=rate", rate[1], "the second's");
             Eq(2 * N, (recv.Count - 1) + 288 + 288, "every claim of the sender is on its own line or counted");
             Check(recv.Last().StartsWith("[POISON-CLAIM] recv from=3 c=1 "), "another sender is admitted on its own");
             Eq(95, ClaimLine.Recv(int.MinValue, int.MinValue, int.MinValue, int.MinValue, "").Length, "an own line: 95 bytes + its outcome");
             var ext = new object[] { null, null, int.MinValue, int.MinValue, int.MinValue };
-            Eq(279, ClaimLine.Rate(int.MinValue, long.MinValue, int.MaxValue, ext, ext, long.MaxValue, long.MaxValue).Length,
-                "an aggregate line: at most 279 bytes");
+            Eq(ClaimLine.RateMax, ClaimLine.Rate(int.MinValue, long.MinValue, int.MaxValue, ext, ext, long.MaxValue, long.MaxValue,
+                int.MinValue).Length, "an aggregate line: at most RateMax bytes");
+        }
+
+        // ── Fix pass 3 (M2): every state that decides a claim's result is on a line ──
+
+        // 82. A claim past the rate moves the sender's high water; a later
+        //     claim within the rate that it makes a "dup" names that high water
+        //     and the aggregate that counts it, and that aggregate carries hw=.
+        //     A high water moved by a claim with its own line is named as such.
+        private static void ClaimDupExplained()
+        {
+            var c = new ClaimCore();
+            Action<ClaimFacts> fill = f => { f.GateOn = false; f.GateWhy = "test"; };
+            Func<int, string> start = id => ClaimLine.Started(0, 0, 0, 0, null);
+            for (int i = 1; i <= ClaimCore.ClaimsPerRollingSecond; i++) c.Receive(2, ClaimEv(i, 500 + i), 1000 + i, fill, start);
+            c.Receive(2, ClaimEv(100, 600), 1500, fill, start);   // past the rate: refused, high water 100
+            c.Receive(2, ClaimEv(50, 601), 1600, fill, start);    // past the rate: refused, below the high water
+            c.Receive(2, ClaimEv(60, 602), 2100, fill, start);    // within the rate again: decided by the refused 100
+            c.Receive(2, ClaimEv(200, 603), 2200, fill, start);   // its own line moves the high water
+            c.Receive(2, ClaimEv(150, 604), 2300, fill, start);
+            var tail = c.Lines.Skip(ClaimCore.ClaimsPerRollingSecond).ToList();
+            Eq("[POISON-CLAIM] rate from=2 second=1 excess=2 first=(c=100 proj=600 victim=1001) last=(c=50 proj=601 victim=1001)"
+                + " total=2 room_total=2 hw=100 outcome=drop reason=rate", tail[0], "the aggregate carries the high water it moved");
+            Eq("[POISON-CLAIM] recv from=2 c=60 proj=602 victim=1001 outcome=drop reason=dup hw=100 hw_from=rate second=1",
+                tail[1], "the dup names the refused claim's high water and its aggregate");
+            Eq("[POISON-CLAIM] recv from=2 c=150 proj=604 victim=1001 outcome=drop reason=dup hw=200 hw_from=line",
+                tail[3], "a high water from a claim with its own line");
+            Eq(4, tail.Count, "one line each");
+        }
+
+        // 83. VictimDecide's admitted claims get their one line like Receive's,
+        //     so no high-water move is without its line.
+        private static void VictimDecideLines()
+        {
+            var c = new ClaimCore();
+            Eq("started", c.VictimDecide(Facts(2, 1, 77)), "started");
+            Eq("dup", c.VictimDecide(Facts(2, 1, 77)), "its repeat");
+            Eq("[POISON-CLAIM] recv from=2 c=1 proj=0 victim=1001 outcome=started|"
+                + "[POISON-CLAIM] recv from=2 c=1 proj=0 victim=1001 outcome=drop reason=dup hw=1 hw_from=line",
+                string.Join("|", c.Lines), "one line per admitted claim, the dup's deciding state named");
+        }
+
+        // 84. "start-refused" names the saturation that decided it: a poison
+        //     prefix fault before any claim, or the durable start cap.
+        private static void StartRefusedExplained()
+        {
+            var c = new ClaimCore();
+            Check(c.FaultBeforeStart(), "no claim started: the effect runs and the seat saturates");
+            Eq("start-refused", c.VictimDecide(Facts(2, 1, 77)), "refused");
+            Check(c.Lines[0].EndsWith("outcome=drop reason=start-refused saturated=prefix-fault starts=0"), "named: " + c.Lines[0]);
+            var d = new ClaimCore();
+            for (int i = 1; i <= ClaimCore.StartedCap; i++) d.TryStart(i, V, StartPath.Broadcast);
+            Check(d.TryStart(ClaimCore.StartedCap + 1, V, StartPath.Broadcast), "past the cap a broadcast proceeds");
+            Eq("start-refused", d.VictimDecide(Facts(2, 1, 999999)), "refused");
+            Check(d.Lines[0].EndsWith("outcome=drop reason=start-refused saturated=start-cap starts=16384"), "named: " + d.Lines[0]);
+        }
+
+        // 86. Every claim past the rate is counted where its aggregate says:
+        //     the sender's own total and the room's total across senders.
+        private static void RateTotalsCounted()
+        {
+            var c = new ClaimCore();
+            Action<ClaimFacts> fill = f => { f.GateOn = false; f.GateWhy = "test"; };
+            Func<int, string> start = id => "started";
+            for (int s = 2; s <= 3; s++)
+                for (int i = 1; i <= ClaimCore.ClaimsPerRollingSecond + 2; i++) c.Receive(s, ClaimEv(i, i), 1000 + i, fill, start);
+            c.FlushRate(2000, false);
+            var rate = c.Lines.Where(x => x.StartsWith("[POISON-CLAIM] rate ")).ToList();
+            Eq(2, rate.Count, "one aggregate per sender");
+            foreach (var r in rate)
+                Check(r.Contains(" excess=2 ") && r.Contains(" total=2 room_total=4 hw=34 "), "counted: " + r);
+        }
+
+        // 85. Every claim line has a finite byte bound: the outcome field is
+        //     capped, a started claim's outcome counts its streams and children
+        //     (no per-stream or per-child list), and an exception type is capped.
+        private static void ClaimLineBounded()
+        {
+            string big = new string('x', 10000);
+            Eq(ClaimLine.RecvMax, ClaimLine.Recv(int.MinValue, int.MinValue, int.MinValue, int.MinValue, big).Length, "recv");
+            Eq(ClaimLine.RecvMax - 1, ClaimLine.Arm(int.MinValue, int.MinValue, int.MinValue, int.MinValue, big).Length, "arm");
+            Eq("started streams=3 first=s10 last=s12 children=4 threw=2 first_threw=NullReferenceException",
+                ClaimLine.Started(3, 10, 4, 2, "NullReferenceException"), "one field per fact");
+            Eq("started streams=0 children=1 threw=0", ClaimLine.Started(0, 10, 1, 0, null), "nothing opened");
+            string st = ClaimLine.Started(int.MaxValue, int.MinValue, int.MaxValue, int.MaxValue, big);
+            Check(st.Length <= ClaimLine.OutcomeMax && st.EndsWith("..."), "a started outcome fits its field uncut: " + st.Length);
+            Check(ClaimLine.StartFault(big).Length <= ClaimLine.OutcomeMax, "a start fault");
+            var c = new ClaimCore();
+            c.Receive(2, ClaimEv(1, 9), 1000, f => { f.GateOn = false; f.GateWhy = big; }, id => "started");
+            Check(c.Lines[0].Length <= ClaimLine.RecvMax && c.Lines[0].EndsWith("..."),
+                "a received claim's line with an oversized reason: " + c.Lines[0].Length);
         }
 
         private static ClaimFacts Facts(int sender, int claimId, long proj)
@@ -1348,6 +1438,11 @@ namespace PoisonLedgerTests
             { "retired_stream_sends_nothing", RetiredStreamSendsNothing },
             { "truncated_claim_terminal", TruncatedClaimTerminal },
             { "claim_rate_bounded", ClaimRateBounded },
+            { "claim_dup_explained", ClaimDupExplained },
+            { "victim_decide_lines", VictimDecideLines },
+            { "start_refused_explained", StartRefusedExplained },
+            { "claim_line_bounded", ClaimLineBounded },
+            { "rate_totals_counted", RateTotalsCounted },
         };
 
         private static int Main(string[] args)
