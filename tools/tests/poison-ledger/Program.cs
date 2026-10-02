@@ -299,16 +299,20 @@ namespace PoisonLedgerTests
             Eq("evict", l.RetiredLog[0].Retired, "evicted as terminal");
         }
 
-        // 20. Only a 17-element header with both trailing elements typed is v3.
-        private static void NonV3Equivalence()
+        // 20. (restated by A2b) A header is v3 only on a seat holding that
+        //     stream's LIFE message; every other header is today's, and a LIFE
+        //     message is consumed by its own stream's header once.
+        private static void LifeMessageRequired()
         {
-            LifeEpoch e;
-            Check(!PoisonLedgerCore.TryV3Epoch(15, null, null, out e), "today's 15");
-            Check(!PoisonLedgerCore.TryV3Epoch(16, 5, null, out e), "16 elements");
-            Check(!PoisonLedgerCore.TryV3Epoch(17, 5, 1, out e), "untyped flag");
-            Check(!PoisonLedgerCore.TryV3Epoch(17, 5L, true, out e), "untyped stamp");
-            Check(PoisonLedgerCore.TryV3Epoch(17, 5, true, out e) && e.Set && e.Ts == 5, "v3 with a stamp");
-            Check(PoisonLedgerCore.TryV3Epoch(17, 0, false, out e) && !e.Set, "v3 before any boundary");
+            var inbox = new EpochInbox(); LifeEpoch e;
+            Check(!inbox.Take(V, 1, out e), "no LIFE message: today's header");
+            inbox.Note(V, 2, E(500));
+            Check(!inbox.Take(V, 1, out e), "another stream's LIFE message does not count");
+            Check(!inbox.Take(U, 2, out e), "another view's LIFE message does not count");
+            Check(inbox.Take(V, 2, out e) && e.Set && e.Ts == 500, "its own stream");
+            Check(!inbox.Take(V, 2, out e), "consumed once");
+            for (int s = 0; s < EpochInbox.Cap + 10; s++) inbox.Note(V, 100 + s, E(1));
+            Eq(EpochInbox.Cap, inbox.Count, "bounded");
         }
 
         // 21. Two seats, one slow, end with the same applied set.
@@ -430,99 +434,218 @@ namespace PoisonLedgerTests
             Eq(apX.Seen, apY.Seen, "seat y agrees");
         }
 
-        // ── A2: activation ────────────────────────────────────────────────
+        // ── A2b: activation over the acknowledged FIGHTERS; rooms stay open ──
+        // Actors 1 and 2 are fighters (1 is master), 3 joins (a spectator or
+        // a fighter), 9 is a spectator already present.
 
-        private static readonly int[] R123 = { 1, 2, 3 };
+        private static readonly int[] F12 = { 1, 2 };
+        private static readonly int[] F123 = { 1, 2, 3 };
         private static bool All(int a) { return true; }
 
-        private static ActivationCore Armed()
+        private static ActivationCore Armed(int aid, int[] fighters, params int[] extraAcks)
         {
             var a = new ActivationCore();
-            a.OnActivate(1, 1, 7, R123, 0);
-            foreach (int x in R123) a.OnAck(x, 1, 7);
+            a.OnActivate(1, 1, aid, fighters, 0);
+            foreach (int x in fighters) a.OnAck(x, 1, aid);
+            foreach (int x in extraAcks) a.OnAck(x, 1, aid);
             return a;
         }
 
-        // 31. Every roster actor must acknowledge.
+        // 31. Every fighter must acknowledge; a spectator's ack is optional.
         private static void ActivationRequiresAllAcks()
         {
             var a = new ActivationCore(); string w;
-            a.OnActivate(1, 1, 7, R123, 0);
-            Check(!a.Evaluate(true, R123, All, 10, out w), "no acks");
-            a.OnAck(1, 1, 7); a.OnAck(2, 1, 7);
-            Check(!a.Evaluate(true, R123, All, 10, out w) && w == "not-acked 2/3", "two of three: " + w);
-            a.OnAck(3, 1, 8);
-            Check(!a.Evaluate(true, R123, All, 10, out w), "an ack for another activation does not count");
-            a.OnAck(3, 1, 7);
-            Check(a.Evaluate(true, R123, All, 10, out w), "all three: " + w);
+            a.OnActivate(1, 1, 7, F12, 0);
+            Check(!a.Evaluate(F12, All, 10, out w), "no acks");
+            a.OnAck(1, 1, 7); a.OnAck(9, 1, 7);
+            Check(!a.Evaluate(F12, All, 10, out w) && w == "not-acked 1/2", "one fighter and a spectator: " + w);
+            a.OnAck(2, 1, 8);
+            Check(!a.Evaluate(F12, All, 10, out w), "an ack for another activation does not count");
+            a.OnAck(2, 1, 7);
+            Check(a.Evaluate(F12, All, 10, out w), "both fighters: " + w);
+            Eq("1,2,9", string.Join(",", a.AckedPresent(new[] { 1, 2, 9 })), "the acknowledged spectator is an addressee");
         }
 
-        // 32. A present actor outside the roster kills the activation for good.
-        private static void ActivationKilledByJoin()
+        // 32. Any entered/left/cap-change event kills v3 on the observing seat
+        //     until a fresh activation is acknowledged; the old acks never count.
+        private static void ActivationKilledByRoomEvent()
         {
-            var a = Armed(); string w;
-            Check(a.Evaluate(true, R123, All, 10, out w), "armed");
-            Check(!a.Evaluate(true, new[] { 1, 2, 3, 4 }, All, 10, out w), "join: " + w);
-            Check(!a.Evaluate(true, R123, All, 10, out w), "still off after it leaves: " + w);
+            var a = Armed(7, F12); string w;
+            Check(a.Evaluate(F12, All, 10, out w), "armed");
+            a.OnRoomEvent("player-entered actor=3");
+            Check(!a.Evaluate(F12, All, 10, out w) && w == "killed:player-entered actor=3", "event: " + w);
+            Eq(0, a.AckedPresent(F12).Length, "nothing is addressed while off");
+            a.OnAck(1, 1, 7); a.OnAck(2, 1, 7);
+            Check(!a.Evaluate(F12, All, 20, out w), "re-acks of the old activation do not revive it: " + w);
+            a.OnActivate(1, 1, 8, F12, 30); a.OnAck(1, 1, 8); a.OnAck(2, 1, 8);
+            Check(a.Evaluate(F12, All, 40, out w), "fresh activation: " + w);
         }
 
-        // 33. Any present actor without cr_pois3 turns v3 off, and no ack is given.
+        // 33. A fighter without cr_pois3 turns v3 off and gets no ack anywhere.
         private static void ActivationCapMissing()
         {
             var fresh = new ActivationCore(); string w;
-            Check(!fresh.Evaluate(true, R123, x => x != 2, 10, out w) && w == "cap-missing actor=2", "before any activation: " + w);
-            var a = Armed();
-            Check(!a.Evaluate(true, R123, x => x != 2, 10, out w), "armed, then a cap missing");
-            Check(!a.Evaluate(true, R123, All, 10, out w), "sticky: " + w);
+            Check(!fresh.Evaluate(F12, x => x != 2, 10, out w) && w == "cap-missing actor=2", "before any activation: " + w);
+            var a = Armed(7, F12);
+            Check(!a.Evaluate(F12, x => x != 2, 10, out w), "armed, then a fighter's cap missing");
+            Check(!a.Evaluate(F12, All, 10, out w), "sticky: " + w);
             var b = new ActivationCore();
-            b.OnActivate(1, 1, 9, R123, 0);
-            Check(!b.ShouldAck(true, R123, x => x != 3), "no ack with a cap missing");
+            b.OnActivate(1, 1, 9, F12, 0);
+            Check(!b.ShouldAck(F12, x => x != 2), "no ack with a fighter's cap missing");
         }
 
-        // 34. An open room turns v3 off for the rest of that activation.
-        private static void ActivationRoomOpen()
+        // 34. An OLD spectator (no cr_pois3) joins: before this seat observes
+        //     it, it is in no list, so nothing v3-only can be addressed to it;
+        //     after, the event kills v3, the re-offer over the same fighters
+        //     acks, and v3 is on again with the spectator never addressed.
+        private static void JoinUnseenOldSpectator()
         {
-            var a = Armed(); string w;
-            Check(!a.Evaluate(false, R123, All, 10, out w), "open");
-            Check(!a.Evaluate(true, R123, All, 10, out w), "closed again, still off: " + w);
-            a.OnActivate(1, 1, 8, R123, 20);
-            foreach (int x in R123) a.OnAck(x, 1, 8);
-            Check(a.Evaluate(true, R123, All, 30, out w), "a fresh activation: " + w);
+            Func<int, bool> cap = x => x != 3;
+            var a = Armed(7, F12); string w;
+            Eq("1,2", string.Join(",", V3Targets.Capable(F12, cap)), "unseen: not in the present list");
+            a.OnRoomEvent("player-entered actor=3");
+            int[] present = { 1, 2, 3 };
+            Check(V3Targets.ShouldOffer(F12, cap, true), "the fighters still all carry cr_pois3");
+            a.OnActivate(1, 1, 8, F12, 50);
+            Eq("1,2", string.Join(",", V3Targets.Capable(present, cap)), "ACTIVATE/ACK addressees exclude it");
+            a.OnAck(1, 1, 8); a.OnAck(2, 1, 8);
+            Check(a.Evaluate(F12, cap, 60, out w), "an old spectator does not block the fighters: " + w);
+            Eq("1,2", string.Join(",", a.AckedPresent(present)), "LIFE/summary addressees exclude it");
         }
 
-        // 35. An ack only for the exact roster in a closed room.
+        // 35. An ack only for the exact fighter roster.
         private static void AckRequiresExactRoster()
         {
             var a = new ActivationCore();
-            a.OnActivate(1, 1, 7, R123, 0);
-            Check(a.ShouldAck(true, new[] { 3, 1, 2 }, All), "exact, any order");
-            Check(!a.ShouldAck(true, new[] { 1, 2 }, All), "subset");
-            Check(!a.ShouldAck(true, new[] { 1, 2, 3, 4 }, All), "superset");
-            Check(!a.ShouldAck(false, R123, All), "open room");
+            a.OnActivate(1, 1, 7, F123, 0);
+            Check(a.ShouldAck(new[] { 3, 1, 2 }, All), "exact, any order");
+            Check(!a.ShouldAck(new[] { 1, 2 }, All), "subset");
+            Check(!a.ShouldAck(new[] { 1, 2, 3, 4 }, All), "superset");
         }
 
         // 36. Only the current master's ACTIVATE counts.
         private static void ActivationMasterOnly()
         {
             var a = new ActivationCore(); string w;
-            Check(!a.OnActivate(2, 1, 7, R123, 0), "not the master");
-            Check(!a.Evaluate(true, R123, All, 10, out w) && w == "no-activation", w);
+            Check(!a.OnActivate(2, 1, 7, F12, 0), "not the master");
+            Check(!a.Evaluate(F12, All, 10, out w) && w == "no-activation", w);
         }
 
-        // 37. An activation not fully acknowledged in time, or whose unacked
-        //     actor left, is retired so a fresh one can be offered.
+        // 37. An activation not fully acknowledged in time is retired.
         private static void ActivationAckTimeout()
         {
             var a = new ActivationCore(); string w;
-            a.OnActivate(1, 1, 7, R123, 0);
-            a.OnAck(1, 1, 7); a.OnAck(2, 1, 7);
-            Check(!a.Evaluate(true, R123, All, 14999, out w) && w == "not-acked 2/3", "before the timeout: " + w);
-            Check(!a.Evaluate(true, R123, All, 15000, out w) && w == "killed:ack-timeout", "at the timeout: " + w);
+            a.OnActivate(1, 1, 7, F12, 0);
+            a.OnAck(1, 1, 7);
+            Check(!a.Evaluate(F12, All, 14999, out w) && w == "not-acked 1/2", "before the timeout: " + w);
+            Check(!a.Evaluate(F12, All, 15000, out w) && w == "killed:ack-timeout", "at the timeout: " + w);
             Check(!a.Live, "retired");
-            var b = new ActivationCore();
-            b.OnActivate(1, 1, 8, R123, 0);
-            b.OnAck(1, 1, 8); b.OnAck(2, 1, 8);
-            Check(!b.Evaluate(true, new[] { 1, 2 }, All, 10, out w) && w == "killed:unacked-left actor=3", w);
+        }
+
+        // 47. An OLD fighter joins: once observed, v3 is off, the master offers
+        //     nothing, and no claim is sent; before, it is addressed nothing.
+        private static void JoinUnseenOldFighter()
+        {
+            Func<int, bool> cap = x => x != 3;
+            var a = Armed(7, F12); string w;
+            Eq("1,2", string.Join(",", a.AckedPresent(F12)), "unseen: addressed nothing");
+            a.OnRoomEvent("player-entered actor=3");
+            Check(!V3Targets.ShouldOffer(F123, cap, true), "no offer while a fighter lacks cr_pois3");
+            Check(!a.Evaluate(F123, cap, 10, out w) && w == "cap-missing actor=3", w);
+            var c = new ClaimCore(); int id;
+            Eq("v3-off:" + w, c.ShooterArm(false, w, true, true, 5, V, 0, out id), "no claim sent");
+            var f = Facts(2, 1, 77); f.GateOn = false; f.GateWhy = w;
+            Eq("gate:" + w, c.VictimDecide(f), "none accepted");
+        }
+
+        // 48. A NEW fighter joins: v3 is off until a fresh activation over the
+        //     three fighters is acknowledged by all three.
+        private static void JoinUnseenNewFighter()
+        {
+            var a = Armed(7, F12); string w;
+            a.OnRoomEvent("player-entered actor=3");
+            Check(V3Targets.ShouldOffer(F123, All, true), "offered over three fighters");
+            Check(!V3Targets.ShouldOffer(F123, All, false), "not while the join is settling");
+            a.OnActivate(1, 1, 8, F123, 100);
+            a.OnAck(3, 1, 8);
+            Check(!a.Evaluate(F123, All, 110, out w) && w == "not-acked 1/3", "the earlier acks do not carry over: " + w);
+            a.OnAck(1, 1, 8); a.OnAck(2, 1, 8);
+            Check(a.Evaluate(F123, All, 120, out w), "all three: " + w);
+        }
+
+        // 49. A fighter leaving turns v3 off even before the event is seen.
+        private static void FighterLeave()
+        {
+            var a = Armed(7, F123); string w;
+            Check(!a.Evaluate(F12, All, 10, out w) && w == "killed:roster-change", "fighter gone: " + w);
+            Check(!a.Evaluate(F123, All, 20, out w), "sticky: " + w);
+        }
+
+        // 50. A cr_pois3 change kills; a fighter whose value is no longer 1
+        //     neither acks nor lets the master offer.
+        private static void PropertyFlip()
+        {
+            Func<int, bool> flipped = x => x != 2;
+            var a = Armed(7, F12); string w;
+            a.OnRoomEvent("cap-change actor=2");
+            Check(!a.Evaluate(F12, All, 10, out w), "the event kills: " + w);
+            a.OnActivate(1, 1, 8, F12, 20);
+            Check(!a.ShouldAck(F12, flipped), "no ack while a fighter reads cr_pois3 != 1");
+            Check(!V3Targets.ShouldOffer(F12, flipped, true), "no offer either");
+        }
+
+        // 51. Readmission: the fighter leaves and comes back under its actor
+        //     number; a late ack from the previous activation never counts.
+        private static void Readmission()
+        {
+            var a = Armed(7, F12); string w;
+            a.OnRoomEvent("player-left actor=2");
+            a.OnRoomEvent("player-entered actor=2");
+            a.OnActivate(1, 1, 8, F12, 100);
+            a.OnAck(1, 1, 8);
+            a.OnAck(2, 1, 7);
+            Check(!a.Evaluate(F12, All, 110, out w) && w == "not-acked 1/2", "the old ack: " + w);
+            a.OnAck(2, 1, 8);
+            Check(a.Evaluate(F12, All, 120, out w), "re-acknowledged: " + w);
+        }
+
+        // 52. A join during an active stream: the joiner gets that stream's
+        //     catch-up only once it has acknowledged (it never saw the header).
+        private static void JoinDuringActiveStream()
+        {
+            int[] life = { 1, 2 }, atStart = { 1, 2 };
+            Eq("2", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 2, 3 }, new int[0], 1)),
+                "not acknowledged: not caught up");
+            Eq("2,3", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 2, 3 }, new[] { 1, 2, 3 }, 1)),
+                "acknowledged: caught up");
+            Eq("3", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 3 }, new[] { 1, 3 }, 1)),
+                "a LIFE addressee that left is dropped");
+        }
+
+        // 53. An actor present at the start WITHOUT the LIFE message handled
+        //     the stream by today's path: never caught up on top of it.
+        private static void TodayPathSeatNotCaughtUp()
+        {
+            int[] life = { 1, 2 }, atStart = { 1, 2, 9 };
+            Eq("2", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 2, 9 }, new[] { 1, 2, 9 }, 1)),
+                "the spectator that acked after the start is excluded");
+        }
+
+        // 54. The shooter claims only toward an acknowledged victim owner.
+        private static void ClaimOwnerNotAcked()
+        {
+            var c = new ClaimCore(); int id;
+            Eq("owner-not-acked", c.ShooterArm(true, null, false, true, 5, V, 0, out id), "unacknowledged owner");
+            Eq(null, c.ShooterArm(true, null, true, true, 6, V, 0, out id), "acknowledged owner");
+        }
+
+        // 55. The victim accepts claims only from an acknowledged sender.
+        private static void ClaimSenderNotAcked()
+        {
+            var c = new ClaimCore();
+            var f = Facts(2, 1, 77); f.SenderAcked = false;
+            Eq("sender-not-acked", c.VictimDecide(f), "refused");
+            Eq("started", c.VictimDecide(Facts(2, 2, 78)), "acknowledged sender");
         }
 
         // ── A3: the funnel ───────────────────────────────────────────────
@@ -601,11 +724,11 @@ namespace PoisonLedgerTests
         private static void SenderPairMarked()
         {
             var c = new ClaimCore(); int id1, id2, id3, id4;
-            Eq(null, c.ShooterArm(true, null, true, 10, V, 0, out id1), "first");
-            Eq("pair-marked", c.ShooterArm(true, null, true, 10, V, 1, out id2), "second");
+            Eq(null, c.ShooterArm(true, null, true, true, 10, V, 0, out id1), "first");
+            Eq("pair-marked", c.ShooterArm(true, null, true, true, 10, V, 1, out id2), "second");
             Check(id2 == id1 + 1, "every arm gets an id");
-            Eq("v3-off:room-open", c.ShooterArm(false, "room-open", true, 11, V, 2, out id3), "gate off");
-            Eq("no-life", c.ShooterArm(true, null, false, 12, V, 3, out id4), "life unknown");
+            Eq("v3-off:no-activation", c.ShooterArm(false, "no-activation", true, true, 11, V, 2, out id3), "gate off");
+            Eq("no-life", c.ShooterArm(true, null, true, false, 12, V, 3, out id4), "life unknown");
         }
 
         // 45. At most 32 sends per rolling second.
@@ -613,20 +736,20 @@ namespace PoisonLedgerTests
         {
             var c = new ClaimCore(); int id;
             for (int i = 0; i < ClaimCore.ClaimsPerRollingSecond; i++)
-                Eq(null, c.ShooterArm(true, null, true, 100 + i, V, i, out id), "send " + i);
-            Eq("rate", c.ShooterArm(true, null, true, 500, V, 500, out id), "the 33rd");
-            Eq(null, c.ShooterArm(true, null, true, 501, V, 1000, out id), "a second later, a new pair");
+                Eq(null, c.ShooterArm(true, null, true, true, 100 + i, V, i, out id), "send " + i);
+            Eq("rate", c.ShooterArm(true, null, true, true, 500, V, 500, out id), "the 33rd");
+            Eq(null, c.ShooterArm(true, null, true, true, 501, V, 1000, out id), "a second later, a new pair");
         }
 
         // 46. A refused or failed send is never retried for that pair.
         private static void SenderNoRetryAfterFail()
         {
             var c = new ClaimCore(); int id;
-            Eq(null, c.ShooterArm(true, null, true, 1, V, 0, out id), "raised (its send failed)");
-            Eq("pair-marked", c.ShooterArm(true, null, true, 1, V, 10, out id), "not retried");
-            for (int i = 0; i < ClaimCore.ClaimsPerRollingSecond - 1; i++) c.ShooterArm(true, null, true, 100 + i, V, 20, out id);
-            Eq("rate", c.ShooterArm(true, null, true, 999, V, 30, out id), "rate-refused");
-            Eq("pair-marked", c.ShooterArm(true, null, true, 999, V, 5000, out id), "not retried after the window");
+            Eq(null, c.ShooterArm(true, null, true, true, 1, V, 0, out id), "raised (its send failed)");
+            Eq("pair-marked", c.ShooterArm(true, null, true, true, 1, V, 10, out id), "not retried");
+            for (int i = 0; i < ClaimCore.ClaimsPerRollingSecond - 1; i++) c.ShooterArm(true, null, true, true, 100 + i, V, 20, out id);
+            Eq("rate", c.ShooterArm(true, null, true, true, 999, V, 30, out id), "rate-refused");
+            Eq("pair-marked", c.ShooterArm(true, null, true, true, 999, V, 5000, out id), "not retried after the window");
         }
 
         private static ClaimFacts Facts(int sender, int claimId, long proj)
@@ -634,7 +757,7 @@ namespace PoisonLedgerTests
             return new ClaimFacts
             {
                 Sender = sender, ClaimId = claimId, VictimView = V, ProjOwner = sender, PoisonChildren = 1,
-                ProjInstance = proj, NowMs = 1000, GateOn = true, VictimFound = true, VictimIsMine = true,
+                ProjInstance = proj, NowMs = 1000, GateOn = true, SenderAcked = true, VictimFound = true, VictimIsMine = true,
                 ProjFound = true, Live = true, VictimFenceKnown = true, ShooterEpoch = E(100), VictimEpoch = E(100),
             };
         }
@@ -660,7 +783,7 @@ namespace PoisonLedgerTests
             { "rule_refusal_consumed", RuleRefusalConsumed },
             { "index_range", IndexRange },
             { "per_view_cap", PerViewCap },
-            { "nonv3_equivalence", NonV3Equivalence },
+            { "life_message_required", LifeMessageRequired },
             { "two_seat_convergence", TwoSeatConvergence },
             { "claim_starts_once", ClaimStartsOnce },
             { "claim_then_broadcast", ClaimThenBroadcast },
@@ -672,9 +795,9 @@ namespace PoisonLedgerTests
             { "summary_idempotent", SummaryIdempotent },
             { "boundary_stamp_order_independent", BoundaryStampOrderIndependent },
             { "activation_requires_all_acks", ActivationRequiresAllAcks },
-            { "activation_killed_by_join", ActivationKilledByJoin },
+            { "activation_killed_by_room_event", ActivationKilledByRoomEvent },
             { "activation_cap_missing", ActivationCapMissing },
-            { "activation_room_open", ActivationRoomOpen },
+            { "join_unseen_old_spectator", JoinUnseenOldSpectator },
             { "ack_requires_exact_roster", AckRequiresExactRoster },
             { "activation_master_only", ActivationMasterOnly },
             { "activation_ack_timeout", ActivationAckTimeout },
@@ -687,6 +810,15 @@ namespace PoisonLedgerTests
             { "sender_pair_marked", SenderPairMarked },
             { "sender_rate_32", SenderRate32 },
             { "sender_no_retry_after_fail", SenderNoRetryAfterFail },
+            { "join_unseen_old_fighter", JoinUnseenOldFighter },
+            { "join_unseen_new_fighter", JoinUnseenNewFighter },
+            { "fighter_leave", FighterLeave },
+            { "property_flip", PropertyFlip },
+            { "readmission", Readmission },
+            { "join_during_active_stream", JoinDuringActiveStream },
+            { "today_path_seat_not_caught_up", TodayPathSeatNotCaughtUp },
+            { "claim_owner_not_acked", ClaimOwnerNotAcked },
+            { "claim_sender_not_acked", ClaimSenderNotAcked },
         };
 
         private static int Main(string[] args)

@@ -353,19 +353,6 @@ namespace CompetitiveRounds
             _openUntil.Clear();
         }
 
-        // ── Header parsing (pure) ──────────────────────────────────────────
-
-        /// <summary>A header is v3 only with BOTH trailing elements present and
-        /// typed: index 15 an int stamp and index 16 a bool. Anything else is
-        /// today's 15-element header and today's path.</summary>
-        internal static bool TryV3Epoch(int length, object e15, object e16, out LifeEpoch s)
-        {
-            s = default(LifeEpoch);
-            if (length < 17 || !(e15 is int) || !(e16 is bool)) return false;
-            s = (bool)e16 ? LifeEpoch.At((int)e15) : default(LifeEpoch);
-            return true;
-        }
-
         // ── Victim-side admission bound (deterministic at the authority) ────
 
         internal const int MaxOpenV3StreamsPerVictim = 64;
@@ -391,7 +378,7 @@ namespace CompetitiveRounds
     {
         internal int Sender, ClaimId, VictimView, ProjOwner, PoisonChildren;
         internal long ProjInstance, NowMs;
-        internal bool GateOn, VictimFound, VictimIsMine, ProjFound, Live, VictimFenceKnown;
+        internal bool GateOn, SenderAcked, VictimFound, VictimIsMine, ProjFound, Live, VictimFenceKnown;
         internal string GateWhy;
         internal LifeEpoch ShooterEpoch, VictimEpoch;
     }
@@ -419,11 +406,12 @@ namespace CompetitiveRounds
         /// arm gets a claim id. Null means "raise it now"; anything else is the
         /// drop reason. The pair is marked BEFORE the raise and never cleared,
         /// so a refused or failed send is never retried.</summary>
-        internal string ShooterArm(bool v3On, string offWhy, bool victimFenceKnown, long projInstance, int victimView,
-                                   long nowMs, out int claimId)
+        internal string ShooterArm(bool v3On, string offWhy, bool ownerAcked, bool victimFenceKnown, long projInstance,
+                                   int victimView, long nowMs, out int claimId)
         {
             claimId = ++_nextClaimId;
             if (!v3On) return "v3-off:" + (offWhy ?? "unknown");
+            if (!ownerAcked) return "owner-not-acked";
             if (!victimFenceKnown) return "no-life";
             long key = PairKey(projInstance, victimView);
             if (_sentPairs.Contains(key)) return "pair-marked";
@@ -453,6 +441,7 @@ namespace CompetitiveRounds
             bool overRate = q.Count > ClaimsPerRollingSecond;
 
             if (!f.GateOn) return "gate:" + (f.GateWhy ?? "unknown");
+            if (!f.SenderAcked) return "sender-not-acked";
             if (!f.VictimFound || !f.VictimIsMine) return "not-victim";
             if (!f.ProjFound) return "no-projectile";
             if (f.ProjOwner != f.Sender) return "not-owner";
@@ -490,7 +479,7 @@ namespace CompetitiveRounds
         }
     }
 
-    // ── Activation: an acknowledged exact roster while joins are closed ─────
+    // ── Activation (A2b): an acknowledged roster of FIGHTERS; rooms stay open ─
 
     internal sealed class ActivationCore
     {
@@ -499,7 +488,7 @@ namespace CompetitiveRounds
         internal const long AckTimeoutMs = 15000;
 
         private int _master = -1, _aid;
-        private int[] _roster;
+        private int[] _roster;                       // the fighters, sorted
         private readonly HashSet<int> _acks = new HashSet<int>();
         private bool _killed;
         private string _killWhy;
@@ -510,12 +499,12 @@ namespace CompetitiveRounds
         internal bool Live { get { return _roster != null && !_killed; } }
 
         /// <summary>An ACTIVATE counts only from the actor who is master when it
-        /// arrives; it replaces any earlier activation.</summary>
-        internal bool OnActivate(int sender, int currentMaster, int aid, int[] roster, long nowMs)
+        /// arrives; it replaces any earlier activation and its acknowledgements.</summary>
+        internal bool OnActivate(int sender, int currentMaster, int aid, int[] fighters, long nowMs)
         {
-            if (sender != currentMaster || roster == null || roster.Length == 0) return false;
+            if (sender != currentMaster || fighters == null || fighters.Length == 0) return false;
             _master = sender; _aid = aid;
-            _roster = (int[])roster.Clone();
+            _roster = (int[])fighters.Clone();
             Array.Sort(_roster);
             _acks.Clear();
             _killed = false; _killWhy = null;
@@ -523,54 +512,76 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>An acknowledgement of the current activation, from a fighter
+        /// or a spectator. A spectator's acknowledgement only makes it a v3
+        /// addressee; it is never required.</summary>
         internal void OnAck(int sender, int master, int aid)
         {
             if (_roster == null || master != _master || aid != _aid) return;
-            if (Array.IndexOf(_roster, sender) >= 0) _acks.Add(sender);
+            _acks.Add(sender);
         }
 
-        /// <summary>A seat acknowledges only an exact match: the room closed,
-        /// its present actors equal to the roster, every one carrying cr_pois3.</summary>
-        internal bool ShouldAck(bool roomClosed, int[] present, Func<int, bool> cap3)
+        /// <summary>A player entered or left the room, or a cr_pois3 property
+        /// changed: v3 is off on this seat from now until a fresh activation is
+        /// acknowledged by every fighter present.</summary>
+        internal void OnRoomEvent(string why) { Kill(why); }
+
+        /// <summary>A seat acknowledges only an exact match: the fighters it
+        /// sees equal the roster, and every one carries cr_pois3.</summary>
+        internal bool ShouldAck(int[] fighters, Func<int, bool> cap3)
         {
-            if (_roster == null || _killed || !roomClosed || present == null) return false;
-            var p = (int[])present.Clone();
-            Array.Sort(p);
-            if (p.Length != _roster.Length) return false;
-            for (int i = 0; i < p.Length; i++) if (p[i] != _roster[i] || !cap3(p[i])) return false;
+            if (_roster == null || _killed || fighters == null) return false;
+            var f = (int[])fighters.Clone();
+            Array.Sort(f);
+            if (f.Length != _roster.Length) return false;
+            for (int i = 0; i < f.Length; i++) if (f[i] != _roster[i] || !cap3(f[i])) return false;
             return true;
         }
 
-        /// <summary>The v3 decision, re-read at every use. A cap missing on a
-        /// present actor, an open room, or a present actor outside the roster
-        /// kills the activation for good on this seat.</summary>
-        internal bool Evaluate(bool roomClosed, int[] present, Func<int, bool> cap3, long nowMs, out string why)
+        /// <summary>The v3 decision, re-read at every use. A fighter without
+        /// cr_pois3, or a fighter set different from the roster, kills the
+        /// activation on this seat. Spectators play no part.</summary>
+        internal bool Evaluate(int[] fighters, Func<int, bool> cap3, long nowMs, out string why)
         {
-            if (present != null)
-                foreach (int a in present)
+            if (fighters != null)
+                foreach (int a in fighters)
                     if (!cap3(a)) { Kill("cap-missing actor=" + a); why = "cap-missing actor=" + a; return false; }
-            if (!roomClosed) { Kill("room-open"); why = "room-open"; return false; }
             if (_roster == null) { why = "no-activation"; return false; }
             if (_killed) { why = "killed:" + _killWhy; return false; }
-            if (present != null)
-                foreach (int a in present)
-                    if (Array.IndexOf(_roster, a) < 0) { Kill("roster-change actor=" + a); why = "killed:" + _killWhy; return false; }
+            if (fighters == null || !SameSet(fighters, _roster)) { Kill("roster-change"); why = "killed:" + _killWhy; return false; }
             int acked = 0;
             foreach (int a in _roster) if (_acks.Contains(a)) acked++;
             if (acked < _roster.Length)
             {
-                // A roster actor that left before acknowledging, or acks that
-                // never completed, can never arm this activation: retire it.
-                foreach (int a in _roster)
-                    if (!_acks.Contains(a) && present != null && Array.IndexOf(present, a) < 0)
-                    { Kill("unacked-left actor=" + a); why = "killed:" + _killWhy; return false; }
                 if (nowMs - _receivedMs >= AckTimeoutMs) { Kill("ack-timeout"); why = "killed:" + _killWhy; return false; }
                 why = "not-acked " + acked + "/" + _roster.Length;
                 return false;
             }
-            why = "on a=" + _aid + " roster=" + _roster.Length;
+            why = "on a=" + _aid + " fighters=" + _roster.Length;
             return true;
         }
+
+        private static bool SameSet(int[] a, int[] sortedB)
+        {
+            var x = (int[])a.Clone();
+            Array.Sort(x);
+            if (x.Length != sortedB.Length) return false;
+            for (int i = 0; i < x.Length; i++) if (x[i] != sortedB[i]) return false;
+            return true;
+        }
+
+        /// <summary>The present actors that acknowledged the live activation:
+        /// the only actors a LIFE message or a summary is addressed to.</summary>
+        internal int[] AckedPresent(int[] present)
+        {
+            var r = new List<int>();
+            if (Live && present != null)
+                foreach (int a in present) if (_acks.Contains(a) && !r.Contains(a)) r.Add(a);
+            r.Sort();
+            return r.ToArray();
+        }
+
+        internal bool IsAcked(int actor) { return Live && _acks.Contains(actor); }
 
         private void Kill(string why)
         {
@@ -583,5 +594,82 @@ namespace CompetitiveRounds
         {
             _master = -1; _aid = 0; _roster = null; _acks.Clear(); _killed = false; _killWhy = null;
         }
+    }
+
+    // ── Addressing (A2b): who a v3-only message may reach ───────────────────
+
+    internal static class V3Targets
+    {
+        /// <summary>Present actors carrying cr_pois3=1: the ACTIVATE and ACK
+        /// addressees. An actor this seat has not seen join is in no list here,
+        /// so nothing v3-only is ever addressed to it.</summary>
+        internal static int[] Capable(int[] present, Func<int, bool> cap3)
+        {
+            var r = new List<int>();
+            if (present != null) foreach (int a in present) if (cap3(a)) r.Add(a);
+            r.Sort();
+            return r.ToArray();
+        }
+
+        /// <summary>The master offers an activation only for fighters that all
+        /// carry cr_pois3, and only when no join or leave is settling.</summary>
+        internal static bool ShouldOffer(int[] fighters, Func<int, bool> cap3, bool settled)
+        {
+            if (!settled || fighters == null || fighters.Length == 0) return false;
+            foreach (int a in fighters) if (!cap3(a)) return false;
+            return true;
+        }
+
+        /// <summary>A stream's catch-up goes to the actors that received its
+        /// LIFE message and are still present, plus actors acknowledged now
+        /// that were NOT present when it started (they never saw its header).
+        /// An actor present at the start without the LIFE message handled the
+        /// stream by today's path and is never caught up on top of it.</summary>
+        internal static int[] SummaryTargets(int[] lifeTargets, int[] presentAtStart, int[] presentNow,
+                                             int[] ackedNow, int self)
+        {
+            var r = new List<int>();
+            if (lifeTargets != null && presentNow != null)
+                foreach (int a in lifeTargets) if (Array.IndexOf(presentNow, a) >= 0 && !r.Contains(a)) r.Add(a);
+            if (ackedNow != null)
+                foreach (int a in ackedNow)
+                    if ((presentAtStart == null || Array.IndexOf(presentAtStart, a) < 0) && !r.Contains(a)) r.Add(a);
+            r.Remove(self);
+            r.Sort();
+            return r.ToArray();
+        }
+    }
+
+    // ── The LIFE message inbox (A2b: the epoch rides its own type) ───────────
+
+    internal sealed class EpochInbox
+    {
+        internal const int Cap = 256;
+        private readonly Dictionary<long, LifeEpoch> _byKey = new Dictionary<long, LifeEpoch>();
+        private readonly Queue<long> _order = new Queue<long>();
+
+        /// <summary>A LIFE message from the view's owner. It is raised just
+        /// before that stream's header on the same reliable channel.</summary>
+        internal void Note(int view, int stream, LifeEpoch e)
+        {
+            long k = PoisonLedgerCore.Key(view, stream);
+            if (!_byKey.ContainsKey(k)) _order.Enqueue(k);
+            _byKey[k] = e;
+            while (_order.Count > Cap) _byKey.Remove(_order.Dequeue());
+        }
+
+        /// <summary>At the header: true (once) when this seat holds the
+        /// stream's LIFE message. Otherwise the header is today's.</summary>
+        internal bool Take(int view, int stream, out LifeEpoch e)
+        {
+            long k = PoisonLedgerCore.Key(view, stream);
+            if (!_byKey.TryGetValue(k, out e)) return false;
+            _byKey.Remove(k);
+            return true;
+        }
+
+        internal int Count { get { return _byKey.Count; } }
+
+        internal void Clear() { _byKey.Clear(); _order.Clear(); }
     }
 }

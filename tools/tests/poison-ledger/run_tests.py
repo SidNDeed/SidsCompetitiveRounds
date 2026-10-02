@@ -24,8 +24,8 @@ APPLY = "r.Applied.Add(k);\n            try { ap.Regular(r, k); } catch { r.Exce
 SUMMARY_SKIP = "if (r.Committed.Contains(k) || r.Blocked.Contains(k) || r.Applied.Contains(k)) continue;"
 BROADCAST_RULE = "return path == StartPath.Broadcast && had == StartPath.Broadcast;"
 SEND_RATE = "if (_sendTimes.Count >= ClaimsPerRollingSecond) return \"rate\";"
-EXACT = ("if (p.Length != _roster.Length) return false;\n"
-         "            for (int i = 0; i < p.Length; i++) if (p[i] != _roster[i] || !cap3(p[i])) return false;")
+EXACT = ("if (f.Length != _roster.Length) return false;\n"
+         "            for (int i = 0; i < f.Length; i++) if (f[i] != _roster[i] || !cap3(f[i])) return false;")
 
 # (name, old text, new text, target case, control case). Each old text must
 # occur exactly once in the shipped file; one mutant per case.
@@ -68,8 +68,8 @@ MUTANTS = [
      "if (k < 0) { r.OutOfRange++; return; }", "index_range", "dup_verdict"),
     ("evict_any_oldest", "if (r.View == view && r.Terminal) victims.Add(r);", "if (r.View == view) victims.Add(r);",
      "per_view_cap", "two_seat_convergence"),
-    ("v3_by_length", "if (length < 17 || !(e15 is int) || !(e16 is bool)) return false;",
-     "if (length < 17) return false;", "nonv3_equivalence", "wrap"),
+    ("inbox_not_consumed", "_byKey.Remove(k);\n            return true;", "return true;",
+     "life_message_required", "dup_verdict"),
     ("fill_regular", "try { ap.Corrective(r, k); }", "try { ap.Regular(r, k); }", "two_seat_convergence", "dup_verdict"),
     ("claim_no_highwater",
      "if (_highWater.TryGetValue(f.Sender, out hw) && !PoisonLedgerCore.After(f.ClaimId, hw)) return \"dup\";",
@@ -92,26 +92,45 @@ MUTANTS = [
      "summary_idempotent", "summary_late_joiner"),
     ("boundary_last_arrival", "if (!_hasPoint || After(ts, _point)) { _point = ts; _hasPoint = true; }",
      "{ _point = ts; _hasPoint = true; }", "boundary_stamp_order_independent", "late_joiner_unset"),
-    # A2: activation
+    # A2b: activation over the acknowledged fighters; rooms stay open
     ("ack_count_any", "if (acked < _roster.Length)", "if (acked == 0)",
      "activation_requires_all_acks", "activation_master_only"),
-    ("join_not_sticky",
-     "if (Array.IndexOf(_roster, a) < 0) { Kill(\"roster-change actor=\" + a); why = \"killed:\" + _killWhy; return false; }",
-     "if (Array.IndexOf(_roster, a) < 0) { why = \"roster-change\"; return false; }",
-     "activation_killed_by_join", "activation_master_only"),
+    ("event_not_sticky", "internal void OnRoomEvent(string why) { Kill(why); }",
+     "internal void OnRoomEvent(string why) { }", "activation_killed_by_room_event", "activation_requires_all_acks"),
     ("cap_not_checked",
      "if (!cap3(a)) { Kill(\"cap-missing actor=\" + a); why = \"cap-missing actor=\" + a; return false; }",
-     "{ }", "activation_cap_missing", "activation_room_open"),
-    ("open_room_not_sticky", "if (!roomClosed) { Kill(\"room-open\"); why = \"room-open\"; return false; }",
-     "if (!roomClosed) { why = \"room-open\"; return false; }", "activation_room_open", "activation_killed_by_join"),
-    ("ack_subset", EXACT, "foreach (int x in p) if (Array.IndexOf(_roster, x) < 0 || !cap3(x)) return false;",
+     "{ }", "activation_cap_missing", "activation_master_only"),
+    ("targets_ignore_cap", "if (present != null) foreach (int a in present) if (cap3(a)) r.Add(a);",
+     "if (present != null) foreach (int a in present) r.Add(a);", "join_unseen_old_spectator",
+     "activation_requires_all_acks"),
+    ("ack_subset", EXACT, "foreach (int x in f) if (Array.IndexOf(_roster, x) < 0 || !cap3(x)) return false;",
      "ack_requires_exact_roster", "activation_cap_missing"),
-    ("activate_any_sender", "if (sender != currentMaster || roster == null || roster.Length == 0) return false;",
-     "if (roster == null || roster.Length == 0) return false;", "activation_master_only",
+    ("activate_any_sender", "if (sender != currentMaster || fighters == null || fighters.Length == 0) return false;",
+     "if (fighters == null || fighters.Length == 0) return false;", "activation_master_only",
      "activation_requires_all_acks"),
     ("ack_timeout_off",
      "if (nowMs - _receivedMs >= AckTimeoutMs) { Kill(\"ack-timeout\"); why = \"killed:\" + _killWhy; return false; }",
-     "", "activation_ack_timeout", "activation_room_open"),
+     "", "activation_ack_timeout", "activation_master_only"),
+    ("offer_ignores_cap", "foreach (int a in fighters) if (!cap3(a)) return false;", "",
+     "join_unseen_old_fighter", "join_unseen_new_fighter"),
+    ("acks_survive_reactivation", "_acks.Clear();\n            _killed = false; _killWhy = null;\n            _receivedMs",
+     "_killed = false; _killWhy = null;\n            _receivedMs", "join_unseen_new_fighter", "activation_master_only"),
+    ("roster_compare_subset", "if (fighters == null || !SameSet(fighters, _roster)) {", "if (fighters == null) {",
+     "fighter_leave", "activation_requires_all_acks"),
+    ("ack_ignores_cap", "if (f[i] != _roster[i] || !cap3(f[i])) return false;", "if (f[i] != _roster[i]) return false;",
+     "property_flip", "activation_requires_all_acks"),
+    ("ack_ignores_aid", "if (_roster == null || master != _master || aid != _aid) return;",
+     "if (_roster == null || master != _master) return;", "readmission", "activation_master_only"),
+    ("summary_targets_present_now", "if (ackedNow != null)\n                foreach (int a in ackedNow)",
+     "if (presentNow != null)\n                foreach (int a in presentNow)", "join_during_active_stream",
+     "today_path_seat_not_caught_up"),
+    ("summary_targets_acked_now",
+     "if ((presentAtStart == null || Array.IndexOf(presentAtStart, a) < 0) && !r.Contains(a)) r.Add(a);",
+     "if (!r.Contains(a)) r.Add(a);", "today_path_seat_not_caught_up", "join_during_active_stream"),
+    ("owner_ack_unchecked", "if (!ownerAcked) return \"owner-not-acked\";", "",
+     "claim_owner_not_acked", "sender_pair_marked"),
+    ("sender_ack_unchecked", "if (!f.SenderAcked) return \"sender-not-acked\";", "",
+     "claim_sender_not_acked", "claim_not_owner"),
     # A3: the funnel
     ("summary_applies_regular", "r.Pending.Add(k);\n                r.CatchUp++;",
      "r.Applied.Add(k); ap.Regular(r, k);\n                r.CatchUp++;", "catchup_never_regular", "dup_verdict"),

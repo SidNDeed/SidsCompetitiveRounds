@@ -242,15 +242,16 @@ PoisonSync.cs	PointEvidence	PointEnd	players	N	evidence only (bugs 406/407 item 
 PoisonSync.cs	PointEvidence	SawAfter	players	N	evidence only (bugs 406/407 item C): reads each player's health for the bounded per-point [HP-POINT-END]/[SAW-POINT] lines and writes nothing	
 PoisonSync.cs	PointEvidence	SawBefore	players	N	evidence only (bugs 406/407 item C): reads each player's health for the bounded per-point [HP-POINT-END]/[SAW-POINT] lines and writes nothing	
 PoisonSync.cs	PoisonSync	ApplyCommitted	players	V	attacker lookup for credit; the damage reaches the DoDamage prefix (surface 3)	VanillaFixes.cs|DamageRulesGate|BeforeDoDamage
+PoisonSync.cs	PoisonSync	Fighters	ActiveFighters	V	the v3 activation roster is the room's kept fighter view itself (A2b: the players the game is scoring)	
 PoisonSync.cs	PoisonSync	FindPlayer	players	V	attacker lookup for a corrective poison tick; the funnel asks DamageRulesGate.Refuses, which is the DoDamage prefix's own rule (surface 3)	VanillaFixes.cs|DamageRulesGate|BeforeDoDamage
-PoisonSync.cs	PoisonSync	HasCap3	PlayerList	R	whole-room predicate over every actor: any actor without cr_pois3=1 turns v3 off (counting a quarantined actor is the stricter side)	
-PoisonSync.cs	PoisonSync	OnActivate	MasterClient	R	raw by design: an ACTIVATE counts only from the actor who is master when it arrives; every seat still acknowledges only its own exact roster	
+PoisonSync.cs	PoisonSync	HasCap3	PlayerList	R	raw replicated read of one actor's cr_pois3: a fighter without it turns v3 off, and an actor without it is never a v3 addressee	
+PoisonSync.cs	PoisonSync	NotePointBoundary	IsMasterClient	R	only the current master re-takes the v3 activation at a point boundary; every seat still acknowledges only the fighters it sees	
+PoisonSync.cs	PoisonSync	OnActivate	MasterClient	R	raw by design: an ACTIVATE counts only from the actor who is master when it arrives; every seat still acknowledges only the fighters it sees	
 PoisonSync.cs	PoisonSync	OnEvent	Sender	R	identity check: only the victim's owner speaks for the victim (PoisonSync.cs:1662-1667); the claim, activation and acknowledgement kinds are handed the sender raw and judge it themselves, so a quarantined sender speaks only for its own quarantined body, whose damage no count or credit reads (surfaces 3 and 6)	
-PoisonSync.cs	PoisonSync	PresentActors	PlayerList	R	the activation roster and the exact-roster comparison read every actor; a quarantined actor must acknowledge too (the stricter side)	
+PoisonSync.cs	PoisonSync	PresentActors	PlayerList	R	the addressee base: the handshake goes to present cr_pois3 actors, LIFE and summaries to present acknowledged actors; an actor not yet seen to join is in no list	
 PoisonSync.cs	PoisonSync	RawNonSpectatorCount	PlayerList	R	whole-room predicate over every actor (counting a quarantined one is the stricter side)	
 PoisonSync.cs	PoisonSync	RawNonSpectators	PlayerList	R	whole-room predicate over every actor	
-PoisonSync.cs	PoisonSync	V3Upkeep	IsMasterClient	R	only the current master offers an ACTIVATE; it changes whether poison metadata is stamped, never a match result, and every seat checks its own roster before acknowledging	
-PoisonSync.cs	PoisonSync	WitnessLever	IsMasterClient	R	witness lever, default off: only the current master closes the room for a two-seat witness	
+PoisonSync.cs	PoisonSync	V3Upkeep	IsMasterClient	R	only the current master offers an ACTIVATE over the fighters; it changes whether poison metadata is exchanged, never a match result, and every seat checks the fighters it sees before acknowledging	
 PortraitRender.cs	PortraitRender	DevLeverBlocked	players	N	dev lever	
 PostSessionReport.cs	PostSessionReport	FfaRosterOverlapEnough	players	N	JSON record field	
 PostSessionReport.cs	PostSessionReport	FfaRosterPlayers	players	N	JSON record field	

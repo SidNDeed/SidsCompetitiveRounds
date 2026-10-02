@@ -4569,6 +4569,8 @@ namespace CompetitiveRounds
         {
             // Roster changed: drop the same-frame fighter cache (r3).
             try { RoomActors.InvalidateFighterCache(); } catch { }
+            // Poison convergence v3 (A2b): any entry, spectators included.
+            try { PoisonSync.V3RoomEvent("player-entered", p); } catch { }
 
             // Local classification cache. Best effort and LOCAL by design
             // (r9 deleted the announced-verdict property): the cross-client
@@ -4749,6 +4751,8 @@ namespace CompetitiveRounds
             // Roster changed: same-frame reads must not see the cached view
             // (Codex r3 — two same-frame departures vs the DC reporter).
             try { RoomActors.InvalidateFighterCache(); } catch { }
+            // Poison convergence v3 (A2b): any departure, spectators included.
+            try { PoisonSync.V3RoomEvent("player-left", p); } catch { }
 
             // A 2v2 DC fallback watch, if one is armed, is watching for exactly
             // this: the ELECTED seat leaving. Before any of the classification
@@ -5289,6 +5293,8 @@ namespace CompetitiveRounds
             // arrives with nothing we recognise still carries the actor's
             // current properties.
             try { DcReportSync.NoteActorProps(target); } catch { }
+            // Poison convergence v3 (A2b): a cr_pois3 change on any actor.
+            try { PoisonSync.V3PropsChanged(target, changedProps); } catch { }
 
             // r8 M4: identity and role are what the lag-notice window keys on,
             // and both of them change through this callback. A change that

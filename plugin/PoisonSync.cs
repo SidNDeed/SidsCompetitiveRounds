@@ -134,16 +134,20 @@ namespace CompetitiveRounds
         // cr_pois3 (convergence v3, bugs 406/407) is ADDITIVE: it is staged in
         // the same pre-join write as cr_pois2, needs no MIN_MOD_VERSION raise,
         // and is read per decision. v3 adds a room-common life epoch on the
-        // header (two trailing elements), an end-of-stream catch-up (TYPE 3),
+        // stream (TYPE 6 LIFE), an end-of-stream catch-up (TYPE 3),
         // the drill-window start claim (TYPE 2) and the activation handshake
-        // (TYPE 4/5). A victim stamps a v3 header and a summary, and a seat
-        // sends or accepts a claim, only while V3On() holds: an ACTIVATE from
-        // the master naming an exact roster, an ACK from every roster actor,
-        // the room closed for joins, and every present actor carrying integer
-        // cr_pois3=1. Otherwise the victim sends today's bytes. A v3 header or
-        // summary that does arrive goes to the ledger on any seat that has not
-        // marked its epoch broken; a seat without cr_pois3 reads the header as
-        // today's 15 elements and drops the unknown kinds.
+        // (TYPE 4/5). The header and ticks stay today's bytes to everyone;
+        // the life epoch rides its own LIFE message (TYPE 6). A victim opens a
+        // v3 stream (its LIFE message at the start; its summary at the end, to
+        // the LIFE addressees still present and to actors acknowledged since),
+        // and a seat sends or accepts a claim, only while V3On() holds
+        // (amendment A2b): the current master's activation over
+        // exactly the fighters this seat sees, every fighter carrying integer
+        // cr_pois3=1 and acknowledged, no join, leave or cr_pois3 change
+        // observed since. Rooms stay open. Every v3-only message is addressed
+        // to named, acknowledged (or, for the handshake, cr_pois3-carrying)
+        // actors, so an actor not yet seen to join never receives one; a
+        // header without its LIFE message is handled by today's path.
         internal const string CapabilityProp = "cr_pois2";
         internal const string CapabilityPropV3 = "cr_pois3";
         private const int CapabilityValue = 1;
@@ -347,7 +351,8 @@ namespace CompetitiveRounds
                 // cr_pois3 rides the SAME hashtable, so the two keys arrive
                 // together in the join op. It is 1 only when every v3 patch
                 // attached (V3PatchesLive): a seat that cannot stamp the epoch,
-                // bracket the hit or arm the claim must read as v3-incapable.
+                // bracket the hit, arm the claim or flush a stopped stream must
+                // read as v3-incapable.
                 int v3 = V3PatchesLive ? CapabilityValue : 0;
                 local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
                 {
@@ -357,7 +362,8 @@ namespace CompetitiveRounds
                 _staged = true;
                 Plugin.Log.LogInfo("[POISON-CAP] staged " + CapabilityProp + "=" + CapabilityValue
                     + " " + CapabilityPropV3 + "=" + v3
-                    + " pre-join (" + source + ", state=" + st + ")");
+                    + " pre-join (" + source + ", state=" + st + "); v3 can activate in an open room: "
+                    + (v3 == CapabilityValue ? "yes (acknowledged fighters)" : "no (a v3 patch did not attach)"));
             }
             catch (Exception ex)
             {
@@ -906,7 +912,9 @@ namespace CompetitiveRounds
                 _v3LogLines = 0;
                 _v3LastState = null;
                 _lastActivateSent = -999f;
-                _witnessClosed = false;
+                _v3LastRoomEvent = -999f;
+                _v3RetakeDue = false;
+                _inbox.Clear();
                 _hitStack.Clear();
                 if (_claimDropSuppressed > 0)
                     Plugin.Log.LogInfo("[POISON-CLAIM] recv drop lines suppressed this room: " + _claimDropSuppressed);
@@ -925,37 +933,47 @@ namespace CompetitiveRounds
         // the network say and carries out what it returns. Record:
         // POISON-CONVERGENCE-AMENDMENTS-V3.md (local notes).
         //
+        //  Every v3-only message is ADDRESSED (TargetActors), never sent to a
+        //  receiver group, so an actor this seat has not seen join is never an
+        //  addressee. The stream header and ticks stay today's bytes to all.
         //  TYPE 2 claim:    2, PROTO, victimViewId, projViewId, claimId, hitTs,
-        //                   nPoison(byte), epochTs, epochSet          (9, to the victim's owner)
+        //                   nPoison(byte), epochTs, epochSet   (9, to the victim's owner, acknowledged)
         //  TYPE 3 summary:  3, PROTO, viewId, streamId, epochTs, epochSet,
         //                   sliceX, sliceY, colR, colG, colB, attackerPlayerId,
         //                   lethal, damageSource, ticks, committed(byte[]),
-        //                   blocked(byte[]), seq                      (18, to others)
-        //  TYPE 4 activate: 4, PROTO, aid, roster(int[])              (4, master to all)
-        //  TYPE 5 ack:      5, PROTO, aid, masterActor                (4, to all)
+        //                   blocked(byte[]), seq               (18, V3Targets.SummaryTargets)
+        //  TYPE 4 activate: 4, PROTO, aid, fighters(int[])     (4, master to present cr_pois3 actors)
+        //  TYPE 5 ack:      5, PROTO, aid, masterActor         (4, to present cr_pois3 actors)
+        //  TYPE 6 life:     6, PROTO, viewId, streamId, epochTs, epochSet
+        //                                                      (6, to acknowledged actors, just
+        //                                                       before that stream's header)
+        // The released build (v1.40.3, PoisonSync.cs:837 and :844-846) drops
+        // every one of these silently before any indexed read; addressing
+        // keeps them off it anyway.
         private const byte TypeClaim = 2;
         private const byte TypeSummary = 3;
         private const byte TypeActivate = 4;
         private const byte TypeAck = 5;
+        private const byte TypeLife = 6;
 
         private static readonly PoisonLedgerCore _ledger = new PoisonLedgerCore();
         private static readonly ClaimCore _claims = new ClaimCore();
         private static readonly ActivationCore _act = new ActivationCore();
+        private static readonly EpochInbox _inbox = new EpochInbox();
         private static readonly LedgerApplier _applier = new LedgerApplier();
 
         // A boundary RPC seen without its send stamp leaves this seat unable to
         // name lives the way the others do, so for the rest of the room it
-        // stamps no v3 header, sends and accepts no claim, and handles v3
-        // headers by today's path.
+        // stamps no LIFE message, sends and accepts no claim, and handles
+        // every header by today's path.
         private static bool _epochBroken;
         private const int V3LineCap = 24;
         private static int _v3LogLines;
         private static string _v3LastState;
         private static int _activateSeq;
         private static float _lastActivateSent = -999f;
-        private static bool _witnessClosed;
-        private static bool _witnessBound;
-        private static BepInEx.Configuration.ConfigEntry<bool> _witnessLever;
+        private static float _v3LastRoomEvent = -999f;
+        private static bool _v3RetakeDue;
 
         private static long NowMs() { return (long)(Time.realtimeSinceStartup * 1000f); }
 
@@ -987,6 +1005,22 @@ namespace CompetitiveRounds
             return keep.ToArray();
         }
 
+        /// <summary>The players the game is scoring (RoomActors.ActiveFighters:
+        /// spectators and unkept actors excluded), as actor numbers.</summary>
+        private static int[] Fighters()
+        {
+            var keep = new List<int>(4);
+            try
+            {
+                var f = RoomActors.ActiveFighters();
+                if (f != null)
+                    for (int i = 0; i < f.Length; i++)
+                        if (f[i] != null) keep.Add(f[i].ActorNumber);
+            }
+            catch { }
+            return keep.ToArray();
+        }
+
         /// <summary>Raw replicated read of cr_pois3 on a present actor
         /// (spectators included): integer 1 or not capable.</summary>
         private static bool HasCap3(int actor)
@@ -1008,9 +1042,12 @@ namespace CompetitiveRounds
             return false;
         }
 
-        /// <summary>THE v3 GATE (amendment A2), re-read at every decision: the
-        /// header stamp, a claim send, a claim accept. Off means today's bytes
-        /// and today's paths.</summary>
+        /// <summary>THE v3 GATE (amendment A2b), re-read at every decision: a
+        /// LIFE message, a claim send, a claim accept. On only while this seat
+        /// holds the current master's activation over exactly the fighters it
+        /// sees, every fighter carries cr_pois3=1 and has acknowledged it, and
+        /// no join, leave or cr_pois3 change has been observed since. Rooms
+        /// stay open; spectators neither block nor are required.</summary>
         internal static bool V3On(out string why)
         {
             why = "unknown";
@@ -1021,76 +1058,74 @@ namespace CompetitiveRounds
                 if (_epochBroken) { why = "epoch-broken"; return false; }
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode || PhotonNetwork.CurrentRoom == null)
                 { why = "no-room"; return false; }
-                return _act.Evaluate(!PhotonNetwork.CurrentRoom.IsOpen, PresentActors(), HasCap3, NowMs(), out why);
+                return _act.Evaluate(Fighters(), HasCap3, NowMs(), out why);
             }
             catch (Exception ex) { why = "error:" + ex.GetType().Name; return false; }
         }
 
-        /// <summary>Once a second: the witness lever, the state line, and the
-        /// master's activation offer while the room is closed.</summary>
+        /// <summary>Photon room callbacks (Plugin.OnPlayerEnteredRoom,
+        /// OnPlayerLeftRoom): every entry or departure, spectators included,
+        /// turns v3 off on this seat until a fresh acknowledged activation.</summary>
+        internal static void V3RoomEvent(string kind, Photon.Realtime.Player p)
+        {
+            try
+            {
+                string why = kind + " actor=" + (p != null ? p.ActorNumber : -1);
+                bool was = _act.Live;
+                _act.OnRoomEvent(why);
+                _v3LastRoomEvent = Time.unscaledTime;
+                if (was) V3Line("v3 off why=" + why + " (a fresh activation is needed)");
+            }
+            catch { }
+        }
+
+        /// <summary>Plugin.OnPlayerPropertiesUpdate: a cr_pois3 change on any
+        /// actor is a room event for v3.</summary>
+        internal static void V3PropsChanged(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changed)
+        {
+            try
+            {
+                if (changed != null && changed.ContainsKey(CapabilityPropV3)) V3RoomEvent("cap-change", target);
+            }
+            catch { }
+        }
+
+        /// <summary>Once a second: the state line and the master's activation
+        /// offer, re-taken at every point boundary.</summary>
         private static void V3Upkeep()
         {
             try
             {
-                WitnessLever();
                 string why;
                 bool on = V3On(out why);
                 string state = on ? "v3 " + why : "v3 off why=" + why;
                 if (state != _v3LastState) { _v3LastState = state; V3Line(state); }
 
-                if (!PhotonNetwork.IsMasterClient || _act.Live || _epochBroken || !V3PatchesLive) return;
-                var room = PhotonNetwork.CurrentRoom;
-                if (room == null || room.IsOpen) return;
-                if (Time.unscaledTime - _lastRosterChange < RosterQuarantineSeconds) return;
-                if (Time.unscaledTime - _lastActivateSent < 10f) return;
-                int[] present = PresentActors();
-                if (present.Length == 0) return;
-                foreach (int a in present) if (!HasCap3(a)) return;
+                if (!PhotonNetwork.IsMasterClient || _epochBroken || !V3PatchesLive) return;
+                if (_act.Live && !_v3RetakeDue) return;
+                bool settled = Time.unscaledTime - _v3LastRoomEvent >= RosterQuarantineSeconds
+                    && Time.unscaledTime - _lastRosterChange >= RosterQuarantineSeconds;
+                int[] fighters = Fighters();
+                if (!V3Targets.ShouldOffer(fighters, HasCap3, settled)) return;
+                if (!_v3RetakeDue && Time.unscaledTime - _lastActivateSent < 10f) return;
+                _v3RetakeDue = false;
                 _lastActivateSent = Time.unscaledTime;
                 int aid = ++_activateSeq;
-                bool ok = RaiseTo(new object[] { TypeActivate, Protocol, aid, present }, ReceiverGroup.All, null);
-                V3Line("activation " + (ok ? "sent" : "send-failed") + " a=" + aid + " roster=" + present.Length);
+                int[] to = V3Targets.Capable(PresentActors(), HasCap3);
+                bool ok = RaiseTo(new object[] { TypeActivate, Protocol, aid, fighters }, to);
+                V3Line("activation " + (ok ? "sent" : "send-failed") + " a=" + aid + " fighters=" + fighters.Length
+                    + " addressees=" + to.Length);
             }
             catch { }
         }
 
-        /// <summary>Two-seat witness only (default off): the master seat closes
-        /// its room for joins once a game is running and never reopens it. A
-        /// closed room refuses every later join, spectators included, which is
-        /// why production does not do this (question for Sid).</summary>
-        private static void WitnessLever()
-        {
-            if (_witnessClosed) return;
-            if (!_witnessBound)
-            {
-                _witnessBound = true;
-                try
-                {
-                    var cf = Plugin.ConfigFileForLevers;
-                    if (cf != null)
-                        _witnessLever = cf.Bind("Poison", "V3WitnessCloseRoom", false,
-                            "Two-seat witness only: while this seat is the room's master and a game is running, "
-                            + "close the room for joins (never reopened) so poison convergence v3 can activate. "
-                            + "A closed room refuses every later join, spectators included.");
-                }
-                catch { }
-            }
-            if (_witnessLever == null || !_witnessLever.Value) return;
-            var room = PhotonNetwork.CurrentRoom;
-            if (!PhotonNetwork.IsMasterClient || room == null || !room.IsOpen) return;
-            if (GameManager.instance == null || !GameManager.instance.battleOngoing) return;
-            room.IsOpen = false;
-            _witnessClosed = true;
-            V3Line("witness lever: this seat closed the room for joins");
-        }
-
-        private static bool RaiseTo(object[] payload, ReceiverGroup group, int[] targets)
+        /// <summary>Every v3-only send: addressed to the named actors only.</summary>
+        private static bool RaiseTo(object[] payload, int[] targets)
         {
             try
             {
-                var o = new RaiseEventOptions();
-                if (targets != null) o.TargetActors = targets;
-                else o.Receivers = group;
+                if (targets == null || targets.Length == 0) return false;
+                var o = new RaiseEventOptions { TargetActors = targets };
                 return PhotonNetwork.RaiseEvent(EventCode, payload, o, SendOptions.SendReliable);
             }
             catch (Exception ex)
@@ -1106,18 +1141,17 @@ namespace CompetitiveRounds
             {
                 if (a.Length < 4 || !(a[2] is int) || !(a[3] is int[])) return;
                 int aid = (int)a[2];
-                var roster = (int[])a[3];
+                var fighters = (int[])a[3];
                 int master = PhotonNetwork.MasterClient != null ? PhotonNetwork.MasterClient.ActorNumber : -1;
-                if (!_act.OnActivate(sender, master, aid, roster, NowMs()))
+                if (!_act.OnActivate(sender, master, aid, fighters, NowMs()))
                 {
                     V3Line("activation ignored a=" + aid + " from=" + sender + " (not the master)");
                     return;
                 }
-                var room = PhotonNetwork.CurrentRoom;
-                bool closed = room != null && !room.IsOpen;
-                bool ack = !_epochBroken && V3PatchesLive && _act.ShouldAck(closed, PresentActors(), HasCap3);
-                bool sent = ack && RaiseTo(new object[] { TypeAck, Protocol, aid, sender }, ReceiverGroup.All, null);
-                V3Line("activation received a=" + aid + " from=" + sender + " roster=" + roster.Length
+                bool ack = !_epochBroken && V3PatchesLive && _act.ShouldAck(Fighters(), HasCap3);
+                bool sent = ack && RaiseTo(new object[] { TypeAck, Protocol, aid, sender },
+                    V3Targets.Capable(PresentActors(), HasCap3));
+                V3Line("activation received a=" + aid + " from=" + sender + " fighters=" + fighters.Length
                     + " ack=" + (ack ? (sent ? "sent" : "send-failed") : "refused"));
             }
             catch { }
@@ -1129,6 +1163,19 @@ namespace CompetitiveRounds
             {
                 if (a.Length < 4 || !(a[2] is int) || !(a[3] is int)) return;
                 _act.OnAck(sender, (int)a[3], (int)a[2]);
+            }
+            catch { }
+        }
+
+        /// <summary>A LIFE message: only the view's owner names its stream's life.</summary>
+        private static void OnLife(int sender, object[] a)
+        {
+            try
+            {
+                if (a.Length < 6 || !(a[2] is int) || !(a[3] is int) || !(a[4] is int) || !(a[5] is bool)) return;
+                var view = PhotonView.Find((int)a[2]);
+                if (view == null || view.Owner == null || view.Owner.ActorNumber != sender) return;
+                _inbox.Note((int)a[2], (int)a[3], (bool)a[5] ? LifeEpoch.At((int)a[4]) : default(LifeEpoch));
             }
             catch { }
         }
@@ -1169,6 +1216,7 @@ namespace CompetitiveRounds
         private static void OnSummaryV3(PhotonView view, object[] a, int viewId, int streamId)
         {
             if (_epochBroken) return;
+            if (_streams.ContainsKey(StreamKey(viewId, streamId))) return;   // today's path owns it here
             if (!(a[4] is int) || !(a[5] is bool) || !(a[14] is int)) return;
             var epoch = (bool)a[5] ? LifeEpoch.At((int)a[4]) : default(LifeEpoch);
             var held = _ledger.OnSummary(viewId, streamId, epoch, (int)a[14], a[15] as byte[], a[16] as byte[],
@@ -1188,6 +1236,7 @@ namespace CompetitiveRounds
             internal bool Lethal;
             internal readonly List<int> Committed = new List<int>();
             internal readonly List<int> Blocked = new List<int>();
+            internal int[] LifeTargets, PresentAtStart;
         }
         private static readonly Dictionary<long, OpenV3> _openV3 = new Dictionary<long, OpenV3>();
 
@@ -1205,12 +1254,16 @@ namespace CompetitiveRounds
                 int ticks = 0;
                 foreach (int k in o.Committed) if (k + 1 > ticks) ticks = k + 1;
                 foreach (int k in o.Blocked) if (k + 1 > ticks) ticks = k + 1;
+                int[] present = PresentActors();
+                int[] to = V3Targets.SummaryTargets(o.LifeTargets, o.PresentAtStart, present,
+                    _act.AckedPresent(present), LocalActor());
+                if (to.Length == 0) return;
                 bool ok = RaiseTo(new object[]
                 {
                     TypeSummary, Protocol, o.View, o.Stream, o.Epoch.Ts, o.Epoch.Set,
                     o.Slice.x, o.Slice.y, o.Color.r, o.Color.g, o.Color.b, o.AttackerId, o.Lethal, (byte)o.DamageSource,
                     ticks, PoisonLedgerCore.Mask(o.Committed, ticks), PoisonLedgerCore.Mask(o.Blocked, ticks), _nextSeq++
-                }, ReceiverGroup.Others, null);
+                }, to);
                 if (!ok)
                     Plugin.Log.LogWarning("[POISON-AUTH] SUMMARY SEND FAILED v" + o.View + "/s" + o.Stream
                         + " — no catch-up for seats that missed this stream");
@@ -1319,7 +1372,10 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
                 int ts;
                 if (gm != null && gm.view != null && PoisonRpcStampPatch.TryFor(gm.view.ViewID, out ts))
+                {
                     _ledger.NotePointBoundary(ts);
+                    if (PhotonNetwork.IsMasterClient) _v3RetakeDue = true;   // re-take over the next point's fighters
+                }
                 else EpochBroken("point-over without its RPC stamp");
             }
             catch { }
@@ -1495,19 +1551,20 @@ namespace CompetitiveRounds
             LifeEpoch ep;
             bool known = _ledger.FenceOf(vv.ViewID, out ep);
             int claimId;
-            string drop = _claims.ShooterArm(on, why, known, ph.GetInstanceID(), vv.ViewID, NowMs(), out claimId);
+            int owner = vv.Owner != null ? vv.Owner.ActorNumber : -1;
+            bool ownerAcked = owner > 0 && _act.IsAcked(owner);
+            string drop = _claims.ShooterArm(on, why, ownerAcked, known, ph.GetInstanceID(), vv.ViewID, NowMs(), out claimId);
             int projView = pv != null ? pv.ViewID : -1;
             string head = "[POISON-CLAIM] arm from=" + LocalActor() + " c=" + claimId + " proj=" + projView
                 + " victim=" + vv.ViewID + " outcome=";
             if (drop != null) { Plugin.Log.LogInfo(head + "drop reason=" + drop); return claimId; }
-            int owner = vv.Owner != null ? vv.Owner.ActorNumber : -1;
             int nPoison = 0;
             try { nPoison = ph.GetComponentsInChildren<RayHitPoison>(true).Length; } catch { }
             bool sent = owner > 0 && RaiseTo(new object[]
             {
                 TypeClaim, Protocol, vv.ViewID, projView, claimId, PhotonNetwork.ServerTimestamp,
                 (byte)Math.Min(nPoison, 255), ep.Ts, ep.Set
-            }, ReceiverGroup.Others, new[] { owner });
+            }, new[] { owner });
             Plugin.Log.LogInfo(head + (sent ? "sent" : "send-failed"));
             return claimId;
         }
@@ -1541,6 +1598,7 @@ namespace CompetitiveRounds
                 string why;
                 f.GateOn = V3On(out why);
                 f.GateWhy = why;
+                f.SenderAcked = _act.IsAcked(sender);
                 PhotonView vv = PhotonView.Find(victimView);
                 f.VictimFound = vv != null;
                 f.VictimIsMine = vv != null && vv.IsMine;
@@ -1707,11 +1765,13 @@ namespace CompetitiveRounds
 
                 byte kind = (byte)a[0];
                 // v3 messages that are not the victim's own verdicts: the start
-                // claim (sender = the shooter, checked in OnClaim) and the
-                // activation handshake (sender = master, or a roster actor).
+                // claim (sender = the shooter, checked in OnClaim), the
+                // activation handshake (sender = master, or an acknowledging
+                // actor) and LIFE (sender = the view's owner, checked in OnLife).
                 if (kind == TypeClaim) { OnClaim(e.Sender, a); return; }
                 if (kind == TypeActivate) { OnActivate(e.Sender, a); return; }
                 if (kind == TypeAck) { OnAck(e.Sender, a); return; }
+                if (kind == TypeLife) { OnLife(e.Sender, a); return; }
 
                 // Length must be validated for THIS kind before any indexed read
                 // below — the seq read alone is at index 14 on a header.
@@ -1758,14 +1818,13 @@ namespace CompetitiveRounds
 
                 if (kind == TypeHeader)
                 {
-                    // v3 header: the victim stamped its life epoch (indexes 15
-                    // and 16, both typed). It goes to the ledger, which replaces
-                    // the revive fence below with the room-common life fence.
-                    // A seat that saw a boundary without a common stamp handles
-                    // it by today's path instead.
+                    // v3: this seat holds the stream's LIFE message (sent to it
+                    // just before this header). The stream goes to the ledger,
+                    // which replaces the revive fence below with the
+                    // room-common life fence. Without it, or on a seat that saw
+                    // a boundary without a common stamp, today's path.
                     LifeEpoch epoch;
-                    if (!_epochBroken && PoisonLedgerCore.TryV3Epoch(a.Length,
-                            a.Length > 15 ? a[15] : null, a.Length > 16 ? a[16] : null, out epoch))
+                    if (_inbox.Take(viewId, streamId, out epoch) && !_epochBroken)
                     {
                         _lastHeardServerTs[e.Sender] = PhotonNetwork.ServerTimestamp;
                         var held = _ledger.OnHeader(viewId, streamId, epoch, (bool)a[13],
@@ -2101,6 +2160,11 @@ namespace CompetitiveRounds
                 long span = (long)(time / Mathf.Max(TimeHandler.timeScale, 0.01f) * 1000f) + 1000L;
                 if (!_ledger.AdmitV3Stream(now, now + span)) v3 = false;
             }
+            // The LIFE addressees: acknowledged actors present now, this seat
+            // included (its own echo goes through its ledger too).
+            int[] presentAtStart = PresentActors();
+            int[] lifeTargets = v3 ? _act.AckedPresent(presentAtStart) : null;
+            if (v3 && Array.IndexOf(lifeTargets, LocalActor()) < 0) v3 = false;
             long openKey = StreamKey(viewId, stream);
             OpenV3 ov = null;
             if (v3)
@@ -2109,6 +2173,7 @@ namespace CompetitiveRounds
                 {
                     View = viewId, Stream = stream, Epoch = epoch, Slice = slice, Color = color,
                     AttackerId = attackerId, Lethal = lethal, DamageSource = damageSource,
+                    LifeTargets = lifeTargets, PresentAtStart = presentAtStart,
                 };
                 _openV3[openKey] = ov;
             }
@@ -2139,19 +2204,19 @@ namespace CompetitiveRounds
                 if (blocked) blockedCount++;
 
                 bool sent;
-                if (tick == 0 && v3)
+                // v3: the LIFE message goes first, addressed to the acknowledged
+                // actors only, on the same reliable channel as the header that
+                // follows; the header itself is today's 15 elements to all. If
+                // LIFE cannot be sent the stream is today's everywhere.
+                if (tick == 0 && ov != null
+                    && !RaiseTo(new object[] { TypeLife, Protocol, viewId, stream, epoch.Ts, epoch.Set }, ov.LifeTargets))
                 {
-                    // 17 elements: today's 15, then the life epoch (stamp, set).
-                    // Old receivers read the first 15 and ignore the rest.
-                    sent = Raise(new object[]
-                    {
-                        TypeHeader, Protocol, viewId, stream, streamStartTs,
-                        slice.x, slice.y, color.r, color.g, color.b,
-                        attackerId, lethal, (byte)damageSource, blocked, _nextSeq++,
-                        epoch.Ts, epoch.Set
-                    });
+                    _openV3.Remove(openKey);
+                    ov = null;
+                    v3 = false;
                 }
-                else if (tick == 0)
+
+                if (tick == 0)
                 {
                     sent = Raise(new object[]
                     {

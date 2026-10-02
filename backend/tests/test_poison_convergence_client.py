@@ -6,8 +6,10 @@ mutant and one control per case). What is checked here is the wiring a
 harness cannot reach: where the capability is staged and read, where the
 claim is raised and accepted, what the correction funnel may call, which
 predicates are shared with the DoDamage prefixes, where the catch-up is
-flushed, and that the two evidence tags are used nowhere else and carry no
-account identity.
+flushed, that every v3-only message is addressed to named actors (A2b: an
+actor not yet seen to join is never an addressee), that rooms are never
+closed, that every join, leave and cr_pois3 change reaches the gate, and that
+the two evidence tags are used nowhere else and carry no account identity.
 
 Each check is a function over the source text. test_checks_hold runs them
 on the tree; test_each_check_turns_red runs each on an in-memory copy with
@@ -52,6 +54,7 @@ def _code(text):
 
 PS = "PoisonSync.cs"
 VF = "VanillaFixes.cs"
+PL = "Plugin.cs"
 
 
 # -- the capability and the gate (A2) -------------------------------------------
@@ -81,20 +84,63 @@ def check_gate_reads_raw_cap(src):
     assert "TryGetValue(CapabilityPropV3, out v)" in cap and "v is int && (int)v == CapabilityValue" in cap, \
         "the gate does not require integer cr_pois3=1"
     on = _code(_member(src[PS], "internal static bool V3On("))
-    assert "_act.Evaluate(!PhotonNetwork.CurrentRoom.IsOpen, PresentActors(), HasCap3, NowMs(), out why)" in on, \
-        "the gate is not the activation rule over the room's open flag, every present actor and cr_pois3"
+    assert "return _act.Evaluate(Fighters(), HasCap3, NowMs(), out why);" in on, \
+        "the gate is not the activation rule over the fighters and cr_pois3"
+    fighters = _code(_member(src[PS], "private static int[] Fighters("))
+    assert "RoomActors.ActiveFighters()" in fighters, "the activation roster is not the scored fighters"
+    stage = _member(src[PS], "internal static void StageCapability(")
+    assert '"); v3 can activate in an open room: "' in stage, "the boot line does not say whether v3 can activate"
     for pre in ("if (!V3PatchesLive)", "if (Plugin.modDisabled)", "if (_epochBroken)"):
         assert pre in on, "the gate lost " + pre
 
 
-def check_only_witness_closes(src):
-    hits = [(n, m.start()) for n, s in src.items() for m in re.finditer(r"\.IsOpen\s*=\s*false", _code(s))]
-    ps_hits = [h for h in hits if h[0] == PS]
-    assert len(ps_hits) == 1, "PoisonSync writes the room's open flag %d times" % len(ps_hits)
-    lever = _member(src[PS], "private static void WitnessLever(")
-    assert "room.IsOpen = false;" in lever, "the room is closed outside the witness lever"
-    assert 'cf.Bind("Poison", "V3WitnessCloseRoom", false,' in lever, "the witness lever is not default off"
-    assert "if (_witnessLever == null || !_witnessLever.Value) return;" in lever
+def check_rooms_stay_open(src):
+    ps = _code(src[PS])
+    assert not re.search(r"\.IsOpen\s*=", ps), "PoisonSync writes the room's open flag"
+    assert "V3WitnessCloseRoom" not in src[PS], "the room-closing witness lever is back"
+    on = _code(_member(src[PS], "internal static bool V3On("))
+    assert "IsOpen" not in on, "the gate reads the room's open flag"
+
+
+V3_KINDS = ("TypeClaim", "TypeSummary", "TypeActivate", "TypeAck", "TypeLife")
+
+
+def check_targeted_sends(src):
+    ps = _code(src[PS])
+    raise_to = _member(ps, "private static bool RaiseTo(")
+    assert "object[] payload, int[] targets)" in raise_to, "RaiseTo is not addressed"
+    assert "if (targets == null || targets.Length == 0) return false;" in raise_to
+    assert "new RaiseEventOptions { TargetActors = targets };" in raise_to, "RaiseTo is not addressed to named actors"
+    assert "ReceiverGroup" not in raise_to and "Receivers" not in raise_to, "RaiseTo can reach a receiver group"
+    for kind in V3_KINDS:
+        uses = [m.start() for m in re.finditer(r"\{\s*%s, Protocol," % kind, ps)]
+        assert len(uses) == 1, "%s is raised %d times" % (kind, len(uses))
+        before = ps[max(0, uses[0] - 400):uses[0]]
+        assert "RaiseTo(new object[]" in before[-120:], kind + " is not sent through RaiseTo"
+    assert "RaiseTo(new object[] { TypeActivate, Protocol, aid, fighters }, to);" in ps
+    assert "int[] to = V3Targets.Capable(PresentActors(), HasCap3);" in ps
+    assert "V3Targets.Capable(PresentActors(), HasCap3));" in _member(ps, "private static void OnActivate(")
+    assert "int[] lifeTargets = v3 ? _act.AckedPresent(presentAtStart) : null;" in ps
+    assert "{ TypeLife, Protocol, viewId, stream, epoch.Ts, epoch.Set }, ov.LifeTargets)" in ps
+    assert "int[] to = V3Targets.SummaryTargets(o.LifeTargets, o.PresentAtStart, present," in ps
+    arm = _member(ps, "private static int ShooterArm(")
+    assert "bool ownerAcked = owner > 0 && _act.IsAcked(owner);" in arm and "}, new[] { owner });" in arm
+    assert "f.SenderAcked = _act.IsAcked(sender);" in _member(ps, "private static void OnClaim(")
+
+
+def check_room_events_reach_the_gate(src):
+    pl = _code(src[PL])
+    for sig, call in (("public void OnPlayerEnteredRoom(", 'PoisonSync.V3RoomEvent("player-entered", p);'),
+                      ("public void OnPlayerLeftRoom(", 'PoisonSync.V3RoomEvent("player-left", p);'),
+                      ("public void OnPlayerPropertiesUpdate(", "PoisonSync.V3PropsChanged(target, changedProps);")):
+        body = _member(pl, sig)
+        assert call in body, sig + " does not reach the v3 gate"
+        first_return = body.find("return")
+        assert first_return < 0 or body.index(call) < first_return, sig + " can return before the v3 hook"
+    props = _code(_member(src[PS], "internal static void V3PropsChanged("))
+    assert "changed.ContainsKey(CapabilityPropV3)" in props
+    ev = _code(_member(src[PS], "internal static void V3RoomEvent("))
+    assert "_act.OnRoomEvent(why);" in ev
 
 
 # -- the claim (A5, A6, A8, A9) ---------------------------------------------------
@@ -181,13 +227,22 @@ def check_shared_predicates(src):
 
 def check_epoch_wire(src):
     dot = _code(_member(src[PS], "internal static IEnumerator AuthoritativeDot("))
-    assert "attackerId, lethal, (byte)damageSource, blocked, _nextSeq++,\n                        epoch.Ts, epoch.Set" in dot, \
-        "the v3 header is not today's 15 elements followed by the epoch"
+    headers = re.findall(r"TypeHeader, Protocol,(.*?)\}\);", dot, re.S)
+    assert len(headers) == 1, "more than one header form"
+    assert headers[0].rstrip().endswith("attackerId, lethal, (byte)damageSource, blocked, _nextSeq++"), \
+        "the header is not today's 15 elements"
+    assert dot.index("TypeLife, Protocol,") < dot.index("TypeHeader, Protocol,"), "LIFE is not raised before the header"
     assert "bool v3 = V3On(out v3Why);" in dot and "if (v3 && !_ledger.FenceOf(viewId, out epoch)) v3 = false;" in dot
     assert "if (!_ledger.AdmitV3Stream(now, now + span)) v3 = false;" in dot
     assert dot.count("CloseV3(openKey);") == 3, "a stream exit sends no catch-up"
     ev = _code(_member(src[PS], "private static void OnEvent("))
-    assert "if (!_epochBroken && PoisonLedgerCore.TryV3Epoch(a.Length," in ev
+    assert "if (_inbox.Take(viewId, streamId, out epoch) && !_epochBroken)" in ev
+    assert "if (kind == TypeLife) { OnLife(e.Sender, a); return; }" in ev
+    life = _code(_member(src[PS], "private static void OnLife("))
+    assert "view.Owner.ActorNumber != sender) return;" in life, "a LIFE message is taken from someone other than the owner"
+    summ = _code(_member(src[PS], "private static void OnSummaryV3("))
+    assert "if (_streams.ContainsKey(StreamKey(viewId, streamId))) return;" in summ, \
+        "a stream handled by today's path can be caught up on top"
     assert "else if (kind == TypeSummary) { if (a.Length < 18) return; }" in ev
     # the stamp: PUN's own RPC send stamp, read in ExecuteRpc for the view the RPC targets
     stamp = _member(src[PS], "internal static class PoisonRpcStampPatch")
@@ -224,7 +279,8 @@ def check_evidence_tags(src):
 
 
 CHECKS = {f.__name__: f for f in (
-    check_staged_together, check_gate_reads_raw_cap, check_only_witness_closes,
+    check_staged_together, check_gate_reads_raw_cap, check_rooms_stay_open, check_targeted_sends,
+    check_room_events_reach_the_gate,
     check_claim_only_from_entered_poison, check_claim_decided_before_start, check_every_arm_one_terminal_line,
     check_funnel_is_closed, check_shared_predicates, check_epoch_wire, check_flush_on_every_stop,
     check_evidence_tags,
@@ -234,7 +290,11 @@ CHECKS = {f.__name__: f for f in (
 MUTANTS = {
     "check_staged_together": (PS, "                    { CapabilityPropV3, v3 }\n", ""),
     "check_gate_reads_raw_cap": (PS, "v is int && (int)v == CapabilityValue", "v != null"),
-    "check_only_witness_closes": (PS, "V3WitnessCloseRoom\", false,", "V3WitnessCloseRoom\", true,"),
+    "check_rooms_stay_open": (PS, "                _v3RetakeDue = false;\n                _lastActivateSent",
+                              "                PhotonNetwork.CurrentRoom.IsOpen = false;\n                _v3RetakeDue = false;\n                _lastActivateSent"),
+    "check_targeted_sends": (PS, "new RaiseEventOptions { TargetActors = targets };",
+                             "new RaiseEventOptions { Receivers = ReceiverGroup.All };"),
+    "check_room_events_reach_the_gate": (PL, '            try { PoisonSync.V3RoomEvent("player-left", p); } catch { }\n', ""),
     "check_claim_only_from_entered_poison": (PS, "if (f == null || !f.LocalOnly || vv.IsMine) return true;",
                                              "if (f == null || vv.IsMine) return true;"),
     "check_claim_decided_before_start": (PS, "if (_claims.TryStart(ph.GetInstanceID(), vv.ViewID, StartPath.Broadcast)) return true;",
@@ -244,8 +304,8 @@ MUTANTS = {
                                "            hh.DoDamage(Vector2.zero, Vector2.zero, Color.white);\n"),
     "check_shared_predicates": (PS, "if (!RoomActors.LocalIsSpectator && EndScreenKillPatch.RefusesNow()) return false;",
                                 "if (!RoomActors.LocalIsSpectator && !GameManager.instance.battleOngoing) return false;"),
-    "check_epoch_wire": (PS, "if (data.dead || !data.isPlaying) { CloseV3(openKey); yield break; }",
-                         "if (data.dead || !data.isPlaying) { yield break; }"),
+    "check_epoch_wire": (PS, "attackerId, lethal, (byte)damageSource, blocked, _nextSeq++\n                    });",
+                         "attackerId, lethal, (byte)damageSource, blocked, _nextSeq++, epoch.Ts, epoch.Set\n                    });"),
     "check_flush_on_every_stop": (PS, "                if (v != null) PoisonSync.FlushOpenV3(v.ViewID);\n            }\n            catch { }",
                                   "            }\n            catch { }"),
     "check_evidence_tags": (PS, 'string head = "[POISON-CLAIM] recv from=" + sender',
