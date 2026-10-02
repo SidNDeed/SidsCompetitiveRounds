@@ -742,7 +742,9 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # connect-failure LAND, sitting 3 (2026-09-30): the union of the lane's 387 and main 0e751993's 384 over
     # their shared 383 (main cd8d846) is 388: the lane's 4 new routes plus the Discord fix's 1, confirmed by
     # the re-pin dry run
-    assert len(manifest) == 388
+    # seat evidence V2 (claude/seat-evidence-server-v2): +4 (the seat record and compat outcome routes, the
+    # admin seat-evidence view and the release digest registration; 388 before)
+    assert len(manifest) == 392
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -762,7 +764,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # connect-failure LAND, sitting 3 (2026-09-30): the union of the lane's 386 and main 0e751993's 383 over
     # their shared 382 is 387: the lane's 4 plus the Discord fix's 1 (all statically-nonconsumer), confirmed
     # by the re-pin dry run
-    assert len(static) == 387
+    # seat evidence V2 (claude/seat-evidence-server-v2): +4, all statically-nonconsumer (387 before)
+    assert len(static) == 391
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -1358,7 +1361,20 @@ def test_the_helper_closure_stays_affordable():
     # code bindings accounted for at the code bound above, with no import
     # line added. The bound moves to 520, ~6% over the measurement, for that
     # reason and no other.
-    assert all_worst <= 520, f"worst closure {all_worst} of {total}"
+    # Seat evidence V2 (claude/seat-evidence-server-v2, 2026-10-02): the same
+    # route measured 503 at the base 14127702 and 526 on the lane -- +23, and
+    # all 23 are IMPORT leaves: the five new modules (seat_evidence and the
+    # four review modules) each bind stdlib names every route already
+    # references (json, os, hashlib, datetime, timezone, time, math, hmac,
+    # uuid, secrets, stat, text), and the walk folds in every module that binds
+    # a shared name. No code binding of the new modules reaches an existing
+    # route: after the review modules' generic function names were made
+    # distinctive, the code tier moves only on the four new routes and
+    # /api/v1/health (median 22 / p90 97 / worst 370, all under their bounds).
+    # Whole closure over 391 routes: median 76 -> 86, p90 197 -> 196. The
+    # bound moves to 556, ~6% over the measurement, for that reason and no
+    # other; the median and p90 bounds stay.
+    assert all_worst <= 556, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
