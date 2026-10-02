@@ -140,6 +140,8 @@ namespace CompetitiveRounds
         /// (RecordMovementSample).</summary>
         private static void CommitTiming(ActorStats actor, int actorNumber, int networkTime, long arrivalTick, out GapSample sample)
         {
+            // Seat evidence: the batch's sender stamp, for age, age_b, drift and cadence.
+            try { SeatEvidence.NoteView(actorNumber, networkTime); } catch { }
             GapSample roomSample;
             actor.Room.Record(networkTime, arrivalTick, out roomSample);
             sample = roomSample;

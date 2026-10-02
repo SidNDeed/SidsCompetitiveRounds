@@ -179,6 +179,7 @@ namespace CompetitiveRounds
                     if (kv.Value.Any) Plugin.Log.LogInfo(HitEvidenceCore.HitRecvLine(point, kv.Key, kv.Value));
             }
             catch { }
+            try { PushToSeatEvidence(); } catch { }
             _point.Clear();
             _blockedThisPoint = false;
         }
@@ -209,17 +210,35 @@ namespace CompetitiveRounds
             _point.Clear(); _game.Clear(); _projAmmo.Clear(); _blockedThisPoint = false;
         }
 
+        /// <summary>Seat evidence's push counts: this point's pairing of the
+        /// damage and knockback messages, per sending actor.</summary>
+        private static void PushToSeatEvidence()
+        {
+            foreach (var kv in _point)
+            {
+                var t = kv.Value;
+                if (!t.Any) continue;
+                int paired, dmgAlone, forceAlone;
+                HitEvidenceCore.Pair(t.DirectT, t.ForceT, HitEvidenceCore.PAIR_WINDOW_S, out paired, out dmgAlone, out forceAlone);
+                try { SeatEvidence.AddPush(kv.Key, t.Direct, t.Force, paired, dmgAlone, forceAlone, t.ForceInert, t.Dot); } catch { }
+            }
+        }
+
         internal static void ResetForRoomExit(int point)
         {
             GameEnd(point);
             _games = 0;
             RpcSender = 0;
+            try { SeatEvidence.RoomExit(); } catch { }
         }
     }
 
     /// <summary>The sender of every RPC this seat executes. The prefix only
     /// records it and the finalizer restores the previous value (RPCs can nest)
-    /// and returns the exception it was given; neither changes the call.</summary>
+    /// and returns the exception it was given; neither changes the call.
+    /// Seat evidence: the prefix also copies the envelope's view, stamp and
+    /// method into a nesting-safe frame (one long __state carries both the
+    /// previous sender and the frame depth to restore).</summary>
     [HarmonyPatch]
     internal static class HitEvidence_ExecuteRpcPatch
     {
@@ -232,16 +251,20 @@ namespace CompetitiveRounds
         }
 
         [HarmonyPrefix]
-        private static void Prefix(Photon.Realtime.Player __1, out int __state)
+        private static void Prefix(ExitGames.Client.Photon.Hashtable __0, Photon.Realtime.Player __1, out long __state)
         {
-            __state = HitEvidence.RpcSender;
+            int prev = HitEvidence.RpcSender;
+            int depth = -1;
+            try { depth = SeatEvidence.EnterRpc(__0, __1); } catch { }
+            __state = (long)(uint)prev | ((long)depth << 32);
             try { HitEvidence.RpcSender = __1 != null ? __1.ActorNumber : 0; } catch { HitEvidence.RpcSender = 0; }
         }
 
         [HarmonyFinalizer]
-        private static Exception Finalizer(int __state, Exception __exception)
+        private static Exception Finalizer(long __state, Exception __exception)
         {
-            HitEvidence.RpcSender = __state;
+            HitEvidence.RpcSender = (int)(uint)(__state & 0xFFFFFFFFL);
+            try { SeatEvidence.ExitRpc((int)(__state >> 32)); } catch { }
             return __exception;
         }
     }
@@ -251,10 +274,20 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(HealthHandler), "RPCA_SendTakeDamage")]
     internal static class HitEvidence_DamagePatch
     {
-        [HarmonyFinalizer]
-        private static Exception Finalizer(HealthHandler __instance, Vector2 damage, Exception __exception)
+        /// <summary>Seat evidence: whether this envelope's damage passes
+        /// TakeDamage's gate here, read before the body applies it.</summary>
+        [HarmonyPrefix]
+        private static void Prefix(HealthHandler __instance, out bool __state)
         {
-            HitEvidence.NoteDamage(__instance, damage);
+            __state = false;
+            try { __state = SeatEvidence.DamageGate(__instance); } catch { }
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(HealthHandler __instance, Vector2 damage, bool __state, Exception __exception)
+        {
+            try { HitEvidence.NoteDamage(__instance, damage); } catch { }
+            try { SeatEvidence.DamageArrived(__instance, __state); } catch { }
             return __exception;
         }
     }
@@ -266,7 +299,7 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, Vector2 force, Exception __exception)
         {
-            HitEvidence.NoteForce(__instance, force);
+            try { HitEvidence.NoteForce(__instance, force); } catch { }
             return __exception;
         }
     }
@@ -278,19 +311,30 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, Vector2 damage, Player damagingPlayer, bool healthRemoval, Exception __exception)
         {
-            HitEvidence.NoteDot(__instance, damage, damagingPlayer, healthRemoval);
+            try { HitEvidence.NoteDot(__instance, damage, damagingPlayer, healthRemoval); } catch { }
             return __exception;
         }
     }
 
-    /// <summary>D3: the local player's block began this point.</summary>
+    /// <summary>D3: the local player's block began this point. Seat evidence:
+    /// the prefix classifies the window (the RPC that carried it, an Echo
+    /// under its root, or unkeyed) and the finalizer reads whether the copy's
+    /// sinceBlock reset ran in the synchronous part.</summary>
     [HarmonyPatch(typeof(Block), "RPCA_DoBlock")]
     internal static class HitEvidence_BlockPatch
     {
-        [HarmonyFinalizer]
-        private static Exception Finalizer(Block __instance, Exception __exception)
+        [HarmonyPrefix]
+        private static void Prefix(Block __instance, bool __0, BlockTrigger.BlockTriggerType __2, bool __4, out int __state)
         {
-            HitEvidence.NoteBlock(__instance);
+            __state = -1;
+            try { __state = SeatEvidence.BlockEnter(__instance, __0, __2, __4); } catch { }
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Block __instance, int __state, Exception __exception)
+        {
+            try { HitEvidence.NoteBlock(__instance); } catch { }
+            try { SeatEvidence.BlockExit(__state); } catch { }
             return __exception;
         }
     }
@@ -303,7 +347,8 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileInit __instance, Exception __exception)
         {
-            HitEvidence.NoteSpawn(__instance, 0);
+            try { HitEvidence.NoteSpawn(__instance, 0); } catch { }
+            try { SeatEvidence.ShotArrived(__instance, 0); } catch { }
             return __exception;
         }
     }
@@ -314,7 +359,8 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileInit __instance, Exception __exception)
         {
-            HitEvidence.NoteSpawn(__instance, 1);
+            try { HitEvidence.NoteSpawn(__instance, 1); } catch { }
+            try { SeatEvidence.ShotArrived(__instance, 1); } catch { }
             return __exception;
         }
     }
@@ -325,27 +371,35 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileInit __instance, Exception __exception)
         {
-            HitEvidence.NoteSpawn(__instance, 2);
+            try { HitEvidence.NoteSpawn(__instance, 2); } catch { }
+            try { SeatEvidence.ShotArrived(__instance, 2); } catch { }
             return __exception;
         }
     }
 
     /// <summary>D2: a remote projectile's impact arrived. The projectile's id is
     /// read before the body (a killing or destroying impact can tear the view
-    /// down inside it); the prefix only records it.</summary>
+    /// down inside it); the prefix only records it. Seat evidence: the prefix
+    /// also reads the hit copy's sinceBlock before the body can reset it and
+    /// opens a frame for a direct (path 1) decision; one long __state carries
+    /// the projectile id and that frame.</summary>
     [HarmonyPatch(typeof(ProjectileHit), "RPCA_DoHit")]
     internal static class HitEvidence_ImpactPatch
     {
         [HarmonyPrefix]
-        private static void Prefix(ProjectileHit __instance, out int __state)
+        private static void Prefix(ProjectileHit __instance, int __3, bool __5, out long __state)
         {
-            __state = HitEvidence.ProjectileId(__instance);
+            int pid = 0, frame = -1;
+            try { pid = HitEvidence.ProjectileId(__instance); } catch { }
+            try { frame = SeatEvidence.HitEnter(__instance, pid, __3, __5); } catch { }
+            __state = (long)(uint)pid | ((long)frame << 32);
         }
 
         [HarmonyFinalizer]
-        private static Exception Finalizer(int __state, int viewID, bool wasBlocked, Exception __exception)
+        private static Exception Finalizer(long __state, int viewID, bool wasBlocked, Exception __exception)
         {
-            HitEvidence.NoteImpact(__state, viewID, wasBlocked);
+            try { HitEvidence.NoteImpact((int)(uint)(__state & 0xFFFFFFFFL), viewID, wasBlocked); } catch { }
+            try { SeatEvidence.HitExit((int)(__state >> 32)); } catch { }
             return __exception;
         }
     }
@@ -358,7 +412,7 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception)
         {
-            HitEvidence.GameEnd(PointEvidence.Point);
+            try { HitEvidence.GameEnd(PointEvidence.Point); } catch { }
             return __exception;
         }
     }

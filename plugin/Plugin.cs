@@ -3432,7 +3432,17 @@ namespace CompetitiveRounds
             // reads the room and writes only this seat's own statement.
             try { PeerBuild.StageBuildProp("tick"); PeerBuild.Tick(); } catch { }
 
+            // Seat evidence: a pending compat outcome is signed and persisted
+            // once the Steam id is known. Above the return because a finding
+            // is exactly the state that disables the mod; it only writes this
+            // seat's own queue file.
+            try { SeatEvidence.CompatTick(); } catch { }
+
             if (Plugin.modDisabled) return;
+
+            // Seat evidence: own clocks during a game, and the record queue
+            // (sends only while no battle is live). No setting in front of it.
+            try { SeatEvidence.Tick(); } catch { }
 
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
@@ -3655,6 +3665,9 @@ namespace CompetitiveRounds
         {
             Plugin.Log.LogInfo("[PERSIST] Delayed initialization starting...");
 
+            // Seat evidence: hash this DLL and the game's off the main thread.
+            try { SeatEvidence.StartHashing(); } catch { }
+
             // ── Other mods check (Chainloader is complete by now) ──
             try
             {
@@ -3673,6 +3686,13 @@ namespace CompetitiveRounds
                         foreach (var m in otherMods)
                             Plugin.Log.LogError($"[COMPAT]   - {m}");
                         Plugin.Log.LogError("[COMPAT] Mod DISABLED to ensure competitive integrity.");
+                        try
+                        {
+                            var guids = new List<string>();
+                            foreach (var kvp in plugins) if (kvp.Key != Plugin.ModId) guids.Add(kvp.Key);
+                            SeatEvidence.NoteCompat("finding", guids);
+                        }
+                        catch { }
                         Plugin.modDisabled = true;
                         Plugin.compatCheckComplete = true;
                         // Awake already staged the poison-authority capability, and
@@ -3718,10 +3738,13 @@ namespace CompetitiveRounds
                     }
                 }
                 Plugin.Log.LogInfo("[COMPAT] No other mods detected — OK");
+                try { SeatEvidence.NoteCompat("pass", null); } catch { }
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
+                // A check that threw reports not_run, never pass.
+                try { SeatEvidence.NoteCompat("not_run", null); } catch { }
             }
             Plugin.compatCheckComplete = true;
             // r3 find 4: releases the injector's activation gate. Everything

@@ -1779,12 +1779,12 @@ namespace CompetitiveRounds
     internal static class SawPointEvidencePatch
     {
         [HarmonyPrefix]
-        private static void Before() { PointEvidence.SawBefore(); }
+        private static void Before() { try { PointEvidence.SawBefore(); } catch { } }
 
         [HarmonyFinalizer]
         private static Exception After(Exception __exception)
         {
-            PointEvidence.SawAfter();
+            try { PointEvidence.SawAfter(); } catch { }
             return __exception;
         }
     }
@@ -1795,6 +1795,10 @@ namespace CompetitiveRounds
     internal static class PointEndEvidencePatch
     {
         [HarmonyPostfix]
-        private static void After(GM_ArmsRace __instance) { PointEvidence.PointEnd(); PointEvidence.GameOverCheck(__instance); }
+        private static void After(GM_ArmsRace __instance)
+        {
+            try { PointEvidence.PointEnd(); } catch { }
+            try { PointEvidence.GameOverCheck(__instance); } catch { }
+        }
     }
 }

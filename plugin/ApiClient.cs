@@ -2957,6 +2957,33 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
 
+        // ── Seat evidence (contract V2) ──────────────────────────
+        // Its own canonical strings ("seat-evidence:v2:...", "compat-outcome:v1:...")
+        // signed under the match-report key. The 7-field match canonical above is
+        // not touched, not reused and not extended.
+
+        internal static string SeatEvidenceSig(string canonical) { return ComputeHmacHex(canonical); }
+
+        /// <summary>The api is configured and this seat holds a session token
+        /// (the seat-evidence routes answer 401 without one).</summary>
+        internal static bool SeatEvidenceReady
+        {
+            get { return !string.IsNullOrEmpty(baseUrl) && !string.IsNullOrEmpty(SteamAuth.SessionToken) && Plugin.Instance != null; }
+        }
+
+        /// <summary>One POST of frozen bytes. callback(ok, text, carriedToken):
+        /// text is the body, or "HTTP code: body" plus a Retry-After line on
+        /// a refusal; carriedToken says whether the session token went out.</summary>
+        internal static bool SeatEvidencePost(string path, string body, Action<bool, string, bool> callback)
+        {
+            if (string.IsNullOrEmpty(baseUrl) || Plugin.Instance == null) return false;
+            bool carried = false;
+            Plugin.Instance.StartCoroutine(PostRequest(baseUrl + path, body,
+                (ok, resp) => { try { callback(ok, resp, carried); } catch { } },
+                onTokenStamped: stamped => carried = stamped));
+            return true;
+        }
+
         // Security A2: admin canonicals sign with the SEPARATE admin secret
         // from the local BepInEx config (never compiled into the DLL). Empty
         // secret -> empty signature -> clean server-side 403; the one-time log

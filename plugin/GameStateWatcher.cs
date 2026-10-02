@@ -433,6 +433,11 @@ namespace CompetitiveRounds
         private static string sharedGameToken = "";
         private static string previousGameToken = "";
         private static int matchStartServerTimestamp;
+        // Seat evidence B5: the master's numeric T0 from cr_game_token, held by
+        // BOTH seats once the shared token is adopted (the master keeps the
+        // value it published; the non-master adopts the published one).
+        private static int sharedGameT0;
+        private static bool sharedGameT0Set;
 
         // Game over
         private static bool gameOverReported = false;
@@ -5207,6 +5212,8 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.CurrentRoom.SetCustomProperties(props))
                     return;
                 sharedGameToken = token;
+                sharedGameT0 = matchStartServerTimestamp;
+                sharedGameT0Set = true;
             }
             catch { }
         }
@@ -5220,6 +5227,8 @@ namespace CompetitiveRounds
                 previousGameToken = sharedGameToken;
             sharedGameToken = "";
             matchStartServerTimestamp = 0;
+            sharedGameT0 = 0;
+            sharedGameT0Set = false;
             if (!oneVOneMatchAtStart) return;
             // Record the common Photon clock even if this client has not yet
             // observed both capability properties. The master may already see
@@ -5257,6 +5266,10 @@ namespace CompetitiveRounds
                         // one Unity main thread can enter the match >10s later
                         // even though Photon delivered the correct room token.
                         sharedGameToken = parts[0];
+                        // B5: adopt the master's T0 with its token (the
+                        // number used to be parsed and discarded).
+                        sharedGameT0 = publishedAt;
+                        sharedGameT0Set = true;
                         return;
                     }
                 }
@@ -5801,6 +5814,9 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+
+            // Seat evidence (contract V2): open this game's window. Contained.
+            try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
 
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
@@ -6789,6 +6805,20 @@ namespace CompetitiveRounds
                     // Sept 6 item c: opaque room-occupancy id, outside the HMAC canonical.
                     sessionUuid: SessionUuid
                 );
+            }
+
+            // Seat evidence (contract V2): built AFTER the match report above is
+            // queued, ranked 1v1 only, both seats, and contained like the other
+            // telemetry: it can never delay or drop the report.
+            if (!isOfflineMatch)
+            {
+                try
+                {
+                    SeatEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId,
+                        localTeamId == 0 ? p1Rounds : p2Rounds, localTeamId == 0 ? p2Rounds : p1Rounds,
+                        matchIsRanked && oneVOneMatchAtStart);
+                }
+                catch { }
             }
 
             // Evaluate achievements before clearing match state
@@ -8912,6 +8942,8 @@ namespace CompetitiveRounds
             sharedGameToken = "";
             previousGameToken = "";
             matchStartServerTimestamp = 0;
+            sharedGameT0 = 0;
+            sharedGameT0Set = false;
             wasGameInProgress = false;
             pcolorRoomApplied = false;
             // Room over — drop the Tab-board card baselines (bug #64); the Player
@@ -9064,6 +9096,15 @@ namespace CompetitiveRounds
         }
         public static bool LeavingForRanked { get; set; } = false;
         public static string LocalSteamId => localSteamId;
+
+        /// <summary>Seat evidence: this game's T0. With the shared token adopted
+        /// it is the master's published value (fromToken); otherwise this seat's
+        /// own start stamp. Raw int32 Photon server time.</summary>
+        internal static int SeatEvidenceT0(out bool fromToken)
+        {
+            fromToken = sharedGameT0Set && !string.IsNullOrEmpty(sharedGameToken);
+            return fromToken ? sharedGameT0 : matchStartServerTimestamp;
+        }
         public static string LocalDisplayName => localDisplayName;
         public static string OpponentDisplayName => opponentDisplayName;
         public static string OpponentSteamId => opponentSteamId;
