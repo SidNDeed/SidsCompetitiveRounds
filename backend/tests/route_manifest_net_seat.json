@@ -2200,7 +2200,7 @@
           ],
           "main",
           "get_mod_version",
-          "abe08ff337ab95dc15dd92b50f6b0f9d258e98f1"
+          "8f319dbce3c5c15ebb20a0027b8fb3dba0a725c7"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
