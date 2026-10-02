@@ -40,7 +40,13 @@ CONTRACT_BOUNDS = {
 # Which raised-block kinds open a window: a fact of the client contract.
 WINDOW_KINDS = (0, 2, 3)
 
-FINGERPRINT_MODULES = ("review_measures", "review_rules", "review_module")
+FINGERPRINT_MODULES = ("review_measures", "review_rules", "review_module", "combat_measures")
+
+# The subjects a combat rule evaluates over (combat_measures builds their rows).
+COMBAT_SUBJECTS = ("combat.direction", "combat.cycle", "combat.shot", "combat.refill",
+                   "combat.stat", "combat.point", "combat.block", "combat.contact",
+                   "combat.top", "combat.aim", "combat.push", "combat.vchange",
+                   "combat.bounce", "combat.chain", "combat.death")
 
 REGISTRY: dict = {}
 BRIDGE: dict = {}
@@ -887,3 +893,7 @@ def game_view(records: list, match, registry, params) -> dict:
         view["evidence"] = "two_records"
     return view
 
+
+# The combat vocabulary registers itself into REGISTRY when imported; it is
+# imported here so every reader of this registry sees the same entries.
+import combat_measures as _combat  # noqa: E402,F401

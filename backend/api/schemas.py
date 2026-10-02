@@ -1027,6 +1027,11 @@ class HealthResponse(BaseModel):
     # default, so building the answer without it raises instead of silently
     # leaving the key out. Absent on any build before the lane.
     seat_evidence: int
+    # combat_evidence: whether this build serves the combat evidence lane
+    # (main._combat_evidence_health_word; 1 = both combat evidence routes are
+    # registered on the app, else 0). Derived on every request; equal on both
+    # roles. No default, as above. Absent on any build before the lane.
+    combat_evidence: int
     # review_eval: 8 hex over the public review vocabulary's per-entry
     # fingerprints (review_measures.review_eval). Equal on both roles; the
     # build discriminator through the edge. No default, as above.

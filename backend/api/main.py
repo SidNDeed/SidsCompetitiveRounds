@@ -38,6 +38,7 @@ from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_relea
 from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import seat_evidence as _sev
+import combat_evidence as _cev
 import review_rules as _review_rules
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
@@ -3705,6 +3706,9 @@ async def lifespan(app: FastAPI):
             # started no worker (an absent pass line alone cannot tell a
             # disabled worker from a log that was not collected).
             print("[REVIEW] worker=standby-disabled", flush=True)
+            # The combat evidence pass runs inside the same worker, so it is
+            # primary-only too; this is the standby's positive signal for it.
+            print("[COMBAT] worker=standby-disabled", flush=True)
             # The floor still has to track the primary — see the docstring.
             tasks.append(asyncio.create_task(
                 _supervised("min_version_follow", min_version_follow_loop)))
@@ -3756,6 +3760,7 @@ async def lifespan(app: FastAPI):
             # evaluating under the loaded rules revision, posting advisory
             # review items, the purge. PRIMARY ONLY with the other writers.
             print("[REVIEW] worker=primary", flush=True)
+            print("[COMBAT] worker=primary", flush=True)
             tasks.append(asyncio.create_task(
                 _supervised("review_worker", review_worker_loop)))
             # Detached one-shot, deliberately NOT under _supervised (its while-True
@@ -4463,12 +4468,16 @@ async def review_worker_loop():
             state = await asyncio.to_thread(_review_rules.refresh_rules)
             games = await _sev.games_pass(async_session, state)
             sittings = await _sev.sitting_pass(async_session, state)
-            purged = None
+            # The combat pass: its own games, each in its own transaction.
+            combat = await _cev.games_pass(async_session, state)
+            purged = combat_purged = None
             if last_purge is None or time.monotonic() - last_purge > REVIEW_PURGE_EVERY_S:
                 purged = await _sev.purge_pass(async_session)
+                combat_purged = await _cev.purge_pass(async_session)
                 last_purge = time.monotonic()
             print(_review_pass_line(state.word, games, sittings), flush=True)
             print(f"[SEAT-EVIDENCE] games={games} sittings={sittings} purge={purged}", flush=True)
+            print(f"[COMBAT] games={combat} purge={combat_purged}", flush=True)
         except Exception as e:
             print(f"[REVIEW] pass error: {type(e).__name__}", flush=True)
         await asyncio.sleep(REVIEW_PASS_S)
@@ -7167,6 +7176,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
                               seat_evidence=_seat_evidence_health_word(),
+                              combat_evidence=_combat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
@@ -7200,6 +7210,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
                               seat_evidence=_seat_evidence_health_word(),
+                              combat_evidence=_combat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
@@ -8168,6 +8179,61 @@ async def admin_seat_evidence(
     target = str(match_id) if match_id is not None else stable_game_key
     await _require_admin(db, admin_steam_id, "seat_evidence", target, hmac_signature)
     return await _sev.admin_view(db, match_id=str(match_id) if match_id else None,
+                                 stable_game_key=stable_game_key,
+                                 rs=_review_rules.current_rules().ruleset)
+
+
+@app.post("/api/v1/matches/combat-evidence", tags=["Matches"])
+async def submit_combat_evidence(request: Request, db: AsyncSession = Depends(get_db)):
+    """One seat's combat record for one ranked game (combat contract one).
+
+    The session rule and signing are the seat evidence route's: the FIRST
+    decision is the session (401 unless the request carries a verified
+    session for the seat the body names), before any other route work.
+    After it, this route writes the combat_evidence table and nothing else,
+    storing the record before anything is derived: it never
+    creates a player row, never touches a match, a series, a rating, gold
+    or flagged_matches. Every derivation runs later, in review_worker_loop."""
+    seat, body = await _sev_claimed_seat(request)
+    if not seat or not await _strict_steam_session_ok(request, seat, db):
+        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+    try:
+        if await _cev.setting(db, "combat_evidence_accept", "0") != "1":
+            return JSONResponse(status_code=503, content={"error": "combat_evidence_off"})
+        env = _cev.parse_envelope(body)
+        if not _cev.verify_sig(MATCH_HMAC_SECRET, env):
+            return JSONResponse(status_code=403, content={"detail": "signature"})
+        rec = _cev.parse_record(env)
+        rows = (await db.execute(
+            select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
+        )).all()
+        by_steam = {r.steam_id: r.id for r in rows}
+        if env["seat"] not in by_steam or env["other"] not in by_steam:
+            return JSONResponse(status_code=409, content={"status": "not_ready"})
+        return await _cev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
+                                       _sev_header_version(request))
+    except _cev.EvidenceRefused as r:
+        return _sev_refusal(r)
+
+
+@app.get("/api/v1/admin/combat-evidence", tags=["Admin"])
+async def admin_combat_evidence(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    match_id: UUID | None = Query(None),
+    stable_game_key: str | None = Query(None, max_length=60),
+    db: AsyncSession = Depends(get_db),
+):
+    """The reviewer's view of one game's combat evidence, per canonical seat
+    pair: the stored records, the attachment, the rebuild faults, the
+    findings, and the pair view computed now with each gun's display case
+    (only the measuring record, only the owner's, both agree, both differ)
+    and every missing, trimmed or incompatible input shown NOT-RUN. Admin only."""
+    if (match_id is None) == (stable_game_key is None):
+        raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
+    target = str(match_id) if match_id is not None else stable_game_key
+    await _require_admin(db, admin_steam_id, "combat_evidence", target, hmac_signature)
+    return await _cev.admin_view(db, match_id=str(match_id) if match_id else None,
                                  stable_game_key=stable_game_key,
                                  rs=_review_rules.current_rules().ruleset)
 
@@ -61539,6 +61605,18 @@ _SEAT_EVIDENCE_ROUTES = (submit_seat_evidence, submit_compat_outcome, admin_seat
 def _seat_evidence_health_word() -> int:
     registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
     return 1 if all(id(fn) in registered for fn in _SEAT_EVIDENCE_ROUTES) else 0
+
+
+# Combat evidence (combat contract one): `combat_evidence` on /health is 1
+# when this app registers both combat evidence routes, else 0. Derived on
+# every call from the routing table, so it is equal on both roles; the
+# combat pass's primary-only start is shown by its own log markers.
+_COMBAT_EVIDENCE_ROUTES = (submit_combat_evidence, admin_combat_evidence)
+
+
+def _combat_evidence_health_word() -> int:
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return 1 if all(id(fn) in registered for fn in _COMBAT_EVIDENCE_ROUTES) else 0
 
 
 def _pc_motion_health_word() -> int:

@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.join(REPO, "backend", "tools"))
 
 import review_guard as g  # noqa: E402
 
-MODULES = ("review_measures", "review_rules", "review_module", "review_module_runner", "seat_evidence")
+MODULES = ("review_measures", "review_rules", "review_module", "review_module_runner", "seat_evidence",
+           "combat_measures", "combat_evidence")
 
 
 def _copy(tmp):

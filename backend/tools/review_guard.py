@@ -6,10 +6,11 @@ not part of this repository. This guard checks that, as a transitive analysis
 over the source of every tree it is given:
 
   * JUDGING modules (review_measures, review_rules, review_module,
-    review_module_runner, and any local module one of them imports) are
-    scanned whole: code, module-level constants, string constants (SQL and
-    text included) and comments;
-  * seat_evidence is scanned from its REVIEW ROOTS (every function that
+    review_module_runner, combat_measures, and any local module one of them
+    imports) are scanned whole: code, module-level constants, string
+    constants (SQL and text included) and comments;
+  * seat_evidence and combat_evidence are scanned from their REVIEW ROOTS
+    (every function that
     touches the review modules or a loaded ruleset) through every module
     -level function and constant they reach, and main.py from its review
     worker functions the same way; any local module either imports is
@@ -28,7 +29,8 @@ Within that reach it refuses:
   setting  a runtime setting read other than the operational switches, or
            the settings table named outside the one reader;
   env      an environment read other than the allowlisted keys;
-  pinned   a pinned bound whose value differs from its pin.
+  pinned   a pinned bound whose value differs from its pin (a large wire
+           layout is pinned by the sha256 of its literal value's repr).
 
 Modes:
   python backend/tools/review_guard.py tree <repo dir>
@@ -44,6 +46,7 @@ Exit 0 clean, 1 findings, 2 usage or a tree that could not be read.
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import os
 import re
@@ -52,9 +55,10 @@ import sys
 import tokenize
 
 API = "backend/api/"
-JUDGING = ("review_measures", "review_rules", "review_module", "review_module_runner")
-ROOTED = {"seat_evidence": None, "main": ("review_worker_loop", "review_rules_refresh_loop",
-                                          "_review_pass_line")}
+JUDGING = ("review_measures", "review_rules", "review_module", "review_module_runner",
+           "combat_measures")
+ROOTED = {"seat_evidence": None, "combat_evidence": None,
+          "main": ("review_worker_loop", "review_rules_refresh_loop", "_review_pass_line")}
 REVIEW_NAMES = {"rm", "rr", "_review_rules", "review_measures", "review_rules"}
 REVIEW_PARAMS = {"rs", "state", "ruleset"}
 # Plumbing a rooted function may import without it being followed: the
@@ -86,20 +90,35 @@ PINNED = {
     ("seat_evidence", "MARK_ROWS_PER_PASS"): 5000,
     ("seat_evidence", "DETAILS_MAX_BYTES"): 2048,
     ("seat_evidence", "COMPAT_ROWS_SHOWN"): 10,
+    ("combat_evidence", "GAME_EXPIRY_DAYS"): 14,
+    ("combat_evidence", "GAMES_PER_PASS"): 500,
     ("main", "REVIEW_PASS_S"): 600,
     ("main", "REVIEW_FIRST_PASS_S"): 90,
     ("main", "REVIEW_PURGE_EVERY_S"): 72000,
     ("main", "REVIEW_REFRESH_S"): 60,
 }
-SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge"}
-SETTINGS_READER = ("seat_evidence", "setting")
+# The combat wire layout (field bounds, list caps, tier order, enum codes):
+# pinned by the sha256 of repr(ast.literal_eval(value)). A value added to or
+# changed in it makes the digest differ, and the guard refuses it.
+PINNED_SHA = {
+    ("combat_measures", "COMBAT_WIRE"):
+        "fda942f62f14fed7fbe28eb41ae9fb330c1980de23cfe2425807d38198bdc7fd",
+}
+SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge",
+            "combat_evidence_accept", "combat_evidence_worker", "combat_evidence_purge"}
+SETTINGS_READERS = {("seat_evidence", "setting"), ("combat_evidence", "setting")}
 ENV_KEYS = {"SCR_REVIEW_ROOT", "SYSTEMROOT"}
 
 # Identifiers that carry a digit and decide nothing: match-row columns of the
-# two seats, their SQL aliases, digest and encoding names.
+# two seats, their SQL aliases, digest and encoding names, the combat wire's
+# own key names (a closed list) and its public vocabulary names (the dotted
+# b-family names).
 _SAFE_TEXT = re.compile(
     r"\bp[12]_\w+|\bplayer[12](?:_id)?\b|\b[ps][12]\b|sha256\b|\butf-8\b|\bint(?:32|64)\b"
-    r"|\bnoqa: ?[A-Z]+\d+(?:, ?[A-Z]+\d+)*")
+    r"|\bnoqa: ?[A-Z]+\d+(?:, ?[A-Z]+\d+)*"
+    r"|\bt0(?:_src)?\b|\bframe_p50_us\b|\ba1(?:s|p|m|n|sum)\b"
+    r"|\bp3(?:n|dp0|an0|dp1|an1|hm|self|top|tb|ht)\b|\bb5_(?:tot|s|o|h|c|r)\b|\b(?:s0|pid0|b[135])\b"
+    r"|\bb[1235](?:\.[a-z_]+)+")
 _STANDALONE = re.compile(r"(?<![\w.])[01](?![\w.])")
 _DIGIT = re.compile(r"\d")
 
@@ -169,6 +188,15 @@ class _Scan:
                 targets = top.targets if isinstance(top, ast.Assign) else [top.target]
                 names = [t.id for t in targets if isinstance(t, ast.Name)]
                 for n in names:
+                    if (self.mod, n) in PINNED_SHA:
+                        pinned_node = top.value
+                        try:
+                            digest = hashlib.sha256(
+                                repr(ast.literal_eval(top.value)).encode()).hexdigest()
+                        except ValueError:
+                            digest = None
+                        if digest != PINNED_SHA[(self.mod, n)]:
+                            self.add(top.lineno, "pinned")
                     if (self.mod, n) in PINNED:
                         pinned_node = top.value
                         try:
@@ -215,7 +243,7 @@ class _Scan:
                     t = v.decode("latin-1") if isinstance(v, bytes) else v
                     if text_bad(t):
                         self.add(node.lineno, "text")
-                    if "runtime_settings" in t and (self.mod, self._fn_of(node)) != SETTINGS_READER:
+                    if "runtime_settings" in t and (self.mod, self._fn_of(node)) not in SETTINGS_READERS:
                         self.add(node.lineno, "setting")
             elif isinstance(node, ast.JoinedStr):
                 pass  # its literal parts are Constants, checked above
