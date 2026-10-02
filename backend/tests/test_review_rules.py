@@ -206,6 +206,14 @@ def test_the_digest_is_framed_and_injective():
     c = rr.revision_digest({"rules.jsona": b"b", "selftest.json": b"c"})
     assert len({a, b, c}) == 3
     assert rr.revision_digest({"x": b""}) != rr.revision_digest({"x": b"", "y": b""})
+    # the frame itself, written out independently: domain tag, count, then per
+    # sorted path its 8-byte length, the path, the 8-byte content length, the content
+    import hashlib
+    files = {"selftest.json": b"{}", "rules.json": b"[1]", "data/x.json": b""}
+    h = hashlib.sha256(rr.DOMAIN + (3).to_bytes(8, "big"))
+    for p in sorted(files):
+        h.update(len(p).to_bytes(8, "big") + p.encode() + len(files[p]).to_bytes(8, "big") + files[p])
+    assert rr.revision_digest(files) == h.hexdigest()
 
 
 def test_the_vocabulary_must_be_exactly_the_entries_used(tmp_path):

@@ -439,11 +439,12 @@ def test_a3_absent_reads_absent_passes_evaluate_nothing_and_the_match_body_is_un
 # -- A8: shadow, then one posted flag; re-evaluation on a revision change -------
 
 def test_a8_shadow_then_posting_from_post_since_and_the_bot_prints_the_line(live, signing, revs):
+    new, old = "ranked_seva8_000001", "ranked_seva8_000002"
+
     async def go():
         sm = live.sm
         ids = await _players(sm, A8_A, A8_B)
         ta, tb = await _session(sm, A8_A), await _session(sm, A8_B)
-        new, old = "ranked_seva8_000001", "ranked_seva8_000002"
         mid_new = await _match(sm, ids, A8_A, A8_B, new + "_r8")
         mid_old = await _match(sm, ids, A8_A, A8_B, old + "_r8", minutes_ago=3 * 24 * 60)
         for key in (new, old):
@@ -632,6 +633,30 @@ def test_finding3_the_cursor_reaches_every_sitting_in_the_window_including_after
         {k["dedup_key"] for k in keys2}
     assert {k["rules_rev"] for k in keys3} == {revs.armed.ruleset.rev}
     assert cur[0]["rules_rev"] == revs.armed.ruleset.rev
+
+
+def test_finding3_a_failing_sitting_rule_keeps_the_dirty_rows_for_the_next_pass(live, revs, monkeypatch):
+    a, b = "1000000000000601", "1000000000000602"
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        await _step_sitting(sm, ids, a, b, 2, "e", created_seconds_ago=150)
+        rs = revs.shadow.ruleset
+        monkeypatch.setattr(rs, "sitting_statement",
+                            lambda rule, mode="dirty": ("SELECT * FROM sev_no_such_table", {}),
+                            raising=False)
+        failed = await se.sitting_pass(sm, revs.shadow, mark_limit=1000)
+        kept = await _scalar(sm, "SELECT count(*) FROM review_sitting_dirty")
+        monkeypatch.undo()
+        await _drain(sm, revs.shadow)
+        lo, hi = sorted([str(ids[a]), str(ids[b])])
+        found = await _scalar(sm, "SELECT count(*) FROM seat_evidence_findings WHERE scope = 'sitting' "
+                                  "AND rule_id = :r AND dedup_key LIKE :k", r=tk.ID_STEP, k="%s|%s|%%" % (lo, hi))
+        return failed, kept, found
+    failed, kept, found = live.run(go())
+    assert failed["rule_errors"] >= 1 and kept > 0, (failed, kept)
+    assert found == 1
 
 
 # -- retention and the compat outcome ------------------------------------------
