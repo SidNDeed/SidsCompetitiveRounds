@@ -514,6 +514,88 @@ def test_rate_limit_bypass_unchanged():
         assert p not in main._RATE_LIMIT_BYPASS
 
 
+# -- build round 2 M8: every credential lookup is charged to the limiter first --
+
+def _unissued(i):
+    """A well-formed operator key no row holds (each one a cache miss)."""
+    return "scrop1_" + "%043d" % i
+
+
+def _charges():
+    return sum(len(dq) for dq in main._RL_BUCKETS.values())
+
+
+def test_unissued_operator_keys_without_version_reach_429(env):
+    """A GET with no X-Mod-Version and a well-formed unissued operator key is
+    charged to the per-address bucket BEFORE the version gate's operator
+    lookup: up to the bucket limit each answers 426 after one lookup, past it
+    each answers 429 and the operator table is not read again."""
+    limit = main._RL_GLOBAL[0]
+    statuses = [_get(env, PUBLIC_PATH, version=None, operator=_unissued(i)).status_code
+                for i in range(limit + 10)]
+    assert statuses[:limit] == [426] * limit, statuses
+    assert statuses[limit:] == [429] * 10, statuses
+    assert env.stub.calls["operator"] == limit
+    assert env.calls["public"] == []
+
+
+def test_operator_exemption_charged_once(env):
+    """The version gate's charge is the request's ONE charge: a live key with
+    no version reaches the handler with one bucket entry, exactly as a request
+    with a version header does through rate_limit_gate alone."""
+    assert _get(env, PUBLIC_PATH, version=None, operator=OP_A).status_code == 200
+    assert _charges() == 1
+    assert _get(env, PUBLIC_PATH).status_code == 200
+    assert _charges() == 2
+
+
+def test_internal_paths_keep_auth_before_parse(env):
+    """/api/v1/internal/* without the internal key is refused by
+    rate_limit_gate before anything else runs; an operator key on it is never
+    looked up and charges nothing."""
+    r = _get(env, "/api/v1/internal/zz-verified-reads", version=None, operator=_unissued(1))
+    assert r.status_code == 403 and r.json() == {"error": "forbidden"}
+    assert env.stub.calls["operator"] == 0 and _charges() == 0
+
+
+def test_bypassed_route_lookups_charged_at_miss(env, monkeypatch):
+    """A gated route the limiter never charges (one in _RATE_LIMIT_BYPASS):
+    a session lookup that would read the database is charged first, so past
+    the bucket an unknown token is not looked up (429 in enforce; counted
+    lookup_limited and passed in log), while a cached valid session is not
+    charged at all."""
+    monkeypatch.setattr(main, "_RATE_LIMIT_BYPASS", main._RATE_LIMIT_BYPASS | {PUBLIC_PATH})
+    limit = main._RL_GLOBAL[0]
+    env.set_mode("enforce")
+    st = [_get(env, PUBLIC_PATH, session="unknown-token-%05d" % i).status_code
+          for i in range(limit + 5)]
+    assert st[:limit] == [401] * limit and st[limit:] == [429] * 5, st
+    assert env.stub.calls["session"] == limit
+    env.set_mode("log")
+    read_gate.census_reset()
+    assert _get(env, PUBLIC_PATH, session="unknown-token-last").status_code == 200
+    assert env.stub.calls["session"] == limit
+    assert K.census_rows(route=PUBLIC_PATH, **{"class": "lookup_limited"})
+    env.set_mode("enforce")
+    main._RL_BUCKETS.clear()
+    for _ in range(limit + 20):
+        assert _get(env, PUBLIC_PATH, session=GOOD).status_code == 200
+    assert _charges() == 1 and env.stub.calls["session"] == limit + 1
+
+
+def test_socket_operator_lookup_charged(env):
+    """The chat socket passes no http middleware: its count's operator lookup
+    is charged to the same bucket, so past it no lookup runs."""
+    env.set_mode("log")
+    limit = main._RL_GLOBAL[0]
+    for i in range(limit + 3):
+        with env.client.websocket_connect("/api/v1/ws/chat", headers={
+                "X-Mod-Version": K.LIVE_VERSION, "X-Operator-Key": _unissued(i)}) as ws:
+            ws.receive_text()
+    assert env.stub.calls["operator"] == limit
+    assert K.census_rows(route=read_gate.SOCKET_TEMPLATE, **{"class": "mod_no_session"})
+
+
 # -- M5 / requirement 26: the chat socket is counted --------------------------
 
 def test_ws_connect_counted_by_class(env):

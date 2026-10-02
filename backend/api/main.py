@@ -6370,9 +6370,34 @@ async def rate_limit_gate(request: Request, call_next):
         return await call_next(request)   # authorized bot — exempt from RL
     if (not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS:
         return await call_next(request)
+    refusal = _rl_charge(request)
+    if refusal is not None:
+        return refusal
+    return await call_next(request)
+
+
+def _rl_charge(request, force: bool = False):
+    """Charge this request (or chat socket) to its per-address bucket, at most
+    ONCE per connection: the answer is None when it may proceed, else the
+    refusal response (413, 429, or the motion latch's 503). A connection
+    already charged is not charged again, so the version gate's charge ahead
+    of an operator-key lookup and rate_limit_gate's own charge are one charge.
+
+    rate_limit_gate calls it for every /api/v1/ path outside
+    _RATE_LIMIT_BYPASS. `force` charges a path in that bypass too: the version
+    gate passes it before the operator-key exemption lookup, and the read gate
+    (read_gate.LOOKUP_CHARGE) before a credential lookup that would read the
+    database on a connection nothing has charged. A valid internal key is
+    never charged, as before."""
+    state = request.state
+    if getattr(state, "rl_charged", False):
+        return None
+    path = request.url.path
+    if not force and ((not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS):
+        return None
     internal_key = request.headers.get("X-Internal-Key")
     if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
-        return await call_next(request)   # bot is exempt
+        return None   # bot is exempt
     # Cheap body-size gate (header only; the proxy enforces the real limit).
     cl = request.headers.get("content-length")
     if cl:
@@ -6428,6 +6453,7 @@ async def rate_limit_gate(request: Request, call_next):
             headers={"Retry-After": str(int(window))},
         )
     dq.append(now)
+    state.rl_charged = True
     # Periodic prune of idle buckets so the dict can't grow unbounded.
     if now - _RL_LAST_PRUNE[0] > 60:
         _RL_LAST_PRUNE[0] = now
@@ -6439,7 +6465,13 @@ async def rate_limit_gate(request: Request, call_next):
                 del _RL_BUCKETS[k]
         for k in [k for k, until in _RL_MOTION_LATCH.items() if until <= now]:
             del _RL_MOTION_LATCH[k]
-    return await call_next(request)
+    return None
+
+
+# Verified reads: the read gate charges a credential lookup that would read the
+# database on a connection nothing has charged yet (a route in
+# _RATE_LIMIT_BYPASS, the chat socket) to the same per-address buckets.
+read_gate.LOOKUP_CHARGE = lambda conn: _rl_charge(conn, force=True) is None
 
 
 @app.middleware("http")
@@ -6484,6 +6516,15 @@ async def version_gate(request: Request, call_next):
         # its route is WRITE_ON_GET, PLAYER or BOT_ONLY. Every other request
         # with no version, an unissued or revoked key included, gets the 426
         # below exactly as before. The verdict rides request.state to the gate.
+        # The per-address limiter charges the request BEFORE that lookup (it
+        # is the request's one charge: rate_limit_gate does not charge it
+        # again), so repeated unissued keys answer 429 and stop reaching the
+        # operator table. /internal/ paths and a valid internal key returned
+        # above, so the internal key is still checked before any body is read.
+        if request.method == "GET" and request.headers.get("X-Operator-Key"):
+            refusal = _rl_charge(request, force=True)
+            if refusal is not None:
+                return refusal
         if await read_gate.operator_version_exempt(request, app):
             return await call_next(request)
         if REQUIRE_MOD_VERSION:

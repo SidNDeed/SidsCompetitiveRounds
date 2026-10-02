@@ -41,12 +41,18 @@ Classes, and what the gate requires of each:
 ANY valid credential wins: the gate evaluates every presented credential the
 class accepts and passes if one is valid, so an invalid or expired header
 never shadows a valid one. With none valid, in this order: a lookup that
-raised answers 503 read_gate_unavailable; a session token unknown to the
-STANDBY answers 503 session_replication_pending (the mint lands on the
-primary and replication may not have carried it yet); otherwise 401.
+raised answers 503 read_gate_unavailable; a lookup the per-address limiter
+refused answers 429 rate_limited; a session token unknown to the STANDBY
+answers 503 session_replication_pending (the mint lands on the primary and
+replication may not have carried it yet); otherwise 401.
 
 Lookups run on their own short session (database.async_session), never the
-handler's, so a failed lookup cannot abort the handler's transaction.
+handler's, so a failed lookup cannot abort the handler's transaction. A
+lookup that would read the database (a cache miss) is charged to the
+per-address rate limiter first when the request or socket has not been
+charged yet (LOOKUP_CHARGE, installed by main; on every route behind
+rate_limit_gate the request is already charged and this is a no-op). A
+refused charge is the verdict `limited`: no lookup runs.
 Positive verdicts are cached: a session until min(now + 60 s, its
 expires_at), an operator key for 60 s; negatives never. A revoked operator
 key or a deleted session therefore keeps passing on a box for at most 60 s
@@ -476,6 +482,28 @@ _OPERATOR_SQL = ("SELECT id, operator_name, slot FROM api_operator_keys "
 
 _cred_cache: "OrderedDict[str, tuple[float, object]]" = OrderedDict()
 
+# The per-address rate limiter's charge, installed by main at import:
+# LOOKUP_CHARGE(conn) -> True when the lookup may read the database. It charges
+# a request or socket the limiter has not charged yet (a route in
+# main._RATE_LIMIT_BYPASS, the version gate's operator exemption, the chat
+# socket) and is a no-op for one already charged. None (this module alone, as
+# in unit tests of the verifiers) charges nothing.
+LOOKUP_CHARGE = None
+
+
+def _lookup_allowed(conn) -> bool:
+    """Charge `conn` before a database lookup; False when the limiter refused
+    it. A charge that raises lets the lookup run: the limiter is an
+    availability bound, and its own failure must not refuse a valid read."""
+    hook = LOOKUP_CHARGE
+    if hook is None or conn is None:
+        return True
+    try:
+        return bool(hook(conn))
+    except Exception as ex:
+        _log_once("lookup-charge-error", f"[READ-GATE] lookup charge failed: {ex}")
+        return True
+
 
 def _cache_get(key: str):
     hit = _cred_cache.get(key)
@@ -521,10 +549,11 @@ def internal_key_valid(presented) -> bool:
     return hmac.compare_digest(str(presented), expected)
 
 
-async def verify_session(token):
-    """("absent"|"bad"|"miss"|"error"|"valid", None). `miss` = no row with
-    this hash; `bad` = a row that is expired or not Steam-verified, or a
-    token no mint could have issued."""
+async def verify_session(token, conn=None):
+    """("absent"|"bad"|"miss"|"error"|"limited"|"valid", None). `miss` = no
+    row with this hash; `bad` = a row that is expired or not Steam-verified,
+    or a token no mint could have issued; `limited` = the per-address limiter
+    refused `conn` before the lookup, so none ran."""
     if not token:
         return "absent", None
     if len(token) > _MAX_CREDENTIAL_LEN:
@@ -532,6 +561,8 @@ async def verify_session(token):
     key = "s:" + _sha(token)
     if _cache_get(key) is not None:
         return "valid", None
+    if not _lookup_allowed(conn):
+        return "limited", None
     try:
         async with database.async_session() as s:
             row = (await s.execute(text(_SESSION_SQL), {"th": key[2:]})).mappings().first()
@@ -549,9 +580,9 @@ async def verify_session(token):
     return "valid", None
 
 
-async def verify_operator_key(key_value):
-    """("absent"|"bad"|"error"|"valid", payload) where payload is
-    (id, slot, operator_name) for a live key."""
+async def verify_operator_key(key_value, conn=None):
+    """("absent"|"bad"|"error"|"limited"|"valid", payload) where payload is
+    (id, slot, operator_name) for a live key; `limited` as verify_session."""
     if not key_value:
         return "absent", None
     if (len(key_value) > _MAX_CREDENTIAL_LEN
@@ -561,6 +592,8 @@ async def verify_operator_key(key_value):
     hit = _cache_get(key)
     if hit is not None:
         return "valid", hit[1]
+    if not _lookup_allowed(conn):
+        return "limited", None
     try:
         async with database.async_session() as s:
             row = (await s.execute(text(_OPERATOR_SQL), {"kh": key[2:]})).mappings().first()
@@ -601,7 +634,8 @@ _SOURCES_CAP = 4096
 _AGENTS_CAP = 50
 _SOURCE_HOURS_KEPT = 48
 UNVERIFIED_CLASSES = frozenset({"bad_session", "bad_operator_key", "replication_pending",
-                                "lookup_error", "mod_no_session", "other", "mode_unknown"})
+                                "lookup_error", "lookup_limited", "mod_no_session", "other",
+                                "mode_unknown"})
 
 _census: dict = {}
 _sources: dict = {}
@@ -670,14 +704,15 @@ def _key_id(payload) -> str:
 
 
 class _Evaluation:
-    __slots__ = ("valid_class", "key_id", "operator_payload", "error", "standby_miss",
-                 "bad_session", "bad_operator")
+    __slots__ = ("valid_class", "key_id", "operator_payload", "error", "limited",
+                 "standby_miss", "bad_session", "bad_operator")
 
     def __init__(self):
         self.valid_class = None
         self.key_id = ""
         self.operator_payload = None
         self.error = False
+        self.limited = False
         self.standby_miss = False
         self.bad_session = False
         self.bad_operator = False
@@ -690,7 +725,7 @@ async def _operator_verdict(request):
     stored = getattr(request.state, "read_gate_operator", None)
     if presented and stored is not None and stored[0] == _sha(presented):
         return stored[1], stored[2]
-    return await verify_operator_key(presented)
+    return await verify_operator_key(presented, request)
 
 
 async def evaluate(request, accept_operator: bool) -> _Evaluation:
@@ -702,12 +737,14 @@ async def evaluate(request, accept_operator: bool) -> _Evaluation:
     if internal_key_valid(headers.get("X-Internal-Key")):
         ev.valid_class = "internal"
         return ev
-    verdict, _ = await verify_session(headers.get("X-Session-Token"))
+    verdict, _ = await verify_session(headers.get("X-Session-Token"), request)
     if verdict == "valid":
         ev.valid_class = "session"
         return ev
     if verdict == "error":
         ev.error = True
+    elif verdict == "limited":
+        ev.limited = True
     elif verdict == "miss":
         if REPLICA_NODE:
             ev.standby_miss = True
@@ -725,6 +762,9 @@ async def evaluate(request, accept_operator: bool) -> _Evaluation:
     elif over == "error":
         if accept_operator:
             ev.error = True
+    elif over == "limited":
+        if accept_operator:
+            ev.limited = True
     elif over == "bad":
         ev.bad_operator = True
     return ev
@@ -735,6 +775,8 @@ def _unverified_class(ev: _Evaluation, version_present: bool) -> str:
         return "operator:" + ev.operator_payload[2]
     if ev.error:
         return "lookup_error"
+    if ev.limited:
+        return "lookup_limited"
     if ev.standby_miss:
         return "replication_pending"
     if ev.bad_session:
@@ -747,6 +789,8 @@ def _unverified_class(ev: _Evaluation, version_present: bool) -> str:
 def _refusal_for(ev: _Evaluation, cls: str) -> HTTPException:
     if ev.error:
         return _refuse(503, "read_gate_unavailable", retry_after=5)
+    if ev.limited:
+        return _refuse(429, "rate_limited", retry_after=10)
     if ev.standby_miss:
         return _refuse(503, "session_replication_pending", retry_after=2)
     if ev.bad_session:
@@ -866,7 +910,7 @@ async def operator_version_exempt(request, app) -> bool:
     template = match_template(app, request.scope)
     if template is None or route_class(template) in _NO_OPERATOR_VERSION_EXEMPTION:
         return False
-    verdict, payload = await verify_operator_key(presented)
+    verdict, payload = await verify_operator_key(presented, request)
     request.state.read_gate_operator = (_sha(presented), verdict, payload)
     return verdict == "valid"
 
@@ -888,7 +932,7 @@ async def count_socket(ws) -> None:
         elif headers.get("x-session-token"):
             cred = "session"
         else:
-            verdict, payload = await verify_operator_key(headers.get("x-operator-key"))
+            verdict, payload = await verify_operator_key(headers.get("x-operator-key"), ws)
             if verdict == "valid":
                 cred, key_id = "operator:" + payload[2], _key_id(payload)
             else:
