@@ -135,7 +135,8 @@ def test_point_end_lines_and_saw_bracket():
     src = _read(POISON)
     patch = src[src.index("internal static class PointEndEvidencePatch") - 200:]
     assert '[HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound"' in patch
-    assert "PointEvidence.PointEnd();" in _member(src, "internal static class PointEndEvidencePatch")
+    # each postfix step runs inside its own guard (poison V4 B7)
+    assert "HookGuard.Run(() => PointEvidence.PointEnd());" in _member(src, "internal static class PointEndEvidencePatch")
     saw = _member(src, "internal static class SawPointEvidencePatch")
     assert "PointEvidence.SawBefore();" in saw and "PointEvidence.SawAfter();" in saw
     assert "[HarmonyFinalizer]" in saw and "return __exception;" in saw
@@ -227,7 +228,8 @@ def test_hit_evidence_flushes_per_point_and_per_game():
     over = _member(ev, "internal static void GameOverCheck(GM_ArmsRace gm)")
     assert "gm.p1Rounds >= gm.roundsToWinGame || gm.p2Rounds >= gm.roundsToWinGame" in over
     assert "HitEvidence.GameEnd(_point);" in over
-    assert "PointEvidence.GameOverCheck(__instance);" in _member(poison, "internal static class PointEndEvidencePatch")
+    assert "HookGuard.Run(() => PointEvidence.GameOverCheck(__instance));" in \
+        _member(poison, "internal static class PointEndEvidencePatch")
     src = _read(HIT)
     start = _member(src, "internal static class HitEvidence_StartGamePatch")
     assert "HitEvidence.GameEnd(PointEvidence.Point);" in start
