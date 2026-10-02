@@ -190,6 +190,7 @@ NativeUI.cs	NativeUI	RenderFfaBettingSection	players	N	JSON record field
 NetworkReplicaDiagnostics.cs	NetworkReplicaSpectatorSnapshotPatch	Postfix	MasterClient	N	diagnostics	
 NetworkReplicaDiagnostics.cs	NetworkReplicaSpectatorSnapshotPatch	Postfix	Sender	N	diagnostics	
 NetworkSeatTelemetry.cs	NetworkSeatTelemetry	SampleEligibleKey	ActiveFighters	N	telemetry	
+PeerBuild.cs	PeerBuild	Tick	PlayerListOthers	N	the [PEER-BUILD] log line only: each remote seat's published property keys, read for the log and never for a count, a send or a verdict	
 PerfPatches.cs	PlayerManagerSetInputActiveNullGuard	Prefix	players	R	vanilla input loop with a null guard; input drives only the local body	
 PlayerColorCosmetic.cs	PlayerColorCosmetic	DelayedApplyAll	ActiveFighters	N	cosmetic colour	
 PlayerColorCosmetic.cs	PlayerColorCosmetic	DelayedApplyAll	players	N	cosmetic colour	
@@ -237,6 +238,9 @@ Plugin.cs	OvtExtraPickPatch	Prefix	players	N	OVT rooms
 Plugin.cs	PlayerAssigner_CreatePlayer_2v2_Patch	Prefix	players	N	2v2 body creation	
 Plugin.cs	QuickplayChurnAbandonGuardPatch	Prefix	ActiveFighterCount	N	quickplay rooms	
 Plugin.cs	QuickplayChurnFreezePatch	Postfix	ActiveFighterCount	N	quickplay rooms	
+PoisonSync.cs	PointEvidence	PointEnd	players	N	the [HP-POINT-END] log line only: each body's health at the point's end, printed and never read for a count, a send or a verdict	
+PoisonSync.cs	PointEvidence	SawAfter	players	N	the [SAW-POINT] log tally only: health each body lost across a saw frame, printed at the point's end and never read for a count, a send or a verdict	
+PoisonSync.cs	PointEvidence	SawBefore	players	N	the [SAW-POINT] log tally's per-frame health snapshot, read only by SawAfter	
 PoisonSync.cs	PoisonSync	Apply	players	V	attacker lookup for credit; the damage reaches the DoDamage prefix (surface 3)	VanillaFixes.cs|DamageRulesGate|BeforeDoDamage
 PoisonSync.cs	PoisonSync	OnEvent	Sender	R	identity check: only the victim's owner speaks for the victim (PoisonSync.cs:854-860), so a quarantined sender speaks only for its own quarantined body, whose damage no count or credit reads (surfaces 3 and 6)	
 PoisonSync.cs	PoisonSync	RawNonSpectatorCount	PlayerList	R	whole-room predicate over every actor (counting a quarantined one is the stricter side)	
