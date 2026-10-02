@@ -183,9 +183,12 @@ def check_claim_only_from_entered_poison(src):
 def check_claim_decided_before_start(src):
     ps = _code(src[PS])
     on = _code(_member(src[PS], "private static void OnClaim("))
-    decide = on.index("string result = _claims.Handle(sender, claimId, now, () =>")
-    gate = on.index('outcome = result == "started" ? StartClaim(claimId, vv, poisons) : ClaimLine.Outcome(result);')
+    assert "}, claimId => StartClaim(claimId, vv, poisons));" in on, "a started claim is not started by StartClaim"
+    rcv = _code(_member(src[CORE], "internal void Receive("))
+    decide = rcv.index("string result = Handle(sender, claimId, nowMs, () =>")
+    gate = rcv.index('outcome = result == "started" ? start(claimId) : ClaimLine.Outcome(result);')
     assert decide < gate, "a claim can start poison before the victim's decision"
+    assert rcv.count("start(") == 1, "a claim can start other than on Handle's \"started\""
     assert "DoHitEffect(" not in on
     assert len(re.findall(r"\bStartClaim\(", ps)) == 2, "StartClaim has another caller"
     start = _code(_member(src[PS], "private static string StartClaim("))
@@ -206,12 +209,22 @@ def check_every_arm_one_terminal_line(src):
     assert "try { Plugin.Log.LogInfo(ClaimLine.Arm(LocalActor(), claimId, projView, victimView, outcome)); } catch { }" in arm
     assert arm.count("return") == 1 and arm.rstrip("} \n").endswith("return claimId;"), "an arm can leave before its line"
     assert "catch (Exception ex)" in arm and 'outcome = ClaimLine.Outcome(fault);' in arm, "a faulting arm has no line"
+    # fix pass 2 (M1, M2): the received claim's line is ClaimCore.Receive's, written by DrainClaimLines
     on = _code(_member(src[PS], "private static void OnClaim("))
-    assert on.count("Plugin.Log.LogInfo(") == 1
-    assert "try { Plugin.Log.LogInfo(ClaimLine.Recv(sender, claimId, projView, victimView, outcome)); } catch { }" in on
-    assert "return" not in on.replace("return c;", ""), "a claim can leave before its line"
-    assert 'outcome = ClaimLine.Outcome("malformed");' in on, "a malformed claim has no line"
-    assert 'catch (Exception ex) { outcome = ClaimLine.Outcome("fault:" + ex.GetType().Name); }' in on
+    assert "_claims.Receive(sender, a, NowMs(), c =>" in on and "DrainClaimLines();" in on
+    assert "return" not in on and "Plugin.Log" not in on, "OnClaim can leave before, or write beside, its line"
+    assert on.index("_claims.Receive(") < on.index("DrainClaimLines();")
+    drain = _code(_member(src[PS], "private static void DrainClaimLines("))
+    assert "foreach (string line in _claims.Lines) Plugin.Log.LogInfo(line);" in drain
+    rcv = _code(_member(src[CORE], "internal void Receive("))
+    assert rcv.count("Lines.Add(") == 1, "an admitted claim has other than one line"
+    assert rcv.rstrip("} \n").endswith("Lines.Add(ClaimLine.Recv(sender, claimId, proj, victim, outcome));"), \
+        "the line is not Receive's last step"
+    assert rcv.replace("return c;", "").count("return") == 1, "a claim can leave Receive before its line"
+    assert rcv.lstrip().split("{", 1)[1].lstrip().startswith(
+        "if (!AdmitRate(sender, nowMs)) { Refuse(sender, nowMs, a); return; }"), "work precedes the rate admission"
+    assert 'outcome = ClaimLine.Outcome("malformed");' in rcv, "a malformed claim has no line"
+    assert 'catch (Exception ex) { outcome = ClaimLine.Outcome("fault:" + ex.GetType().Name); }' in rcv
     for gone in ("ClaimDropLine", "_claimDropLines", "_claimDropSuppressed", "ClaimDropLineCap"):
         assert gone not in ps, "a per-line cap can drop a claim's tuple: " + gone
 
@@ -332,8 +345,9 @@ def check_replay_wiring(src):
     assert "else { PointRetainer.Unmark(k, actor); failed++; }" in rp, "a failed replay leaves the actor marked"
     dot = _code(_member(src[PS], "internal static IEnumerator AuthoritativeDot("))
     assert "ov = _retainer.Begin(viewId, stream, _ledger.PointEpoch, epoch, lifeTargets, presentAtStart," in dot
-    assert "if (ov == null) v3 = false;" in dot and "_retainer.Drop(ov);" in dot
-    assert "if (ov != null && sent) PointRetainer.Note(ov, tick, blocked);" in dot
+    assert "if (ov == null) v3 = false;" in dot and "var send = new StreamSend(viewId, ov);" in dot
+    assert "if (!send.AfterLife(_retainer, lifeSent))" in dot, "a stream whose LIFE failed stays retained"
+    assert "send.AfterTick(tick, blocked, sent);" in dot, "the retained state names ticks that did not go out"
     hdr = _code(_member(src[PS], "private static void OnEvent("))
     assert hdr.index("NoteTodayPath(viewId, streamId);") < hdr.index("int reviveTs;"), "today's header is not recorded"
     rev = _code(_member(src[PS], "internal static void OnLocalRevive("))
@@ -348,7 +362,156 @@ def check_unstamped_break(src):
     ps = _code(src[PS])
     assert 'EpochBroken("point-over without its RPC stamp", -1);' in ps
     assert 'EpochBroken("Phoenix without its RPC stamp", v != null ? v.ViewID : -1);' in ps
-    assert len(re.findall(r"\bEpochBroken\(", ps)) == 3
+    # the declaration and the seven fence-failure sites check_fence_failure_retires names
+    assert len(re.findall(r"\bEpochBroken\(", ps)) == 8
+
+
+# -- fix pass 2 -----------------------------------------------------------------------
+
+def check_header_failure_retires(src):
+    """H1 and the send sweep: a stream whose header was not sent, or whose
+    seat retired it, sends nothing more -- no tick, no summary, no replay."""
+    dot = _code(_member(src[PS], "internal static IEnumerator AuthoritativeDot("))
+    assert "if (!send.AfterHeader(_retainer, sent)) _openV3.Remove(openKey);" in dot, "a failed header is not retired"
+    assert dot.index("if (!send.MaySendTick)") < dot.index("damageDealt += dpt;") < dot.index("sent = Raise("), \
+        "a retired stream can raise another tick"
+    stop = dot[dot.index("if (!send.MaySendTick)"):dot.index("damageDealt += dpt;")]
+    assert "yield break;" in stop and "CloseV3(" not in stop, "a retired stream is closed with a summary"
+    close = _code(_member(src[PS], "private static void CloseV3("))
+    assert "if (k == null || s.Retired) return;" in close, "a retired stream gets a summary"
+    eb = _code(_member(src[PS], "private static void EpochBroken("))
+    assert eb.index('RetireOpenV3(view, "epoch-broken");') < eb.index("if (_epochBroken) return;"), \
+        "an unrecorded fence leaves this seat's own open streams sending"
+    reset = _code(_member(src[PS], "private static void ResetForRoomExit("))
+    assert reset.index('RetireOpenV3(-1, "room-exit");') < reset.index("_openV3.Clear();")
+
+
+FENCE_FINALIZERS = (
+    ("PointEndEvidencePatch", "private static Exception Threw(Exception __exception)",
+     'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");'),
+    ("PoisonReviveFencePatch", "private static Exception Threw(HealthHandler __instance, Exception __exception)",
+     'if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance);'),
+    ("PoisonPhoenixBoundaryPatch", "private static Exception Threw(HealthHandler __instance, Exception __exception)",
+     'if (__exception != null) PoisonSync.FenceNotRecorded("Phoenix threw", __instance);'),
+)
+
+
+def check_fence_failure_retires(src):
+    """H2: a fence this seat could not record -- no stamp, a fault while
+    recording it, a view lookup fault, or the fenced method throwing --
+    retires every possibly ended v3 state before next-life health moves."""
+    ps = _code(src[PS])
+    nb = _code(_member(src[PS], "internal static void NotePointBoundary("))
+    assert "recorded = _ledger.Fence(-1, () =>" in nb
+    assert 'if (!stamped) EpochBroken("point-over without its RPC stamp", -1);' in nb
+    assert 'else EpochBroken("point-over fence not recorded: fault", -1);' in nb
+    ph = _code(_member(src[PS], "internal static void NotePhoenixBoundary("))
+    assert "recorded = _ledger.Fence(vid, () =>" in ph
+    assert 'if (!looked) EpochBroken("Phoenix fence not recorded: view lookup fault", -1);' in ph
+    rev = _code(_member(src[PS], "internal static void OnLocalRevive("))
+    assert "recorded = _ledger.Fence(viewId, () => { _ledger.OnRevive(viewId); return true; });" in rev
+    assert 'if (!recorded) EpochBroken("revive fence not recorded: fault", viewId);' in rev
+    assert rev.index("_ledger.Fence(") < rev.index("EpochBroken(") < rev.index("ForgetTodayPath(")
+    for sig in ("internal static void FenceNotRecorded(string why, HealthHandler hh)",
+                "internal static void FenceNotRecorded(string why)"):
+        assert "EpochBroken(why, " in _code(_member(src[PS], sig))
+    after = _code(_member(src[PS], "private static void AfterRevive("))
+    assert 'if (id == -2) PoisonSync.FenceNotRecorded("revive fence not recorded: view lookup fault");' in after
+    assert after.index("int id = -2;") < after.index("id == -2") < after.index("if (id < 0) return;")
+    for cls, sig, line in FENCE_FINALIZERS:
+        body = _member(_member(ps, "internal static class " + cls), sig)
+        assert "[HarmonyFinalizer]" in _member(ps, "internal static class " + cls), cls + " has no finalizer"
+        assert line in body, cls + ": a throwing method leaves its fence unrecorded and nothing retired"
+        assert "return __exception;" in body
+
+
+# V3PatchesLive must name exactly the patches v3 depends on, derived from the
+# code: every Harmony patch class whose body calls PoisonSync, or whose member
+# PoisonSync calls. A class here is a candidate whose absence changes nothing
+# v3 applies, with the reason.
+V3_EXEMPT = {
+    "PoisonGhostPatch": "returns before acting for every capable victim (PoisonSync.CapableVictim), "
+                        "and v3 streams exist only for capable victims",
+    "StaleProjectileSweepPatch": "NoteRoundBoundary feeds ShadowDot's silence-report window only; no health",
+    "EndScreenKillPatch": "v3 reads RefusesNow() as a state predicate (LiveReplica keeps a fighter's regular "
+                          "tick out of the refusal window); its prefix's attachment does not change that read",
+}
+
+
+CLASS_DECL = re.compile(r"^( *)(?:(?:internal|public|private)\s+)?(?:(?:static|sealed|partial)\s+)*class\s+(\w+)\b", re.M)
+
+
+def _classes(text):
+    """{name: (attributes above it, body)} for every class declared in the
+    text; a class ends at the first line holding only its own indentation
+    and a closing brace (the plugin's layout)."""
+    out = {}
+    for m in CLASS_DECL.finditer(text):
+        ind = m.group(1)
+        end = text.find("\n" + ind + "}", m.end())
+        assert end > 0, "no end for class " + m.group(2)
+        prev = text.rfind("\n" + ind + "}", 0, m.start())
+        out[m.group(2)] = (text[max(prev, 0):m.start()], text[m.start():end + len(ind) + 2])
+    return out
+
+
+def _v3_dependencies(src):
+    """The Harmony patch classes v3 depends on, from the code: every patch
+    class whose body calls PoisonSync, or whose member PoisonSync calls."""
+    ps_body = _classes(_code(src[PS]))["PoisonSync"][1]
+    deps = {}
+    for f in sorted(src):
+        text = _code(src[f])
+        if "class " not in text:
+            continue
+        for name, (head, body) in _classes(text).items():
+            if name == "PoisonSync" or "[HarmonyPatch" not in head + body:
+                continue
+            if "PoisonSync." in body or re.search(r"\b%s\.\w+" % re.escape(name), ps_body):
+                deps[name] = body
+    return deps
+
+
+def _v3_term(name, body):
+    cleanup = body[body.index("[HarmonyCleanup]"):] if "[HarmonyCleanup]" in body else ""
+    m = re.findall(r"PoisonSync\.(\w+) = true;", cleanup)
+    if m:
+        assert re.search(r"if \(exception == null\)\s*\{?\s*PoisonSync\.%s = true;" % m[0], cleanup), \
+            name + " records its flag on a failed attachment"
+        assert len(m) == 1, name + " sets more than one v3 flag"
+        return m[0]
+    m = re.findall(r'return VanillaFixSupport\.Cleanup\("(\w+)", exception\);', body)
+    assert len(m) == 1, name + " is a v3 dependency whose attachment nothing records"
+    return 'VanillaFixSupport.IsAttached("%s")' % m[0]
+
+
+def check_v3_live_names_every_dependency(src):
+    deps = _v3_dependencies(src)
+    for name in V3_EXEMPT:
+        assert name in deps, "a stale exemption: " + name
+    want = {_v3_term(n, b): n for n, b in deps.items() if n not in V3_EXEMPT}
+    live = _code(_member(src[PS], "internal static bool V3PatchesLive"))
+    terms = [t.strip() for t in live[live.index("return ") + 7:live.index(";")].split("&&")]
+    assert sorted(terms) == sorted(want), "V3PatchesLive names %s; v3 depends on %s" % (sorted(terms), sorted(want))
+    ps = _code(src[PS])
+    missing = _code(_member(src[PS], "private static string V3PatchesMissing("))
+    for t in terms:
+        if not t.startswith("VanillaFixSupport."):
+            assert ps.count("PoisonSync.%s = true;" % t) == 1, t + " is not set by exactly one cleanup"
+        assert "if (!%s) m.Add(" % t in missing, "the boot line does not name a missing " + t
+    stage = _member(src[PS], "internal static void StageCapability(")
+    assert '"; v3 patches missing: " + V3PatchesMissing()' in stage, "a failed v3 attachment is not seen"
+
+
+def check_claim_dispatch_terminal(src):
+    """M1: every current-protocol claim the dispatcher receives reaches
+    OnClaim, a truncated one included (ClaimCore.Receive gives it its line)."""
+    ev = _code(_member(src[PS], "private static void OnEvent("))
+    head = ev[:ev.index("if (kind == TypeClaim) { OnClaim(e.Sender, a); return; }")]
+    exits = [" ".join(l.split()) for l in head.splitlines() if "return" in l]
+    assert exits == ["if (e.Code != EventCode) return;", "if (a == null || a.Length < 2) return;",
+                     "if (!(a[0] is byte) || !(a[1] is byte)) return;", "if ((byte)a[1] != Protocol) return;"], \
+        "a claim can leave the dispatcher before OnClaim: %s" % exits
 
 
 def check_silent_arm(src):
@@ -365,6 +528,8 @@ CHECKS = {f.__name__: f for f in (
     check_claim_only_from_entered_poison, check_claim_decided_before_start, check_every_arm_one_terminal_line,
     check_funnel_is_closed, check_shared_predicates, check_epoch_wire, check_flush_on_every_stop,
     check_evidence_tags, check_point_binding, check_replay_wiring, check_unstamped_break, check_silent_arm,
+    check_header_failure_retires, check_fence_failure_retires, check_v3_live_names_every_dependency,
+    check_claim_dispatch_terminal,
 )}
 
 # (check, file, old, new): one named mutation per check that must turn it red.
@@ -380,7 +545,7 @@ MUTANTS = {
                                              "if (f == null || vv.IsMine) return;"),
     "check_claim_decided_before_start": (PS, "return _claims.TryStart(ph.GetInstanceID(), vv.ViewID, StartPath.Broadcast);",
                                          "return true;"),
-    "check_every_arm_one_terminal_line": (PS, 'outcome = ClaimLine.Outcome("malformed");', "return;"),
+    "check_every_arm_one_terminal_line": (CORE, 'outcome = ClaimLine.Outcome("malformed");', "return;"),
     "check_funnel_is_closed": (PS, "            if (DamageRulesGate.Refuses(hh, FindPlayer(rec.AttackerId))) return;\n",
                                "            hh.DoDamage(Vector2.zero, Vector2.zero, Color.white);\n"),
     "check_shared_predicates": (PS, "if (!RoomActors.LocalIsSpectator && EndScreenKillPatch.RefusesNow()) return false;",
@@ -389,8 +554,8 @@ MUTANTS = {
                          "attackerId, lethal, (byte)damageSource, blocked, _nextSeq++, epoch.Ts, epoch.Set\n                    });"),
     "check_flush_on_every_stop": (PS, "                if (v != null) PoisonSync.FlushOpenV3(v.ViewID);\n            });\n        }",
                                   "            });\n        }"),
-    "check_evidence_tags": (PS, "Plugin.Log.LogInfo(ClaimLine.Recv(sender,",
-                            "Plugin.Log.LogInfo(ClaimLine.Recv(PhotonNetwork.LocalPlayer.NickName.Length,"),
+    "check_evidence_tags": (PS, "foreach (string line in _claims.Lines) Plugin.Log.LogInfo(line);",
+                            "foreach (string line in _claims.Lines) Plugin.Log.LogInfo(line + PhotonNetwork.LocalPlayer.NickName);"),
     "check_point_binding": (PS, "if (_inbox.Take(viewId, streamId, out epoch) && AcceptNewV3(epoch))",
                             "if (_inbox.Take(viewId, streamId, out epoch))"),
     "check_replay_wiring": (PS, "if (_act.OnAck(sender, (int)a[3], (int)a[2])) ReplayTo(sender);",
@@ -398,6 +563,32 @@ MUTANTS = {
     "check_unstamped_break": (PS, "            try { _ledger.Break(view); _inbox.Clear(); DrainRetired(); } catch { }\n            if (_epochBroken) return;\n",
                               "            if (_epochBroken) return;\n            try { _ledger.Break(view); _inbox.Clear(); DrainRetired(); } catch { }\n"),
     "check_silent_arm": (PS, '" arm=" + SilentArm.Label(armClaim)', '(armClaim > 0 ? " arm=local-only c=" + armClaim : " arm=broadcast-or-direct")'),
+    "check_header_failure_retires": (PS, "if (!send.AfterHeader(_retainer, sent)) _openV3.Remove(openKey);",
+                                     "send.AfterTick(0, blocked, sent);"),
+    "check_fence_failure_retires": (PS, 'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");',
+                                    "if (__exception != null) { }"),
+    "check_v3_live_names_every_dependency": (PS, "                    && ReviveFenceLive\n", ""),
+    "check_claim_dispatch_terminal": (PS, "if (a == null || a.Length < 2) return;", "if (a == null || a.Length < 4) return;"),
+}
+
+# check_v3_live_names_every_dependency: one mutation per term of V3PatchesLive
+# (each must turn it red), plus a patch that newly calls PoisonSync (the derived
+# set grows) and a dependency whose cleanup records nothing.
+V3_LIVE_MUTANTS = {
+    "PatchesLive": (PS, "return PatchesLive\n                    && RpcStampLive", "return RpcStampLive"),
+    "RpcStampLive": (PS, "                    && RpcStampLive\n", ""),
+    "HitBracketLive": (PS, "                    && HitBracketLive\n", ""),
+    "PoisonArmLive": (PS, "                    && PoisonArmLive\n", ""),
+    "PhoenixBoundaryLive": (PS, "                    && PhoenixBoundaryLive\n", ""),
+    "DeathFlushLive": (PS, "                    && DeathFlushLive\n", ""),
+    "PointBoundaryLive": (PS, "                    && PointBoundaryLive\n", ""),
+    "ReviveFenceLive": (PS, "                    && ReviveFenceLive\n", ""),
+    "DamageRulesGate": (PS, "                    && ReviveFenceLive\n                    && VanillaFixSupport.IsAttached(\"DamageRulesGate\");",
+                        "                    && ReviveFenceLive;"),
+    "new-dependency": (PS, "        private static void Before() { PointEvidence.SawBefore(); }",
+                       "        private static void Before() { PointEvidence.SawBefore(); PoisonSync.NoteRoundBoundary(); }"),
+    "unrecorded-attach": (PS, "            if (exception == null) PoisonSync.PointBoundaryLive = true;\n", ""),
+    "missing-not-named": (PS, '            if (!ReviveFenceLive) m.Add("PoisonReviveFence");\n', ""),
 }
 
 # One control mutation, far from every check's anchors: every check stays green.
@@ -430,6 +621,14 @@ def test_each_check_turns_red(name):
     with pytest.raises(AssertionError):
         CHECKS[name](mutant)
     CHECKS[name](control)
+
+
+@pytest.mark.parametrize("term", sorted(V3_LIVE_MUTANTS))
+def test_v3_live_turns_red(term):
+    src = _normal(_load())
+    with pytest.raises(AssertionError):
+        check_v3_live_names_every_dependency(_mutate(src, V3_LIVE_MUTANTS[term]))
+    check_v3_live_names_every_dependency(_mutate(src, CONTROL))
 
 
 # -- V4 B7: every hook and callback the poison lane adds or changes contains its own faults --
@@ -466,10 +665,17 @@ HOOKS = {
     "PoisonSync.V3RoomEvent": (PS, None, "internal static void V3RoomEvent("),
     "PoisonSync.V3PropsChanged": (PS, None, "internal static void V3PropsChanged("),
     "EndScreenKillPatch.BeforeTransitionDamage": (VF, None, "private static bool BeforeTransitionDamage("),
+    # fix pass 2 (H2): the fence finalizers
+    "PointEndEvidencePatch.Threw": (PS, "internal static class PointEndEvidencePatch",
+                                    "private static Exception Threw(Exception __exception)"),
+    "PoisonReviveFencePatch.Threw": (PS, "internal static class PoisonReviveFencePatch",
+                                     "private static Exception Threw(HealthHandler __instance, Exception __exception)"),
+    "PoisonPhoenixBoundaryPatch.Threw": (PS, "internal static class PoisonPhoenixBoundaryPatch",
+                                         "private static Exception Threw(HealthHandler __instance, Exception __exception)"),
 }
 
 HOOK_ALLOWED = (
-    "int id = -1;", "if (id < 0) return;", "return __exception;", "__state = 0;", "__state = _cur;",
+    "int id = -1;", "int id = -2;", "if (id < 0) return;", "return __exception;", "__state = 0;", "__state = _cur;",
     "var f = new Frame();", "_cur = f;", "_cur = __state;", "if (e.Code != EventCode) return;",
     "prevArm = _currentArmClaim;", "ProjectileHit ph = null;", "PhotonView pv = null, vv = null;",
 )
@@ -623,6 +829,15 @@ HOOK_MUTANTS = {
         "            try { if (healthRemoval && RefusesNow()) { VanillaFixSupport.DiagLimited(\"k\", \"m\", 20); return false; } }\n"
         "            catch { return true; }\n"
         "            return HookGuard.Prefix(\n                () => !healthRemoval || !RefusesNow(),"),
+    "PointEndEvidencePatch.Threw": (
+        PS, 'HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw"); });',
+        'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");'),
+    "PoisonReviveFencePatch.Threw": (
+        PS, 'HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance); });',
+        'if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance);'),
+    "PoisonPhoenixBoundaryPatch.Threw": (
+        PS, 'HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("Phoenix threw", __instance); });',
+        'if (__exception != null) PoisonSync.FenceNotRecorded("Phoenix threw", __instance);'),
     "Plugin.OnPlayerEnteredRoom": (PL, '            try { PoisonSync.V3RoomEvent("player-entered", p); } catch { }\n',
                                    '            PoisonSync.V3RoomEvent("player-entered", p);\n'),
     "Plugin.OnPlayerLeftRoom": (PL, '            try { PoisonSync.V3RoomEvent("player-left", p); } catch { }\n',
