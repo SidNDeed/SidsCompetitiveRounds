@@ -333,6 +333,38 @@ namespace SeatEvidenceReplay
             Eq(0, QueueLines().Length, "dropped from the file after recorded");
         }
 
+        /// <summary>A server without amendment A1 answers a cut game's record
+        /// 422: the record stays in the queue file, is not sent again in this
+        /// launch, and the next launch sends the identical bytes.</summary>
+        private static void Cut422Kept()
+        {
+            SeatEvidence.BeginGame(true, true);
+            SeatEvidence.RoomExit();
+            SeatEvidence.NoteEnd("lost");
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            Eq(1, RecordCount(), "the cut game's record is queued");
+            ApiClient.Base = "https://replay.invalid:8444";
+            SteamAuth.SessionToken = "session-for-the-replay";
+            ApiClient.AnswerOk = false;
+            ApiClient.Answer = "HTTP 422: {\"detail\":\"end\"}";
+            SeatEvidence.Tick();
+            Eq(1, ApiClient.Posts.Count, "sent once");
+            Eq(1, RecordCount(), "kept in the queue file after the 422");
+            SetField("_nextPumpMs", 0L);
+            SeatEvidence.Tick();
+            Eq(1, ApiClient.Posts.Count, "held: not sent again in this launch");
+            // the next launch, against a server that now takes the key
+            ((System.Collections.IList)Field("_queue")).Clear();
+            SetField("_loaded", false);
+            SetField("_nextPumpMs", 0L);
+            ApiClient.AnswerOk = true;
+            ApiClient.Answer = "{\"status\":\"recorded\"}";
+            SeatEvidence.Tick();
+            Eq(2, ApiClient.Posts.Count, "sent again at the next launch");
+            Eq(ApiClient.Posts[0].Value, ApiClient.Posts[1].Value, "the identical bytes");
+            Eq(0, QueueLines().Length, "dropped from the file after recorded");
+        }
+
         /// <summary>The compat sender on a seat the finding disabled: it points
         /// the api at the configured base, obtains a session through the Steam
         /// ticket path for this seat's own id, posts the compat outcome once,
@@ -388,6 +420,7 @@ namespace SeatEvidenceReplay
             { "victim_block_hit", VictimBlockHit }, { "shooter_paths", ShooterPaths },
             { "unkeyed_and_nesting", UnkeyedAndNesting }, { "cut_left", CutLeft }, { "cut_guards", CutGuards },
             { "closing_next_boot", ClosingNextBoot }, { "compat_sender", CompatSender }, { "compat_bounds", CompatBounds },
+            { "cut_422_kept", Cut422Kept },
         };
 
         private static int Main(string[] args)

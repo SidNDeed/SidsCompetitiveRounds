@@ -31,7 +31,7 @@ SE = os.path.join(PLUGIN, "SeatEvidence.cs")
 TRACKED = ["SeatEvidence.cs", "SeatEvidenceCore.cs", "GameStateWatcher.cs", "Plugin.cs"]
 
 CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left", "cut_guards",
-         "closing_next_boot", "compat_sender", "compat_bounds"]
+         "closing_next_boot", "compat_sender", "compat_bounds", "cut_422_kept"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -66,6 +66,7 @@ MUTANTS = [
     ("sender_no_identity", "try { SteamAuth.FallbackIdentity = OwnSteamId(); } catch { }", "", "compat_sender", "compat_bounds"),
     ("sender_base_without_consent", "if (Plugin.DataConsentGranted)\n                {\n                    try { ApiClient.SeatEvidenceCompatBase",
      "{\n                    try { ApiClient.SeatEvidenceCompatBase", "compat_bounds", "compat_sender"),
+    ("held_not_set", "p.HoldUntilNextLaunch = true;", "", "cut_422_kept", "closing_next_boot"),
 ]
 
 # Wiring the replays cannot reach: (file, what, anchors that must each occur

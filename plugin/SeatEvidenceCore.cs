@@ -927,6 +927,16 @@ namespace CompetitiveRounds
             if (status == 400) { reason = "malformed"; return Act.Drop; }
             if (status == 403) { reason = "signature"; return Act.Drop; }
             if (status == 413) { reason = "budgeter_fault"; return Act.Drop; }
+            if (status == 422 && IsCutRecord(p))
+            {
+                // A cut game's record is the one a review most needs, and a
+                // server without amendment A1 refuses its "end" key: keep it
+                // (same cap, same expiry, same attempt bound) for the next launch.
+                if (expired) { reason = "expired"; return Act.Drop; }
+                if (p.Attempts >= MAX_ATTEMPTS) { reason = "attempts_spent"; return Act.Drop; }
+                reason = "cut_game_field:" + DetailField(body);
+                return Act.RetryNextLaunch;
+            }
             if (status == 422) { reason = "field:" + DetailField(body); return Act.Drop; }
             if (status == 409 && body.Contains("\"conflict\"")) { reason = "conflict"; return Act.Drop; }
             if (expired) { reason = "expired"; return Act.Drop; }
@@ -944,6 +954,22 @@ namespace CompetitiveRounds
             reason = status == 409 ? "not_ready" : (status == 503 ? "unavailable" : (status == 0 ? "transport" : "status_" + status));
             delayS = Backoff(p.Attempts);
             return Act.Retry;
+        }
+
+        /// <summary>Whether a queued game record is a cut game's (its record
+        /// carries "end"). The first "rounds" key in the envelope body is the
+        /// record's own: the envelope fields before "record" cannot hold a
+        /// quote, and a string value inside the record is escaped twice there.
+        /// "end", when present, follows that key's two-number array directly.</summary>
+        internal static bool IsCutRecord(Pending p)
+        {
+            if (p == null || p.Route != "e" || p.Body == null) return false;
+            const string R = "\\\"rounds\\\":[";
+            const string E = ",\\\"end\\\":\\\"";
+            int i = p.Body.IndexOf(R, StringComparison.Ordinal);
+            if (i < 0) return false;
+            int j = p.Body.IndexOf(']', i + R.Length);
+            return j > 0 && j + 1 + E.Length <= p.Body.Length && string.CompareOrdinal(p.Body, j + 1, E, 0, E.Length) == 0;
         }
 
         /// <summary>Retry spacing: 2 min doubling, at most an hour.</summary>

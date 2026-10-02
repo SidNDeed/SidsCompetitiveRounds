@@ -333,6 +333,42 @@ namespace SeatEvidenceTests
             Eq(C.SendStep.Post, C.CompatSenderStep(true, true, true, true, 10), "a session: post");
         }
 
+        private static C.Pending Queued(C.Record r, long firstUnix)
+        {
+            string rec = C.Budget(r.ToObj());
+            string seat = "76561198000000001", other = "76561198000000002", stable = "ranked_abc_123456", attach = stable + "_r8";
+            string env = C.Envelope(seat, other, stable, attach, rec, C.Hmac(Encoding.UTF8.GetBytes("k"), C.Canonical(seat, other, stable, attach, rec)));
+            return new C.Pending { Route = "e", Body = env, FirstUnix = firstUnix, Attempts = 1 };
+        }
+
+        // Integrator ruling on A1: a 422 on a cut game's record keeps it for
+        // the next launch (same cap, expiry and attempt bound); any other
+        // record's 422 still drops.
+        private static void Cut422()
+        {
+            long now = 1000000000, d; string why;
+            var cut = Sample(3, false); cut.End = "lost";
+            var full = Sample(3, false);
+            Check(C.IsCutRecord(Queued(cut, now)), "a record with end is a cut game's");
+            Check(!C.IsCutRecord(Queued(full, now)), "a record without end is not");
+            var elsewhere = Queued(full, now);
+            elsewhere.Body = elsewhere.Body.Replace("\\\"blk_faults\\\":", "\\\"z\\\":0,\\\"end\\\":\\\"left\\\",\\\"blk_faults\\\":");
+            Check(elsewhere.Body.Contains(",\\\"end\\\":\\\""), "the planted text is there");
+            Check(!C.IsCutRecord(elsewhere), "end anywhere but right after rounds is not");
+            var c = Queued(cut, now);
+            c.Route = "c";
+            Check(!C.IsCutRecord(c), "a compat outcome is not");
+            string ans = "{\"detail\":\"end\"}";
+            Eq(C.Act.RetryNextLaunch, C.Decide(Queued(cut, now), 422, ans, 0, now + 10, out d, out why), "cut game 422: kept");
+            Eq("cut_game_field:end", why, "reason");
+            Eq(C.Act.Drop, C.Decide(Queued(full, now), 422, ans, 0, now + 10, out d, out why), "full game 422: dropped");
+            Eq(C.Act.Drop, C.Decide(Queued(cut, now), 422, ans, 0, now + C.EXPIRY_S, out d, out why), "cut game 422 past expiry: dropped");
+            Eq("expired", why, "expired reason");
+            var spent = Queued(cut, now); spent.Attempts = C.MAX_ATTEMPTS;
+            Eq(C.Act.Drop, C.Decide(spent, 422, ans, 0, now + 10, out d, out why), "cut game 422 with attempts spent: dropped");
+            Eq(C.Act.Drop, C.Decide(Queued(cut, now), 403, "", 0, now + 10, out d, out why), "a cut game's other refusals unchanged");
+        }
+
         // -- the server-comparison fixtures --------------------------------------------
 
         private static void Fixtures(string dir)
@@ -386,7 +422,7 @@ namespace SeatEvidenceTests
             { "json", Json }, { "budget", Budget }, { "entries", Entries }, { "drift", Drift },
             { "congestion", Congestion }, { "buckets", Buckets }, { "cadence", Cadence }, { "ordinals", Ordinals },
             { "window", Window }, { "decide", Decide }, { "line", Line }, { "build", Build },
-            { "reservoir", Reservoir }, { "envelope", Envelope }, { "end", End }, { "sender", Sender },
+            { "reservoir", Reservoir }, { "envelope", Envelope }, { "end", End }, { "sender", Sender }, { "cut422", Cut422 },
         };
 
         private static int Main(string[] args)

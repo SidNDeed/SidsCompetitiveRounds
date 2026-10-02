@@ -69,6 +69,11 @@ MUTANTS = [
     ("sender_no_limit", "if (elapsedMs > COMPAT_SEND_LIMIT_MS) return SendStep.GiveUp;", "", "sender", "end"),
     ("sender_ignores_consent", "if (!consent) return SendStep.NoConsent;", "", "sender", "end"),
     ("sender_runs_enabled", "if (!disabled || !queued) return SendStep.Stop;", "if (!queued) return SendStep.Stop;", "sender", "end"),
+    ("cut422_dropped", "if (status == 422 && IsCutRecord(p))", "if (false && IsCutRecord(p))", "cut422", "decide"),
+    ("cut422_no_expiry", 'if (expired) { reason = "expired"; return Act.Drop; }\n                if (p.Attempts >= MAX_ATTEMPTS)',
+     "if (p.Attempts >= MAX_ATTEMPTS)", "cut422", "decide"),
+    ("cut_record_end_anywhere", "return j > 0 && j + 1 + E.Length <= p.Body.Length && string.CompareOrdinal(p.Body, j + 1, E, 0, E.Length) == 0;",
+     "return p.Body.Contains(E);", "cut422", "decide"),
 ]
 
 # Amendment A1 (build notes, "Contract amendments for the integrator"): an
