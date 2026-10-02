@@ -418,8 +418,8 @@ def test_a3_absent_reads_absent_passes_evaluate_nothing_and_the_match_body_is_un
     async def go():
         monkeypatch.setattr(rr, "_STATE", rr.State("absent"))
         word = rr.health_word()
-        g = await se.games_pass(live.sm, rr.current())
-        s = await se.sitting_pass(live.sm, rr.current())
+        g = await se.games_pass(live.sm, rr.current_rules())
+        s = await se.sitting_pass(live.sm, rr.current_rules())
         line = main._review_pass_line(rr.health_word(), g, s)
         absent = await submit(*pairs[0], "ranked_seva3_000001_r1")
         monkeypatch.setattr(rr, "_STATE", revs.shadow)
@@ -476,9 +476,9 @@ def test_a8_shadow_then_posting_from_post_since_and_the_bot_prints_the_line(live
     assert len(flags) == 1 and flags[0]["match_id"] == mid_new
     assert f2[old][0]["flag_id"] is None and f2[new][0]["flag_id"] is not None
     assert flags[0]["flag_reason"] == "review" and flags[0]["auto_invalidated"] is False
-    det = se._j(flags[0]["flag_details"])
+    det = se._jsonv(flags[0]["flag_details"])
     rule = revs.armed.ruleset.rule(tk.ID_GAP)
-    want = revs.armed.ruleset.render_line(rule, se._j(f2[new][0]["details"])["items"])
+    want = revs.armed.ruleset.render_line(rule, se._jsonv(f2[new][0]["details"])["items"])
     assert det["line"] == want and det["rule_id"] == tk.ID_GAP
     assert det["rules_rev"] == revs.armed.ruleset.rev
     assert want.startswith("synthetic gap ")
@@ -520,7 +520,7 @@ def _broken(store, rev, how):
 
 def test_a4_each_refused_revision_changes_no_count_and_a_loaded_one_does(live, signing, revs, monkeypatch):
     shadow = revs.shadow.ruleset.rev
-    monkeypatch.setattr(rr, "_STATE", rr.current())
+    monkeypatch.setattr(rr, "_STATE", rr.current_rules())
 
     async def go():
         sm = live.sm
@@ -537,7 +537,7 @@ def test_a4_each_refused_revision_changes_no_count_and_a_loaded_one_does(live, s
             tk.point(root, os.path.basename(rdir))
             monkeypatch.setenv(rr.ROOT_ENV, root)
             monkeypatch.setattr(rr, "_KEY", None)
-            st = rr.refresh()
+            st = rr.refresh_rules()
             before = await _counts(sm)
             g = await se.games_pass(sm, st)
             s = await se.sitting_pass(sm, st)

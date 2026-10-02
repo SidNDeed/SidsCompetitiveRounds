@@ -78,7 +78,7 @@ def _register(entry: Entry) -> Entry:
     return entry
 
 
-def resolve(name: str, fp: str):
+def resolve_entry(name: str, fp: str):
     """The entry a revision bound: the current one if its fingerprint matches,
     else a retained BRIDGE version, else None (the revision is stale)."""
     cur = REGISTRY.get(name)
@@ -150,7 +150,7 @@ def entry_fingerprint(e: Entry) -> str:
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
-def manifest() -> list:
+def entry_manifest() -> list:
     """Sorted (name, fingerprint) of every current entry and every retained
     BRIDGE version."""
     rows = {(n, e.fp) for n, e in REGISTRY.items()}
@@ -160,7 +160,7 @@ def manifest() -> list:
 
 def review_eval() -> str:
     """The public vocabulary's digest: derived on every call."""
-    text = "\n".join("%s %s" % r for r in manifest())
+    text = "\n".join("%s %s" % r for r in entry_manifest())
     return hashlib.sha256(text.encode()).hexdigest()[: CONTRACT_BOUNDS["eval_hex"]]
 
 
@@ -180,18 +180,18 @@ def operator(name, args):
     return deco
 
 
-def sitting(name, args, outputs):
+def sitting_operator(name, args, outputs):
     def deco(fn):
         _register(Entry("sitting", name, (fn,), args=args, outputs=outputs))
         return fn
     return deco
 
 
-def _params(name, keys):
+def _param_family(name, keys):
     _register(Entry("params", name, data=list(keys)))
 
 
-def _sql(kind, name, *parts):
+def _sitting_sql(kind, name, *parts):
     _register(Entry(kind, name, data=list(parts)))
 
 
@@ -212,10 +212,10 @@ def median(xs):
 
 # -- parameterised descriptions (parameters come only from a revision) ----------
 
-_params("params.case_table", ("pair_lo_ms", "pair_hi_ms", "late_margin_ms", "window_ms"))
-_params("params.one_record", ("due_margin_ms", "due_hi_ms", "edge_span_ms", "own_window_ms"))
-_params("params.age_sum", ("budget_slack_ms",))
-_params("params.blocks_missing", ("in_flight_ms",))
+_param_family("params.case_table", ("pair_lo_ms", "pair_hi_ms", "late_margin_ms", "window_ms"))
+_param_family("params.one_record", ("due_margin_ms", "due_hi_ms", "edge_span_ms", "own_window_ms"))
+_param_family("params.age_sum", ("budget_slack_ms",))
+_param_family("params.blocks_missing", ("in_flight_ms",))
 
 
 def classify_blocks(victim: dict, shooter, p: dict) -> dict:
@@ -389,22 +389,22 @@ class Ctx:
         self.pair_other = self.other if self.two else None
 
 
-def _p(ctx, family):
+def _family_params(ctx, family):
     return ctx.params[family]
 
 
 def _case_table(ctx):
     key = ("case_table", ctx.i)
     if key not in ctx.cache:
-        ctx.cache[key] = classify_blocks(ctx.r["rec"], ctx.pair_other["rec"], _p(ctx, "params.case_table"))
+        ctx.cache[key] = classify_blocks(ctx.r["rec"], ctx.pair_other["rec"], _family_params(ctx, "params.case_table"))
     return ctx.cache[key]
 
 
-def _age(ctx):
+def _record_age(ctx):
     key = ("age_sum", None)
     if key not in ctx.cache:
         ctx.cache[key] = age_sum(ctx.records[0]["rec"], ctx.records[1]["rec"],
-                                 _p(ctx, "params.age_sum"))
+                                 _family_params(ctx, "params.age_sum"))
     return ctx.cache[key]
 
 
@@ -551,34 +551,34 @@ def m_shooter_faults(ctx, p):
 def m_blocks_missing(ctx, p):
     if ctx.pair_other is None:
         return None
-    return blocks_missing(ctx.r["rec"], ctx.pair_other["rec"], _p(ctx, "params.blocks_missing"))
+    return blocks_missing(ctx.r["rec"], ctx.pair_other["rec"], _family_params(ctx, "params.blocks_missing"))
 
 
 # -- game measures (two records) -----------------------------------------------
 
 @measure("game.age_sum_buckets", "game", "params.age_sum")
 def m_age_buckets(ctx, p):
-    return _age(ctx)["buckets"] if ctx.two else None
+    return _record_age(ctx)["buckets"] if ctx.two else None
 
 
 @measure("game.age_sum_min_median", "game", "params.age_sum")
 def m_age_min(ctx, p):
-    return _age(ctx)["min_sum_median"] if ctx.two else None
+    return _record_age(ctx)["min_sum_median"] if ctx.two else None
 
 
 @measure("game.age_sum_median", "game", "params.age_sum")
 def m_age_median(ctx, p):
-    return _age(ctx)["sum_median"] if ctx.two else None
+    return _record_age(ctx)["sum_median"] if ctx.two else None
 
 
 @measure("game.age_sum_budget", "game", "params.age_sum")
 def m_age_budget(ctx, p):
-    return _age(ctx)["budget_ms"] if ctx.two else None
+    return _record_age(ctx)["budget_ms"] if ctx.two else None
 
 
 @measure("game.age_sum_excess", "game", "params.age_sum")
 def m_age_excess(ctx, p):
-    return _age(ctx)["excess_ms"] if ctx.two else None
+    return _record_age(ctx)["excess_ms"] if ctx.two else None
 
 
 @measure("game.drift_first", "game")
@@ -650,18 +650,18 @@ def op_in_set(a, values):
 # column); row.*: one expression for the row; reporter.*: an expression from
 # the reporting seat's side. They read only match columns.
 
-_sql("side", "side.shots_fired", "m.p1_bullets_fired", "m.p2_bullets_fired")
-_sql("side", "side.shots_hit", "m.p1_bullets_hit", "m.p2_bullets_hit")
-_sql("side", "side.blocks_activated", "m.p1_blocks_activated", "m.p2_blocks_activated")
-_sql("side", "side.blocks_successful", "m.p1_blocks_successful", "m.p2_blocks_successful")
-_sql("side", "side.opponent_ping_avg", "m.p2_ping_avg", "m.p1_ping_avg")
-_sql("row", "row.duration_s", "COALESCE(m.duration_seconds, m.match_duration)")
-_sql("reporter", "reporter.observed_batches",
+_sitting_sql("side", "side.shots_fired", "m.p1_bullets_fired", "m.p2_bullets_fired")
+_sitting_sql("side", "side.shots_hit", "m.p1_bullets_hit", "m.p2_bullets_hit")
+_sitting_sql("side", "side.blocks_activated", "m.p1_blocks_activated", "m.p2_blocks_activated")
+_sitting_sql("side", "side.blocks_successful", "m.p1_blocks_successful", "m.p2_blocks_successful")
+_sitting_sql("side", "side.opponent_ping_avg", "m.p2_ping_avg", "m.p1_ping_avg")
+_sitting_sql("row", "row.duration_s", "COALESCE(m.duration_seconds, m.match_duration)")
+_sitting_sql("reporter", "reporter.observed_batches",
      "CASE WHEN m.reported_by = m.player1_id THEN m.p1_obs_batches ELSE m.p2_obs_batches END")
-_sql("population", "pop.completed_series",
+_sitting_sql("population", "pop.completed_series",
      "JOIN ranked_series rs ON rs.id = m.series_id",
      "rs.status = 'completed' AND rs.invalidated_at IS NULL")
-_sql("population", "pop.reporter_is_player", "", "m.reported_by IN (m.player1_id, m.player2_id)")
+_sitting_sql("population", "pop.reporter_is_player", "", "m.reported_by IN (m.player1_id, m.player2_id)")
 
 # One population, written once: ranked, not invalidated, ended inside the
 # rule's window and at least the ready lag ago. UTC days explicitly.
@@ -690,7 +690,7 @@ def _scope(mode, s, o):
     return SCOPE_DIRTY.format(s=s, o=o) if mode == "dirty" else SCOPE_DAYS_BACK
 
 
-@sitting("sitting.rate_vs_own",
+@sitting_operator("sitting.rate_vs_own",
          (("num", "side"), ("den", "side"), ("filters", "filters"), ("window_days", "int"),
           ("elig_min_den", "int"), ("quantile", "num"), ("min_games", "int"),
           ("min_q_games", "int"), ("other_min", "int"), ("margin", "num")),
@@ -735,7 +735,7 @@ SELECT a subject, b opponent, d, n, n_all, n_q, rate, own_rate, other_n, last_mi
    AND {_scope(mode, "a", "b")}"""
 
 
-@sitting("sitting.binomial_vs_own",
+@sitting_operator("sitting.binomial_vs_own",
          (("trials", "side"), ("successes", "side"), ("stratify", "side"), ("edges", "edges"),
           ("strata_label", "label"), ("filters", "filters"), ("window_days", "int"),
           ("min_games", "int"), ("min_trials", "int"), ("base_min", "int"), ("z", "num")),
@@ -787,7 +787,7 @@ SELECT v subject, o opponent, d, n, aa trials, ss successes, bk stratum, p, basi
    AND {_scope(mode, "v", "o")}"""
 
 
-@sitting("sitting.step_ratio",
+@sitting_operator("sitting.step_ratio",
          (("num", "reporter"), ("den", "row"), ("filters", "filters"), ("window_days", "int"),
           ("min_den", "int"), ("pre_rows", "int"), ("post_rows", "int"), ("low", "num"),
           ("high", "num")),

@@ -132,7 +132,7 @@ def build_revision(tmp, doc=None, cases=None, name="draft"):
     store = os.path.join(str(tmp), "store")
     os.makedirs(store, exist_ok=True)
     draft = write_draft(os.path.join(str(tmp), name), doc, cases)
-    return store, rr.build(draft, store, "synthetic")
+    return store, rr.build_revision(draft, store, "synthetic")
 
 
 def point(root, target):

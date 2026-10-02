@@ -69,8 +69,8 @@ MUTANTS = [
      'POP_BASE = ("m.p1_bullets_fired > 17 AND m.is_ranked IS TRUE', "text"),
     ("comment", "review_rules", "def eval_expr(node, ctx, memo, rs):\n",
      "def eval_expr(node, ctx, memo, rs):\n    # a slack of 7 is tolerated\n", "text"),
-    ("env", "review_rules", "def root() -> str:\n",
-     'def root() -> str:\n    os.environ.get("SCR_SYNTHETIC_SLACK")\n', "env"),
+    ("env", "review_rules", "def rules_root() -> str:\n",
+     'def rules_root() -> str:\n    os.environ.get("SCR_SYNTHETIC_SLACK")\n', "env"),
     ("pinned", "review_rules", '"work_max": 200000,', '"work_max": 200000, "slack": 0,', "pinned"),
     ("hoisted_rooted", "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n",
      "SYNTHETIC_FLOOR = 7\n\n\nasync def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n"

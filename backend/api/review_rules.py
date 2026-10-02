@@ -69,7 +69,7 @@ CONTRACT_BOUNDS = {
     "frame_bytes": 8,
     "format": 1,
 }
-B = CONTRACT_BOUNDS
+_BOUNDS = CONTRACT_BOUNDS
 
 ROOT_ENV = "SCR_REVIEW_ROOT"
 DEFAULT_ROOT = "/app/private/review"
@@ -79,10 +79,10 @@ TOP_FILES = ("rules.json", "selftest.json", "REVISION")
 DOMAIN = b"scr-review-rules-revision\n"
 
 _HEX = re.compile(r"[a-f\d]+")
-_REV_DIR = re.compile(r"rules-[a-f\d]{%d}" % B["rev_hex"])
-_RULE_ID = re.compile(r"r[a-f\d]{%d}" % B["id_hex"])
-_DATA_NAME = re.compile(r"[a-z_]{1,%d}\.(json|txt)" % B["data_name_max"])
-_LABEL = re.compile(r"[a-z_]\w{0,%d}" % (rm.CONTRACT_BOUNDS["label_max"] * 2))
+_REV_DIR = re.compile(r"rules-[a-f\d]{%d}" % _BOUNDS["rev_hex"])
+_RULE_ID = re.compile(r"r[a-f\d]{%d}" % _BOUNDS["id_hex"])
+_DATA_NAME = re.compile(r"[a-z_]{1,%d}\.(json|txt)" % _BOUNDS["data_name_max"])
+_RULE_LABEL = re.compile(r"[a-z_]\w{0,%d}" % (rm.CONTRACT_BOUNDS["label_max"] * 2))
 _STRATA = re.compile(r"[a-z_]{1,%d}" % rm.CONTRACT_BOUNDS["label_max"])
 _PLACE = re.compile(r"\{([a-z_]\w*)(?::(\d))?(\|none)?\}")
 RELS = ("gt", "ge", "lt", "le", "eq", "ne")
@@ -107,7 +107,7 @@ def revision_digest(files: dict) -> str:
     file (sorted by relative POSIX path) the path length, the path, the
     content length and the content. Lengths are fixed-width, so no two
     different inventories frame to the same bytes."""
-    w = B["frame_bytes"]
+    w = _BOUNDS["frame_bytes"]
     h = hashlib.sha256()
     h.update(DOMAIN)
     h.update(len(files).to_bytes(w, "big"))
@@ -155,20 +155,20 @@ def _inventory(rdir: str, deadline: float) -> dict:
                     if (stat.S_ISLNK(ds.st_mode) or not stat.S_ISREG(ds.st_mode)
                             or not _DATA_NAME.fullmatch(dn)):
                         raise Refused("inventory", "data entry")
-                    plan.append(("data/" + dn, dp, ds.st_size, B["data_bytes_max"]))
+                    plan.append(("data/" + dn, dp, ds.st_size, _BOUNDS["data_bytes_max"]))
             elif name in TOP_FILES:
                 if not stat.S_ISREG(s.st_mode):
                     raise Refused("inventory", "not a regular file")
-                cap = {"rules.json": B["rules_bytes_max"],
-                       "selftest.json": B["selftest_bytes_max"]}.get(name, B["digest_hex"] + 1)
+                cap = {"rules.json": _BOUNDS["rules_bytes_max"],
+                       "selftest.json": _BOUNDS["selftest_bytes_max"]}.get(name, _BOUNDS["digest_hex"] + 1)
                 plan.append((name, path, s.st_size, cap))
             else:
                 raise Refused("inventory", "unexpected entry")
-            if len(plan) > B["files_max"]:
+            if len(plan) > _BOUNDS["files_max"]:
                 raise Refused("inventory", "file count")
     except OSError as e:
         raise Refused("unreadable", type(e).__name__)
-    if sum(p[2] for p in plan) > B["total_bytes_max"]:
+    if sum(p[2] for p in plan) > _BOUNDS["total_bytes_max"]:
         raise Refused("inventory", "aggregate bytes")
     for name in TOP_FILES:
         if name not in {p[0] for p in plan}:
@@ -266,11 +266,11 @@ class _Binder:
         if name.startswith("module."):
             if self.build:
                 fp = (self.vocab or {}).get(name)
-                if not isinstance(fp, str) or len(fp) != B["digest_hex"]:
+                if not isinstance(fp, str) or len(fp) != _BOUNDS["digest_hex"]:
                     raise Refused("malformed", "module entry needs a bound fingerprint")
             else:
                 fp = self.vocab.get(name)
-                if not isinstance(fp, str) or len(fp) != B["digest_hex"] or not _HEX.fullmatch(fp):
+                if not isinstance(fp, str) or len(fp) != _BOUNDS["digest_hex"] or not _HEX.fullmatch(fp):
                     raise Refused("malformed", "module entry binding")
             self.used[name] = fp
             self.kinds[name] = "module"
@@ -283,7 +283,7 @@ class _Binder:
             fp = self.vocab.get(name)
             if not isinstance(fp, str):
                 raise Refused("malformed", "unbound entry")
-            entry = rm.resolve(name, fp)
+            entry = rm.resolve_entry(name, fp)
             if entry is None:
                 raise Refused("stale", "entry fingerprint")
         if kind is not None and entry.kind not in ((kind,) if isinstance(kind, str) else kind):
@@ -320,7 +320,7 @@ def _compile_expr(node, bind, subject):
 
 
 def _compile_pred(node, bind, subject, data, depth=0):
-    if depth > B["pred_depth_max"]:
+    if depth > _BOUNDS["pred_depth_max"]:
         raise Refused("malformed", "predicate depth")
     if not isinstance(node, dict):
         raise Refused("malformed", "predicate")
@@ -361,7 +361,7 @@ def _compile_pred(node, bind, subject, data, depth=0):
 
 
 def _compile_template(line, labels):
-    if not isinstance(line, str) or len(line) > B["line_max"]:
+    if not isinstance(line, str) or len(line) > _BOUNDS["line_max"]:
         raise Refused("malformed", "line")
     parts, pos = [], 0
     for m in _PLACE.finditer(line):
@@ -372,7 +372,7 @@ def _compile_template(line, labels):
         label, places, none = m.groups()
         if label not in labels:
             raise Refused("malformed", "line placeholder")
-        parts.append((label, int(places) if places else B["places_default"], bool(none)))
+        parts.append((label, int(places) if places else _BOUNDS["places_default"], bool(none)))
         pos = m.end()
     tail = line[pos:]
     if "{" in tail or "}" in tail:
@@ -461,10 +461,10 @@ def compile_rules(doc, bind, data) -> Ruleset:
     if not isinstance(doc, dict) or set(doc) != {"format", "nonce", "vocabulary",
                                                  "measure_params", "rules"}:
         raise Refused("malformed", "top level")
-    if doc["format"] != B["format"]:
+    if doc["format"] != _BOUNDS["format"]:
         raise Refused("malformed", "format")
     nonce = doc["nonce"]
-    if (not isinstance(nonce, str) or len(nonce) != B["nonce_bytes"] * 2
+    if (not isinstance(nonce, str) or len(nonce) != _BOUNDS["nonce_bytes"] * 2
             or not _HEX.fullmatch(nonce)):
         raise Refused("malformed", "nonce")
     if not isinstance(doc["vocabulary"], dict):
@@ -481,7 +481,7 @@ def compile_rules(doc, bind, data) -> Ruleset:
             raise Refused("malformed", "measure_params values")
         rs.params[family] = dict(values)
     rules = doc["rules"]
-    if not isinstance(rules, list) or len(rules) > B["rules_max"]:
+    if not isinstance(rules, list) or len(rules) > _BOUNDS["rules_max"]:
         raise Refused("malformed", "rules")
     seen = set()
     for raw in rules:
@@ -502,7 +502,7 @@ def compile_rules(doc, bind, data) -> Ruleset:
         show = raw.get("show")
         if (not isinstance(show, list) or not show or len(show) > rm.CONTRACT_BOUNDS["show_max"]
                 or not all(isinstance(s, list) and len(s) == 2
-                           and isinstance(s[0], str) and _LABEL.fullmatch(s[0]) for s in show)
+                           and isinstance(s[0], str) and _RULE_LABEL.fullmatch(s[0]) for s in show)
                 or len({s[0] for s in show}) != len(show)):
             raise Refused("malformed", "show")
         if r.scope == "game":
@@ -669,7 +669,7 @@ def render_line(rule, items) -> str:
     """The rule's wording over a finding's items: numbers and recorded text
     only, one line per item, at most the render bound of items."""
     return "\n".join(render_item(rule.line, it)
-                     for it in list(items)[: B["render_items_max"]] if isinstance(it, dict))
+                     for it in list(items)[: _BOUNDS["render_items_max"]] if isinstance(it, dict))
 
 
 def norm_pair(a, b):
@@ -680,7 +680,7 @@ def _py(v):
     if isinstance(v, Decimal):
         v = int(v) if v == v.to_integral_value() else float(v)
     if isinstance(v, float):
-        return round(v, B["round_places"])
+        return round(v, _BOUNDS["round_places"])
     if not isinstance(v, (int, str, type(None))):
         return str(v)
     return v
@@ -712,7 +712,7 @@ def sitting_statement(rule, mode="dirty"):
 
 def run_selftest(rs, cases, deadline):
     """Each synthetic case must fire exactly the rule ids it lists."""
-    budget = _Budget(B["work_max"])
+    budget = _Budget(_BOUNDS["work_max"])
     for case in cases:
         _check_time(deadline)
         if not isinstance(case, dict) or set(case) != {"records", "match", "registry", "fire"}:
@@ -756,14 +756,14 @@ def _no_constants(text):
 def load_dir(rdir: str, *, deadline: float | None = None) -> Ruleset:
     """Validate one revision directory completely. Raises Refused(cls)."""
     if deadline is None:
-        deadline = time.monotonic() + B["deadline_s"]
+        deadline = time.monotonic() + _BOUNDS["deadline_s"]
     base = os.path.basename(os.path.normpath(rdir))
     if not _REV_DIR.fullmatch(base):
         raise Refused("inventory", "directory name")
     files = _inventory(rdir, deadline)
     digest = revision_digest({k: v for k, v in files.items() if k != "REVISION"})
     stated = files["REVISION"].decode("ascii", "replace").strip()
-    if stated != digest or base != "rules-" + digest[: B["rev_hex"]]:
+    if stated != digest or base != "rules-" + digest[: _BOUNDS["rev_hex"]]:
         raise Refused("digest")
     try:
         doc = json.loads(files["rules.json"].decode("utf-8"), parse_constant=_no_constants)
@@ -785,10 +785,10 @@ def load_dir(rdir: str, *, deadline: float | None = None) -> Ruleset:
     if set(binder.used) != set(binder.vocab):
         raise Refused("malformed", "vocabulary is not exactly the entries used")
     if (not isinstance(selftest, dict) or set(selftest) != {"cases"}
-            or not isinstance(selftest["cases"], list) or len(selftest["cases"]) > B["cases_max"]):
+            or not isinstance(selftest["cases"], list) or len(selftest["cases"]) > _BOUNDS["cases_max"]):
         raise Refused("malformed", "selftest")
     rs.run_selftest(selftest["cases"], deadline)
-    rs.rev = digest[: B["rev_hex"]]
+    rs.rev = digest[: _BOUNDS["rev_hex"]]
     rs.digest = digest
     rs.vocabulary = dict(binder.vocab)
     return rs
@@ -809,7 +809,7 @@ _LOCK = threading.Lock()
 _LOGGED = None
 
 
-def root() -> str:
+def rules_root() -> str:
     return os.environ.get(ROOT_ENV) or DEFAULT_ROOT
 
 
@@ -821,9 +821,9 @@ def _pointer_target(base):
         return None
     if stat.S_ISLNK(st.st_mode):
         target = os.readlink(p)
-    elif stat.S_ISREG(st.st_mode) and st.st_size <= B["pointer_bytes_max"]:
+    elif stat.S_ISREG(st.st_mode) and st.st_size <= _BOUNDS["pointer_bytes_max"]:
         with open(p, "rb") as f:
-            target = f.read(B["pointer_bytes_max"]).decode("ascii", "replace").strip()
+            target = f.read(_BOUNDS["pointer_bytes_max"]).decode("ascii", "replace").strip()
     else:
         raise Refused("pointer")
     if target == NONE_TARGET:
@@ -844,7 +844,7 @@ def _log(state):
             print("[REVIEW] rules: %s" % state.word, flush=True)
 
 
-def refresh() -> State:
+def refresh_rules() -> State:
     """Re-read the pointer; when it or its target changed, validate the new
     target completely and publish the outcome in one assignment. A load in
     progress elsewhere answers the state already published."""
@@ -852,7 +852,7 @@ def refresh() -> State:
     if not _LOCK.acquire(blocking=False):
         return _STATE
     try:
-        base = root()
+        base = rules_root()
         try:
             target = _pointer_target(base)
             if target is None:
@@ -888,7 +888,7 @@ def refresh() -> State:
         _LOCK.release()
 
 
-def current() -> State:
+def current_rules() -> State:
     return _STATE
 
 
@@ -902,7 +902,7 @@ def _canon(obj) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 
 
-def build(draft: str, store: str, reason: str) -> str:
+def build_revision(draft: str, store: str, reason: str) -> str:
     """Canonicalise a draft into a new immutable revision in `store`: a fresh
     nonce, the bound vocabulary, the framed digest; validated in a disposable
     incoming directory and renamed into place only when it loads. Appends one
@@ -918,7 +918,7 @@ def build(draft: str, store: str, reason: str) -> str:
             with open(os.path.join(ddir, dn), "rb") as f:
                 data_files["data/" + dn] = f.read()
     doc = dict(doc)
-    doc["nonce"] = secrets.token_hex(B["nonce_bytes"])
+    doc["nonce"] = secrets.token_hex(_BOUNDS["nonce_bytes"])
     module_vocab = {k: v for k, v in (doc.get("vocabulary") or {}).items() if k.startswith("module.")}
     doc["vocabulary"] = {}
     data = {}
@@ -932,11 +932,11 @@ def build(draft: str, store: str, reason: str) -> str:
     files = {"rules.json": _canon(doc), "selftest.json": _canon(selftest)}
     files.update(data_files)
     digest = revision_digest(files)
-    rev = digest[: B["rev_hex"]]
+    rev = digest[: _BOUNDS["rev_hex"]]
     final = os.path.join(store, "rules-" + rev)
     if os.path.exists(final):
         raise FileExistsError(final)
-    incoming = os.path.join(store, ".incoming-" + secrets.token_hex(B["id_hex"] // 2))
+    incoming = os.path.join(store, ".incoming-" + secrets.token_hex(_BOUNDS["id_hex"] // 2))
     os.makedirs(os.path.join(incoming, "data") if data_files else incoming)
     try:
         for rel, raw in files.items():
@@ -944,7 +944,7 @@ def build(draft: str, store: str, reason: str) -> str:
                 f.write(raw)
         with open(os.path.join(incoming, "REVISION"), "wb") as f:
             f.write((digest + "\n").encode())
-        staged = os.path.join(store, ".validate-" + secrets.token_hex(B["id_hex"] // 2), "rules-" + rev)
+        staged = os.path.join(store, ".validate-" + secrets.token_hex(_BOUNDS["id_hex"] // 2), "rules-" + rev)
         os.makedirs(os.path.dirname(staged))
         os.rename(incoming, staged)
         try:
@@ -1004,7 +1004,7 @@ def cli(argv) -> int:
     if cmd == "build" and rest:
         draft, store, reason = rest
         try:
-            print(build(draft, store, reason))
+            print(build_revision(draft, store, reason))
             return 0
         except Refused as e:
             print("refused (%s)" % e.cls)

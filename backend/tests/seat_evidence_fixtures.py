@@ -103,7 +103,7 @@ def envelope(rec, *, seat=SEAT_A, other=SEAT_B, stable="room_test_123456", round
            "record_bytes": record_text.encode("ascii")}
     body = {"contract": 2, "seat_steam_id": seat, "other_steam_id": other,
             "stable_game_key": stable, "attach_key": env["attach"],
-            "record": record_text, "sig": se.sign(key, env)}
+            "record": record_text, "sig": se.record_sign(key, env)}
     return body
 
 

@@ -49,20 +49,20 @@ def _into_root(root, rdir):
 # -- A3: absent ------------------------------------------------------------------
 
 def test_a3_no_pointer_a_missing_root_and_rules_none_all_read_absent(fresh, monkeypatch, tmp_path):
-    assert rr.refresh().word == "absent" and rr.health_word() == "absent"
-    assert rr.current().ruleset is None
+    assert rr.refresh_rules().word == "absent" and rr.health_word() == "absent"
+    assert rr.current_rules().ruleset is None
     tk.point(fresh, rr.NONE_TARGET)
-    assert rr.refresh().word == "absent"
+    assert rr.refresh_rules().word == "absent"
     monkeypatch.setenv(rr.ROOT_ENV, str(tmp_path / "no-such-root"))
-    assert rr.refresh().word == "absent"
+    assert rr.refresh_rules().word == "absent"
 
 
 def test_initial_absent_bootstrap_then_a_valid_revision_loads(fresh, tmp_path, capsys):
-    assert rr.refresh().word == "absent"
+    assert rr.refresh_rules().word == "absent"
     rdir, rev = _built(tmp_path)
     _into_root(fresh, rdir)
     tk.point(fresh, "rules-" + rev)
-    st = rr.refresh()
+    st = rr.refresh_rules()
     assert st.word == rev and st.ruleset.rev == rev
     out = capsys.readouterr().out
     assert "[REVIEW] rules: absent" in out and "[REVIEW] rules: %s" % rev in out
@@ -77,9 +77,9 @@ def test_a6_re_pointing_current_changes_the_word_with_no_restart(fresh, tmp_path
     _into_root(fresh, r1)
     _into_root(fresh, r2)
     tk.point(fresh, "rules-" + rev1)
-    assert rr.refresh().word == rev1
+    assert rr.refresh_rules().word == rev1
     tk.point(fresh, "rules-" + rev2)
-    assert rr.refresh().word == rev2
+    assert rr.refresh_rules().word == rev2
     assert rr.health_word() == rev2
 
 
@@ -87,8 +87,8 @@ def test_a6_re_pointing_current_changes_the_word_with_no_restart(fresh, tmp_path
 
 def _refused_once(root, target, cls, capsys):
     tk.point(root, target)
-    assert rr.refresh().word == "refused" and rr.current().reason == cls
-    assert rr.refresh().word == "refused"
+    assert rr.refresh_rules().word == "refused" and rr.current_rules().reason == cls
+    assert rr.refresh_rules().word == "refused"
     out = capsys.readouterr().out
     assert out.count("[REVIEW] rules: refused (%s)" % cls) == 1, out
 
@@ -149,7 +149,7 @@ def test_a5_a_resealed_selftest_mutant_refuses_and_the_original_loads(fresh, tmp
     _into_root(fresh, mutant)
     _refused_once(fresh, "rules-" + mrev, "selftest", capsys)
     tk.point(fresh, os.path.basename(keep))
-    assert rr.refresh().word == rev
+    assert rr.refresh_rules().word == rev
 
 
 # -- finding 9: bounded inventory and work -------------------------------------------
@@ -158,7 +158,7 @@ def test_too_many_files_unexpected_entries_and_aggregate_bytes_refuse_before_par
     rdir, _ = _built(tmp_path)
     data = os.path.join(rdir, "data")
     os.mkdir(data)
-    for i in range(rr.B["files_max"] + 1):
+    for i in range(rr._BOUNDS["files_max"] + 1):
         with open(os.path.join(data, "t_" + chr(97 + i % 26) * (1 + i // 26) + ".txt"), "w") as f:
             f.write("x")
     with pytest.raises(rr.Refused) as e:
@@ -171,7 +171,7 @@ def test_too_many_files_unexpected_entries_and_aggregate_bytes_refuse_before_par
     assert e.value.cls == "inventory"
     os.rmdir(os.path.join(rdir, "other"))
     os.mkdir(data)
-    chunk = b"x" * (rr.B["data_bytes_max"] - 1)
+    chunk = b"x" * (rr._BOUNDS["data_bytes_max"] - 1)
     for n in ("a.txt", "b.txt", "c.txt"):
         with open(os.path.join(data, n), "wb") as f:
             f.write(chunk)
@@ -194,7 +194,7 @@ def test_selftest_work_beyond_the_bound_refuses(tmp_path):
 
 def test_the_deadline_refuses(tmp_path, monkeypatch):
     rdir, _ = _built(tmp_path)
-    monkeypatch.setitem(rr.B, "deadline_s", -1)
+    monkeypatch.setitem(rr._BOUNDS, "deadline_s", -1)
     with pytest.raises(rr.Refused) as e:
         rr.load_dir(rdir)
     assert e.value.cls == "work"
@@ -351,7 +351,7 @@ def test_rendering_places_none_lists_and_the_item_bound(tmp_path):
 
     class R:
         line = rr._compile_template("{x}", {"x"})
-    assert rr.render_line(R, [{"x": i} for i in range(20)]).count("\n") == rr.B["render_items_max"] - 1
+    assert rr.render_line(R, [{"x": i} for i in range(20)]).count("\n") == rr._BOUNDS["render_items_max"] - 1
     with pytest.raises(rr.Refused):
         rr._compile_template("{unknown}", {"x"})
     with pytest.raises(rr.Refused):

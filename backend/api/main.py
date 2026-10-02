@@ -4430,7 +4430,7 @@ async def review_rules_refresh_loop():
     re-pointed `current` with no recreate."""
     while True:
         try:
-            await asyncio.to_thread(_review_rules.refresh)
+            await asyncio.to_thread(_review_rules.refresh_rules)
         except Exception as e:
             print(f"[REVIEW] refresh error: {type(e).__name__}", flush=True)
         await asyncio.sleep(REVIEW_REFRESH_S)
@@ -4460,7 +4460,7 @@ async def review_worker_loop():
     await asyncio.sleep(REVIEW_FIRST_PASS_S)
     while True:
         try:
-            state = await asyncio.to_thread(_review_rules.refresh)
+            state = await asyncio.to_thread(_review_rules.refresh_rules)
             games = await _sev.games_pass(async_session, state)
             sittings = await _sev.sitting_pass(async_session, state)
             purged = None
@@ -8169,7 +8169,7 @@ async def admin_seat_evidence(
     await _require_admin(db, admin_steam_id, "seat_evidence", target, hmac_signature)
     return await _sev.admin_view(db, match_id=str(match_id) if match_id else None,
                                  stable_game_key=stable_game_key,
-                                 rs=_review_rules.current().ruleset)
+                                 rs=_review_rules.current_rules().ruleset)
 
 
 @app.post("/api/v1/admin/release-digests", tags=["Admin"])

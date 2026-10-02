@@ -110,7 +110,7 @@ def _S(pattern, maxlen):
     return check
 
 
-def _E(*values):
+def _ENUM(*values):
     def check(v):
         return isinstance(v, str) and v in values
     return check
@@ -144,7 +144,7 @@ ORD = _I(0, 255)
 KIND = _I(0, 9)
 PID = _I(0, I32_MAX)
 SINCE = _I(-1, 600000)
-DLL = _A(_S(re.compile(r"(?:[0-9a-f]{64})?"), 64), _E("ok", "no_location", "read_failed"))
+DLL = _A(_S(re.compile(r"(?:[0-9a-f]{64})?"), 64), _ENUM("ok", "no_location", "read_failed"))
 
 ENTRY = {
     "blk_sent": _A(I32, KIND, ORD, MS),
@@ -157,14 +157,14 @@ ENTRY = {
 RECORD_SPEC = (
     ("schema", _I(2, 2)),
     ("t0", I32),
-    ("t0_src", _E("m", "o")),
+    ("t0_src", _ENUM("m", "o")),
     ("master", B01),
     ("ranked", B01),
     ("rounds", _A(_I(0, 9), _I(0, 9))),
     ("build", _A(_S(_BUILD_PART, 16), _S(_BUILD_PART, 16), _S(_BUILD_PART, 12))),
     ("dll", DLL),
     ("game_dll", DLL),
-    ("compat", _E("pass", "not_run")),
+    ("compat", _ENUM("pass", "not_run")),
     ("foreign", _A(_I(0, 9999), _I(0, 9999))),
     ("rtt", _A(_I(0, 60000), _I(0, 60000))),
     ("offset", _A(_I(0, 1000000), _I(0, 1000000))),
@@ -270,7 +270,7 @@ def _refuse_float(_text):
     raise EvidenceRefused(422, "record_number")
 
 
-def canonical(env: dict) -> str:
+def record_canonical(env: dict) -> str:
     """Contract section 1. New and separate from the 7-field match HMAC."""
     h = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
     return ("seat-evidence:v2:" + env["seat"] + ":" + env["other"] + ":"
@@ -278,14 +278,14 @@ def canonical(env: dict) -> str:
             + h(env["record_bytes"]))
 
 
-def sign(key: str, env: dict) -> str:
-    return hmac.new(key.encode(), canonical(env).encode(), hashlib.sha256).hexdigest()
+def record_sign(key: str, env: dict) -> str:
+    return hmac.new(key.encode(), record_canonical(env).encode(), hashlib.sha256).hexdigest()
 
 
 def verify_sig(key: str, env: dict) -> bool:
     if not key:
         return False
-    return hmac.compare_digest(env["sig"], sign(key, env))
+    return hmac.compare_digest(env["sig"], record_sign(key, env))
 
 
 # -- the byte budgeter (contract section 4) ----------------------------------
@@ -318,7 +318,7 @@ def budget_record(rec: dict, limit: int = RECORD_MAX_BYTES) -> str:
     return body
 
 
-def bounded(details: dict) -> dict:
+def bounded_details(details: dict) -> dict:
     """A finding's details, at most DETAILS_MAX_BYTES serialized."""
     body = _dumps(details)
     if len(body) <= DETAILS_MAX_BYTES:
@@ -345,7 +345,7 @@ async def upsert_finding(db, scope: str, dedup_key: str, rule_id: str, rules_rev
                          match_id, details: dict) -> int:
     """One row per normalized (scope, key, rule); a repeat with the same
     details leaves changed_at alone, so idempotent re-evaluation is a no-op."""
-    det = _dumps(bounded(details))
+    det = _dumps(bounded_details(details))
     row = (await db.execute(text(
         "INSERT INTO seat_evidence_findings (scope, dedup_key, rule_id, rules_rev, match_id, details) "
         "VALUES (:s, :k, :rid, :rev, CAST(:m AS uuid), CAST(:d AS jsonb)) "
@@ -360,7 +360,7 @@ async def upsert_finding(db, scope: str, dedup_key: str, rule_id: str, rules_rev
     return int(row[0])
 
 
-def flag_payload(rs, rule, finding_id, details) -> dict:
+def review_flag_payload(rs, rule, finding_id, details) -> dict:
     """What a posted finding carries into flagged_matches: the rule id and
     revision, the rendered line (numbers and recorded text only), the items."""
     items = list(details.get("items") or [])
@@ -396,7 +396,7 @@ async def post_finding(db, finding_id: int, rs) -> str:
         return "no_match"
     if rule.post_since is not None and m["ended_at"] < rule.post_since:
         return "shadow"
-    det = _dumps(flag_payload(rs, rule, f["id"], dict(_j(f["details"]) or {})))
+    det = _dumps(review_flag_payload(rs, rule, f["id"], dict(_jsonv(f["details"]) or {})))
     if f["flag_id"] is not None:
         await db.execute(text(
             "UPDATE flagged_matches SET flag_details = CAST(:d AS jsonb) "
@@ -496,7 +496,7 @@ async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:
     evaluated = None
     if match is not None:
         records = [{"seat": r["seat_player_id"], "other": r["other_player_id"],
-                    "rec": _j(r["payload"]), "header_version": r["header_mod_version"],
+                    "rec": _jsonv(r["payload"]), "header_version": r["header_mod_version"],
                     "conflict": r["conflict_at"] is not None} for r in rows]
         if any(not _has_lists(r["rec"]) for r in records):
             final = True          # lists purged: nothing left to compare
@@ -525,7 +525,7 @@ async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:
     return state, fired, errors, evaluated is not None
 
 
-def _j(v):
+def _jsonv(v):
     """A jsonb value as Python, whichever form the driver returned it in."""
     return json.loads(v) if isinstance(v, (str, bytes)) else v
 
@@ -850,7 +850,7 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
                     "SELECT id, player1_id, player2_id, p1_rounds_won, p2_rounds_won, is_ranked "
                     "FROM matches WHERE id = :m"), {"m": g["match_id"]})).mappings().first()
             records = [{"seat": r["seat_player_id"], "other": r["other_player_id"],
-                        "rec": _j(r["payload"]), "header_version": r["header_mod_version"],
+                        "rec": _jsonv(r["payload"]), "header_version": r["header_mod_version"],
                         "conflict": r["conflict_at"] is not None} for r in rs_rows]
             view = None
             if all(_has_lists(x["rec"]) for x in records):
@@ -875,10 +875,10 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
                              "attach_key": r["attach_key"], "received_at": r["received_at"].isoformat(),
                              "conflict_kind": r["conflict_kind"], "payload_bytes": r["payload_bytes"],
                              "lists_purged": r["lists_purged_at"] is not None,
-                             "record": _j(r["payload"])} for r in rs_rows],
+                             "record": _jsonv(r["payload"])} for r in rs_rows],
                 "comparison": view,
                 "findings": [{"rule_id": f["rule_id"], "rules_rev": f["rules_rev"],
-                              "details": _j(f["details"]),
+                              "details": _jsonv(f["details"]),
                               "posted_flag_id": str(f["flag_id"]) if f["flag_id"] else None}
                              for f in findings],
                 "compat": [{"steam_id": c["steam_id"], "outcome": c["outcome"],

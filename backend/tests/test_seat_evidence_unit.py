@@ -115,7 +115,7 @@ def test_a_hash_state_other_than_ok_never_carries_a_digest():
 
 def test_the_signing_canonical_is_new_and_separate_from_the_match_hmac():
     env = se.parse_envelope(fx.envelope(fx.base_record()))
-    c = se.canonical(env)
+    c = se.record_canonical(env)
     assert c.startswith("seat-evidence:v2:%s:%s:" % (fx.SEAT_A, fx.SEAT_B))
     assert len(c.split(":")) == 7 and all(len(p) == 64 for p in c.split(":")[4:])
     assert se.verify_sig(fx.KEY, env) and not se.verify_sig("other", env)
@@ -138,10 +138,10 @@ def test_the_compat_outcome_has_no_pass_and_a_thrown_check_is_not_run():
 
 def test_details_are_bounded_and_say_so():
     big = {"items": [{"x": "y" * 100}] * 100}
-    out = se.bounded(big)
+    out = se.bounded_details(big)
     assert out["truncated"] is True and len(se._dumps(out)) <= se.DETAILS_MAX_BYTES
     small = {"items": [{"x": 1}]}
-    assert se.bounded(small) is small
+    assert se.bounded_details(small) is small
 
 
 # -- A9: every statement of the lane and of the review modules ------------------
