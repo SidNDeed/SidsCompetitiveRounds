@@ -870,6 +870,16 @@ class HealthResponse(BaseModel):
     # any build before the fix, which is how the release train reads the old
     # build on both boxes.
     discord_fix: int
+    # pc_card_art: whether this box's faces draw the top card's art
+    # (main._pc_card_art_word; Discord card render parity). 3 = the renderer
+    # is up, the private art bundle validated in full, and the boot proof drew
+    # every entry into its rect; 1 = the renderer is up and the bundle is
+    # absent or invalid (every top card keeps the name-only badge; never a
+    # refusal); 0 = the renderer cannot serve faces, or an accepted bundle
+    # failed its proof. DERIVED by drawing, never a constant (#342). Declared
+    # without a default, so an answer built without it raises instead of
+    # leaving the key out. Absent on any build before it.
+    pc_card_art: int
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
