@@ -35,7 +35,10 @@ A JSON-lines file, one record per pull attempt:
   A box fails when it has no successful pull, when a pull of it answered as
   the other node or a boot id answered for both boxes, or when that longest
   interval exceeds GAP_LIMIT (60 minutes). coverage_cli exits 0 only when
-  both boxes pass.
+  both boxes pass. Only records that affect the window are read: the pulls
+  inside it plus, per box, at most its last valid pull before it (the
+  leading-edge and restart anchor); identity checks and the reported pull
+  count are the window's own.
 """
 from __future__ import annotations
 
@@ -228,18 +231,21 @@ def coverage(records, days: float, now: float, expected=None) -> dict:
     (window start to the first pull) and the clipped TRAILING one (last pull
     to now) included, is at most GAP_LIMIT. `covered` is the window fraction
     outside every such interval longer than GAP_LIMIT and outside every
-    unrecorded restart."""
+    unrecorded restart. Every check reads only _window_records: an anomaly
+    before the window and before the box's last valid pre-window pull does
+    not fail it. `pulls` counts pulls inside the window; `anchor` says
+    whether a pre-window pull anchored its leading edge."""
     expected = EXPECTED_BOXES if expected is None else expected
     start = now - days * 86400
     span = max(1.0, now - start)
-    ok_recs = [r for r in records if r.get("ok")]
+    scoped, anchors = _window_records(records, expected, start, now)
     boots = {}
-    for r in ok_recs:
+    for r in scoped:
         boots.setdefault(r["boot_id"], set()).add(r.get("box"))
     shared = {b for b, boxes in boots.items() if len(boxes & set(expected)) > 1}
     result = {}
     for box, identity in expected.items():
-        mine = sorted((r for r in ok_recs if r.get("box") == box), key=lambda r: r["at"])
+        mine = sorted((r for r in scoped if r.get("box") == box), key=lambda r: r["at"])
         why = []
         wrong = [r for r in mine if r["node"] != identity]
         if wrong:
@@ -248,10 +254,12 @@ def coverage(records, days: float, now: float, expected=None) -> dict:
         if any(r["boot_id"] in shared for r in mine):
             why.append("a boot id answered for both boxes: one process, not two")
         pulls = [r for r in mine if r["node"] == identity]
+        in_window = sum(1 for r in pulls if r["at"] >= start)
+        anchored = box in anchors
         if not pulls:
             why.append("no successful pull")
             result[box] = {"covered": 0.0, "longest_gap": span, "ok": False,
-                           "pulls": 0, "why": "; ".join(why)}
+                           "pulls": 0, "anchor": False, "why": "; ".join(why)}
             continue
         times = [r["at"] for r in pulls]
         intervals = [(start, times[0])] + list(zip(times, times[1:])) + [(times[-1], now)]
@@ -266,8 +274,27 @@ def coverage(records, days: float, now: float, expected=None) -> dict:
         if longest > GAP_LIMIT:
             why.append(f"longest gap {longest / 60:.1f} min exceeds {GAP_LIMIT / 60:.0f} min")
         result[box] = {"covered": covered, "longest_gap": longest, "ok": not why,
-                       "pulls": len(pulls), "why": "; ".join(why)}
+                       "pulls": in_window, "anchor": anchored, "why": "; ".join(why)}
     return result
+
+
+def _window_records(records, expected, start: float, now: float):
+    """(records, anchors): the successful pulls that AFFECT [start, now] --
+    every one inside the window, plus, per expected box, at most ONE before
+    it: the last pull of that box that answered as the box's own identity
+    (the leading-edge and restart anchor). Nothing older is read, so an
+    anomaly (a crossed answer, a shared boot id) that ended before the window
+    and its last valid pull affects no later verdict, and pull counts are the
+    window's own."""
+    ok_recs = [r for r in records if r.get("ok")]
+    inside = [r for r in ok_recs if start <= r["at"] <= now]
+    anchors = {}
+    for box, identity in expected.items():
+        before = [r for r in ok_recs
+                  if r.get("box") == box and r["at"] < start and r["node"] == identity]
+        if before:
+            anchors[box] = max(before, key=lambda r: r["at"])
+    return inside + list(anchors.values()), anchors
 
 
 def _union_length(intervals) -> float:
@@ -337,7 +364,9 @@ def coverage_cli(ledger: str, days: float, at: float | None = None) -> int:
     result = coverage(records, days, now() if at is None else at)
     bad = 0
     for box, v in sorted(result.items()):
-        print(f"{box}: {v['pulls']} pulls, covered {v['covered'] * 100:.2f}% of {days:g} days, "
+        print(f"{box}: {v['pulls']} pulls in the window"
+              + (" (+1 anchor before it)" if v.get("anchor") else "")
+              + f", covered {v['covered'] * 100:.2f}% of {days:g} days, "
               f"longest gap {v['longest_gap'] / 60:.1f} min, "
               + ("ok" if v["ok"] else "FAIL " + v["why"]))
         bad += 0 if v["ok"] else 1

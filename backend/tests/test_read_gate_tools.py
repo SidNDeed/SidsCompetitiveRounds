@@ -239,6 +239,62 @@ def test_coverage_requires_distinct_identities():
     assert "one process" in v["standby"]["why"]
 
 
+def test_coverage_stale_anomaly_recovers(tmp_path):
+    """An anomaly that ended before the window -- a standby pull answered as
+    the primary, and one boot id answering for both boxes -- followed by 14
+    perfect days: `coverage --days 14` passes for both boxes, and each box's
+    pull count is the window's own. The same anomalies inside the window
+    still fail it (control)."""
+    now = T0 + 20 * 86400
+    start = now - 14 * 86400
+    old_shared = (_hourly(now - 20 * 86400, now - 17 * 86400, node="primary", boot="one")
+                  + _hourly(now - 20 * 86400, now - 17 * 86400, node="standby", boot="one"))
+    old_crossed = [dict(r, box="standby")
+                   for r in _hourly(now - 17 * 86400, now - 16 * 86400, node="primary", boot="p0")]
+    recent = _both(now - 16 * 86400, now)
+    recs = old_shared + old_crossed + recent
+    v = T.coverage(recs, 14, now)
+    for box in ("primary", "standby"):
+        assert v[box]["ok"] and v[box]["why"] == "", v
+        assert v[box]["anchor"] is True, v
+        assert v[box]["pulls"] == len([r for r in recent if r["box"] == box and r["at"] >= start]), v
+    path = str(tmp_path / "ledger.jsonl")
+    for r in recs:
+        T.append(path, r)
+    assert T.coverage_cli(path, 14, now) == 0
+    # control: the same two anomalies inside the window fail both boxes
+    late = now - 2 * 86400
+    inside = ([dict(r, box="standby") for r in _hourly(late, late + 3600, node="primary", boot="p0")]
+              + _hourly(late, late + 3600, node="primary", boot="one")
+              + _hourly(late, late + 3600, node="standby", boot="one"))
+    bad = T.coverage(recent + inside, 14, now)
+    assert not bad["standby"]["ok"] and "answered as node" in bad["standby"]["why"], bad
+    assert not bad["primary"]["ok"] and "one process" in bad["primary"]["why"], bad
+
+
+def test_coverage_reads_one_anchor_per_box():
+    """At most the LAST valid pre-window pull of a box anchors its leading
+    edge: a later pre-window pull of that box that answered as the other node
+    is not an anchor, and older valid pulls are not read at all (their boot id
+    cannot make a shared boot)."""
+    now = T0 + 20 * 86400
+    start = now - 14 * 86400
+    recs = (_hourly(start - 86400, start - 7200, node="primary", boot="p1")
+            + [dict(_rec(start - 3600, node="standby", boot="p1"), box="primary")]  # crossed, pre-window
+            + _hourly(start - 86400, start - 600, node="standby", boot="s1")
+            + _both(start + 600, now))
+    scoped, anchors = T._window_records(recs, T.EXPECTED_BOXES, start, now)
+    assert anchors["primary"]["at"] == max(r["at"] for r in recs if r["box"] == "primary"
+                                           and r["node"] == "primary" and r["at"] < start)
+    assert anchors["primary"]["node"] == "primary"
+    assert len([r for r in scoped if r["at"] < start]) == 2
+    v = T.coverage(recs, 14, now)
+    assert v["primary"]["ok"] and v["standby"]["ok"], v
+    # the primary's anchor is more than an hour before its first window pull:
+    # it anchors, so the leading interval is measured from it, clipped
+    assert v["primary"]["longest_gap"] <= 3600, v
+
+
 def test_canary_counts_exactly_n(seat):
     caller, transport, _, _, _ = seat
     verdict = T.canary(caller, transport, 20, headers=K.headers())
